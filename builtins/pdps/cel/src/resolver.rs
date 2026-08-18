@@ -167,10 +167,6 @@ impl CelResolver {
     /// });
     /// ```
     ///
-    /// Function names that collide with the CEL standard library
-    /// (`size`, `has`, `matches`, etc.) silently shadow the built-in
-    /// — be deliberate.
-    ///
     /// # Ownership of the function set
     ///
     /// The custom-function set is a **host concern**, registered once
