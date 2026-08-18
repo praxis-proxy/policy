@@ -27,10 +27,11 @@ help:
 	@echo ""
 	@echo "Lint & format:"
 	@echo "  fmt               Format Rust code (cargo fmt --all)"
-	@echo "  lint              CI lint gate: fmt --check + clippy -D warnings"
+	@echo "  lint              CI lint gate: fmt --check + clippy -D warnings + extended-lint"
 	@echo "  clippy            Run clippy on the workspace (-D warnings)"
 	@echo "  lint-fix          Auto-fix: cargo fmt + clippy --fix"
 	@echo "  machete           Report unused dependencies (advisory)"
+	@echo "  extended-lint     Diff-scoped heuristic checks (TODOs, comment slop, ...)"
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
@@ -88,9 +89,10 @@ clippy:
 # [workspace.lints] in Cargo.toml.
 .PHONY: lint
 lint:
-	@echo "fmt --check + clippy -D warnings ..."
+	@echo "fmt --check + clippy -D warnings + extended-lint ..."
 	@$(CARGO) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+	@$(MAKE) extended-lint
 	@echo "lint passed"
 
 .PHONY: lint-fix
@@ -105,6 +107,15 @@ lint-fix:
 machete:
 	@command -v cargo-machete >/dev/null 2>&1 || $(CARGO) install cargo-machete --locked
 	@cargo machete || true
+
+# Diff-scoped heuristic checks that clippy can't express structurally (comment
+# content, diff-local literal repetition). Scans only lines added/changed vs.
+# the diff base, so pre-existing code is never relitigated. See xtask's own
+# module docstring (xtask/src/lint_extended.rs) for the base-ref resolution
+# order.
+.PHONY: extended-lint
+extended-lint:
+	@$(CARGO) run -p xtask -- lint-extended
 
 # =============================================================================
 # Test
@@ -144,10 +155,18 @@ COVERAGE_FLOOR ?= 95
 # Valkey at all. `VALKEY_TESTS_OPTIONAL=1` lets them skip instead of fail, because
 # this target measures and `make test` is what asserts. Set `VALKEY_TEST_URL` to
 # measure the paths that do need a server.
+#
+# `xtask` is excluded from the report, not from the run: its tests still execute
+# above, they just don't count toward the floor. Its own logic (the regex-based
+# checks) is unit-tested; what isn't is the `git diff`/CLI-argument glue around
+# it, which would need a throwaway git repository fixture per test to exercise
+# and buys little over trusting `git` and `std::env::args` to behave as
+# documented. Revisit if xtask grows real branching logic worth covering.
 .PHONY: coverage
 coverage:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --locked
 	@VALKEY_TESTS_OPTIONAL=1 cargo llvm-cov --workspace --summary-only \
+		--exclude-from-report xtask \
 		--fail-under-lines $(COVERAGE_FLOOR) -- --include-ignored
 
 # =============================================================================

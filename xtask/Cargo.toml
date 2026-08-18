@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# xtask — repo-local developer tooling for the Praxis Policy Engine
+# workspace, run via `cargo run -p xtask --`.
+#
+# Not published: this is workspace automation, not a library or product
+# artifact. No `clap` dependency: nothing else in this workspace depends on
+# it, and a single subcommand doesn't earn a new dependency over manual
+# `std::env::args()` parsing.
+
+[package]
+name = "xtask"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Repo-local developer tooling for the Praxis Policy Engine workspace (extended lint, ...)."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+regex = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

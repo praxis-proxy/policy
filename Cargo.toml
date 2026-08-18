@@ -30,11 +30,16 @@ members = [
     # why it is not a builtin.
     "reference/plugins/pii-scanner",
     "reference/plugins/audit-logger",
+    # Repo-local developer tooling (extended lint, ...), run via
+    # `cargo run -p xtask --`. Not published.
+    "xtask",
 ]
 
 # The session store pulls a redis client and a TLS stack, which slows a default
 # build noticeably. Excluding it from default-members keeps everyday iteration
-# fast; `--workspace` still picks it up, and CI runs the full sweep.
+# fast; `--workspace` still picks it up, and CI runs the full sweep. xtask is
+# cheap to build and every other repo in the org that has one builds it by
+# default too, so it stays in this list rather than getting its own exclusion.
 default-members = [
     "crates/ppe",
     "crates/ppe-core",
@@ -54,6 +59,7 @@ default-members = [
     # why it is not a builtin.
     "reference/plugins/pii-scanner",
     "reference/plugins/audit-logger",
+    "xtask",
 ]
 
 [workspace.package]
