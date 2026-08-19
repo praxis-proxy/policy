@@ -3,14 +3,41 @@
 
 // SecurityExtension → AttributeBag.
 //
+// # Empty sets are emitted, not omitted
+//
+// Every StringSet key below is present whenever its extension slot is
+// present — empty rather than absent. Strict-evaluation decision points
+// treat a *missing* key as an error, not as an empty collection: the CEL
+// PDP raises "no such key" and its default `OnError::Deny` turns that
+// into a denial, so a policy like `!("banned" in subject.roles)` would
+// deny every subject that happens to have no roles. Emitting the empty
+// set makes the membership test simply evaluate false. `cedar-direct`
+// reaches the same conclusion independently — see the empty-defaults
+// note in `builtins/pdps/cedar-direct/src/entities.rs`.
+//
+// This matters most for the capability-gated sub-fields. When a plugin
+// lacks `read_roles`, core's `build_filtered_subject` hands us an empty
+// role set rather than the real one, so "no roles" is a routine state,
+// not an edge case.
+//
+// Bound: this covers an empty set inside a *present* slot. When the slot
+// itself is None (a plugin without `read_client` never sees a
+// ClientExtension at all), the whole `client.*` namespace is absent and
+// CEL reports an undeclared reference instead. Fixing that means
+// synthesizing namespaces for absent extensions, which this bridge does
+// not do.
+//
 // Namespace map (canonical — extend this comment when adding a new key):
 //
 // ----- Subject (user identity) ------------------------------------------
 //   sec.subject.id                   → subject.id           : String
 //   sec.subject.subject_type         → subject.type         : String
-//   sec.subject.roles                → role.<r>             : Bool(true)
-//   sec.subject.permissions          → perm.<p>             : Bool(true)
-//   sec.subject.teams                → subject.teams        : StringSet
+//   sec.subject.roles                → subject.roles        : StringSet (always)
+//                                    → role.<r>             : Bool(true)
+//   sec.subject.permissions          → subject.permissions  : StringSet (always)
+//                                    → perm.<p>             : Bool(true)
+//   sec.subject.teams                → subject.teams        : StringSet (always)
+//                                    → team.<t>             : Bool(true)
 //   sec.subject.claims               → claim.<k>            : flattened JSON
 //   <derived>                        → authenticated        : Bool (iff subject.id is Some)
 //
@@ -18,18 +45,20 @@
 //   sec.client.client_id             → client.client_id     : String
 //   sec.client.client_name           → client.client_name   : String
 //   sec.client.trust_level           → client.trust_level   : String
-//   sec.client.authorized_scopes     → client.authorized_scopes : StringSet
-//   sec.client.authorized_audiences  → client.authorized_audiences : StringSet
-//   sec.client.roles                 → client.role.<r>      : Bool(true)
-//   sec.client.permissions           → client.perm.<p>      : Bool(true)
-//   sec.client.teams                 → client.teams         : StringSet
+//   sec.client.authorized_scopes     → client.authorized_scopes : StringSet (always)
+//   sec.client.authorized_audiences  → client.authorized_audiences : StringSet (always)
+//   sec.client.roles                 → client.roles         : StringSet (always)
+//                                    → client.role.<r>      : Bool(true)
+//   sec.client.permissions           → client.permissions   : StringSet (always)
+//                                    → client.perm.<p>      : Bool(true)
+//   sec.client.teams                 → client.teams         : StringSet (always)
 //   sec.client.claims                → client.claim.<k>     : flattened JSON
 //
 // ----- Workload identity (SPIFFE / mTLS attestation) --------------------
 //   sec.caller_workload.spiffe_id    → caller_workload.spiffe_id    : String
 //   sec.caller_workload.trust_domain → caller_workload.trust_domain : String
 //   sec.caller_workload.attestor     → caller_workload.attestor     : String
-//   sec.caller_workload.selectors    → caller_workload.selectors    : StringSet
+//   sec.caller_workload.selectors    → caller_workload.selectors    : StringSet (always)
 //   sec.caller_workload.client_id    → caller_workload.client_id    : String
 //   sec.this_workload.*              → this_workload.*  (same shape, our identity)
 //
@@ -39,7 +68,7 @@
 //
 // ----- Other -----------------------------------------------------------
 //   sec.auth_method                  → auth_method          : String
-//   sec.labels                       → security.labels      : StringSet
+//   sec.labels                       → security.labels      : StringSet (always)
 //   sec.classification               → security.classification : String
 
 use praxis_policy_apl_core::AttributeBag;
@@ -49,8 +78,9 @@ use praxis_policy_core::extensions::{
 use std::collections::HashSet;
 
 use crate::constants::{
-    BAG_AUTHENTICATED, BAG_CLAIM_PREFIX, BAG_PERM_PREFIX, BAG_ROLE_PREFIX, BAG_SUBJECT_ID,
-    BAG_SUBJECT_TEAMS, BAG_SUBJECT_TYPE, BAG_TEAM_PREFIX,
+    BAG_AUTHENTICATED, BAG_CLAIM_PREFIX, BAG_CLIENT_PERMISSIONS, BAG_CLIENT_ROLES, BAG_PERM_PREFIX,
+    BAG_ROLE_PREFIX, BAG_SUBJECT_ID, BAG_SUBJECT_PERMISSIONS, BAG_SUBJECT_ROLES, BAG_SUBJECT_TEAMS,
+    BAG_SUBJECT_TYPE, BAG_TEAM_PREFIX,
 };
 
 /// Flatten a `SecurityExtension` into the bag.
@@ -64,22 +94,25 @@ pub fn extract_security(sec: &SecurityExtension, bag: &mut AttributeBag) {
         if let Some(st) = subject.subject_type {
             bag.set(BAG_SUBJECT_TYPE, subject_type_str(st));
         }
+        // Full role set as one StringSet, so policies can do membership
+        // tests (`"hr" in subject.roles`) without enumerating names. Set
+        // unconditionally — see the empty-set note in the module header.
+        bag.set(BAG_SUBJECT_ROLES, subject.roles.clone());
+        // Plus the flattened role.<name> = true keys. DSL: `require(role.hr)`.
+        // No guard needed: iterating an empty set writes nothing.
         for role in &subject.roles {
             bag.set(format!("{BAG_ROLE_PREFIX}{role}"), true);
         }
+        bag.set(BAG_SUBJECT_PERMISSIONS, subject.permissions.clone());
         for perm in &subject.permissions {
             bag.set(format!("{BAG_PERM_PREFIX}{perm}"), true);
         }
-        if !subject.teams.is_empty() {
-            // Clone into a fresh HashSet — AttributeValue::StringSet owns its data.
-            let teams: HashSet<String> = subject.teams.iter().cloned().collect();
-            bag.set(BAG_SUBJECT_TEAMS, teams);
-            // Mirror the role.X / perm.X namespace so policies can
-            // gate on team membership with the same DSL shape, e.g.
-            // `require(team.engineering | team.security)`.
-            for team in &subject.teams {
-                bag.set(format!("{BAG_TEAM_PREFIX}{team}"), true);
-            }
+        bag.set(BAG_SUBJECT_TEAMS, subject.teams.clone());
+        // Mirror the role.X / perm.X namespace so policies can
+        // gate on team membership with the same DSL shape, e.g.
+        // `require(team.engineering | team.security)`.
+        for team in &subject.teams {
+            bag.set(format!("{BAG_TEAM_PREFIX}{team}"), true);
         }
         for (k, v) in &subject.claims {
             // Nested JSON claims flatten through the same walker
@@ -111,20 +144,20 @@ pub fn extract_security(sec: &SecurityExtension, bag: &mut AttributeBag) {
         bag.set("auth_method", m.clone());
     }
     let labels: HashSet<String> = sec.labels.iter().cloned().collect();
-    if !labels.is_empty() {
-        bag.set("security.labels", labels);
-    }
+    bag.set("security.labels", labels);
     if let Some(c) = &sec.classification {
         bag.set("security.classification", c.clone());
     }
 }
 
 /// Flatten a `ClientExtension` into the bag under the `client.*`
-/// namespace. Shape is deliberately symmetric with subject — roles
-/// and permissions become presence-only `client.role.<r> = true` /
-/// `client.perm.<p> = true` keys so policies can write
-/// `require(client.role.partner)` the same way as `role.hr`. Claims
-/// are flattened through the same JSON walker as `custom.*`, so
+/// namespace. Shape is deliberately symmetric with subject — roles and
+/// permissions land twice, as the whole set under `client.roles` /
+/// `client.permissions` for membership tests
+/// (`"partner" in client.roles`), and as presence-only
+/// `client.role.<r> = true` / `client.perm.<p> = true` keys so policies
+/// can write `require(client.role.partner)` the same way as `role.hr`.
+/// Claims are flattened through the same JSON walker as `custom.*`, so
 /// nested objects produce dotted-path keys.
 pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
     bag.set("client.client_id", client.client_id.clone());
@@ -132,24 +165,22 @@ pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
         bag.set("client.client_name", n.clone());
     }
     bag.set("client.trust_level", trust_level_str(&client.trust_level));
+    let roles: HashSet<String> = client.roles.iter().cloned().collect();
+    bag.set(BAG_CLIENT_ROLES, roles);
     for role in &client.roles {
         bag.set(format!("client.role.{role}"), true);
     }
+    let perms: HashSet<String> = client.permissions.iter().cloned().collect();
+    bag.set(BAG_CLIENT_PERMISSIONS, perms);
     for perm in &client.permissions {
         bag.set(format!("client.perm.{perm}"), true);
     }
-    if !client.authorized_scopes.is_empty() {
-        let scopes: HashSet<String> = client.authorized_scopes.iter().cloned().collect();
-        bag.set("client.authorized_scopes", scopes);
-    }
-    if !client.authorized_audiences.is_empty() {
-        let auds: HashSet<String> = client.authorized_audiences.iter().cloned().collect();
-        bag.set("client.authorized_audiences", auds);
-    }
-    if !client.teams.is_empty() {
-        let teams: HashSet<String> = client.teams.iter().cloned().collect();
-        bag.set("client.teams", teams);
-    }
+    let scopes: HashSet<String> = client.authorized_scopes.iter().cloned().collect();
+    bag.set("client.authorized_scopes", scopes);
+    let auds: HashSet<String> = client.authorized_audiences.iter().cloned().collect();
+    bag.set("client.authorized_audiences", auds);
+    let teams: HashSet<String> = client.teams.iter().cloned().collect();
+    bag.set("client.teams", teams);
     for (k, v) in &client.claims {
         crate::payload::walk(v, &format!("client.claim.{k}"), bag);
     }
@@ -170,10 +201,8 @@ pub fn extract_workload(prefix: &str, w: &WorkloadIdentity, bag: &mut AttributeB
     if let Some(a) = &w.attestor {
         bag.set(format!("{prefix}.attestor"), a.clone());
     }
-    if !w.selectors.is_empty() {
-        let selectors: HashSet<String> = w.selectors.iter().cloned().collect();
-        bag.set(format!("{prefix}.selectors"), selectors);
-    }
+    let selectors: HashSet<String> = w.selectors.iter().cloned().collect();
+    bag.set(format!("{prefix}.selectors"), selectors);
     if let Some(id) = &w.client_id {
         bag.set(format!("{prefix}.client_id"), id.clone());
     }
@@ -266,6 +295,11 @@ mod tests {
         assert_eq!(bag.get_bool("role.manager"), Some(true));
         // A role Alice doesn't have is absent (not false — missing).
         assert_eq!(bag.get_bool("role.finance"), None);
+        // Roles are ALSO mirrored as one set under subject.roles, so
+        // membership tests work without enumerating names.
+        assert!(bag.set_contains("subject.roles", "hr"));
+        assert!(bag.set_contains("subject.roles", "manager"));
+        assert!(!bag.set_contains("subject.roles", "finance"));
     }
 
     #[test]
@@ -274,6 +308,9 @@ mod tests {
         extract_security(&alice(), &mut bag);
         assert_eq!(bag.get_bool("perm.view_ssn"), Some(true));
         assert_eq!(bag.get_bool("perm.delete_user"), None);
+        // Mirrored as a set under subject.permissions too.
+        assert!(bag.set_contains("subject.permissions", "view_ssn"));
+        assert!(!bag.set_contains("subject.permissions", "delete_user"));
     }
 
     #[test]
@@ -368,6 +405,69 @@ mod tests {
         assert_eq!(bag.get_bool("role.guest"), Some(true));
     }
 
+    #[test]
+    fn empty_subject_sets_are_present_not_absent() {
+        // The regression this guards: a subject with no roles used to leave
+        // `subject.roles` out of the bag entirely, and a strict-evaluation
+        // PDP (CEL) turns a missing key into an eval error that its
+        // fail-closed default converts to Deny — so `"x" in subject.roles`
+        // denied every unroled subject instead of evaluating false.
+        //
+        // Assert presence-with-emptiness, not just `!set_contains(...)`:
+        // that weaker check passes under the buggy behavior too.
+        let sec = SecurityExtension {
+            subject: Some(SubjectExtension {
+                id: Some("nobody@corp.com".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_security(&sec, &mut bag);
+
+        let empty = HashSet::new();
+        assert_eq!(bag.get_string_set("subject.roles"), Some(&empty));
+        assert_eq!(bag.get_string_set("subject.permissions"), Some(&empty));
+        assert_eq!(bag.get_string_set("subject.teams"), Some(&empty));
+        // No flattened keys, though — those stay presence-only.
+        assert_eq!(bag.get_bool("role.hr"), None);
+    }
+
+    #[test]
+    fn empty_labels_and_selectors_are_present_not_absent() {
+        let sec = SecurityExtension {
+            this_workload: Some(WorkloadIdentity {
+                spiffe_id: Some("spiffe://corp.com/svc".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_security(&sec, &mut bag);
+
+        let empty = HashSet::new();
+        assert_eq!(bag.get_string_set("security.labels"), Some(&empty));
+        assert_eq!(bag.get_string_set("this_workload.selectors"), Some(&empty));
+    }
+
+    #[test]
+    fn empty_client_sets_are_present_not_absent() {
+        let client = ClientExtension {
+            client_id: "bare-app".into(),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_client(&client, &mut bag);
+
+        let empty = HashSet::new();
+        assert_eq!(bag.get_string_set("client.authorized_scopes"), Some(&empty));
+        assert_eq!(
+            bag.get_string_set("client.authorized_audiences"),
+            Some(&empty)
+        );
+        assert_eq!(bag.get_string_set("client.teams"), Some(&empty));
+    }
+
     fn agent_client() -> ClientExtension {
         ClientExtension {
             client_id: "agent-app".into(),
@@ -406,6 +506,32 @@ mod tests {
         assert_eq!(bag.get_bool("client.role.partner"), Some(true));
         assert_eq!(bag.get_bool("client.perm.call_tool"), Some(true));
         assert_eq!(bag.get_bool("client.role.nonexistent"), None);
+    }
+
+    #[test]
+    fn client_roles_and_perms_also_land_as_sets() {
+        // The membership idiom generalizes across principals: an author who
+        // learns `"hr" in subject.roles` can write `"partner" in
+        // client.roles` and have it resolve rather than error.
+        let mut bag = AttributeBag::new();
+        extract_client(&agent_client(), &mut bag);
+        assert!(bag.set_contains("client.roles", "partner"));
+        assert!(!bag.set_contains("client.roles", "nonexistent"));
+        assert!(bag.set_contains("client.permissions", "call_tool"));
+    }
+
+    #[test]
+    fn empty_client_roles_and_perms_are_present_not_absent() {
+        let client = ClientExtension {
+            client_id: "bare-app".into(),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_client(&client, &mut bag);
+
+        let empty = HashSet::new();
+        assert_eq!(bag.get_string_set("client.roles"), Some(&empty));
+        assert_eq!(bag.get_string_set("client.permissions"), Some(&empty));
     }
 
     #[test]

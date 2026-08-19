@@ -59,9 +59,11 @@ const TABLE: &[CapabilityEntry] = &[
     },
     CapabilityEntry {
         name: CAP_READ_ROLES,
-        // Implies the read_subject baseline + role.* prefix.
+        // Implies the read_subject baseline + role.* prefix, plus the
+        // full role set mirrored under subject.roles.
         prefixes: &[
             BAG_ROLE_PREFIX,
+            BAG_SUBJECT_ROLES,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
             BAG_AUTHENTICATED,
@@ -71,6 +73,7 @@ const TABLE: &[CapabilityEntry] = &[
         name: CAP_READ_PERMISSIONS,
         prefixes: &[
             BAG_PERM_PREFIX,
+            BAG_SUBJECT_PERMISSIONS,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
             BAG_AUTHENTICATED,
@@ -239,9 +242,31 @@ mod tests {
     fn read_roles_implies_subject_baseline_plus_role_prefix() {
         let prefixes = capability_namespaces(CAP_READ_ROLES);
         assert!(prefixes.contains(&BAG_ROLE_PREFIX));
+        // The full role set is exposed alongside the flattened prefix.
+        assert!(prefixes.contains(&BAG_SUBJECT_ROLES));
         // Implied subject baseline.
         assert!(prefixes.contains(&BAG_SUBJECT_ID));
         assert!(prefixes.contains(&BAG_AUTHENTICATED));
+    }
+
+    #[test]
+    fn read_permissions_exposes_perm_prefix_and_set() {
+        let prefixes = capability_namespaces(CAP_READ_PERMISSIONS);
+        assert!(prefixes.contains(&BAG_PERM_PREFIX));
+        assert!(prefixes.contains(&BAG_SUBJECT_PERMISSIONS));
+    }
+
+    #[test]
+    fn read_client_covers_the_client_role_and_permission_sets() {
+        // Subject keys are enumerated exactly, so `subject.roles` had to be
+        // added to the table by hand. Client keys are covered by the
+        // `client.` prefix instead, so `client.roles` / `client.permissions`
+        // need no table entry — assert that rather than trusting it, since
+        // the two halves of the vocabulary are gated differently.
+        let prefixes = capability_namespaces(CAP_READ_CLIENT);
+        assert!(prefixes.contains(&BAG_CLIENT_PREFIX));
+        assert!(BAG_CLIENT_ROLES.starts_with(BAG_CLIENT_PREFIX));
+        assert!(BAG_CLIENT_PERMISSIONS.starts_with(BAG_CLIENT_PREFIX));
     }
 
     #[test]

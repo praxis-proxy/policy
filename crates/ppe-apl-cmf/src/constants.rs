@@ -87,6 +87,13 @@ pub const BAG_SUBJECT_ID: &str = "subject.id";
 pub const BAG_SUBJECT_TYPE: &str = "subject.type";
 /// Bag key `subject.teams`.
 pub const BAG_SUBJECT_TEAMS: &str = "subject.teams";
+/// Bag key `subject.roles` — the full role set, mirroring the
+/// flattened `role.<name>` keys as one `StringSet` for `in`/`contains`
+/// membership tests (e.g. OPA `"hr" in input.subject.roles`).
+pub const BAG_SUBJECT_ROLES: &str = "subject.roles";
+/// Bag key `subject.permissions` — the full permission set, mirroring
+/// the flattened `perm.<name>` keys as one `StringSet`.
+pub const BAG_SUBJECT_PERMISSIONS: &str = "subject.permissions";
 /// Bag key `authenticated`.
 pub const BAG_AUTHENTICATED: &str = "authenticated";
 /// Key prefix for role, as in `role.<name>`.
@@ -111,6 +118,14 @@ pub const BAG_RESULT_PREFIX: &str = "result.";
 
 /// Key prefix for the OAuth client, as in `client.<name>`.
 pub const BAG_CLIENT_PREFIX: &str = "client.";
+/// Bag key `client.roles` — the client's full role set, mirroring the
+/// flattened `client.role.<name>` keys as one `StringSet`. Symmetric
+/// with [`BAG_SUBJECT_ROLES`] so the same membership idiom works on
+/// either principal.
+pub const BAG_CLIENT_ROLES: &str = "client.roles";
+/// Bag key `client.permissions` — the client's full permission set,
+/// mirroring the flattened `client.perm.<name>` keys as one `StringSet`.
+pub const BAG_CLIENT_PERMISSIONS: &str = "client.permissions";
 /// Key prefix for workload identity, as in `workload.<name>`.
 pub const BAG_WORKLOAD_PREFIX: &str = "workload.";
 /// Key prefix for caller workload, as in `caller_workload.<name>`.
