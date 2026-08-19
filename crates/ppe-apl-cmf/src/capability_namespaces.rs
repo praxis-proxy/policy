@@ -59,9 +59,11 @@ const TABLE: &[CapabilityEntry] = &[
     },
     CapabilityEntry {
         name: CAP_READ_ROLES,
-        // Implies the read_subject baseline + role.* prefix.
+        // Implies the read_subject baseline + role.* prefix, plus the
+        // full role set mirrored under subject.roles.
         prefixes: &[
             BAG_ROLE_PREFIX,
+            BAG_SUBJECT_ROLES,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
             BAG_AUTHENTICATED,
@@ -71,6 +73,7 @@ const TABLE: &[CapabilityEntry] = &[
         name: CAP_READ_PERMISSIONS,
         prefixes: &[
             BAG_PERM_PREFIX,
+            BAG_SUBJECT_PERMISSIONS,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
             BAG_AUTHENTICATED,
@@ -239,9 +242,18 @@ mod tests {
     fn read_roles_implies_subject_baseline_plus_role_prefix() {
         let prefixes = capability_namespaces(CAP_READ_ROLES);
         assert!(prefixes.contains(&BAG_ROLE_PREFIX));
+        // The full role set is exposed alongside the flattened prefix.
+        assert!(prefixes.contains(&BAG_SUBJECT_ROLES));
         // Implied subject baseline.
         assert!(prefixes.contains(&BAG_SUBJECT_ID));
         assert!(prefixes.contains(&BAG_AUTHENTICATED));
+    }
+
+    #[test]
+    fn read_permissions_exposes_perm_prefix_and_set() {
+        let prefixes = capability_namespaces(CAP_READ_PERMISSIONS);
+        assert!(prefixes.contains(&BAG_PERM_PREFIX));
+        assert!(prefixes.contains(&BAG_SUBJECT_PERMISSIONS));
     }
 
     #[test]

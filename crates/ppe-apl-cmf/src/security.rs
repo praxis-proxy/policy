@@ -50,7 +50,8 @@ use std::collections::HashSet;
 
 use crate::constants::{
     BAG_AUTHENTICATED, BAG_CLAIM_PREFIX, BAG_PERM_PREFIX, BAG_ROLE_PREFIX, BAG_SUBJECT_ID,
-    BAG_SUBJECT_TEAMS, BAG_SUBJECT_TYPE, BAG_TEAM_PREFIX,
+    BAG_SUBJECT_PERMISSIONS, BAG_SUBJECT_ROLES, BAG_SUBJECT_TEAMS, BAG_SUBJECT_TYPE,
+    BAG_TEAM_PREFIX,
 };
 
 /// Flatten a `SecurityExtension` into the bag.
@@ -64,11 +65,22 @@ pub fn extract_security(sec: &SecurityExtension, bag: &mut AttributeBag) {
         if let Some(st) = subject.subject_type {
             bag.set(BAG_SUBJECT_TYPE, subject_type_str(st));
         }
-        for role in &subject.roles {
-            bag.set(format!("{BAG_ROLE_PREFIX}{role}"), true);
+        if !subject.roles.is_empty() {
+            // Full role set as one StringSet, so policies can do membership
+            // tests (`"hr" in subject.roles`) without enumerating names.
+            let roles: HashSet<String> = subject.roles.iter().cloned().collect();
+            bag.set(BAG_SUBJECT_ROLES, roles);
+            // Plus the flattened role.<name> = true keys. DSL: `require(role.hr)`.
+            for role in &subject.roles {
+                bag.set(format!("{BAG_ROLE_PREFIX}{role}"), true);
+            }
         }
-        for perm in &subject.permissions {
-            bag.set(format!("{BAG_PERM_PREFIX}{perm}"), true);
+        if !subject.permissions.is_empty() {
+            let perms: HashSet<String> = subject.permissions.iter().cloned().collect();
+            bag.set(BAG_SUBJECT_PERMISSIONS, perms);
+            for perm in &subject.permissions {
+                bag.set(format!("{BAG_PERM_PREFIX}{perm}"), true);
+            }
         }
         if !subject.teams.is_empty() {
             // Clone into a fresh HashSet — AttributeValue::StringSet owns its data.
@@ -264,6 +276,11 @@ mod tests {
         assert_eq!(bag.get_bool("role.manager"), Some(true));
         // A role Alice doesn't have is absent (not false — missing).
         assert_eq!(bag.get_bool("role.finance"), None);
+        // Roles are ALSO mirrored as one set under subject.roles, so
+        // membership tests work without enumerating names.
+        assert!(bag.set_contains("subject.roles", "hr"));
+        assert!(bag.set_contains("subject.roles", "manager"));
+        assert!(!bag.set_contains("subject.roles", "finance"));
     }
 
     #[test]
@@ -272,6 +289,9 @@ mod tests {
         extract_security(&alice(), &mut bag);
         assert_eq!(bag.get_bool("perm.view_ssn"), Some(true));
         assert_eq!(bag.get_bool("perm.delete_user"), None);
+        // Mirrored as a set under subject.permissions too.
+        assert!(bag.set_contains("subject.permissions", "view_ssn"));
+        assert!(!bag.set_contains("subject.permissions", "delete_user"));
     }
 
     #[test]
