@@ -6,13 +6,12 @@
 // Namespace:
 //   meta.entity_type        : String   ("tool" | "resource" | "prompt" | "llm")
 //   meta.entity_name        : String
-//   meta.tags               : StringSet     ← used by spec-level tag-driven policy inheritance
+//   meta.tags               : StringSet (always) ← used by spec-level tag-driven policy inheritance
 //   meta.scope              : String
 //   meta.properties.<k>     : String
 
 use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::MetaExtension;
-use std::collections::HashSet;
 
 /// Write operational metadata into the bag.
 pub fn extract_meta(meta: &MetaExtension, bag: &mut AttributeBag) {
@@ -22,10 +21,9 @@ pub fn extract_meta(meta: &MetaExtension, bag: &mut AttributeBag) {
     if let Some(v) = &meta.entity_name {
         bag.set("meta.entity_name", v.clone());
     }
-    if !meta.tags.is_empty() {
-        let tags: HashSet<String> = meta.tags.iter().cloned().collect();
-        bag.set("meta.tags", tags);
-    }
+    // Always emitted, empty rather than absent — see the empty-set note in
+    // `security.rs`, which documents the rule for the whole bridge.
+    bag.set("meta.tags", meta.tags.clone());
     if let Some(v) = &meta.scope {
         bag.set("meta.scope", v.clone());
     }
@@ -46,7 +44,7 @@ pub fn extract_meta(meta: &MetaExtension, bag: &mut AttributeBag) {
 )]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn tags_and_properties_flatten() {

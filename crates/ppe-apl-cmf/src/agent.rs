@@ -11,7 +11,7 @@
 //   agent.agent_id               : String
 //   agent.parent_agent_id        : String
 //   agent.conversation.summary   : String
-//   agent.conversation.topics    : StringSet
+//   agent.conversation.topics    : StringSet (always, when `conversation` is present)
 
 use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::AgentExtension;
@@ -41,10 +41,10 @@ pub fn extract_agent(agent: &AgentExtension, bag: &mut AttributeBag) {
         if let Some(s) = &conv.summary {
             bag.set("agent.conversation.summary", s.clone());
         }
-        if !conv.topics.is_empty() {
-            let topics: HashSet<String> = conv.topics.iter().cloned().collect();
-            bag.set("agent.conversation.topics", topics);
-        }
+        // Always emitted, empty rather than absent — see the empty-set note in
+        // `security.rs`, which documents the rule for the whole bridge.
+        let topics: HashSet<String> = conv.topics.iter().cloned().collect();
+        bag.set("agent.conversation.topics", topics);
         // `history: Vec<Value>` is deliberately not flattened — too unstructured.
         // Policies wanting conversation history should call a plugin.
     }

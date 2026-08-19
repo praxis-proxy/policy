@@ -6,7 +6,7 @@
 // Namespace:
 //   llm.model_id        : String
 //   llm.provider        : String
-//   llm.capabilities    : StringSet
+//   llm.capabilities    : StringSet (always present, empty rather than absent)
 
 use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::LLMExtension;
@@ -20,10 +20,10 @@ pub fn extract_llm(llm: &LLMExtension, bag: &mut AttributeBag) {
     if let Some(v) = &llm.provider {
         bag.set("llm.provider", v.clone());
     }
-    if !llm.capabilities.is_empty() {
-        let caps: HashSet<String> = llm.capabilities.iter().cloned().collect();
-        bag.set("llm.capabilities", caps);
-    }
+    // Always emitted, empty rather than absent — see the empty-set note in
+    // `security.rs`, which documents the rule for the whole bridge.
+    let caps: HashSet<String> = llm.capabilities.iter().cloned().collect();
+    bag.set("llm.capabilities", caps);
 }
 
 #[cfg(test)]
