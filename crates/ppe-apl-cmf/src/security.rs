@@ -78,9 +78,9 @@ use praxis_policy_core::extensions::{
 use std::collections::HashSet;
 
 use crate::constants::{
-    BAG_AUTHENTICATED, BAG_CLAIM_PREFIX, BAG_PERM_PREFIX, BAG_ROLE_PREFIX, BAG_SUBJECT_ID,
-    BAG_SUBJECT_PERMISSIONS, BAG_SUBJECT_ROLES, BAG_SUBJECT_TEAMS, BAG_SUBJECT_TYPE,
-    BAG_TEAM_PREFIX,
+    BAG_AUTHENTICATED, BAG_CLAIM_PREFIX, BAG_CLIENT_PERMISSIONS, BAG_CLIENT_ROLES, BAG_PERM_PREFIX,
+    BAG_ROLE_PREFIX, BAG_SUBJECT_ID, BAG_SUBJECT_PERMISSIONS, BAG_SUBJECT_ROLES, BAG_SUBJECT_TEAMS,
+    BAG_SUBJECT_TYPE, BAG_TEAM_PREFIX,
 };
 
 /// Flatten a `SecurityExtension` into the bag.
@@ -147,11 +147,13 @@ pub fn extract_security(sec: &SecurityExtension, bag: &mut AttributeBag) {
 }
 
 /// Flatten a `ClientExtension` into the bag under the `client.*`
-/// namespace. Shape is deliberately symmetric with subject — roles
-/// and permissions become presence-only `client.role.<r> = true` /
-/// `client.perm.<p> = true` keys so policies can write
-/// `require(client.role.partner)` the same way as `role.hr`. Claims
-/// are flattened through the same JSON walker as `custom.*`, so
+/// namespace. Shape is deliberately symmetric with subject — roles and
+/// permissions land twice, as the whole set under `client.roles` /
+/// `client.permissions` for membership tests
+/// (`"partner" in client.roles`), and as presence-only
+/// `client.role.<r> = true` / `client.perm.<p> = true` keys so policies
+/// can write `require(client.role.partner)` the same way as `role.hr`.
+/// Claims are flattened through the same JSON walker as `custom.*`, so
 /// nested objects produce dotted-path keys.
 pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
     bag.set("client.client_id", client.client_id.clone());
@@ -159,9 +161,13 @@ pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
         bag.set("client.client_name", n.clone());
     }
     bag.set("client.trust_level", trust_level_str(&client.trust_level));
+    let roles: HashSet<String> = client.roles.iter().cloned().collect();
+    bag.set(BAG_CLIENT_ROLES, roles);
     for role in &client.roles {
         bag.set(format!("client.role.{role}"), true);
     }
+    let perms: HashSet<String> = client.permissions.iter().cloned().collect();
+    bag.set(BAG_CLIENT_PERMISSIONS, perms);
     for perm in &client.permissions {
         bag.set(format!("client.perm.{perm}"), true);
     }
@@ -498,6 +504,32 @@ mod tests {
         assert_eq!(bag.get_bool("client.role.partner"), Some(true));
         assert_eq!(bag.get_bool("client.perm.call_tool"), Some(true));
         assert_eq!(bag.get_bool("client.role.nonexistent"), None);
+    }
+
+    #[test]
+    fn client_roles_and_perms_also_land_as_sets() {
+        // The membership idiom generalizes across principals: an author who
+        // learns `"hr" in subject.roles` can write `"partner" in
+        // client.roles` and have it resolve rather than error.
+        let mut bag = AttributeBag::new();
+        extract_client(&agent_client(), &mut bag);
+        assert!(bag.set_contains("client.roles", "partner"));
+        assert!(!bag.set_contains("client.roles", "nonexistent"));
+        assert!(bag.set_contains("client.permissions", "call_tool"));
+    }
+
+    #[test]
+    fn empty_client_roles_and_perms_are_present_not_absent() {
+        let client = ClientExtension {
+            client_id: "bare-app".into(),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_client(&client, &mut bag);
+
+        let empty = HashSet::new();
+        assert_eq!(bag.get_string_set("client.roles"), Some(&empty));
+        assert_eq!(bag.get_string_set("client.permissions"), Some(&empty));
     }
 
     #[test]

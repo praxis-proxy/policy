@@ -529,6 +529,7 @@ fn read_yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
 #[allow(clippy::panic, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn cel_call(expr: &str) -> PdpCall {
         let mut m = serde_yaml::Mapping::new();
@@ -577,6 +578,60 @@ mod tests {
         };
         let err = r.evaluate(&call, &AttributeBag::new()).await.unwrap_err();
         assert!(matches!(err, PdpError::Dispatch(_)));
+    }
+
+    /// Pins the CEL semantics that the CMF bridge's "empty sets are
+    /// emitted, not omitted" rule exists to accommodate.
+    ///
+    /// A membership test against an *absent* key is an evaluation error,
+    /// which fail-closed handling turns into a denial — so a bridge that
+    /// dropped `subject.roles` when a subject had no roles made
+    /// `!("banned" in subject.roles)` deny every unroled subject. Against
+    /// an *empty set* the same expression simply evaluates false.
+    ///
+    /// If a future cel-rust release makes missing-key selection return a
+    /// falsy value instead of erroring, this test fails — which is the
+    /// signal to revisit whether the bridge still needs the rule.
+    #[tokio::test]
+    async fn membership_on_absent_key_denies_but_empty_set_evaluates() {
+        let r = CelResolver::new();
+
+        // Absent key: `subject` exists as a namespace (id is set) but has
+        // no `roles` member. This is the pre-fix bag shape.
+        let absent = bag_with(&[("subject.id", "alice")]);
+        let out = r
+            .evaluate(&cel_call("!('banned' in subject.roles)"), &absent)
+            .await
+            .unwrap();
+        assert!(
+            matches!(out.decision, Decision::Deny { .. }),
+            "a missing key must fail closed — this is the behavior the \
+             bridge's always-emit rule is designed to avoid",
+        );
+
+        // Empty set present: the post-fix bag shape. The subject still has
+        // no roles, but the key exists, so the test resolves to false and
+        // the negation allows.
+        let mut empty = bag_with(&[("subject.id", "alice")]);
+        empty.set("subject.roles", HashSet::new());
+        let out = r
+            .evaluate(&cel_call("!('banned' in subject.roles)"), &empty)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.decision,
+            Decision::Allow,
+            "an empty set must evaluate as a normal negative membership test",
+        );
+
+        // And a populated set still matches, so the fix did not invert it.
+        let mut populated = bag_with(&[("subject.id", "alice")]);
+        populated.set("subject.roles", HashSet::from(["banned".to_owned()]));
+        let out = r
+            .evaluate(&cel_call("!('banned' in subject.roles)"), &populated)
+            .await
+            .unwrap();
+        assert!(matches!(out.decision, Decision::Deny { .. }));
     }
 
     /// A host can register a custom CEL function via `with_functions`

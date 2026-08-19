@@ -118,6 +118,14 @@ pub const BAG_RESULT_PREFIX: &str = "result.";
 
 /// Key prefix for the OAuth client, as in `client.<name>`.
 pub const BAG_CLIENT_PREFIX: &str = "client.";
+/// Bag key `client.roles` — the client's full role set, mirroring the
+/// flattened `client.role.<name>` keys as one `StringSet`. Symmetric
+/// with [`BAG_SUBJECT_ROLES`] so the same membership idiom works on
+/// either principal.
+pub const BAG_CLIENT_ROLES: &str = "client.roles";
+/// Bag key `client.permissions` — the client's full permission set,
+/// mirroring the flattened `client.perm.<name>` keys as one `StringSet`.
+pub const BAG_CLIENT_PERMISSIONS: &str = "client.permissions";
 /// Key prefix for workload identity, as in `workload.<name>`.
 pub const BAG_WORKLOAD_PREFIX: &str = "workload.";
 /// Key prefix for caller workload, as in `caller_workload.<name>`.

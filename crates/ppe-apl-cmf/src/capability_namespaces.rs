@@ -257,6 +257,19 @@ mod tests {
     }
 
     #[test]
+    fn read_client_covers_the_client_role_and_permission_sets() {
+        // Subject keys are enumerated exactly, so `subject.roles` had to be
+        // added to the table by hand. Client keys are covered by the
+        // `client.` prefix instead, so `client.roles` / `client.permissions`
+        // need no table entry — assert that rather than trusting it, since
+        // the two halves of the vocabulary are gated differently.
+        let prefixes = capability_namespaces(CAP_READ_CLIENT);
+        assert!(prefixes.contains(&BAG_CLIENT_PREFIX));
+        assert!(BAG_CLIENT_ROLES.starts_with(BAG_CLIENT_PREFIX));
+        assert!(BAG_CLIENT_PERMISSIONS.starts_with(BAG_CLIENT_PREFIX));
+    }
+
+    #[test]
     fn read_delegation_exposes_delegation_namespace_and_delegated_flag() {
         let prefixes = capability_namespaces(CAP_READ_DELEGATION);
         assert!(prefixes.contains(&BAG_DELEGATION_PREFIX));
