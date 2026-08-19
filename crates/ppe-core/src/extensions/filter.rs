@@ -6,7 +6,7 @@
 // Builds a Extensions from Extensions + declared capabilities.
 // Secure by default: slots not explicitly included are None.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::container::Extensions;
@@ -504,7 +504,7 @@ fn build_filtered_subject(
         claims: if capabilities.contains(&cap_str(Capability::ReadClaims)) {
             subject.claims.clone()
         } else {
-            std::collections::HashMap::new()
+            HashMap::new()
         },
     }
 }
@@ -534,7 +534,7 @@ mod tests {
             roles: ["admin".to_owned()].into(),
             permissions: ["read_all".to_owned()].into(),
             teams: ["engineering".to_owned()].into(),
-            claims: [("iss".to_owned(), "example.com".to_owned())].into(),
+            claims: [("iss".to_owned(), serde_json::json!("example.com"))].into(),
         });
 
         let mut http = super::super::HttpExtension::default();

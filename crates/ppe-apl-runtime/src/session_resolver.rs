@@ -138,9 +138,9 @@ pub fn resolve_session(ext: &Extensions) -> Option<(String, SessionSource)> {
     // store key must still incorporate the subject.
     if let Some(sec) = ext.security.as_deref()
         && let Some(subj) = sec.subject.as_ref()
-        && let Some(sid) = subj.claims.get("session_id")
+        && let Some(sid) = subj.claim_str("session_id")
         && !sid.is_empty()
-        && let Some(bound) = subject_scoped(subject_id, sid)
+        && let Some(bound) = subject_scoped(subject_id, sid.as_ref())
     {
         return Some((bound, SessionSource::TokenClaim));
     }
@@ -206,7 +206,7 @@ mod tests {
             id: id.map(String::from),
             claims: claims
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
                 .collect(),
             ..Default::default()
         }
@@ -440,7 +440,7 @@ mod tests {
         let sec = SecurityExtension {
             subject: Some(SubjectExtension {
                 id: None,
-                claims: [("session_id".to_owned(), "claim-value".to_owned())]
+                claims: [("session_id".to_owned(), serde_json::json!("claim-value"))]
                     .into_iter()
                     .collect(),
                 ..Default::default()
