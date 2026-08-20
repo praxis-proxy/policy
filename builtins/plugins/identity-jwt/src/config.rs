@@ -18,6 +18,7 @@ use praxis_policy_core::extensions::raw_credentials::TokenRole;
 use serde::{Deserialize, Serialize};
 
 use super::trusted_issuer::{KeyStore, TrustedIssuer};
+use crate::claim_map_config::ClaimMapConfig;
 
 /// Top-level plugin config — what operators write under
 /// `plugins[<name>].config:` in unified-config YAML.
@@ -55,12 +56,32 @@ pub struct JwtIdentityResolverConfig {
     #[serde(default = "default_header")]
     pub header: String,
 
-    /// Which claim mapper to use. `"standard"` is the OIDC default;
-    /// future named mappers (e.g., `"keycloak"`, `"cognito"`) plug
-    /// in via the registry pattern in `resolver.rs`. Omitted →
-    /// `StandardClaimMap`.
+    /// Which shipped preset to map claims with: `standard`, `keycloak`,
+    /// `auth0` or `cognito`. Omitted resolves to `standard`, which reproduces
+    /// the OIDC shape this plugin has always mapped. An unknown name fails at
+    /// construction and lists the valid ones.
+    ///
+    /// Each preset's `description` in `src/presets/` records what it covers and
+    /// what it deliberately omits, which matters: two of the three providers
+    /// namespace or parameterize their roles claim per deployment, so no preset
+    /// can carry it. Reach those with [`claim_map`].
+    ///
+    /// Mutually exclusive with [`claim_map`].
+    ///
+    /// [`claim_map`]: Self::claim_map
     #[serde(default)]
     pub claim_mapper: Option<String>,
+
+    /// An inline claim map, for a shape no preset covers.
+    ///
+    /// Mutually exclusive with [`claim_mapper`]; setting both is a config error
+    /// rather than a precedence rule.
+    ///
+    /// See [`ClaimMapConfig`] for the surface and its escaping rules.
+    ///
+    /// [`claim_mapper`]: Self::claim_mapper
+    #[serde(default)]
+    pub claim_map: Option<ClaimMapConfig>,
 }
 
 fn default_role() -> TokenRole {

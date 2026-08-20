@@ -58,8 +58,10 @@ use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
-use super::claim_map::{ClaimMap, ClaimMapper, StandardClaimMap};
+use super::claim_map::{ClaimMap, ClaimMapper};
 use super::config::{JwtIdentityResolverConfig, TrustedIssuerConfig};
+use super::configured_mapper::ConfiguredClaimMap;
+use super::presets;
 use super::trusted_issuer::{KeyStore, TrustedIssuer};
 
 /// Default clock-skew tolerance, in seconds. Matches what most OIDC
@@ -193,22 +195,6 @@ impl JwtIdentityResolver {
             }
         }
 
-        // Resolve the claim mapper by name. Unknown names are a
-        // config error rather than a silent fallback — fail fast
-        // so operators notice typos.
-        let claim_mapper: Arc<dyn ClaimMapper> = match typed.claim_mapper.as_deref() {
-            None | Some("standard") => Arc::new(StandardClaimMap),
-            Some(other) => {
-                return Err(Box::new(PluginError::Config {
-                    message: format!(
-                        "plugin '{}' (praxis-policy-plugin-identity-jwt): unknown claim_mapper \
-                         '{other}'; valid: [standard]",
-                        cfg.name
-                    ),
-                }));
-            },
-        };
-
         // Reject `role: Custom(...)` at construction — the framework
         // has slots for User / Client / Workload (the three named
         // entries on SecurityExtension). Custom roles would write to
@@ -224,6 +210,42 @@ impl JwtIdentityResolver {
                 ),
             }));
         }
+
+        // Resolve the claim map: an inline `claim_map`, a preset named by
+        // `claim_mapper`, or the standard preset. Unknown names and malformed
+        // maps are config errors rather than silent fallbacks, so an operator's
+        // typo fails at load rather than denying every request.
+        let config_error = |message: String| {
+            Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' (praxis-policy-plugin-identity-jwt): {message}",
+                    cfg.name
+                ),
+            })
+        };
+
+        let compiled = match (typed.claim_map.as_ref(), typed.claim_mapper.as_deref()) {
+            (Some(_), Some(named)) => {
+                return Err(config_error(format!(
+                    "`claim_map` and `claim_mapper: {named}` are both set; pick one, an inline \
+                     map or a preset by name"
+                )));
+            },
+            (Some(inline), None) => inline
+                .compile()
+                .map_err(|e| config_error(format!("`claim_map` is not usable: {e}")))?,
+            (None, named) => presets::lookup(named.unwrap_or(presets::DEFAULT_PRESET))
+                .map_err(&config_error)?
+                .into_claim_map(),
+        };
+
+        // Require the section matching the configured role now, so a
+        // misconfigured pairing is a startup failure rather than a resolver that
+        // denies every request.
+        compiled.role(&typed.role).map_err(&config_error)?;
+
+        let claim_mapper: Arc<dyn ClaimMapper> = Arc::new(ConfiguredClaimMap::new(compiled));
+
         if typed.header.trim().is_empty() {
             return Err(Box::new(PluginError::Config {
                 message: format!(
@@ -534,8 +556,10 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 None => {
                     return PluginResult::deny(PluginViolation::new(
                         "auth.mapping_failed",
-                        "claim mapper produced no subject — required `sub` \
-                         claim missing or wrong shape",
+                        "the claim map produced no subject: no candidate resolved for the \
+                         subject id, or a field declaring `on_missing: deny` resolved \
+                         nothing. Raise the log level to debug to see which fields and \
+                         which paths were tried",
                     ));
                 },
             },
@@ -544,8 +568,10 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 None => {
                     return PluginResult::deny(PluginViolation::new(
                         "auth.mapping_failed",
-                        "claim mapper produced no client — required `client_id` \
-                         / `azp` claim missing",
+                        "the claim map produced no client: no candidate resolved for the \
+                         client id, or a field declaring `on_missing: deny` resolved \
+                         nothing. Raise the log level to debug to see which fields and \
+                         which paths were tried",
                     ));
                 },
             },
@@ -554,8 +580,10 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 None => {
                     return PluginResult::deny(PluginViolation::new(
                         "auth.mapping_failed",
-                        "claim mapper produced no workload — token doesn't look \
-                         like a SPIFFE-JWT-SVID (sub doesn't start with `spiffe://`)",
+                        "the claim map produced no workload: no candidate resolved to a \
+                         `spiffe://` identity, which every candidate must, or a field \
+                         declaring `on_missing: deny` resolved nothing. Raise the log \
+                         level to debug to see which fields and which paths were tried",
                     ));
                 },
             },
@@ -844,21 +872,154 @@ mod tests {
         assert!(format!("{err}").contains("trusted_issuers"));
     }
 
+    /// A config carrying the test issuer plus whatever mapper settings the case
+    /// needs. Every claim-map test goes through `new` like production does.
+    fn cfg_with_mapper(settings: Value) -> PluginConfig {
+        let mut config = json!({
+            "trusted_issuers": [{
+                "issuer": "https://idp.example.com",
+                "algorithms": ["HS256"],
+                "decoding_key": { "kind": "secret", "secret": "x" },
+            }],
+        });
+        if let (Some(target), Some(extra)) = (config.as_object_mut(), settings.as_object()) {
+            for (key, value) in extra {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        cfg_with_config("jwt", config)
+    }
+
+    fn build_err(settings: Value) -> String {
+        format!(
+            "{}",
+            JwtIdentityResolver::new(cfg_with_mapper(settings))
+                .expect_err("this config must not build")
+        )
+    }
+
     #[test]
     fn new_rejects_unknown_claim_mapper() {
-        let cfg = cfg_with_config(
-            "jwt",
-            json!({
-                "trusted_issuers": [{
-                    "issuer": "https://idp.example.com",
-                    "algorithms": ["HS256"],
-                    "decoding_key": { "kind": "secret", "secret": "x" },
-                }],
-                "claim_mapper": "made-up-mapper",
-            }),
-        );
-        let err = JwtIdentityResolver::new(cfg).expect_err("unknown mapper should fail");
-        assert!(format!("{err}").contains("claim_mapper"));
+        let err = build_err(json!({"claim_mapper": "made-up-mapper"}));
+        assert!(err.contains("claim_mapper"), "{err}");
+        assert!(err.contains("made-up-mapper"), "{err}");
+        for name in presets::names() {
+            assert!(err.contains(name), "'{name}' missing from: {err}");
+        }
+    }
+
+    /// The two mapper settings are alternatives, not layers, so setting both is
+    /// a mistake with no coherent reading. The message names both.
+    #[test]
+    fn new_rejects_both_claim_mapper_and_claim_map() {
+        let err = build_err(json!({
+            "claim_mapper": "keycloak",
+            "claim_map": {"subject": {"id": "sub"}},
+        }));
+        assert!(err.contains("claim_mapper"), "{err}");
+        assert!(err.contains("claim_map"), "{err}");
+    }
+
+    /// An absent setting and the `standard` name are the same thing, and both
+    /// have to keep working: an upgrading deployment changes neither.
+    #[test]
+    fn an_absent_mapper_and_the_standard_name_both_build() {
+        for settings in [json!({}), json!({"claim_mapper": "standard"})] {
+            JwtIdentityResolver::new(cfg_with_mapper(settings.clone()))
+                .unwrap_or_else(|e| panic!("{settings} must build: {e}"));
+        }
+    }
+
+    #[test]
+    fn every_shipped_preset_builds_a_resolver_for_a_role_it_declares() {
+        for name in presets::names() {
+            JwtIdentityResolver::new(cfg_with_mapper(json!({"claim_mapper": name})))
+                .unwrap_or_else(|e| panic!("'{name}' must build for the default role: {e}"));
+            JwtIdentityResolver::new(cfg_with_mapper(json!({
+                "claim_mapper": name, "role": "client",
+            })))
+            .unwrap_or_else(|e| panic!("'{name}' must build for role: client: {e}"));
+        }
+    }
+
+    /// `keycloak` is the case that motivated the work: it was rejected before,
+    /// because only `standard` was a name the resolver knew.
+    #[test]
+    fn a_provider_preset_builds_where_it_previously_failed() {
+        JwtIdentityResolver::new(cfg_with_mapper(json!({"claim_mapper": "keycloak"})))
+            .expect("keycloak must build");
+    }
+
+    /// No provider preset has a workload shape, so pairing one with
+    /// `role: workload` fails at load naming the role, which beats a section of
+    /// guesses about a shape the provider does not mint.
+    #[test]
+    fn a_preset_without_a_workload_section_refuses_the_workload_role() {
+        for name in ["auth0", "cognito", "keycloak"] {
+            let err = build_err(json!({"claim_mapper": name, "role": "workload"}));
+            assert!(err.contains("workload"), "'{name}': {err}");
+        }
+        JwtIdentityResolver::new(cfg_with_mapper(json!({
+            "claim_mapper": "standard", "role": "workload",
+        })))
+        .expect("standard declares a workload section");
+    }
+
+    #[test]
+    fn an_inline_claim_map_builds() {
+        JwtIdentityResolver::new(cfg_with_mapper(json!({
+            "claim_map": {
+                "subject": {
+                    "id": "sub",
+                    "roles": {
+                        "paths": ["realm_access.roles", "resource_access.my-api.roles"],
+                        "merge": "union",
+                    },
+                }
+            }
+        })))
+        .expect("an inline map must build");
+    }
+
+    /// A map that declares the wrong section fails at load rather than denying
+    /// every request, which is the whole point of checking at construction.
+    #[test]
+    fn an_inline_claim_map_missing_the_configured_role_names_the_role() {
+        let err = build_err(json!({
+            "claim_map": {"subject": {"id": "sub"}},
+            "role": "client",
+        }));
+        assert!(err.contains("client"), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_path_in_an_inline_claim_map_names_the_field_and_the_path() {
+        let err = build_err(json!({
+            "claim_map": {"subject": {"id": "sub", "roles": "realm_access..roles"}}
+        }));
+        assert!(err.contains("subject.roles"), "{err}");
+        assert!(err.contains("realm_access..roles"), "{err}");
+    }
+
+    /// A map of the wrong JSON shape entirely fails at construction, not at the
+    /// first request.
+    #[test]
+    fn an_inline_claim_map_of_the_wrong_shape_is_refused_at_load() {
+        for map in [
+            json!({"claim_map": "standard"}),
+            json!({"claim_map": {"subjekt": {"id": "sub"}}}),
+            json!({"claim_map": {"subject": {"id": 42}}}),
+            json!({"claim_map": {"subject": {"id": "sub"}, "claims": {"exclude": "iss"}}}),
+        ] {
+            let Err(err) = JwtIdentityResolver::new(cfg_with_mapper(map.clone())) else {
+                panic!("{map} must not build");
+            };
+            let err = format!("{err}");
+            assert!(
+                err.contains("praxis-policy-plugin-identity-jwt"),
+                "{map}: the message must name the plugin: {err}"
+            );
+        }
     }
 
     #[test]

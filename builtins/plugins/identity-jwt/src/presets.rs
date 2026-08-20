@@ -218,8 +218,11 @@ mod tests {
         }
     }
 
+    /// An absent `claim_mapper` resolves here, so changing this name would
+    /// change what every deployment that names no mapper gets.
     #[test]
-    fn the_default_preset_is_in_the_table() {
+    fn the_default_preset_is_standard_and_is_in_the_table() {
+        assert_eq!(DEFAULT_PRESET, "standard");
         assert!(lookup(DEFAULT_PRESET).is_ok());
     }
 
