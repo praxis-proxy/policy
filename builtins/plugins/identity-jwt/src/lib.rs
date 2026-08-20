@@ -52,6 +52,8 @@ pub mod claim_map_config;
 pub mod claim_path;
 /// Plugin configuration and its validation.
 pub mod config;
+/// The mapper a compiled claim map drives.
+pub mod configured_mapper;
 /// Constructs the resolver from configuration.
 pub mod factory;
 /// The identity hook handler.
@@ -66,6 +68,7 @@ pub use claim_map_config::{
 };
 pub use claim_path::ClaimPath;
 pub use config::{DecodingKeySource, JwtIdentityResolverConfig, TrustedIssuerConfig};
+pub use configured_mapper::ConfiguredClaimMap;
 pub use factory::{JwtIdentityFactory, KIND};
 pub use resolver::JwtIdentityResolver;
 pub use trusted_issuer::TrustedIssuer;

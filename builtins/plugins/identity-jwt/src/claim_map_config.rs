@@ -468,11 +468,34 @@ fn compile_role(
                 "{qualified}: `paths` is empty, so nothing can resolve"
             ));
         }
-        if authored_field.merge == MergeMode::Union && SCALAR_FIELDS.contains(interned) {
-            return Err(format!(
-                "{qualified}: `merge: union` needs a field that holds a collection, and \
-                 {qualified} holds one value"
-            ));
+        // A field holding one value takes the first candidate resolving to a
+        // string, so the three collection options cannot mean anything on it.
+        // Rejecting beats ignoring: an ignored `array_only` would make the field
+        // resolve never, surfacing as a runtime denial instead of a load error.
+        if SCALAR_FIELDS.contains(interned) {
+            if authored_field.merge == MergeMode::Union {
+                return Err(format!(
+                    "{qualified}: `merge: union` needs a field that holds a collection, and \
+                     {qualified} holds one value"
+                ));
+            }
+            if authored_field.split.is_some() {
+                return Err(format!(
+                    "{qualified}: `split` needs a field that holds a collection, and {qualified} \
+                     holds one value"
+                ));
+            }
+            if let Some(candidate) = authored_field
+                .paths
+                .iter()
+                .find(|candidate| candidate.array_only)
+            {
+                return Err(format!(
+                    "{qualified}: `array_only` on '{}' would let nothing resolve, because \
+                     {qualified} holds one value",
+                    candidate.path
+                ));
+            }
         }
 
         let mut candidates = Vec::with_capacity(authored_field.paths.len());
@@ -749,6 +772,32 @@ mod tests {
                 "{role}.{field}: {err}"
             );
         }
+    }
+
+    /// `split` and `array_only` are as meaningless on a field holding one value
+    /// as `union` is. Ignoring `array_only` would be worse than rejecting it: it
+    /// would let nothing resolve, turning a config mistake into a runtime denial.
+    #[test]
+    fn split_and_array_only_on_a_field_holding_one_value_are_rejected() {
+        let split = compile_err(json!({
+            "subject": {"id": {"paths": ["sub"], "split": "whitespace"}}
+        }));
+        assert!(
+            split.contains("subject.id") && split.contains("split"),
+            "{split}"
+        );
+
+        let array_only = compile_err(json!({
+            "subject": {"id": [{"path": "sub", "array_only": true}]}
+        }));
+        assert!(
+            array_only.contains("subject.id") && array_only.contains("array_only"),
+            "{array_only}"
+        );
+        assert!(
+            array_only.contains("sub"),
+            "the offending candidate is named: {array_only}"
+        );
     }
 
     #[test]
