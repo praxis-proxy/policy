@@ -39,9 +39,10 @@
 //   sec.subject.teams                → subject.teams        : StringSet (always)
 //                                    → team.<t>             : Bool(true)
 //   sec.subject.claims               → claim.<k>            : flattened JSON
-//        Scalars keep their type; string arrays (empty included) become a
-//        StringSet. A non-string array, `{}` or `null` sets no key, and a
-//        structured claim sets only the children beneath it.
+//        Scalars keep their type; scalar arrays (empty included) become a
+//        StringSet, numbers and bools as strings. `{}`, `null` and an array
+//        holding a nested container set no key, and a structured claim sets
+//        only the children beneath it.
 //   <derived>                        → authenticated        : Bool (iff subject.id is Some)
 //
 // ----- Client (OAuth application identity) ------------------------------
