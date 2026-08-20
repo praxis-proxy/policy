@@ -9,6 +9,10 @@
 //! from. The corpus is the contract: it is asserted against `StandardClaimMap`,
 //! so it describes the mapper rather than any later reimplementation of it.
 //!
+//! The gate then holds the shipped `standard` preset to that same corpus. Where
+//! the two disagree the preset is what changes, never the Rust mapper and never
+//! the corpus, unless the corpus entry is itself wrong about what an `IdP` mints.
+//!
 //! The corpus is embedded rather than read at run time, so a missing or
 //! unparseable file is a compile or test failure and never a silently skipped
 //! entry.
@@ -27,7 +31,9 @@
 use std::collections::{HashMap, HashSet};
 
 use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
-use praxis_policy_plugin_identity_jwt::{ClaimMapper as _, StandardClaimMap};
+use praxis_policy_plugin_identity_jwt::{
+    ClaimMapper as _, ConfiguredClaimMap, StandardClaimMap, presets,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -430,4 +436,179 @@ fn every_role_has_a_declining_entry() {
             "no {role:?} entry expects the mapper to decline"
         );
     }
+}
+
+// =====================================================================
+// The gate: the standard preset agrees with the Rust mapper
+// =====================================================================
+
+fn standard_preset() -> ConfiguredClaimMap {
+    ConfiguredClaimMap::new(
+        presets::lookup("standard")
+            .expect("the shipped standard preset must load")
+            .into_claim_map(),
+    )
+}
+
+/// Map one entry through both paths and assert they agree.
+///
+/// The preset is the `actual` side so a failure reads as the preset diverging,
+/// which is the side that changes when it does.
+fn assert_entry_agrees(entry: &CorpusEntry, preset: &ConfiguredClaimMap) {
+    let context = format!("{} (standard preset vs rust mapper)", entry.name);
+    match entry.role {
+        CorpusRole::User => {
+            match (
+                preset.map_subject(&entry.claims),
+                StandardClaimMap.map_subject(&entry.claims),
+            ) {
+                (Some(from_preset), Some(from_rust)) => {
+                    assert_subjects_agree(&context, &from_preset, &from_rust);
+                },
+                (None, None) => {},
+                (from_preset, from_rust) => panic!(
+                    "{context}: the preset {} but the mapper {}",
+                    described(from_preset.is_some()),
+                    described(from_rust.is_some())
+                ),
+            }
+        },
+        CorpusRole::Client => {
+            match (
+                preset.map_client(&entry.claims),
+                StandardClaimMap.map_client(&entry.claims),
+            ) {
+                (Some(from_preset), Some(from_rust)) => {
+                    assert_clients_agree(&context, &from_preset, &from_rust);
+                },
+                (None, None) => {},
+                (from_preset, from_rust) => panic!(
+                    "{context}: the preset {} but the mapper {}",
+                    described(from_preset.is_some()),
+                    described(from_rust.is_some())
+                ),
+            }
+        },
+        CorpusRole::Workload => {
+            match (
+                preset.map_workload(&entry.claims),
+                StandardClaimMap.map_workload(&entry.claims),
+            ) {
+                (Some(from_preset), Some(from_rust)) => {
+                    assert_workloads_agree(&context, &from_preset, &from_rust);
+                },
+                (None, None) => {},
+                (from_preset, from_rust) => panic!(
+                    "{context}: the preset {} but the mapper {}",
+                    described(from_preset.is_some()),
+                    described(from_rust.is_some())
+                ),
+            }
+        },
+    }
+}
+
+fn described(produced: bool) -> &'static str {
+    if produced {
+        "produced an identity"
+    } else {
+        "declined"
+    }
+}
+
+/// The compatibility promise, in one test: an upgrading deployment that names no
+/// mapper sees the identity it saw before, for every shape in the corpus.
+#[test]
+fn the_standard_preset_agrees_with_the_rust_mapper_across_the_corpus() {
+    let preset = standard_preset();
+    for entry in corpus() {
+        assert_entry_agrees(&entry, &preset);
+    }
+}
+
+/// Both branches of every fallback, asserted through both paths and named by
+/// their fallback. Without this a preset expressing a fallback differently could
+/// pass on the strength of the branch that happens to agree.
+#[test]
+fn both_branches_of_every_fallback_agree_through_both_paths() {
+    let preset = standard_preset();
+    let entries = corpus();
+    let find = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("the corpus must carry an entry named '{name}'"))
+    };
+
+    for (fallback, first, second) in FALLBACK_BRANCHES {
+        for branch in [first, second] {
+            let entry = find(branch);
+            assert_entry_agrees(entry, &preset);
+            println!("{fallback}: '{branch}' agrees");
+        }
+    }
+    for shape in AUD_SHAPES {
+        assert_entry_agrees(find(shape), &preset);
+    }
+}
+
+/// A token the Rust mapper declines must be declined by the preset too. An
+/// anchor the preset accepts where the mapper does not is a widened surface, not
+/// a compatible one.
+#[test]
+fn a_token_the_rust_mapper_declines_is_declined_by_the_preset() {
+    let preset = standard_preset();
+    let declining: Vec<CorpusEntry> = corpus()
+        .into_iter()
+        .filter(|entry| entry.expected.is_none())
+        .collect();
+    assert!(
+        !declining.is_empty(),
+        "the corpus must carry entries the mapper declines"
+    );
+    for entry in declining {
+        let produced = match entry.role {
+            CorpusRole::User => preset.map_subject(&entry.claims).is_some(),
+            CorpusRole::Client => preset.map_client(&entry.claims).is_some(),
+            CorpusRole::Workload => preset.map_workload(&entry.claims).is_some(),
+        };
+        assert!(
+            !produced,
+            "{}: the Rust mapper declines this token and the preset must too",
+            entry.name
+        );
+    }
+}
+
+/// The claims bag is compared key for key and value for value inside
+/// `assert_*_agree`. This spells out why: the bag is the only route from a claim
+/// to a policy, so a claim the preset fails to exclude is a visible change even
+/// when every typed field matches.
+#[test]
+fn the_claims_bag_comparison_is_exhaustive() {
+    let preset = standard_preset();
+    let entry = corpus()
+        .into_iter()
+        .find(|entry| entry.name == "subject-keycloak-access-token")
+        .expect("the Keycloak entry carries the widest claims bag in the corpus");
+
+    let from_preset = preset
+        .map_subject(&entry.claims)
+        .expect("the Keycloak token resolves");
+    let from_rust = StandardClaimMap
+        .map_subject(&entry.claims)
+        .expect("the Keycloak token resolves");
+
+    assert_eq!(
+        from_preset.claims.keys().collect::<HashSet<_>>(),
+        from_rust.claims.keys().collect::<HashSet<_>>(),
+        "same key set"
+    );
+    for (name, value) in &from_rust.claims {
+        assert_eq!(from_preset.claims.get(name), Some(value), "claim `{name}`");
+    }
+    assert!(
+        from_preset.claims.contains_key("realm_access"),
+        "a nested claim no single-segment path consumed stays visible"
+    );
 }
