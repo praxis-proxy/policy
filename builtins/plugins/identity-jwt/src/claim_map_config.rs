@@ -282,6 +282,57 @@ pub struct ClaimsOverrides {
 pub struct RoleMapConfig(pub BTreeMap<String, Value>);
 
 /// The claim map an operator writes under `claim_map:`.
+///
+/// One section per role, and a resolver uses the section matching its own
+/// `role:`. A field is written in one of three forms:
+///
+/// ```yaml
+/// claim_map:
+///   subject:
+///     id: sub                          # a path
+///     teams: [teams, groups]           # ordered candidates, first match wins
+///     roles:                           # candidates plus options
+///       paths:
+///         - realm_access.roles
+///         - resource_access.my-api.roles
+///       merge: union                   # first_match (default) | union
+///     permissions:
+///       paths:
+///         - { path: permissions, array_only: true }
+///         - scope
+///       split: whitespace              # break a delimited string into elements
+///       on_missing: deny               # ignore (default) | deny
+///     claims:
+///       exclude: [internal_debug]      # drop an otherwise-visible claim
+///       include: [iss]                 # keep one the inference drops
+/// ```
+///
+/// A field with no candidate that resolves is left empty and logged at debug,
+/// naming every path tried. `on_missing: deny` makes that a refusal instead.
+/// `array_only` requires an array, so a string-valued claim is skipped and the
+/// next candidate is tried.
+///
+/// # Escaping, and the quoting trap
+///
+/// `.` separates path segments and `\` escapes; every other character, `:` and
+/// `/` included, is a literal. So `cognito:groups` is one segment written
+/// plainly, and a claim whose whole name is a URL needs its dots escaped and
+/// nothing else.
+///
+/// The plugin receives JSON, so how many backslashes to type depends on the YAML
+/// scalar style. Both of these authorize the same path:
+///
+/// ```yaml
+/// # double-quoted: YAML consumes one backslash, so double them
+/// roles: "https://my-app\\.example\\.com/roles"
+///
+/// # plain or single-quoted: YAML passes the backslash through
+/// roles: https://my-app\.example\.com/roles
+/// roles: 'https://my-app\.example\.com/roles'
+/// ```
+///
+/// Escaping the colon is the common mistake, and it is rejected rather than
+/// accepted: a colon is already a literal, so `\:` is not an escape.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimMapConfig {

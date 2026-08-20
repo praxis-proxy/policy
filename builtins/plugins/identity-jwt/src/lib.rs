@@ -43,6 +43,12 @@
 //! into the subject, client, or workload slot. This is the lightweight identity
 //! path: it establishes who is calling, independent of any decision point that
 //! runs later in the route.
+//!
+//! Which claims fill which field is configuration. Name a shipped preset with
+//! `claim_mapper` (`standard`, `keycloak`, `auth0`, `cognito`) or write a
+//! [`ClaimMapConfig`] under `claim_map` for a shape no preset covers, including
+//! the nested and URL-namespaced claims that otherwise need Rust. Naming no
+//! mapper resolves to `standard`, which maps what this plugin has always mapped.
 
 /// Maps validated claims onto the identity slots.
 pub mod claim_map;
