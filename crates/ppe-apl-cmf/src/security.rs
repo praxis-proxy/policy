@@ -39,6 +39,9 @@
 //   sec.subject.teams                → subject.teams        : StringSet (always)
 //                                    → team.<t>             : Bool(true)
 //   sec.subject.claims               → claim.<k>            : flattened JSON
+//        Scalars keep their type; string arrays (empty included) become a
+//        StringSet. A non-string array, `{}` or `null` sets no key, and a
+//        structured claim sets only the children beneath it.
 //   <derived>                        → authenticated        : Bool (iff subject.id is Some)
 //
 // ----- Client (OAuth application identity) ------------------------------
@@ -53,6 +56,7 @@
 //                                    → client.perm.<p>      : Bool(true)
 //   sec.client.teams                 → client.teams         : StringSet (always)
 //   sec.client.claims                → client.claim.<k>     : flattened JSON
+//        Same shape as `claim.<k>` above.
 //
 // ----- Workload identity (SPIFFE / mTLS attestation) --------------------
 //   sec.caller_workload.spiffe_id    → caller_workload.spiffe_id    : String

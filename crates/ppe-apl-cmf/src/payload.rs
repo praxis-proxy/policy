@@ -5,8 +5,8 @@
 //
 // Leaf scalars at any nesting depth land in the bag under their dotted
 // path, prefixed with `args.` or `result.`. Nested objects recurse;
-// arrays-of-strings flatten into a StringSet; arrays of mixed/scalar
-// types are skipped (no list scalar attribute in the bag).
+// arrays-of-strings flatten into a StringSet (empty array → empty set);
+// arrays of mixed/scalar types are skipped (no list scalar in the bag).
 //
 // Examples:
 //   args = { "include_ssn": true,
@@ -38,7 +38,7 @@ pub fn extract_result(result: &Value, bag: &mut AttributeBag) {
 /// Flatten a static attribute tree into `data.*` keys. Same walk as
 /// args/result — nested objects recurse, string arrays become
 /// `StringSet`s (so `data.tenants.x.allowed_models` supports `contains`
-/// and interpolated `restrict` references).
+/// and interpolated `restrict` references), an empty array an empty set.
 pub fn extract_data(tree: &praxis_policy_apl_core::AttributeTree, bag: &mut AttributeBag) {
     walk(tree.as_value(), "data", bag);
 }
@@ -68,7 +68,9 @@ pub(crate) fn walk(value: &Value, prefix: &str, bag: &mut AttributeBag) {
                     break;
                 }
             }
-            if ok && !all_strings.is_empty() {
+            // Empty arrays included: a strict PDP errors on a missing key
+            // but evaluates an empty set fine. See `security.rs`.
+            if ok {
                 bag.set(prefix, all_strings);
             }
             // Non-string arrays (mixed, numeric, nested): silently skipped
@@ -128,6 +130,25 @@ mod tests {
         assert!(bag.set_contains("args.tags", "urgent"));
         assert!(bag.set_contains("args.tags", "audit"));
         assert!(!bag.set_contains("args.tags", "missing"));
+    }
+
+    /// Dropping the key would deny every subject whose `IdP` minted
+    /// `"roles": []`, since a missing key is a CEL error. The resolver's
+    /// `membership_on_absent_key_denies_but_empty_set_evaluates` pins that.
+    #[test]
+    fn empty_array_becomes_an_empty_string_set_not_a_missing_key() {
+        let args = json!({ "tags": [], "nested": { "roles": [] } });
+        let mut bag = AttributeBag::new();
+        extract_args(&args, &mut bag);
+        assert!(
+            bag.contains("args.tags"),
+            "an empty array must set the key, or membership errors",
+        );
+        assert!(!bag.set_contains("args.tags", "anything"), "and be empty");
+        assert!(
+            bag.contains("args.nested.roles"),
+            "nested too — this is the Keycloak `realm_access.roles` shape",
+        );
     }
 
     #[test]

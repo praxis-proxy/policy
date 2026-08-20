@@ -144,6 +144,9 @@ fn claim_keys_become_a_record_preserving_each_value_type() {
 /// provider that emits one being denied. Contrast
 /// `a_float_resource_attribute_is_refused_with_a_message_naming_the_key` below,
 /// where the value *is* operator-authored and rejecting it is the help.
+///
+/// Note the assertion pins survival, not the string form — Cedar has no
+/// double, so there is no rival rendering to rule out.
 #[test]
 fn a_float_claim_is_carried_as_a_string_rather_than_failing_the_request() {
     let mut bag = bag_with(&[]);
@@ -167,7 +170,7 @@ fn an_integer_claim_stays_numeric() {
     let entity = build_principal(&bag, None, None).expect("an integer claim is representable");
     let dbg = format!("{entity:?}");
     assert!(
-        dbg.contains("Long(3)") || dbg.contains("Int(3)") || dbg.contains("3"),
+        dbg.contains("Long(3)") || dbg.contains("Int(3)"),
         "an integer claim must not be stringified: {dbg}"
     );
 }
