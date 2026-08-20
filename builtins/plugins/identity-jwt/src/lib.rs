@@ -46,6 +46,8 @@
 
 /// Maps validated claims onto the identity slots.
 pub mod claim_map;
+/// The claim map an operator authors, and its compiled form.
+pub mod claim_map_config;
 /// Addresses a claim value by a dot-separated path.
 pub mod claim_path;
 /// Plugin configuration and its validation.
@@ -58,6 +60,10 @@ pub mod resolver;
 pub mod trusted_issuer;
 
 pub use claim_map::{ClaimMap, ClaimMapper, StandardClaimMap};
+pub use claim_map_config::{
+    ClaimMapConfig, ClaimsOverrides, CompiledClaimMap, CompiledRoleMap, MergeMode, OnMissing,
+    SplitMode,
+};
 pub use claim_path::ClaimPath;
 pub use config::{DecodingKeySource, JwtIdentityResolverConfig, TrustedIssuerConfig};
 pub use factory::{JwtIdentityFactory, KIND};
