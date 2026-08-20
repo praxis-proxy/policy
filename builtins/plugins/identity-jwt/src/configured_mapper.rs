@@ -106,10 +106,15 @@ fn contribute(
     out: &mut Vec<String>,
 ) -> bool {
     match value {
+        // An array already says where its elements end, so `split` does not
+        // apply to them. Splitting them too would change what a claim carrying
+        // an element with a space in it produces, and one field-level `split`
+        // covers a delimited-string candidate and an array candidate at once
+        // precisely because it leaves the array alone.
         Value::Array(items) => {
             for item in items {
                 if let Some(text) = item.as_str() {
-                    push_text(text, split, out);
+                    out.push(text.to_owned());
                 }
             }
             true
@@ -118,19 +123,15 @@ fn contribute(
             if array_only {
                 return false;
             }
-            push_text(text, split, out);
+            match split {
+                Some(SplitMode::Whitespace) => {
+                    out.extend(text.split_whitespace().map(str::to_owned));
+                },
+                None => out.push(text.to_owned()),
+            }
             true
         },
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => false,
-    }
-}
-
-fn push_text(text: &str, split: Option<SplitMode>, out: &mut Vec<String>) {
-    match split {
-        Some(SplitMode::Whitespace) => {
-            out.extend(text.split_whitespace().map(str::to_owned));
-        },
-        None => out.push(text.to_owned()),
     }
 }
 
@@ -622,12 +623,13 @@ mod tests {
         });
         let from_array = mapper(map.clone())
             .map_subject(&claims(json!({
-                "sub": "alice", "permissions": ["read:all", "write:all"],
+                "sub": "alice", "permissions": ["read:all", "write all reports"],
             })))
             .unwrap();
         assert_eq!(
             sorted(&from_array.permissions),
-            vec!["read:all", "write:all"]
+            vec!["read:all", "write all reports"],
+            "an array says where its elements end, so `split` leaves them whole"
         );
 
         let from_string = mapper(map)

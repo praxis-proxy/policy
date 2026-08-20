@@ -56,6 +56,8 @@ pub mod config;
 pub mod configured_mapper;
 /// Constructs the resolver from configuration.
 pub mod factory;
+/// The shipped claim maps, by name.
+pub mod presets;
 /// The identity hook handler.
 pub mod resolver;
 /// A trusted issuer, its key store, and its accepted algorithms.
@@ -70,5 +72,6 @@ pub use claim_path::ClaimPath;
 pub use config::{DecodingKeySource, JwtIdentityResolverConfig, TrustedIssuerConfig};
 pub use configured_mapper::ConfiguredClaimMap;
 pub use factory::{JwtIdentityFactory, KIND};
+pub use presets::{DEFAULT_PRESET, PRESETS, Preset};
 pub use resolver::JwtIdentityResolver;
 pub use trusted_issuer::TrustedIssuer;

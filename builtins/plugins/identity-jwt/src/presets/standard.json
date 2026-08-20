@@ -1,0 +1,30 @@
+{
+  "description": "Standard OIDC claim shape, and what an absent claim_mapper resolves to. Reads sub, roles, permissions or scope, and teams or groups for a subject; client_id or azp, client_name, authorized_scopes or scope, aud and roles for a client; and a SPIFFE ID from sub or spiffe_id for a workload. Equivalent to the built-in Rust standard mapper, which a corpus-backed test holds it to: a deployment that names no mapper sees exactly what it saw before. The collection candidates are array-only because the Rust mapper reads them with an array accessor, so a string-valued roles claim contributes nothing and falls through where there is a next candidate.",
+  "claim_map": {
+    "subject": {
+      "id": "sub",
+      "roles": [{ "path": "roles", "array_only": true }],
+      "permissions": {
+        "paths": [{ "path": "permissions", "array_only": true }, "scope"],
+        "split": "whitespace"
+      },
+      "teams": [
+        { "path": "teams", "array_only": true },
+        { "path": "groups", "array_only": true }
+      ]
+    },
+    "client": {
+      "client_id": ["client_id", "azp"],
+      "client_name": "client_name",
+      "authorized_scopes": {
+        "paths": [{ "path": "authorized_scopes", "array_only": true }, "scope"],
+        "split": "whitespace"
+      },
+      "authorized_audiences": "aud",
+      "roles": [{ "path": "roles", "array_only": true }]
+    },
+    "workload": {
+      "spiffe_id": ["sub", "spiffe_id"]
+    }
+  }
+}
