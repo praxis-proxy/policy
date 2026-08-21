@@ -10,7 +10,7 @@
 // mistake into "data did not match any variant", and the whole point of failing
 // at construction is telling the operator which field and which path.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use praxis_policy_core::extensions::raw_credentials::TokenRole;
 use serde::{Deserialize, Serialize};
@@ -318,18 +318,25 @@ impl ClaimsOverrides {
     ///
     /// # Errors
     ///
-    /// Returns a message naming the claim when one appears in both lists. There
-    /// is no coherent intent to honour, and picking a winner silently would hide
-    /// the mistake.
+    /// Returns a message naming every claim that appears in both lists. There is
+    /// no coherent intent to honour, and picking a winner silently would hide the
+    /// mistake. All of them at once, so fixing one does not uncover the next on
+    /// the following startup.
     pub fn validate(&self) -> Result<(), String> {
-        for claim in &self.include {
-            if self.exclude.iter().any(|excluded| excluded == claim) {
-                return Err(format!(
-                    "claims: `{claim}` is in both `exclude` and `include`; pick one"
-                ));
-            }
+        let both: BTreeSet<&str> = self
+            .include
+            .iter()
+            .filter(|claim| self.exclude.contains(claim))
+            .map(String::as_str)
+            .collect();
+        if both.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let named: Vec<String> = both.iter().map(|claim| format!("`{claim}`")).collect();
+        Err(format!(
+            "claims: {} in both `exclude` and `include`; pick one list for each",
+            named.join(", ")
+        ))
     }
 }
 
@@ -858,6 +865,38 @@ mod tests {
             .expect_err("a claim cannot be both dropped and kept");
         assert!(err.contains("tenant"), "{err}");
         assert!(err.contains("exclude") && err.contains("include"), "{err}");
+    }
+
+    /// Every overlap in one message: an operator fixing them one startup at a
+    /// time is a round-trip per mistake.
+    #[test]
+    fn every_claim_in_both_lists_is_named_at_once() {
+        let overrides: ClaimsOverrides = serde_json::from_value(json!({
+            "exclude": ["tenant", "jti", "region"],
+            "include": ["region", "iss", "tenant"],
+        }))
+        .expect("the overrides deserialize");
+        let err = overrides
+            .validate()
+            .expect_err("two claims are both dropped and kept");
+        assert!(err.contains("tenant"), "{err}");
+        assert!(err.contains("region"), "{err}");
+        assert!(
+            !err.contains("jti") && !err.contains("iss"),
+            "a claim in one list only is not a conflict: {err}"
+        );
+    }
+
+    /// A name repeated within `include` is one conflict, not two.
+    #[test]
+    fn a_repeated_claim_is_named_once() {
+        let overrides: ClaimsOverrides = serde_json::from_value(json!({
+            "exclude": ["tenant"],
+            "include": ["tenant", "tenant"],
+        }))
+        .expect("the overrides deserialize");
+        let err = overrides.validate().expect_err("tenant conflicts");
+        assert_eq!(err.matches("tenant").count(), 1, "{err}");
     }
 
     /// The overrides are a plugin-level setting, so a `claims` block written inside
