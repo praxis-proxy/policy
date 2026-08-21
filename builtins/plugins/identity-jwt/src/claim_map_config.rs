@@ -37,7 +37,12 @@ pub const CLIENT_FIELDS: &[&str] = &[
 ];
 
 /// Fields a `workload` section may map.
-pub const WORKLOAD_FIELDS: &[&str] = &["client_id", "selectors", "spiffe_id", "trust_domain"];
+///
+/// `trust_domain` is deliberately absent. It is the SPIFFE URI's authority, so it
+/// is derived from the identity rather than read from a claim: a mapped value
+/// that disagreed would let a policy read one workload's trust boundary off
+/// another's identity, and one that agreed would be decoration.
+pub const WORKLOAD_FIELDS: &[&str] = &["client_id", "selectors", "spiffe_id"];
 
 /// Fields whose destination holds one string, so the first candidate resolving
 /// to a string wins and `merge: union` is meaningless.
@@ -351,12 +356,13 @@ pub struct RoleMapConfig(pub BTreeMap<String, Value>);
 /// |---|---|
 /// | `array_only` | Only an array satisfies it; a string is skipped and the next candidate is tried. |
 /// | `string_only` | Only a string satisfies it; an array is skipped. What a claim read as a delimited value needs, so an array-valued `scope` contributes nothing rather than contributing each element. |
-/// | `stop_if_present` | The candidate claims the field the moment its path resolves at all. A present but unusable value then leaves the field empty instead of falling through, which is what a chain that picks the first claim that *exists* and only then requires a shape of it needs. |
+/// | `stop_if_present` | The candidate claims the field the moment its path resolves at all, so a present but unusable value leaves the field empty instead of falling through. What a chain that picks the first claim that *exists* and only then requires a string of it needs. Valid only on a field holding one value. |
 ///
 /// `array_only` and `string_only` together are rejected: nothing could satisfy
 /// such a candidate. Both are also rejected on a field that holds one value,
-/// which already requires a string. `stop_if_present` is a chain rule rather
-/// than a shape rule, so it stays valid on every field.
+/// which already requires a string, and `stop_if_present` is rejected on a field
+/// that holds a collection. Each flag is valid exactly where it can mean
+/// something.
 ///
 /// # Escaping, and the quoting trap
 ///
@@ -614,6 +620,23 @@ fn compile_role(
                     candidate.path
                 ));
             }
+        }
+
+        // `stop_if_present` decides which whole claim wins a chain, which only a
+        // field holding one value has. On a collection it would truncate a union
+        // mid-chain and drop the candidates behind it, so it is rejected there
+        // rather than given a meaning nobody asked for.
+        if !SCALAR_FIELDS.contains(interned)
+            && let Some(candidate) = authored_field
+                .paths
+                .iter()
+                .find(|candidate| candidate.stop_if_present)
+        {
+            return Err(format!(
+                "{qualified}: `stop_if_present` on '{}' needs a field that holds one value, and \
+                 {qualified} holds a collection",
+                candidate.path
+            ));
         }
 
         let mut candidates = Vec::with_capacity(authored_field.paths.len());
@@ -979,35 +1002,45 @@ mod tests {
 
     #[test]
     fn the_candidate_flags_round_trip_and_default_to_unset() {
+        // Shape flags belong to a collection field, the chain flag to a field
+        // holding one value, so each is exercised where it is valid.
         let map = compiled(json!({
             "subject": {
                 "permissions": {
                     "paths": [
                         {"path": "permissions", "array_only": true},
-                        {"path": "scope", "string_only": true, "stop_if_present": true},
+                        {"path": "scope", "string_only": true},
                         "plain",
                     ],
                     "split": "whitespace",
                 }
-            }
+            },
+            "client": {
+                "client_id": [{"path": "client_id", "stop_if_present": true}, "azp"],
+            },
         }));
-        let flags: Vec<(bool, bool, bool)> = map
+
+        let shapes: Vec<(bool, bool)> = map
             .role(&TokenRole::User)
             .unwrap()
             .field("permissions")
             .unwrap()
             .candidates()
             .iter()
-            .map(|c| (c.array_only(), c.string_only(), c.stop_if_present()))
+            .map(|c| (c.array_only(), c.string_only()))
             .collect();
-        assert_eq!(
-            flags,
-            vec![
-                (true, false, false),
-                (false, true, true),
-                (false, false, false)
-            ],
-        );
+        assert_eq!(shapes, vec![(true, false), (false, true), (false, false)]);
+
+        let chain: Vec<bool> = map
+            .role(&TokenRole::Client)
+            .unwrap()
+            .field("client_id")
+            .unwrap()
+            .candidates()
+            .iter()
+            .map(CompiledCandidate::stop_if_present)
+            .collect();
+        assert_eq!(chain, vec![true, false]);
     }
 
     /// Nothing can be both an array and a string, so a candidate declaring both

@@ -150,12 +150,10 @@ fn resolve_collection(field: &CompiledField, claims: &ClaimMap) -> FieldOutcome 
             continue;
         };
         if !contribute(value, candidate, field.split(), &mut values) {
-            // A present value the candidate cannot use normally leaves the chain
-            // running. `stop_if_present` is for a chain that picks the first
-            // claim that exists and then requires a shape of it.
-            if candidate.stop_if_present() {
-                break;
-            }
+            // A present value the candidate cannot use leaves the chain running,
+            // which is what the Rust mapper's collection accessors do. Only a
+            // field holding one value can declare otherwise, so there is no
+            // `stop_if_present` case here.
             continue;
         }
         resolved = true;
@@ -210,7 +208,6 @@ struct Diagnostics {
     missed: Vec<(&'static str, Vec<String>)>,
     empty: Vec<&'static str>,
     denied: Vec<&'static str>,
-    undeclared_anchor: Option<&'static str>,
 }
 
 impl Diagnostics {
@@ -220,7 +217,6 @@ impl Diagnostics {
             missed: Vec::new(),
             empty: Vec::new(),
             denied: Vec::new(),
-            undeclared_anchor: None,
         }
     }
 
@@ -253,10 +249,10 @@ impl Diagnostics {
     ///
     /// Recorded so the miss event names it: without this the denial says to raise
     /// the log level and the raised log says nothing, because a field nothing
-    /// asked for never reaches the resolution path.
+    /// asked for never reaches the resolution path. The condition is static, so
+    /// the loud warning belongs at construction rather than once per request.
     fn record_undeclared_anchor(&mut self, name: &'static str) {
         self.missed.push((name, Vec::new()));
-        self.undeclared_anchor = Some(name);
     }
 
     /// Whether a field declared `on_missing: deny` and did not resolve.
@@ -284,14 +280,6 @@ impl Diagnostics {
                 role = self.role,
                 fields = %self.empty.join(", "),
                 "claim map: these fields resolved to an empty collection",
-            );
-        }
-        if let Some(anchor) = self.undeclared_anchor {
-            tracing::warn!(
-                role = self.role,
-                field = anchor,
-                "claim map: the section declares no path for its anchor, so every token is \
-                 declined",
             );
         }
         if !self.denied.is_empty() {
@@ -427,9 +415,6 @@ impl ClaimMapper for ConfiguredClaimMap {
         });
         let client_id = scalar(section, "client_id", claims, &mut diag, accept_any);
         let selectors = collection(section, "selectors", claims, &mut diag);
-        let mapped_trust_domain = section
-            .field("trust_domain")
-            .map(|_| scalar(section, "trust_domain", claims, &mut diag, accept_any));
 
         diag.emit();
         if diag.declined() {
@@ -437,27 +422,7 @@ impl ClaimMapper for ConfiguredClaimMap {
         }
 
         let spiffe_id = spiffe_id?;
-        let derived = trust_domain_of(&spiffe_id);
-        // The trust domain is the SPIFFE URI's authority. A declared path may
-        // name where to read it, but it cannot disagree with the identity it is
-        // the authority of: a policy gating the trust boundary would be reading
-        // one workload's domain off another's identity.
-        let trust_domain = match mapped_trust_domain.flatten() {
-            Some(mapped) if Some(&mapped) == derived.as_ref() => Some(mapped),
-            Some(mapped) => {
-                tracing::warn!(
-                    role = "workload",
-                    // Debug-escaped, not Display: this value comes from the token,
-                    // and an unescaped newline in it would forge a log line.
-                    mapped = ?mapped,
-                    derived = derived.as_deref().unwrap_or(""),
-                    "claim map: declining, the mapped trust domain disagrees with the SPIFFE ID \
-                     authority",
-                );
-                return None;
-            },
-            None => derived,
-        };
+        let trust_domain = trust_domain_of(&spiffe_id);
 
         Some(WorkloadIdentity {
             spiffe_id: Some(spiffe_id),
@@ -496,6 +461,10 @@ mod tests {
 
     fn claims(value: Value) -> ClaimMap {
         value.as_object().unwrap().clone().into_iter().collect()
+    }
+
+    fn config(map: Value) -> ClaimMapConfig {
+        serde_json::from_value(map).expect("the map deserializes")
     }
 
     fn mapper(map: Value) -> ConfiguredClaimMap {
@@ -1141,74 +1110,28 @@ mod tests {
         );
     }
 
-    /// The trust domain is the SPIFFE URI's authority. A declared path can name
-    /// where to read it, but it cannot disagree with the identity it is the
-    /// authority of, and it cannot suppress the derivation by resolving nothing.
+    /// The trust domain is the SPIFFE URI's authority, always. It is not a
+    /// mappable field, so no claim can decouple the trust boundary a policy gates
+    /// on from the identity it belongs to.
     #[test]
-    fn the_trust_domain_always_matches_the_spiffe_authority() {
-        let spiffe = "spiffe://corp.example/ns/a/sa/b";
-
-        let derived = mapper(json!({"workload": {"spiffe_id": "sub"}}))
-            .map_workload(&claims(json!({"sub": spiffe})))
-            .expect("an unmapped trust domain is derived");
-        assert_eq!(derived.trust_domain.as_deref(), Some("corp.example"));
-
-        let declared = json!({"workload": {"spiffe_id": "sub", "trust_domain": "td"}});
-
-        let agreeing = mapper(declared.clone())
-            .map_workload(&claims(json!({"sub": spiffe, "td": "corp.example"})))
-            .expect("a mapped trust domain that agrees is used");
-        assert_eq!(agreeing.trust_domain.as_deref(), Some("corp.example"));
-
-        let unresolved = mapper(declared.clone())
-            .map_workload(&claims(json!({"sub": spiffe})))
-            .expect("a declared path that resolves nothing falls back to derivation");
-        assert_eq!(
-            unresolved.trust_domain.as_deref(),
-            Some("corp.example"),
-            "a declared path must not suppress the derivable authority"
-        );
-
-        let (disagreeing, events) = capturing(|| {
-            mapper(declared).map_workload(&claims(json!({"sub": spiffe, "td": "attacker.example"})))
-        });
-        assert!(
-            disagreeing.is_none(),
-            "a trust domain that contradicts the SPIFFE authority must not reach a policy \
-             gating the trust boundary"
-        );
-        let warning = events.matching("disagrees with the SPIFFE ID authority");
-        let event = warning.first().expect("the disagreement is named");
-        assert!(event.contains("attacker.example"), "{event}");
-        assert!(event.contains("corp.example"), "{event}");
-    }
-
-    /// The trust-domain warning is the one diagnostic carrying a value taken from
-    /// the token rather than from operator config, so it is the one place a claim
-    /// could forge a log line. It is Debug-escaped for that reason.
-    #[test]
-    fn a_token_derived_value_reaches_the_log_escaped() {
-        let (declined, events) = capturing(|| {
-            mapper(json!({
-                "workload": {"spiffe_id": "sub", "trust_domain": "td"}
-            }))
+    fn the_trust_domain_is_always_the_spiffe_authority() {
+        let workload = mapper(json!({"workload": {"spiffe_id": "sub"}}))
             .map_workload(&claims(json!({
-                "sub": "spiffe://corp.example/w",
-                "td": "attacker\n2026-08-20 WARN forged log line",
+                "sub": "spiffe://corp.example/ns/a/sa/b",
+                "trust_domain": "attacker.example",
             })))
-        });
-        assert!(declined.is_none(), "a disagreeing trust domain declines");
+            .expect("the token resolves");
+        assert_eq!(
+            workload.trust_domain.as_deref(),
+            Some("corp.example"),
+            "a trust_domain claim must not displace the SPIFFE authority"
+        );
 
-        let warning = events.matching("disagrees with the SPIFFE ID authority");
-        let event = warning.first().expect("the disagreement is logged");
-        assert!(
-            !event.contains('\n'),
-            "a claim value must not put a raw newline in a log record: {event:?}"
-        );
-        assert!(
-            event.contains("\\n"),
-            "the newline should survive as an escape rather than vanish: {event:?}"
-        );
+        let err = config(json!({"workload": {"spiffe_id": "sub", "trust_domain": "td"}}))
+            .compile()
+            .expect_err("trust_domain is not a mappable field");
+        assert!(err.contains("trust_domain"), "{err}");
+        assert!(err.contains("workload"), "{err}");
     }
 
     /// The mirror of `array_only`: what a claim read as a delimited string needs,
@@ -1275,31 +1198,26 @@ mod tests {
         assert_eq!(usable.client_id, "explicit");
     }
 
-    /// The same rule on a collection field.
+    /// The chain flag decides which whole claim wins, which only a field holding
+    /// one value has. On a collection it would truncate a union and drop the
+    /// candidates behind it, so it is a construction error there.
     #[test]
-    fn stop_if_present_also_ends_a_collection_chain() {
-        let map = json!({
+    fn stop_if_present_is_rejected_on_a_field_holding_a_collection() {
+        let config: ClaimMapConfig = serde_json::from_value(json!({
             "subject": {
                 "id": "sub",
-                "roles": [{"path": "primary", "stop_if_present": true}, "backup"],
+                "roles": {
+                    "paths": ["a", {"path": "b", "stop_if_present": true}, "c"],
+                    "merge": "union",
+                },
             }
-        });
-        // An object is unusable for a collection field. A bare string is not:
-        // it contributes as one element unless the candidate is array-only.
-        let stopped = mapper(map.clone())
-            .map_subject(&claims(json!({
-                "sub": "alice", "primary": {"k": "v"}, "backup": ["fallback"],
-            })))
-            .unwrap();
-        assert!(
-            stopped.roles.is_empty(),
-            "a present but unusable primary claims the field"
-        );
-
-        let fell_through = mapper(map)
-            .map_subject(&claims(json!({"sub": "alice", "backup": ["fallback"]})))
-            .unwrap();
-        assert_eq!(sorted(&fell_through.roles), vec!["fallback"]);
+        }))
+        .expect("the shape deserializes");
+        let err = config
+            .compile()
+            .expect_err("a collection field cannot stop on presence");
+        assert!(err.contains("subject.roles"), "{err}");
+        assert!(err.contains("stop_if_present"), "{err}");
     }
 
     /// A section that declares no path for its anchor denies every token. The
@@ -1326,12 +1244,14 @@ mod tests {
                 }
             });
             assert!(!identity, "{role}: an undeclared anchor declines");
-            let warning = events.matching("declares no path for its anchor");
-            let event = warning
+            // The loud warning is emitted once at construction, since the
+            // condition is static. Per request the anchor is named in the miss
+            // event, which is what the denial reason points an operator at.
+            let misses = events.matching("no candidate resolved");
+            let event = misses
                 .first()
                 .unwrap_or_else(|| panic!("{role}: the undeclared anchor must be named"));
             assert!(event.contains(anchor), "{role}: {event}");
-            assert!(event.contains("WARN"), "{role}: {event}");
         }
     }
 

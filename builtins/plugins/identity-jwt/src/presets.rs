@@ -424,6 +424,57 @@ mod tests {
         assert!(cognito_client.authorized_audiences.is_empty());
     }
 
+    /// Every preset reads `scope` as a delimited string, so an array-valued
+    /// `scope` must contribute nothing rather than contributing each element as a
+    /// permission. Without this, dropping `string_only` from a provider preset
+    /// would fail no test, and only the standard preset's parity gate would
+    /// notice.
+    #[test]
+    fn no_preset_grants_permissions_from_an_array_valued_scope() {
+        let array_scope = json!({
+            "sub": "alice",
+            "client_id": "svc",
+            "azp": "svc",
+            "scope": ["admin", "root"],
+        });
+        for name in names() {
+            let map = mapper(name);
+
+            let subject = map
+                .map_subject(&claims(array_scope.clone()))
+                .unwrap_or_else(|| panic!("'{name}': the subject resolves"));
+            assert!(
+                subject.permissions.is_empty(),
+                "'{name}': an array-valued scope granted {:?} as permissions",
+                sorted(&subject.permissions)
+            );
+
+            let client = map
+                .map_client(&claims(array_scope.clone()))
+                .unwrap_or_else(|| panic!("'{name}': the client resolves"));
+            assert!(
+                client.authorized_scopes.is_empty(),
+                "'{name}': an array-valued scope granted {:?} as authorized scopes",
+                client.authorized_scopes
+            );
+        }
+    }
+
+    /// The four presets have to agree on the same token. A present but unusable
+    /// anchor declines everywhere rather than falling through to the next
+    /// candidate in some presets and not others.
+    #[test]
+    fn every_preset_declines_a_present_but_unusable_client_anchor() {
+        for name in names() {
+            let declined =
+                mapper(name).map_client(&claims(json!({"client_id": null, "azp": "svc-billing"})));
+            assert!(
+                declined.is_none(),
+                "'{name}': a null client_id must not fall through to azp"
+            );
+        }
+    }
+
     /// A field no preset declares is still reachable, which is the point of the
     /// map: no provider mints `client_name`, so only a hand-written map fills it.
     #[test]
