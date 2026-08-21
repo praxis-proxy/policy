@@ -928,6 +928,72 @@ mod tests {
 
     /// The two mapper settings are alternatives, not layers, so setting both is
     /// a mistake with no coherent reading. The message names both.
+    /// Every field in this config is optional or defaulted, so a misspelling
+    /// would deserialize to the default and take effect silently. `claim_maps`
+    /// is the one that matters most: the resolver would stay on the standard
+    /// preset while the operator believed their map was live.
+    #[test]
+    fn new_rejects_a_misspelled_config_key_and_names_it() {
+        for typo in [
+            "claim_maps",
+            "claim_mappers",
+            "roles",
+            "headers",
+            "trusted_issuer",
+        ] {
+            let err = build_err(json!({typo: "whatever"}));
+            assert!(
+                err.contains(typo),
+                "a misspelled `{typo}` must be named, not ignored: {err}"
+            );
+        }
+    }
+
+    /// The same hole one level down, and this one is a validation bypass rather
+    /// than a surprise: `audiences` is defaulted and an empty list turns audience
+    /// checking off, so a misspelling would silently accept a token minted for
+    /// any audience.
+    #[test]
+    fn new_rejects_a_misspelled_issuer_key_rather_than_dropping_audience_validation() {
+        let err = format!(
+            "{}",
+            JwtIdentityResolver::new(cfg_with_config(
+                "jwt",
+                json!({
+                    "trusted_issuers": [{
+                        "issuer": "https://idp.example.com",
+                        "audience": ["my-api"],
+                        "algorithms": ["HS256"],
+                        "decoding_key": { "kind": "secret", "secret": "x" },
+                    }],
+                }),
+            ))
+            .expect_err("a misspelled `audiences` must not silently disable aud validation")
+        );
+        assert!(err.contains("audience"), "{err}");
+    }
+
+    /// The rejection must not be so eager that a valid config stops building.
+    #[test]
+    fn every_documented_config_key_is_still_accepted() {
+        JwtIdentityResolver::new(cfg_with_config(
+            "jwt",
+            json!({
+                "trusted_issuers": [{
+                    "issuer": "https://idp.example.com",
+                    "audiences": ["my-api"],
+                    "algorithms": ["HS256"],
+                    "decoding_key": { "kind": "secret", "secret": "x" },
+                    "leeway_seconds": 30,
+                }],
+                "role": "client",
+                "header": "X-Client-Token",
+                "claim_mapper": "keycloak",
+            }),
+        ))
+        .expect("every documented key together must still build");
+    }
+
     #[test]
     fn new_rejects_both_claim_mapper_and_claim_map() {
         let err = build_err(json!({

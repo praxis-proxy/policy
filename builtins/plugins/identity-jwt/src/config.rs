@@ -28,7 +28,13 @@ use crate::claim_map_config::ClaimMapConfig;
 /// expects multiple inbound tokens — e.g. user JWT in
 /// `X-User-Token`, OAuth client token in `Authorization`, and a
 /// SPIFFE JWT-SVID in `X-Workload-Token`.
+///
+/// Unknown keys are rejected. Every field here is optional or defaulted, so a
+/// misspelling would otherwise deserialize to the default and take effect
+/// silently: `claim_maps` would leave the resolver on the standard preset while
+/// the operator believed their map was live.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JwtIdentityResolverConfig {
     /// One or more trusted issuers. At least one required.
     pub trusted_issuers: Vec<TrustedIssuerConfig>,
@@ -104,6 +110,7 @@ fn default_header() -> String {
 /// One issuer's config — issuer URL, audiences, decoding key
 /// source, accepted algorithms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedIssuerConfig {
     /// Expected `iss` claim value.
     pub issuer: String,
