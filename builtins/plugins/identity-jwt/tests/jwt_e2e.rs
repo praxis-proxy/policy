@@ -14,8 +14,8 @@
 //   * audience mismatch
 //   * signature tamper
 //
-// Keypair is generated once per test process (RSA 2048 takes
-// ~50-100ms; one-time cost) and shared across tests via OnceLock.
+// The keypair, minter, config builder and pipeline call live in `common`, which
+// the claim-map suite shares.
 
 #![allow(
     missing_docs,
@@ -27,156 +27,37 @@
     clippy::unwrap_used,
     reason = "test and example code"
 )]
-use std::sync::Arc;
-use std::sync::OnceLock;
 
-use praxis_policy_core::engine::PolicyEngine;
+mod common;
+
+use common::{TEST_AUDIENCE, TEST_ISSUER, invoke, mint_exact as mint_jwt, now_unix, plugin_config};
+
 use praxis_policy_core::extensions::raw_credentials::{TokenKind, TokenRole};
-use praxis_policy_core::hooks::payload::Extensions;
-use praxis_policy_core::identity::{
-    HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource,
-};
-use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
+use praxis_policy_core::identity::{IdentityPayload, TokenSource};
+use praxis_policy_core::plugin::PluginConfig;
 
-use praxis_policy_plugin_identity_jwt::JwtIdentityResolver;
+use serde_json::json;
 
-use rsa::pkcs8::{EncodePrivateKey as _, EncodePublicKey as _, LineEnding};
-use rsa::{RsaPrivateKey, RsaPublicKey};
-
-use serde_json::{Value, json};
-
-const TEST_ISSUER: &str = "https://idp.test.local";
-const TEST_AUDIENCE: &str = "test-api";
-
-// =====================================================================
-// Test fixtures
-// =====================================================================
-
-struct Keypair {
-    private_pem: String,
-    public_pem: String,
-}
-
-/// Process-global keypair. Generated once on first access; RSA 2048
-/// is ~50-100ms which we don't want to pay per-test.
-fn keypair() -> &'static Keypair {
-    static KP: OnceLock<Keypair> = OnceLock::new();
-    KP.get_or_init(|| {
-        let mut rng = rand::thread_rng();
-        let priv_key = RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA");
-        let pub_key = RsaPublicKey::from(&priv_key);
-        Keypair {
-            private_pem: priv_key
-                .to_pkcs8_pem(LineEnding::LF)
-                .expect("encode private PEM")
-                .to_string(),
-            public_pem: pub_key
-                .to_public_key_pem(LineEnding::LF)
-                .expect("encode public PEM"),
-        }
-    })
-}
-
-/// Sign `claims` as an RS256 JWT using the test private key. JWT
-/// payload is whatever JSON the caller hands in.
-fn mint_jwt(claims: Value) -> String {
-    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    let header = Header::new(Algorithm::RS256);
-    let key = EncodingKey::from_rsa_pem(keypair().private_pem.as_bytes())
-        .expect("build EncodingKey from test private PEM");
-    encode(&header, &claims, &key).expect("sign JWT")
-}
-
-/// Construct a `PluginConfig` whose `config:` block declares the
-/// test public key as the trusted-issuer signing material. Mirrors
-/// what an operator writes in unified-config YAML.
+/// The config every scenario starts from: the test key, and the standard mapper
+/// named explicitly so the default is not what is under test.
 fn resolver_plugin_config() -> PluginConfig {
-    let plugin_config = json!({
-        "trusted_issuers": [{
-            "issuer": TEST_ISSUER,
-            "audiences": [TEST_AUDIENCE],
-            "algorithms": ["RS256"],
-            "decoding_key": {
-                "kind": "pem",
-                "pem": keypair().public_pem,
-            },
-            "leeway_seconds": 60,
-        }],
-        "claim_mapper": "standard",
-    });
-    PluginConfig {
-        name: "jwt-resolver".into(),
-        kind: "test".into(),
-        hooks: vec![HOOK_IDENTITY_RESOLVE.into()],
-        mode: PluginMode::Sequential,
-        priority: 10,
-        on_error: OnError::Fail,
-        config: Some(plugin_config),
-        ..Default::default()
-    }
+    plugin_config(json!({ "claim_mapper": "standard" }))
 }
 
-/// Role-aware variant of [`resolver_plugin_config`]. `role` and
-/// `header` are the two knobs that decide which identity slot a
-/// resolver instance fills and where it reads its token from — one
-/// instance per inbound credential, so a deployment expecting a user
-/// JWT *and* a workload SVID wires two.
+/// Role-aware variant of [`resolver_plugin_config`]. `role` and `header` are the
+/// two knobs that decide which identity slot a resolver instance fills and where
+/// it reads its token from, so a deployment expecting a user JWT *and* a workload
+/// SVID wires two.
 fn resolver_plugin_config_for(role: &str, header: &str) -> PluginConfig {
-    let mut cfg = resolver_plugin_config();
-    match cfg.config.as_mut() {
-        Some(Value::Object(map)) => {
-            map.insert("role".into(), json!(role));
-            map.insert("header".into(), json!(header));
-        },
-        other => panic!("resolver config should be a JSON object, got {other:?}"),
-    }
-    cfg
+    plugin_config(json!({
+        "claim_mapper": "standard",
+        "role": role,
+        "header": header,
+    }))
 }
 
-/// Build the `PolicyEngine` + register the resolver + initialize.
-/// All four scenarios share this skeleton.
-async fn build_manager() -> Arc<PolicyEngine> {
-    build_manager_with(resolver_plugin_config()).await
-}
-
-async fn build_manager_with(cfg: PluginConfig) -> Arc<PolicyEngine> {
-    let resolver = JwtIdentityResolver::new(cfg.clone()).expect("resolver should construct");
-
-    let mgr = Arc::new(PolicyEngine::default());
-    mgr.register_handler_for_names::<IdentityHook, _>(
-        Arc::new(resolver),
-        cfg,
-        &[HOOK_IDENTITY_RESOLVE],
-    )
-    .unwrap();
-    mgr.initialize().await.unwrap();
-    mgr
-}
-
-/// Run a token through the full handler pipeline.
-async fn invoke(token: String) -> praxis_policy_core::executor::PipelineResult {
-    invoke_with(resolver_plugin_config(), token, TokenSource::Bearer).await
-}
-
-async fn invoke_with(
-    cfg: PluginConfig,
-    token: String,
-    source: TokenSource,
-) -> praxis_policy_core::executor::PipelineResult {
-    let mgr = build_manager_with(cfg).await;
-    let (result, _bg) = mgr
-        .invoke_named::<IdentityHook>(
-            HOOK_IDENTITY_RESOLVE,
-            IdentityPayload::new(token, source),
-            Extensions::default(),
-            None,
-        )
-        .await;
-    result
-}
-
-fn now_unix() -> i64 {
-    chrono::Utc::now().timestamp()
+async fn invoke_bearer(token: String) -> praxis_policy_core::executor::PipelineResult {
+    invoke(resolver_plugin_config(), token, TokenSource::Bearer).await
 }
 
 // =====================================================================
@@ -197,7 +78,7 @@ async fn valid_jwt_resolves_subject() {
         "email": "alice@corp.com",
     }));
 
-    let result = invoke(token.clone()).await;
+    let result = invoke_bearer(token.clone()).await;
     assert!(
         result.continue_processing,
         "valid token should resolve: violation = {:?}",
@@ -256,7 +137,7 @@ async fn workload_svid_resolves_caller_workload_and_stashes_as_spiffe_jwt() {
         "iat": now_unix(),
     }));
 
-    let result = invoke_with(
+    let result = invoke(
         resolver_plugin_config_for("workload", "X-Workload-Token"),
         svid.clone(),
         TokenSource::SpiffeJwtSvid,
@@ -320,7 +201,7 @@ async fn workload_role_rejects_a_non_spiffe_token() {
         "iat": now_unix(),
     }));
 
-    let result = invoke_with(
+    let result = invoke(
         resolver_plugin_config_for("workload", "X-Workload-Token"),
         user_jwt,
         TokenSource::SpiffeJwtSvid,
@@ -350,7 +231,7 @@ async fn workload_role_rejects_non_spiffe_sub_with_bogus_spiffe_id_claim() {
         "iat": now_unix(),
     }));
 
-    let result = invoke_with(
+    let result = invoke(
         resolver_plugin_config_for("workload", "X-Workload-Token"),
         jwt,
         TokenSource::SpiffeJwtSvid,
@@ -381,7 +262,7 @@ async fn workload_role_accepts_valid_spiffe_id_claim_fallback() {
         "iat": now_unix(),
     }));
 
-    let result = invoke_with(
+    let result = invoke(
         resolver_plugin_config_for("workload", "X-Workload-Token"),
         jwt,
         TokenSource::SpiffeJwtSvid,
@@ -406,7 +287,7 @@ async fn untrusted_issuer_rejects() {
         "exp": now_unix() + 300,
     }));
 
-    let result = invoke(token).await;
+    let result = invoke_bearer(token).await;
     assert!(!result.continue_processing);
     let v = result.violation.expect("rejection should surface");
     assert_eq!(v.code, "auth.untrusted_issuer");
@@ -423,7 +304,7 @@ async fn expired_token_rejects() {
         "exp": now_unix() - 3600,
     }));
 
-    let result = invoke(token).await;
+    let result = invoke_bearer(token).await;
     assert!(!result.continue_processing);
     let v = result.violation.expect("rejection should surface");
     assert_eq!(v.code, "auth.token_expired");
@@ -439,7 +320,7 @@ async fn wrong_audience_rejects() {
         "exp": now_unix() + 300,
     }));
 
-    let result = invoke(token).await;
+    let result = invoke_bearer(token).await;
     assert!(!result.continue_processing);
     let v = result.violation.expect("rejection should surface");
     assert_eq!(v.code, "auth.audience_mismatch");
@@ -477,7 +358,7 @@ async fn tampered_signature_rejects() {
     let new_sig: String = sig_chars.into_iter().collect();
     let tampered = format!("{}.{}.{}", parts[0], parts[1], new_sig);
 
-    let result = invoke(tampered).await;
+    let result = invoke_bearer(tampered).await;
     assert!(!result.continue_processing);
     let v = result.violation.expect("rejection should surface");
     assert_eq!(v.code, "auth.signature_invalid");
@@ -494,7 +375,7 @@ async fn missing_iss_rejects() {
         "exp": now_unix() + 300,
     }));
 
-    let result = invoke(token).await;
+    let result = invoke_bearer(token).await;
     assert!(!result.continue_processing);
     let v = result.violation.expect("rejection should surface");
     assert_eq!(v.code, "auth.malformed_header");

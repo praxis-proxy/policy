@@ -8,164 +8,32 @@
 //! payload. The unit tests cover the engine; these cover the surface an operator
 //! actually writes, including the escaping that is the likeliest thing to get
 //! wrong.
-//!
-//! The harness is copied from `jwt_e2e.rs` rather than shared: integration test
-//! binaries do not share code, and that file's helpers are private to it.
 
 #![allow(
     missing_docs,
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
-    clippy::print_stderr,
-    clippy::print_stdout,
     clippy::unwrap_used,
     reason = "test and example code"
 )]
 
-use std::sync::{Arc, OnceLock};
+mod common;
 
-use praxis_policy_core::engine::PolicyEngine;
+use common::{TEST_ISSUER, invoke, mint, plugin_config, sorted};
+
 use praxis_policy_core::error::PluginError;
+use praxis_policy_core::extensions::SubjectExtension;
 use praxis_policy_core::extensions::raw_credentials::{TokenKind, TokenRole};
 use praxis_policy_core::factory::PluginFactory as _;
-use praxis_policy_core::hooks::payload::Extensions;
-use praxis_policy_core::identity::{
-    HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource,
-};
-use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
-
-use praxis_policy_plugin_identity_jwt::{JwtIdentityFactory, JwtIdentityResolver, KIND};
-
-use rsa::pkcs8::{EncodePrivateKey as _, EncodePublicKey as _, LineEnding};
-use rsa::{RsaPrivateKey, RsaPublicKey};
-
+use praxis_policy_core::identity::{IdentityPayload, TokenSource};
+use praxis_policy_plugin_identity_jwt::JwtIdentityFactory;
 use serde_json::{Value, json};
-
-const TEST_ISSUER: &str = "https://idp.test.local";
-const TEST_AUDIENCE: &str = "test-api";
-
-// =====================================================================
-// Harness
-// =====================================================================
-
-struct Keypair {
-    private_pem: String,
-    public_pem: String,
-}
-
-fn keypair() -> &'static Keypair {
-    static KP: OnceLock<Keypair> = OnceLock::new();
-    KP.get_or_init(|| {
-        let mut rng = rand::thread_rng();
-        let priv_key = RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA");
-        let pub_key = RsaPublicKey::from(&priv_key);
-        Keypair {
-            private_pem: priv_key
-                .to_pkcs8_pem(LineEnding::LF)
-                .expect("encode private PEM")
-                .to_string(),
-            public_pem: pub_key
-                .to_public_key_pem(LineEnding::LF)
-                .expect("encode public PEM"),
-        }
-    })
-}
-
-fn now_unix() -> i64 {
-    chrono::Utc::now().timestamp()
-}
-
-/// Sign a token carrying `extra` plus the registered claims the resolver
-/// validates against.
-fn mint(extra: Value) -> String {
-    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-
-    let mut claims = json!({
-        "iss": TEST_ISSUER,
-        "aud": TEST_AUDIENCE,
-        "exp": now_unix() + 300,
-        "iat": now_unix(),
-    });
-    match (claims.as_object_mut(), extra.as_object()) {
-        (Some(target), Some(source)) => {
-            for (key, value) in source {
-                target.insert(key.clone(), value.clone());
-            }
-        },
-        _ => panic!("both claim sets must be JSON objects"),
-    }
-
-    let key = EncodingKey::from_rsa_pem(keypair().private_pem.as_bytes())
-        .expect("build EncodingKey from the test private PEM");
-    encode(&Header::new(Algorithm::RS256), &claims, &key).expect("sign JWT")
-}
-
-/// A plugin config wiring the test key, plus whatever mapper and role settings
-/// the case needs. Mirrors what an operator writes in unified-config YAML.
-fn plugin_config(settings: Value) -> PluginConfig {
-    let mut config = json!({
-        "trusted_issuers": [{
-            "issuer": TEST_ISSUER,
-            "audiences": [TEST_AUDIENCE],
-            "algorithms": ["RS256"],
-            "decoding_key": { "kind": "pem", "pem": keypair().public_pem },
-            "leeway_seconds": 60,
-        }],
-    });
-    match (config.as_object_mut(), settings.as_object()) {
-        (Some(target), Some(source)) => {
-            for (key, value) in source {
-                target.insert(key.clone(), value.clone());
-            }
-        },
-        _ => panic!("both config blocks must be JSON objects"),
-    }
-
-    PluginConfig {
-        name: "jwt-resolver".into(),
-        kind: KIND.into(),
-        hooks: vec![HOOK_IDENTITY_RESOLVE.into()],
-        mode: PluginMode::Sequential,
-        priority: 10,
-        on_error: OnError::Fail,
-        config: Some(config),
-        ..Default::default()
-    }
-}
-
-async fn invoke(
-    settings: Value,
-    token: String,
-    source: TokenSource,
-) -> praxis_policy_core::executor::PipelineResult {
-    let cfg = plugin_config(settings);
-    let resolver = JwtIdentityResolver::new(cfg.clone()).expect("the resolver must construct");
-
-    let mgr = Arc::new(PolicyEngine::default());
-    mgr.register_handler_for_names::<IdentityHook, _>(
-        Arc::new(resolver),
-        cfg,
-        &[HOOK_IDENTITY_RESOLVE],
-    )
-    .expect("registration");
-    mgr.initialize().await.expect("initialize");
-
-    let (result, _bg) = mgr
-        .invoke_named::<IdentityHook>(
-            HOOK_IDENTITY_RESOLVE,
-            IdentityPayload::new(token, source),
-            Extensions::default(),
-            None,
-        )
-        .await;
-    result
-}
 
 /// Resolve a token and return the identity, failing with the violation when the
 /// resolver denied.
 async fn identity_from(settings: Value, token: String) -> IdentityPayload {
-    let result = invoke(settings, token, TokenSource::Bearer).await;
+    let result = invoke(plugin_config(settings), token, TokenSource::Bearer).await;
     assert!(
         result.continue_processing,
         "the token should have resolved: violation = {:?}",
@@ -174,25 +42,16 @@ async fn identity_from(settings: Value, token: String) -> IdentityPayload {
     IdentityPayload::from_pipeline_result(&result).expect("the payload is present")
 }
 
-async fn subject_from(
-    settings: Value,
-    token: String,
-) -> praxis_policy_core::extensions::SubjectExtension {
+async fn subject_from(settings: Value, token: String) -> SubjectExtension {
     identity_from(settings, token)
         .await
         .subject
         .expect("the subject slot is populated")
 }
 
-fn sorted(values: &std::collections::HashSet<String>) -> Vec<&str> {
-    let mut items: Vec<&str> = values.iter().map(String::as_str).collect();
-    items.sort_unstable();
-    items
-}
-
 /// A token the resolver refused, and the violation code it refused with.
 async fn denial_code(settings: Value, token: String, source: TokenSource) -> String {
-    let result = invoke(settings, token, source).await;
+    let result = invoke(plugin_config(settings), token, source).await;
     assert!(
         !result.continue_processing,
         "the token should have been refused"
@@ -397,10 +256,8 @@ async fn including_iss_makes_the_issuing_idp_visible_to_a_policy() {
 
     let subject = subject_from(
         json!({
-            "claim_map": {
-                "subject": {"id": "sub"},
-                "claims": {"include": ["iss"]},
-            }
+            "claim_map": {"subject": {"id": "sub"}},
+            "claims": {"include": ["iss"]},
         }),
         token.clone(),
     )
@@ -414,6 +271,40 @@ async fn including_iss_makes_the_issuing_idp_visible_to_a_policy() {
     );
 }
 
+/// The overrides are a sibling of the two ways of choosing a map, so a preset
+/// reaches them too. Before this they lived inside `claim_map`, which is mutually
+/// exclusive with `claim_mapper`, so gating on `iss` meant copying a whole preset
+/// into an inline map.
+#[tokio::test]
+async fn claims_overrides_apply_to_a_preset_named_by_claim_mapper() {
+    let token = mint(json!({
+        "sub": "f:2c1b:alice",
+        "realm_access": {"roles": ["viewer"]},
+        "internal_debug": "noisy",
+    }));
+
+    let subject = subject_from(
+        json!({
+            "claim_mapper": "keycloak",
+            "claims": {"include": ["iss"], "exclude": ["internal_debug"]},
+        }),
+        token,
+    )
+    .await;
+
+    assert_eq!(
+        sorted(&subject.roles),
+        vec!["viewer"],
+        "the preset still maps what it maps"
+    );
+    assert_eq!(
+        subject.claims.get("iss"),
+        Some(&json!(TEST_ISSUER)),
+        "a registered claim is reachable without forking the preset"
+    );
+    assert!(!subject.claims.contains_key("internal_debug"));
+}
+
 #[tokio::test]
 async fn excluding_a_claim_keeps_it_out_of_the_policy_bag() {
     let token = mint(json!({
@@ -422,10 +313,8 @@ async fn excluding_a_claim_keeps_it_out_of_the_policy_bag() {
 
     let subject = subject_from(
         json!({
-            "claim_map": {
-                "subject": {"id": "sub"},
-                "claims": {"exclude": ["internal_debug"]},
-            }
+            "claim_map": {"subject": {"id": "sub"}},
+            "claims": {"exclude": ["internal_debug"]},
         }),
         token,
     )
@@ -582,10 +471,8 @@ async fn the_raw_token_and_the_full_claim_set_still_pass_through() {
 
     let identity = identity_from(
         json!({
-            "claim_map": {
-                "subject": {"id": "sub", "roles": "realm_access.roles"},
-                "claims": {"exclude": ["internal_debug"]},
-            }
+            "claim_map": {"subject": {"id": "sub", "roles": "realm_access.roles"}},
+            "claims": {"exclude": ["internal_debug"]},
         }),
         token.clone(),
     )

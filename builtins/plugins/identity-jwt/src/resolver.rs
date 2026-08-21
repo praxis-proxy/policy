@@ -59,6 +59,7 @@ use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 use super::claim_map::{ClaimMap, ClaimMapper};
+use super::claim_map_config::ClaimsOverrides;
 use super::config::{JwtIdentityResolverConfig, TrustedIssuerConfig};
 use super::configured_mapper::ConfiguredClaimMap;
 use super::presets;
@@ -224,6 +225,20 @@ impl JwtIdentityResolver {
             })
         };
 
+        let claims_overrides: ClaimsOverrides = match typed.claims.as_ref() {
+            Some(value) => {
+                let parsed: ClaimsOverrides =
+                    serde_json::from_value(value.clone()).map_err(|e| {
+                        config_error(format!(
+                            "`claims` takes `exclude` and `include` lists of claim names: {e}"
+                        ))
+                    })?;
+                parsed.validate().map_err(&config_error)?;
+                parsed
+            },
+            None => ClaimsOverrides::default(),
+        };
+
         let compiled = match (typed.claim_map.as_ref(), typed.claim_mapper.as_deref()) {
             (Some(_), Some(named)) => {
                 return Err(config_error(format!(
@@ -238,6 +253,8 @@ impl JwtIdentityResolver {
                 .map_err(&config_error)?
                 .into_claim_map(),
         };
+
+        let compiled = compiled.with_claims(claims_overrides);
 
         // Require the section matching the configured role now, so a
         // misconfigured pairing is a startup failure rather than a resolver that
@@ -1006,6 +1023,49 @@ mod tests {
 
     /// An absent setting and the `standard` name are the same thing, and both
     /// have to keep working: an upgrading deployment changes neither.
+    /// The claims-bag overrides are a sibling of the two mapper fields, so they
+    /// build alongside either one.
+    #[test]
+    fn claims_overrides_build_with_a_preset_and_with_an_inline_map() {
+        for settings in [
+            json!({"claim_mapper": "keycloak", "claims": {"include": ["iss"]}}),
+            json!({
+                "claim_map": {"subject": {"id": "sub"}},
+                "claims": {"exclude": ["internal_debug"]},
+            }),
+            json!({"claims": {"include": ["iss"], "exclude": ["jti"]}}),
+        ] {
+            JwtIdentityResolver::new(cfg_with_mapper(settings.clone()))
+                .unwrap_or_else(|e| panic!("{settings} must build: {e}"));
+        }
+    }
+
+    /// A malformed or incoherent overrides block fails at load naming `claims`,
+    /// rather than quietly dropping the overrides an operator asked for.
+    #[test]
+    fn a_bad_claims_block_is_refused_at_load_and_names_the_field() {
+        for settings in [
+            json!({"claims": {"exclude": "iss"}}),
+            json!({"claims": {"include": 42}}),
+            json!({"claims": ["iss"]}),
+            json!({"claims": {"exclud": ["iss"]}}),
+            json!({"claims": {"exclude": ["tenant"], "include": ["tenant"]}}),
+        ] {
+            let err = build_err(settings.clone());
+            assert!(err.contains("claims"), "{settings}: {err}");
+        }
+    }
+
+    /// The claim named in both lists is the one the message has to identify.
+    #[test]
+    fn a_claim_in_both_override_lists_is_named() {
+        let err = build_err(json!({
+            "claims": {"exclude": ["tenant", "jti"], "include": ["tenant"]}
+        }));
+        assert!(err.contains("tenant"), "{err}");
+        assert!(err.contains("exclude") && err.contains("include"), "{err}");
+    }
+
     #[test]
     fn an_absent_mapper_and_the_standard_name_both_build() {
         for settings in [json!({}), json!({"claim_mapper": "standard"})] {

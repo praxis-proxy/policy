@@ -472,7 +472,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::claim_map_config::ClaimMapConfig;
+    use crate::claim_map_config::{ClaimMapConfig, ClaimsOverrides};
 
     fn claims(value: Value) -> ClaimMap {
         value.as_object().unwrap().clone().into_iter().collect()
@@ -485,6 +485,21 @@ mod tests {
     fn mapper(map: Value) -> ConfiguredClaimMap {
         let config: ClaimMapConfig = serde_json::from_value(map).expect("the map deserializes");
         ConfiguredClaimMap::new(config.compile().expect("the map compiles"))
+    }
+
+    /// A mapper with the plugin-level claims-bag overrides attached, which is how
+    /// the resolver assembles one.
+    fn mapper_with_claims(map: Value, claims: Value) -> ConfiguredClaimMap {
+        let config: ClaimMapConfig = serde_json::from_value(map).expect("the map deserializes");
+        let overrides: ClaimsOverrides =
+            serde_json::from_value(claims).expect("the overrides deserialize");
+        overrides.validate().expect("the overrides are coherent");
+        ConfiguredClaimMap::new(
+            config
+                .compile()
+                .expect("the map compiles")
+                .with_claims(overrides),
+        )
     }
 
     fn sorted(values: &HashSet<String>) -> Vec<&str> {
@@ -872,10 +887,10 @@ mod tests {
         let token = claims(json!({
             "sub": "alice", "groups": ["eng"], "internal_debug": "noisy", "tenant": "acme",
         }));
-        let subject = mapper(json!({
-            "subject": {"id": "sub", "teams": "groups"},
-            "claims": {"exclude": ["internal_debug"], "include": ["groups"]},
-        }))
+        let subject = mapper_with_claims(
+            json!({"subject": {"id": "sub", "teams": "groups"}}),
+            json!({"exclude": ["internal_debug"], "include": ["groups"]}),
+        )
         .map_subject(&token)
         .unwrap();
 
@@ -896,10 +911,10 @@ mod tests {
         let token = claims(json!({
             "sub": "alice", "iss": "https://internal.idp", "jti": "abc", "exp": 2_000_000_000_i64,
         }));
-        let subject = mapper(json!({
-            "subject": {"id": "sub"},
-            "claims": {"include": ["iss", "jti", "exp"]},
-        }))
+        let subject = mapper_with_claims(
+            json!({"subject": {"id": "sub"}}),
+            json!({"include": ["iss", "jti", "exp"]}),
+        )
         .map_subject(&token)
         .unwrap();
         assert_eq!(

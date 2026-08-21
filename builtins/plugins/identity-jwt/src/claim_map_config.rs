@@ -294,6 +294,12 @@ fn candidates_from_list(field: &str, items: &[Value]) -> Result<Vec<Candidate>, 
 /// Claim names to drop from, or restore to, the policy-visible claims bag.
 ///
 /// Plain names rather than paths: the bag is keyed by top-level claim name.
+///
+/// A plugin-level setting rather than part of [`ClaimMapConfig`], so it applies
+/// to a preset named by `claim_mapper` and to an inline `claim_map` alike. The
+/// bag is a separate output from the typed fields, and pinning the overrides to
+/// one of the two ways of choosing a map would leave the other unable to reach
+/// them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimsOverrides {
@@ -305,6 +311,26 @@ pub struct ClaimsOverrides {
     /// this exists: it is otherwise unreachable from a policy.
     #[serde(default)]
     pub include: Vec<String>,
+}
+
+impl ClaimsOverrides {
+    /// Check the two lists do not disagree with each other.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the claim when one appears in both lists. There
+    /// is no coherent intent to honour, and picking a winner silently would hide
+    /// the mistake.
+    pub fn validate(&self) -> Result<(), String> {
+        for claim in &self.include {
+            if self.exclude.iter().any(|excluded| excluded == claim) {
+                return Err(format!(
+                    "claims: `{claim}` is in both `exclude` and `include`; pick one"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One role's authored section: field name to field map.
@@ -336,9 +362,16 @@ pub struct RoleMapConfig(pub BTreeMap<String, Value>);
 ///         - scope
 ///       split: whitespace              # break a delimited string into elements
 ///       on_missing: deny               # ignore (default) | deny
-///     claims:
-///       exclude: [internal_debug]      # drop an otherwise-visible claim
-///       include: [iss]                 # keep one the inference drops
+/// ```
+///
+/// The claims-bag overrides are a sibling of `claim_map`, not part of it, so they
+/// work with a preset too:
+///
+/// ```yaml
+/// claim_mapper: keycloak
+/// claims:
+///   exclude: [internal_debug]          # drop an otherwise-visible claim
+///   include: [iss]                     # keep one the inference drops
 /// ```
 ///
 /// A field with no candidate that resolves is left empty and logged at debug,
@@ -392,12 +425,6 @@ pub struct ClaimMapConfig {
     /// The section a `role: caller_workload` resolver uses.
     #[serde(default)]
     pub workload: Option<RoleMapConfig>,
-    /// Overrides for the inferred claims-bag exclusions.
-    ///
-    /// Read as a raw value so a malformed one names the field, the same reason
-    /// the role sections are.
-    #[serde(default)]
-    pub claims: Option<Value>,
 }
 
 // =====================================================================
@@ -522,6 +549,16 @@ impl CompiledClaimMap {
     pub fn claims(&self) -> &ClaimsOverrides {
         &self.claims
     }
+
+    /// Attach the plugin-level claims-bag overrides.
+    ///
+    /// Applied after the map compiles, so a preset and an inline map reach them
+    /// the same way.
+    #[must_use]
+    pub fn with_claims(mut self, claims: ClaimsOverrides) -> Self {
+        self.claims = claims;
+        self
+    }
 }
 
 impl ClaimMapConfig {
@@ -535,25 +572,11 @@ impl ClaimMapConfig {
     /// candidate list, `merge: union` on a field holding one string, and a claim
     /// named in both `exclude` and `include`.
     pub fn compile(&self) -> Result<CompiledClaimMap, String> {
-        let claims: ClaimsOverrides = match self.claims.as_ref() {
-            Some(value) => serde_json::from_value(value.clone()).map_err(|e| {
-                format!("claims: expected `exclude` and `include` lists of claim names: {e}")
-            })?,
-            None => ClaimsOverrides::default(),
-        };
-        for claim in &claims.include {
-            if claims.exclude.iter().any(|excluded| excluded == claim) {
-                return Err(format!(
-                    "claims: `{claim}` is in both `exclude` and `include`; pick one"
-                ));
-            }
-        }
-
         Ok(CompiledClaimMap {
             subject: compile_role("subject", SUBJECT_FIELDS, self.subject.as_ref())?,
             client: compile_role("client", CLIENT_FIELDS, self.client.as_ref())?,
             workload: compile_role("workload", WORKLOAD_FIELDS, self.workload.as_ref())?,
-            claims,
+            claims: ClaimsOverrides::default(),
         })
     }
 }
@@ -811,27 +834,62 @@ mod tests {
     // ---- claims overrides -------------------------------------------------
 
     #[test]
-    fn claims_overrides_compile_and_default_to_empty() {
-        let with = compiled(json!({
-            "subject": {"id": "sub"},
-            "claims": {"exclude": ["internal_debug"], "include": ["iss"]},
-        }));
-        assert_eq!(with.claims().exclude, vec!["internal_debug"]);
-        assert_eq!(with.claims().include, vec!["iss"]);
+    fn claims_overrides_deserialize_and_default_to_empty() {
+        let with: ClaimsOverrides =
+            serde_json::from_value(json!({"exclude": ["internal_debug"], "include": ["iss"]}))
+                .expect("the overrides deserialize");
+        assert_eq!(with.exclude, vec!["internal_debug"]);
+        assert_eq!(with.include, vec!["iss"]);
+        with.validate().expect("distinct lists are coherent");
 
-        let without = compiled(json!({"subject": {"id": "sub"}}));
-        assert!(without.claims().exclude.is_empty());
-        assert!(without.claims().include.is_empty());
+        let without = ClaimsOverrides::default();
+        assert!(without.exclude.is_empty());
+        assert!(without.include.is_empty());
+        without.validate().expect("empty lists are coherent");
     }
 
     #[test]
     fn a_claim_in_both_exclude_and_include_is_rejected_and_named() {
-        let err = compile_err(json!({
-            "subject": {"id": "sub"},
-            "claims": {"exclude": ["tenant"], "include": ["tenant"]},
-        }));
+        let overrides: ClaimsOverrides =
+            serde_json::from_value(json!({"exclude": ["tenant"], "include": ["tenant"]}))
+                .expect("the overrides deserialize");
+        let err = overrides
+            .validate()
+            .expect_err("a claim cannot be both dropped and kept");
         assert!(err.contains("tenant"), "{err}");
         assert!(err.contains("exclude") && err.contains("include"), "{err}");
+    }
+
+    /// The overrides are a plugin-level setting, so a `claims` block written inside
+    /// a map is rejected and the valid sections are listed.
+    #[test]
+    fn a_claims_block_inside_a_map_is_rejected() {
+        let err = serde_json::from_value::<ClaimMapConfig>(json!({
+            "subject": {"id": "sub"},
+            "claims": {"include": ["iss"]},
+        }))
+        .expect_err("`claims` is not part of a claim map");
+        let message = err.to_string();
+        assert!(message.contains("claims"), "{message}");
+        assert!(
+            message.contains("subject"),
+            "the valid sections are listed: {message}"
+        );
+    }
+
+    /// A malformed override names the field rather than dumping a serde type
+    /// error, which is why the resolver reads it as a raw value first.
+    #[test]
+    fn a_malformed_claims_block_is_rejected() {
+        for value in [
+            json!({"exclude": "iss"}),
+            json!({"include": 42}),
+            json!({"exclud": ["iss"]}),
+            json!(["iss"]),
+        ] {
+            serde_json::from_value::<ClaimsOverrides>(value.clone())
+                .expect_err(&format!("{value} must be rejected"));
+        }
     }
 
     // ---- role sections ----------------------------------------------------
@@ -1099,27 +1157,6 @@ mod tests {
             assert!(
                 !err.contains("did not match any variant"),
                 "{label}: must not be a serde variant dump: {err}"
-            );
-        }
-    }
-
-    /// A malformed `claims` block names the field too. It is read as a raw value
-    /// for exactly that reason.
-    #[test]
-    fn a_malformed_claims_block_names_the_field() {
-        for value in [
-            json!({"subject": {"id": "sub"}, "claims": {"exclude": "iss"}}),
-            json!({"subject": {"id": "sub"}, "claims": {"include": 42}}),
-            json!({"subject": {"id": "sub"}, "claims": ["iss"]}),
-            json!({"subject": {"id": "sub"}, "claims": {"exclud": ["iss"]}}),
-        ] {
-            let err = config(value.clone())
-                .compile()
-                .expect_err("a malformed claims block must be rejected");
-            assert!(err.contains("claims"), "{value}: {err}");
-            assert!(
-                !err.contains("did not match any variant"),
-                "{value}: must not be a serde variant dump: {err}"
             );
         }
     }

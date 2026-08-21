@@ -88,6 +88,22 @@ pub struct JwtIdentityResolverConfig {
     /// [`claim_mapper`]: Self::claim_mapper
     #[serde(default)]
     pub claim_map: Option<ClaimMapConfig>,
+
+    /// Which claims stay visible to a policy, overriding what the map's declared
+    /// paths imply.
+    ///
+    /// A sibling of [`claim_mapper`] and [`claim_map`] rather than part of either,
+    /// so it applies whichever way the map was chosen. `include` accepts any claim
+    /// name, registered ones included: `claims: {include: [iss]}` is what makes
+    /// gating on the issuing `IdP` expressible, since the subject claims bag is
+    /// the only route from a claim to a policy.
+    ///
+    /// Read as a raw value so a malformed one names the field.
+    ///
+    /// [`claim_mapper`]: Self::claim_mapper
+    /// [`claim_map`]: Self::claim_map
+    #[serde(default)]
+    pub claims: Option<serde_json::Value>,
 }
 
 fn default_role() -> TokenRole {
