@@ -95,7 +95,10 @@ struct FieldOutcome {
     /// claim holding `[]` resolves and contributes nothing, which is not the
     /// same as a path that led nowhere.
     resolved: bool,
-    paths_tried: Vec<String>,
+    /// How many candidates were reached, so a diagnostic can name them. A count
+    /// rather than rendered paths: rendering re-escapes every path, and the
+    /// request path pays that only when something actually missed.
+    tried: usize,
 }
 
 /// Append what one value contributes, or report that its shape cannot serve
@@ -142,10 +145,10 @@ fn contribute(
 fn resolve_collection(field: &CompiledField, claims: &ClaimMap) -> FieldOutcome {
     let mut values = Vec::new();
     let mut resolved = false;
-    let mut paths_tried = Vec::with_capacity(field.candidates().len());
+    let mut tried = 0_usize;
 
     for candidate in field.candidates() {
-        paths_tried.push(candidate.path().to_string());
+        tried += 1;
         let Some(value) = candidate.path().resolve(claims) else {
             continue;
         };
@@ -165,7 +168,7 @@ fn resolve_collection(field: &CompiledField, claims: &ClaimMap) -> FieldOutcome 
     FieldOutcome {
         values,
         resolved,
-        paths_tried,
+        tried,
     }
 }
 
@@ -179,22 +182,33 @@ fn resolve_scalar(
     field: &CompiledField,
     claims: &ClaimMap,
     accept: impl Fn(&str) -> bool,
-) -> (Option<String>, Vec<String>) {
-    let mut paths_tried = Vec::with_capacity(field.candidates().len());
+) -> (Option<String>, usize) {
+    let mut tried = 0_usize;
     for candidate in field.candidates() {
-        paths_tried.push(candidate.path().to_string());
+        tried += 1;
         let Some(value) = candidate.path().resolve(claims) else {
             continue;
         };
         match value.as_str() {
-            Some(text) if accept(text) => return (Some(text.to_owned()), paths_tried),
+            Some(text) if accept(text) => return (Some(text.to_owned()), tried),
             // Present but unusable. The chain continues unless this candidate
             // claims the field the moment its path resolves at all.
             _ if candidate.stop_if_present() => break,
             _ => {},
         }
     }
-    (None, paths_tried)
+    (None, tried)
+}
+
+/// Render the paths a field reached, for a diagnostic. Called only when a field
+/// missed, so the escaping cost never lands on a resolving request.
+fn paths_tried(field: &CompiledField, tried: usize) -> Vec<String> {
+    field
+        .candidates()
+        .iter()
+        .take(tried)
+        .map(|candidate| candidate.path().to_string())
+        .collect()
 }
 
 // =====================================================================
@@ -220,27 +234,28 @@ impl Diagnostics {
         }
     }
 
-    fn record(&mut self, name: &'static str, on_missing: OnMissing, outcome: &FieldOutcome) {
+    fn record(
+        &mut self,
+        name: &'static str,
+        field: &CompiledField,
+        outcome: &FieldOutcome,
+    ) -> bool {
         if outcome.resolved {
             if outcome.values.is_empty() {
                 self.empty.push(name);
             }
-            return;
+            return true;
         }
-        self.missed.push((name, outcome.paths_tried.clone()));
-        if on_missing == OnMissing::Deny {
+        self.missed.push((name, paths_tried(field, outcome.tried)));
+        if field.on_missing() == OnMissing::Deny {
             self.denied.push(name);
         }
+        false
     }
 
-    fn record_scalar_miss(
-        &mut self,
-        name: &'static str,
-        on_missing: OnMissing,
-        paths_tried: Vec<String>,
-    ) {
-        self.missed.push((name, paths_tried));
-        if on_missing == OnMissing::Deny {
+    fn record_scalar_miss(&mut self, name: &'static str, field: &CompiledField, tried: usize) {
+        self.missed.push((name, paths_tried(field, tried)));
+        if field.on_missing() == OnMissing::Deny {
             self.denied.push(name);
         }
     }
@@ -270,22 +285,22 @@ impl Diagnostics {
                 .collect();
             tracing::debug!(
                 role = self.role,
-                fields = %fields.join(", "),
-                paths_tried = %tried.join("; "),
+                fields = ?fields,
+                paths_tried = ?tried,
                 "claim map: no candidate resolved for these fields",
             );
         }
         if !self.empty.is_empty() {
             tracing::debug!(
                 role = self.role,
-                fields = %self.empty.join(", "),
+                fields = ?self.empty,
                 "claim map: these fields resolved to an empty collection",
             );
         }
         if !self.denied.is_empty() {
             tracing::warn!(
                 role = self.role,
-                fields = %self.denied.join(", "),
+                fields = ?self.denied,
                 "claim map: declining the token because a field declared `on_missing: deny` and \
                  no candidate resolved",
             );
@@ -304,7 +319,7 @@ fn collection(
         return Vec::new();
     };
     let outcome = resolve_collection(field, claims);
-    diag.record(name, field.on_missing(), &outcome);
+    diag.record(name, field, &outcome);
     outcome.values
 }
 
@@ -317,9 +332,9 @@ fn scalar(
     accept: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let field = section.field(name)?;
-    let (value, paths_tried) = resolve_scalar(field, claims, accept);
+    let (value, tried) = resolve_scalar(field, claims, accept);
     if value.is_none() {
-        diag.record_scalar_miss(name, field.on_missing(), paths_tried);
+        diag.record_scalar_miss(name, field, tried);
     }
     value
 }
@@ -1007,6 +1022,35 @@ mod tests {
         let event = warning.first().expect("the field is named in a warning");
         assert!(event.contains("WARN"), "{event}");
         assert!(event.contains("roles"), "{event}");
+    }
+
+    /// `on_missing: deny` on a field holding one value takes the scalar miss path,
+    /// which is a different branch from the collection one and reports through the
+    /// same warning.
+    #[test]
+    fn on_missing_deny_on_a_field_holding_one_value_declines_and_names_it() {
+        let (declined, events) = capturing(|| {
+            mapper(json!({
+                "client": {
+                    "client_id": ["client_id", "azp"],
+                    "client_name": {"paths": ["client_name", "app_name"], "on_missing": "deny"},
+                }
+            }))
+            .map_client(&claims(json!({"client_id": "svc"})))
+        });
+        assert!(
+            declined.is_none(),
+            "a strict field holding one value declines when nothing resolves"
+        );
+
+        let warning = events.matching("on_missing");
+        let event = warning.first().expect("the field is named in a warning");
+        assert!(event.contains("client_name"), "{event}");
+
+        let misses = events.matching("no candidate resolved");
+        let miss = misses.first().expect("the miss names every path tried");
+        assert!(miss.contains("client_name"), "{miss}");
+        assert!(miss.contains("app_name"), "both paths are named: {miss}");
     }
 
     /// An empty collection satisfies `on_missing: deny`: the claim was there.

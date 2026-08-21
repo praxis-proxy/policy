@@ -78,6 +78,6 @@ pub use claim_path::ClaimPath;
 pub use config::{DecodingKeySource, JwtIdentityResolverConfig, TrustedIssuerConfig};
 pub use configured_mapper::ConfiguredClaimMap;
 pub use factory::{JwtIdentityFactory, KIND};
-pub use presets::{DEFAULT_PRESET, PRESETS, Preset};
+pub use presets::{DEFAULT_PRESET, Preset};
 pub use resolver::JwtIdentityResolver;
 pub use trusted_issuer::TrustedIssuer;

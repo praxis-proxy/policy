@@ -46,13 +46,7 @@ pub const WORKLOAD_FIELDS: &[&str] = &["client_id", "selectors", "spiffe_id"];
 
 /// Fields whose destination holds one string, so the first candidate resolving
 /// to a string wins and `merge: union` is meaningless.
-const SCALAR_FIELDS: &[&str] = &[
-    "client_id",
-    "client_name",
-    "id",
-    "spiffe_id",
-    "trust_domain",
-];
+const SCALAR_FIELDS: &[&str] = &["client_id", "client_name", "id", "spiffe_id"];
 
 /// How a field combines its resolving candidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +65,7 @@ pub enum MergeMode {
 /// without invalidating a config anyone has already written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SplitMode {
     /// Split on runs of whitespace, which is how all three researched providers
     /// delimit `scope`.
@@ -90,37 +85,37 @@ pub enum OnMissing {
 
 /// One authored candidate: a path, plus the rules for what satisfies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Candidate {
+pub(crate) struct Candidate {
     /// The path as authored.
-    pub path: String,
+    pub(crate) path: String,
     /// Require an array. A string is then unusable and the chain continues.
-    pub array_only: bool,
+    pub(crate) array_only: bool,
     /// Require a string. An array is then unusable and the chain continues.
     ///
     /// The mirror of `array_only`, and what a claim read as a delimited string
     /// needs: an array-valued `scope` must contribute nothing rather than
     /// contributing each element.
-    pub string_only: bool,
+    pub(crate) string_only: bool,
     /// End the chain as soon as this path resolves to anything, usable or not.
     ///
     /// The default is to keep looking when a value is present but the wrong
     /// shape. A chain that picks the first claim that *exists* and then requires
     /// a shape of it needs this instead, so a present-but-unusable value denies
     /// rather than falling through to a later candidate.
-    pub stop_if_present: bool,
+    pub(crate) stop_if_present: bool,
 }
 
 /// One authored field: its ordered candidates and its options.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FieldMap {
+pub(crate) struct FieldMap {
     /// Candidates in the order the author wrote them.
-    pub paths: Vec<Candidate>,
+    pub(crate) paths: Vec<Candidate>,
     /// How resolving candidates combine.
-    pub merge: MergeMode,
+    pub(crate) merge: MergeMode,
     /// How a resolved string is broken into elements.
-    pub split: Option<SplitMode>,
+    pub(crate) split: Option<SplitMode>,
     /// What happens when no candidate resolves.
-    pub on_missing: OnMissing,
+    pub(crate) on_missing: OnMissing,
 }
 
 const FIELD_OPTIONS: &[&str] = &["merge", "on_missing", "paths", "split"];
@@ -215,7 +210,7 @@ impl FieldMap {
     /// Returns a message naming the field when the value is not one of the three
     /// forms, when an option or candidate key is unrecognized, or when `paths`
     /// is missing.
-    pub fn from_value(field: &str, value: &Value) -> Result<Self, String> {
+    pub(crate) fn from_value(field: &str, value: &Value) -> Result<Self, String> {
         match value {
             Value::String(path) => Ok(Self {
                 paths: vec![Candidate {
@@ -398,8 +393,11 @@ pub struct ClaimMapConfig {
     #[serde(default)]
     pub workload: Option<RoleMapConfig>,
     /// Overrides for the inferred claims-bag exclusions.
+    ///
+    /// Read as a raw value so a malformed one names the field, the same reason
+    /// the role sections are.
     #[serde(default)]
-    pub claims: Option<ClaimsOverrides>,
+    pub claims: Option<Value>,
 }
 
 // =====================================================================
@@ -537,7 +535,12 @@ impl ClaimMapConfig {
     /// candidate list, `merge: union` on a field holding one string, and a claim
     /// named in both `exclude` and `include`.
     pub fn compile(&self) -> Result<CompiledClaimMap, String> {
-        let claims = self.claims.clone().unwrap_or_default();
+        let claims: ClaimsOverrides = match self.claims.as_ref() {
+            Some(value) => serde_json::from_value(value.clone()).map_err(|e| {
+                format!("claims: expected `exclude` and `include` lists of claim names: {e}")
+            })?,
+            None => ClaimsOverrides::default(),
+        };
         for claim in &claims.include {
             if claims.exclude.iter().any(|excluded| excluded == claim) {
                 return Err(format!(
@@ -1064,6 +1067,95 @@ mod tests {
             "subject": {"roles": [{"path": "roles", "arrayonly": true}]}
         }));
         assert!(err.contains("arrayonly"), "{err}");
+    }
+
+    /// The remaining shape-rejection branches. Each names the field rather than
+    /// dumping a serde type error, which is the whole reason the field forms are
+    /// read from the JSON value by hand.
+    #[test]
+    fn every_malformed_candidate_shape_names_the_field() {
+        for (label, value) in [
+            (
+                "a non-string path",
+                json!({"subject": {"roles": [{"path": 42}]}}),
+            ),
+            (
+                "a numeric candidate",
+                json!({"subject": {"roles": ["ok", 42]}}),
+            ),
+            ("a boolean candidate", json!({"subject": {"roles": [true]}})),
+            ("a null candidate", json!({"subject": {"roles": [null]}})),
+            (
+                "a numeric paths value",
+                json!({"subject": {"roles": {"paths": 42}}}),
+            ),
+            (
+                "an object paths value",
+                json!({"subject": {"roles": {"paths": {"path": "roles"}}}}),
+            ),
+        ] {
+            let err = compile_err(value);
+            assert!(err.contains("subject.roles"), "{label}: {err}");
+            assert!(
+                !err.contains("did not match any variant"),
+                "{label}: must not be a serde variant dump: {err}"
+            );
+        }
+    }
+
+    /// A malformed `claims` block names the field too. It is read as a raw value
+    /// for exactly that reason.
+    #[test]
+    fn a_malformed_claims_block_names_the_field() {
+        for value in [
+            json!({"subject": {"id": "sub"}, "claims": {"exclude": "iss"}}),
+            json!({"subject": {"id": "sub"}, "claims": {"include": 42}}),
+            json!({"subject": {"id": "sub"}, "claims": ["iss"]}),
+            json!({"subject": {"id": "sub"}, "claims": {"exclud": ["iss"]}}),
+        ] {
+            let err = config(value.clone())
+                .compile()
+                .expect_err("a malformed claims block must be rejected");
+            assert!(err.contains("claims"), "{value}: {err}");
+            assert!(
+                !err.contains("did not match any variant"),
+                "{value}: must not be a serde variant dump: {err}"
+            );
+        }
+    }
+
+    /// Every field name the mapper resolves as a single value is in
+    /// `SCALAR_FIELDS`, and nothing else is. Without this, adding a scalar field
+    /// to one list and not the other lets `merge: union` and the shape flags
+    /// compile with no effect.
+    #[test]
+    fn scalar_fields_is_exactly_what_the_mapper_resolves_as_one_value() {
+        // The mapper's scalar call sites, per role. Kept here rather than derived
+        // so a change to either side has to be made deliberately in both.
+        const RESOLVED_AS_ONE_VALUE: &[&str] = &["id", "client_id", "client_name", "spiffe_id"];
+
+        for name in RESOLVED_AS_ONE_VALUE {
+            assert!(
+                SCALAR_FIELDS.contains(name),
+                "the mapper resolves `{name}` as one value, so it must be in SCALAR_FIELDS"
+            );
+        }
+        for name in SCALAR_FIELDS {
+            assert!(
+                RESOLVED_AS_ONE_VALUE.contains(name),
+                "`{name}` is in SCALAR_FIELDS but the mapper does not resolve it as one value"
+            );
+        }
+        // And every scalar name is a real field of some role, so a typo in either
+        // list fails here rather than silently never matching.
+        for name in SCALAR_FIELDS {
+            assert!(
+                SUBJECT_FIELDS.contains(name)
+                    || CLIENT_FIELDS.contains(name)
+                    || WORKLOAD_FIELDS.contains(name),
+                "`{name}` is in SCALAR_FIELDS but is not a field of any role"
+            );
+        }
     }
 
     #[test]

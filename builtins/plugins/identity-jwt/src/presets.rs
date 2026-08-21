@@ -17,8 +17,10 @@ use crate::claim_map_config::{ClaimMapConfig, CompiledClaimMap};
 
 /// Every shipped preset, by the name an operator writes in `claim_mapper`.
 ///
-/// Sorted by name so the unknown-name error lists them in a stable order.
-pub const PRESETS: &[(&str, &str)] = &[
+/// Sorted by name so the unknown-name error lists them in a stable order. Not
+/// public: the embedded JSON is an implementation detail, and [`names`] plus
+/// [`lookup`] are what a caller needs.
+const PRESETS: &[(&str, &str)] = &[
     ("auth0", include_str!("presets/auth0.json")),
     ("cognito", include_str!("presets/cognito.json")),
     ("keycloak", include_str!("presets/keycloak.json")),
@@ -271,6 +273,76 @@ mod tests {
                 .field("trust_domain")
                 .is_none(),
             "the trust domain is derived from the SPIFFE URI, not mapped"
+        );
+    }
+
+    /// Each provider preset's candidates, pinned in order. The standard preset has
+    /// a parity gate; these have only their own tests, so without this a candidate
+    /// could be added, reordered or dropped silently.
+    #[test]
+    fn every_provider_preset_declares_the_candidates_it_is_documented_to() {
+        for (name, role, field, expected) in [
+            ("keycloak", TokenRole::User, "id", vec!["sub"]),
+            (
+                "keycloak",
+                TokenRole::User,
+                "roles",
+                vec!["realm_access.roles"],
+            ),
+            ("keycloak", TokenRole::User, "permissions", vec!["scope"]),
+            (
+                "keycloak",
+                TokenRole::Client,
+                "client_id",
+                vec!["client_id", "azp", "clientId"],
+            ),
+            ("auth0", TokenRole::User, "id", vec!["sub"]),
+            (
+                "auth0",
+                TokenRole::User,
+                "permissions",
+                vec!["permissions", "scope"],
+            ),
+            (
+                "auth0",
+                TokenRole::Client,
+                "client_id",
+                vec!["client_id", "azp"],
+            ),
+            ("cognito", TokenRole::User, "id", vec!["sub"]),
+            ("cognito", TokenRole::User, "teams", vec!["cognito:groups"]),
+            ("cognito", TokenRole::Client, "client_id", vec!["client_id"]),
+        ] {
+            let map = lookup(name)
+                .unwrap_or_else(|e| panic!("'{name}': {e}"))
+                .into_claim_map();
+            assert_eq!(
+                authored_paths(&map, &role, field),
+                expected,
+                "'{name}' {role:?}.{field}"
+            );
+        }
+    }
+
+    /// Pre-2023 Keycloak spells the claim `clientId`. It is the tail candidate, so
+    /// nothing else in the suite reaches it.
+    #[test]
+    fn the_keycloak_preset_accepts_the_camel_case_client_id() {
+        let client = mapper("keycloak")
+            .map_client(&claims(
+                json!({"clientId": "legacy-service", "scope": "openid"}),
+            ))
+            .expect("a pre-2023 Keycloak token resolves");
+        assert_eq!(client.client_id, "legacy-service");
+
+        let precedence = mapper("keycloak")
+            .map_client(&claims(json!({
+                "client_id": "modern", "azp": "middle", "clientId": "legacy",
+            })))
+            .expect("resolves");
+        assert_eq!(
+            precedence.client_id, "modern",
+            "the candidates are tried in the order the preset declares"
         );
     }
 

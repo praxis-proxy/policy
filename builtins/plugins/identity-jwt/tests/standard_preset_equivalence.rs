@@ -397,9 +397,47 @@ const AUD_SHAPES: &[&str] = &[
     "client-aud-absent",
 ];
 
+/// What makes the first candidate of a chain win, which is what the second
+/// branch's entry has to avoid in order to reach the fallback at all.
+#[derive(Debug, Clone, Copy)]
+enum Wins {
+    /// The candidate is array-only, so only an array wins.
+    Array,
+    /// A plain scalar candidate: any string wins.
+    AnyString,
+    /// The workload chain filters every candidate by the SPIFFE prefix.
+    SpiffeString,
+}
+
+impl Wins {
+    fn satisfied_by(self, value: &Value) -> bool {
+        match self {
+            Self::Array => value.is_array(),
+            Self::AnyString => value.is_string(),
+            Self::SpiffeString => value
+                .as_str()
+                .is_some_and(|text| text.starts_with("spiffe://")),
+        }
+    }
+}
+
+/// The claim each fallback branch is about, and the rule that decides the first
+/// candidate. Coverage is asserted on content rather than on an entry's name: a
+/// rename is a rename, but an entry edited until it no longer exercises its
+/// branch is a silent loss of coverage, and only this catches that.
+const FALLBACK_CLAIMS: &[(&str, &str, Wins)] = &[
+    ("client_id", "azp", Wins::AnyString),
+    ("authorized_scopes", "scope", Wins::Array),
+    ("permissions", "scope", Wins::Array),
+    ("teams", "groups", Wins::Array),
+    ("sub", "spiffe_id", Wins::SpiffeString),
+];
+
 #[test]
 fn every_fallback_has_an_entry_on_both_branches() {
-    let names: HashSet<String> = corpus().into_iter().map(|entry| entry.name).collect();
+    let entries = corpus();
+    let names: HashSet<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+
     for (fallback, first, second) in FALLBACK_BRANCHES {
         for branch in [first, second] {
             assert!(
@@ -407,6 +445,47 @@ fn every_fallback_has_an_entry_on_both_branches() {
                 "{fallback}: no entry named '{branch}' covers this branch"
             );
         }
+    }
+
+    for ((first_claim, second_claim, wins), (fallback, first_entry, second_entry)) in
+        FALLBACK_CLAIMS.iter().zip(FALLBACK_BRANCHES.iter())
+    {
+        let find = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("{fallback}: no entry named '{name}'"))
+        };
+
+        // The first branch exercises the winning candidate, so its claim must be
+        // present in a shape that actually wins.
+        let winner = find(first_entry);
+        let value = winner
+            .claims
+            .get(*first_claim)
+            .unwrap_or_else(|| panic!("{fallback}: '{first_entry}' must carry `{first_claim}`"));
+        assert!(
+            wins.satisfied_by(value),
+            "{fallback}: '{first_entry}' carries `{first_claim}` as {value}, which does not \
+             satisfy {wins:?}, so it does not exercise the winning branch"
+        );
+
+        // The second branch exercises the fallback, so the first candidate must
+        // not win and the second claim must be present.
+        let fell_through = find(second_entry);
+        assert!(
+            fell_through.claims.contains_key(*second_claim),
+            "{fallback}: '{second_entry}' must carry `{second_claim}`"
+        );
+        let first_would_win = fell_through
+            .claims
+            .get(*first_claim)
+            .is_some_and(|value| wins.satisfied_by(value));
+        assert!(
+            !first_would_win,
+            "{fallback}: '{second_entry}' carries a winning `{first_claim}`, so it never \
+             reaches the fallback branch it is named for"
+        );
     }
 }
 
