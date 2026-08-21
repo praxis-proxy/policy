@@ -2243,8 +2243,10 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "bytes",
  "chrono",
  "hashbrown 0.17.1",
+ "http",
  "praxis-policy-orchestration",
  "serde",
  "serde_json",

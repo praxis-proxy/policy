@@ -27,6 +27,11 @@ use super::raw_credentials::RawCredentialsExtension;
 use super::request::RequestExtension;
 use super::routing::{CAP_WRITE_CANDIDATE_CONSTRAINT, CandidateConstraintExtension};
 use super::security::SecurityExtension;
+// Fully qualified module path: `super::http` is the HTTP *extension*
+// (headers), `crate::http` is the outbound-transport seam. Different
+// things, one letter apart in the import list.
+use crate::host::{HTTP_CAPABILITY, HTTP_SERVICE, HostServices, ServiceError, ServiceSlot};
+use crate::http::HttpTransport;
 
 /// Typed container for all message extensions.
 ///
@@ -122,10 +127,37 @@ pub struct Extensions {
     #[serde(skip)]
     /// Permits appending to the delegation chain.
     pub delegation_write_token: Option<WriteToken>,
+
+    /// The host's HTTP transport, as this plugin may see it. Set by
+    /// `filter_extensions` from the plugin's `perform_http` grant, NOT
+    /// serialized.
+    ///
+    /// Unlike the write tokens above, this *is* carried across `clone()`.
+    /// A write token is a one-shot authorization validated at the merge
+    /// boundary, so propagating it through a clone would widen write
+    /// authority. A transport handle is a borrowed service whose gate was
+    /// already applied when the filtered view was built; dropping it on
+    /// clone would only surprise a plugin that already holds the right.
+    ///
+    /// A [`ServiceSlot::NotPermitted`] here is distinct from
+    /// [`ServiceSlot::NotInstalled`] so the plugin's error names the
+    /// right fix. Reach it through [`HostServices::http`] rather than
+    /// matching on it.
+    #[serde(skip)]
+    pub http_transport: ServiceSlot<Arc<dyn HttpTransport>>,
+}
+
+impl HostServices for Extensions {
+    fn http(&self) -> Result<&dyn HttpTransport, ServiceError> {
+        self.http_transport
+            .get(HTTP_SERVICE, HTTP_CAPABILITY)
+            .map(|arc| &**arc)
+    }
 }
 
 impl Clone for Extensions {
-    /// All Arc bumps — zero data copies. Write tokens are NOT cloned.
+    /// All Arc bumps — zero data copies. Write tokens are NOT cloned;
+    /// the transport handle is (see the field docs for why they differ).
     fn clone(&self) -> Self {
         Self {
             request: self.request.clone(),
@@ -142,6 +174,7 @@ impl Clone for Extensions {
             framework: self.framework.clone(),
             meta: self.meta.clone(),
             custom: self.custom.clone(),
+            http_transport: self.http_transport.clone(),
             http_write_token: None,
             labels_write_token: None,
             delegation_write_token: None,

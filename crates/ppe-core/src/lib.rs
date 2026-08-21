@@ -54,6 +54,12 @@ pub mod extensions;
 pub mod factory;
 /// Hook types, payloads, and the handler traits.
 pub mod hooks;
+/// Host-provided services and the carriers that lend them to a plugin.
+pub mod host;
+/// The outbound-HTTP seam. Types and a trait; PPE performs no HTTP itself.
+pub mod http;
+/// Retry policy for outbound HTTP, keyed to whether a repeat is safe.
+pub mod http_retry;
 /// The identity resolution hook and its payload.
 pub mod identity;
 /// The `Plugin` trait and its trusted configuration.

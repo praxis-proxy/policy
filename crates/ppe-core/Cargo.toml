@@ -25,6 +25,11 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+# Types for the outbound-HTTP seam (`http` module). Types only — no
+# client, no runtime, no TLS. PPE never performs HTTP itself; a host
+# installs an `HttpTransport`.
+http = { workspace = true }
+bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
