@@ -645,6 +645,10 @@ fn shapes() -> Vec<(&'static str, Option<Value>)> {
         ("empty string", Some(json!(""))),
         ("whitespace string", Some(json!("   "))),
         ("one word", Some(json!("one"))),
+        // Without a SPIFFE-shaped string every workload case declines on both
+        // sides, which agrees vacuously and proves nothing about that role.
+        ("spiffe id", Some(json!("spiffe://corp.example/ns/a/sa/b"))),
+        ("non-spiffe uri", Some(json!("https://corp.example/ns/a"))),
         ("two words", Some(json!("two words"))),
         ("empty array", Some(json!([]))),
         ("string array", Some(json!(["a", "b"]))),

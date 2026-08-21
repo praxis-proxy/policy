@@ -354,7 +354,9 @@ pub struct RoleMapConfig(pub BTreeMap<String, Value>);
 /// | `stop_if_present` | The candidate claims the field the moment its path resolves at all. A present but unusable value then leaves the field empty instead of falling through, which is what a chain that picks the first claim that *exists* and only then requires a shape of it needs. |
 ///
 /// `array_only` and `string_only` together are rejected: nothing could satisfy
-/// such a candidate. All three are rejected on a field that holds one value.
+/// such a candidate. Both are also rejected on a field that holds one value,
+/// which already requires a string. `stop_if_present` is a chain rule rather
+/// than a shape rule, so it stays valid on every field.
 ///
 /// # Escaping, and the quoting trap
 ///
@@ -592,14 +594,23 @@ fn compile_role(
                      holds one value"
                 ));
             }
-            if let Some((flag, candidate)) = authored_field
-                .paths
-                .iter()
-                .find_map(|candidate| candidate.array_only.then_some(("array_only", candidate)))
-            {
+            // The shape flags say nothing a field holding one value does not
+            // already say: it requires a string, so `array_only` would let nothing
+            // resolve. `stop_if_present` is a chain rule rather than a shape rule
+            // and stays valid here, which is what the standard preset's client
+            // anchor needs to reproduce the Rust mapper.
+            if let Some((flag, candidate)) = authored_field.paths.iter().find_map(|candidate| {
+                if candidate.array_only {
+                    Some(("array_only", candidate))
+                } else if candidate.string_only {
+                    Some(("string_only", candidate))
+                } else {
+                    None
+                }
+            }) {
                 return Err(format!(
-                    "{qualified}: `{flag}` on '{}' would let nothing resolve, because {qualified} \
-                     holds one value",
+                    "{qualified}: `{flag}` on '{}' says nothing a field holding one value does \
+                     not already say",
                     candidate.path
                 ));
             }
@@ -887,7 +898,7 @@ mod tests {
     /// as `union` is. Ignoring `array_only` would be worse than rejecting it: it
     /// would let nothing resolve, turning a config mistake into a runtime denial.
     #[test]
-    fn split_and_array_only_on_a_field_holding_one_value_are_rejected() {
+    fn split_and_the_shape_flags_on_a_field_holding_one_value_are_rejected() {
         let split = compile_err(json!({
             "subject": {"id": {"paths": ["sub"], "split": "whitespace"}}
         }));
@@ -896,16 +907,35 @@ mod tests {
             "{split}"
         );
 
-        let array_only = compile_err(json!({
-            "subject": {"id": [{"path": "sub", "array_only": true}]}
+        for flag in ["array_only", "string_only"] {
+            let err = compile_err(json!({
+                "subject": {"id": [{"path": "sub", flag: true}]}
+            }));
+            assert!(err.contains("subject.id"), "{flag}: {err}");
+            assert!(err.contains(flag), "{flag}: {err}");
+            assert!(err.contains("sub"), "the candidate is named: {err}");
+        }
+    }
+
+    /// `stop_if_present` is a chain rule, not a shape rule, so a field holding one
+    /// value accepts it. The standard preset's client anchor depends on that: it is
+    /// how the first anchor key that exists claims the field.
+    #[test]
+    fn stop_if_present_is_accepted_on_a_field_holding_one_value() {
+        let map = compiled(json!({
+            "client": {"client_id": [{"path": "client_id", "stop_if_present": true}, "azp"]}
         }));
+        let candidates = map
+            .role(&TokenRole::Client)
+            .unwrap()
+            .field("client_id")
+            .unwrap()
+            .candidates();
         assert!(
-            array_only.contains("subject.id") && array_only.contains("array_only"),
-            "{array_only}"
-        );
-        assert!(
-            array_only.contains("sub"),
-            "the offending candidate is named: {array_only}"
+            candidates
+                .first()
+                .is_some_and(CompiledCandidate::stop_if_present),
+            "the flag must survive compilation on a scalar field"
         );
     }
 

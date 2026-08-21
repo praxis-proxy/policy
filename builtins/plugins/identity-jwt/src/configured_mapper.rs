@@ -447,7 +447,9 @@ impl ClaimMapper for ConfiguredClaimMap {
             Some(mapped) => {
                 tracing::warn!(
                     role = "workload",
-                    mapped = %mapped,
+                    // Debug-escaped, not Display: this value comes from the token,
+                    // and an unescaped newline in it would forge a log line.
+                    mapped = ?mapped,
                     derived = derived.as_deref().unwrap_or(""),
                     "claim map: declining, the mapped trust domain disagrees with the SPIFFE ID \
                      authority",
@@ -1179,6 +1181,34 @@ mod tests {
         let event = warning.first().expect("the disagreement is named");
         assert!(event.contains("attacker.example"), "{event}");
         assert!(event.contains("corp.example"), "{event}");
+    }
+
+    /// The trust-domain warning is the one diagnostic carrying a value taken from
+    /// the token rather than from operator config, so it is the one place a claim
+    /// could forge a log line. It is Debug-escaped for that reason.
+    #[test]
+    fn a_token_derived_value_reaches_the_log_escaped() {
+        let (declined, events) = capturing(|| {
+            mapper(json!({
+                "workload": {"spiffe_id": "sub", "trust_domain": "td"}
+            }))
+            .map_workload(&claims(json!({
+                "sub": "spiffe://corp.example/w",
+                "td": "attacker\n2026-08-20 WARN forged log line",
+            })))
+        });
+        assert!(declined.is_none(), "a disagreeing trust domain declines");
+
+        let warning = events.matching("disagrees with the SPIFFE ID authority");
+        let event = warning.first().expect("the disagreement is logged");
+        assert!(
+            !event.contains('\n'),
+            "a claim value must not put a raw newline in a log record: {event:?}"
+        );
+        assert!(
+            event.contains("\\n"),
+            "the newline should survive as an escape rather than vanish: {event:?}"
+        );
     }
 
     /// The mirror of `array_only`: what a claim read as a delimited string needs,
