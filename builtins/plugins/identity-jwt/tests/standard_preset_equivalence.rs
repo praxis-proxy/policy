@@ -14,7 +14,7 @@
 //! the corpus, unless the corpus entry is itself wrong about what an `IdP` mints.
 //!
 //! The corpus is embedded rather than read at run time, so a missing or
-//! unparseable file is a compile or test failure and never a silently skipped
+//! unparsable file is a compile or test failure and never a silently skipped
 //! entry.
 
 #![allow(

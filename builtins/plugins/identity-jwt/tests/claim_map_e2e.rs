@@ -338,7 +338,7 @@ async fn a_mistyped_path_is_permissive_by_default_and_fatal_on_request() {
 
     let permissive = subject_from(
         json!({
-            "claim_map": {"subject": {"id": "sub", "roles": "realm_acces.roles"}}
+            "claim_map": {"subject": {"id": "sub", "roles": "realm_access.rolez"}}
         }),
         token.clone(),
     )
@@ -354,7 +354,7 @@ async fn a_mistyped_path_is_permissive_by_default_and_fatal_on_request() {
             "claim_map": {
                 "subject": {
                     "id": "sub",
-                    "roles": {"paths": ["realm_acces.roles"], "on_missing": "deny"},
+                    "roles": {"paths": ["realm_access.rolez"], "on_missing": "deny"},
                 }
             }
         }),

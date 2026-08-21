@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn the_default_preset_is_standard_and_is_in_the_table() {
         assert_eq!(DEFAULT_PRESET, "standard");
-        assert!(lookup(DEFAULT_PRESET).is_ok());
+        lookup(DEFAULT_PRESET).expect("the default preset must load");
     }
 
     // ---- the standard preset ----------------------------------------------

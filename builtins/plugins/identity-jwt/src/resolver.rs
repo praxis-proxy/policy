@@ -125,7 +125,7 @@ impl JwtIdentityResolver {
     ///
     /// Returns `PluginError::Config` for any config-time failure:
     /// missing config block, malformed JSON, no trusted issuers,
-    /// unparseable decoding key, unknown claim mapper, etc.
+    /// unparsable decoding key, unknown claim mapper, etc.
     /// # Errors
     ///
     /// Returns `PluginError::Config` when the `config:` block is absent or does
@@ -1048,7 +1048,7 @@ mod tests {
             json!({"claims": {"exclude": "iss"}}),
             json!({"claims": {"include": 42}}),
             json!({"claims": ["iss"]}),
-            json!({"claims": {"exclud": ["iss"]}}),
+            json!({"claims": {"excludes": ["iss"]}}),
             json!({"claims": {"exclude": ["tenant"], "include": ["tenant"]}}),
         ] {
             let err = build_err(settings.clone());

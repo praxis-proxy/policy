@@ -884,7 +884,7 @@ mod tests {
         for value in [
             json!({"exclude": "iss"}),
             json!({"include": 42}),
-            json!({"exclud": ["iss"]}),
+            json!({"excludes": ["iss"]}),
             json!(["iss"]),
         ] {
             serde_json::from_value::<ClaimsOverrides>(value.clone())

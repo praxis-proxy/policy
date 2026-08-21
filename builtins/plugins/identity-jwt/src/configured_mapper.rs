@@ -934,7 +934,7 @@ mod tests {
     fn a_field_that_resolved_nothing_names_itself_and_every_path_tried() {
         let (subject, events) = capturing(|| {
             mapper(json!({
-                "subject": {"id": "sub", "roles": ["realm_acces.roles", "rolez"]}
+                "subject": {"id": "sub", "roles": ["realm_access.rolez", "rolez"]}
             }))
             .map_subject(&claims(json!({
                 "sub": "alice", "realm_access": {"roles": ["admin"]},
@@ -949,7 +949,7 @@ mod tests {
         assert_eq!(misses.len(), 1, "one aggregated event per call: {misses:?}");
         let event = misses.first().expect("one miss event");
         assert!(event.contains("roles"), "{event}");
-        assert!(event.contains("realm_acces.roles"), "{event}");
+        assert!(event.contains("realm_access.rolez"), "{event}");
         assert!(event.contains("rolez"), "{event}");
     }
 
