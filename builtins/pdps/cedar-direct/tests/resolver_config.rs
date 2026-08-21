@@ -103,7 +103,7 @@ fn a_schema_file_is_read_from_disk() {
 #[test]
 fn schema_text_is_accepted_inline() {
     let yaml = "policy_text: |\n  permit(principal, action, resource);\nschema_text: |\n  entity User;\n  entity Document;\n  action read appliesTo { principal: User, resource: Document };\n";
-    assert!(CedarDirectResolver::from_config(&cfg(yaml)).is_ok());
+    CedarDirectResolver::from_config(&cfg(yaml)).unwrap();
 }
 
 #[test]

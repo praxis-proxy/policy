@@ -184,8 +184,8 @@ mod tests {
 
     #[test]
     fn https_gate() {
-        assert!(require_https("https://kc/", false).is_ok());
-        assert!(require_https("http://localhost:8080/", false).is_err());
-        assert!(require_https("http://localhost:8080/", true).is_ok());
+        require_https("https://kc/", false).unwrap();
+        require_https("http://localhost:8080/", false).unwrap_err();
+        require_https("http://localhost:8080/", true).unwrap();
     }
 }

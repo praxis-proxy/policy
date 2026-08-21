@@ -189,8 +189,7 @@ pub fn resolve_session(ext: &Extensions) -> Option<(String, SessionSource)> {
 mod tests {
     use super::*;
     use praxis_policy_core::extensions::{
-        AgentExtension, Extensions, HttpExtension, SecurityExtension, SubjectExtension,
-        WorkloadIdentity,
+        AgentExtension, HttpExtension, SecurityExtension, SubjectExtension, WorkloadIdentity,
     };
     use std::sync::Arc;
 

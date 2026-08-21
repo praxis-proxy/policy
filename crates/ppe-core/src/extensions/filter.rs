@@ -521,7 +521,6 @@ fn build_filtered_subject(
 )]
 mod tests {
     use super::*;
-    use crate::extensions::SecurityExtension;
     use crate::extensions::meta::MetaExtension;
 
     fn make_full_extensions() -> Extensions {
@@ -709,9 +708,7 @@ mod tests {
     /// slots — subject, client, `caller_workload`, `this_workload`.
     /// Used by the new-slot cap-gating tests.
     fn security_with_all_principals() -> SecurityExtension {
-        use crate::extensions::{
-            ClientExtension, ClientTrustLevel, SubjectExtension, WorkloadIdentity,
-        };
+        use crate::extensions::{ClientExtension, ClientTrustLevel, WorkloadIdentity};
         SecurityExtension {
             subject: Some(SubjectExtension {
                 id: Some("alice".into()),

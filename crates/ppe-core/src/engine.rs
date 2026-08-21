@@ -1926,8 +1926,6 @@ mod tests {
     use super::*;
     use crate::context::PluginContext;
     use crate::error::PluginViolation;
-    use crate::hooks::payload::Extensions;
-    use crate::hooks::{HookHandler, PluginResult};
     use crate::plugin::{OnError, PluginMode};
     use async_trait::async_trait;
 

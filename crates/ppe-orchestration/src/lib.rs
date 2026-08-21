@@ -91,16 +91,16 @@ impl<T> BranchOutcome<T> {
     /// `None` for timeouts, aborts, and panics.
     pub fn completed(&self) -> Option<&T> {
         match self {
-            BranchOutcome::Completed(v) => Some(v),
-            _ => None,
+            BranchOutcome::Completed(val) => Some(val),
+            BranchOutcome::TimedOut | BranchOutcome::Aborted | BranchOutcome::Panicked(_) => None,
         }
     }
 
     /// Consume the outcome, returning the completed value if any.
     pub fn into_completed(self) -> Option<T> {
         match self {
-            BranchOutcome::Completed(v) => Some(v),
-            _ => None,
+            BranchOutcome::Completed(val) => Some(val),
+            BranchOutcome::TimedOut | BranchOutcome::Aborted | BranchOutcome::Panicked(_) => None,
         }
     }
 }
@@ -161,10 +161,10 @@ where
         let handle = set.spawn(async move {
             let result = match to {
                 None => Ok(fut.await),
-                Some(d) => timeout(d, fut).await,
+                Some(dur) => timeout(dur, fut).await,
             };
             let outcome = match result {
-                Ok(v) => BranchOutcome::Completed(v),
+                Ok(val) => BranchOutcome::Completed(val),
                 Err(_) => BranchOutcome::TimedOut,
             };
             (idx, outcome)
@@ -190,7 +190,7 @@ where
     while let Some(joined) = set.join_next_with_id().await {
         match joined {
             Ok((_id, (idx, outcome))) => {
-                let halts = matches!(&outcome, BranchOutcome::Completed(v) if is_deny(v));
+                let halts = matches!(&outcome, BranchOutcome::Completed(val) if is_deny(val));
                 done.insert(idx, outcome);
                 if halts && config.short_circuit_on_deny && !aborted {
                     set.abort_all();
@@ -202,16 +202,16 @@ where
                     // continues until JoinSet is empty.
                 }
             },
-            Err(e) => {
+            Err(err) => {
                 // A task either panicked or was cancelled by
                 // `abort_all`. JoinError exposes the task `Id`, which
                 // we look up in `id_to_idx` to recover the original
                 // input index. Panicked branches land in their own
                 // slot; cancelled ones get left as `None` and filled
                 // with `Aborted` post-loop.
-                if e.is_panic() {
-                    let payload = format!("{e:?}");
-                    if let Some(&idx) = id_to_idx.get(&e.id()) {
+                if err.is_panic() {
+                    let payload = format!("{err:?}");
+                    if let Some(&idx) = id_to_idx.get(&err.id()) {
                         done.insert(idx, BranchOutcome::Panicked(payload));
                     }
                 }

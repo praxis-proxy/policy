@@ -32,6 +32,8 @@ avoid-breaking-exported-api = false
 # the policy engine's, so adopting it unchanged would flag every mention of APL,
 # CMF, PDP, and the rest across the engine's documentation.
 doc-valid-idents = [
+    # ".." preserves clippy's built-in defaults; extend per project.
+    "..",
     # Praxis vocabulary
     "OpenAI", "Praxis", "Pingora", "SQLite", "gRPC", "OpenTelemetry",
     "NGINX", "HAProxy", "Envoy", "Rustls", "XDP", "eBPF",

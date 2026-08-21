@@ -246,21 +246,21 @@ mod tests {
     fn audit_plugin_in_parallel_is_accepted() {
         let reg = MockLookup::new().with("audit_logger", PluginMode::Audit);
         let route = route_with_policy(vec![rule(vec![parallel_plugin("audit_logger")])]);
-        assert!(validate_parallel_plugin_modes(&route, &reg).is_ok());
+        validate_parallel_plugin_modes(&route, &reg).unwrap();
     }
 
     #[test]
     fn concurrent_plugin_in_parallel_is_accepted() {
         let reg = MockLookup::new().with("pii_scanner", PluginMode::Concurrent);
         let route = route_with_policy(vec![rule(vec![parallel_plugin("pii_scanner")])]);
-        assert!(validate_parallel_plugin_modes(&route, &reg).is_ok());
+        validate_parallel_plugin_modes(&route, &reg).unwrap();
     }
 
     #[test]
     fn fire_and_forget_in_parallel_is_accepted() {
         let reg = MockLookup::new().with("metrics", PluginMode::FireAndForget);
         let route = route_with_policy(vec![rule(vec![parallel_plugin("metrics")])]);
-        assert!(validate_parallel_plugin_modes(&route, &reg).is_ok());
+        validate_parallel_plugin_modes(&route, &reg).unwrap();
     }
 
     #[test]
@@ -298,7 +298,7 @@ mod tests {
         let route = route_with_policy(vec![rule(vec![Effect::Plugin {
             name: "mutator".into(),
         }])]);
-        assert!(validate_parallel_plugin_modes(&route, &reg).is_ok());
+        validate_parallel_plugin_modes(&route, &reg).unwrap();
     }
 
     #[test]

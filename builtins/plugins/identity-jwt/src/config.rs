@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn jwks_https_accepted() {
-        assert!(require_https("https://idp.example/realms/x/jwks", false).is_ok());
+        require_https("https://idp.example/realms/x/jwks", false).unwrap();
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn jwks_http_with_explicit_opt_in_allowed() {
-        assert!(require_https("http://localhost:8081/jwks", true).is_ok());
+        require_https("http://localhost:8081/jwks", true).unwrap();
     }
 
     #[tokio::test]
@@ -562,7 +562,7 @@ mod tests {
         let src = DecodingKeySource::Secret {
             secret: "test-secret".into(),
         };
-        assert!(src.build().is_ok());
+        src.build().unwrap();
     }
 
     #[test]

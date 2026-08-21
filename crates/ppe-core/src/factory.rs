@@ -161,7 +161,6 @@ impl Default for PluginFactoryRegistry {
 )]
 mod tests {
     use super::*;
-    use crate::plugin::PluginConfig;
 
     #[derive(Debug)]
     struct StubFactory(&'static str);

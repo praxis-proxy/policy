@@ -595,9 +595,6 @@ mod tests {
     // were covered. With an injected store the decision is testable directly,
     // which is what these do.
 
-    use crate::store::{Correlation, InMemoryCorrelationStore};
-    use praxis_policy_core::elicitation::payload::ElicitationOp;
-
     fn approver_with(correlations: &[(&str, &str, Option<&str>)]) -> CibaApprover {
         let store = InMemoryCorrelationStore::new();
         for (id, expected, resolved) in correlations {

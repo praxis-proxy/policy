@@ -749,7 +749,7 @@ fn ext_for_tool_with_subject_and_label(
     subject_id: &str,
     label: &str,
 ) -> Extensions {
-    use praxis_policy_core::extensions::{SecurityExtension, SubjectExtension};
+    use praxis_policy_core::extensions::SecurityExtension;
     let mut sec = SecurityExtension::default();
     sec.subject = Some(SubjectExtension {
         id: Some(subject_id.to_owned()),

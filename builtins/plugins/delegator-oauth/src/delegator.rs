@@ -697,7 +697,7 @@ mod construction_tests {
     fn the_valid_baseline_builds() {
         // Guards the negative tests below: without this, a typo in `valid()`
         // would make all of them pass for the wrong reason.
-        assert!(OAuthDelegator::new(cfg(Some(valid()))).is_ok());
+        OAuthDelegator::new(cfg(Some(valid()))).unwrap();
     }
 
     #[test]
@@ -790,8 +790,8 @@ mod scheme_tests {
 
     #[test]
     fn https_always_ok() {
-        assert!(require_https("https://idp.example/oauth/token", false).is_ok());
-        assert!(require_https("HTTPS://IDP.EXAMPLE/", false).is_ok());
+        require_https("https://idp.example/oauth/token", false).unwrap();
+        require_https("HTTPS://IDP.EXAMPLE/", false).unwrap();
     }
 
     #[test]
@@ -803,7 +803,7 @@ mod scheme_tests {
 
     #[test]
     fn http_with_explicit_opt_in_allowed() {
-        assert!(require_https("http://localhost:8081/oauth/token", true).is_ok());
+        require_https("http://localhost:8081/oauth/token", true).unwrap();
     }
 
     #[test]

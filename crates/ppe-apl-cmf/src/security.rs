@@ -256,7 +256,7 @@ fn subject_type_str(t: SubjectType) -> &'static str {
 )]
 mod tests {
     use super::*;
-    use praxis_policy_core::extensions::{SubjectExtension, WorkloadIdentity};
+    use praxis_policy_core::extensions::SubjectExtension;
     use std::collections::HashMap;
 
     fn alice() -> SecurityExtension {

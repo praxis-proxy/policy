@@ -65,7 +65,7 @@ tracing = { workspace = true }
 base64 = "0.22"
 
 # Secret-clearing wrapper for client credentials in memory.
-zeroize = { version = "1.8", features = ["zeroize_derive"] }
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
