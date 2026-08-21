@@ -11,7 +11,7 @@
 # its TLS/async stack never land in the default FFI artifact or everyday
 # `cargo build`. The redis client is pinned with
 # `default-features = false` and a rustls TLS path to stay openssl-free,
-# matching the `reqwest = { features = ["rustls-tls"] }` discipline in
+# matching the rustls-only TLS discipline in
 # praxis-policy-plugin-identity-jwt / praxis-policy-plugin-delegator-oauth.
 
 [package]

@@ -17,6 +17,10 @@ use jsonwebtoken::{Algorithm, DecodingKey};
 use praxis_policy_core::extensions::raw_credentials::TokenRole;
 use serde::{Deserialize, Serialize};
 
+use praxis_policy_core::host::HostServices;
+use praxis_policy_core::http::HttpRequest;
+use praxis_policy_core::http_retry::RetryPolicy;
+
 use super::trusted_issuer::{KeyStore, TrustedIssuer};
 
 /// Top-level plugin config — what operators write under
@@ -72,6 +76,15 @@ fn default_role() -> TokenRole {
 /// that a routine key rotation propagates within a normal change
 /// window. Operators with stricter or laxer needs override per
 /// `JwksUrl` via the `refresh_secs` field.
+/// Floor between JWKS refresh attempts for one issuer.
+///
+/// Thirty seconds bounds two things at once: how much load invented
+/// `kid`s can drive at an `IdP`, and how long a transient boot failure
+/// denies an issuer before the next verify retries.
+const fn default_min_refresh_interval_secs() -> u64 {
+    30
+}
+
 fn default_refresh_secs() -> u64 {
     600
 }
@@ -147,14 +160,28 @@ pub enum DecodingKeySource {
     /// the gateway accepts. Set to `true` only for `http://localhost`
     /// docker-compose development; production must always use https.
     ///
-    /// **`refresh_secs`** controls how often the background
-    /// refresh task re-fetches the JWKS. Default 600 (10 minutes)
-    /// — high enough that a fleet of gateways doesn't hammer the
-    /// `IdP`, low enough that a routine key roll propagates within
-    /// the same business hour. A failed refresh logs a warning
-    /// and keeps the previous `KeyStore` — verification continues
-    /// to work as long as one of the previously-fetched keys
-    /// matches the inbound token's `kid`.
+    /// **`refresh_secs`** is how stale the key set may get before a
+    /// verify refreshes it proactively. Default 600 (10 minutes) — high
+    /// enough that a fleet of gateways doesn't hammer the `IdP`, low
+    /// enough that a routine key roll propagates within the same
+    /// business hour. A failed refresh keeps the previous `KeyStore`, so
+    /// verification continues to work as long as one of the
+    /// previously-fetched keys matches the inbound token's `kid`.
+    ///
+    /// Refresh happens on the verify path, not on a timer. A timer needs
+    /// a background task, and a background task binds to whichever
+    /// runtime spawned it — for a host that initializes on a short-lived
+    /// runtime, that task is cancelled before it ever ticks. Refreshing
+    /// from a request needs no runtime of its own, and recovers on the
+    /// first token that needs the new key rather than at the next tick.
+    ///
+    /// **`min_refresh_interval_secs`** is the floor between attempts,
+    /// default 30. An unknown `kid` triggers a refresh and is reachable
+    /// with an unauthenticated request, so without a floor a stream of
+    /// invented `kid`s would be an amplification attack pointed at your
+    /// own `IdP`. It is deliberately separate from `refresh_secs`:
+    /// reusing that as the floor would make a four-second `IdP` blip at
+    /// boot cost ten minutes of denial.
     JwksUrl {
         /// The JWKS endpoint.
         url: String,
@@ -162,8 +189,11 @@ pub enum DecodingKeySource {
         /// Permits plaintext HTTP, for local development only.
         insecure_http: bool,
         #[serde(default = "default_refresh_secs")]
-        /// How often the background task refetches the key set.
+        /// How stale the key set may get before a verify refreshes it.
         refresh_secs: u64,
+        #[serde(default = "default_min_refresh_interval_secs")]
+        /// Floor between refresh attempts for this issuer.
+        min_refresh_interval_secs: u64,
     },
 
     /// Symmetric HMAC secret (HS256 / HS384 / HS512 only). Not
@@ -193,6 +223,17 @@ impl DecodingKeySource {
                 Some(std::time::Duration::from_secs(*refresh_secs))
             },
             _ => None,
+        }
+    }
+
+    /// Floor between refresh attempts, for sources that can refresh.
+    pub fn min_refresh_interval(&self) -> std::time::Duration {
+        match self {
+            Self::JwksUrl {
+                min_refresh_interval_secs,
+                ..
+            } => std::time::Duration::from_secs(*min_refresh_interval_secs),
+            _ => std::time::Duration::MAX,
         }
     }
 
@@ -258,7 +299,7 @@ impl DecodingKeySource {
     ///
     /// Returns a message when the JWKS endpoint is unreachable, answers with a
     /// non-success status, or returns a document with no usable signature key.
-    pub async fn build_async(&self) -> Result<KeyStore, String> {
+    pub async fn build_async(&self, svc: &dyn HostServices) -> Result<KeyStore, String> {
         match self {
             Self::JwksUrl {
                 url, insecure_http, ..
@@ -268,30 +309,38 @@ impl DecodingKeySource {
                 // signing keys and forge JWTs the gateway accepts.
                 require_https(url, *insecure_http)?;
 
-                // Build a Client with both a connect timeout and an
-                // overall request timeout. Without these a slow or
-                // half-open JWKS endpoint hangs the initialize() call
-                // indefinitely. The defaults are conservative; if a
-                // future config wants per-issuer override, add a
-                // `jwks_timeout_secs` field on `JwksUrl`.
-                let client = reqwest::Client::builder()
+                // Bounds travel on the request rather than on a
+                // client we own: PPE performs no HTTP itself, so the
+                // host's transport does the work and only the caller
+                // knows what this particular call can afford. Without
+                // both bounds a slow or half-open JWKS endpoint hangs
+                // `initialize()` indefinitely.
+                let req = HttpRequest::get(url)
                     .timeout(JWKS_FETCH_TIMEOUT)
                     .connect_timeout(JWKS_CONNECT_TIMEOUT)
-                    .build()
-                    .map_err(|e| format!("JWKS client construction failed: {e}"))?;
+                    // A ceiling reqwest never gave us. The document is
+                    // a few kilobytes; anything approaching this is a
+                    // hostile or broken endpoint, and buffering it
+                    // would be the whole point of the limit.
+                    .max_response_bytes(JWKS_MAX_BYTES);
 
-                let body = client
-                    .get(url)
-                    .send()
+                // A JWKS fetch is a `GET` with no side effect, so it is
+                // safe to repeat — including after a timeout, where a
+                // non-idempotent call would have to stop and treat the
+                // outcome as unknown.
+                let resp = svc
+                    .http_request(req, RetryPolicy::idempotent())
                     .await
-                    .map_err(|e| format!("JWKS GET {url} failed: {e}"))?
-                    .error_for_status()
-                    .map_err(|e| format!("JWKS GET {url} returned non-2xx: {e}"))?
-                    .text()
-                    .await
-                    .map_err(|e| format!("JWKS GET {url} body read failed: {e}"))?;
+                    .map_err(|e| format!("JWKS GET {url} failed: {e}"))?;
 
-                let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_str(&body)
+                if !resp.is_success() {
+                    return Err(format!("JWKS GET {url} returned non-2xx: {}", resp.status));
+                }
+
+                let body = std::str::from_utf8(&resp.body)
+                    .map_err(|e| format!("JWKS GET {url} body is not UTF-8: {e}"))?;
+
+                let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_str(body)
                     .map_err(|e| format!("JWKS {url} body is not a JWKSet: {e}"))?;
 
                 // Iterate every signature-use key (or every key, if
@@ -344,6 +393,15 @@ impl DecodingKeySource {
         }
     }
 }
+
+/// Ceiling on a JWKS response body.
+///
+/// A JWKS document runs to single-digit kilobytes even for an `IdP`
+/// mid-rotation with several overlapping keys. `256 KiB` is far above any
+/// legitimate set and far below what would trouble the process, so a
+/// hostile or broken endpoint streaming without end is refused rather
+/// than buffered. `reqwest` applied no limit here at all.
+const JWKS_MAX_BYTES: usize = 256 * 1024;
 
 /// Overall request timeout on the JWKS HTTP GET (includes connect +
 /// TLS + response body). 5s is a forgiving upper bound for a healthy
@@ -421,6 +479,8 @@ impl TrustedIssuerConfig {
             keys: std::sync::Arc::new(std::sync::RwLock::new(keys)),
             algorithms: self.algorithms,
             leeway_seconds: self.leeway_seconds,
+            source: self.decoding_key,
+            refresh: crate::trusted_issuer::RefreshGate::default(),
         })
     }
 
@@ -432,9 +492,9 @@ impl TrustedIssuerConfig {
     ///
     /// Returns a message when [`Self::validate`] rejects the shape, or when the
     /// decoding key cannot be fetched or parsed.
-    pub async fn build_async(self) -> Result<TrustedIssuer, String> {
+    pub async fn build_async(self, svc: &dyn HostServices) -> Result<TrustedIssuer, String> {
         self.validate()?;
-        let keys = self.decoding_key.build_async().await.map_err(|e| {
+        let keys = self.decoding_key.build_async(svc).await.map_err(|e| {
             format!(
                 "trusted_issuer '{}' decoding_key build failed: {e}",
                 self.issuer
@@ -446,6 +506,8 @@ impl TrustedIssuerConfig {
             keys: std::sync::Arc::new(std::sync::RwLock::new(keys)),
             algorithms: self.algorithms,
             leeway_seconds: self.leeway_seconds,
+            source: self.decoding_key,
+            refresh: crate::trusted_issuer::RefreshGate::default(),
         })
     }
 }
@@ -474,6 +536,7 @@ fn require_https(url: &str, insecure_http: bool) -> Result<(), String> {
 
 #[cfg(test)]
 #[allow(
+    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
     clippy::unwrap_used,
@@ -481,7 +544,9 @@ fn require_https(url: &str, insecure_http: bool) -> Result<(), String> {
 )]
 mod tests {
     use super::*;
+    use praxis_policy_core::http_testing::{FakeTransport, granting};
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn jwks_https_accepted() {
@@ -506,11 +571,21 @@ mod tests {
             url: "http://idp.example/jwks".into(),
             insecure_http: false,
             refresh_secs: 3600,
+            min_refresh_interval_secs: 30,
         };
-        match src.build_async().await {
+        // The scheme guard runs before any request is issued, so the
+        // transport is never asked for anything — asserting that is the
+        // point: a plaintext JWKS URL must not reach the network at all.
+        let http = Arc::new(FakeTransport::new());
+        match src.build_async(&granting(Arc::clone(&http))).await {
             Err(e) => assert!(e.contains("https"), "{}", e),
             Ok(_) => panic!("http:// JWKS URL must not build by default"),
         }
+        assert_eq!(
+            http.call_count(),
+            0,
+            "a rejected scheme must not produce a request"
+        );
     }
 
     #[test]
@@ -565,26 +640,18 @@ mod tests {
     // misconfigured or hostile endpoint fails loudly at startup or leaves the
     // resolver holding no usable key, and the message has to say which it was.
 
-    async fn jwks_err(body: &str, status: usize) -> String {
-        let mut server = mockito::Server::new_async().await;
-        let m = server
-            .mock("GET", "/jwks")
-            .with_status(status)
-            .with_header("content-type", "application/json")
-            .with_body(body)
-            .create_async()
-            .await;
+    async fn jwks_err(body: &str, status: u16) -> String {
+        let http = Arc::new(FakeTransport::new().json("/jwks", status, body));
         let src = DecodingKeySource::JwksUrl {
-            url: format!("{}/jwks", server.url()),
-            insecure_http: true,
+            url: "https://idp.example/jwks".into(),
+            insecure_http: false,
             refresh_secs: 3600,
+            min_refresh_interval_secs: 30,
         };
-        let err = match src.build_async().await {
+        match src.build_async(&granting(Arc::clone(&http))).await {
             Ok(_) => panic!("this JWKS document must be rejected"),
             Err(e) => e,
-        };
-        m.assert_async().await;
-        err
+        }
     }
 
     /// One well-formed RSA signature key. Built as a `Value` so the tests below
@@ -607,19 +674,24 @@ mod tests {
     async fn a_well_formed_jwks_is_accepted() {
         // Positive control: without it, every negative test below could be
         // passing for the wrong reason.
-        let mut server = mockito::Server::new_async().await;
-        server
-            .mock("GET", "/jwks")
-            .with_status(200)
-            .with_body(jwks_of(vec![rsa_jwk()]))
-            .create_async()
-            .await;
+        let http = Arc::new(FakeTransport::new().json("/jwks", 200, &jwks_of(vec![rsa_jwk()])));
         let src = DecodingKeySource::JwksUrl {
-            url: format!("{}/jwks", server.url()),
-            insecure_http: true,
+            url: "https://idp.example/jwks".into(),
+            insecure_http: false,
             refresh_secs: 3600,
+            min_refresh_interval_secs: 30,
         };
-        assert!(src.build_async().await.is_ok(), "a valid JWKS must build");
+        assert!(
+            src.build_async(&granting(Arc::clone(&http))).await.is_ok(),
+            "a valid JWKS must build"
+        );
+
+        // The bounds are the caller's to choose, and a regression that
+        // dropped them would be invisible against a healthy endpoint.
+        let req = http.last_request().expect("one request was issued");
+        assert_eq!(req.timeout, JWKS_FETCH_TIMEOUT);
+        assert_eq!(req.connect_timeout, Some(JWKS_CONNECT_TIMEOUT));
+        assert_eq!(req.max_response_bytes, JWKS_MAX_BYTES);
     }
 
     #[tokio::test]
@@ -691,6 +763,7 @@ mod tests {
             url: "https://idp.example/jwks".into(),
             insecure_http: false,
             refresh_secs: 3600,
+            min_refresh_interval_secs: 30,
         };
         let Err(e) = src.build() else {
             panic!("JwksUrl must not resolve synchronously")
@@ -726,6 +799,7 @@ mod tests {
             url: "https://idp.example/jwks".into(),
             insecure_http: false,
             refresh_secs: 900,
+            min_refresh_interval_secs: 30,
         };
         assert_eq!(
             jwks.refresh_interval(),

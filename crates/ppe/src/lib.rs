@@ -214,6 +214,40 @@ pub fn install_builtins(mgr: &std::sync::Arc<PolicyEngine>) {
     let _visitor = register_apl(mgr, opts);
 }
 
+/// A default `HttpTransport` on hyper, for hosts that inject none.
+///
+/// Available with the `http-hyper` feature.
+#[cfg(feature = "http-hyper")]
+pub mod http_hyper;
+
+#[cfg(feature = "http-hyper")]
+pub use http_hyper::HyperTransport;
+
+/// Install the bundled hyper transport so plugins can perform outbound
+/// HTTP.
+///
+/// PPE performs no HTTP itself, so without a transport a plugin that
+/// needs one — a JWKS fetch, a token exchange — fails at initialization
+/// with a message saying so. A host embedding PPE in a process that
+/// already has an HTTP stack should install *that* instead, via
+/// [`PolicyEngine::set_http_transport`], so the process keeps one
+/// connection pool and one egress path.
+///
+/// Deliberately not folded into [`install_builtins`]. A host calling
+/// `install_builtins` should not acquire a second HTTP stack because
+/// some unrelated crate in its dependency graph happened to turn this
+/// feature on. Wiring an egress path is worth one explicit line.
+///
+/// The transport builds its pool on first use, so calling this from a
+/// short-lived initialization runtime is safe.
+///
+/// Returns `false` if a transport was already installed, in which case
+/// the existing one is kept.
+#[cfg(feature = "http-hyper")]
+pub fn install_default_http_transport(mgr: &std::sync::Arc<PolicyEngine>) -> bool {
+    mgr.set_http_transport(std::sync::Arc::new(http_hyper::HyperTransport::new()))
+}
+
 #[cfg(all(test, feature = "_builtin"))]
 mod tests {
     use super::*;

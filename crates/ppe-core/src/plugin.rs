@@ -100,7 +100,7 @@ pub trait Plugin: Send + Sync {
     /// [`initialize`](Self::initialize), so a plugin needing no host
     /// services implements that one and never names [`InitExtensions`].
     ///
-    /// `ctx` carries only what this plugin's capabilities allow, and
+    /// `ext` carries only what this plugin's capabilities allow, and
     /// only for the duration of the call. Borrow per use and store
     /// nothing: the grants are re-evaluated on every request, so a
     /// handle stashed here would outlive a capability an operator later
@@ -121,8 +121,8 @@ pub trait Plugin: Send + Sync {
     /// Returns `PluginError` when initialization fails. Returning an
     /// error aborts engine startup and shuts down the plugins that
     /// already initialized, so the engine never comes up half-started.
-    async fn initialize_with(&self, ctx: &InitExtensions) -> Result<(), Box<PluginError>> {
-        let _ = ctx;
+    async fn initialize_with(&self, ext: &InitExtensions) -> Result<(), Box<PluginError>> {
+        let _ = ext;
         self.initialize().await
     }
 

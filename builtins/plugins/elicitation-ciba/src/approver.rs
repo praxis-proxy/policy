@@ -41,6 +41,9 @@ use praxis_policy_core::elicitation::{
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
+use praxis_policy_core::host::{HostServices as _, HttpRequestError};
+use praxis_policy_core::http::{HttpRequest, HttpTransportError, form_urlencode};
+use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 use crate::config::{CibaConfig, require_https};
@@ -54,7 +57,9 @@ pub struct CibaApprover {
     cfg: PluginConfig,
     typed: CibaConfig,
     client_secret: Zeroizing<String>,
-    http: reqwest::Client,
+    /// Overall deadline for one OP call, from config. The transport
+    /// itself is the host's and arrives per request.
+    http_timeout: std::time::Duration,
     store: Arc<dyn CorrelationStore>,
 }
 
@@ -68,6 +73,14 @@ impl std::fmt::Debug for CibaApprover {
             .finish()
     }
 }
+
+/// Ceiling on a CIBA response body.
+///
+/// Both `OP` responses are small JSON objects — an `auth_req_id` and an
+/// expiry, or a token set. `64 KiB` is far above any legitimate one, and
+/// the bound exists because a compromised or broken endpoint would
+/// otherwise stream until the process died. `reqwest` applied no limit.
+const OP_RESPONSE_MAX_BYTES: usize = 64 * 1024;
 
 impl CibaApprover {
     /// Build from a `PluginConfig`: parse `cfg.config` into [`CibaConfig`],
@@ -106,18 +119,91 @@ impl CibaApprover {
             .resolve()
             .map_err(|e| cfg_err(&cfg.name, format!("client secret resolve failed: {e}")))?;
 
-        let http = reqwest::Client::builder()
-            .timeout(typed.http_timeout())
-            .build()
-            .map_err(|e| cfg_err(&cfg.name, format!("HTTP client build failed: {e}")))?;
+        let http_timeout = typed.http_timeout();
 
         Ok(Self {
             cfg,
             typed,
             client_secret: Zeroizing::new(secret),
-            http,
+            http_timeout,
             store: Arc::new(InMemoryCorrelationStore::new()),
         })
+    }
+
+    /// Build a form POST to `endpoint`, carrying our client credentials.
+    ///
+    /// Encoding lives in `praxis_policy_core::http::form_urlencode` rather
+    /// than in a transport, so every transport sends identical bytes to
+    /// the `OP`.
+    fn op_request(
+        &self,
+        endpoint: &str,
+        form: &[(&str, &str)],
+    ) -> Result<HttpRequest, Box<PluginViolation>> {
+        use base64::Engine as _;
+        let basic = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!(
+                "{}:{}",
+                self.typed.client_id,
+                self.client_secret.as_str()
+            ))
+        );
+
+        HttpRequest::post(endpoint, form_urlencode(form))
+            .timeout(self.http_timeout)
+            // A CIBA response is a small JSON object. The ceiling stops a
+            // compromised or broken `OP` streaming without end; reqwest
+            // applied none.
+            .max_response_bytes(OP_RESPONSE_MAX_BYTES)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .and_then(|r| r.header("accept", "application/json"))
+            .and_then(|r| r.header("authorization", basic))
+            .map_err(|e| {
+                Box::new(PluginViolation::new(
+                    "elicitation.bad_request",
+                    format!("could not build the {endpoint} request: {e}"),
+                ))
+            })
+    }
+
+    /// Turn a transport failure into the right violation.
+    ///
+    /// A timeout may mean the call *landed* and only the reply was lost,
+    /// which for CIBA is never harmless: a dispatch that landed has
+    /// already asked a human, and a poll that landed has already spent
+    /// the single-use `auth_req_id`. Both must read as indeterminate
+    /// rather than as "did not happen".
+    fn op_violation(&self, what: &str, err: &HttpRequestError) -> PluginViolation {
+        let err = match err {
+            // No transport at all, or this plugin may not use one. A
+            // config or wiring problem, not the OP's.
+            HttpRequestError::Unavailable(e) => {
+                return PluginViolation::new(
+                    "elicitation.no_transport",
+                    format!("plugin '{}' {e}", self.cfg.name),
+                );
+            },
+            HttpRequestError::Transport(e) => e,
+        };
+        match err {
+            // The host declined to make the call: an egress policy, an
+            // SSRF guard, an open circuit. Its own code, because "we
+            // declined to try" and "we tried and failed" send an
+            // operator to different places.
+            HttpTransportError::Rejected(_) => PluginViolation::new(
+                "elicitation.egress_denied",
+                format!("{what} was refused before it left the process: {err}"),
+            ),
+            e if e.may_have_reached_peer() => PluginViolation::new(
+                "elicitation.op_timeout",
+                format!("{what} did not complete: {err}"),
+            ),
+            _ => PluginViolation::new(
+                "elicitation.op_unreachable",
+                format!("{what} never reached the OP: {err}"),
+            ),
+        }
     }
 
     /// Replace the correlation store.
@@ -134,7 +220,11 @@ impl CibaApprover {
         self
     }
 
-    async fn do_dispatch(&self, payload: &ElicitationPayload) -> PluginResult<ElicitationPayload> {
+    async fn do_dispatch(
+        &self,
+        payload: &ElicitationPayload,
+        ext: &Extensions,
+    ) -> PluginResult<ElicitationPayload> {
         let login_hint = payload.from();
         if login_hint.is_empty() {
             return deny(
@@ -173,42 +263,34 @@ impl CibaApprover {
             form.push(("binding_message", bm));
         }
 
-        let response = match self
-            .http
-            .post(&self.typed.backchannel_endpoint)
-            .basic_auth(&self.typed.client_id, Some(self.client_secret.as_str()))
-            .form(&form)
-            .send()
+        // Registering an approval request is not idempotent: repeat one
+        // that already landed and a human is asked to approve the same
+        // thing twice, from one policy decision. So retry only failures
+        // that provably never reached the `OP`.
+        let request = match self.op_request(&self.typed.backchannel_endpoint, &form) {
+            Ok(r) => r,
+            Err(v) => return PluginResult::deny(*v),
+        };
+        let response = match ext
+            .http_request(request, RetryPolicy::undelivered_only())
             .await
         {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return deny(
-                    "elicitation.op_timeout",
-                    format!("CIBA backchannel POST timed out: {e}"),
-                );
-            },
             Err(e) => {
-                return deny(
-                    "elicitation.op_unreachable",
-                    format!(
-                        "CIBA backchannel POST to {} failed: {e}",
-                        self.typed.backchannel_endpoint
-                    ),
-                );
+                return PluginResult::deny(self.op_violation("CIBA backchannel POST", &e));
             },
         };
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        if !response.is_success() {
+            let status = response.status;
+            let body = String::from_utf8_lossy(&response.body).into_owned();
             return deny(
                 "elicitation.op_rejected",
                 format!("CIBA backchannel rejected ({status}): {body}"),
             );
         }
 
-        let parsed = match response.json::<BackchannelResponse>().await {
+        let parsed = match serde_json::from_slice::<BackchannelResponse>(&response.body) {
             Ok(p) => p,
             Err(e) => {
                 return deny(
@@ -241,7 +323,11 @@ impl CibaApprover {
         PluginResult::modify_payload(out)
     }
 
-    async fn do_check(&self, payload: &ElicitationPayload) -> PluginResult<ElicitationPayload> {
+    async fn do_check(
+        &self,
+        payload: &ElicitationPayload,
+        ext: &Extensions,
+    ) -> PluginResult<ElicitationPayload> {
         let id = match payload.elicitation_id() {
             Some(id) => id,
             None => {
@@ -269,36 +355,29 @@ impl CibaApprover {
 
         let form: Vec<(&str, &str)> = vec![("grant_type", GRANT_TYPE_CIBA), ("auth_req_id", id)];
 
-        let response = match self
-            .http
-            .post(&self.typed.token_endpoint)
-            .basic_auth(&self.typed.client_id, Some(self.client_secret.as_str()))
-            .form(&form)
-            .send()
+        // The poll looks idempotent and is not: a successful one spends
+        // the single-use `auth_req_id`. Repeat a timed-out poll and the
+        // spent id comes back `invalid_grant`, turning an approval the
+        // human already gave into a denial. Same rule as the dispatch —
+        // retry only what provably never arrived.
+        let request = match self.op_request(&self.typed.token_endpoint, &form) {
+            Ok(r) => r,
+            Err(v) => return PluginResult::deny(*v),
+        };
+        let response = match ext
+            .http_request(request, RetryPolicy::undelivered_only())
             .await
         {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return deny(
-                    "elicitation.op_timeout",
-                    format!("CIBA token poll timed out: {e}"),
-                );
-            },
             Err(e) => {
-                return deny(
-                    "elicitation.op_unreachable",
-                    format!(
-                        "CIBA token poll to {} failed: {e}",
-                        self.typed.token_endpoint
-                    ),
-                );
+                return PluginResult::deny(self.op_violation("CIBA token poll", &e));
             },
         };
 
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let status = response.status;
+        let body = String::from_utf8_lossy(&response.body).into_owned();
 
-        if status.is_success() {
+        if response.is_success() {
             // Approved — the OP handed back tokens (once). Extract the
             // approver claim NOW and store just that string; we never keep
             // the token at rest (see store.rs). `validate` then compares
@@ -413,12 +492,20 @@ impl HookHandler<ElicitationHook> for CibaApprover {
     async fn handle(
         &self,
         payload: &ElicitationPayload,
-        _ext: &Extensions,
+        ext: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<ElicitationPayload> {
+        // Each operation resolves the transport itself, *after* checking
+        // its own arguments, and `validate` never does — it compares a
+        // stored approver and touches no network.
+        //
+        // Order matters: resolving up front would answer a payload with a
+        // missing `login_hint` by complaining about a missing capability,
+        // sending an operator to fix the wrong file. A malformed request
+        // is rejected on its own terms.
         match payload.operation() {
-            ElicitationOp::Dispatch => self.do_dispatch(payload).await,
-            ElicitationOp::Check => self.do_check(payload).await,
+            ElicitationOp::Dispatch => self.do_dispatch(payload, ext).await,
+            ElicitationOp::Check => self.do_check(payload, ext).await,
             ElicitationOp::Validate => self.do_validate(payload).await,
         }
     }

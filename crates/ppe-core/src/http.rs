@@ -182,6 +182,59 @@ impl HttpRequest {
     }
 }
 
+/// Encode `pairs` as an `application/x-www-form-urlencoded` body.
+///
+/// Caller-side rather than a transport concern, deliberately. Every OAuth
+/// exchange PPE performs is a form POST, and if each transport encoded
+/// its own, two of them could encode differently — which surfaces as an
+/// `IdP` rejecting an exchange in production rather than as a diff in
+/// review. One encoder means every transport sees identical bytes.
+///
+/// Follows the WHATWG URL form-urlencoded serializer: unreserved
+/// characters pass through, a space becomes `+`, and everything else is
+/// percent-encoded. Note `*`, `-`, `.` and `_` are unreserved here, so a
+/// scope string such as `read:users` percent-encodes only the colon.
+///
+/// The caller still sets `Content-Type: application/x-www-form-urlencoded`;
+/// this produces the body, not the header, because a transport must not
+/// have to guess which of the two a caller meant.
+pub fn form_urlencode(pairs: &[(&str, &str)]) -> Bytes {
+    fn encode_into(out: &mut String, raw: &str) {
+        for byte in raw.as_bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                    out.push(*byte as char);
+                },
+                b' ' => out.push('+'),
+                other => {
+                    out.push('%');
+                    out.push(
+                        char::from_digit(u32::from(other >> 4), 16)
+                            .unwrap_or('0')
+                            .to_ascii_uppercase(),
+                    );
+                    out.push(
+                        char::from_digit(u32::from(other & 0xF), 16)
+                            .unwrap_or('0')
+                            .to_ascii_uppercase(),
+                    );
+                },
+            }
+        }
+    }
+
+    let mut out = String::new();
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        encode_into(&mut out, key);
+        out.push('=');
+        encode_into(&mut out, value);
+    }
+    Bytes::from(out)
+}
+
 /// A buffered HTTP response.
 ///
 /// Buffered rather than streaming because every PPE call site parses a
@@ -212,6 +265,18 @@ impl HttpResponse {
             headers: HeaderMap::new(),
             body,
         }
+    }
+
+    /// Attach response headers.
+    ///
+    /// [`HttpResponse`] is `#[non_exhaustive]`, so a transport outside
+    /// this crate — which is every real one — cannot build it with a
+    /// struct literal. This is the supported path, and it keeps adding a
+    /// field later from breaking implementations.
+    #[must_use]
+    pub fn with_headers(mut self, headers: HeaderMap) -> Self {
+        self.headers = headers;
+        self
     }
 
     /// Whether the status is in the 2xx range.
@@ -451,6 +516,46 @@ pub trait HttpTransport: Send + Sync + fmt::Debug {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_encoding_matches_what_an_idp_expects() {
+        // The OAuth shapes PPE actually sends. An encoder that differs
+        // here fails at the IdP, not in review.
+        assert_eq!(
+            &*form_urlencode(&[("grant_type", "client_credentials")]),
+            b"grant_type=client_credentials"
+        );
+        assert_eq!(&*form_urlencode(&[("a", "1"), ("b", "2")]), b"a=1&b=2");
+        // A space is `+`, not `%20`, in form encoding specifically —
+        // this is the classic way a hand-rolled encoder goes wrong, and
+        // a space-separated `scope` is exactly where it bites.
+        assert_eq!(
+            &*form_urlencode(&[("scope", "read write")]),
+            b"scope=read+write"
+        );
+        // Reserved characters percent-encode uppercase.
+        assert_eq!(
+            &*form_urlencode(&[("scope", "read:users")]),
+            b"scope=read%3Ausers"
+        );
+        // Unreserved pass through untouched.
+        assert_eq!(&*form_urlencode(&[("k", "a*-._z")]), b"k=a*-._z");
+        // A JWT assertion is base64url, whose `-` and `_` must survive
+        // and whose `=` padding must not.
+        assert_eq!(
+            &*form_urlencode(&[("client_assertion", "aB-_9.xY=")]),
+            b"client_assertion=aB-_9.xY%3D"
+        );
+        assert!(form_urlencode(&[]).is_empty());
+    }
+
+    #[test]
+    fn form_encoding_escapes_the_separators_it_uses() {
+        // A value containing `&` or `=` must not be able to forge extra
+        // parameters. Getting this wrong lets a crafted scope inject a
+        // `grant_type` the caller never asked for.
+        assert_eq!(&*form_urlencode(&[("x", "a&b=c")]), b"x=a%26b%3Dc");
+    }
 
     #[test]
     fn a_new_request_carries_the_default_bounds() {

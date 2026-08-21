@@ -882,7 +882,7 @@ impl PolicyEngine {
     /// PPE performs no HTTP of its own. A plugin that must reach an
     /// `IdP` — a JWKS fetch, a token exchange, a CIBA backchannel —
     /// borrows this through
-    /// [`HostServices::http`](crate::host::HostServices::http), gated by
+    /// [`HostServices::http_transport`](crate::host::HostServices::http_transport), gated by
     /// the `perform_http` capability. Installing the host's own client
     /// keeps one HTTP stack in the process: one connection pool, one
     /// TLS trust store, one egress policy.
@@ -935,7 +935,7 @@ impl PolicyEngine {
     /// makes the transport reachable at all.
     fn with_host_services(&self, mut extensions: Extensions) -> Extensions {
         if let Some(t) = self.http_transport.get() {
-            extensions.http_transport = crate::host::ServiceSlot::Available(Arc::clone(t));
+            extensions.http_transport = crate::host::HttpTransportSlot::installed(Arc::clone(t));
         }
         extensions
     }
@@ -4997,17 +4997,26 @@ routes:
 
         async fn initialize_with(
             &self,
-            ctx: &crate::host::InitExtensions,
+            ext: &crate::host::InitExtensions,
         ) -> Result<(), Box<PluginError>> {
             if self.legacy {
                 // Exercise the documented "call it yourself" path.
                 return self.initialize().await;
             }
-            use crate::host::{HostServices as _, ServiceError};
-            let seen = match ctx.http() {
-                Ok(_) => Ok(true),
-                Err(ServiceError::NotPermitted { .. }) => Ok(false),
-                Err(ServiceError::NotInstalled { .. }) => Err(()),
+            use crate::host::{HostServices as _, HttpRequestError, ServiceError};
+            // A request the fake transport answers when it is reachable.
+            // Availability is now observable only by asking, which is
+            // the point of the operation shape.
+            let seen = match ext
+                .http_request(
+                    crate::http::HttpRequest::get("https://example.test/probe"),
+                    crate::http_retry::RetryPolicy::none(),
+                )
+                .await
+            {
+                Ok(_) | Err(HttpRequestError::Transport(_)) => Ok(true),
+                Err(HttpRequestError::Unavailable(ServiceError::NotPermitted { .. })) => Ok(false),
+                Err(HttpRequestError::Unavailable(ServiceError::NotInstalled { .. })) => Err(()),
             };
             *self
                 .saw

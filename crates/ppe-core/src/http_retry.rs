@@ -205,6 +205,12 @@ impl Default for RetryPolicy {
 
 /// Perform `req` through `transport`, retrying per `policy`.
 ///
+/// Crate-internal: a plugin never holds a transport, so it reaches this
+/// through [`HostServices::http_request`](crate::host::HostServices::http_request),
+/// which takes the policy as an argument. Exposing it would mean handing
+/// out a transport for it to act on, which is the thing the operation
+/// shape exists to avoid.
+///
 /// Returns the first success, or the last error. Every attempt sends the
 /// identical request; nothing is mutated between tries.
 ///
@@ -215,7 +221,7 @@ impl Default for RetryPolicy {
 /// this policy will not repeat. The error is the last one observed, so a
 /// caller inspecting [`HttpTransportError::may_have_reached_peer`] sees
 /// the state of the attempt that actually ran last.
-pub async fn execute_with_retry(
+pub(crate) async fn execute_with_retry(
     transport: &dyn HttpTransport,
     req: HttpRequest,
     policy: RetryPolicy,

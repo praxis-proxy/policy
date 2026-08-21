@@ -17,9 +17,37 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **PPE performs no outbound HTTP of its own.** A host installs an `HttpTransport` and plugins borrow it, so a process embedding PPE keeps one connection pool, one TLS trust store, and one egress path instead of two. `identity-jwt`, `delegator-oauth`, and `elicitation-ciba` all go through it; `reqwest` is gone from the workspace entirely. A proxy injects its own client via `PolicyEngine::set_http_transport`; anyone embedding PPE standalone can call `install_default_http_transport` for a bundled hyper implementation behind the non-default `http-hyper` feature. ([#20](https://github.com/praxis-proxy/policy/issues/20))
+
+- **`perform_http` capability.** Gates outbound HTTP, and gates the *action* rather than a slot — the first capability that authorizes reaching outside the process. Withholding it stops the call rather than degrading it, because a plugin that quietly skipped its `IdP` call would fail open. **Breaking for existing config**: a plugin using `jwks_url`, an OAuth delegator, or a CIBA approver must now declare it or the engine refuses to start, naming the plugin and the capability to add.
+
+- **Response bodies are bounded.** Every outbound call now carries a size ceiling — 256 KiB for a JWKS document, 64 KiB for a token response — so a compromised or broken endpoint cannot stream until the process dies. `reqwest` applied no limit on any of these paths, so this closes a gap rather than tightening a bound.
+
+- **HTTP/2, where the peer supports it.** The bundled transport advertises ALPN `h2, http/1.1` and falls back to HTTP/1.1, which the previous `reqwest` configuration never enabled. A deployment minting a token per request carries those concurrently over one connection instead of one connection each.
+
+- **Retries are keyed to whether a repeat is safe.** `RetryPolicy` distinguishes an operation that can be repeated from one that cannot, and `HttpTransportError::may_have_reached_peer` answers the question a caller actually needs. A JWKS `GET` retries freely; a token exchange and a CIBA dispatch retry only failures that provably never reached the peer, because a timeout cannot tell "never arrived" from "the reply was lost" and repeating either would mint a second credential or ask a human twice.
+
+- **`delegation.egress_denied` / `elicitation.egress_denied`.** New deny codes for the case where the host refuses a call before it leaves the process — an egress policy, an SSRF guard, an open circuit. Kept distinct from `idp_unreachable` on purpose: "we declined to try" and "we tried and failed" send an operator to different places, and collapsing them turns a blocked destination into a phantom network problem. No behaviour changes until a host transport produces the refusal; the bundled hyper transport never does.
+
+- **A shared table of addresses an outbound call must not reach.** `praxis_policy_core::http_addr` covers loopback, RFC 1918, link-local (the cloud-metadata range), CGNAT `100.64/10`, the IPv6 equivalents, and the embedded-IPv4 forms including NAT64. The table only; `praxis-policy-core` opens no sockets, so a transport enforces it where it dials. Sharing it stops three transports each writing a range list that drifts, and these are exactly the ranges that look finished while missing an entry.
+
+- **`FakeTransport` for tests.** A scripted transport in `praxis-policy-core::http_testing`, which makes the paths a mock server cannot reach — a timeout, a connect failure, a rotation between two fetches — assertable without sleeping.
+
 - **Roles and permissions are readable as whole sets.** `subject.roles`, `subject.permissions`, `client.roles`, and `client.permissions` join `subject.teams` as `StringSet` bag keys, so a policy can write `"hr" in subject.roles` rather than enumerating `role.<name>` booleans. The flattened boolean keys are unchanged. ([#7](https://github.com/praxis-proxy/policy/pull/7))
 
+### Changed
+
+- **`Plugin::initialize_with` is what the engine calls.** It receives the host services the plugin's capabilities allow, and its default forwards to `initialize`, so a plugin needing nothing from the host is untouched. Override exactly one: the default body of `initialize_with` is what calls `initialize`, so overriding it replaces that call.
+
+- **`identity-jwt` refreshes JWKS on demand instead of on a timer**, and `min_refresh_interval_secs` (default 30) is a new knob bounding how often one issuer may re-fetch. `refresh_secs` keeps its meaning as the staleness bound. See the fix below for why the timer went.
+
 ### Fixed
+
+- **JWKS rotation was silently dead under any host that dropped the runtime it initialized on.** `identity-jwt` spawned a background refresh ticker during `initialize()`, and `tokio::spawn` binds a task to whichever runtime is current — so a host driving async initialization on a short-lived runtime (a sync filter factory does exactly this) had that task cancelled before it ticked once. Nothing errored and nothing logged; the task simply stopped existing.
+
+  Two consequences, both permanent until a restart. A key roll denied every token signed with the new key. Worse, the deliberate soft-fail-at-boot became permanent-fail-at-boot: a brief `IdP` outage during startup denied an issuer indefinitely, so a rolling restart during `IdP` maintenance was enough to trigger it.
+
+  Refresh now happens on the verify path, triggered by the two failures whose cause is stale keys, single-flighted per issuer and floored by `min_refresh_interval_secs` — the floor matters because an unknown `kid` is reachable with an unauthenticated request and would otherwise be an amplification attack on your own `IdP`. Rotation now recovers on the first token that needs the new key rather than at the next tick, and a failed boot fetch recovers on the next request. ([#29](https://github.com/praxis-proxy/policy/issues/29))
 
 - **An empty set no longer reads as a missing attribute.** Every `StringSet` the CMF bridge emits is now present-but-empty instead of omitted. Under CEL a missing key is an evaluation error that fail-closed handling turns into a denial, so `"x" in subject.roles` denied every subject that had no roles — a routine state, since a plugin without `read_roles` is handed an empty set. Does not cover an absent extension slot, where the namespace is missing entirely. ([#7](https://github.com/praxis-proxy/policy/pull/7))
 

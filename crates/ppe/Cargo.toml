@@ -63,6 +63,29 @@ cel = ["_builtin", "dep:praxis-policy-pdp-cel"]
 opa = ["_builtin", "dep:praxis-policy-pdp-opa"]
 valkey = ["_builtin", "dep:praxis-policy-session-valkey"]
 
+# A default `HttpTransport` for hosts that inject none, built on hyper.
+#
+# Deliberately NOT a separate crate, unlike every other feature above. We
+# publish 15 crates at a shared version and a full publish runs about 90
+# minutes against crates.io rate limits (hence `tools/publish.sh`); a 16th
+# crate is that cost on every release, forever. The trait lives in
+# praxis-policy-core; only this implementation lives here.
+#
+# Off by default and never auto-wired: a host calls
+# `install_default_http_transport` explicitly. Praxis injects its own
+# pingora-backed transport instead and builds without this feature, so it
+# links no hyper at all.
+http-hyper = [
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:hyper-rustls",
+    "dep:http-body-util",
+    "dep:bytes",
+    "dep:http",
+    "dep:async-trait",
+    "dep:tokio",
+]
+
 # Private marker meaning "at least one builtin is enabled", which is what gates
 # the registration helpers. Not for hosts to name. It exists because the
 # alternative is repeating a nine-arm `any(feature = ...)` at every gate, and one
@@ -89,8 +112,47 @@ praxis-policy-pdp-cel = { workspace = true, optional = true }
 praxis-policy-pdp-opa = { workspace = true, optional = true }
 praxis-policy-session-valkey = { workspace = true, optional = true }
 
+# --- `http-hyper` only -------------------------------------------------
+#
+# The whole stack below is already in the tree today, pulled in by the
+# plugins' `reqwest`, so this adds nothing transitively — it removes
+# reqwest's convenience layer on top. Going direct also drops the ICU
+# block that arrives via `url` for IDNA-correct parsing; `http::Uri`
+# parses without it and JWKS / OAuth endpoints are ASCII hostnames.
+#
+# TLS matches what the reqwest path resolved to exactly: rustls over
+# `ring`, webpki roots, TLS 1.2 kept because some enterprise IdPs still
+# require it. `default-features = false` throughout so no OpenSSL and no
+# native-cert store creep in.
+hyper = { version = "1", optional = true, default-features = false, features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", optional = true, default-features = false, features = [
+    "client-legacy",
+    "http1",
+    "http2",
+    "tokio",
+] }
+hyper-rustls = { version = "0.27", optional = true, default-features = false, features = [
+    "http1",
+    "http2",
+    "ring",
+    "tls12",
+    "webpki-roots",
+] }
+http-body-util = { version = "0.1", optional = true }
+bytes = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+# For the overall per-request deadline (`tokio::time::timeout`). Takes
+# the workspace feature floor; an inherited dependency cannot disable
+# default features. The transport spawns nothing and runs on whatever
+# runtime the host is already using.
+tokio = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# Server-side HTTP mock, for exercising the bundled transport against a
+# real socket rather than only its error paths.
+mockito = "1"
 
 [lints]
 workspace = true

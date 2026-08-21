@@ -27,11 +27,9 @@ use super::raw_credentials::RawCredentialsExtension;
 use super::request::RequestExtension;
 use super::routing::{CAP_WRITE_CANDIDATE_CONSTRAINT, CandidateConstraintExtension};
 use super::security::SecurityExtension;
-// Fully qualified module path: `super::http` is the HTTP *extension*
-// (headers), `crate::http` is the outbound-transport seam. Different
-// things, one letter apart in the import list.
-use crate::host::{HTTP_CAPABILITY, HTTP_SERVICE, HostServices, ServiceError, ServiceSlot};
-use crate::http::HttpTransport;
+use crate::host::{HostServices, HttpRequestError, HttpTransportSlot};
+use crate::http::{HttpRequest, HttpResponse};
+use crate::http_retry::RetryPolicy;
 
 /// Typed container for all message extensions.
 ///
@@ -139,19 +137,21 @@ pub struct Extensions {
     /// already applied when the filtered view was built; dropping it on
     /// clone would only surprise a plugin that already holds the right.
     ///
-    /// A [`ServiceSlot::NotPermitted`] here is distinct from
-    /// [`ServiceSlot::NotInstalled`] so the plugin's error names the
-    /// right fix. Reach it through [`HostServices::http`] rather than
-    /// matching on it.
+    /// Opaque on purpose: the `Arc` inside cannot be taken out, so the
+    /// only way to use the transport is [`HostServices::http_request`],
+    /// which re-checks the capability on every call.
     #[serde(skip)]
-    pub http_transport: ServiceSlot<Arc<dyn HttpTransport>>,
+    pub http_transport: HttpTransportSlot,
 }
 
+#[async_trait::async_trait]
 impl HostServices for Extensions {
-    fn http(&self) -> Result<&dyn HttpTransport, ServiceError> {
-        self.http_transport
-            .get(HTTP_SERVICE, HTTP_CAPABILITY)
-            .map(|arc| &**arc)
+    async fn http_request(
+        &self,
+        req: HttpRequest,
+        retry: RetryPolicy,
+    ) -> Result<HttpResponse, HttpRequestError> {
+        crate::host::run_request(&self.http_transport, req, retry).await
     }
 }
 

@@ -109,7 +109,7 @@ pub enum Capability {
     ReadDelegatedTokens,
 
     /// Perform outbound HTTP through the host's transport
-    /// (`HostServices::http`).
+    /// (`HostServices::http_transport`).
     ///
     /// Gates an *action*, not a slot, so it is the first capability here
     /// that authorizes reaching outside the process rather than reading
