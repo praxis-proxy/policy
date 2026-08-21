@@ -405,7 +405,8 @@ enum Wins {
     Array,
     /// A plain scalar candidate: any string wins.
     AnyString,
-    /// The workload chain filters every candidate by the SPIFFE prefix.
+    /// The workload chain filters every candidate by the SPIFFE scheme and a
+    /// non-empty authority.
     SpiffeString,
 }
 
@@ -414,9 +415,11 @@ impl Wins {
         match self {
             Self::Array => value.is_array(),
             Self::AnyString => value.is_string(),
-            Self::SpiffeString => value
-                .as_str()
-                .is_some_and(|text| text.starts_with("spiffe://")),
+            Self::SpiffeString => value.as_str().is_some_and(|text| {
+                text.strip_prefix("spiffe://")
+                    .and_then(|rest| rest.split('/').next())
+                    .is_some_and(|authority| !authority.is_empty())
+            }),
         }
     }
 }
@@ -727,6 +730,12 @@ fn shapes() -> Vec<(&'static str, Option<Value>)> {
         // Without a SPIFFE-shaped string every workload case declines on both
         // sides, which agrees vacuously and proves nothing about that role.
         ("spiffe id", Some(json!("spiffe://corp.example/ns/a/sa/b"))),
+        // Carries the scheme but no trust domain, so it is the case where the
+        // two sides could disagree about what the prefix check accepts.
+        (
+            "spiffe id with no authority",
+            Some(json!("spiffe:///ns/a/sa/b")),
+        ),
         ("non-spiffe uri", Some(json!("https://corp.example/ns/a"))),
         ("two words", Some(json!("two words"))),
         ("empty array", Some(json!([]))),

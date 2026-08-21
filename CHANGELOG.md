@@ -29,6 +29,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Unknown keys in the JWT plugin's config are rejected.** The resolver config and each `trusted_issuers` entry default every field, so a misspelling took effect silently, and a misspelled `audiences` turned audience checking off. **Breaking** for a config carrying a key the plugin does not read. ([#31](https://github.com/praxis-proxy/policy/pull/31))
 
+- **A SPIFFE ID with no trust domain is refused.** `spiffe:///ns/default/sa/agent` carries the scheme but no authority, so it named no trust boundary and the mapper still filed it as a workload identity whose trust domain was the empty string. It now declines, the same as any other non-SPIFFE subject, and a valid candidate behind it still resolves. **Breaking** for a deployment minting such a token, which was never a valid SPIFFE ID. ([#31](https://github.com/praxis-proxy/policy/pull/31))
+
 - **A workload's trust domain is no longer mappable.** It is the authority of the SPIFFE ID, so it is derived from the identity rather than read from a claim. ([#31](https://github.com/praxis-proxy/policy/pull/31))
 
 ### Fixed

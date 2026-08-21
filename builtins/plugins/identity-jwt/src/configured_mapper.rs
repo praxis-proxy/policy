@@ -17,14 +17,11 @@ use praxis_policy_core::extensions::raw_credentials::TokenRole;
 use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
 use serde_json::Value;
 
-use crate::claim_map::{ClaimMap, ClaimMapper};
+use crate::claim_map::{ClaimMap, ClaimMapper, is_spiffe_id, trust_domain_of};
 use crate::claim_map_config::{
     CompiledCandidate, CompiledClaimMap, CompiledField, CompiledRoleMap, MergeMode, OnMissing,
     SplitMode,
 };
-
-/// Every SPIFFE ID starts here, and no configuration can turn the check off.
-const SPIFFE_SCHEME: &str = "spiffe://";
 
 /// The registered JWT claims, which the claims bag drops unless a map asks for
 /// one back. They are properties of token validation rather than subject
@@ -422,12 +419,10 @@ impl ClaimMapper for ConfiguredClaimMap {
         let section = self.map.role(&TokenRole::CallerWorkload).ok()?;
         let mut diag = Diagnostics::new("workload");
 
-        // Prefix-check every candidate before it counts as resolving: a
-        // non-SPIFFE `sub` must not smuggle in an arbitrary `spiffe_id` claim,
-        // and a later SPIFFE-shaped candidate must still win.
-        let spiffe_id = anchor(section, "spiffe_id", claims, &mut diag, |text| {
-            text.starts_with(SPIFFE_SCHEME)
-        });
+        // Check every candidate before it counts as resolving: a non-SPIFFE
+        // `sub` must not smuggle in an arbitrary `spiffe_id` claim, and a later
+        // SPIFFE-shaped candidate must still win.
+        let spiffe_id = anchor(section, "spiffe_id", claims, &mut diag, is_spiffe_id);
         let client_id = scalar(section, "client_id", claims, &mut diag, accept_any);
         let selectors = collection(section, "selectors", claims, &mut diag);
 
@@ -437,6 +432,8 @@ impl ClaimMapper for ConfiguredClaimMap {
         }
 
         let spiffe_id = spiffe_id?;
+        // `is_spiffe_id` already required the authority, so this cannot be
+        // `None`.
         let trust_domain = trust_domain_of(&spiffe_id);
 
         Some(WorkloadIdentity {
@@ -448,15 +445,6 @@ impl ClaimMapper for ConfiguredClaimMap {
             client_id,
         })
     }
-}
-
-/// The trust domain is the SPIFFE URI's authority, which the standard makes the
-/// trust boundary. Deriving it from `iss` instead is explicitly discouraged.
-fn trust_domain_of(spiffe_id: &str) -> Option<String> {
-    spiffe_id
-        .strip_prefix(SPIFFE_SCHEME)
-        .and_then(|rest| rest.split('/').next())
-        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -1139,6 +1127,29 @@ mod tests {
             workload.spiffe_id.as_deref(),
             Some("spiffe://corp.example/ns/default/sa/agent")
         );
+    }
+
+    /// The scheme alone is not a SPIFFE ID: the authority carries the trust
+    /// domain the standard makes mandatory. An authority-less candidate is
+    /// unusable like any other, so it is skipped and a valid one behind it wins.
+    #[test]
+    fn a_spiffe_id_with_no_authority_declines() {
+        let map = mapper(json!({"workload": {"spiffe_id": ["sub", "spiffe_id"]}}));
+
+        for id in ["spiffe:///ns/default/sa/agent", "spiffe://", "spiffe:///"] {
+            assert!(
+                map.map_workload(&claims(json!({"sub": id}))).is_none(),
+                "`{id}` names no trust domain, so it is not an identity"
+            );
+        }
+
+        let workload = map
+            .map_workload(&claims(json!({
+                "sub": "spiffe:///ns/default/sa/agent",
+                "spiffe_id": "spiffe://corp.example/ns/default/sa/agent",
+            })))
+            .expect("a valid SPIFFE candidate behind an authority-less one resolves");
+        assert_eq!(workload.trust_domain.as_deref(), Some("corp.example"));
     }
 
     /// There is no configuration that turns the prefix check off: it is not a

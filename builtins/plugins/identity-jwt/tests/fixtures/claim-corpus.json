@@ -1006,6 +1006,15 @@
     }
   },
   {
+    "name": "workload-spiffe-id-with-no-authority-declines",
+    "role": "workload",
+    "provenance": "Constructed: the trust domain is the URI authority and SPIFFE requires it, so a string carrying the scheme alone names no trust boundary. Tightened in this PR; the mapper previously filed it with an empty trust domain.",
+    "claims": {
+      "sub": "spiffe:///ns/default/sa/agent"
+    },
+    "expected": null
+  },
+  {
     "name": "workload-trust-domain-from-a-spiffe-id-with-no-path",
     "role": "workload",
     "provenance": "Constructed: the trust domain is the URI authority, which is the whole identifier when there is no path.",

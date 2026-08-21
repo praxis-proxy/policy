@@ -616,9 +616,10 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                     return PluginResult::deny(PluginViolation::new(
                         "auth.mapping_failed",
                         "the claim map produced no workload: no candidate resolved to a \
-                         `spiffe://` identity, which every candidate must, or a field \
-                         declaring `on_missing: deny` resolved nothing. Raise the log \
-                         level to debug to see which fields and which paths were tried",
+                         `spiffe://` identity carrying a trust domain, which every \
+                         candidate must, or a field declaring `on_missing: deny` resolved \
+                         nothing. Raise the log level to debug to see which fields and \
+                         which paths were tried",
                     ));
                 },
             },
