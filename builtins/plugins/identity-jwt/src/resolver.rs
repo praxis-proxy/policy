@@ -242,7 +242,25 @@ impl JwtIdentityResolver {
         // Require the section matching the configured role now, so a
         // misconfigured pairing is a startup failure rather than a resolver that
         // denies every request.
-        compiled.role(&typed.role).map_err(&config_error)?;
+        let section = compiled.role(&typed.role).map_err(&config_error)?;
+
+        // A section that declares no path for its anchor compiles, because
+        // declaring the role is what the section check asks. It then denies every
+        // token, so say so at load rather than leaving it to be discovered one
+        // denial at a time.
+        let anchor = match typed.role {
+            TokenRole::Client => "client_id",
+            TokenRole::CallerWorkload => "spiffe_id",
+            _ => "id",
+        };
+        if section.field(anchor).is_none() {
+            tracing::warn!(
+                plugin = %cfg.name,
+                role = ?typed.role,
+                field = anchor,
+                "claim map declares no path for its anchor, so every token will be declined",
+            );
+        }
 
         let claim_mapper: Arc<dyn ClaimMapper> = Arc::new(ConfiguredClaimMap::new(compiled));
 

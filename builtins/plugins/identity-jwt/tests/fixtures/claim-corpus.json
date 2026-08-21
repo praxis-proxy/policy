@@ -218,6 +218,23 @@
     }
   },
   {
+    "name": "subject-array-valued-scope-contributes-nothing",
+    "role": "user",
+    "provenance": "Constructed: the Rust mapper reads scope through an as_str accessor, so an array-valued scope contributes nothing. A candidate that accepted the array would grant permissions the mapper does not.",
+    "claims": {
+      "sub": "alice",
+      "scope": [
+        "admin",
+        "write"
+      ]
+    },
+    "expected": {
+      "id": "alice",
+      "permissions": [],
+      "claims": {}
+    }
+  },
+  {
     "name": "subject-an-array-element-containing-whitespace-stays-whole",
     "role": "user",
     "provenance": "Constructed: the shape that separates splitting a delimited string from splitting an array. A field whose candidates are an array and a delimited string must not split the array's elements.",
@@ -544,6 +561,26 @@
     }
   },
   {
+    "name": "client-a-present-but-unusable-client-id-declines-rather-than-using-azp",
+    "role": "client",
+    "provenance": "Constructed: the Rust mapper picks the first anchor key that is present and only then requires a string, so a null client_id denies rather than falling through to azp.",
+    "claims": {
+      "client_id": null,
+      "azp": "svc-billing"
+    },
+    "expected": null
+  },
+  {
+    "name": "client-a-numeric-client-id-declines-rather-than-using-azp",
+    "role": "client",
+    "provenance": "Constructed: the same presence-before-shape rule for a non-null wrong type.",
+    "claims": {
+      "client_id": 42,
+      "azp": "svc-billing"
+    },
+    "expected": null
+  },
+  {
     "name": "client-scopes-from-authorized-scopes",
     "role": "client",
     "provenance": "Constructed to exercise the authorized_scopes branch of the authorized_scopes/scope fallback, with both claims present.",
@@ -590,6 +627,23 @@
       "client_id": "svc",
       "authorized_scopes": [],
       "scope": "read write"
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_scopes": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-array-valued-scope-contributes-nothing",
+    "role": "client",
+    "provenance": "Constructed: the client-side pair of the array-valued scope case.",
+    "claims": {
+      "client_id": "svc",
+      "scope": [
+        "read",
+        "write"
+      ]
     },
     "expected": {
       "client_id": "svc",

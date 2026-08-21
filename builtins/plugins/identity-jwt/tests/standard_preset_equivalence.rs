@@ -35,7 +35,7 @@ use praxis_policy_plugin_identity_jwt::{
     ClaimMapper as _, ConfiguredClaimMap, StandardClaimMap, presets,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const CORPUS_JSON: &str = include_str!("fixtures/claim-corpus.json");
 
@@ -456,14 +456,24 @@ fn standard_preset() -> ConfiguredClaimMap {
 /// which is the side that changes when it does.
 fn assert_entry_agrees(entry: &CorpusEntry, preset: &ConfiguredClaimMap) {
     let context = format!("{} (standard preset vs rust mapper)", entry.name);
-    match entry.role {
+    compare_both_paths(entry.role, preset, &entry.claims, &context);
+}
+
+/// Map one claim set through both paths and assert they agree.
+fn compare_both_paths(
+    role: CorpusRole,
+    preset: &ConfiguredClaimMap,
+    claims: &HashMap<String, Value>,
+    context: &str,
+) {
+    match role {
         CorpusRole::User => {
             match (
-                preset.map_subject(&entry.claims),
-                StandardClaimMap.map_subject(&entry.claims),
+                preset.map_subject(claims),
+                StandardClaimMap.map_subject(claims),
             ) {
                 (Some(from_preset), Some(from_rust)) => {
-                    assert_subjects_agree(&context, &from_preset, &from_rust);
+                    assert_subjects_agree(context, &from_preset, &from_rust);
                 },
                 (None, None) => {},
                 (from_preset, from_rust) => panic!(
@@ -475,11 +485,11 @@ fn assert_entry_agrees(entry: &CorpusEntry, preset: &ConfiguredClaimMap) {
         },
         CorpusRole::Client => {
             match (
-                preset.map_client(&entry.claims),
-                StandardClaimMap.map_client(&entry.claims),
+                preset.map_client(claims),
+                StandardClaimMap.map_client(claims),
             ) {
                 (Some(from_preset), Some(from_rust)) => {
-                    assert_clients_agree(&context, &from_preset, &from_rust);
+                    assert_clients_agree(context, &from_preset, &from_rust);
                 },
                 (None, None) => {},
                 (from_preset, from_rust) => panic!(
@@ -491,11 +501,11 @@ fn assert_entry_agrees(entry: &CorpusEntry, preset: &ConfiguredClaimMap) {
         },
         CorpusRole::Workload => {
             match (
-                preset.map_workload(&entry.claims),
-                StandardClaimMap.map_workload(&entry.claims),
+                preset.map_workload(claims),
+                StandardClaimMap.map_workload(claims),
             ) {
                 (Some(from_preset), Some(from_rust)) => {
-                    assert_workloads_agree(&context, &from_preset, &from_rust);
+                    assert_workloads_agree(context, &from_preset, &from_rust);
                 },
                 (None, None) => {},
                 (from_preset, from_rust) => panic!(
@@ -611,4 +621,168 @@ fn the_claims_bag_comparison_is_exhaustive() {
         from_preset.claims.contains_key("realm_access"),
         "a nested claim no single-segment path consumed stays visible"
     );
+}
+
+// =====================================================================
+// The shape sweep
+// =====================================================================
+//
+// The corpus samples token shapes a human thought to write down. This
+// enumerates them instead: every claim the standard preset declares, against
+// every JSON shape a claim can hold, and every pair of shapes across each
+// fallback. Two parity breaks reached the corpus-backed gate without being
+// caught, both of them a claim carrying the wrong JSON type as the second
+// candidate of a chain, which is the axis a hand-written corpus does not think
+// to vary.
+
+/// Every JSON shape a claim value can take, named for the failure message.
+fn shapes() -> Vec<(&'static str, Option<Value>)> {
+    vec![
+        ("absent", None),
+        ("null", Some(json!(null))),
+        ("bool", Some(json!(true))),
+        ("number", Some(json!(42))),
+        ("empty string", Some(json!(""))),
+        ("whitespace string", Some(json!("   "))),
+        ("one word", Some(json!("one"))),
+        ("two words", Some(json!("two words"))),
+        ("empty array", Some(json!([]))),
+        ("string array", Some(json!(["a", "b"]))),
+        ("array with a spaced element", Some(json!(["a b", "c"]))),
+        ("mixed array", Some(json!([null, 42, ["x"], {}, "s"]))),
+        ("object", Some(json!({"k": "v"}))),
+    ]
+}
+
+fn claim_set(base: &Value, overrides: &[(&str, &Option<Value>)]) -> HashMap<String, Value> {
+    let mut claims: HashMap<String, Value> = base
+        .as_object()
+        .expect("the base claim set is an object")
+        .clone()
+        .into_iter()
+        .collect();
+    for (name, shape) in overrides {
+        match shape {
+            Some(value) => claims.insert((*name).to_owned(), value.clone()),
+            None => claims.remove(*name),
+        };
+    }
+    claims
+}
+
+/// Every claim name the standard preset declares a path for, per role.
+const SWEEP: &[(CorpusRole, &[&str])] = &[
+    (
+        CorpusRole::User,
+        &["sub", "roles", "permissions", "scope", "teams", "groups"],
+    ),
+    (
+        CorpusRole::Client,
+        &[
+            "client_id",
+            "azp",
+            "client_name",
+            "authorized_scopes",
+            "scope",
+            "aud",
+            "roles",
+        ],
+    ),
+    (CorpusRole::Workload, &["sub", "spiffe_id"]),
+];
+
+fn base_for(role: CorpusRole) -> Value {
+    match role {
+        CorpusRole::User => json!({"sub": "alice"}),
+        CorpusRole::Client => json!({"client_id": "svc"}),
+        CorpusRole::Workload => json!({"sub": "spiffe://corp.example/w"}),
+    }
+}
+
+#[test]
+fn the_preset_agrees_with_the_rust_mapper_over_every_shape_of_every_declared_claim() {
+    let preset = standard_preset();
+    let mut checked = 0_usize;
+    for (role, names) in SWEEP {
+        for name in *names {
+            for (label, shape) in shapes() {
+                let claims = claim_set(&base_for(*role), &[(name, &shape)]);
+                compare_both_paths(
+                    *role,
+                    &preset,
+                    &claims,
+                    &format!("{role:?}: {name} = {label}"),
+                );
+                checked += 1;
+            }
+        }
+    }
+    println!("{checked} single-claim shapes agreed");
+}
+
+/// Each fallback pair, with the base claim needed to reach it. A chain is where
+/// the two implementations can differ on which candidate wins, so both
+/// positions vary together.
+const FALLBACK_PAIRS: &[(CorpusRole, &str, &str)] = &[
+    (CorpusRole::User, "permissions", "scope"),
+    (CorpusRole::User, "teams", "groups"),
+    (CorpusRole::Client, "authorized_scopes", "scope"),
+    (CorpusRole::Client, "client_id", "azp"),
+    (CorpusRole::Workload, "sub", "spiffe_id"),
+];
+
+#[test]
+fn the_preset_agrees_with_the_rust_mapper_over_every_shape_pair_of_every_fallback() {
+    let preset = standard_preset();
+    let mut checked = 0_usize;
+    for (role, first, second) in FALLBACK_PAIRS {
+        // A pair that is itself the anchor starts from nothing, so neither
+        // position is pinned by the base.
+        let anchored = match role {
+            CorpusRole::User => *first != "sub",
+            CorpusRole::Client => *first != "client_id",
+            CorpusRole::Workload => *first != "sub",
+        };
+        let base = if anchored { base_for(*role) } else { json!({}) };
+
+        for (first_label, first_shape) in shapes() {
+            for (second_label, second_shape) in shapes() {
+                let claims = claim_set(&base, &[(first, &first_shape), (second, &second_shape)]);
+                compare_both_paths(
+                    *role,
+                    &preset,
+                    &claims,
+                    &format!("{role:?}: {first} = {first_label}, {second} = {second_label}"),
+                );
+                checked += 1;
+            }
+        }
+    }
+    println!("{checked} shape pairs agreed");
+}
+
+/// A SPIFFE-shaped value has to appear in the workload sweep, or every case
+/// declines on both sides and the sweep proves nothing about that role.
+#[test]
+fn the_workload_sweep_reaches_a_resolving_case() {
+    let preset = standard_preset();
+    for (name, other) in [("sub", "spiffe_id"), ("spiffe_id", "sub")] {
+        let claims = claim_set(
+            &json!({}),
+            &[
+                (name, &Some(json!("spiffe://corp.example/w"))),
+                (other, &None),
+            ],
+        );
+        assert!(
+            preset.map_workload(&claims).is_some(),
+            "{name} carrying a SPIFFE ID must resolve"
+        );
+        compare_both_paths(
+            CorpusRole::Workload,
+            &preset,
+            &claims,
+            &format!("workload anchored on {name}"),
+        );
+    }
 }

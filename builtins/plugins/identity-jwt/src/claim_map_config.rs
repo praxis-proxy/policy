@@ -83,13 +83,26 @@ pub enum OnMissing {
     Deny,
 }
 
-/// One authored candidate: a path, plus whether only an array satisfies it.
+/// One authored candidate: a path, plus the rules for what satisfies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     /// The path as authored.
     pub path: String,
     /// Require an array. A string is then unusable and the chain continues.
     pub array_only: bool,
+    /// Require a string. An array is then unusable and the chain continues.
+    ///
+    /// The mirror of `array_only`, and what a claim read as a delimited string
+    /// needs: an array-valued `scope` must contribute nothing rather than
+    /// contributing each element.
+    pub string_only: bool,
+    /// End the chain as soon as this path resolves to anything, usable or not.
+    ///
+    /// The default is to keep looking when a value is present but the wrong
+    /// shape. A chain that picks the first claim that *exists* and then requires
+    /// a shape of it needs this instead, so a present-but-unusable value denies
+    /// rather than falling through to a later candidate.
+    pub stop_if_present: bool,
 }
 
 /// One authored field: its ordered candidates and its options.
@@ -106,7 +119,7 @@ pub struct FieldMap {
 }
 
 const FIELD_OPTIONS: &[&str] = &["merge", "on_missing", "paths", "split"];
-const CANDIDATE_KEYS: &[&str] = &["array_only", "path"];
+const CANDIDATE_KEYS: &[&str] = &["array_only", "path", "stop_if_present", "string_only"];
 
 fn kind_of(value: &Value) -> &'static str {
     match value {
@@ -134,6 +147,8 @@ impl Candidate {
             Value::String(path) => Ok(Self {
                 path: path.clone(),
                 array_only: false,
+                string_only: false,
+                stop_if_present: false,
             }),
             Value::Object(entries) => {
                 for key in entries.keys() {
@@ -154,11 +169,26 @@ impl Candidate {
                     },
                     None => return Err(format!("{field}: a candidate object needs a `path`")),
                 };
-                let array_only = match entries.get("array_only") {
-                    Some(value) => option_from_value(field, "array_only", value)?,
-                    None => false,
+                let flag = |name: &str| -> Result<bool, String> {
+                    match entries.get(name) {
+                        Some(value) => option_from_value(field, name, value),
+                        None => Ok(false),
+                    }
                 };
-                Ok(Self { path, array_only })
+                let array_only = flag("array_only")?;
+                let string_only = flag("string_only")?;
+                if array_only && string_only {
+                    return Err(format!(
+                        "{field}: '{path}' declares both `array_only` and `string_only`, so \
+                         nothing can satisfy it"
+                    ));
+                }
+                Ok(Self {
+                    path,
+                    array_only,
+                    string_only,
+                    stop_if_present: flag("stop_if_present")?,
+                })
             },
             other => Err(format!(
                 "{field}: a candidate is a path or an object with `path`, got {}",
@@ -186,6 +216,8 @@ impl FieldMap {
                 paths: vec![Candidate {
                     path: path.clone(),
                     array_only: false,
+                    string_only: false,
+                    stop_if_present: false,
                 }],
                 merge: MergeMode::default(),
                 split: None,
@@ -211,6 +243,8 @@ impl FieldMap {
                     Some(Value::String(path)) => vec![Candidate {
                         path: path.clone(),
                         array_only: false,
+                        string_only: false,
+                        stop_if_present: false,
                     }],
                     Some(other) => {
                         return Err(format!(
@@ -309,8 +343,18 @@ pub struct RoleMapConfig(pub BTreeMap<String, Value>);
 ///
 /// A field with no candidate that resolves is left empty and logged at debug,
 /// naming every path tried. `on_missing: deny` makes that a refusal instead.
-/// `array_only` requires an array, so a string-valued claim is skipped and the
-/// next candidate is tried.
+///
+/// Three per-candidate flags control what satisfies a candidate and when the
+/// chain stops:
+///
+/// | Flag | Effect |
+/// |---|---|
+/// | `array_only` | Only an array satisfies it; a string is skipped and the next candidate is tried. |
+/// | `string_only` | Only a string satisfies it; an array is skipped. What a claim read as a delimited value needs, so an array-valued `scope` contributes nothing rather than contributing each element. |
+/// | `stop_if_present` | The candidate claims the field the moment its path resolves at all. A present but unusable value then leaves the field empty instead of falling through, which is what a chain that picks the first claim that *exists* and only then requires a shape of it needs. |
+///
+/// `array_only` and `string_only` together are rejected: nothing could satisfy
+/// such a candidate. All three are rejected on a field that holds one value.
 ///
 /// # Escaping, and the quoting trap
 ///
@@ -359,6 +403,8 @@ pub struct ClaimMapConfig {
 pub struct CompiledCandidate {
     path: ClaimPath,
     array_only: bool,
+    string_only: bool,
+    stop_if_present: bool,
 }
 
 impl CompiledCandidate {
@@ -370,6 +416,16 @@ impl CompiledCandidate {
     /// Whether only an array satisfies this candidate.
     pub fn array_only(&self) -> bool {
         self.array_only
+    }
+
+    /// Whether only a string satisfies this candidate.
+    pub fn string_only(&self) -> bool {
+        self.string_only
+    }
+
+    /// Whether a present but unusable value ends the chain here.
+    pub fn stop_if_present(&self) -> bool {
+        self.stop_if_present
     }
 }
 
@@ -536,14 +592,14 @@ fn compile_role(
                      holds one value"
                 ));
             }
-            if let Some(candidate) = authored_field
+            if let Some((flag, candidate)) = authored_field
                 .paths
                 .iter()
-                .find(|candidate| candidate.array_only)
+                .find_map(|candidate| candidate.array_only.then_some(("array_only", candidate)))
             {
                 return Err(format!(
-                    "{qualified}: `array_only` on '{}' would let nothing resolve, because \
-                     {qualified} holds one value",
+                    "{qualified}: `{flag}` on '{}' would let nothing resolve, because {qualified} \
+                     holds one value",
                     candidate.path
                 ));
             }
@@ -556,6 +612,8 @@ fn compile_role(
             candidates.push(CompiledCandidate {
                 path,
                 array_only: candidate.array_only,
+                string_only: candidate.string_only,
+                stop_if_present: candidate.stop_if_present,
             });
         }
 
@@ -887,6 +945,54 @@ mod tests {
         }));
         assert!(err.contains("mergemode"), "{err}");
         assert!(err.contains("merge"), "{err}");
+    }
+
+    #[test]
+    fn the_candidate_flags_round_trip_and_default_to_unset() {
+        let map = compiled(json!({
+            "subject": {
+                "permissions": {
+                    "paths": [
+                        {"path": "permissions", "array_only": true},
+                        {"path": "scope", "string_only": true, "stop_if_present": true},
+                        "plain",
+                    ],
+                    "split": "whitespace",
+                }
+            }
+        }));
+        let flags: Vec<(bool, bool, bool)> = map
+            .role(&TokenRole::User)
+            .unwrap()
+            .field("permissions")
+            .unwrap()
+            .candidates()
+            .iter()
+            .map(|c| (c.array_only(), c.string_only(), c.stop_if_present()))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                (true, false, false),
+                (false, true, true),
+                (false, false, false)
+            ],
+        );
+    }
+
+    /// Nothing can be both an array and a string, so a candidate declaring both
+    /// could never resolve. That is a config mistake, not a way to disable a
+    /// candidate.
+    #[test]
+    fn a_candidate_declaring_both_shape_flags_is_rejected() {
+        let err = compile_err(json!({
+            "subject": {"roles": [{"path": "roles", "array_only": true, "string_only": true}]}
+        }));
+        assert!(
+            err.contains("array_only") && err.contains("string_only"),
+            "{err}"
+        );
+        assert!(err.contains("roles"), "{err}");
     }
 
     #[test]

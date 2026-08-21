@@ -3,12 +3,35 @@
   "claim_map": {
     "subject": {
       "id": "sub",
-      "permissions": { "paths": ["scope"], "split": "whitespace" },
-      "teams": [{ "path": "cognito:groups", "array_only": true }]
+      "permissions": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      },
+      "teams": [
+        {
+          "path": "cognito:groups",
+          "array_only": true
+        }
+      ]
     },
     "client": {
-      "client_id": ["client_id"],
-      "authorized_scopes": { "paths": ["scope"], "split": "whitespace" }
+      "client_id": [
+        "client_id"
+      ],
+      "authorized_scopes": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      }
     }
   }
 }

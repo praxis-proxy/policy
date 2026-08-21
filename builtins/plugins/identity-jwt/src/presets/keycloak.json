@@ -3,12 +3,37 @@
   "claim_map": {
     "subject": {
       "id": "sub",
-      "roles": [{ "path": "realm_access.roles", "array_only": true }],
-      "permissions": { "paths": ["scope"], "split": "whitespace" }
+      "roles": [
+        {
+          "path": "realm_access.roles",
+          "array_only": true
+        }
+      ],
+      "permissions": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      }
     },
     "client": {
-      "client_id": ["client_id", "azp", "clientId"],
-      "authorized_scopes": { "paths": ["scope"], "split": "whitespace" },
+      "client_id": [
+        "client_id",
+        "azp",
+        "clientId"
+      ],
+      "authorized_scopes": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      },
       "authorized_audiences": "aud"
     }
   }
