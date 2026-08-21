@@ -1,7 +1,7 @@
 ---
 title: "feat: Configurable claim mapping for the JWT identity plugin"
 type: feat
-status: active
+status: completed
 date: 2026-08-20
 origin: docs/brainstorms/2026-08-20-configurable-claim-mapping-requirements.md
 ---
