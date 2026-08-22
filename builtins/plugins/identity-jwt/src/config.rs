@@ -98,6 +98,11 @@ pub struct JwtIdentityResolverConfig {
     /// gating on the issuing `IdP` expressible, since the subject claims bag is
     /// the only route from a claim to a policy.
     ///
+    /// Both lists take top-level claim names rather than paths, because the bag
+    /// is keyed by name. A dotted entry is refused at load, and a claim whose own
+    /// name holds a dot is written with `\.`. A `caller_workload` resolver has no
+    /// claims bag, so the setting is inert there and says so at load.
+    ///
     /// Read as a raw value so a malformed one names the field.
     ///
     /// [`claim_mapper`]: Self::claim_mapper

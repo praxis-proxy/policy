@@ -71,8 +71,8 @@ pub mod trusted_issuer;
 
 pub use claim_map::{ClaimMap, ClaimMapper, StandardClaimMap};
 pub use claim_map_config::{
-    ClaimMapConfig, ClaimsOverrides, CompiledClaimMap, CompiledRoleMap, MergeMode, OnMissing,
-    SplitMode,
+    ClaimMapConfig, ClaimsOverrides, CompiledClaimMap, CompiledClaimsOverrides, CompiledRoleMap,
+    MergeMode, OnMissing, SplitMode,
 };
 pub use claim_path::ClaimPath;
 pub use config::{DecodingKeySource, JwtIdentityResolverConfig, TrustedIssuerConfig};

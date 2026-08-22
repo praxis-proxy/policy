@@ -59,7 +59,7 @@ use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 use super::claim_map::{ClaimMap, ClaimMapper};
-use super::claim_map_config::ClaimsOverrides;
+use super::claim_map_config::{ClaimsOverrides, CompiledClaimsOverrides};
 use super::config::{JwtIdentityResolverConfig, TrustedIssuerConfig};
 use super::configured_mapper::ConfiguredClaimMap;
 use super::presets;
@@ -225,7 +225,7 @@ impl JwtIdentityResolver {
             })
         };
 
-        let claims_overrides: ClaimsOverrides = match typed.claims.as_ref() {
+        let claims_overrides: CompiledClaimsOverrides = match typed.claims.as_ref() {
             Some(value) => {
                 let parsed: ClaimsOverrides =
                     serde_json::from_value(value.clone()).map_err(|e| {
@@ -233,11 +233,21 @@ impl JwtIdentityResolver {
                             "`claims` takes `exclude` and `include` lists of claim names: {e}"
                         ))
                     })?;
-                parsed.validate().map_err(&config_error)?;
-                parsed
+                parsed.compile().map_err(&config_error)?
             },
-            None => ClaimsOverrides::default(),
+            None => CompiledClaimsOverrides::default(),
         };
+
+        // A workload identity carries no claims bag, so the overrides would sit
+        // there doing nothing. Same treatment as the undeclared anchor below:
+        // the condition is static, so say it once at load.
+        if matches!(typed.role, TokenRole::CallerWorkload) && !claims_overrides.is_empty() {
+            tracing::warn!(
+                plugin = %cfg.name,
+                "`claims` has no effect under `role: caller_workload`, which carries no claims \
+                 bag; the overrides will be ignored",
+            );
+        }
 
         let compiled = match (typed.claim_map.as_ref(), typed.claim_mapper.as_deref()) {
             (Some(_), Some(named)) => {
@@ -1010,6 +1020,28 @@ mod tests {
             }),
         ))
         .expect("every documented key together must still build");
+    }
+
+    /// A dotted override entry matches nothing, so the resolver refuses it at
+    /// load rather than starting with a claim the operator meant to drop still
+    /// visible to policy.
+    #[test]
+    fn new_rejects_a_dotted_claim_override() {
+        let err = build_err(json!({"claims": {"exclude": ["realm_access.roles"]}}));
+        assert!(err.contains("realm_access.roles"), "{err}");
+        assert!(err.contains("exclude"), "{err}");
+    }
+
+    /// A workload identity has no claims bag, so the overrides cannot do
+    /// anything. Building still succeeds, with a warning, which is how the
+    /// undeclared anchor is handled one field over.
+    #[test]
+    fn a_workload_resolver_still_builds_with_claims_overrides_it_cannot_use() {
+        JwtIdentityResolver::new(cfg_with_mapper(json!({
+            "role": "caller_workload",
+            "claims": {"include": ["iss"]},
+        })))
+        .expect("the overrides are inert here, not a config error");
     }
 
     #[test]

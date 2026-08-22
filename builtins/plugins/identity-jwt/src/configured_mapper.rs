@@ -66,11 +66,11 @@ impl ConfiguredClaimMap {
             }
         }
         let overrides = self.map.claims();
-        for name in &overrides.exclude {
-            excluded.insert(name.as_str());
+        for name in overrides.exclude() {
+            excluded.insert(name);
         }
-        for name in &overrides.include {
-            excluded.remove(name.as_str());
+        for name in overrides.include() {
+            excluded.remove(name);
         }
 
         claims
@@ -495,12 +495,11 @@ mod tests {
         let config: ClaimMapConfig = serde_json::from_value(map).expect("the map deserializes");
         let overrides: ClaimsOverrides =
             serde_json::from_value(claims).expect("the overrides deserialize");
-        overrides.validate().expect("the overrides are coherent");
         ConfiguredClaimMap::new(
             config
                 .compile()
                 .expect("the map compiles")
-                .with_claims(overrides),
+                .with_claims(overrides.compile().expect("the overrides are coherent")),
         )
     }
 
@@ -994,6 +993,30 @@ mod tests {
         );
         assert_eq!(subject.claims.get("jti"), Some(&json!("abc")));
         assert_eq!(subject.claims.get("exp"), Some(&json!(2_000_000_000_i64)));
+    }
+
+    /// The override names reach the bag unescaped, so a claim whose name holds a
+    /// dot is dropped by the escaped spelling and not by the literal one.
+    #[test]
+    fn an_escaped_override_name_matches_the_claim_it_names() {
+        let token = claims(json!({
+            "sub": "alice",
+            "https://my-app.example.com/roles": ["admin"],
+            "tenant": "acme",
+        }));
+        let subject = mapper_with_claims(
+            json!({"subject": {"id": "sub"}}),
+            json!({"exclude": ["https://my-app\\.example\\.com/roles"]}),
+        )
+        .map_subject(&token)
+        .unwrap();
+
+        assert!(
+            !subject
+                .claims
+                .contains_key("https://my-app.example.com/roles")
+        );
+        assert_eq!(subject.claims.get("tenant"), Some(&json!("acme")));
     }
 
     // ---- diagnostics ------------------------------------------------------

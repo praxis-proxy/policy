@@ -10,7 +10,7 @@
 // mistake into "data did not match any variant", and the whole point of failing
 // at construction is telling the operator which field and which path.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use praxis_policy_core::extensions::raw_credentials::TokenRole;
 use serde::{Deserialize, Serialize};
@@ -314,29 +314,80 @@ pub struct ClaimsOverrides {
 }
 
 impl ClaimsOverrides {
-    /// Check the two lists do not disagree with each other.
+    /// Parse every name, and check the two lists do not disagree with each
+    /// other.
     ///
     /// # Errors
     ///
-    /// Returns a message naming every claim that appears in both lists. There is
-    /// no coherent intent to honour, and picking a winner silently would hide the
+    /// Returns a message naming an entry that does not address one top-level
+    /// claim, or every claim that appears in both lists. A claim in both has no
+    /// coherent intent to honour, and picking a winner silently would hide the
     /// mistake. All of them at once, so fixing one does not uncover the next on
     /// the following startup.
-    pub fn validate(&self) -> Result<(), String> {
-        let both: BTreeSet<&str> = self
-            .include
-            .iter()
-            .filter(|claim| self.exclude.contains(claim))
-            .map(String::as_str)
-            .collect();
+    pub fn compile(&self) -> Result<CompiledClaimsOverrides, String> {
+        let exclude = compile_claim_names("exclude", &self.exclude)?;
+        let include = compile_claim_names("include", &self.include)?;
+
+        let both: BTreeSet<&str> = include.intersection(&exclude).map(String::as_str).collect();
         if both.is_empty() {
-            return Ok(());
+            return Ok(CompiledClaimsOverrides { exclude, include });
         }
         let named: Vec<String> = both.iter().map(|claim| format!("`{claim}`")).collect();
         Err(format!(
             "claims: {} in both `exclude` and `include`; pick one list for each",
             named.join(", ")
         ))
+    }
+}
+
+/// Parse the names in one override list, rejecting anything that does not
+/// address a single top-level claim.
+///
+/// The bag is keyed by claim name, so a dotted entry such as
+/// `realm_access.roles` would match nothing. Every other path-shaped field in
+/// this config takes dotted syntax, which makes writing one here a plausible
+/// mistake rather than a contrived one, so it fails at load instead. A claim
+/// whose name really holds a dot is written `\.`, the escape a path already
+/// uses.
+fn compile_claim_names(list: &str, names: &[String]) -> Result<HashSet<String>, String> {
+    names
+        .iter()
+        .map(|name| {
+            let path = ClaimPath::parse(name).map_err(|e| format!("claims.{list}: {e}"))?;
+            path.single_segment().map(str::to_owned).ok_or_else(|| {
+                format!(
+                    "claims.{list}: `{name}` addresses a nested claim, and the claims bag is \
+                     keyed by top-level claim name; name the top-level claim, or write a literal \
+                     dot as `\\.`"
+                )
+            })
+        })
+        .collect()
+}
+
+/// The overrides with every name parsed: single top-level claim names,
+/// unescaped, ready to match a key in the bag.
+#[derive(Debug, Clone, Default)]
+pub struct CompiledClaimsOverrides {
+    exclude: HashSet<String>,
+    include: HashSet<String>,
+}
+
+impl CompiledClaimsOverrides {
+    /// Claims to drop even though nothing consumed them.
+    pub fn exclude(&self) -> impl Iterator<Item = &str> {
+        self.exclude.iter().map(String::as_str)
+    }
+
+    /// Claims to keep even though a path consumed them, or because the inferred
+    /// exclusions always drop them.
+    pub fn include(&self) -> impl Iterator<Item = &str> {
+        self.include.iter().map(String::as_str)
+    }
+
+    /// Whether the operator asked for neither.
+    pub fn is_empty(&self) -> bool {
+        self.exclude.is_empty() && self.include.is_empty()
     }
 }
 
@@ -525,7 +576,7 @@ pub struct CompiledClaimMap {
     subject: Option<CompiledRoleMap>,
     client: Option<CompiledRoleMap>,
     workload: Option<CompiledRoleMap>,
-    claims: ClaimsOverrides,
+    claims: CompiledClaimsOverrides,
 }
 
 impl CompiledClaimMap {
@@ -553,7 +604,7 @@ impl CompiledClaimMap {
     }
 
     /// The claims-bag overrides.
-    pub fn claims(&self) -> &ClaimsOverrides {
+    pub fn claims(&self) -> &CompiledClaimsOverrides {
         &self.claims
     }
 
@@ -562,7 +613,7 @@ impl CompiledClaimMap {
     /// Applied after the map compiles, so a preset and an inline map reach them
     /// the same way.
     #[must_use]
-    pub fn with_claims(mut self, claims: ClaimsOverrides) -> Self {
+    pub fn with_claims(mut self, claims: CompiledClaimsOverrides) -> Self {
         self.claims = claims;
         self
     }
@@ -583,7 +634,7 @@ impl ClaimMapConfig {
             subject: compile_role("subject", SUBJECT_FIELDS, self.subject.as_ref())?,
             client: compile_role("client", CLIENT_FIELDS, self.client.as_ref())?,
             workload: compile_role("workload", WORKLOAD_FIELDS, self.workload.as_ref())?,
-            claims: ClaimsOverrides::default(),
+            claims: CompiledClaimsOverrides::default(),
         })
     }
 }
@@ -847,12 +898,12 @@ mod tests {
                 .expect("the overrides deserialize");
         assert_eq!(with.exclude, vec!["internal_debug"]);
         assert_eq!(with.include, vec!["iss"]);
-        with.validate().expect("distinct lists are coherent");
+        with.compile().expect("distinct lists are coherent");
 
         let without = ClaimsOverrides::default();
         assert!(without.exclude.is_empty());
         assert!(without.include.is_empty());
-        without.validate().expect("empty lists are coherent");
+        without.compile().expect("empty lists are coherent");
     }
 
     #[test]
@@ -861,7 +912,7 @@ mod tests {
             serde_json::from_value(json!({"exclude": ["tenant"], "include": ["tenant"]}))
                 .expect("the overrides deserialize");
         let err = overrides
-            .validate()
+            .compile()
             .expect_err("a claim cannot be both dropped and kept");
         assert!(err.contains("tenant"), "{err}");
         assert!(err.contains("exclude") && err.contains("include"), "{err}");
@@ -877,7 +928,7 @@ mod tests {
         }))
         .expect("the overrides deserialize");
         let err = overrides
-            .validate()
+            .compile()
             .expect_err("two claims are both dropped and kept");
         assert!(err.contains("tenant"), "{err}");
         assert!(err.contains("region"), "{err}");
@@ -895,8 +946,51 @@ mod tests {
             "include": ["tenant", "tenant"],
         }))
         .expect("the overrides deserialize");
-        let err = overrides.validate().expect_err("tenant conflicts");
+        let err = overrides.compile().expect_err("tenant conflicts");
         assert_eq!(err.matches("tenant").count(), 1, "{err}");
+    }
+
+    /// The bag is keyed by claim name, so a dotted entry would match nothing. It
+    /// is a plausible mistake, since every other path-shaped field here takes
+    /// dotted syntax, so it fails at load rather than quietly doing nothing.
+    #[test]
+    fn a_dotted_override_entry_is_rejected_and_named() {
+        for list in ["exclude", "include"] {
+            let overrides: ClaimsOverrides =
+                serde_json::from_value(json!({list: ["realm_access.roles"]}))
+                    .expect("the overrides deserialize");
+            let err = overrides
+                .compile()
+                .expect_err("a nested path is not a claim name");
+            assert!(err.contains("realm_access.roles"), "{err}");
+            assert!(err.contains(list), "the message names the list: {err}");
+        }
+    }
+
+    /// A claim name that really holds dots, an Auth0 namespaced claim being the
+    /// usual one, stays reachable through the same escape a path uses.
+    #[test]
+    fn an_escaped_dot_names_a_claim_whose_name_holds_one() {
+        let overrides: ClaimsOverrides = serde_json::from_value(json!({
+            "exclude": ["https://my-app\\.example\\.com/roles"],
+        }))
+        .expect("the overrides deserialize");
+        let compiled = overrides.compile().expect("an escaped dot is a claim name");
+        assert_eq!(
+            compiled.exclude().collect::<Vec<_>>(),
+            vec!["https://my-app.example.com/roles"],
+            "the name is stored unescaped, which is how it reaches the bag"
+        );
+    }
+
+    /// A malformed escape is the operator's typo, not a claim name, so it says so
+    /// rather than dropping a claim nothing is named after.
+    #[test]
+    fn a_malformed_escape_in_an_override_entry_is_rejected() {
+        let overrides: ClaimsOverrides = serde_json::from_value(json!({"include": ["tenant\\x"]}))
+            .expect("the overrides deserialize");
+        let err = overrides.compile().expect_err("`\\x` is not an escape");
+        assert!(err.contains("include"), "{err}");
     }
 
     /// The overrides are a plugin-level setting, so a `claims` block written inside
