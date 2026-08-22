@@ -213,7 +213,7 @@ async fn valid_jwt_resolves_subject() {
     // `email` was not a reserved claim, lands under subject.claims
     assert_eq!(
         subject.claims.get("email"),
-        Some(&"alice@corp.com".to_owned()),
+        Some(&serde_json::json!("alice@corp.com")),
     );
 
     // Raw token stashed for forwarding plugins.

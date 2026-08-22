@@ -522,7 +522,9 @@ mod tests {
             max_backoff: Duration::from_millis(1000),
             ..RetryPolicy::idempotent()
         };
-        let delays: Vec<_> = (0..16).map(|_| policy.backoff_after(3)).collect();
+        let delays: Vec<_> = std::iter::repeat_with(|| policy.backoff_after(3))
+            .take(16)
+            .collect();
         let distinct = delays
             .iter()
             .collect::<std::collections::HashSet<_>>()

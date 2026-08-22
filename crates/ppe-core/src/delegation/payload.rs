@@ -684,7 +684,6 @@ impl_plugin_payload!(DelegationPayload);
 mod tests {
     use super::*;
     use crate::extensions::RawCredentialsExtension;
-    use crate::extensions::raw_credentials::RawDelegatedToken;
 
     #[test]
     fn bearer_token_does_not_serialize() {

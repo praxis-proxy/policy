@@ -589,7 +589,6 @@ impl Message {
 )]
 mod tests {
     use super::*;
-    use crate::cmf::enums::Role;
     use crate::hooks::payload::MetaExtension;
 
     fn make_test_message() -> Message {

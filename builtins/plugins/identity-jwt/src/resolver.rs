@@ -973,9 +973,7 @@ mod tests {
     // header would leave the identity slot empty and any downstream
     // `require(authenticated)` reading as satisfied-by-absence.
 
-    use praxis_policy_core::context::PluginContext;
-    use praxis_policy_core::hooks::payload::Extensions;
-    use praxis_policy_core::identity::{IdentityPayload, TokenSource};
+    use praxis_policy_core::identity::TokenSource;
     use std::collections::HashMap;
 
     /// A resolver reading a non-default header, so the tests below can control

@@ -105,7 +105,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 paste = "1"
 futures = "0.3"
 hashbrown = "0.17"
-arc-swap = "1.7"
+arc-swap = "1.9"
 wildmatch = "2"
 rmp-serde = "1"
 serde_bytes = "0.11"
@@ -188,9 +188,19 @@ trivial_casts = "deny"
 # zero-sized capability token were the only occurrence; they were unnecessary,
 # since the token's sole field is `()` and the auto traits already applied. A
 # compile-time assertion stands in their place.
-unsafe_code = "deny"
+unsafe_code = "forbid"
 
 missing_docs = "deny"
+# Lifetime clarity (extended)
+unused_lifetimes = "deny"
+# Visibility hygiene
+unnameable_types = "deny"
+# Import hygiene (extended)
+redundant_imports = "deny"
+# Binding hygiene
+unit_bindings = "deny"
+# Bound clarity
+explicit_outlives_requirements = "deny"
 
 # --- Not enforced: a settled list, see the header ---
 #
@@ -358,6 +368,33 @@ doc_lazy_continuation = "deny"
 doc_markdown = "deny"
 doc_overindented_list_items = "deny"
 missing_errors_doc = "deny"
+# --- Enforced: new-tier lints from conventions ---
+# Float correctness: no direct float equality comparisons
+float_cmp = "deny"
+# Endianness safety: no native-endian byte conversions on the wire
+host_endian_bytes = "deny"
+# Restriction: unit enum variants use no brackets
+empty_enum_variants_with_brackets = "deny"
+# Restriction: build PathBuf with from/join, not push chains
+pathbuf_init_then_push = "deny"
+# Restriction: prefer iterator repetition over mapped ranges
+map_with_unused_argument_over_ranges = "deny"
+# Restriction: no read-and-write of one variable in a single expression
+mixed_read_write_in_expression = "deny"
+# Restriction: use `..` instead of `field: _` in patterns
+unneeded_field_pattern = "deny"
+# Restriction: no `self` imports of items
+unnecessary_self_imports = "deny"
+# Restriction: use fs::read / fs::read_to_string over manual reads
+verbose_file_reads = "deny"
+# Restriction: `^` is not exponentiation
+suspicious_xor_used_as_pow = "deny"
+# API design (extended)
+pub_underscore_fields = "deny"
+pub_without_shorthand = "deny"
+ref_option = "deny"
+# Test quality: unwrap results in tests so failures print the error
+assertions_on_result_states = "deny"
 
 # --- Not enforced: a settled list, see the header ---
 #
@@ -422,6 +459,44 @@ significant_drop_tightening = "allow"
 # test-hygiene: Test placement. Applies to one helper that must live outside a
 # `cfg(test)` module because an integration test also uses it.
 tests_outside_test_module = "allow"
+#
+# naming: Single-char bindings (`v`, `e`, `i`) and `'a` lifetimes are idiomatic
+# in closures, match arms, and short generic contexts. 430+ sites in the engine
+# use them; renaming adds noise without improving comprehension. Similarly,
+# struct field prefixes match their domain vocabulary (e.g. `content_type` on a
+# `Content*` struct).
+min_ident_chars = "allow"
+single_char_lifetime_names = "allow"
+struct_field_names = "allow"
+#
+# casting: The rule engine uses `as` conversions and unchecked arithmetic in
+# numeric evaluation and attribute coercion paths. Converting to From/TryFrom
+# and checked_*/saturating_* across 59+ arithmetic and 6 cast sites would be a
+# significant refactor with marginal safety gain in this context.
+arithmetic_side_effects = "allow"
+as_conversions = "allow"
+#
+# pattern: Wildcard match arms, `impl Trait` params, mixed pub fields, and
+# shadow rebinding are pervasive API design choices in the policy engine:
+# 31 wildcard arms, 53 `impl Trait` params, 3 mixed-pub payload structs, and
+# 6 shadow rebindings in the parser/evaluator.
+wildcard_enum_match_arm = "allow"
+impl_trait_in_params = "allow"
+partial_pub_fields = "allow"
+shadow_unrelated = "allow"
+#
+# determinism: The engine iterates HashMap/HashSet in 10+ sites where order is
+# irrelevant to correctness (config validation, attribute merging). Switching to
+# BTreeMap would add overhead without benefit.
+iter_over_hash_type = "allow"
+#
+# module: The codebase uses `mod.rs` for three module directories. Switching to
+# file-adjacent style requires structural file renames across the tree.
+mod_module_files = "allow"
+#
+# test-naming: 222+ test functions use the `test_` prefix convention from before
+# this lint existed. Renaming them all would be pure churn with no behavior change.
+redundant_test_prefix = "allow"
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
 private_intra_doc_links = "deny"

@@ -356,7 +356,6 @@ pub const HTTP_CAPABILITY: &str = "perform_http";
 )]
 mod tests {
     use super::*;
-    use crate::http::{HttpRequest, HttpResponse, HttpTransportError};
     use async_trait::async_trait;
     use bytes::Bytes;
 

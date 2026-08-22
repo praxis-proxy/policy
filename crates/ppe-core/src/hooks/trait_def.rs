@@ -310,7 +310,6 @@ impl<P: PluginPayload> Default for PluginResult<P> {
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
-    use crate::extensions::Extensions;
 
     #[derive(Debug, Clone, PartialEq)]
     struct TestPayload {

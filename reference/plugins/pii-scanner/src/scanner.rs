@@ -225,7 +225,7 @@ impl HookHandler<CmfHook> for PiiScanner {
 mod tests {
     use super::*;
     use praxis_policy_core::cmf::{Role, ToolCall};
-    use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
+    use praxis_policy_core::plugin::{OnError, PluginMode};
     use serde_json::json;
     use std::collections::HashMap;
 

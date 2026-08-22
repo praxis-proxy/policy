@@ -52,7 +52,7 @@ tokio = { workspace = true, features = ["sync"] }
 chrono = { workspace = true }
 
 # Secret-clearing wrapper for the OAuth client secret in memory.
-zeroize = { version = "1.8", features = ["zeroize_derive"] }
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 # The `HttpTransport` test double. A dev-dependency so the feature is

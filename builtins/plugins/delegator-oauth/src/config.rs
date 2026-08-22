@@ -207,6 +207,6 @@ mod tests {
         let src = ClientSecretSource::EnvVar {
             name: "_THIS_VAR_DEFINITELY_NOT_SET_FOR_TESTS_".into(),
         };
-        assert!(src.resolve().is_err());
+        src.resolve().unwrap_err();
     }
 }

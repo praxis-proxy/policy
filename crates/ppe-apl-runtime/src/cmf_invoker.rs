@@ -240,7 +240,6 @@ impl CmfPluginInvoker {
         &self,
         taints: &[praxis_policy_apl_core::pipeline::TaintEvent],
     ) {
-        use praxis_policy_apl_core::pipeline::TaintScope;
         use praxis_policy_core::extensions::SecurityExtension;
 
         let session_labels: Vec<&str> = taints

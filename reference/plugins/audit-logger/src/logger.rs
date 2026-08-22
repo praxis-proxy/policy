@@ -203,7 +203,7 @@ mod tests {
     use super::*;
     use praxis_policy_core::cmf::{Message, Role, ToolCall};
     use praxis_policy_core::extensions::{MetaExtension, SecurityExtension, SubjectExtension};
-    use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
+    use praxis_policy_core::plugin::{OnError, PluginMode};
     use std::collections::HashMap;
     use std::sync::Arc;
 

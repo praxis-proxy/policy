@@ -81,7 +81,7 @@ pub type ClaimMap = HashMap<String, Value>;
 ///   * `permissions` / `scope`  → `subject.permissions` (array, or a
 ///     space-separated string)
 ///   * `groups` / `teams`       → `subject.teams`     (string array)
-///   * Every other claim        → `subject.claims.<name>` (stringified)
+///   * Every other claim        → `subject.claims.<name>` (full `Value`)
 ///
 /// Implementations with non-standard `IdPs` (Keycloak's nested
 /// `realm_access.roles`, AWS Cognito's `cognito:*` prefixed claims)
@@ -149,9 +149,8 @@ impl ClaimMapper for StandardClaimMap {
             }
         }
 
-        // Remaining claims — keyed by name with full Value preserved
-        // (ClientExtension.claims is HashMap<String, serde_json::Value>,
-        // unlike SubjectExtension.claims which stringifies).
+        // Remaining claims — keyed by name with full Value preserved,
+        // same as `SubjectExtension.claims`.
         const RESERVED: &[&str] = &[
             "client_id",
             "azp",
@@ -259,13 +258,12 @@ impl ClaimMapper for StandardClaimMap {
             }
         }
 
-        // Every other claim → `subject.claims.<name>`.
-        // SubjectExtension.claims is HashMap<String, String>, so
-        // non-string values get stringified (JSON-serialized). The
-        // reserved-claim set is the ones we already mapped to
-        // structured fields, plus the JWT standard registered
-        // claims (iss/aud/exp/nbf/iat/jti) which aren't useful as
-        // policy-visible claims.
+        // Every other claim → `subject.claims.<name>`, with the full
+        // `Value` preserved so a nested claim survives to the policy
+        // bag (`payload::walk` flattens it there). The reserved-claim
+        // set is the ones we already mapped to structured fields, plus
+        // the JWT standard registered claims (iss/aud/exp/nbf/iat/jti)
+        // which aren't useful as policy-visible claims.
         const RESERVED: &[&str] = &[
             "sub",
             "roles",
@@ -284,11 +282,7 @@ impl ClaimMapper for StandardClaimMap {
             if RESERVED.contains(&k.as_str()) {
                 continue;
             }
-            let stringified = match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            subject.claims.insert(k.clone(), stringified);
+            subject.claims.insert(k.clone(), v.clone());
         }
 
         Some(subject)
@@ -392,18 +386,59 @@ mod tests {
             "iat": 1700000000,  // reserved, should be skipped
         }));
         let subject = StandardClaimMap.map_subject(&claims).unwrap();
-        assert_eq!(
-            subject.claims.get("email"),
-            Some(&"alice@corp.com".to_owned())
-        );
+        assert_eq!(subject.claims.get("email"), Some(&json!("alice@corp.com")));
         assert_eq!(
             subject.claims.get("preferred_username"),
-            Some(&"alice".to_owned()),
+            Some(&json!("alice")),
         );
         // Reserved JWT claims aren't propagated as policy-visible
         // subject claims.
         assert!(!subject.claims.contains_key("iat"));
         assert!(!subject.claims.contains_key("sub"));
+    }
+
+    #[test]
+    fn structured_subject_claims_keep_their_shape() {
+        // A nested or list claim must reach `subject.claims` as the JSON it
+        // was, not as a string of that JSON. `praxis-policy-apl-cmf` flattens
+        // it into the policy bag from there, which is what makes
+        // `claim.realm_access.roles contains 'admin'` resolve for a Keycloak
+        // token.
+        let claims = make_claims(json!({
+            "sub": "alice",
+            "realm_access": { "roles": ["admin"] },
+            "projects": ["rhoai-prod", "rhoai-stage"],
+            "quota": 42,
+        }));
+        let subject = StandardClaimMap.map_subject(&claims).unwrap();
+        assert_eq!(
+            subject.claims.get("realm_access"),
+            Some(&json!({ "roles": ["admin"] })),
+            "a nested object must not be flattened to a string here"
+        );
+        assert_eq!(
+            subject.claims.get("projects"),
+            Some(&json!(["rhoai-prod", "rhoai-stage"])),
+        );
+        assert_eq!(subject.claims.get("quota"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn a_string_claim_is_not_confused_with_a_one_element_array() {
+        // The ambiguity stringification used to create: a claim whose value
+        // is literally the text `["a"]` and a claim whose value is the array
+        // `["a"]` both serialized to the same five characters, so nothing
+        // downstream could tell them apart. Preserving `Value` keeps them
+        // distinct.
+        let as_string = StandardClaimMap
+            .map_subject(&make_claims(json!({ "sub": "alice", "x": "[\"a\"]" })))
+            .unwrap();
+        let as_array = StandardClaimMap
+            .map_subject(&make_claims(json!({ "sub": "alice", "x": ["a"] })))
+            .unwrap();
+        assert_eq!(as_string.claims.get("x"), Some(&json!("[\"a\"]")));
+        assert_eq!(as_array.claims.get("x"), Some(&json!(["a"])));
+        assert_ne!(as_string.claims.get("x"), as_array.claims.get("x"));
     }
 
     // ---- map_client -------------------------------------------------------

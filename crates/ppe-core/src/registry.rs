@@ -539,7 +539,6 @@ mod tests {
     use super::*;
     use crate::error::PluginError;
     use crate::hooks::PluginResult;
-    use crate::hooks::payload::PluginPayload;
     use async_trait::async_trait;
 
     // -- Test payload and hook type --
@@ -675,14 +674,10 @@ mod tests {
         let h1: Arc<dyn AnyHookHandler> = Arc::new(TestHandler);
         let h2: Arc<dyn AnyHookHandler> = Arc::new(TestHandler);
 
-        assert!(
-            reg.register_for_names_inner(p1, c1, h1, &["hook_a"])
-                .is_ok()
-        );
-        assert!(
-            reg.register_for_names_inner(p2, c2, h2, &["hook_a"])
-                .is_err()
-        );
+        reg.register_for_names_inner(p1, c1, h1, &["hook_a"])
+            .unwrap();
+        reg.register_for_names_inner(p2, c2, h2, &["hook_a"])
+            .unwrap_err();
     }
 
     #[test]

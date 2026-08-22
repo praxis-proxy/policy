@@ -66,11 +66,16 @@ pub fn build(
 /// Operators with custom claim attributes write their Cedar policies
 /// against `principal.claims.foo` — those land via the `claim.foo` bag
 /// key, populated upstream by praxis-policy-apl-cmf from `SubjectExtension.claims`.
+/// A nested claim arrives already flattened by that bridge, so
+/// `realm_access: {roles: [...]}` becomes the bag key
+/// `claim.realm_access.roles` and therefore the record key
+/// `realm_access.roles`, which Cedar reaches with bracket syntax:
+/// `principal.claims["realm_access.roles"]`.
+///
 /// # Errors
 ///
 /// Returns `PdpError::Dispatch` when `subject.id` is absent, since Cedar cannot
-/// authorize without a principal, or when an attribute value has no Cedar
-/// equivalent.
+/// authorize without a principal.
 pub fn build_principal(
     bag: &AttributeBag,
     schema: Option<&Schema>,
@@ -124,8 +129,7 @@ pub fn build_principal(
         .unwrap_or_default();
     attrs.insert(ATTR_TEAMS.to_owned(), json!(teams));
 
-    let claims = collect_claims(bag)?;
-    attrs.insert(ATTR_CLAIMS.to_owned(), Value::Object(claims));
+    attrs.insert(ATTR_CLAIMS.to_owned(), Value::Object(collect_claims(bag)));
 
     let mut uid_obj = Map::new();
     uid_obj.insert(ATTR_TYPE.to_owned(), json!(entity_type));
@@ -184,12 +188,12 @@ pub fn build_resource(
             "cedar:() `resource.attributes` not JSON-representable: {e}"
         ))
     })?;
-    // Same floating-point limitation as `collect_claims`, reached from the other
-    // direction: this block is operator-authored YAML, so `score: 1.5` is an easy
-    // thing to write. Cedar rejects it with "error during entity
-    // deserialization" and the resolver fails closed, so without this check the
-    // operator sees every request through the step denied and nothing that says
-    // which value to change.
+    // The same floating-point limitation `collect_claims` works around, but the
+    // opposite call is right here: this block is operator-authored YAML, so
+    // `score: 1.5` is an easy thing to write and the operator can fix it. Cedar
+    // rejects it with "error during entity deserialization" and the resolver
+    // fails closed, so without this check the operator sees every request
+    // through the step denied and nothing that says which value to change.
     if let Some(key) = first_float_key(&attrs_json) {
         return Err(PdpError::Dispatch(format!(
             "cedar:() `resource.attributes.{key}` holds a floating-point value, and Cedar's value \
@@ -245,36 +249,31 @@ fn collect_prefixed_bools(bag: &AttributeBag, prefix: &str) -> Vec<String> {
 /// values. Each claim's value type comes through as JSON (`Bool`,
 /// `String`, etc.) so Cedar's record-of-records story works.
 ///
-/// # Errors
-///
-/// Returns `PdpError::Dispatch` when a claim holds a floating-point value.
-/// Cedar's value model has no floating-point type, so such a claim cannot be
-/// carried into an entity at all. Rejecting here rather than letting Cedar fail
-/// is purely about the diagnosis: Cedar reports "error during entity
-/// deserialization" with no indication of which value it choked on, and because
-/// the resolver fails closed, the operator sees every request denied with no
-/// clue what to change.
-fn collect_claims(bag: &AttributeBag) -> Result<Map<String, Value>, PdpError> {
+/// Cedar's value model has no floating-point type, so a float claim is carried
+/// as its string form rather than rejected. Claims come from an `IdP`'s token,
+/// not from anything the operator authored, so failing the request would deny
+/// every user whose provider happens to mint a non-integer number — a fault the
+/// operator cannot fix from this side. Compare `resource.attributes`, which
+/// *is* operator-authored YAML and still rejects a float outright
+/// (`first_float_key`), because there the fix is to edit the value.
+fn collect_claims(bag: &AttributeBag) -> Map<String, Value> {
     let mut out = Map::new();
     for (key, value) in bag.iter() {
         if let Some(name) = key.strip_prefix("claim.") {
             let v = match value {
                 AttributeValue::Bool(b) => json!(*b),
                 AttributeValue::Int(i) => json!(*i),
-                AttributeValue::Float(f) => {
-                    return Err(PdpError::Dispatch(format!(
-                        "attribute '{key}' holds the floating-point value {f}, and Cedar's value \
-                         model has no floating-point type; supply it as an integer or a string, \
-                         or drop the claim from the attribute source"
-                    )));
-                },
+                // Cedar has no float type — carry the string form so the
+                // claim stays visible to policy instead of failing the
+                // request. `principal.claims.<name>` compares as a string.
+                AttributeValue::Float(f) => json!(f.to_string()),
                 AttributeValue::String(s) => json!(s),
                 AttributeValue::StringSet(set) => json!(set.iter().collect::<Vec<_>>()),
             };
             out.insert(name.to_owned(), v);
         }
     }
-    Ok(out)
+    out
 }
 
 /// Name the first key holding a floating-point value, searching nested objects

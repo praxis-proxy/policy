@@ -318,8 +318,6 @@ impl RestrictSpec {
 )]
 mod tests {
     use super::*;
-    use crate::attributes::AttributeBag;
-
     // `is_empty()` is hand-written on both `CandidateConstraint` and
     // `RestrictSpec` (and mirrored again on the praxis-policy-core extension). A field
     // that's added to the struct but forgotten in `is_empty()` would make a
@@ -329,6 +327,10 @@ mod tests {
     // constraint-bearing field to count toward non-emptiness.
 
     #[test]
+    #[allow(
+        clippy::unneeded_field_pattern,
+        reason = "exhaustive destructure is intentional"
+    )]
     fn candidate_constraint_is_empty_covers_every_field() {
         // No `..`: adding a field breaks this until it's accounted for.
         let CandidateConstraint {
@@ -389,6 +391,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unneeded_field_pattern,
+        reason = "exhaustive destructure is intentional"
+    )]
     fn restrict_spec_is_empty_covers_every_field() {
         let RestrictSpec {
             allow_models,

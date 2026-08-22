@@ -186,7 +186,6 @@ impl SessionStore for MemorySessionStore {
 )]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn load_for_unknown_session_is_empty() {

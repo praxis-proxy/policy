@@ -138,23 +138,40 @@ fn claim_keys_become_a_record_preserving_each_value_type() {
     );
 }
 
-/// Cedar has no floating-point type, so a float cannot be carried into an
-/// entity at all. What matters is that the failure says so: the raw Cedar text
-/// is "error during entity deserialization", which tells an operator staring at
-/// a blanket deny nothing about which value to change.
+/// Cedar has no floating-point type, but a claim is not the operator's to fix —
+/// it arrives in whatever shape the `IdP` minted. So a float claim is carried as
+/// its string form and the request proceeds, rather than every user of a
+/// provider that emits one being denied. Contrast
+/// `a_float_resource_attribute_is_refused_with_a_message_naming_the_key` below,
+/// where the value *is* operator-authored and rejecting it is the help.
+///
+/// Note the assertion pins survival, not the string form — Cedar has no
+/// double, so there is no rival rendering to rule out.
 #[test]
-fn a_float_claim_is_refused_with_a_message_naming_the_cause() {
+fn a_float_claim_is_carried_as_a_string_rather_than_failing_the_request() {
     let mut bag = bag_with(&[]);
     bag.set("claim.score", 1.5_f64);
-    let err = build_principal(&bag, None, None).expect_err("Cedar cannot hold a float");
-    let msg = err.to_string();
+    let entity =
+        build_principal(&bag, None, None).expect("a float claim must not fail the request");
+    let claims = format!("{entity:?}");
     assert!(
-        msg.contains("floating-point") || msg.contains("float"),
-        "the message must name the cause, not just say deserialization failed: {msg}"
+        claims.contains("1.5"),
+        "the claim must survive as its string form, not be dropped: {claims}"
     );
+}
+
+/// An integer claim keeps its numeric type — the string fallback above is only
+/// for the values Cedar genuinely cannot hold, so a policy comparing
+/// `principal.claims.level > 2` still works.
+#[test]
+fn an_integer_claim_stays_numeric() {
+    let mut bag = bag_with(&[]);
+    bag.set("claim.level", 3_i64);
+    let entity = build_principal(&bag, None, None).expect("an integer claim is representable");
+    let dbg = format!("{entity:?}");
     assert!(
-        msg.contains("claim.score"),
-        "the message must name the offending key: {msg}"
+        dbg.contains("Long(3)") || dbg.contains("Int(3)"),
+        "an integer claim must not be stringified: {dbg}"
     );
 }
 

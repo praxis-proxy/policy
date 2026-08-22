@@ -38,7 +38,11 @@
 //                                    → perm.<p>             : Bool(true)
 //   sec.subject.teams                → subject.teams        : StringSet (always)
 //                                    → team.<t>             : Bool(true)
-//   sec.subject.claims               → claim.<k>            : String
+//   sec.subject.claims               → claim.<k>            : flattened JSON
+//        Scalars keep their type; scalar arrays (empty included) become a
+//        StringSet, numbers and bools as strings. `{}`, `null` and an array
+//        holding a nested container set no key, and a structured claim sets
+//        only the children beneath it.
 //   <derived>                        → authenticated        : Bool (iff subject.id is Some)
 //
 // ----- Client (OAuth application identity) ------------------------------
@@ -53,6 +57,7 @@
 //                                    → client.perm.<p>      : Bool(true)
 //   sec.client.teams                 → client.teams         : StringSet (always)
 //   sec.client.claims                → client.claim.<k>     : flattened JSON
+//        Same shape as `claim.<k>` above.
 //
 // ----- Workload identity (SPIFFE / mTLS attestation) --------------------
 //   sec.caller_workload.spiffe_id    → caller_workload.spiffe_id    : String
@@ -115,7 +120,11 @@ pub fn extract_security(sec: &SecurityExtension, bag: &mut AttributeBag) {
             bag.set(format!("{BAG_TEAM_PREFIX}{team}"), true);
         }
         for (k, v) in &subject.claims {
-            bag.set(format!("{BAG_CLAIM_PREFIX}{k}"), v.clone());
+            // Nested JSON claims flatten through the same walker
+            // `client.claim.*` and `custom.*` use — keeps semantics
+            // consistent across bridges, so `claim.realm_access.roles`
+            // is a StringSet a policy can test with `contains`.
+            crate::payload::walk(v, &format!("{BAG_CLAIM_PREFIX}{k}"), bag);
         }
         // Single top-level authenticated marker — DSL idiom is `require(authenticated)`,
         // unprefixed. Only set when truly authenticated (subject + id present).
@@ -178,8 +187,6 @@ pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
     let teams: HashSet<String> = client.teams.iter().cloned().collect();
     bag.set("client.teams", teams);
     for (k, v) in &client.claims {
-        // Nested JSON claims flatten through the same walker `custom.*`
-        // uses — keeps semantics consistent across bridges.
         crate::payload::walk(v, &format!("client.claim.{k}"), bag);
     }
 }
@@ -249,7 +256,7 @@ fn subject_type_str(t: SubjectType) -> &'static str {
 )]
 mod tests {
     use super::*;
-    use praxis_policy_core::extensions::{SubjectExtension, WorkloadIdentity};
+    use praxis_policy_core::extensions::SubjectExtension;
     use std::collections::HashMap;
 
     fn alice() -> SecurityExtension {
@@ -260,7 +267,7 @@ mod tests {
                 roles: HashSet::from(["hr".to_owned(), "manager".to_owned()]),
                 permissions: HashSet::from(["view_ssn".to_owned()]),
                 teams: HashSet::from(["compliance".to_owned()]),
-                claims: HashMap::from([("iss".to_owned(), "auth.corp".to_owned())]),
+                claims: HashMap::from([("iss".to_owned(), serde_json::json!("auth.corp"))]),
             }),
             this_workload: Some(WorkloadIdentity {
                 spiffe_id: Some("spiffe://corp.com/hr-tool".into()),
@@ -553,6 +560,65 @@ mod tests {
         assert_eq!(
             bag.get_int("client.claim.scope_meta.max_calls_per_min"),
             Some(60),
+        );
+    }
+
+    #[test]
+    fn subject_claims_flatten_nested_paths() {
+        // The reason this bridge exists: an IdP that nests roles under
+        // `realm_access.roles` (Keycloak) must reach policy with the
+        // structure intact, so `claim.realm_access.roles contains 'admin'`
+        // resolves. Before subject claims carried `Value`, this arrived as
+        // one opaque JSON string and no predicate could see inside it.
+        let subject = SubjectExtension {
+            id: Some("alice".to_owned()),
+            claims: HashMap::from([(
+                "realm_access".to_owned(),
+                serde_json::json!({ "roles": ["admin", "auditor"] }),
+            )]),
+            ..Default::default()
+        };
+        let sec = SecurityExtension {
+            subject: Some(subject),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_security(&sec, &mut bag);
+        assert!(
+            bag.set_contains("claim.realm_access.roles", "admin"),
+            "a nested string array must arrive as a StringSet, not a JSON string"
+        );
+        assert!(bag.set_contains("claim.realm_access.roles", "auditor"));
+        assert!(
+            bag.get("claim.realm_access").is_none(),
+            "the parent key holds no scalar of its own — only the flattened children"
+        );
+    }
+
+    #[test]
+    fn subject_claims_keep_scalars_as_scalars() {
+        // The compatibility half of the same change: a plain string claim
+        // still lands as a String at the same key, so an existing policy
+        // written as `claim.tenant == 'acme'` is unaffected.
+        let subject = SubjectExtension {
+            id: Some("alice".to_owned()),
+            claims: HashMap::from([
+                ("tenant".to_owned(), serde_json::json!("acme")),
+                ("level".to_owned(), serde_json::json!(3)),
+            ]),
+            ..Default::default()
+        };
+        let sec = SecurityExtension {
+            subject: Some(subject),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_security(&sec, &mut bag);
+        assert_eq!(bag.get_string("claim.tenant"), Some("acme"));
+        assert_eq!(
+            bag.get_int("claim.level"),
+            Some(3),
+            "a numeric claim keeps its type"
         );
     }
 
