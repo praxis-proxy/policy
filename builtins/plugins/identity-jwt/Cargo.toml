@@ -57,13 +57,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
-# Async HTTP — used by `DecodingKeySource::build_async()` to fetch
-# IdP JWKS during `Plugin::initialize()`. We default the rustls-tls
-# backend (no OpenSSL system dep) and turn off any features we don't
-# use to keep the dep tree lean. praxis-policy-plugin-delegator-oauth pulls reqwest
-# too, so cargo dedups to one copy.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
 # `futures::join_all` so multiple resolvers' JWKS endpoints fetch
 # concurrently at initialize time rather than one-at-a-time.
 futures = { workspace = true }
@@ -76,9 +69,11 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
 
 [dev-dependencies]
+# The `HttpTransport` test double. A dev-dependency so the feature is
+# enabled for test builds only; resolver 3 keeps it out of the normal
+# build of this crate.
+praxis-policy-core = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-# Mock JWKS endpoint for the async `JwksUrl` resolution tests.
-mockito = "1"
 # RSA keypair + JWK fixtures for tests. `rsa` generates keypairs;
 # `pkcs8` encodes them in the PEM format jsonwebtoken accepts.
 rsa = { version = "0.9", features = ["pem"] }

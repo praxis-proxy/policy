@@ -94,6 +94,11 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_yaml = "0.9"
 serde_json = "1"
 async-trait = "0.1"
+# HTTP types only (no client, no I/O) for the `HttpTransport` seam in
+# praxis-policy-core. Both are already in the tree via the plugins' HTTP
+# clients, so this adds nothing transitively.
+http = "1"
+bytes = "1"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }

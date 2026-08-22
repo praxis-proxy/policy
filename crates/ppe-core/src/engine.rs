@@ -263,6 +263,19 @@ pub struct PolicyEngine {
     /// install handlers via `annotate_route`. Empty by default — the
     /// `load_config(PolicyConfig)` path skips visitors entirely.
     visitors: RwLock<Vec<Arc<dyn crate::visitor::ConfigVisitor>>>,
+
+    /// The host's outbound HTTP transport, if one was installed.
+    ///
+    /// Not config-derived and not part of the runtime snapshot: a host
+    /// installs it once during wiring, before `initialize()`, and it does
+    /// not change across hot reloads. `OnceLock` rather than a lock
+    /// because reads happen per plugin per request and set-once is the
+    /// actual lifecycle.
+    ///
+    /// PPE performs no HTTP itself. Absent an installed transport, a
+    /// plugin that needs one fails at `initialize_with` with a message
+    /// naming the omission — see `crate::host::ServiceError`.
+    http_transport: std::sync::OnceLock<Arc<dyn crate::http::HttpTransport>>,
 }
 
 /// Emit warnings for YAML settings that the runtime doesn't currently
@@ -375,6 +388,7 @@ impl PolicyEngine {
             generation: AtomicU64::new(0),
             task_tracker: tokio_util::task::TaskTracker::new(),
             visitors: RwLock::new(Vec::new()),
+            http_transport: std::sync::OnceLock::new(),
         }
     }
 
@@ -861,16 +875,80 @@ impl PolicyEngine {
         Ok(())
     }
 
-    /// Initialize all registered plugins.
+    /// Install the host's outbound HTTP transport.
     ///
-    /// Calls `plugin.initialize()` on each registered plugin. Must be
-    /// called before invoking any hooks. Idempotent — calling twice
-    /// has no effect.
+    /// PPE performs no HTTP of its own. A plugin that must reach an
+    /// `IdP` — a JWKS fetch, a token exchange, a CIBA backchannel —
+    /// reaches this by asking through
+    /// [`HostServices::http_request`](crate::host::HostServices::http_request), gated by
+    /// the `perform_http` capability. Installing the host's own client
+    /// keeps one HTTP stack in the process: one connection pool, one
+    /// TLS trust store, one egress policy.
+    ///
+    /// Call before [`initialize`](Self::initialize), since that is when
+    /// a plugin may first want it.
+    ///
+    /// Set-once. A second call is ignored and returns `false`, so a host
+    /// that wires twice does not silently swap the transport out from
+    /// under plugins already holding a borrowed reference.
+    ///
+    /// The transport must be runtime-agnostic and build any connection
+    /// pool lazily. A host may drive `initialize()` on a short-lived
+    /// runtime that is dropped before the first request, at which point
+    /// eagerly created connections are already dead.
+    pub fn set_http_transport(&self, transport: Arc<dyn crate::http::HttpTransport>) -> bool {
+        let installed = self.http_transport.set(transport).is_ok();
+        if !installed {
+            warn!("policy: an HTTP transport is already installed; ignoring the second install");
+        }
+        installed
+    }
+
+    /// The host services `plugin_name` may borrow, per its capabilities.
+    ///
+    /// The withheld case is carried rather than dropped so the plugin's
+    /// error names the capability to add instead of blaming the host for
+    /// installing nothing.
+    fn init_extensions_for(
+        &self,
+        capabilities: &std::collections::HashSet<String>,
+    ) -> crate::host::InitExtensions {
+        let ext = crate::host::InitExtensions::new();
+        match self.http_transport.get() {
+            None => ext,
+            Some(t) => {
+                if capabilities.contains(crate::host::HTTP_CAPABILITY) {
+                    ext.with_http(Arc::clone(t))
+                } else {
+                    ext.with_http_withheld()
+                }
+            },
+        }
+    }
+
+    /// Seed a request's extensions with the host services available to
+    /// plugins, before the executor filters them per plugin.
+    ///
+    /// `filter_extensions` applies the `perform_http` gate; this only
+    /// makes the transport reachable at all.
+    fn with_host_services(&self, mut extensions: Extensions) -> Extensions {
+        if let Some(t) = self.http_transport.get() {
+            extensions.http_transport = crate::host::HttpTransportSlot::installed(Arc::clone(t));
+        }
+        extensions
+    }
+
+    /// Initialize every registered plugin.
+    ///
+    /// Calls `plugin.initialize_with()` on each, handing it the host
+    /// services its capabilities allow. Must be called before invoking
+    /// any hooks. Idempotent — calling twice has no effect.
+    ///
     /// # Errors
     ///
-    /// Returns `PluginError::Execution` when a plugin's `initialize` fails.
-    /// Plugins already initialized in this call are shut down first, so the
-    /// engine does not come up half-started.
+    /// Returns `PluginError::Execution` when a plugin's initialization
+    /// fails. Plugins already initialized in this call are shut down
+    /// first, so the engine does not come up half-started.
     pub async fn initialize(&self) -> Result<(), Box<PluginError>> {
         if self.initialized.load(Ordering::Acquire) {
             return Ok(());
@@ -892,7 +970,9 @@ impl PolicyEngine {
                 let plugin = plugin_ref.plugin().clone();
                 let plugin_name = name;
 
-                if let Err(e) = plugin.initialize().await {
+                let init_ext = self.init_extensions_for(&plugin_ref.trusted_config().capabilities);
+
+                if let Err(e) = plugin.initialize_with(&init_ext).await {
                     error!("Failed to initialize plugin '{}': {}", plugin_name, e);
 
                     for init_name in initialized_plugins.iter().rev() {
@@ -1035,7 +1115,9 @@ impl PolicyEngine {
             .execute(
                 &entries,
                 payload,
-                extensions,
+                // Make the host's transport reachable; `filter_extensions`
+                // applies the `perform_http` gate per plugin.
+                self.with_host_services(extensions),
                 context_table,
                 &self.task_tracker,
             )
@@ -1106,7 +1188,9 @@ impl PolicyEngine {
             .execute(
                 &entries,
                 boxed,
-                extensions,
+                // Make the host's transport reachable; `filter_extensions`
+                // applies the `perform_http` gate per plugin.
+                self.with_host_services(extensions),
                 context_table,
                 &self.task_tracker,
             )
@@ -1183,7 +1267,9 @@ impl PolicyEngine {
             .execute(
                 &entries,
                 boxed,
-                extensions,
+                // Make the host's transport reachable; `filter_extensions`
+                // applies the `perform_http` gate per plugin.
+                self.with_host_services(extensions),
                 context_table,
                 &self.task_tracker,
             )
@@ -1249,7 +1335,9 @@ impl PolicyEngine {
             .execute(
                 entries,
                 boxed,
-                extensions,
+                // Make the host's transport reachable; `filter_extensions`
+                // applies the `perform_http` gate per plugin.
+                self.with_host_services(extensions),
                 context_table,
                 &self.task_tracker,
             )
@@ -1551,7 +1639,7 @@ impl PolicyEngine {
     /// - the plugin name isn't registered in the engine,
     /// - the factory for the plugin's `kind` is missing,
     /// - the factory's `create` errors,
-    /// - or `initialize()` fails on the new instance.
+    /// - or `initialize_with()` fails on the new instance.
     ///
     /// Each of those is a configuration / wiring fault the caller
     /// should treat as `NotFound` at dispatch time. The method logs
@@ -1674,11 +1762,16 @@ impl PolicyEngine {
             }
         };
 
-        if let Err(e) = instance.plugin.initialize().await {
+        // `initialize_with`, not `initialize` — an override instance is a
+        // full instance and needs the same host services the registered
+        // one got. Capabilities come from `merged_config`, so a route that
+        // narrows them narrows what its override may reach.
+        let init_ext = self.init_extensions_for(&merged_config.capabilities);
+        if let Err(e) = instance.plugin.initialize_with(&init_ext).await {
             error!(
                 plugin = %plugin_name,
                 error = %e,
-                "build_override_entries: initialize() failed on new instance",
+                "build_override_entries: initialize_with() failed on new instance",
             );
             return Vec::new();
         }
@@ -1728,7 +1821,7 @@ impl PolicyEngine {
     /// - no factory is available for the plugin's kind,
     /// - the factory fails to create the instance,
     /// - the new instance has no handler for the target hook,
-    /// - or `initialize()` fails on the new instance.
+    /// - or `initialize_with()` fails on the new instance.
     async fn create_override_instance(
         &self,
         base_entry: &crate::registry::HookEntry,
@@ -1803,8 +1896,11 @@ impl PolicyEngine {
 
         // Initialize the new instance — without this, plugins that need to
         // set up DB connections / file handles / network clients run with
-        // default state.
-        if let Err(e) = instance.plugin.initialize().await {
+        // default state. `initialize_with` rather than `initialize` for the
+        // same reason the registration path uses it: a plugin that reaches
+        // the host during init must reach it here too.
+        let init_ext = self.init_extensions_for(&merged_config.capabilities);
+        if let Err(e) = instance.plugin.initialize_with(&init_ext).await {
             error!(
                 "Failed to initialize override instance for '{}': {} — falling back to base",
                 base_config.name, e
@@ -4859,6 +4955,180 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 1);
     }
 
+    // ---- host services at initialization -------------------------------
+    //
+    // The engine calls `initialize_with`, never `initialize` directly.
+    // These pin that the compatibility shim still runs an old-style
+    // plugin, and that the `perform_http` gate is applied before the
+    // plugin ever sees the transport.
+
+    #[derive(Debug)]
+    struct StubTransport;
+
+    #[async_trait]
+    impl crate::http::HttpTransport for StubTransport {
+        async fn execute(
+            &self,
+            _req: crate::http::HttpRequest,
+        ) -> Result<crate::http::HttpResponse, crate::http::HttpTransportError> {
+            Ok(crate::http::HttpResponse::new(200, bytes::Bytes::new()))
+        }
+    }
+
+    /// Records what its initialization saw, and through which method.
+    struct ServiceProbePlugin {
+        cfg: PluginConfig,
+        /// `Ok(true)` transport available, `Ok(false)` withheld,
+        /// `Err(())` never installed.
+        saw: Arc<std::sync::Mutex<Option<Result<bool, ()>>>>,
+        /// Set only by the legacy `initialize()` path.
+        used_legacy: Arc<std::sync::atomic::AtomicBool>,
+        /// When true, override the old method instead of the new one.
+        legacy: bool,
+    }
+
+    #[async_trait]
+    impl Plugin for ServiceProbePlugin {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+
+        async fn initialize(&self) -> Result<(), Box<PluginError>> {
+            self.used_legacy
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn initialize_with(
+            &self,
+            ext: &crate::host::InitExtensions,
+        ) -> Result<(), Box<PluginError>> {
+            if self.legacy {
+                // Exercise the documented "call it yourself" path.
+                return self.initialize().await;
+            }
+            use crate::host::{HostServices as _, HttpRequestError, ServiceError};
+            // A request the fake transport answers when it is reachable.
+            // Availability is now observable only by asking, which is
+            // the point of the operation shape.
+            let seen = match ext
+                .http_request(
+                    crate::http::HttpRequest::get("https://example.test/probe"),
+                    crate::http_retry::RetryPolicy::none(),
+                )
+                .await
+            {
+                Ok(_) | Err(HttpRequestError::Transport(_)) => Ok(true),
+                Err(HttpRequestError::Unavailable(ServiceError::NotPermitted { .. })) => Ok(false),
+                Err(HttpRequestError::Unavailable(ServiceError::NotInstalled { .. })) => Err(()),
+            };
+            *self
+                .saw
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(seen);
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+            Ok(())
+        }
+    }
+
+    impl HookHandler<TestHook> for ServiceProbePlugin {
+        async fn handle(
+            &self,
+            _payload: &TestPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> PluginResult<TestPayload> {
+            PluginResult::allow()
+        }
+    }
+
+    /// Initialize one probe plugin and report what it saw.
+    async fn probe_init(
+        caps: &[&str],
+        install_transport: bool,
+        legacy: bool,
+    ) -> (Option<Result<bool, ()>>, bool) {
+        let mgr = PolicyEngine::default();
+        if install_transport {
+            assert!(mgr.set_http_transport(Arc::new(StubTransport)));
+        }
+
+        let mut cfg = make_config("probe", 10, PluginMode::Sequential);
+        cfg.capabilities = caps.iter().map(|c| (*c).to_owned()).collect();
+
+        let saw = Arc::new(std::sync::Mutex::new(None));
+        let used_legacy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let plugin = Arc::new(ServiceProbePlugin {
+            cfg: cfg.clone(),
+            saw: Arc::clone(&saw),
+            used_legacy: Arc::clone(&used_legacy),
+            legacy,
+        });
+        mgr.register_handler::<TestHook, _>(plugin, cfg).unwrap();
+        mgr.initialize().await.unwrap();
+
+        let seen = *saw
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (seen, used_legacy.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn a_plugin_with_perform_http_receives_the_transport_at_init() {
+        let (seen, _) = probe_init(&["perform_http"], true, false).await;
+        assert_eq!(
+            seen,
+            Some(Ok(true)),
+            "a plugin declaring perform_http must reach the installed transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plugin_without_perform_http_is_told_it_lacks_the_capability() {
+        // Not "no transport installed" — that would send an operator
+        // hunting a host wiring bug when the fix is one line of their
+        // own config.
+        let (seen, _) = probe_init(&["read_headers"], true, false).await;
+        assert_eq!(seen, Some(Ok(false)));
+    }
+
+    #[tokio::test]
+    async fn with_no_transport_installed_even_a_capable_plugin_is_told_so() {
+        let (seen, _) = probe_init(&["perform_http"], false, false).await;
+        assert_eq!(
+            seen,
+            Some(Err(())),
+            "holding the capability cannot conjure a transport the host never installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_plugin_overriding_only_initialize_still_runs() {
+        // The compatibility shim: `initialize_with`'s default forwards to
+        // `initialize`, so a plugin written before host services existed
+        // keeps working untouched.
+        let (_, used_legacy) = probe_init(&[], false, true).await;
+        assert!(
+            used_legacy,
+            "the engine calls initialize_with, whose default must still run initialize()"
+        );
+    }
+
+    #[tokio::test]
+    async fn installing_a_transport_twice_keeps_the_first() {
+        // Set-once: a second install would swap the transport out from
+        // under plugins already holding a borrowed reference.
+        let mgr = PolicyEngine::default();
+        assert!(mgr.set_http_transport(Arc::new(StubTransport)));
+        assert!(
+            !mgr.set_http_transport(Arc::new(StubTransport)),
+            "the second install must be refused, not silently applied"
+        );
+    }
+
     /// Override instances must have `initialize()` called so plugins that
     /// open DB connections / file handles / network clients on init don't
     /// run with default state. Uses a tracking factory whose plugin
@@ -4965,6 +5235,208 @@ routes:
             2,
             "override instance must have initialize() called",
         );
+    }
+
+    // ---- host services on the override paths ---------------------------
+    //
+    // `test_route_override_initializes_new_instance` above passes whether
+    // the engine calls `initialize` or `initialize_with`, because its
+    // plugin overrides only the former and the default shim forwards to
+    // it. These use a plugin that overrides `initialize_with` instead, so
+    // the two are distinguishable: an override instance built through
+    // either path must reach the host, under its own merged capabilities.
+
+    /// What an initialization could reach: `Ok(true)` the transport was
+    /// available, `Ok(false)` it exists but this plugin may not use it,
+    /// `Err(())` the host installed none.
+    async fn probe_host_transport(ext: &crate::host::InitExtensions) -> Result<bool, ()> {
+        use crate::host::{HostServices as _, HttpRequestError, ServiceError};
+        match ext
+            .http_request(
+                crate::http::HttpRequest::get("https://example.test/probe"),
+                crate::http_retry::RetryPolicy::none(),
+            )
+            .await
+        {
+            Ok(_) | Err(HttpRequestError::Transport(_)) => Ok(true),
+            Err(HttpRequestError::Unavailable(ServiceError::NotPermitted { .. })) => Ok(false),
+            Err(HttpRequestError::Unavailable(ServiceError::NotInstalled { .. })) => Err(()),
+        }
+    }
+
+    /// Appends one entry per instance initialized, in order. The log is
+    /// owned by the test rather than a `static` so tests running
+    /// concurrently in one process cannot see each other's entries.
+    struct HostProbePlugin {
+        cfg: PluginConfig,
+        log: Arc<std::sync::Mutex<Vec<Result<bool, ()>>>>,
+    }
+
+    #[async_trait]
+    impl Plugin for HostProbePlugin {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+
+        async fn initialize_with(
+            &self,
+            ext: &crate::host::InitExtensions,
+        ) -> Result<(), Box<PluginError>> {
+            let seen = probe_host_transport(ext).await;
+            self.log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(seen);
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+            Ok(())
+        }
+    }
+
+    impl HookHandler<TestHook> for HostProbePlugin {
+        async fn handle(
+            &self,
+            _payload: &TestPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> PluginResult<TestPayload> {
+            PluginResult::allow()
+        }
+    }
+
+    struct HostProbeFactory {
+        log: Arc<std::sync::Mutex<Vec<Result<bool, ()>>>>,
+    }
+
+    impl crate::factory::PluginFactory for HostProbeFactory {
+        fn create(
+            &self,
+            config: &PluginConfig,
+        ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            let plugin = Arc::new(HostProbePlugin {
+                cfg: config.clone(),
+                log: Arc::clone(&self.log),
+            });
+            let handler: Arc<dyn AnyHookHandler> =
+                Arc::new(TypedHandlerAdapter::<TestHook, HostProbePlugin>::new(
+                    Arc::clone(&plugin),
+                ));
+            Ok(crate::factory::PluginInstance {
+                plugin,
+                handlers: vec![("test_hook", handler)],
+            })
+        }
+    }
+
+    /// Engine with a stub transport and one `perform_http` base plugin,
+    /// plus the log its instances append to.
+    fn host_probe_engine(
+        yaml: &str,
+    ) -> (PolicyEngine, Arc<std::sync::Mutex<Vec<Result<bool, ()>>>>) {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mgr = PolicyEngine::default();
+        assert!(mgr.set_http_transport(Arc::new(StubTransport)));
+        mgr.register_factory(
+            "test/host_probe",
+            Box::new(HostProbeFactory {
+                log: Arc::clone(&log),
+            }),
+        );
+        mgr.load_config(crate::config::parse_config(yaml).unwrap())
+            .unwrap();
+        (mgr, log)
+    }
+
+    const HOST_PROBE_YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: prober
+    kind: test/host_probe
+    hooks: [test_hook]
+    mode: sequential
+    priority: 10
+    capabilities: [perform_http]
+    config:
+      max_requests: 100
+routes:
+  - tool: get_compensation
+    plugins:
+      - prober:
+          config:
+            max_requests: 10
+"#;
+
+    #[tokio::test]
+    async fn a_route_override_instance_receives_host_services() {
+        // The failure this pins: an override instance built by
+        // `create_override_instance` got the no-op default `initialize()`,
+        // so a plugin that fetches during init — `identity-jwt` with a
+        // `jwks_url` issuer — came up with nothing and denied every
+        // request on that route while the base route worked.
+        let (mgr, log) = host_probe_engine(HOST_PROBE_YAML);
+        mgr.initialize().await.unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![Ok(true)],
+            "the base instance reaches the transport"
+        );
+
+        let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "t".into() });
+        let (result, _) = mgr
+            .invoke_by_name(
+                "test_hook",
+                payload,
+                make_meta("tool", "get_compensation", None, &[]),
+                None,
+            )
+            .await;
+        assert!(result.continue_processing);
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![Ok(true), Ok(true)],
+            "the override instance must reach the transport too, not the \
+             default initialize() that reaches nothing",
+        );
+    }
+
+    #[tokio::test]
+    async fn build_override_entries_hands_the_new_instance_host_services() {
+        // The host-facing entry point to the same path. It has no caller
+        // inside this crate, so nothing else would catch a regression.
+        let (mgr, log) = host_probe_engine(HOST_PROBE_YAML);
+        mgr.initialize().await.unwrap();
+
+        let cfg_override: serde_yaml::Value = serde_yaml::from_str("max_requests: 10").unwrap();
+        let entries = mgr
+            .build_override_entries("prober", Some(&cfg_override), None, None)
+            .await;
+        assert!(!entries.is_empty(), "the override instance was built");
+
+        assert_eq!(*log.lock().unwrap(), vec![Ok(true), Ok(true)]);
+    }
+
+    #[tokio::test]
+    async fn an_override_that_drops_perform_http_withholds_the_transport() {
+        // Capabilities come from the merged config, so narrowing them on a
+        // route narrows what that route's instance may reach. `Ok(false)`
+        // rather than `Err(())`: the host wired a transport, and the fix is
+        // in the operator's own config.
+        let (mgr, log) = host_probe_engine(HOST_PROBE_YAML);
+        mgr.initialize().await.unwrap();
+
+        let cfg_override: serde_yaml::Value = serde_yaml::from_str("max_requests: 10").unwrap();
+        let narrowed: std::collections::HashSet<String> =
+            ["read_headers".to_owned()].into_iter().collect();
+        let entries = mgr
+            .build_override_entries("prober", Some(&cfg_override), Some(&narrowed), None)
+            .await;
+        assert!(!entries.is_empty());
+
+        assert_eq!(*log.lock().unwrap(), vec![Ok(true), Ok(false)]);
     }
 
     /// Override and base must have INDEPENDENT circuit breakers. A failure

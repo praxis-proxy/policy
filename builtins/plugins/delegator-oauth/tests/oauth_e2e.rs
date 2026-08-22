@@ -32,6 +32,9 @@
 )]
 use std::sync::Arc;
 
+use praxis_policy_core::http::{HttpTransport, HttpTransportError};
+use praxis_policy_core::http_testing::FakeTransport;
+
 use praxis_policy_core::delegation::{
     AttenuationConfig, AuthEnforcedBy, DelegationPayload, DelegationSubject, HOOK_TOKEN_DELEGATE,
     TargetType, TokenDelegateHook,
@@ -43,7 +46,6 @@ use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
 use praxis_policy_plugin_delegator_oauth::OAuthDelegator;
 
-use mockito::{Matcher, Server};
 use serde_json::json;
 
 // =====================================================================
@@ -58,6 +60,11 @@ fn plugin_config(token_endpoint: &str) -> PluginConfig {
         mode: PluginMode::Sequential,
         priority: 10,
         on_error: OnError::Fail,
+        // A token exchange is an outbound call, so the plugin declares
+        // `perform_http`. Withholding it stops the exchange rather than
+        // degrading it: a delegator that silently skipped its IdP call
+        // would fail open.
+        capabilities: ["perform_http".to_owned()].into(),
         config: Some(json!({
             "token_endpoint": token_endpoint,
             "client_id": "gateway-client",
@@ -95,8 +102,24 @@ fn build_payload(target: &str, audience: &str, scopes: &[&str]) -> DelegationPay
         })
 }
 
-async fn build_manager(token_endpoint: &str) -> Arc<PolicyEngine> {
-    let cfg = plugin_config(token_endpoint);
+/// Path the scripted `IdP` serves its token endpoint on.
+const TOKEN_PATH: &str = "/oauth/token";
+
+/// Token endpoint URL for the scripted transport. The host never
+/// resolves — the transport is programmed, not dialled.
+fn token_endpoint() -> String {
+    format!("https://idp.example.test{TOKEN_PATH}")
+}
+
+/// An engine wired to `http`.
+///
+/// These tests exercise what the delegator sends and how it maps what
+/// comes back. Wire mechanics belong to the transport and are tested
+/// against real sockets where it lives. What a script buys here is the
+/// half a mock server cannot reach: a timeout on demand, so the
+/// non-idempotent retry rule is assertable without waiting on one.
+async fn build_manager(http: &Arc<FakeTransport>) -> Arc<PolicyEngine> {
+    let cfg = plugin_config(&token_endpoint());
     let delegator = OAuthDelegator::new(cfg.clone()).expect("delegator constructs");
     let mgr = Arc::new(PolicyEngine::default());
     mgr.register_handler_for_names::<TokenDelegateHook, _>(
@@ -105,8 +128,66 @@ async fn build_manager(token_endpoint: &str) -> Arc<PolicyEngine> {
         &[HOOK_TOKEN_DELEGATE],
     )
     .unwrap();
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    mgr.set_http_transport(transport);
     mgr.initialize().await.unwrap();
     mgr
+}
+
+/// A transport that answers the token endpoint with `status` and `body`.
+fn idp(status: u16, body: &str) -> Arc<FakeTransport> {
+    Arc::new(FakeTransport::new().json(TOKEN_PATH, status, body))
+}
+
+/// Percent-decode one `application/x-www-form-urlencoded` value.
+fn form_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            },
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(b) => out.push(b),
+                    Err(_) => out.push(bytes[i]),
+                }
+                i += 3;
+            },
+            b => {
+                out.push(b);
+                i += 1;
+            },
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether the form body the delegator sent mentions `key` at all.
+///
+/// Absence is the assertion in several cases — a `this_workload` grant
+/// must not carry a `subject_token`, and a delegation with no actor must
+/// not invent one — so it needs to be as easy to state as presence.
+fn did_not_send(http: &FakeTransport, key: &str) -> bool {
+    sent_field(http, key).is_none()
+}
+
+/// One field from the form body the delegator actually sent.
+///
+/// Asserting on the recorded request rather than on a server-side
+/// matcher means a failure names the value that was wrong, instead of
+/// reporting that a mock went unmatched.
+fn sent_field(http: &FakeTransport, key: &str) -> Option<String> {
+    let req = http.last_request()?;
+    let body = String::from_utf8_lossy(&req.body).into_owned();
+    body.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (form_decode(k) == key).then(|| form_decode(v))
+    })
 }
 
 async fn invoke(
@@ -134,40 +215,18 @@ async fn invoke(
 /// expiry derived from `expires_in`.
 #[tokio::test]
 async fn happy_path_mints_delegated_token() {
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/oauth/token")
-        .match_header("content-type", "application/x-www-form-urlencoded")
-        // Expect the form fields RFC 8693 requires.
-        .match_body(Matcher::AllOf(vec![
-            Matcher::UrlEncoded(
-                "grant_type".into(),
-                "urn:ietf:params:oauth:grant-type:token-exchange".into(),
-            ),
-            Matcher::UrlEncoded(
-                "subject_token".into(),
-                "caller-bearer-token-bytes".into(),
-            ),
-            Matcher::UrlEncoded(
-                "audience".into(),
-                "https://hr.example.com".into(),
-            ),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "access_token": "minted-downstream-jwt",
-                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                "expires_in": 300,
-                "scope": "read:compensation audit",
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
+    let http = idp(
+        200,
+        &json!({
+            "access_token": "minted-downstream-jwt",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "expires_in": 300,
+            "scope": "read:compensation audit",
+        })
+        .to_string(),
+    );
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let payload = build_payload(
         "get_compensation",
         "https://hr.example.com",
@@ -209,7 +268,32 @@ async fn happy_path_mints_delegated_token() {
         "ttl should reflect min(idp_ttl, route_hint); got {ttl_left}s",
     );
 
-    mock.assert_async().await;
+    // The RFC 8693 fields the exchange requires. Asserted on what was
+    // actually sent, so a failure names the wrong value rather than
+    // reporting an unmatched mock.
+    assert_eq!(
+        sent_field(&http, "grant_type").as_deref(),
+        Some("urn:ietf:params:oauth:grant-type:token-exchange")
+    );
+    assert_eq!(
+        sent_field(&http, "subject_token").as_deref(),
+        Some("caller-bearer-token-bytes")
+    );
+    assert_eq!(
+        sent_field(&http, "audience").as_deref(),
+        Some("https://hr.example.com")
+    );
+    let sent = http.last_request().expect("a request was sent");
+    assert_eq!(
+        sent.headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-www-form-urlencoded")
+    );
+    assert!(
+        sent.headers.contains_key("authorization"),
+        "client credentials ride in the Authorization header"
+    );
 }
 
 /// `IdP` returns a 400 with the standard `error` / `error_description`
@@ -217,22 +301,16 @@ async fn happy_path_mints_delegated_token() {
 /// `IdP`'s machine-readable code.
 #[tokio::test]
 async fn idp_rejection_surfaces_error_code() {
-    let mut server = Server::new_async().await;
-    server
-        .mock("POST", "/oauth/token")
-        .with_status(400)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "error": "invalid_grant",
-                "error_description": "subject_token is not active",
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
+    let http = idp(
+        400,
+        &json!({
+            "error": "invalid_grant",
+            "error_description": "subject_token is not active",
+        })
+        .to_string(),
+    );
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let payload = build_payload("tool", "https://downstream.example.com", &["read"]);
 
     let result = invoke(&mgr, payload).await;
@@ -258,7 +336,12 @@ async fn idp_unreachable_surfaces_violation() {
     // Use a localhost URL that should be unreachable (no listener
     // on that port). The `127.0.0.1:1` port-1 trick: port 1 isn't
     // bound by typical systems and connection refusal is fast.
-    let mgr = build_manager("http://127.0.0.1:1/oauth/token").await;
+    // Unreachable on demand: a refused connection, scripted rather than
+    // relying on port 1 being unbound.
+    let http = Arc::new(
+        FakeTransport::new().fail(TOKEN_PATH, HttpTransportError::Connect("refused".into())),
+    );
+    let mgr = build_manager(&http).await;
     let payload = build_payload("tool", "https://downstream.example.com", &["read"]);
 
     let result = invoke(&mgr, payload).await;
@@ -279,7 +362,10 @@ async fn idp_unreachable_surfaces_violation() {
 /// touching the network. Verifies the input-validation path.
 #[tokio::test]
 async fn empty_bearer_token_rejects_without_network() {
-    let mgr = build_manager("http://this-must-not-be-called/oauth/token").await;
+    // Programmed but never expected to answer: these cases must reject
+    // before any request is issued.
+    let http = idp(200, &ok_token_response());
+    let mgr = build_manager(&http).await;
     let payload =
         DelegationPayload::new("", "tool").with_target_audience("https://downstream.example.com");
 
@@ -294,7 +380,10 @@ async fn empty_bearer_token_rejects_without_network() {
 /// `audience` for downstream scoping).
 #[tokio::test]
 async fn missing_audience_rejects_without_network() {
-    let mgr = build_manager("http://this-must-not-be-called/oauth/token").await;
+    // Programmed but never expected to answer: these cases must reject
+    // before any request is issued.
+    let http = idp(200, &ok_token_response());
+    let mgr = build_manager(&http).await;
     let payload = DelegationPayload::new("some-token", "tool"); // no audience
 
     let result = invoke(&mgr, payload).await;
@@ -312,25 +401,19 @@ async fn missing_audience_rejects_without_network() {
 /// with no observable signal about *why* the call failed downstream.
 #[tokio::test]
 async fn idp_narrower_scope_surfaces_scope_too_broad() {
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/oauth/token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "access_token": "narrower-token",
-                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                "expires_in": 300,
-                // Asked for both, got only `read`.
-                "scope": "read",
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
+    let http = idp(
+        200,
+        &json!({
+            "access_token": "narrower-token",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "expires_in": 300,
+            // Asked for both, got only `read`.
+            "scope": "read",
+        })
+        .to_string(),
+    );
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let payload = build_payload("tool", "https://downstream.example.com", &["read", "write"]);
 
     let result = invoke(&mgr, payload).await;
@@ -346,7 +429,7 @@ async fn idp_narrower_scope_surfaces_scope_too_broad() {
         violation.reason,
     );
 
-    mock.assert_async().await;
+    assert_eq!(http.call_count_for(TOKEN_PATH), 1);
 }
 
 /// Sanity check: when the `IdP` grants exactly the requested set, the
@@ -354,24 +437,18 @@ async fn idp_narrower_scope_surfaces_scope_too_broad() {
 /// `scope_too_broad` behaviour.
 #[tokio::test]
 async fn idp_exact_scope_match_succeeds() {
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/oauth/token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "access_token": "ok-token",
-                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                "expires_in": 300,
-                "scope": "read write",
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
+    let http = idp(
+        200,
+        &json!({
+            "access_token": "ok-token",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "expires_in": 300,
+            "scope": "read write",
+        })
+        .to_string(),
+    );
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let payload = build_payload("tool", "https://downstream.example.com", &["read", "write"]);
 
     let result = invoke(&mgr, payload).await;
@@ -380,7 +457,7 @@ async fn idp_exact_scope_match_succeeds() {
         "exact scope match should mint a token; violation = {:?}",
         result.violation,
     );
-    mock.assert_async().await;
+    assert_eq!(http.call_count_for(TOKEN_PATH), 1);
 }
 
 // =====================================================================
@@ -406,26 +483,9 @@ fn ok_token_response() -> String {
 /// minted token still speaks for the user.
 #[tokio::test]
 async fn actor_token_reaches_the_idp_when_the_payload_carries_one() {
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/oauth/token")
-        .match_body(Matcher::AllOf(vec![
-            // The user is still the subject...
-            Matcher::UrlEncoded("subject_token".into(), "caller-bearer-token-bytes".into()),
-            // ...and the workload SVID rides along as the actor.
-            Matcher::UrlEncoded("actor_token".into(), "workload.svid.bytes".into()),
-            Matcher::UrlEncoded(
-                "actor_token_type".into(),
-                "urn:ietf:params:oauth:token-type:jwt".into(),
-            ),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(ok_token_response())
-        .create_async()
-        .await;
+    let http = idp(200, &ok_token_response());
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let payload = build_payload(
         "get_compensation",
         "https://hr.example.com",
@@ -451,7 +511,21 @@ async fn actor_token_reaches_the_idp_when_the_payload_carries_one() {
 
     // If the actor fields hadn't been sent, the matcher above would
     // have failed to match and this assertion would fire.
-    mock.assert_async().await;
+    // The user remains the subject; the workload SVID rides along as the
+    // actor. Conflating the two would attribute the call to the wrong
+    // principal downstream.
+    assert_eq!(
+        sent_field(&http, "subject_token").as_deref(),
+        Some("caller-bearer-token-bytes")
+    );
+    assert_eq!(
+        sent_field(&http, "actor_token").as_deref(),
+        Some("workload.svid.bytes")
+    );
+    assert_eq!(
+        sent_field(&http, "actor_token_type").as_deref(),
+        Some("urn:ietf:params:oauth:token-type:jwt")
+    );
 }
 
 /// The negative half: a payload with no actor must produce a plain
@@ -460,20 +534,9 @@ async fn actor_token_reaches_the_idp_when_the_payload_carries_one() {
 /// would confuse strict `IdPs`, so "absent" has to mean absent.
 #[tokio::test]
 async fn absent_actor_leaves_no_actor_fields_on_the_wire() {
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/oauth/token")
-        .match_request(|req| {
-            let body = req.body().expect("request has a body");
-            !String::from_utf8_lossy(body).contains("actor_token")
-        })
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(ok_token_response())
-        .create_async()
-        .await;
+    let http = idp(200, &ok_token_response());
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     // No `.with_actor_token(...)` — the ordinary single-token case.
     let payload = build_payload(
         "get_compensation",
@@ -487,7 +550,11 @@ async fn absent_actor_leaves_no_actor_fields_on_the_wire() {
         "single-token exchange should still succeed; violation = {:?}",
         result.violation,
     );
-    mock.assert_async().await;
+    assert!(
+        did_not_send(&http, "actor_token"),
+        "no actor was configured, so none may appear on the wire"
+    );
+    assert!(did_not_send(&http, "actor_token_type"));
 }
 
 /// `subject: this_workload` — this instance holds the access to the
@@ -499,25 +566,9 @@ async fn absent_actor_leaves_no_actor_fields_on_the_wire() {
 /// auth header it already sends.
 #[tokio::test]
 async fn this_workload_subject_uses_client_credentials_not_token_exchange() {
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/oauth/token")
-        .match_body(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("grant_type".into(), "client_credentials".into()),
-            Matcher::UrlEncoded("audience".into(), "https://hr.example.com".into()),
-        ]))
-        // A token exchange sends subject_token; this must not.
-        .match_request(|req| {
-            let body = req.body().expect("request has a body");
-            !String::from_utf8_lossy(body).contains("subject_token")
-        })
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(ok_token_response())
-        .create_async()
-        .await;
+    let http = idp(200, &ok_token_response());
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     // Note the empty bearer token: for a this_workload subject that is the
     // expected state, not the "caller forgot the credential" error.
     let payload = DelegationPayload::new("", "get_compensation")
@@ -542,7 +593,20 @@ async fn this_workload_subject_uses_client_credentials_not_token_exchange() {
         "this_workload subject must be attributed to this instance, got {:?}",
         final_payload.delegation_mode,
     );
-    mock.assert_async().await;
+    assert_eq!(
+        sent_field(&http, "grant_type").as_deref(),
+        Some("client_credentials"),
+        "there is no inbound credential to exchange, so this must be a \
+         client_credentials grant"
+    );
+    assert_eq!(
+        sent_field(&http, "audience").as_deref(),
+        Some("https://hr.example.com")
+    );
+    assert!(
+        did_not_send(&http, "subject_token"),
+        "a client_credentials grant carries no subject_token"
+    );
 }
 
 /// An empty bearer token is still an error for every subject that
@@ -551,7 +615,8 @@ async fn this_workload_subject_uses_client_credentials_not_token_exchange() {
 /// workload or user token.
 #[tokio::test]
 async fn empty_bearer_still_rejected_for_non_this_workload_subjects() {
-    let mgr = build_manager("https://unused.example.com/oauth/token").await;
+    let http = idp(200, &ok_token_response());
+    let mgr = build_manager(&http).await;
     let payload = DelegationPayload::new("", "get_compensation")
         .with_subject(DelegationSubject::CallerWorkload)
         .with_target_audience("https://hr.example.com");
@@ -573,20 +638,9 @@ async fn empty_bearer_still_rejected_for_non_this_workload_subjects() {
 /// getting a malformed request.
 #[tokio::test]
 async fn this_workload_subject_never_sends_actor_token() {
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/oauth/token")
-        .match_request(|req| {
-            let body = req.body().expect("request has a body");
-            !String::from_utf8_lossy(body).contains("actor_token")
-        })
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(ok_token_response())
-        .create_async()
-        .await;
+    let http = idp(200, &ok_token_response());
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let payload = DelegationPayload::new("", "get_compensation")
         .with_subject(DelegationSubject::ThisWorkload)
         .with_actor(TokenRole::CallerWorkload, "workload.svid.bytes")
@@ -599,7 +653,10 @@ async fn this_workload_subject_never_sends_actor_token() {
         "should still mint; violation = {:?}",
         result.violation,
     );
-    mock.assert_async().await;
+    assert!(
+        did_not_send(&http, "actor_token"),
+        "this_workload is the subject; there is no separate actor"
+    );
 }
 
 /// Mode A — the calling agent acts as itself. Its SVID is a *client
@@ -621,50 +678,22 @@ async fn this_workload_subject_never_sends_actor_token() {
 /// — never the raw SVID as a `subject_token`.
 #[tokio::test]
 async fn workload_subject_authenticates_by_svid_then_exchanges() {
-    let mut server = Server::new_async().await;
+    // Two legs against the same endpoint, so the replies are queued in
+    // order: leg 1 answers with the agent's base token, leg 2 with the
+    // exchanged one. A mock server had to express this by matching on
+    // request bodies; a queue says it directly, and the body assertions
+    // move below where a failure can name the field that was wrong.
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(
+                TOKEN_PATH,
+                200,
+                &json!({ "access_token": "agent-base-token", "expires_in": 300 }).to_string(),
+            )
+            .json(TOKEN_PATH, 200, &ok_token_response()),
+    );
 
-    // Leg 1: SVID as client_assertion (jwt-spiffe) under
-    // client_credentials → the agent's base token. Must NOT be a
-    // subject_token here.
-    let leg1 = server
-        .mock("POST", "/oauth/token")
-        .match_body(Matcher::AllOf(vec![
-            Matcher::UrlEncoded("grant_type".into(), "client_credentials".into()),
-            Matcher::UrlEncoded(
-                "client_assertion_type".into(),
-                "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe".into(),
-            ),
-            Matcher::UrlEncoded(
-                "client_assertion".into(),
-                "caller-bearer-token-bytes".into(),
-            ),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "access_token": "agent-base-token", "expires_in": 300 }).to_string())
-        .create_async()
-        .await;
-
-    // Leg 2: the exchange runs on the BASE token from leg 1, not the
-    // SVID. Pinning subject_token here is what fails if leg 1 is
-    // skipped or the raw SVID leaks through as the subject.
-    let leg2 = server
-        .mock("POST", "/oauth/token")
-        .match_body(Matcher::AllOf(vec![
-            Matcher::UrlEncoded(
-                "grant_type".into(),
-                "urn:ietf:params:oauth:grant-type:token-exchange".into(),
-            ),
-            Matcher::UrlEncoded("subject_token".into(), "agent-base-token".into()),
-            Matcher::UrlEncoded("audience".into(), "https://hr.example.com".into()),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(ok_token_response())
-        .create_async()
-        .await;
-
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let payload = build_payload(
         "get_compensation",
         "https://hr.example.com",
@@ -677,6 +706,29 @@ async fn workload_subject_authenticates_by_svid_then_exchanges() {
         result.continue_processing,
         "two-leg workload delegation should mint a token; violation = {:?}",
         result.violation,
+    );
+
+    assert_eq!(
+        http.call_count_for(TOKEN_PATH),
+        2,
+        "the workload path is two legs: authenticate, then exchange"
+    );
+
+    // Leg 2 is the last request, and it must carry the BASE token from
+    // leg 1 as `subject_token`. This is the assertion that fails if leg
+    // 1 is skipped, or if the raw SVID leaks through as the subject.
+    assert_eq!(
+        sent_field(&http, "grant_type").as_deref(),
+        Some("urn:ietf:params:oauth:grant-type:token-exchange")
+    );
+    assert_eq!(
+        sent_field(&http, "subject_token").as_deref(),
+        Some("agent-base-token"),
+        "leg 2 must exchange the base token, never the SVID"
+    );
+    assert_eq!(
+        sent_field(&http, "audience").as_deref(),
+        Some("https://hr.example.com")
     );
 
     let final_payload = DelegationPayload::from_pipeline_result(&result)
@@ -692,8 +744,6 @@ async fn workload_subject_authenticates_by_svid_then_exchanges() {
 
     // Both legs actually fired — the SVID authenticated the agent (leg
     // 1) and the exchange ran on the base token (leg 2).
-    leg1.assert_async().await;
-    leg2.assert_async().await;
 }
 
 /// A leg-1 rejection must not echo submitted credential material. Even
@@ -702,23 +752,16 @@ async fn workload_subject_authenticates_by_svid_then_exchanges() {
 /// `client_assertion` bytes.
 #[tokio::test]
 async fn leg1_rejection_does_not_leak_the_client_assertion() {
-    let mut server = Server::new_async().await;
+    let http = idp(
+        400,
+        &json!({
+            "error": "invalid_client",
+            "error_description": "assertion 'caller-bearer-token-bytes' is not valid",
+        })
+        .to_string(),
+    );
 
-    let _leg1 = server
-        .mock("POST", "/oauth/token")
-        .with_status(400)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "error": "invalid_client",
-                "error_description": "assertion 'caller-bearer-token-bytes' is not valid",
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
-
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let payload = build_payload(
         "get_compensation",
         "https://hr.example.com",
@@ -759,9 +802,9 @@ fn workload_payload() -> DelegationPayload {
 
 async fn violation_for(
     payload: DelegationPayload,
-    endpoint: &str,
+    http: &Arc<FakeTransport>,
 ) -> praxis_policy_core::error::PluginViolation {
-    let mgr = build_manager(endpoint).await;
+    let mgr = build_manager(http).await;
     let result = invoke(&mgr, payload).await;
     assert!(
         !result.continue_processing,
@@ -776,18 +819,13 @@ async fn violation_for(
 /// was never established.
 #[tokio::test]
 async fn a_leg1_transport_failure_denies_the_whole_delegation() {
-    // Bind a loopback port, learn its number, then release it. Connecting to a
-    // closed loopback port is refused immediately, which keeps this a transport
-    // failure rather than the timeout a firewalled address would produce.
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free loopback port");
-        listener.local_addr().expect("the bound address").port()
-    };
-    let violation = violation_for(
-        workload_payload(),
-        &format!("http://127.0.0.1:{port}/oauth/token"),
-    )
-    .await;
+    // A refused connection, scripted. `Connect` specifically, not
+    // `Timeout`: it proves nothing was sent, which is what makes leg 1's
+    // failure unambiguous rather than an indeterminate mint.
+    let http = Arc::new(
+        FakeTransport::new().fail(TOKEN_PATH, HttpTransportError::Connect("refused".into())),
+    );
+    let violation = violation_for(workload_payload(), &http).await;
     assert_eq!(violation.code, "delegation.idp_unreachable");
     assert!(
         violation.reason.contains("workload client_assertion"),
@@ -802,16 +840,9 @@ async fn a_leg1_transport_failure_denies_the_whole_delegation() {
 /// a bare `idp_rejected` with no detail cannot tell a 400 from a 503.
 #[tokio::test]
 async fn a_leg1_rejection_with_an_unparseable_body_still_reports_the_status() {
-    let mut server = Server::new_async().await;
-    let _leg1 = server
-        .mock("POST", "/oauth/token")
-        .with_status(503)
-        .with_body("<html>gateway timeout</html>")
-        .create_async()
-        .await;
+    let http = idp(503, "<html>gateway timeout</html>");
 
-    let violation =
-        violation_for(workload_payload(), &format!("{}/oauth/token", server.url())).await;
+    let violation = violation_for(workload_payload(), &http).await;
     assert_eq!(violation.code, "delegation.idp_rejected");
     assert!(
         violation.reason.contains("503"),
@@ -831,17 +862,9 @@ async fn a_leg1_rejection_with_an_unparseable_body_still_reports_the_status() {
 /// and produce a confusing leg-2 rejection instead of naming the real fault.
 #[tokio::test]
 async fn a_leg1_success_that_is_not_a_token_response_denies() {
-    let mut server = Server::new_async().await;
-    let _leg1 = server
-        .mock("POST", "/oauth/token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "not_a_token": true }).to_string())
-        .create_async()
-        .await;
+    let http = idp(200, &json!({ "not_a_token": true }).to_string());
 
-    let violation =
-        violation_for(workload_payload(), &format!("{}/oauth/token", server.url())).await;
+    let violation = violation_for(workload_payload(), &http).await;
     assert_eq!(violation.code, "delegation.bad_response");
     assert!(
         violation.reason.contains("workload client_assertion"),
@@ -863,20 +886,14 @@ async fn a_leg1_success_that_is_not_a_token_response_denies() {
 /// here. This test records what the code does today rather than endorsing it.
 #[tokio::test]
 async fn a_leg2_rejection_surfaces_the_error_description() {
-    let mut server = Server::new_async().await;
-    let _leg2 = server
-        .mock("POST", "/oauth/token")
-        .with_status(400)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "error": "invalid_scope",
-                "error_description": "read:compensation is not granted to this client",
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
+    let http = idp(
+        400,
+        &json!({
+            "error": "invalid_scope",
+            "error_description": "read:compensation is not granted to this client",
+        })
+        .to_string(),
+    );
 
     let violation = violation_for(
         build_payload(
@@ -884,7 +901,7 @@ async fn a_leg2_rejection_surfaces_the_error_description() {
             "https://hr.example.com",
             &["read:compensation"],
         ),
-        &format!("{}/oauth/token", server.url()),
+        &http,
     )
     .await;
     assert_eq!(violation.code, "delegation.idp_rejected");
@@ -904,17 +921,11 @@ async fn a_leg2_rejection_surfaces_the_error_description() {
 /// status. Without the fallback the violation would carry an empty reason.
 #[tokio::test]
 async fn a_leg2_rejection_with_an_unparseable_body_falls_back_to_the_status() {
-    let mut server = Server::new_async().await;
-    let _leg2 = server
-        .mock("POST", "/oauth/token")
-        .with_status(500)
-        .with_body("upstream exploded")
-        .create_async()
-        .await;
+    let http = idp(500, "upstream exploded");
 
     let violation = violation_for(
         build_payload("get_compensation", "https://hr.example.com", &[]),
-        &format!("{}/oauth/token", server.url()),
+        &http,
     )
     .await;
     assert_eq!(violation.code, "delegation.idp_rejected");
@@ -929,18 +940,11 @@ async fn a_leg2_rejection_with_an_unparseable_body_falls_back_to_the_status() {
 /// token to forward, so this has to deny rather than mint an empty credential.
 #[tokio::test]
 async fn a_leg2_success_with_no_access_token_denies() {
-    let mut server = Server::new_async().await;
-    let _leg2 = server
-        .mock("POST", "/oauth/token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "token_type": "Bearer" }).to_string())
-        .create_async()
-        .await;
+    let http = idp(200, &json!({ "token_type": "Bearer" }).to_string());
 
     let violation = violation_for(
         build_payload("get_compensation", "https://hr.example.com", &[]),
-        &format!("{}/oauth/token", server.url()),
+        &http,
     )
     .await;
     assert_eq!(violation.code, "delegation.bad_response");
@@ -953,14 +957,7 @@ async fn a_leg2_success_with_no_access_token_denies() {
 /// Run the happy path with a chosen token response and attenuation, and return
 /// the minted payload.
 async fn mint_with(body: String, attenuation: Option<AttenuationConfig>) -> DelegationPayload {
-    let mut server = Server::new_async().await;
-    let _m = server
-        .mock("POST", "/oauth/token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(body)
-        .create_async()
-        .await;
+    let http = idp(200, &body);
 
     let mut payload = DelegationPayload::new("caller-bearer-token-bytes", "get_compensation")
         .with_target_type(TargetType::Tool)
@@ -970,7 +967,7 @@ async fn mint_with(body: String, attenuation: Option<AttenuationConfig>) -> Dele
         payload = payload.with_route_attenuation(att);
     }
 
-    let mgr = build_manager(&format!("{}/oauth/token", server.url())).await;
+    let mgr = build_manager(&http).await;
     let result = invoke(&mgr, payload).await;
     assert!(
         result.continue_processing,
@@ -1079,5 +1076,160 @@ async fn the_issued_token_type_is_recorded_whether_or_not_the_idp_sends_one() {
         defaulted.metadata.get("issued_token_type"),
         Some(&json!("urn:ietf:params:oauth:token-type:access_token")),
         "and an absent one must be defaulted rather than left unset"
+    );
+}
+
+// =====================================================================
+// the non-idempotency rule
+// =====================================================================
+
+/// A timed-out exchange is never repeated.
+///
+/// This is the assertion that stops duplicate credentials. RFC 8693
+/// mints a fresh token per call, and a timeout cannot distinguish "never
+/// arrived" from "arrived, and the reply was lost" — so a retry may
+/// issue a second live token that nobody holds and nothing is tracking.
+///
+/// Only a scripted transport can state this: a mock server cannot time
+/// out on demand, and a real one would cost seconds of wall clock to
+/// assert something that must hold in microseconds.
+#[tokio::test]
+async fn a_timed_out_exchange_is_not_retried() {
+    let http = Arc::new(FakeTransport::new().fail(TOKEN_PATH, HttpTransportError::Timeout));
+    let mgr = build_manager(&http).await;
+    let payload = build_payload(
+        "get_compensation",
+        "https://hr.example.com",
+        &["read:compensation"],
+    );
+
+    let result = invoke(&mgr, payload).await;
+    assert!(!result.continue_processing);
+    assert_eq!(
+        result.violation.expect("a deny carries a violation").code,
+        "delegation.idp_timeout",
+        "a timeout must surface as indeterminate, not as a clean rejection"
+    );
+    assert_eq!(
+        http.call_count_for(TOKEN_PATH),
+        1,
+        "exactly one attempt: repeating a timed-out mint could issue a second token"
+    );
+}
+
+/// A refused connection *is* retried, because nothing was ever sent.
+///
+/// The complement of the test above, and the reason the rule is about
+/// delivery rather than about whether a failure looks transient.
+#[tokio::test]
+async fn a_refused_connection_is_retried() {
+    let http = Arc::new(
+        FakeTransport::new()
+            .fail(TOKEN_PATH, HttpTransportError::Connect("refused".into()))
+            .json(TOKEN_PATH, 200, &ok_token_response()),
+    );
+    let mgr = build_manager(&http).await;
+    let payload = build_payload(
+        "get_compensation",
+        "https://hr.example.com",
+        &["read:compensation"],
+    );
+
+    let result = invoke(&mgr, payload).await;
+    assert!(
+        result.continue_processing,
+        "a refused connection sent nothing, so retrying cannot duplicate a mint: {:?}",
+        result.violation
+    );
+    assert_eq!(http.call_count_for(TOKEN_PATH), 2);
+}
+
+/// Withholding `perform_http` stops the exchange rather than degrading it.
+///
+/// A delegator that silently skipped its `IdP` call would fail open: the
+/// pipeline would continue with no delegated credential, and whatever
+/// depends on that credential would decide for itself what to do.
+#[tokio::test]
+async fn without_perform_http_the_delegation_denies() {
+    let cfg = {
+        let mut c = plugin_config(&token_endpoint());
+        c.capabilities.clear();
+        c
+    };
+    let delegator = OAuthDelegator::new(cfg.clone()).expect("constructs");
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_handler_for_names::<TokenDelegateHook, _>(
+        Arc::new(delegator),
+        cfg,
+        &[HOOK_TOKEN_DELEGATE],
+    )
+    .unwrap();
+    let http = idp(200, &ok_token_response());
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    mgr.set_http_transport(transport);
+    mgr.initialize().await.unwrap();
+
+    let result = invoke(
+        &mgr,
+        build_payload("get_compensation", "https://hr.example.com", &["read"]),
+    )
+    .await;
+
+    assert!(!result.continue_processing, "no capability, no delegation");
+    let v = result.violation.expect("a deny carries a violation");
+    assert_eq!(v.code, "delegation.no_transport");
+    assert!(
+        v.reason.contains("perform_http"),
+        "the message must name the capability to add: {}",
+        v.reason
+    );
+    assert_eq!(
+        http.call_count(),
+        0,
+        "a denied capability must stop the call, not merely ignore the result"
+    );
+}
+
+/// A host that declines the call reports that, not a phantom network
+/// failure.
+///
+/// `Rejected` means an egress policy, an SSRF guard, or an open circuit
+/// stopped the request before it left the process. Nothing reached the
+/// `IdP`, so it is *safe* to retry — and pointless, because it will fail
+/// identically while each attempt feeds the host's breaker.
+///
+/// Collapsing it into `idp_unreachable` would be the expensive mistake:
+/// an operator reads "never reached the `IdP`" and goes debugging DNS and
+/// firewalls, when the answer is in their own egress config.
+#[tokio::test]
+async fn a_host_refusal_is_reported_as_egress_denied_and_not_retried() {
+    let http = Arc::new(FakeTransport::new().fail(
+        TOKEN_PATH,
+        HttpTransportError::Rejected("circuit open".into()),
+    ));
+    let mgr = build_manager(&http).await;
+    let violation = {
+        let result = invoke(
+            &mgr,
+            build_payload("get_compensation", "https://hr.example.com", &["read"]),
+        )
+        .await;
+        assert!(!result.continue_processing);
+        result.violation.expect("a deny carries a violation")
+    };
+
+    assert_eq!(
+        violation.code, "delegation.egress_denied",
+        "a refusal by the host is not an unreachable IdP"
+    );
+    assert!(
+        violation.reason.contains("circuit open"),
+        "the host's reason must survive so an operator can act on it: {}",
+        violation.reason
+    );
+    assert_eq!(
+        http.call_count_for(TOKEN_PATH),
+        1,
+        "retrying into an open circuit is pointless and feeds the breaker"
     );
 }

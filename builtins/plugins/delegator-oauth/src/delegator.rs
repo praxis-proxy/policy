@@ -52,6 +52,9 @@ use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::extensions::raw_credentials::RawDelegatedToken;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
+use praxis_policy_core::host::{HostServices, HttpRequestError};
+use praxis_policy_core::http::{HttpRequest, HttpTransportError, form_urlencode};
+use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 use super::config::OAuthDelegatorConfig;
@@ -72,15 +75,23 @@ const GRANT_TYPE_CLIENT_CREDENTIALS: &str = "client_credentials";
 /// only.
 const DEFAULT_ISSUED_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 
+/// Ceiling on a token-endpoint response body.
+///
+/// A token response is a small JSON object — an access token, a type, an
+/// expiry, a scope list. `64 KiB` is far above any legitimate one, and the
+/// bound exists because a compromised or broken endpoint would otherwise
+/// stream until the process died. `reqwest` applied no limit here.
+const TOKEN_RESPONSE_MAX_BYTES: usize = 64 * 1024;
+
 /// OAuth-mediated `TokenDelegate` handler.
 pub struct OAuthDelegator {
     cfg: PluginConfig,
     typed: OAuthDelegatorConfig,
     /// Loaded client secret, zeroized on drop.
     client_secret: Zeroizing<String>,
-    /// Shared HTTP client. Pre-built so repeated invocations
-    /// reuse connections / TLS sessions.
-    http: reqwest::Client,
+    /// Overall deadline for one token-endpoint call, from config.
+    /// The transport itself is the host's and arrives per request.
+    timeout: std::time::Duration,
     /// Latches once the best-effort "actor requested but no `act` minted"
     /// warning has fired, so it logs at most once per delegator instead of
     /// on every request (and skips the per-request JWT decode thereafter).
@@ -164,23 +175,13 @@ impl OAuthDelegator {
             })
         })?;
 
-        let http = reqwest::Client::builder()
-            .timeout(typed.timeout())
-            .build()
-            .map_err(|e| {
-                Box::new(PluginError::Config {
-                    message: format!(
-                        "plugin '{}' (praxis-policy-plugin-delegator-oauth) HTTP client build failed: {e}",
-                        cfg.name
-                    ),
-                })
-            })?;
+        let timeout = typed.timeout();
 
         Ok(Self {
             cfg,
             typed,
             client_secret: Zeroizing::new(secret),
-            http,
+            timeout,
             warned_missing_act: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -212,11 +213,96 @@ impl OAuthDelegator {
     /// ordinary exchange (leg 2), which is where the downstream
     /// audience/scope — the authority the agent itself lacks — is
     /// actually granted. Splitting it this way is what keeps the
+    /// Build a token-endpoint POST carrying `form`.
+    ///
+    /// Encoding lives in `praxis_policy_core::http::form_urlencode` rather
+    /// than in a transport, so every transport sends identical bytes.
+    fn token_request(&self, form: &[(&str, &str)]) -> Result<HttpRequest, Box<PluginViolation>> {
+        HttpRequest::post(&self.typed.token_endpoint, form_urlencode(form))
+            .timeout(self.timeout)
+            // A token response is a small JSON object. The ceiling stops
+            // a compromised or broken endpoint streaming without end;
+            // reqwest applied none.
+            .max_response_bytes(TOKEN_RESPONSE_MAX_BYTES)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .and_then(|r| r.header("accept", "application/json"))
+            .map_err(|e| {
+                Box::new(PluginViolation::new(
+                    "delegation.bad_request",
+                    format!("could not build the token-endpoint request: {e}"),
+                ))
+            })
+    }
+
+    /// `Authorization: Basic base64(client_id:client_secret)`.
+    ///
+    /// Built here rather than in the transport for the same reason as
+    /// the form body: one encoder, identical bytes everywhere.
+    fn basic_auth_header(&self) -> String {
+        use base64::Engine as _;
+        let raw = format!("{}:{}", self.typed.client_id, self.client_secret.as_str());
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        )
+    }
+
+    /// Turn a transport failure into the right violation.
+    ///
+    /// The distinction is not cosmetic. A timeout may mean the exchange
+    /// *landed* and only the response was lost, so the mint outcome is
+    /// indeterminate and must never be treated as "did not happen" —
+    /// assuming otherwise is how a second token gets minted for a
+    /// credential that already exists. Anything that provably never
+    /// reached the `IdP` is a clean "unreachable".
+    /// `leg` names which call failed. Both legs POST to the same
+    /// endpoint, so without it an operator reading the violation cannot
+    /// tell a failed workload authentication from a failed exchange —
+    /// and those have different causes and different fixes.
+    fn violation_for(&self, leg: &str, err: &HttpRequestError) -> PluginViolation {
+        let endpoint = &self.typed.token_endpoint;
+        let err = match err {
+            // No transport at all, or this plugin may not use one. A
+            // config or wiring problem, not the IdP's.
+            HttpRequestError::Unavailable(e) => {
+                return PluginViolation::new(
+                    "delegation.no_transport",
+                    format!("plugin '{}' {e}", self.cfg.name),
+                );
+            },
+            HttpRequestError::Transport(e) => e,
+        };
+        match err {
+            // The host declined to make the call: an egress policy, an
+            // SSRF guard, an open circuit. Its own code, because
+            // "we declined to try" and "we tried and failed" send an
+            // operator to different places — collapsing them turns a
+            // blocked destination into a phantom network problem and
+            // costs an afternoon in DNS.
+            HttpTransportError::Rejected(_) => PluginViolation::new(
+                "delegation.egress_denied",
+                format!("{leg} to {endpoint} was refused before it left the process: {err}"),
+            ),
+            e if e.may_have_reached_peer() => PluginViolation::new(
+                "delegation.idp_timeout",
+                format!("{leg} to {endpoint} did not complete: {err}"),
+            ),
+            _ => PluginViolation::new(
+                "delegation.idp_unreachable",
+                format!("{leg} to {endpoint} never reached the IdP: {err}"),
+            ),
+        }
+    }
+
     /// enforcement point, not the agent, as the holder of downstream authority.
     ///
     /// Errors map to the same `delegation.*` violation codes the
     /// exchange uses, so a failed leg 1 denies the whole delegation.
-    async fn mint_base_token(&self, svid: &str) -> Result<String, PluginViolation> {
+    async fn mint_base_token(
+        &self,
+        svid: &str,
+        svc: &dyn HostServices,
+    ) -> Result<String, PluginViolation> {
         let form = [
             ("grant_type", GRANT_TYPE_CLIENT_CREDENTIALS),
             (
@@ -226,37 +312,21 @@ impl OAuthDelegator {
             ("client_assertion", svid),
         ];
 
-        let response = match self
-            .http
-            .post(&self.typed.token_endpoint)
-            .form(&form)
-            .send()
+        // Minting is not idempotent: repeat one that already landed and
+        // the IdP issues a second credential nobody holds. So retry only
+        // failures that provably never reached it — a timeout ends the
+        // attempt and the caller treats the outcome as indeterminate.
+        let response = svc
+            .http_request(
+                self.token_request(&form).map_err(|v| *v)?,
+                RetryPolicy::undelivered_only(),
+            )
             .await
-        {
-            Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return Err(PluginViolation::new(
-                    "delegation.idp_timeout",
-                    format!(
-                        "workload client_assertion to {} timed out",
-                        self.typed.token_endpoint
-                    ),
-                ));
-            },
-            Err(e) => {
-                return Err(PluginViolation::new(
-                    "delegation.idp_unreachable",
-                    format!(
-                        "workload client_assertion POST to {} failed: {e}",
-                        self.typed.token_endpoint
-                    ),
-                ));
-            },
-        };
+            .map_err(|e| self.violation_for("workload client_assertion POST", &e))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+        let status = response.status;
+        if !response.is_success() {
+            let body = String::from_utf8_lossy(&response.body).into_owned();
             // Sanitize: surface only the OAuth `error` CODE (a fixed
             // vocabulary — invalid_client, invalid_grant, …), never the
             // free-text `error_description` or the raw body. Leg 1 submits
@@ -269,7 +339,7 @@ impl OAuthDelegator {
             return Err(PluginViolation::new("delegation.idp_rejected", reason));
         }
 
-        match response.json::<TokenExchangeResponse>().await {
+        match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {
             Ok(parsed) => Ok(parsed.access_token),
             Err(e) => Err(PluginViolation::new(
                 "delegation.bad_response",
@@ -315,7 +385,7 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
     async fn handle(
         &self,
         payload: &DelegationPayload,
-        _ext: &Extensions,
+        ext: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<DelegationPayload> {
         // `subject: this_workload` means *we* are the principal. There
@@ -358,7 +428,7 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
         // own `bearer` directly. `Cow` avoids cloning the (already
         // borrowed) bearer on the non-workload path.
         let subject_token: Cow<str> = if is_workload {
-            match self.mint_base_token(bearer).await {
+            match self.mint_base_token(bearer, ext).await {
                 Ok(token) => Cow::Owned(token),
                 Err(violation) => return PluginResult::deny(violation),
             }
@@ -415,37 +485,38 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
         }
 
         // POST to the IdP. Basic auth carries our client credentials.
-        let response = match self
-            .http
-            .post(&self.typed.token_endpoint)
-            .basic_auth(&self.typed.client_id, Some(self.client_secret.as_str()))
-            .form(&form)
-            .send()
+        //
+        // Same non-idempotency as leg 1, and it matters more here: this
+        // is the exchange that mints the delegated credential. Retrying a
+        // timed-out exchange could leave a live token nobody is tracking.
+        let request = match self.token_request(&form) {
+            Ok(r) => match r.header("authorization", self.basic_auth_header()) {
+                Ok(r) => r,
+                Err(e) => {
+                    return PluginResult::deny(PluginViolation::new(
+                        "delegation.bad_request",
+                        format!("could not attach client credentials: {e}"),
+                    ));
+                },
+            },
+            Err(v) => return PluginResult::deny(*v),
+        };
+
+        let response = match ext
+            .http_request(request, RetryPolicy::undelivered_only())
             .await
         {
             Ok(r) => r,
-            Err(e) if e.is_timeout() => {
-                return PluginResult::deny(PluginViolation::new(
-                    "delegation.idp_timeout",
-                    format!("token-exchange to {} timed out", self.typed.token_endpoint),
-                ));
-            },
             Err(e) => {
-                return PluginResult::deny(PluginViolation::new(
-                    "delegation.idp_unreachable",
-                    format!(
-                        "token-exchange POST to {} failed: {e}",
-                        self.typed.token_endpoint,
-                    ),
-                ));
+                return PluginResult::deny(self.violation_for("token-exchange POST", &e));
             },
         };
 
-        let status = response.status();
-        if !status.is_success() {
+        let status = response.status;
+        if !response.is_success() {
             // Try to surface the standard `error` / `error_description`
             // fields from the IdP. Fall back to status code.
-            let body = response.text().await.unwrap_or_default();
+            let body = String::from_utf8_lossy(&response.body).into_owned();
             let (code, reason) = match serde_json::from_str::<TokenErrorResponse>(&body) {
                 Ok(err) => {
                     let mut reason = err.error.clone();
@@ -463,7 +534,7 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
             return PluginResult::deny(PluginViolation::new(code, reason));
         }
 
-        let parsed = match response.json::<TokenExchangeResponse>().await {
+        let parsed = match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {
             Ok(p) => p,
             Err(e) => {
                 return PluginResult::deny(PluginViolation::new(

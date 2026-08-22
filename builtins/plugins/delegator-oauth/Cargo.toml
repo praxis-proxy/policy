@@ -43,14 +43,6 @@ rust-version.workspace = true
 [dependencies]
 praxis-policy-core = { workspace = true }
 
-# `reqwest` for the HTTP POST to the IdP token endpoint. Default
-# features pull `rustls` for TLS — we explicitly disable the
-# default `default-tls` (native-tls) and pick `rustls-tls` instead
-# for a cleaner build on macOS/Linux (no openssl link).
-# `json` feature for `.json()` response parsing; we send
-# application/x-www-form-urlencoded ourselves (RFC 8693 wants form).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -68,11 +60,11 @@ base64 = "0.22"
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 [dev-dependencies]
+# The `HttpTransport` test double. A dev-dependency so the feature is
+# enabled for test builds only; resolver 3 keeps it out of the normal
+# build of this crate.
+praxis-policy-core = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
-# `mockito` stands up an HTTP server in the test process so we can
-# verify the request body shape + simulate IdP responses without
-# touching the network.
-mockito = "1"
 
 [lints]
 workspace = true
