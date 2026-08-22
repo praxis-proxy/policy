@@ -162,6 +162,19 @@ fn resolve_collection(field: &CompiledField, claims: &ClaimMap) -> FieldOutcome 
         }
     }
 
+    // A union merges candidate lists, so a value both of them carry arrives
+    // twice: Keycloak naming the same role under `realm_access` and
+    // `resource_access.<client>` is the ordinary case. The subject fields are
+    // sets downstream and would swallow it, but the client fields are `Vec`s and
+    // would carry it into audit logs and serialized output, so the same map
+    // would behave differently per role. Deduped here, first-seen order kept, so
+    // it behaves the same everywhere. A single candidate is left alone under
+    // `first_match`: duplicates there are the claim's own content.
+    if field.merge() == MergeMode::Union {
+        let mut seen: HashSet<String> = HashSet::with_capacity(values.len());
+        values.retain(|value| seen.insert(value.clone()));
+    }
+
     FieldOutcome {
         values,
         resolved,
@@ -646,11 +659,12 @@ mod tests {
         assert_eq!(sorted(&first.roles), vec!["realm-admin"]);
     }
 
-    /// Order is candidate-declaration order, then in-array order, and a value in
-    /// two candidates appears twice. Only a `Vec` destination shows it; the
-    /// deduplication a set gives is the set's, not the engine's.
+    /// Order is candidate-declaration order, then in-array order, and a value two
+    /// candidates carry appears once, at its first position. A `Vec` destination
+    /// is where this is visible at all: a set would have hidden it, which is
+    /// exactly why the engine cannot leave it to the destination.
     #[test]
-    fn union_preserves_declaration_order_and_does_not_deduplicate() {
+    fn union_preserves_declaration_order_and_deduplicates() {
         let token = claims(json!({
             "client_id": "svc",
             "primary": ["a", "b"],
@@ -664,9 +678,34 @@ mod tests {
         }))
         .map_client(&token)
         .unwrap();
-        assert_eq!(client.roles, vec!["a", "b", "b", "c"]);
+        assert_eq!(client.roles, vec!["a", "b", "c"]);
     }
 
+    /// The union case a Keycloak realm actually hits: a role granted both at the
+    /// realm and on the client reaches `client.roles` once.
+    #[test]
+    fn a_role_in_both_unioned_candidates_reaches_a_client_once() {
+        let token = claims(json!({
+            "client_id": "svc",
+            "realm_access": {"roles": ["admin", "viewer"]},
+            "resource_access": {"api": {"roles": ["admin", "auditor"]}},
+        }));
+        let client = mapper(json!({
+            "client": {
+                "client_id": "client_id",
+                "roles": {
+                    "paths": ["realm_access.roles", "resource_access.api.roles"],
+                    "merge": "union",
+                },
+            }
+        }))
+        .map_client(&token)
+        .unwrap();
+        assert_eq!(client.roles, vec!["admin", "viewer", "auditor"]);
+    }
+
+    /// Under `first_match` a repeated value is the claim's own content, not an
+    /// artifact of merging, so it is carried through as authored.
     #[test]
     fn a_set_destination_deduplicates_where_a_vec_destination_does_not() {
         let token = claims(json!({
