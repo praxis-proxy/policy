@@ -22,6 +22,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -55,6 +56,9 @@ struct Rule {
 pub struct FakeTransport {
     rules: Mutex<Vec<Rule>>,
     seen: Mutex<Vec<HttpRequest>>,
+    /// Held open for this long before answering. See
+    /// [`FakeTransport::with_latency`].
+    latency: Option<Duration>,
 }
 
 impl std::fmt::Debug for FakeTransport {
@@ -129,6 +133,23 @@ impl FakeTransport {
         )
     }
 
+    /// Hold every call open for `latency` before answering.
+    ///
+    /// An instant transport cannot express concurrency. Two calls never
+    /// overlap, so a test cannot tell a caller that collapses concurrent
+    /// requests into one from a caller that simply runs them fast enough
+    /// that they never meet — and single-flight, `try_lock` and
+    /// wait-budget behaviour are exactly the things that only show up
+    /// when calls do overlap.
+    ///
+    /// Keep it small. It is real wall clock in the test suite, and its
+    /// only job is to make overlap certain rather than likely.
+    #[must_use]
+    pub fn with_latency(mut self, latency: Duration) -> Self {
+        self.latency = Some(latency);
+        self
+    }
+
     /// Fail any URL containing `fragment` with `err`.
     ///
     /// The point of the whole type: `Timeout` and `Connect` mean
@@ -197,31 +218,40 @@ impl HttpTransport for FakeTransport {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(req);
 
-        let mut rules = self
-            .rules
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Take the reply first, then sleep, so the reply queue advances
+        // in arrival order rather than in wake order. The `rules` guard
+        // is dropped before the await: it is a `std::sync::Mutex`, and
+        // holding one across a yield point would deadlock the moment two
+        // calls overlap — which is the whole point of `latency`.
+        let reply = {
+            let mut rules = self
+                .rules
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let Some(rule) = rules.iter_mut().find(|r| url.contains(&r.fragment)) else {
-            return Err(HttpTransportError::Connect(format!(
-                "FakeTransport has no rule matching '{url}'"
-            )));
+            let Some(rule) = rules.iter_mut().find(|r| url.contains(&r.fragment)) else {
+                return Err(HttpTransportError::Connect(format!(
+                    "FakeTransport has no rule matching '{url}'"
+                )));
+            };
+
+            // Keep the last reply rather than draining to empty: a caller
+            // that polls or retries should keep seeing the programmed
+            // behaviour instead of falling off the end into a confusing
+            // "no rule" error.
+            if rule.replies.len() > 1 {
+                rule.replies.pop_front()
+            } else {
+                rule.replies.front().cloned()
+            }
+            .unwrap_or_else(|| Err(HttpTransportError::Connect("empty rule queue".to_owned())))
         };
 
-        // Keep the last reply rather than draining to empty: a caller
-        // that polls or retries should keep seeing the programmed
-        // behaviour instead of falling off the end into a confusing
-        // "no rule" error.
-        if rule.replies.len() > 1 {
-            rule.replies
-                .pop_front()
-                .unwrap_or_else(|| Err(HttpTransportError::Connect("empty rule queue".to_owned())))
-        } else {
-            rule.replies
-                .front()
-                .cloned()
-                .unwrap_or_else(|| Err(HttpTransportError::Connect("empty rule queue".to_owned())))
+        if let Some(latency) = self.latency {
+            tokio::time::sleep(latency).await;
         }
+
+        reply
     }
 }
 

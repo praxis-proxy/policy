@@ -33,7 +33,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use praxis_policy_core::http::{HttpTransport, HttpTransportError};
+use praxis_policy_core::http::{HeaderMap, HttpTransport, HttpTransportError};
 use praxis_policy_core::http_testing::{FakeTransport, granting};
 
 use praxis_policy_core::engine::PolicyEngine;
@@ -43,7 +43,7 @@ use praxis_policy_core::identity::{
 };
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
-use praxis_policy_plugin_identity_jwt::{DecodingKeySource, JwtIdentityResolver};
+use praxis_policy_plugin_identity_jwt::{DecodingKeySource, JwksFetchBudget, JwtIdentityResolver};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rsa::pkcs1::EncodeRsaPublicKey as _;
@@ -506,12 +506,22 @@ async fn a_jwks_fetch_that_times_out_is_an_error_not_an_empty_store() {
         min_refresh_interval_secs: 30,
     };
 
-    match src.build_async(&granting(Arc::clone(&http))).await {
+    match src
+        .build_async(&granting(Arc::clone(&http)), JwksFetchBudget::Startup)
+        .await
+    {
         Ok(_) => panic!("a stalled JWKS must not produce a KeyStore"),
-        Err(e) => assert!(
-            e.contains("JWKS GET"),
-            "the message must name the fetch that failed: {e}"
-        ),
+        Err(e) => {
+            // A timeout is the `IdP` being slow right now, so the gateway
+            // still boots and a later verify tries again. Classifying it
+            // fatal would turn a brief outage during a rolling restart
+            // into a deployment that refuses to come up.
+            assert!(!e.is_fatal(), "a timeout must stay recoverable: {e}");
+            assert!(
+                e.to_string().contains("JWKS GET"),
+                "the message must name the fetch that failed: {e}"
+            );
+        },
     }
 
     // The bounds this plugin chose, asserted where a healthy endpoint
@@ -544,10 +554,14 @@ async fn a_transient_jwks_failure_is_retried() {
     // The second attempt returns an empty key set, which the resolver
     // rejects on its own terms — the point is that it got there at all.
     let err = src
-        .build_async(&granting(Arc::clone(&http)))
+        .build_async(&granting(Arc::clone(&http)), JwksFetchBudget::Startup)
         .await
         .expect_err("an empty JWKS has no usable keys");
-    assert!(err.contains("no usable signature keys"), "{err}");
+    assert!(!err.is_fatal(), "an empty key set stays recoverable: {err}");
+    assert!(
+        err.to_string().contains("no usable signature keys"),
+        "{err}"
+    );
     assert_eq!(
         http.call_count_for(CERTS_PATH),
         2,
@@ -629,6 +643,129 @@ async fn jwks_unreachable_at_initialize_soft_fails() {
         v.reason.contains(ISS),
         "reason should name the affected issuer: {}",
         v.reason,
+    );
+}
+
+// ---- configuration faults are fatal, IdP faults are not ----------------
+//
+// The counterpart to `jwks_unreachable_at_initialize_soft_fails` above.
+// Soft-fail exists so a gateway survives an `IdP` that is down right now.
+// It must not extend to faults that no retry clears, because there the
+// gateway boots holding an empty key store, denies every token from the
+// issuer for the life of the process, and denies it with
+// `auth.jwks_unavailable`, which points the operator at an `IdP` that was
+// never contacted.
+
+/// Register one resolver and initialize, returning the failure message.
+///
+/// `http` is `None` for the case where the host wired no transport at all.
+async fn init_outcome(cfg: PluginConfig, http: Option<&Arc<FakeTransport>>) -> Result<(), String> {
+    let resolver = Arc::new(JwtIdentityResolver::new(cfg.clone()).expect("constructs"));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_handler_for_names::<IdentityHook, _>(
+        Arc::clone(&resolver),
+        cfg,
+        &[HOOK_IDENTITY_RESOLVE],
+    )
+    .unwrap();
+    if let Some(h) = http {
+        install(&mgr, h);
+    }
+    mgr.initialize().await.map_err(|e| e.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_that_wired_no_transport_fails_initialization() {
+    // Nothing in policy YAML fixes this, so the message must not send an
+    // operator hunting through their own config.
+    let err = init_outcome(resolver_config(&jwks_url()), None)
+        .await
+        .expect_err("a jwks_url issuer with no transport cannot start");
+    assert!(
+        err.contains("embedding host"),
+        "the message must name the host as the thing to fix: {err}"
+    );
+    assert!(err.contains(ISS), "and name the issuer affected: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn withholding_perform_http_fails_initialization_and_names_the_capability() {
+    // The opposite owner: the host did its part and the fix is one line
+    // of the operator's own config. Previously this booted and denied
+    // every token, with a warning as the only clue.
+    let http = Arc::new(FakeTransport::new());
+    let mut cfg = resolver_config(&jwks_url());
+    cfg.capabilities.clear();
+
+    let err = init_outcome(cfg, Some(&http))
+        .await
+        .expect_err("a jwks_url issuer without perform_http cannot start");
+    assert!(
+        err.contains("perform_http"),
+        "the message must name the capability to add: {err}"
+    );
+    assert_eq!(
+        http.call_count(),
+        0,
+        "the gate is checked before anything is dialled"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plaintext_jwks_url_fails_initialization() {
+    // Decided from config text alone — the transport is never asked for
+    // anything. An `IdP` that genuinely serves plaintext is reached by
+    // setting `insecure_http`, so nothing here is unreachable by design.
+    let http = Arc::new(FakeTransport::new());
+    let cfg = resolver_config(&format!("http://idp.example.test{CERTS_PATH}"));
+
+    let err = init_outcome(cfg, Some(&http))
+        .await
+        .expect_err("a plaintext jwks_url cannot start");
+    assert!(err.contains("insecure_http"), "{err}");
+    assert_eq!(
+        http.call_count(),
+        0,
+        "a rejected scheme must not produce a request"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_misconfigured_issuer_is_named_in_one_message() {
+    // Reporting the first and stopping would make a deployment with three
+    // mistakes take three fix-and-restart cycles to discover them all.
+    let http = Arc::new(FakeTransport::new());
+    let mut cfg = resolver_config(&jwks_url());
+    cfg.config = Some(json!({
+        "role": "user",
+        "header": "Authorization",
+        "trusted_issuers": [
+            {
+                "issuer": "https://a.example.test",
+                "audiences": [AUD],
+                "algorithms": ["RS256"],
+                "decoding_key": { "kind": "jwks_url", "url": "http://a.example.test/certs" },
+                "leeway_seconds": 60,
+            },
+            {
+                "issuer": "https://b.example.test",
+                "audiences": [AUD],
+                "algorithms": ["RS256"],
+                "decoding_key": { "kind": "jwks_url", "url": "http://b.example.test/certs" },
+                "leeway_seconds": 60,
+            },
+        ],
+        "claim_mapper": "standard",
+    }));
+
+    let err = init_outcome(cfg, Some(&http))
+        .await
+        .expect_err("two plaintext jwks_urls cannot start");
+    assert!(err.contains("a.example.test"), "{err}");
+    assert!(err.contains("b.example.test"), "{err}");
+    assert!(
+        err.contains("2 of 2"),
+        "the count tells an operator whether any issuer survived: {err}"
     );
 }
 
@@ -1022,5 +1159,324 @@ async fn refresh_works_after_the_initialize_runtime_is_dropped() {
         r.continue_processing,
         "rotation must recover even though the initialize runtime is gone, got {:?}",
         r.violation
+    );
+}
+
+// =====================================================================
+// what a request pays for a refresh
+// =====================================================================
+//
+// Refreshing from the verify path means a request can end up waiting on
+// an `IdP`. These pin the three bounds that keep that affordable: one
+// attempt rather than a retry loop, no queueing behind a refresh the
+// request does not need, and a conditional request so the common case
+// costs a round trip instead of a document.
+
+/// A resolver whose staleness and floor are set by the test.
+///
+/// `refresh_secs: 0` makes the key set stale the moment it is fetched,
+/// which is how a test reaches the opportunistic path without waiting
+/// out a real interval.
+fn tuned_config(refresh_secs: u64, min_refresh_interval_secs: u64) -> PluginConfig {
+    let mut cfg = resolver_config(&jwks_url());
+    cfg.config = Some(json!({
+        "role": "user",
+        "header": "Authorization",
+        "trusted_issuers": [{
+            "issuer": ISS,
+            "audiences": [AUD],
+            "algorithms": ["RS256"],
+            "decoding_key": {
+                "kind": "jwks_url",
+                "url": jwks_url(),
+                "refresh_secs": refresh_secs,
+                "min_refresh_interval_secs": min_refresh_interval_secs,
+            },
+            "leeway_seconds": 60,
+        }],
+        "claim_mapper": "standard",
+    }));
+    cfg
+}
+
+async fn engine_with(cfg: PluginConfig, http: &Arc<FakeTransport>) -> Arc<PolicyEngine> {
+    let resolver = Arc::new(JwtIdentityResolver::new(cfg.clone()).expect("constructs"));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_handler_for_names::<IdentityHook, _>(resolver, cfg, &[HOOK_IDENTITY_RESOLVE])
+        .unwrap();
+    install(&mgr, http);
+    mgr
+}
+
+/// A valid token for `priv_pem`, signed under the `kid` the JWKS
+/// publishes.
+fn valid_payload(priv_pem: &str) -> IdentityPayload {
+    let token = mint_jwt(
+        priv_pem,
+        json!({
+            "sub": "alice",
+            "iss": ISS,
+            "aud": AUD,
+            "exp": now_unix() + 300,
+            "iat": now_unix(),
+        }),
+    );
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("Authorization".into(), format!("Bearer {token}"));
+    IdentityPayload::new(token, TokenSource::Bearer)
+        .with_source_header("Authorization")
+        .with_headers(headers)
+}
+
+/// A refresh a request is waiting on makes exactly one attempt.
+///
+/// The boot fetch retries three times, which is right when nothing is
+/// waiting. On the verify path those same three attempts are the
+/// request's latency — against a 5s per-attempt timeout that was roughly
+/// fifteen seconds, with every concurrent request for the issuer queued
+/// behind it. The retry that matters here is the next request, not a
+/// second attempt inside this one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refresh_a_request_waits_on_makes_one_attempt() {
+    let mut rng = rand::thread_rng();
+    let priv_key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa");
+    let pub_key = RsaPublicKey::from(&priv_key);
+    let priv_pem = priv_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("pem")
+        .to_string();
+
+    // Healthy at boot, then refuses every subsequent attempt. Three
+    // failures are queued so a retry loop would consume them and show up
+    // in the count.
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(CERTS_PATH, 200, &build_jwks(&pub_key).to_string())
+            .fail(CERTS_PATH, HttpTransportError::Connect("refused".into()))
+            .fail(CERTS_PATH, HttpTransportError::Connect("refused".into()))
+            .fail(CERTS_PATH, HttpTransportError::Connect("refused".into())),
+    );
+    let mgr = engine_with(tuned_config(3600, 0), &http).await;
+    mgr.initialize().await.expect("boot fetch succeeds");
+    assert_eq!(http.call_count_for(CERTS_PATH), 1, "one boot fetch");
+
+    // An unknown `kid` is the Required path: the token cannot validate
+    // without keys we do not hold, so this request does wait.
+    let (r, _) = mgr
+        .invoke_named::<IdentityHook>(
+            HOOK_IDENTITY_RESOLVE,
+            unknown_kid_payload(&priv_pem),
+            Extensions::default(),
+            None,
+        )
+        .await;
+    assert!(!r.continue_processing, "an unpublished kid still denies");
+
+    assert_eq!(
+        http.call_count_for(CERTS_PATH),
+        2,
+        "the refresh must make one attempt, not a retry loop's worth"
+    );
+}
+
+/// A token the held keys can verify is never denied because a refresh
+/// failed, and never made to wait for one it does not need.
+///
+/// This is the case that used to add latency for nothing: keys past
+/// `refresh_secs`, a token that validates against them perfectly, and a
+/// blocking fetch in front of the answer anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_but_valid_token_survives_a_failing_refresh() {
+    let mut rng = rand::thread_rng();
+    let priv_key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa");
+    let pub_key = RsaPublicKey::from(&priv_key);
+    let priv_pem = priv_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("pem")
+        .to_string();
+
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(CERTS_PATH, 200, &build_jwks(&pub_key).to_string())
+            .fail(CERTS_PATH, HttpTransportError::Connect("refused".into())),
+    );
+    // Stale immediately, and no floor, so the opportunistic path is
+    // reached on the very first request.
+    let mgr = engine_with(tuned_config(0, 0), &http).await;
+    mgr.initialize().await.expect("boot fetch succeeds");
+
+    let (r, _) = mgr
+        .invoke_named::<IdentityHook>(
+            HOOK_IDENTITY_RESOLVE,
+            valid_payload(&priv_pem),
+            Extensions::default(),
+            None,
+        )
+        .await;
+    assert!(
+        r.continue_processing,
+        "a failed refresh must not widen into denying a token the held \
+         keys verify, got {:?}",
+        r.violation
+    );
+}
+
+/// Concurrent stale-but-valid requests do not queue behind one refresh.
+///
+/// Single-flight already kept a burst to one *fetch* — the waiters woke,
+/// saw a newer generation and skipped fetching. What it did not do was
+/// keep them from *waiting*: every concurrent request sat on
+/// `lock().await` for however long the leader's fetch took, which with
+/// the old three-attempt retry loop was up to about fifteen seconds. And
+/// each of those requests already had a correct answer from keys it
+/// held.
+///
+/// So the assertion is about who pays, not how many fetches happen. One
+/// request may pay for the refresh. The rest must decline to queue and
+/// answer immediately.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_stale_but_valid_requests_do_not_queue_behind_a_refresh() {
+    let mut rng = rand::thread_rng();
+    let priv_key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa");
+    let pub_key = RsaPublicKey::from(&priv_key);
+    let priv_pem = priv_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("pem")
+        .to_string();
+    let jwks = build_jwks(&pub_key).to_string();
+
+    // Latency is what makes the calls actually overlap, and what makes
+    // "did this request wait" measurable at all. Against an instant
+    // transport every request finishes before the next starts, so
+    // waiting and not waiting look identical.
+    const FETCH: Duration = Duration::from_millis(300);
+    let mut http = FakeTransport::new().with_latency(FETCH);
+    for _ in 0..12 {
+        http = http.json(CERTS_PATH, 200, &jwks);
+    }
+    let http = Arc::new(http);
+    let mgr = engine_with(tuned_config(0, 0), &http).await;
+    mgr.initialize().await.expect("boot fetch succeeds");
+
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let mgr = Arc::clone(&mgr);
+        let payload = valid_payload(&priv_pem);
+        tasks.push(tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let (r, _) = mgr
+                .invoke_named::<IdentityHook>(
+                    HOOK_IDENTITY_RESOLVE,
+                    payload,
+                    Extensions::default(),
+                    None,
+                )
+                .await;
+            (r, started.elapsed())
+        }));
+    }
+
+    let mut waited = 0;
+    for t in tasks {
+        let (r, elapsed) = t.await.expect("task");
+        assert!(
+            r.continue_processing,
+            "every request validated against keys already held, got {:?}",
+            r.violation
+        );
+        // Half the fetch is comfortably past any scheduling noise and
+        // comfortably short of having actually waited one out.
+        if elapsed >= FETCH / 2 {
+            waited += 1;
+        }
+    }
+
+    assert!(
+        waited <= 1,
+        "{waited} of 8 requests waited out a refresh none of them needed; \
+         at most the one doing the fetch should have"
+    );
+}
+
+/// A refresh sends `If-None-Match` when the `IdP` gave us a validator,
+/// and a `304` keeps the keys already held.
+///
+/// This is what makes refreshing on a request path affordable: the
+/// common refresh — keys stale, `IdP` has not rotated — costs a round
+/// trip rather than a document. It also pins the `304` handling, where
+/// the reflexive `!is_success()` would turn a successful revalidation
+/// into a fetch failure, and for this plugin that failure is
+/// fail-closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refresh_revalidates_conditionally_and_a_304_keeps_the_keys() {
+    let mut rng = rand::thread_rng();
+    let priv_key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa");
+    let pub_key = RsaPublicKey::from(&priv_key);
+    let priv_pem = priv_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("pem")
+        .to_string();
+
+    let mut etagged = HeaderMap::new();
+    etagged.insert("etag", "\"jwks-v1\"".parse().expect("a legal header value"));
+
+    let http = Arc::new(
+        FakeTransport::new()
+            .respond(
+                CERTS_PATH,
+                200,
+                &build_jwks(&pub_key).to_string(),
+                etagged.clone(),
+            )
+            // The revalidation: unchanged, no body.
+            .respond(CERTS_PATH, 304, "", etagged),
+    );
+    let mgr = engine_with(tuned_config(0, 0), &http).await;
+    mgr.initialize().await.expect("boot fetch succeeds");
+
+    let (r, _) = mgr
+        .invoke_named::<IdentityHook>(
+            HOOK_IDENTITY_RESOLVE,
+            valid_payload(&priv_pem),
+            Extensions::default(),
+            None,
+        )
+        .await;
+    assert!(
+        r.continue_processing,
+        "a 304 confirms the held keys rather than clearing them, got {:?}",
+        r.violation
+    );
+
+    let reqs = http.requests();
+    assert_eq!(reqs.len(), 2, "boot fetch then one revalidation");
+    assert!(
+        reqs[0].headers.get("if-none-match").is_none(),
+        "the boot fetch holds no document to revalidate against"
+    );
+    assert_eq!(
+        reqs[1]
+            .headers
+            .get("if-none-match")
+            .and_then(|v| v.to_str().ok()),
+        Some("\"jwks-v1\""),
+        "the refresh must send back the validator the IdP gave us, \
+         quotes and all"
+    );
+
+    // And the keys survived the 304 rather than being replaced by the
+    // empty body that came with it.
+    let (r2, _) = mgr
+        .invoke_named::<IdentityHook>(
+            HOOK_IDENTITY_RESOLVE,
+            valid_payload(&priv_pem),
+            Extensions::default(),
+            None,
+        )
+        .await;
+    assert!(
+        r2.continue_processing,
+        "the key set must outlive a revalidation, got {:?}",
+        r2.violation
     );
 }

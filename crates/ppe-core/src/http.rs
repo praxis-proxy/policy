@@ -33,7 +33,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue, Method};
+use http::{HeaderName, HeaderValue};
+
+/// Re-exported because they appear in this module's public API.
+///
+/// `HttpRequest::method` and `headers` are public fields, and
+/// `HttpResponse::with_headers` takes a `HeaderMap` — so without this a
+/// host implementing [`HttpTransport`], or a test using
+/// [`FakeTransport::respond`], would have to add a direct `http`
+/// dependency just to name a type this crate handed it.
+///
+/// [`FakeTransport::respond`]: crate::http_testing::FakeTransport::respond
+pub use http::{HeaderMap, Method};
 
 /// Default overall deadline for a request that does not set one.
 ///
@@ -97,6 +108,16 @@ pub struct HttpRequest {
 
     /// Bound on connection establishment alone. `None` leaves it to the
     /// implementation.
+    ///
+    /// A hint rather than a guarantee. A transport that pools connections
+    /// configures the connect bound once for the pool, so a per-request
+    /// value it cannot apply is ignored — the bundled hyper transport
+    /// does exactly this. `timeout` is the bound that always holds, and
+    /// it covers the connect phase, so ignoring this one shortens no
+    /// deadline and loses no safety.
+    ///
+    /// Set it when the caller wants connect to fail faster than the
+    /// overall deadline would allow, and treat honoring it as a bonus.
     pub connect_timeout: Option<Duration>,
 
     /// Ceiling on the buffered response body. Exceeding it is
@@ -555,6 +576,157 @@ mod tests {
         // parameters. Getting this wrong lets a crafted scope inject a
         // `grant_type` the caller never asked for.
         assert_eq!(&*form_urlencode(&[("x", "a&b=c")]), b"x=a%26b%3Dc");
+    }
+
+    // ---- response cache headers ----------------------------------------
+    //
+    // These decide how long a caller may hold a JWKS document and whether
+    // a revalidation counts as success. Both failure directions are
+    // expensive: caching past a rotation denies valid tokens, and treating
+    // a `304` as a failure turns the cheap path into a fail-closed one.
+
+    /// A response carrying `headers`, given as `(name, value)` pairs.
+    fn resp_with(status: u16, headers: &[(&str, &str)]) -> HttpResponse {
+        let mut map = HeaderMap::new();
+        for (k, v) in headers {
+            map.insert(
+                http::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                http::header::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        HttpResponse::new(status, Bytes::new()).with_headers(map)
+    }
+
+    #[test]
+    fn a_revalidation_is_recognized_as_one() {
+        // `304` is outside the 2xx range, so the two must not be confused:
+        // the reflexive `if !is_success() { return Err }` would turn every
+        // successful revalidation into a JWKS fetch failure.
+        assert!(resp_with(304, &[]).is_not_modified());
+        assert!(!resp_with(304, &[]).is_success());
+        assert!(!resp_with(200, &[]).is_not_modified());
+        assert!(!resp_with(404, &[]).is_not_modified());
+    }
+
+    #[test]
+    fn an_etag_is_returned_only_when_the_peer_sent_a_usable_one() {
+        // Quotes are part of the tag and must survive: an `If-None-Match`
+        // sent without them never matches, so every refresh silently
+        // re-downloads the document.
+        assert_eq!(resp_with(200, &[("etag", "\"v1\"")]).etag(), Some("\"v1\""));
+        assert_eq!(
+            resp_with(200, &[("etag", "W/\"weak\"")]).etag(),
+            Some("W/\"weak\"")
+        );
+        assert_eq!(resp_with(200, &[]).etag(), None);
+    }
+
+    #[test]
+    fn max_age_is_read_from_cache_control() {
+        assert_eq!(
+            resp_with(200, &[("cache-control", "max-age=300")]).cache_max_age(),
+            Some(Duration::from_secs(300))
+        );
+        // Multi-directive, in either order, with the whitespace a real
+        // `IdP` sends.
+        assert_eq!(
+            resp_with(200, &[("cache-control", "public, max-age=600")]).cache_max_age(),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            resp_with(200, &[("cache-control", "max-age=600, must-revalidate")]).cache_max_age(),
+            Some(Duration::from_secs(600))
+        );
+        // Directive names are case-insensitive per RFC 9111.
+        assert_eq!(
+            resp_with(200, &[("cache-control", "Max-Age=42")]).cache_max_age(),
+            Some(Duration::from_secs(42))
+        );
+        assert_eq!(
+            resp_with(200, &[("cache-control", "max-age=0")]).cache_max_age(),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn no_store_and_no_cache_beat_a_max_age_in_the_same_header() {
+        // The peer asking us not to hold the document wins over the
+        // lifetime it also stated. Order must not matter: a caller that
+        // honored `max-age=300` because it appeared first would cache a
+        // document the `IdP` explicitly said not to.
+        for raw in [
+            "no-store",
+            "no-cache",
+            "no-store, max-age=300",
+            "max-age=300, no-store",
+            "max-age=300, no-cache",
+            "public, No-Cache, max-age=300",
+        ] {
+            assert_eq!(
+                resp_with(200, &[("cache-control", raw)]).cache_max_age(),
+                None,
+                "`{raw}` must not yield a cacheable lifetime"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unusable_cache_control_yields_no_lifetime() {
+        // `None` means "the caller falls back to its configured default",
+        // so every one of these has to reach it rather than producing a
+        // number invented from a malformed header.
+        for raw in [
+            // No header at all is covered separately below.
+            "",
+            "max-age",
+            "max-age=",
+            "max-age=abc",
+            // Negative and overflowing values do not parse as `u64`.
+            "max-age=-1",
+            "max-age=99999999999999999999999",
+            // A directive that merely starts the same way is not `max-age`.
+            "s-maxage=600",
+            "public",
+        ] {
+            assert_eq!(
+                resp_with(200, &[("cache-control", raw)]).cache_max_age(),
+                None,
+                "`{raw}` must not yield a lifetime"
+            );
+        }
+        assert_eq!(resp_with(200, &[]).cache_max_age(), None);
+    }
+
+    #[test]
+    fn an_unparseable_max_age_does_not_leave_an_earlier_one_standing() {
+        // A repeated directive is malformed input. The later value wins,
+        // including when it is the unusable one, so a peer cannot get a
+        // lifetime honored by appending garbage after it.
+        assert_eq!(
+            resp_with(200, &[("cache-control", "max-age=300, max-age=abc")]).cache_max_age(),
+            None
+        );
+        assert_eq!(
+            resp_with(200, &[("cache-control", "max-age=abc, max-age=300")]).cache_max_age(),
+            Some(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn a_qualified_no_cache_is_not_treated_as_a_bare_one() {
+        // `no-cache="set-cookie"` restricts one field rather than the
+        // whole response, so the stated `max-age` still applies. Pinned
+        // because the bare-string comparison that implements the
+        // unqualified form is what makes this fall through, and someone
+        // "fixing" it with `starts_with` would break this case.
+        assert_eq!(
+            resp_with(
+                200,
+                &[("cache-control", "no-cache=\"set-cookie\", max-age=300")]
+            )
+            .cache_max_age(),
+            Some(Duration::from_secs(300))
+        );
     }
 
     #[test]

@@ -65,7 +65,7 @@ type HyperClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 #[derive(Debug)]
 pub struct HyperTransport {
     client: OnceLock<HyperClient>,
-    connect_timeout: Option<Duration>,
+    connect_timeout: Duration,
     pool_idle_timeout: Option<Duration>,
     pool_max_idle_per_host: usize,
     tcp_keepalive: Option<Duration>,
@@ -76,7 +76,11 @@ impl Default for HyperTransport {
     fn default() -> Self {
         Self {
             client: OnceLock::new(),
-            connect_timeout: None,
+            // A fixed default rather than "whatever the first request
+            // asked for": the connector is built once and shared, so
+            // deferring to a request would make the pool-wide bound
+            // depend on which call happened to arrive first.
+            connect_timeout: praxis_policy_core::http::DEFAULT_CONNECT_TIMEOUT,
             // hyper-util's own default, but only if a timer is wired —
             // see `client()`.
             pool_idle_timeout: Some(Duration::from_secs(90)),
@@ -140,18 +144,23 @@ impl HyperTransport {
         self
     }
 
-    /// Override the connect bound applied to every request.
+    /// The connect bound applied to every request.
     ///
-    /// Normally left unset, so each [`HttpRequest`] supplies its own via
-    /// `connect_timeout`. This exists for a host that wants a floor
-    /// under every plugin regardless of what the plugin asked for.
+    /// Defaults to [`DEFAULT_CONNECT_TIMEOUT`]. It is fixed at
+    /// construction because the connector is built once and shared; a
+    /// per-request connect bound would mean a per-request connector, and
+    /// therefore a per-request pool, which is the whole thing this
+    /// transport exists to avoid.
     ///
-    /// It is fixed at construction because the connector is built once
-    /// and shared; a per-request connect bound would mean a per-request
-    /// connector, and therefore a per-request pool.
+    /// So this transport does not honor [`HttpRequest::connect_timeout`],
+    /// which is documented as a hint for that reason. A request asking
+    /// for a tighter bound is still bounded by its overall `timeout`.
+    ///
+    /// [`DEFAULT_CONNECT_TIMEOUT`]: praxis_policy_core::http::DEFAULT_CONNECT_TIMEOUT
+    /// [`HttpRequest::connect_timeout`]: praxis_policy_core::http::HttpRequest::connect_timeout
     #[must_use]
     pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
-        self.connect_timeout = Some(timeout);
+        self.connect_timeout = timeout;
         self
     }
 
@@ -180,15 +189,13 @@ impl HyperTransport {
     }
 
     /// The shared client, built on first call.
-    fn client(&self, req_connect_timeout: Option<Duration>) -> &HyperClient {
+    fn client(&self) -> &HyperClient {
         self.client.get_or_init(|| {
             let mut http = HttpConnector::new();
             // The HTTPS connector wraps this one, so it must accept the
             // `https` scheme rather than rejecting it as non-HTTP.
             http.enforce_http(false);
-            if let Some(t) = self.connect_timeout.or(req_connect_timeout) {
-                http.set_connect_timeout(Some(t));
-            }
+            http.set_connect_timeout(Some(self.connect_timeout));
             // hyper-util defaults this to false; reqwest sets it true.
             // Leaving Nagle on would let a small request body — a token
             // exchange form is a couple of hundred bytes — sit waiting to
@@ -275,7 +282,10 @@ impl HttpTransport for HyperTransport {
             .body(Full::new(req.body.clone()))
             .map_err(|e| HttpTransportError::InvalidRequest(e.to_string()))?;
 
-        let client = self.client(req.connect_timeout);
+        // `req.connect_timeout` is not consulted: the bound belongs to the
+        // shared connector. See `with_connect_timeout`. The overall
+        // deadline below still covers the connect phase.
+        let client = self.client();
         let limit = req.max_response_bytes;
 
         // The deadline covers the *whole* exchange, headers and body.
@@ -442,6 +452,25 @@ mod tests {
         assert_eq!(t.pool_idle_timeout, Some(Duration::from_secs(5)));
         assert_eq!(t.pool_max_idle_per_host, 4);
         assert!(t.tcp_keepalive.is_none());
+    }
+
+    #[test]
+    fn the_connect_bound_comes_from_the_transport_not_from_a_request() {
+        // The connector is built once and shared, so this has to be
+        // decided before any request arrives. Taking it from a request
+        // instead would mean whichever plugin called first — JWKS at 2s,
+        // a token exchange at its own value — silently set the bound for
+        // every other plugin, and which one that is depends on ordering.
+        assert_eq!(
+            HyperTransport::new().connect_timeout,
+            praxis_policy_core::http::DEFAULT_CONNECT_TIMEOUT,
+        );
+        assert_eq!(
+            HyperTransport::new()
+                .with_connect_timeout(Duration::from_millis(250))
+                .connect_timeout,
+            Duration::from_millis(250),
+        );
     }
 
     #[test]

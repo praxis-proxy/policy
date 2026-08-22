@@ -34,10 +34,9 @@ use jsonwebtoken::{Algorithm, DecodingKey};
 ///
 /// # Update discipline (refresh)
 ///
-/// When the periodic refresh task lands, the intended pattern is
-/// **whole-store replacement** — the refresh fetches a fresh JWKS,
-/// builds a new `KeyStore`, and replaces the old one atomically
-/// (`*shared.write().await = new_store`). Do **not** merge new
+/// Refresh does **whole-store replacement** — it fetches a fresh
+/// JWKS, builds a new `KeyStore`, and replaces the old one
+/// atomically (`*shared.write() = new_store`). Do **not** merge new
 /// keys into the existing `by_kid` map: that grows unbounded as
 /// the `IdP` rotates kids in and out over the deployment's lifetime
 /// (every kid the `IdP` ever published stays in our map forever).
@@ -155,15 +154,15 @@ pub struct TrustedIssuer {
     /// lands here so the verify path can pick the one matching the
     /// inbound token's header.
     ///
-    /// Wrapped in `Arc<RwLock<...>>` so the background JWKS
-    /// refresh task can atomically swap in a fresh `KeyStore`
+    /// Wrapped in `Arc<RwLock<...>>` so an on-demand JWKS refresh
+    /// can atomically swap in a fresh `KeyStore`
     /// without blocking concurrent verifies (read guards are held
     /// for the duration of one `decode()`, which is sync — no
     /// `.await` between acquisition and release, so no deadlock
     /// risk and no contention beyond a few µs per request).
     ///
     /// Empty during the soft-fail boot path (initial JWKS fetch
-    /// failed, refresh task will retry). Verify checks for this
+    /// failed, a later verify will retry). Verify checks for this
     /// and returns `auth.jwks_unavailable` rather than the
     /// `auth.unknown_kid` it would otherwise produce.
     pub keys: std::sync::Arc<std::sync::RwLock<KeyStore>>,
@@ -239,6 +238,16 @@ pub struct RefreshGate {
     /// after a rotation and leave the caller denying a token the `IdP`
     /// can perfectly well vouch for.
     generation: std::sync::atomic::AtomicU64,
+
+    /// The `ETag` of the document the current `KeyStore` came from, when
+    /// the `IdP` sent one.
+    ///
+    /// Fed back as `If-None-Match`, which turns the common refresh — keys
+    /// stale, `IdP` has not rotated — into a `304` with no body. That is
+    /// what makes refreshing from a request path affordable at all: the
+    /// alternative is re-downloading and re-parsing a document that has
+    /// not changed, on a request that already had its answer.
+    etag: std::sync::Mutex<Option<String>>,
 }
 
 impl RefreshGate {
@@ -265,12 +274,44 @@ impl RefreshGate {
 
     /// Record that a fetch replaced the key set.
     pub(crate) fn mark_success(&self) {
+        self.mark_current();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Record that the key set was confirmed current without changing.
+    ///
+    /// The `304` case. It resets the staleness clock — the keys really
+    /// are current, and without this every later request would try to
+    /// refresh again — but must *not* bump the generation, because a
+    /// caller queued on the single-flight lock reads that to decide
+    /// whether re-validating is worth anything, and nothing changed.
+    pub(crate) fn mark_current(&self) {
         *self
             .last_success
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
-        self.generation
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The validator for the document behind the current key set.
+    pub(crate) fn etag(&self) -> Option<String> {
+        self.etag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Record the validator a fetched document arrived with.
+    ///
+    /// `None` clears it: an `IdP` that stops sending `ETag` must not
+    /// leave a stale validator behind, or every later refresh would send
+    /// an `If-None-Match` the peer cannot match and might answer `304`
+    /// to, freezing the key set.
+    pub(crate) fn set_etag(&self, etag: Option<String>) {
+        *self
+            .etag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = etag;
     }
 
     /// The current key-set generation.
