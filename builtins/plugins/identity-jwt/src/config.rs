@@ -18,6 +18,7 @@ use praxis_policy_core::extensions::raw_credentials::TokenRole;
 use serde::{Deserialize, Serialize};
 
 use super::trusted_issuer::{KeyStore, TrustedIssuer};
+use crate::claim_map_config::ClaimMapConfig;
 
 /// Top-level plugin config — what operators write under
 /// `plugins[<name>].config:` in unified-config YAML.
@@ -27,7 +28,13 @@ use super::trusted_issuer::{KeyStore, TrustedIssuer};
 /// expects multiple inbound tokens — e.g. user JWT in
 /// `X-User-Token`, OAuth client token in `Authorization`, and a
 /// SPIFFE JWT-SVID in `X-Workload-Token`.
+///
+/// Unknown keys are rejected. Every field here is optional or defaulted, so a
+/// misspelling would otherwise deserialize to the default and take effect
+/// silently: `claim_maps` would leave the resolver on the standard preset while
+/// the operator believed their map was live.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JwtIdentityResolverConfig {
     /// One or more trusted issuers. At least one required.
     pub trusted_issuers: Vec<TrustedIssuerConfig>,
@@ -55,12 +62,53 @@ pub struct JwtIdentityResolverConfig {
     #[serde(default = "default_header")]
     pub header: String,
 
-    /// Which claim mapper to use. `"standard"` is the OIDC default;
-    /// future named mappers (e.g., `"keycloak"`, `"cognito"`) plug
-    /// in via the registry pattern in `resolver.rs`. Omitted →
-    /// `StandardClaimMap`.
+    /// Which shipped preset to map claims with: `standard`, `keycloak`,
+    /// `auth0` or `cognito`. Omitted resolves to `standard`, which reproduces
+    /// the OIDC shape this plugin has always mapped. An unknown name fails at
+    /// construction and lists the valid ones.
+    ///
+    /// Each preset's `description` in `src/presets/` records what it covers and
+    /// what it deliberately omits, which matters: two of the three providers
+    /// namespace or parameterize their roles claim per deployment, so no preset
+    /// can carry it. Reach those with [`claim_map`].
+    ///
+    /// Mutually exclusive with [`claim_map`].
+    ///
+    /// [`claim_map`]: Self::claim_map
     #[serde(default)]
     pub claim_mapper: Option<String>,
+
+    /// An inline claim map, for a shape no preset covers.
+    ///
+    /// Mutually exclusive with [`claim_mapper`]; setting both is a config error
+    /// rather than a precedence rule.
+    ///
+    /// See [`ClaimMapConfig`] for the surface and its escaping rules.
+    ///
+    /// [`claim_mapper`]: Self::claim_mapper
+    #[serde(default)]
+    pub claim_map: Option<ClaimMapConfig>,
+
+    /// Which claims stay visible to a policy, overriding what the map's declared
+    /// paths imply.
+    ///
+    /// A sibling of [`claim_mapper`] and [`claim_map`] rather than part of either,
+    /// so it applies whichever way the map was chosen. `include` accepts any claim
+    /// name, registered ones included: `claims: {include: [iss]}` is what makes
+    /// gating on the issuing `IdP` expressible, since the subject claims bag is
+    /// the only route from a claim to a policy.
+    ///
+    /// Both lists take top-level claim names rather than paths, because the bag
+    /// is keyed by name. A dotted entry is refused at load, and a claim whose own
+    /// name holds a dot is written with `\.`. A `caller_workload` resolver has no
+    /// claims bag, so the setting is inert there and says so at load.
+    ///
+    /// Read as a raw value so a malformed one names the field.
+    ///
+    /// [`claim_mapper`]: Self::claim_mapper
+    /// [`claim_map`]: Self::claim_map
+    #[serde(default)]
+    pub claims: Option<serde_json::Value>,
 }
 
 fn default_role() -> TokenRole {
@@ -83,6 +131,7 @@ fn default_header() -> String {
 /// One issuer's config — issuer URL, audiences, decoding key
 /// source, accepted algorithms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedIssuerConfig {
     /// Expected `iss` claim value.
     pub issuer: String,

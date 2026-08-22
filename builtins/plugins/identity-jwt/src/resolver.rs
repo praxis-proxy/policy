@@ -58,8 +58,11 @@ use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
-use super::claim_map::{ClaimMap, ClaimMapper, StandardClaimMap};
+use super::claim_map::{ClaimMap, ClaimMapper};
+use super::claim_map_config::{ClaimsOverrides, CompiledClaimsOverrides};
 use super::config::{JwtIdentityResolverConfig, TrustedIssuerConfig};
+use super::configured_mapper::ConfiguredClaimMap;
+use super::presets;
 use super::trusted_issuer::{KeyStore, TrustedIssuer};
 
 /// Default clock-skew tolerance, in seconds. Matches what most OIDC
@@ -122,7 +125,7 @@ impl JwtIdentityResolver {
     ///
     /// Returns `PluginError::Config` for any config-time failure:
     /// missing config block, malformed JSON, no trusted issuers,
-    /// unparseable decoding key, unknown claim mapper, etc.
+    /// unparsable decoding key, unknown claim mapper, etc.
     /// # Errors
     ///
     /// Returns `PluginError::Config` when the `config:` block is absent or does
@@ -193,22 +196,6 @@ impl JwtIdentityResolver {
             }
         }
 
-        // Resolve the claim mapper by name. Unknown names are a
-        // config error rather than a silent fallback — fail fast
-        // so operators notice typos.
-        let claim_mapper: Arc<dyn ClaimMapper> = match typed.claim_mapper.as_deref() {
-            None | Some("standard") => Arc::new(StandardClaimMap),
-            Some(other) => {
-                return Err(Box::new(PluginError::Config {
-                    message: format!(
-                        "plugin '{}' (praxis-policy-plugin-identity-jwt): unknown claim_mapper \
-                         '{other}'; valid: [standard]",
-                        cfg.name
-                    ),
-                }));
-            },
-        };
-
         // Reject `role: Custom(...)` at construction — the framework
         // has slots for User / Client / Workload (the three named
         // entries on SecurityExtension). Custom roles would write to
@@ -224,6 +211,86 @@ impl JwtIdentityResolver {
                 ),
             }));
         }
+
+        // Resolve the claim map: an inline `claim_map`, a preset named by
+        // `claim_mapper`, or the standard preset. Unknown names and malformed
+        // maps are config errors rather than silent fallbacks, so an operator's
+        // typo fails at load rather than denying every request.
+        let config_error = |message: String| {
+            Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' (praxis-policy-plugin-identity-jwt): {message}",
+                    cfg.name
+                ),
+            })
+        };
+
+        let claims_overrides: CompiledClaimsOverrides = match typed.claims.as_ref() {
+            Some(value) => {
+                let parsed: ClaimsOverrides =
+                    serde_json::from_value(value.clone()).map_err(|e| {
+                        config_error(format!(
+                            "`claims` takes `exclude` and `include` lists of claim names: {e}"
+                        ))
+                    })?;
+                parsed.compile().map_err(&config_error)?
+            },
+            None => CompiledClaimsOverrides::default(),
+        };
+
+        // A workload identity carries no claims bag, so the overrides would sit
+        // there doing nothing. Same treatment as the undeclared anchor below:
+        // the condition is static, so say it once at load.
+        if matches!(typed.role, TokenRole::CallerWorkload) && !claims_overrides.is_empty() {
+            tracing::warn!(
+                plugin = %cfg.name,
+                "`claims` has no effect under `role: caller_workload`, which carries no claims \
+                 bag; the overrides will be ignored",
+            );
+        }
+
+        let compiled = match (typed.claim_map.as_ref(), typed.claim_mapper.as_deref()) {
+            (Some(_), Some(named)) => {
+                return Err(config_error(format!(
+                    "`claim_map` and `claim_mapper: {named}` are both set; pick one, an inline \
+                     map or a preset by name"
+                )));
+            },
+            (Some(inline), None) => inline
+                .compile()
+                .map_err(|e| config_error(format!("`claim_map` is not usable: {e}")))?,
+            (None, named) => presets::lookup(named.unwrap_or(presets::DEFAULT_PRESET))
+                .map_err(&config_error)?
+                .into_claim_map(),
+        };
+
+        let compiled = compiled.with_claims(claims_overrides);
+
+        // Require the section matching the configured role now, so a
+        // misconfigured pairing is a startup failure rather than a resolver that
+        // denies every request.
+        let section = compiled.role(&typed.role).map_err(&config_error)?;
+
+        // A section that declares no path for its anchor compiles, because
+        // declaring the role is what the section check asks. It then denies every
+        // token, so say so at load rather than leaving it to be discovered one
+        // denial at a time.
+        let anchor = match typed.role {
+            TokenRole::Client => "client_id",
+            TokenRole::CallerWorkload => "spiffe_id",
+            _ => "id",
+        };
+        if section.field(anchor).is_none() {
+            tracing::warn!(
+                plugin = %cfg.name,
+                role = ?typed.role,
+                field = anchor,
+                "claim map declares no path for its anchor, so every token will be declined",
+            );
+        }
+
+        let claim_mapper: Arc<dyn ClaimMapper> = Arc::new(ConfiguredClaimMap::new(compiled));
+
         if typed.header.trim().is_empty() {
             return Err(Box::new(PluginError::Config {
                 message: format!(
@@ -534,8 +601,10 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 None => {
                     return PluginResult::deny(PluginViolation::new(
                         "auth.mapping_failed",
-                        "claim mapper produced no subject — required `sub` \
-                         claim missing or wrong shape",
+                        "the claim map produced no subject: no candidate resolved for the \
+                         subject id, or a field declaring `on_missing: deny` resolved \
+                         nothing. Raise the log level to debug to see which fields and \
+                         which paths were tried",
                     ));
                 },
             },
@@ -544,8 +613,10 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 None => {
                     return PluginResult::deny(PluginViolation::new(
                         "auth.mapping_failed",
-                        "claim mapper produced no client — required `client_id` \
-                         / `azp` claim missing",
+                        "the claim map produced no client: no candidate resolved for the \
+                         client id, or a field declaring `on_missing: deny` resolved \
+                         nothing. Raise the log level to debug to see which fields and \
+                         which paths were tried",
                     ));
                 },
             },
@@ -554,8 +625,11 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 None => {
                     return PluginResult::deny(PluginViolation::new(
                         "auth.mapping_failed",
-                        "claim mapper produced no workload — token doesn't look \
-                         like a SPIFFE-JWT-SVID (sub doesn't start with `spiffe://`)",
+                        "the claim map produced no workload: no candidate resolved to a \
+                         `spiffe://` identity carrying a trust domain, which every \
+                         candidate must, or a field declaring `on_missing: deny` resolved \
+                         nothing. Raise the log level to debug to see which fields and \
+                         which paths were tried",
                     ));
                 },
             },
@@ -844,21 +918,285 @@ mod tests {
         assert!(format!("{err}").contains("trusted_issuers"));
     }
 
+    /// A config carrying the test issuer plus whatever mapper settings the case
+    /// needs. Every claim-map test goes through `new` like production does.
+    fn cfg_with_mapper(settings: Value) -> PluginConfig {
+        let mut config = json!({
+            "trusted_issuers": [{
+                "issuer": "https://idp.example.com",
+                "algorithms": ["HS256"],
+                "decoding_key": { "kind": "secret", "secret": "x" },
+            }],
+        });
+        if let (Some(target), Some(extra)) = (config.as_object_mut(), settings.as_object()) {
+            for (key, value) in extra {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        cfg_with_config("jwt", config)
+    }
+
+    fn build_err(settings: Value) -> String {
+        format!(
+            "{}",
+            JwtIdentityResolver::new(cfg_with_mapper(settings))
+                .expect_err("this config must not build")
+        )
+    }
+
     #[test]
     fn new_rejects_unknown_claim_mapper() {
-        let cfg = cfg_with_config(
+        let err = build_err(json!({"claim_mapper": "made-up-mapper"}));
+        assert!(err.contains("claim_mapper"), "{err}");
+        assert!(err.contains("made-up-mapper"), "{err}");
+        for name in presets::names() {
+            assert!(err.contains(name), "'{name}' missing from: {err}");
+        }
+    }
+
+    /// The two mapper settings are alternatives, not layers, so setting both is
+    /// a mistake with no coherent reading. The message names both.
+    /// Every field in this config is optional or defaulted, so a misspelling
+    /// would deserialize to the default and take effect silently. `claim_maps`
+    /// is the one that matters most: the resolver would stay on the standard
+    /// preset while the operator believed their map was live.
+    #[test]
+    fn new_rejects_a_misspelled_config_key_and_names_it() {
+        for typo in [
+            "claim_maps",
+            "claim_mappers",
+            "roles",
+            "headers",
+            "trusted_issuer",
+        ] {
+            let err = build_err(json!({typo: "whatever"}));
+            assert!(
+                err.contains(typo),
+                "a misspelled `{typo}` must be named, not ignored: {err}"
+            );
+        }
+    }
+
+    /// The same hole one level down, and this one is a validation bypass rather
+    /// than a surprise: `audiences` is defaulted and an empty list turns audience
+    /// checking off, so a misspelling would silently accept a token minted for
+    /// any audience.
+    #[test]
+    fn new_rejects_a_misspelled_issuer_key_rather_than_dropping_audience_validation() {
+        let err = format!(
+            "{}",
+            JwtIdentityResolver::new(cfg_with_config(
+                "jwt",
+                json!({
+                    "trusted_issuers": [{
+                        "issuer": "https://idp.example.com",
+                        "audience": ["my-api"],
+                        "algorithms": ["HS256"],
+                        "decoding_key": { "kind": "secret", "secret": "x" },
+                    }],
+                }),
+            ))
+            .expect_err("a misspelled `audiences` must not silently disable aud validation")
+        );
+        assert!(err.contains("audience"), "{err}");
+    }
+
+    /// The rejection must not be so eager that a valid config stops building.
+    #[test]
+    fn every_documented_config_key_is_still_accepted() {
+        JwtIdentityResolver::new(cfg_with_config(
             "jwt",
             json!({
                 "trusted_issuers": [{
                     "issuer": "https://idp.example.com",
+                    "audiences": ["my-api"],
                     "algorithms": ["HS256"],
                     "decoding_key": { "kind": "secret", "secret": "x" },
+                    "leeway_seconds": 30,
                 }],
-                "claim_mapper": "made-up-mapper",
+                "role": "client",
+                "header": "X-Client-Token",
+                "claim_mapper": "keycloak",
             }),
-        );
-        let err = JwtIdentityResolver::new(cfg).expect_err("unknown mapper should fail");
-        assert!(format!("{err}").contains("claim_mapper"));
+        ))
+        .expect("every documented key together must still build");
+    }
+
+    /// A dotted override entry matches nothing, so the resolver refuses it at
+    /// load rather than starting with a claim the operator meant to drop still
+    /// visible to policy.
+    #[test]
+    fn new_rejects_a_dotted_claim_override() {
+        let err = build_err(json!({"claims": {"exclude": ["realm_access.roles"]}}));
+        assert!(err.contains("realm_access.roles"), "{err}");
+        assert!(err.contains("exclude"), "{err}");
+    }
+
+    /// A workload identity has no claims bag, so the overrides cannot do
+    /// anything. Building still succeeds, with a warning, which is how the
+    /// undeclared anchor is handled one field over.
+    #[test]
+    fn a_workload_resolver_still_builds_with_claims_overrides_it_cannot_use() {
+        JwtIdentityResolver::new(cfg_with_mapper(json!({
+            "role": "caller_workload",
+            "claims": {"include": ["iss"]},
+        })))
+        .expect("the overrides are inert here, not a config error");
+    }
+
+    #[test]
+    fn new_rejects_both_claim_mapper_and_claim_map() {
+        let err = build_err(json!({
+            "claim_mapper": "keycloak",
+            "claim_map": {"subject": {"id": "sub"}},
+        }));
+        assert!(err.contains("claim_mapper"), "{err}");
+        assert!(err.contains("claim_map"), "{err}");
+    }
+
+    /// An absent setting and the `standard` name are the same thing, and both
+    /// have to keep working: an upgrading deployment changes neither.
+    /// The claims-bag overrides are a sibling of the two mapper fields, so they
+    /// build alongside either one.
+    #[test]
+    fn claims_overrides_build_with_a_preset_and_with_an_inline_map() {
+        for settings in [
+            json!({"claim_mapper": "keycloak", "claims": {"include": ["iss"]}}),
+            json!({
+                "claim_map": {"subject": {"id": "sub"}},
+                "claims": {"exclude": ["internal_debug"]},
+            }),
+            json!({"claims": {"include": ["iss"], "exclude": ["jti"]}}),
+        ] {
+            JwtIdentityResolver::new(cfg_with_mapper(settings.clone()))
+                .unwrap_or_else(|e| panic!("{settings} must build: {e}"));
+        }
+    }
+
+    /// A malformed or incoherent overrides block fails at load naming `claims`,
+    /// rather than quietly dropping the overrides an operator asked for.
+    #[test]
+    fn a_bad_claims_block_is_refused_at_load_and_names_the_field() {
+        for settings in [
+            json!({"claims": {"exclude": "iss"}}),
+            json!({"claims": {"include": 42}}),
+            json!({"claims": ["iss"]}),
+            json!({"claims": {"excludes": ["iss"]}}),
+            json!({"claims": {"exclude": ["tenant"], "include": ["tenant"]}}),
+        ] {
+            let err = build_err(settings.clone());
+            assert!(err.contains("claims"), "{settings}: {err}");
+        }
+    }
+
+    /// The claim named in both lists is the one the message has to identify.
+    #[test]
+    fn a_claim_in_both_override_lists_is_named() {
+        let err = build_err(json!({
+            "claims": {"exclude": ["tenant", "jti"], "include": ["tenant"]}
+        }));
+        assert!(err.contains("tenant"), "{err}");
+        assert!(err.contains("exclude") && err.contains("include"), "{err}");
+    }
+
+    #[test]
+    fn an_absent_mapper_and_the_standard_name_both_build() {
+        for settings in [json!({}), json!({"claim_mapper": "standard"})] {
+            JwtIdentityResolver::new(cfg_with_mapper(settings.clone()))
+                .unwrap_or_else(|e| panic!("{settings} must build: {e}"));
+        }
+    }
+
+    #[test]
+    fn every_shipped_preset_builds_a_resolver_for_a_role_it_declares() {
+        for name in presets::names() {
+            JwtIdentityResolver::new(cfg_with_mapper(json!({"claim_mapper": name})))
+                .unwrap_or_else(|e| panic!("'{name}' must build for the default role: {e}"));
+            JwtIdentityResolver::new(cfg_with_mapper(json!({
+                "claim_mapper": name, "role": "client",
+            })))
+            .unwrap_or_else(|e| panic!("'{name}' must build for role: client: {e}"));
+        }
+    }
+
+    /// `keycloak` is the case that motivated the work: it was rejected before,
+    /// because only `standard` was a name the resolver knew.
+    #[test]
+    fn a_provider_preset_builds_where_it_previously_failed() {
+        JwtIdentityResolver::new(cfg_with_mapper(json!({"claim_mapper": "keycloak"})))
+            .expect("keycloak must build");
+    }
+
+    /// No provider preset has a workload shape, so pairing one with
+    /// `role: workload` fails at load naming the role, which beats a section of
+    /// guesses about a shape the provider does not mint.
+    #[test]
+    fn a_preset_without_a_workload_section_refuses_the_workload_role() {
+        for name in ["auth0", "cognito", "keycloak"] {
+            let err = build_err(json!({"claim_mapper": name, "role": "workload"}));
+            assert!(err.contains("workload"), "'{name}': {err}");
+        }
+        JwtIdentityResolver::new(cfg_with_mapper(json!({
+            "claim_mapper": "standard", "role": "workload",
+        })))
+        .expect("standard declares a workload section");
+    }
+
+    #[test]
+    fn an_inline_claim_map_builds() {
+        JwtIdentityResolver::new(cfg_with_mapper(json!({
+            "claim_map": {
+                "subject": {
+                    "id": "sub",
+                    "roles": {
+                        "paths": ["realm_access.roles", "resource_access.my-api.roles"],
+                        "merge": "union",
+                    },
+                }
+            }
+        })))
+        .expect("an inline map must build");
+    }
+
+    /// A map that declares the wrong section fails at load rather than denying
+    /// every request, which is the whole point of checking at construction.
+    #[test]
+    fn an_inline_claim_map_missing_the_configured_role_names_the_role() {
+        let err = build_err(json!({
+            "claim_map": {"subject": {"id": "sub"}},
+            "role": "client",
+        }));
+        assert!(err.contains("client"), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_path_in_an_inline_claim_map_names_the_field_and_the_path() {
+        let err = build_err(json!({
+            "claim_map": {"subject": {"id": "sub", "roles": "realm_access..roles"}}
+        }));
+        assert!(err.contains("subject.roles"), "{err}");
+        assert!(err.contains("realm_access..roles"), "{err}");
+    }
+
+    /// A map of the wrong JSON shape entirely fails at construction, not at the
+    /// first request.
+    #[test]
+    fn an_inline_claim_map_of_the_wrong_shape_is_refused_at_load() {
+        for map in [
+            json!({"claim_map": "standard"}),
+            json!({"claim_map": {"subjekt": {"id": "sub"}}}),
+            json!({"claim_map": {"subject": {"id": 42}}}),
+            json!({"claim_map": {"subject": {"id": "sub"}, "claims": {"exclude": "iss"}}}),
+        ] {
+            let Err(err) = JwtIdentityResolver::new(cfg_with_mapper(map.clone())) else {
+                panic!("{map} must not build");
+            };
+            let err = format!("{err}");
+            assert!(
+                err.contains("praxis-policy-plugin-identity-jwt"),
+                "{map}: the message must name the plugin: {err}"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,40 @@
+{
+  "description": "Auth0 subject, permissions and client anchor. Covers sub, the permissions array ahead of scope, and client_id / azp as the client anchor: azp is what Auth0's default access-token profile emits and client_id what the RFC 9068 profile emits. permissions is doubly opt-in at the tenant, needing both RBAC and Add Permissions in the Access Token, and enabling it switches the token dialect; without it, scope carries the grant. Deliberately omitted: roles and teams, because Auth0's restricted-claim list forbids roles, groups, permissions and entitlements as bare custom-claim names, so roles can only arrive URL-namespaced under a deployment's own namespace, which no preset can know. Write that path in a hand-written claim_map, escaping its dots. sub is not a client-id candidate: an Auth0 machine-to-machine sub is <clientId>@clients and stripping that suffix is a value transform this plugin does not do. A present but unusable client_id declines rather than falling through to the next anchor candidate, matching the standard preset.",
+  "claim_map": {
+    "subject": {
+      "id": "sub",
+      "permissions": {
+        "paths": [
+          {
+            "path": "permissions",
+            "array_only": true
+          },
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      }
+    },
+    "client": {
+      "client_id": [
+        {
+          "path": "client_id",
+          "stop_if_present": true
+        },
+        "azp"
+      ],
+      "authorized_scopes": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      },
+      "authorized_audiences": "aud"
+    }
+  }
+}

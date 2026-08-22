@@ -19,6 +19,30 @@
 //               algorithms: [RS256]
 //               decoding_key: { kind: jwks_url, url: ... }
 //
+// Claim mapping is configuration. Either name a shipped preset:
+//
+//           claim_mapper: keycloak
+//
+// or write a map, for a shape no preset covers. Mutually exclusive with
+// `claim_mapper`:
+//
+//           claim_map:
+//             subject:
+//               id: sub
+//               roles:
+//                 paths:
+//                   - realm_access.roles
+//                   - resource_access.my-api.roles
+//                 merge: union
+//               teams: 'https://my-app\.example\.com/teams'
+//               permissions:
+//                 paths: [{ path: permissions, array_only: true }, scope]
+//                 split: whitespace
+//             claims:
+//               include: [iss]
+//
+// See `ClaimMapConfig` for the field forms and the backslash-quoting rules.
+//
 // The `kind: identity/jwt` string is part of this crate's public API.
 // Hosts call `mgr.register_factory("identity/jwt", Box::new(JwtIdentityFactory))`
 // before `load_config_yaml`.
@@ -58,7 +82,12 @@ impl PluginFactory for JwtIdentityFactory {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
 
@@ -98,6 +127,64 @@ mod tests {
             inst.handlers[0].0, HOOK_IDENTITY_RESOLVE,
             "the resolver must land on the identity.resolve hook"
         );
+    }
+
+    /// A claim map the resolver rejects has to fail here too. The alternative is
+    /// a registered resolver that denies every request, which reads as an outage
+    /// rather than as the configuration mistake it is.
+    #[test]
+    fn a_claim_map_fault_fails_the_factory_rather_than_the_first_request() {
+        let base = valid_config();
+        let issuers = base
+            .get("trusted_issuers")
+            .expect("the base config declares issuers")
+            .clone();
+
+        for faulty in [
+            serde_json::json!({"trusted_issuers": issuers.clone(), "claim_mapper": "made-up"}),
+            serde_json::json!({
+                "trusted_issuers": issuers.clone(),
+                "claim_map": {"subject": {"roles": "realm_access..roles"}},
+            }),
+            serde_json::json!({
+                "trusted_issuers": issuers.clone(),
+                "claim_map": {"subject": {"id": "sub"}},
+                "role": "client",
+            }),
+            serde_json::json!({
+                "trusted_issuers": issuers,
+                "claim_mapper": "standard",
+                "claim_map": {"subject": {"id": "sub"}},
+            }),
+        ] {
+            let err = JwtIdentityFactory
+                .create(&cfg(faulty.clone()))
+                .err()
+                .unwrap_or_else(|| panic!("{faulty} must not build"));
+            assert!(
+                matches!(*err, PluginError::Config { .. }),
+                "{faulty}: expected a config error, got {err:?}"
+            );
+        }
+    }
+
+    /// Every shipped preset is nameable through the factory, which is the path a
+    /// host actually takes.
+    #[test]
+    fn every_shipped_preset_is_nameable_through_the_factory() {
+        let issuers = valid_config()
+            .get("trusted_issuers")
+            .expect("the base config declares issuers")
+            .clone();
+        for name in crate::presets::names() {
+            let config = serde_json::json!({
+                "trusted_issuers": issuers.clone(),
+                "claim_mapper": name,
+            });
+            JwtIdentityFactory
+                .create(&cfg(config))
+                .unwrap_or_else(|_| panic!("'{name}' must build through the factory"));
+        }
     }
 
     /// The factory propagates construction failure rather than registering a
