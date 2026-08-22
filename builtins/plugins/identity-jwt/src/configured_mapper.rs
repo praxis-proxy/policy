@@ -210,8 +210,9 @@ fn resolve_scalar(
     (None, tried)
 }
 
-/// Render the paths a field reached, for a diagnostic. Called only when a field
-/// missed, so the escaping cost never lands on a resolving request.
+/// Render the paths a field reached, for a diagnostic. Called only for a field
+/// that missed while something is listening at `debug`, since the escaping cost
+/// buys nothing otherwise.
 fn paths_tried(field: &CompiledField, tried: usize) -> Vec<String> {
     field
         .candidates()
@@ -229,6 +230,14 @@ fn paths_tried(field: &CompiledField, tried: usize) -> Vec<String> {
 /// per request rather than one per field.
 struct Diagnostics {
     role: &'static str,
+    /// Whether anything is listening at `debug`, checked once per mapping call.
+    ///
+    /// A miss is the common case rather than the rare one: a plain `{sub, email}`
+    /// token under the standard preset misses `roles`, `permissions` and
+    /// `teams`, so rendering every path tried would cost every request a handful
+    /// of allocations the subscriber then drops. The `deny` bookkeeping below is
+    /// not gated: it decides the answer, not what gets logged.
+    detailed: bool,
     missed: Vec<(&'static str, Vec<String>)>,
     empty: Vec<&'static str>,
     denied: Vec<&'static str>,
@@ -238,6 +247,7 @@ impl Diagnostics {
     fn new(role: &'static str) -> Self {
         Self {
             role,
+            detailed: tracing::enabled!(tracing::Level::DEBUG),
             missed: Vec::new(),
             empty: Vec::new(),
             denied: Vec::new(),
@@ -251,12 +261,14 @@ impl Diagnostics {
         outcome: &FieldOutcome,
     ) -> bool {
         if outcome.resolved {
-            if outcome.values.is_empty() {
+            if outcome.values.is_empty() && self.detailed {
                 self.empty.push(name);
             }
             return true;
         }
-        self.missed.push((name, paths_tried(field, outcome.tried)));
+        if self.detailed {
+            self.missed.push((name, paths_tried(field, outcome.tried)));
+        }
         if field.on_missing() == OnMissing::Deny {
             self.denied.push(name);
         }
@@ -264,7 +276,9 @@ impl Diagnostics {
     }
 
     fn record_scalar_miss(&mut self, name: &'static str, field: &CompiledField, tried: usize) {
-        self.missed.push((name, paths_tried(field, tried)));
+        if self.detailed {
+            self.missed.push((name, paths_tried(field, tried)));
+        }
         if field.on_missing() == OnMissing::Deny {
             self.denied.push(name);
         }
@@ -277,7 +291,9 @@ impl Diagnostics {
     /// asked for never reaches the resolution path. The condition is static, so
     /// the loud warning belongs at construction rather than once per request.
     fn record_undeclared_anchor(&mut self, name: &'static str) {
-        self.missed.push((name, Vec::new()));
+        if self.detailed {
+            self.missed.push((name, Vec::new()));
+        }
     }
 
     /// Whether a field declared `on_missing: deny` and did not resolve.
