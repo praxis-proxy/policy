@@ -168,8 +168,12 @@ fn resolve_collection(field: &CompiledField, claims: &ClaimMap) -> FieldOutcome 
     // sets downstream and would swallow it, but the client fields are `Vec`s and
     // would carry it into audit logs and serialized output, so the same map
     // would behave differently per role. Deduped here, first-seen order kept, so
-    // it behaves the same everywhere. A single candidate is left alone under
-    // `first_match`: duplicates there are the claim's own content.
+    // it behaves the same everywhere. The dedupe covers the whole result rather
+    // than just the seam between candidates, so a lone candidate's own repeats
+    // go too, which is the "each value once" the union is documented to give.
+    // `first_match` never dedupes: it selects one candidate instead of combining
+    // any, so a repeat reaching it is the claim's own content, and passing it
+    // through is what the Rust standard mapper does.
     if field.merge() == MergeMode::Union {
         let mut seen: HashSet<String> = HashSet::with_capacity(values.len());
         values.retain(|value| seen.insert(value.clone()));
