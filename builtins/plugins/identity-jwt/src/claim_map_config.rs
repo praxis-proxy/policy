@@ -319,14 +319,20 @@ impl ClaimsOverrides {
     ///
     /// # Errors
     ///
-    /// Returns a message naming an entry that does not address one top-level
-    /// claim, or every claim that appears in both lists. A claim in both has no
-    /// coherent intent to honour, and picking a winner silently would hide the
-    /// mistake. All of them at once, so fixing one does not uncover the next on
-    /// the following startup.
+    /// Returns a message naming every entry that does not address one
+    /// top-level claim, or every claim that appears in both lists. A claim in
+    /// both has no coherent intent to honour, and picking a winner silently
+    /// would hide the mistake. Bad names across both lists at once, so fixing
+    /// one does not uncover the next on the following startup. The overlap
+    /// check waits for the names to parse, since an entry that is not a claim
+    /// name cannot conflict with one.
     pub fn compile(&self) -> Result<CompiledClaimsOverrides, String> {
-        let exclude = compile_claim_names("exclude", &self.exclude)?;
-        let include = compile_claim_names("include", &self.include)?;
+        let (exclude, mut problems) = compile_claim_names("exclude", &self.exclude);
+        let (include, include_problems) = compile_claim_names("include", &self.include);
+        problems.extend(include_problems);
+        if !problems.is_empty() {
+            return Err(problems.join("; "));
+        }
 
         let both: BTreeSet<&str> = include.intersection(&exclude).map(String::as_str).collect();
         if both.is_empty() {
@@ -340,8 +346,8 @@ impl ClaimsOverrides {
     }
 }
 
-/// Parse the names in one override list, rejecting anything that does not
-/// address a single top-level claim.
+/// Parse the names in one override list, returning the ones that address a
+/// single top-level claim and a message for each entry that does not.
 ///
 /// The bag is keyed by claim name, so a dotted entry such as
 /// `realm_access.roles` would match nothing. Every other path-shaped field in
@@ -349,20 +355,41 @@ impl ClaimsOverrides {
 /// mistake rather than a contrived one, so it fails at load instead. A claim
 /// whose name really holds a dot is written `\.`, the escape a path already
 /// uses.
-fn compile_claim_names(list: &str, names: &[String]) -> Result<HashSet<String>, String> {
-    names
-        .iter()
-        .map(|name| {
-            let path = ClaimPath::parse(name).map_err(|e| format!("claims.{list}: {e}"))?;
-            path.single_segment().map(str::to_owned).ok_or_else(|| {
-                format!(
-                    "claims.{list}: `{name}` addresses a nested claim, and the claims bag is \
-                     keyed by top-level claim name; name the top-level claim, or write a literal \
-                     dot as `\\.`"
-                )
-            })
-        })
-        .collect()
+///
+/// Every bad entry is reported rather than the first, so an operator fixing a
+/// list sees all of it. The nested ones share one message, since they share one
+/// remedy; a malformed escape carries the parser's own reason.
+fn compile_claim_names(list: &str, names: &[String]) -> (HashSet<String>, Vec<String>) {
+    let mut parsed = HashSet::new();
+    let mut problems = Vec::new();
+    let mut nested = Vec::new();
+
+    for name in names {
+        match ClaimPath::parse(name) {
+            Err(e) => problems.push(format!("claims.{list}: {e}")),
+            Ok(path) => match path.single_segment() {
+                Some(segment) => {
+                    parsed.insert(segment.to_owned());
+                },
+                None => nested.push(format!("`{name}`")),
+            },
+        }
+    }
+
+    if !nested.is_empty() {
+        let addresses = if nested.len() == 1 {
+            "addresses a nested claim"
+        } else {
+            "address nested claims"
+        };
+        problems.push(format!(
+            "claims.{list}: {} {addresses}, and the claims bag is keyed by top-level claim \
+             name; name the top-level claim, or write a literal dot as `\\.`",
+            nested.join(", ")
+        ));
+    }
+
+    (parsed, problems)
 }
 
 /// The overrides with every name parsed: single top-level claim names,
@@ -965,6 +992,25 @@ mod tests {
             assert!(err.contains("realm_access.roles"), "{err}");
             assert!(err.contains(list), "the message names the list: {err}");
         }
+    }
+
+    /// The doc promises every bad name at once. Two dotted entries in different
+    /// lists, so a fix to one does not uncover the other on the next startup.
+    #[test]
+    fn every_bad_override_entry_is_named_at_once() {
+        let overrides: ClaimsOverrides = serde_json::from_value(json!({
+            "exclude": ["realm_access.roles", "tenant"],
+            "include": ["resource_access.api", "tenant\\x"],
+        }))
+        .expect("the overrides deserialize");
+
+        let err = overrides.compile().expect_err("three entries are unusable");
+        assert!(err.contains("realm_access.roles"), "{err}");
+        assert!(err.contains("resource_access.api"), "{err}");
+        assert!(
+            err.contains("tenant\\x"),
+            "the malformed escape is named too: {err}"
+        );
     }
 
     /// A claim name that really holds dots, an Auth0 namespaced claim being the
