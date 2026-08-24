@@ -65,7 +65,7 @@ tracing = { workspace = true }
 base64 = "0.22"
 
 # Secret-clearing wrapper for client credentials in memory.
-zeroize = { version = "1.8", features = ["zeroize_derive"] }
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 # Cache-key derivation: HMAC-SHA256 under a per-process secret, so a key
 # is safe to log and a caller who controls the anchor bytes still cannot

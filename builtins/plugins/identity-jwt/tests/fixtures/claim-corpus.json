@@ -1,0 +1,1030 @@
+[
+  {
+    "name": "subject-standard-oidc-shape",
+    "role": "user",
+    "provenance": "Standard OIDC shape, constructed to exercise every subject field at once.",
+    "claims": {
+      "sub": "alice@corp.example",
+      "roles": [
+        "hr",
+        "admin"
+      ],
+      "permissions": [
+        "call_tool",
+        "list_tools"
+      ],
+      "teams": [
+        "platform"
+      ],
+      "email": "alice@corp.example",
+      "preferred_username": "alice",
+      "iss": "https://idp.example",
+      "aud": "my-api",
+      "exp": 2000000000,
+      "iat": 1999999400,
+      "jti": "b1f0"
+    },
+    "expected": {
+      "id": "alice@corp.example",
+      "roles": [
+        "hr",
+        "admin"
+      ],
+      "permissions": [
+        "call_tool",
+        "list_tools"
+      ],
+      "teams": [
+        "platform"
+      ],
+      "claims": {
+        "email": "alice@corp.example",
+        "preferred_username": "alice"
+      }
+    }
+  },
+  {
+    "name": "subject-permissions-from-permissions-array",
+    "role": "user",
+    "provenance": "Constructed to exercise the permissions branch of the permissions/scope fallback, with both claims present.",
+    "claims": {
+      "sub": "alice",
+      "permissions": [
+        "call_tool",
+        "list_tools"
+      ],
+      "scope": "read write"
+    },
+    "expected": {
+      "id": "alice",
+      "permissions": [
+        "call_tool",
+        "list_tools"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-permissions-from-scope-fallback",
+    "role": "user",
+    "provenance": "Constructed to exercise the scope branch of the permissions/scope fallback. `scope` is space-delimited in Keycloak, Auth0 and Cognito alike.",
+    "claims": {
+      "sub": "alice",
+      "scope": "read write delete"
+    },
+    "expected": {
+      "id": "alice",
+      "permissions": [
+        "read",
+        "write",
+        "delete"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-teams-from-teams-array",
+    "role": "user",
+    "provenance": "Constructed to exercise the teams branch of the teams/groups fallback, with both claims present.",
+    "claims": {
+      "sub": "alice",
+      "teams": [
+        "explicit-team"
+      ],
+      "groups": [
+        "fallback-group"
+      ]
+    },
+    "expected": {
+      "id": "alice",
+      "teams": [
+        "explicit-team"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-teams-from-groups-fallback",
+    "role": "user",
+    "provenance": "Constructed to exercise the groups branch of the teams/groups fallback.",
+    "claims": {
+      "sub": "alice",
+      "groups": [
+        "engineering",
+        "platform"
+      ]
+    },
+    "expected": {
+      "id": "alice",
+      "teams": [
+        "engineering",
+        "platform"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-string-valued-roles-is-ignored",
+    "role": "user",
+    "provenance": "Constructed: a string where an array is expected. The shape a configured map is most likely to accept where the Rust mapper does not.",
+    "claims": {
+      "sub": "alice",
+      "roles": "admin"
+    },
+    "expected": {
+      "id": "alice",
+      "roles": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-string-valued-teams-falls-through-to-groups",
+    "role": "user",
+    "provenance": "Constructed: an unusable shape on the first candidate must not stop the fallback chain.",
+    "claims": {
+      "sub": "alice",
+      "teams": "engineering",
+      "groups": [
+        "platform"
+      ]
+    },
+    "expected": {
+      "id": "alice",
+      "teams": [
+        "platform"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-string-valued-permissions-falls-through-to-scope",
+    "role": "user",
+    "provenance": "Constructed: the permissions/scope pair with an unusable first candidate.",
+    "claims": {
+      "sub": "alice",
+      "permissions": "read write",
+      "scope": "list create"
+    },
+    "expected": {
+      "id": "alice",
+      "permissions": [
+        "list",
+        "create"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-non-string-elements-in-a-role-array-are-skipped",
+    "role": "user",
+    "provenance": "Constructed: a mixed-type array. Elements that are not strings are dropped, the array as a whole is not rejected.",
+    "claims": {
+      "sub": "alice",
+      "roles": [
+        "admin",
+        42,
+        null,
+        {
+          "nested": true
+        },
+        [
+          "inner"
+        ],
+        "hr"
+      ]
+    },
+    "expected": {
+      "id": "alice",
+      "roles": [
+        "admin",
+        "hr"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-empty-permissions-array-does-not-fall-through-to-scope",
+    "role": "user",
+    "provenance": "Constructed: an empty array is a usable shape, so it resolves and the chain stops. A configured map that treated empty as unresolved would diverge here.",
+    "claims": {
+      "sub": "alice",
+      "permissions": [],
+      "scope": "read write"
+    },
+    "expected": {
+      "id": "alice",
+      "permissions": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-array-valued-scope-contributes-nothing",
+    "role": "user",
+    "provenance": "Constructed: the Rust mapper reads scope through an as_str accessor, so an array-valued scope contributes nothing. A candidate that accepted the array would grant permissions the mapper does not.",
+    "claims": {
+      "sub": "alice",
+      "scope": [
+        "admin",
+        "write"
+      ]
+    },
+    "expected": {
+      "id": "alice",
+      "permissions": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-an-array-element-containing-whitespace-stays-whole",
+    "role": "user",
+    "provenance": "Constructed: the shape that separates splitting a delimited string from splitting an array. A field whose candidates are an array and a delimited string must not split the array's elements.",
+    "claims": {
+      "sub": "alice",
+      "permissions": [
+        "read reports",
+        "write"
+      ]
+    },
+    "expected": {
+      "id": "alice",
+      "permissions": [
+        "read reports",
+        "write"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "subject-a-null-claim-reaches-the-bag-and-maps-nothing",
+    "role": "user",
+    "provenance": "Constructed: JSON null is present but unusable for a collection field, and is still a policy-visible claim where it was not consumed.",
+    "claims": {
+      "sub": "alice",
+      "roles": null,
+      "department": null
+    },
+    "expected": {
+      "id": "alice",
+      "roles": [],
+      "claims": {
+        "department": null
+      }
+    }
+  },
+  {
+    "name": "subject-missing-anchor-declines",
+    "role": "user",
+    "provenance": "Constructed: no `sub`, so there is no subject to gate on and the mapper declines.",
+    "claims": {
+      "email": "alice@corp.example"
+    },
+    "expected": null
+  },
+  {
+    "name": "subject-non-string-anchor-declines",
+    "role": "user",
+    "provenance": "Constructed: `sub` present but not a string, which is a decline rather than a coercion.",
+    "claims": {
+      "sub": 42
+    },
+    "expected": null
+  },
+  {
+    "name": "subject-keycloak-access-token",
+    "role": "user",
+    "provenance": "Keycloak 26 access token, per the server-admin guide and OIDCLoginProtocolFactory's built-in mappers. Nested realm and per-client roles, space-delimited scope, hyphenated allowed-origins.",
+    "claims": {
+      "exp": 2000000000,
+      "iat": 1999999400,
+      "jti": "6f1c9f3e",
+      "iss": "https://kc.example/realms/demo",
+      "aud": [
+        "account"
+      ],
+      "sub": "f:2c1b:alice",
+      "typ": "Bearer",
+      "azp": "my-api",
+      "sid": "9a7d",
+      "acr": "1",
+      "allowed-origins": [
+        "https://app.example"
+      ],
+      "realm_access": {
+        "roles": [
+          "offline_access",
+          "default-roles-demo",
+          "uma_authorization"
+        ]
+      },
+      "resource_access": {
+        "my-api": {
+          "roles": [
+            "viewer",
+            "editor"
+          ]
+        },
+        "account": {
+          "roles": [
+            "manage-account"
+          ]
+        }
+      },
+      "scope": "openid profile email",
+      "email_verified": true,
+      "preferred_username": "alice",
+      "email": "alice@example.com"
+    },
+    "expected": {
+      "id": "f:2c1b:alice",
+      "roles": [],
+      "permissions": [
+        "openid",
+        "profile",
+        "email"
+      ],
+      "teams": [],
+      "claims": {
+        "typ": "Bearer",
+        "azp": "my-api",
+        "sid": "9a7d",
+        "acr": "1",
+        "allowed-origins": [
+          "https://app.example"
+        ],
+        "realm_access": {
+          "roles": [
+            "offline_access",
+            "default-roles-demo",
+            "uma_authorization"
+          ]
+        },
+        "resource_access": {
+          "my-api": {
+            "roles": [
+              "viewer",
+              "editor"
+            ]
+          },
+          "account": {
+            "roles": [
+              "manage-account"
+            ]
+          }
+        },
+        "email_verified": true,
+        "preferred_username": "alice",
+        "email": "alice@example.com"
+      }
+    }
+  },
+  {
+    "name": "subject-auth0-user-token-with-a-namespaced-roles-claim",
+    "role": "user",
+    "provenance": "Auth0 user access token. The roles claim is URL-namespaced because Auth0's restricted-claim list forbids a bare `roles`; `permissions` requires RBAC plus the add-permissions toggle.",
+    "claims": {
+      "iss": "https://tenant.eu.auth0.com/",
+      "sub": "auth0|507f1f77bcf86cd799439011",
+      "aud": [
+        "https://my-api.example",
+        "https://tenant.eu.auth0.com/userinfo"
+      ],
+      "iat": 1999999400,
+      "exp": 2000000000,
+      "azp": "6MZ2Wt3rBGxOA1example",
+      "scope": "openid profile email",
+      "permissions": [
+        "read:reports"
+      ],
+      "https://my-app.example.com/roles": [
+        "editor"
+      ]
+    },
+    "expected": {
+      "id": "auth0|507f1f77bcf86cd799439011",
+      "roles": [],
+      "permissions": [
+        "read:reports"
+      ],
+      "teams": [],
+      "claims": {
+        "azp": "6MZ2Wt3rBGxOA1example",
+        "https://my-app.example.com/roles": [
+          "editor"
+        ]
+      }
+    }
+  },
+  {
+    "name": "subject-cognito-id-token",
+    "role": "user",
+    "provenance": "Cognito ID token, per the Cognito Developer Guide. `cognito:groups` holds group names; `cognito:roles` holds IAM role ARNs, which are not application roles.",
+    "claims": {
+      "sub": "a1b2c3d4-1111-2222-3333-444455556666",
+      "cognito:groups": [
+        "admins",
+        "engineering"
+      ],
+      "cognito:username": "alice",
+      "cognito:roles": [
+        "arn:aws:iam::123456789012:role/AppRole"
+      ],
+      "cognito:preferred_role": "arn:aws:iam::123456789012:role/AppRole",
+      "identities": [
+        {
+          "userId": "1122334455",
+          "providerName": "Google",
+          "providerType": "Google",
+          "primary": "true",
+          "dateCreated": "1999990000"
+        }
+      ],
+      "custom:department": "platform",
+      "email": "alice@example.com",
+      "email_verified": true,
+      "token_use": "id",
+      "auth_time": 1999999400,
+      "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example",
+      "aud": "1example23456789",
+      "exp": 2000000000,
+      "iat": 1999999400,
+      "jti": "0e2f"
+    },
+    "expected": {
+      "id": "a1b2c3d4-1111-2222-3333-444455556666",
+      "roles": [],
+      "permissions": [],
+      "teams": [],
+      "claims": {
+        "cognito:groups": [
+          "admins",
+          "engineering"
+        ],
+        "cognito:username": "alice",
+        "cognito:roles": [
+          "arn:aws:iam::123456789012:role/AppRole"
+        ],
+        "cognito:preferred_role": "arn:aws:iam::123456789012:role/AppRole",
+        "identities": [
+          {
+            "userId": "1122334455",
+            "providerName": "Google",
+            "providerType": "Google",
+            "primary": "true",
+            "dateCreated": "1999990000"
+          }
+        ],
+        "custom:department": "platform",
+        "email": "alice@example.com",
+        "email_verified": true,
+        "token_use": "id",
+        "auth_time": 1999999400
+      }
+    }
+  },
+  {
+    "name": "subject-kubernetes-projected-service-account-token",
+    "role": "user",
+    "provenance": "Kubernetes projected ServiceAccount token, per the authentication reference. `kubernetes.io` is a top-level claim name containing a dot over a nested object.",
+    "claims": {
+      "aud": [
+        "https://kubernetes.default.svc"
+      ],
+      "exp": 2000000000,
+      "iat": 1999999400,
+      "iss": "https://kubernetes.default.svc",
+      "jti": "5c7a",
+      "nbf": 1999999400,
+      "sub": "system:serviceaccount:default:agent",
+      "kubernetes.io": {
+        "namespace": "default",
+        "node": {
+          "name": "node-1",
+          "uid": "3f2b"
+        },
+        "pod": {
+          "name": "agent-7d9f",
+          "uid": "7c1e"
+        },
+        "serviceaccount": {
+          "name": "agent",
+          "uid": "9b4d"
+        }
+      }
+    },
+    "expected": {
+      "id": "system:serviceaccount:default:agent",
+      "roles": [],
+      "permissions": [],
+      "teams": [],
+      "claims": {
+        "kubernetes.io": {
+          "namespace": "default",
+          "node": {
+            "name": "node-1",
+            "uid": "3f2b"
+          },
+          "pod": {
+            "name": "agent-7d9f",
+            "uid": "7c1e"
+          },
+          "serviceaccount": {
+            "name": "agent",
+            "uid": "9b4d"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "client-anchor-from-client-id",
+    "role": "client",
+    "provenance": "Constructed to exercise the client_id branch of the client_id/azp fallback, with both claims present.",
+    "claims": {
+      "client_id": "svc-billing",
+      "azp": "svc-other"
+    },
+    "expected": {
+      "client_id": "svc-billing",
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-anchor-from-azp",
+    "role": "client",
+    "provenance": "Constructed to exercise the azp branch of the client_id/azp fallback. Keycloak user flows and Auth0's default profile both send azp rather than client_id.",
+    "claims": {
+      "azp": "svc-billing"
+    },
+    "expected": {
+      "client_id": "svc-billing",
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-a-present-but-unusable-client-id-declines-rather-than-using-azp",
+    "role": "client",
+    "provenance": "Constructed: the Rust mapper picks the first anchor key that is present and only then requires a string, so a null client_id denies rather than falling through to azp.",
+    "claims": {
+      "client_id": null,
+      "azp": "svc-billing"
+    },
+    "expected": null
+  },
+  {
+    "name": "client-a-numeric-client-id-declines-rather-than-using-azp",
+    "role": "client",
+    "provenance": "Constructed: the same presence-before-shape rule for a non-null wrong type.",
+    "claims": {
+      "client_id": 42,
+      "azp": "svc-billing"
+    },
+    "expected": null
+  },
+  {
+    "name": "client-scopes-from-authorized-scopes",
+    "role": "client",
+    "provenance": "Constructed to exercise the authorized_scopes branch of the authorized_scopes/scope fallback, with both claims present.",
+    "claims": {
+      "client_id": "svc",
+      "authorized_scopes": [
+        "read",
+        "write"
+      ],
+      "scope": "ignored other"
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_scopes": [
+        "read",
+        "write"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-scopes-from-scope-fallback",
+    "role": "client",
+    "provenance": "Constructed to exercise the scope branch of the authorized_scopes/scope fallback.",
+    "claims": {
+      "client_id": "svc",
+      "scope": "read write admin"
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_scopes": [
+        "read",
+        "write",
+        "admin"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-empty-authorized-scopes-array-does-not-fall-through-to-scope",
+    "role": "client",
+    "provenance": "Constructed: an empty array is a usable shape, so it resolves and `scope` is never read.",
+    "claims": {
+      "client_id": "svc",
+      "authorized_scopes": [],
+      "scope": "read write"
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_scopes": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-array-valued-scope-contributes-nothing",
+    "role": "client",
+    "provenance": "Constructed: the client-side pair of the array-valued scope case.",
+    "claims": {
+      "client_id": "svc",
+      "scope": [
+        "read",
+        "write"
+      ]
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_scopes": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-an-array-element-containing-whitespace-stays-whole",
+    "role": "client",
+    "provenance": "Constructed: the client-side pair of the subject case, where order makes the result fully observable.",
+    "claims": {
+      "client_id": "svc",
+      "authorized_scopes": [
+        "read reports",
+        "write"
+      ]
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_scopes": [
+        "read reports",
+        "write"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-aud-as-a-string",
+    "role": "client",
+    "provenance": "Keycloak serializes a bare string at one audience (StringOrArraySerializer); Auth0 does the same for a pure M2M token.",
+    "claims": {
+      "client_id": "svc",
+      "aud": "gateway"
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_audiences": [
+        "gateway"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-aud-as-an-array",
+    "role": "client",
+    "provenance": "Keycloak serializes an array at two or more audiences; SPIRE and Kubernetes always do.",
+    "claims": {
+      "client_id": "svc",
+      "aud": [
+        "gateway",
+        "api"
+      ]
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_audiences": [
+        "gateway",
+        "api"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-aud-absent",
+    "role": "client",
+    "provenance": "Cognito access tokens carry no aud by default, and an M2M token can never have one.",
+    "claims": {
+      "client_id": "svc"
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_audiences": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-non-string-aud-is-ignored",
+    "role": "client",
+    "provenance": "Constructed: an unusable aud shape produces no audience rather than failing the map.",
+    "claims": {
+      "client_id": "svc",
+      "aud": 42
+    },
+    "expected": {
+      "client_id": "svc",
+      "authorized_audiences": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-roles-from-an-array",
+    "role": "client",
+    "provenance": "Constructed: platform-native client roles, which are ordered on the client extension.",
+    "claims": {
+      "client_id": "svc",
+      "roles": [
+        "service",
+        "admin"
+      ]
+    },
+    "expected": {
+      "client_id": "svc",
+      "roles": [
+        "service",
+        "admin"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-string-valued-roles-is-ignored",
+    "role": "client",
+    "provenance": "Constructed: a string where an array is expected, on a field with no fallback candidate behind it.",
+    "claims": {
+      "client_id": "svc",
+      "roles": "admin"
+    },
+    "expected": {
+      "client_id": "svc",
+      "roles": [],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-duplicate-role-elements-are-preserved",
+    "role": "client",
+    "provenance": "Constructed: the client roles field is a Vec, so a repeated element survives. This is what makes the no-deduplication choice observable.",
+    "claims": {
+      "client_id": "svc",
+      "roles": [
+        "admin",
+        "admin",
+        "viewer"
+      ]
+    },
+    "expected": {
+      "client_id": "svc",
+      "roles": [
+        "admin",
+        "admin",
+        "viewer"
+      ],
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-name-is-carried-when-present",
+    "role": "client",
+    "provenance": "Constructed: no researched provider mints client_name, so only an operator's custom claim reaches it.",
+    "claims": {
+      "client_id": "svc",
+      "client_name": "Billing Service"
+    },
+    "expected": {
+      "client_id": "svc",
+      "client_name": "Billing Service",
+      "claims": {}
+    }
+  },
+  {
+    "name": "client-keycloak-service-account-token",
+    "role": "client",
+    "provenance": "Keycloak service-account access token, per ClientManager.addServiceAccountProtocolMappersViaScope. Carries client_id, clientHost, clientAddress and a service-account preferred_username.",
+    "claims": {
+      "exp": 2000000000,
+      "iat": 1999999400,
+      "jti": "d41f",
+      "iss": "https://kc.example/realms/demo",
+      "aud": "account",
+      "sub": "8b2c:service-account-my-service",
+      "typ": "Bearer",
+      "azp": "my-service",
+      "client_id": "my-service",
+      "clientHost": "10.0.0.5",
+      "clientAddress": "10.0.0.5",
+      "preferred_username": "service-account-my-service",
+      "scope": "openid profile email",
+      "realm_access": {
+        "roles": [
+          "offline_access",
+          "uma_authorization"
+        ]
+      },
+      "resource_access": {
+        "my-service": {
+          "roles": [
+            "svc-role"
+          ]
+        }
+      }
+    },
+    "expected": {
+      "client_id": "my-service",
+      "authorized_scopes": [
+        "openid",
+        "profile",
+        "email"
+      ],
+      "authorized_audiences": [
+        "account"
+      ],
+      "roles": [],
+      "claims": {
+        "typ": "Bearer",
+        "clientHost": "10.0.0.5",
+        "clientAddress": "10.0.0.5",
+        "preferred_username": "service-account-my-service",
+        "realm_access": {
+          "roles": [
+            "offline_access",
+            "uma_authorization"
+          ]
+        },
+        "resource_access": {
+          "my-service": {
+            "roles": [
+              "svc-role"
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "client-auth0-m2m-access-token",
+    "role": "client",
+    "provenance": "Auth0 default-profile machine-to-machine access token, per the organizations token sample. `sub` is <clientId>@clients and `aud` is a bare string.",
+    "claims": {
+      "iss": "https://tenant.eu.auth0.com/",
+      "sub": "6MZ2Wt3rBGxOA1example@clients",
+      "aud": "https://my-api.example",
+      "iat": 1999999400,
+      "exp": 2000000000,
+      "azp": "6MZ2Wt3rBGxOA1example",
+      "gty": "client-credentials",
+      "scope": "read:reports write:reports"
+    },
+    "expected": {
+      "client_id": "6MZ2Wt3rBGxOA1example",
+      "authorized_scopes": [
+        "read:reports",
+        "write:reports"
+      ],
+      "authorized_audiences": [
+        "https://my-api.example"
+      ],
+      "roles": [],
+      "claims": {
+        "gty": "client-credentials"
+      }
+    }
+  },
+  {
+    "name": "client-cognito-access-token-without-aud",
+    "role": "client",
+    "provenance": "Cognito access token, per the Cognito Developer Guide. No azp exists, no aud by default, and a resource-server scope carries a dot and a slash.",
+    "claims": {
+      "sub": "a1b2c3d4-1111-2222-3333-444455556666",
+      "token_use": "access",
+      "scope": "resourceserver.1/appclient2",
+      "auth_time": 1999999400,
+      "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example",
+      "exp": 2000000000,
+      "iat": 1999999400,
+      "version": 2,
+      "jti": "3a8e",
+      "client_id": "1example23456789"
+    },
+    "expected": {
+      "client_id": "1example23456789",
+      "authorized_scopes": [
+        "resourceserver.1/appclient2"
+      ],
+      "authorized_audiences": [],
+      "claims": {
+        "token_use": "access",
+        "auth_time": 1999999400,
+        "version": 2
+      }
+    }
+  },
+  {
+    "name": "client-missing-anchor-declines",
+    "role": "client",
+    "provenance": "Constructed: neither client_id nor azp, so there is no client to gate on.",
+    "claims": {
+      "client_name": "Billing"
+    },
+    "expected": null
+  },
+  {
+    "name": "workload-spiffe-id-from-sub",
+    "role": "workload",
+    "provenance": "SPIFFE JWT-SVID standard: `sub` MUST hold the SPIFFE ID.",
+    "claims": {
+      "sub": "spiffe://corp.example/ns/default/sa/agent",
+      "aud": [
+        "spire-server"
+      ],
+      "exp": 2000000000,
+      "iat": 1999999400
+    },
+    "expected": {
+      "spiffe_id": "spiffe://corp.example/ns/default/sa/agent",
+      "trust_domain": "corp.example",
+      "attestor": "jwt"
+    }
+  },
+  {
+    "name": "workload-spiffe-id-from-the-spiffe-id-claim-fallback",
+    "role": "workload",
+    "provenance": "Constructed: a provider that surfaces the SPIFFE ID in its own claim rather than in `sub`.",
+    "claims": {
+      "sub": "svc-account-123",
+      "spiffe_id": "spiffe://corp.example/ns/default/sa/agent"
+    },
+    "expected": {
+      "spiffe_id": "spiffe://corp.example/ns/default/sa/agent",
+      "trust_domain": "corp.example",
+      "attestor": "jwt"
+    }
+  },
+  {
+    "name": "workload-non-spiffe-sub-with-a-bogus-spiffe-id-declines",
+    "role": "workload",
+    "provenance": "Constructed: the prefix check applies to every candidate, so a non-SPIFFE sub cannot smuggle in an arbitrary spiffe_id claim.",
+    "claims": {
+      "sub": "alice@corp.example",
+      "spiffe_id": "not-a-spiffe-id"
+    },
+    "expected": null
+  },
+  {
+    "name": "workload-non-spiffe-sub-alone-declines",
+    "role": "workload",
+    "provenance": "Constructed: a perfectly valid user token must not file a non-SPIFFE identity into the workload slot.",
+    "claims": {
+      "sub": "alice@corp.example"
+    },
+    "expected": null
+  },
+  {
+    "name": "workload-spire-jwt-svid",
+    "role": "workload",
+    "provenance": "SPIRE JWT-SVID, per credtemplate/builder.go. `aud` is invariantly an array and there is no `iss`, which the JWT-SVID standard does not specify.",
+    "claims": {
+      "aud": [
+        "spire-server",
+        "https://my-api.example"
+      ],
+      "exp": 2000000000,
+      "iat": 1999999400,
+      "sub": "spiffe://example.org/ns/prod/sa/api"
+    },
+    "expected": {
+      "spiffe_id": "spiffe://example.org/ns/prod/sa/api",
+      "trust_domain": "example.org",
+      "attestor": "jwt"
+    }
+  },
+  {
+    "name": "workload-spiffe-id-with-no-authority-declines",
+    "role": "workload",
+    "provenance": "Constructed: the trust domain is the URI authority and SPIFFE requires it, so a string carrying the scheme alone names no trust boundary. Tightened in this PR; the mapper previously filed it with an empty trust domain.",
+    "claims": {
+      "sub": "spiffe:///ns/default/sa/agent"
+    },
+    "expected": null
+  },
+  {
+    "name": "workload-trust-domain-from-a-spiffe-id-with-no-path",
+    "role": "workload",
+    "provenance": "Constructed: the trust domain is the URI authority, which is the whole identifier when there is no path.",
+    "claims": {
+      "sub": "spiffe://example.org"
+    },
+    "expected": {
+      "spiffe_id": "spiffe://example.org",
+      "trust_domain": "example.org",
+      "attestor": "jwt"
+    }
+  }
+]

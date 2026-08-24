@@ -5,8 +5,9 @@
 //
 // Leaf scalars at any nesting depth land in the bag under their dotted
 // path, prefixed with `args.` or `result.`. Nested objects recurse;
-// arrays-of-strings flatten into a StringSet; arrays of mixed/scalar
-// types are skipped (no list scalar attribute in the bag).
+// scalar arrays flatten into a StringSet, numbers and bools rendered as
+// strings (empty array → empty set); arrays holding a nested array or
+// object are skipped (no list scalar in the bag).
 //
 // Examples:
 //   args = { "include_ssn": true,
@@ -36,9 +37,9 @@ pub fn extract_result(result: &Value, bag: &mut AttributeBag) {
 }
 
 /// Flatten a static attribute tree into `data.*` keys. Same walk as
-/// args/result — nested objects recurse, string arrays become
+/// args/result — nested objects recurse, scalar arrays become
 /// `StringSet`s (so `data.tenants.x.allowed_models` supports `contains`
-/// and interpolated `restrict` references).
+/// and interpolated `restrict` references), an empty array an empty set.
 pub fn extract_data(tree: &praxis_policy_apl_core::AttributeTree, bag: &mut AttributeBag) {
     walk(tree.as_value(), "data", bag);
 }
@@ -56,23 +57,38 @@ pub(crate) fn walk(value: &Value, prefix: &str, bag: &mut AttributeBag) {
             }
         },
         Value::Array(items) => {
-            // Promote string-only arrays to StringSet — supports
-            // `args.tags contains "urgent"` predicates.
-            let mut all_strings: HashSet<String> = HashSet::new();
+            // Promote scalar arrays to StringSet — supports
+            // `args.tags contains "urgent"` predicates. Numbers and bools
+            // render to their string form: a claim arrives in whatever
+            // shape the IdP minted, and coercing beats denying every user
+            // of a provider that emits `"group_ids": [1, 2]`.
+            let mut set: HashSet<String> = HashSet::new();
             let mut ok = true;
             for item in items {
-                if let Some(s) = item.as_str() {
-                    all_strings.insert(s.to_owned());
-                } else {
-                    ok = false;
-                    break;
+                match item {
+                    Value::String(s) => {
+                        set.insert(s.clone());
+                    },
+                    Value::Number(n) => {
+                        set.insert(n.to_string());
+                    },
+                    Value::Bool(b) => {
+                        set.insert(b.to_string());
+                    },
+                    // Null is absent, so it contributes no element.
+                    Value::Null => {},
+                    // Nested arrays/objects have no bag representation.
+                    Value::Array(_) | Value::Object(_) => {
+                        ok = false;
+                        break;
+                    },
                 }
             }
-            if ok && !all_strings.is_empty() {
-                bag.set(prefix, all_strings);
+            // Empty arrays included: a strict PDP errors on a missing key
+            // but evaluates an empty set fine. See `security.rs`.
+            if ok {
+                bag.set(prefix, set);
             }
-            // Non-string arrays (mixed, numeric, nested): silently skipped
-            // — no list scalar in the bag for those.
         },
         Value::String(s) => bag.set(prefix, s.clone()),
         Value::Bool(b) => bag.set(prefix, *b),
@@ -130,13 +146,53 @@ mod tests {
         assert!(!bag.set_contains("args.tags", "missing"));
     }
 
+    /// Dropping the key would deny every subject whose `IdP` minted
+    /// `"roles": []`, since a missing key is a CEL error. The resolver's
+    /// `membership_on_absent_key_denies_but_empty_set_evaluates` pins that.
     #[test]
-    fn args_mixed_array_is_skipped() {
-        let args = json!({ "mixed": ["a", 1, true] });
+    fn empty_array_becomes_an_empty_string_set_not_a_missing_key() {
+        let args = json!({ "tags": [], "nested": { "roles": [] } });
         let mut bag = AttributeBag::new();
         extract_args(&args, &mut bag);
-        // No `args.mixed` key — type didn't unify, so we dropped it.
-        assert!(!bag.contains("args.mixed"));
+        assert!(
+            bag.contains("args.tags"),
+            "an empty array must set the key, or membership errors",
+        );
+        assert!(!bag.set_contains("args.tags", "anything"), "and be empty");
+        assert!(
+            bag.contains("args.nested.roles"),
+            "nested too — this is the Keycloak `realm_access.roles` shape",
+        );
+    }
+
+    /// Numbers and bools render to their string form rather than costing
+    /// the key, matching how the Cedar bridge carries a float claim.
+    #[test]
+    fn scalar_array_elements_are_coerced_to_strings() {
+        let args = json!({ "mixed": ["a", 1, true], "ids": [1, 2], "n": ["a", null] });
+        let mut bag = AttributeBag::new();
+        extract_args(&args, &mut bag);
+        assert!(bag.set_contains("args.mixed", "a"));
+        assert!(bag.set_contains("args.mixed", "1"));
+        assert!(bag.set_contains("args.mixed", "true"));
+        assert!(
+            bag.set_contains("args.ids", "2"),
+            "numeric ids are testable"
+        );
+        // Null is absent, so it drops out without costing the key.
+        assert!(bag.contains("args.n"));
+        assert!(!bag.set_contains("args.n", "null"));
+    }
+
+    /// A nested array or object has no bag representation, so the key is
+    /// still skipped — the one remaining case that sets nothing.
+    #[test]
+    fn array_holding_a_nested_container_is_skipped() {
+        let args = json!({ "deep": ["a", [1]], "objs": [{ "k": "v" }] });
+        let mut bag = AttributeBag::new();
+        extract_args(&args, &mut bag);
+        assert!(!bag.contains("args.deep"));
+        assert!(!bag.contains("args.objs"));
     }
 
     #[test]

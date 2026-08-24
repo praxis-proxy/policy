@@ -3317,9 +3317,9 @@ mod tests {
 
     #[test]
     fn pred_exists_requires_paren_and_ident() {
-        assert!(parse_predicate("exists").is_err());
-        assert!(parse_predicate("exists()").is_err());
-        assert!(parse_predicate("exists(authenticated").is_err());
+        parse_predicate("exists").unwrap_err();
+        parse_predicate("exists()").unwrap_err();
+        parse_predicate("exists(authenticated").unwrap_err();
     }
 
     #[test]

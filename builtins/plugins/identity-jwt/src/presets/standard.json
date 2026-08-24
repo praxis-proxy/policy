@@ -1,0 +1,73 @@
+{
+  "description": "Standard OIDC claim shape, and what an absent claim_mapper resolves to. Reads sub, roles, permissions or scope, and teams or groups for a subject; client_id or azp, client_name, authorized_scopes or scope, aud and roles for a client; and a SPIFFE ID from sub or spiffe_id for a workload, whose trust domain is always derived from that identity's authority rather than read from a claim. Equivalent to the built-in Rust standard mapper, which a corpus-backed test and a shape sweep hold it to: a deployment that names no mapper sees exactly what it saw before. Every candidate flag here encodes an accessor the Rust mapper uses, so none of them is cosmetic. The collection candidates are array-only because the mapper reads them with an array accessor, so a string-valued roles claim contributes nothing and falls through where there is a next candidate. The scope candidates are string-only because the mapper reads scope with a string accessor, so an array-valued scope must contribute nothing rather than contributing each element as a permission. The client_id candidate stops if present because the mapper picks the first anchor key that exists and only then requires a string of it, so a present-but-unusable client_id denies rather than falling through to azp.",
+  "claim_map": {
+    "subject": {
+      "id": "sub",
+      "roles": [
+        {
+          "path": "roles",
+          "array_only": true
+        }
+      ],
+      "permissions": {
+        "paths": [
+          {
+            "path": "permissions",
+            "array_only": true
+          },
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      },
+      "teams": [
+        {
+          "path": "teams",
+          "array_only": true
+        },
+        {
+          "path": "groups",
+          "array_only": true
+        }
+      ]
+    },
+    "client": {
+      "client_id": [
+        {
+          "path": "client_id",
+          "stop_if_present": true
+        },
+        "azp"
+      ],
+      "client_name": "client_name",
+      "authorized_scopes": {
+        "paths": [
+          {
+            "path": "authorized_scopes",
+            "array_only": true
+          },
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      },
+      "authorized_audiences": "aud",
+      "roles": [
+        {
+          "path": "roles",
+          "array_only": true
+        }
+      ]
+    },
+    "workload": {
+      "spiffe_id": [
+        "sub",
+        "spiffe_id"
+      ]
+    }
+  }
+}

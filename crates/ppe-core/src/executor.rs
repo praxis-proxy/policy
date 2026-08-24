@@ -1167,7 +1167,6 @@ pub fn erase_result<P: crate::hooks::PluginPayload>(
 mod tests {
     use super::*;
     use crate::hooks::PluginResult;
-    use crate::hooks::payload::PluginPayload;
 
     #[derive(Debug, Clone)]
     #[allow(dead_code)] // test fixture — typed shape is the point, not field reads
@@ -1287,10 +1286,9 @@ mod tests {
     // being dispatched.
 
     use crate::context::PluginContext;
-    use crate::plugin::{OnError, Plugin, PluginConfig, PluginMode};
-    use crate::registry::{AnyHookHandler, HookEntry, PluginRef};
+    use crate::plugin::{Plugin, PluginConfig, PluginMode};
+    use crate::registry::{AnyHookHandler, PluginRef};
     use async_trait::async_trait;
-    use std::sync::Arc;
 
     /// How a mock branch fails.
     #[derive(Clone, Copy)]

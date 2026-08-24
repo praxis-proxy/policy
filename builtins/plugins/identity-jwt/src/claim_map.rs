@@ -81,7 +81,7 @@ pub type ClaimMap = HashMap<String, Value>;
 ///   * `permissions` / `scope`  → `subject.permissions` (array, or a
 ///     space-separated string)
 ///   * `groups` / `teams`       → `subject.teams`     (string array)
-///   * Every other claim        → `subject.claims.<name>` (stringified)
+///   * Every other claim        → `subject.claims.<name>` (full `Value`)
 ///
 /// Implementations with non-standard `IdPs` (Keycloak's nested
 /// `realm_access.roles`, AWS Cognito's `cognito:*` prefixed claims)
@@ -149,9 +149,8 @@ impl ClaimMapper for StandardClaimMap {
             }
         }
 
-        // Remaining claims — keyed by name with full Value preserved
-        // (ClientExtension.claims is HashMap<String, serde_json::Value>,
-        // unlike SubjectExtension.claims which stringifies).
+        // Remaining claims — keyed by name with full Value preserved,
+        // same as `SubjectExtension.claims`.
         const RESERVED: &[&str] = &[
             "client_id",
             "azp",
@@ -185,19 +184,17 @@ impl ClaimMapper for StandardClaimMap {
         let spiffe_id = claims
             .get("sub")
             .and_then(Value::as_str)
-            .filter(|s| s.starts_with("spiffe://"))
+            .filter(|s| is_spiffe_id(s))
             .or_else(|| claims.get("spiffe_id").and_then(Value::as_str))
-            // Guard the `spiffe_id` fallback with the SAME prefix check as
-            // `sub`: a non-SPIFFE `sub` must not smuggle in an arbitrary
-            // `spiffe_id` claim and be accepted as a workload identity.
-            .filter(|s| s.starts_with("spiffe://"))
+            // Guard the `spiffe_id` fallback with the SAME check as `sub`: a
+            // non-SPIFFE `sub` must not smuggle in an arbitrary `spiffe_id`
+            // claim and be accepted as a workload identity.
+            .filter(|s| is_spiffe_id(s))
             .map(str::to_owned)?;
 
-        // Trust domain — pull from the SPIFFE-ID host part.
-        let trust_domain = spiffe_id
-            .strip_prefix("spiffe://")
-            .and_then(|rest| rest.split('/').next())
-            .map(str::to_owned);
+        // The URI authority, which `is_spiffe_id` already required, so this
+        // cannot be `None`.
+        let trust_domain = trust_domain_of(&spiffe_id);
 
         Some(WorkloadIdentity {
             spiffe_id: Some(spiffe_id),
@@ -259,13 +256,12 @@ impl ClaimMapper for StandardClaimMap {
             }
         }
 
-        // Every other claim → `subject.claims.<name>`.
-        // SubjectExtension.claims is HashMap<String, String>, so
-        // non-string values get stringified (JSON-serialized). The
-        // reserved-claim set is the ones we already mapped to
-        // structured fields, plus the JWT standard registered
-        // claims (iss/aud/exp/nbf/iat/jti) which aren't useful as
-        // policy-visible claims.
+        // Every other claim → `subject.claims.<name>`, with the full
+        // `Value` preserved so a nested claim survives to the policy
+        // bag (`payload::walk` flattens it there). The reserved-claim
+        // set is the ones we already mapped to structured fields, plus
+        // the JWT standard registered claims (iss/aud/exp/nbf/iat/jti)
+        // which aren't useful as policy-visible claims.
         const RESERVED: &[&str] = &[
             "sub",
             "roles",
@@ -284,15 +280,36 @@ impl ClaimMapper for StandardClaimMap {
             if RESERVED.contains(&k.as_str()) {
                 continue;
             }
-            let stringified = match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            subject.claims.insert(k.clone(), stringified);
+            subject.claims.insert(k.clone(), v.clone());
         }
 
         Some(subject)
     }
+}
+
+/// Every SPIFFE ID starts here, and no configuration can turn the check off.
+const SPIFFE_SCHEME: &str = "spiffe://";
+
+/// Whether a string is usable as a SPIFFE ID.
+///
+/// The scheme alone is not enough: the authority carries the trust domain, and
+/// the SPIFFE standard makes it mandatory. `spiffe:///ns/default/sa/agent` names
+/// no trust boundary, so it is not an identity this plugin can file.
+pub(crate) fn is_spiffe_id(text: &str) -> bool {
+    trust_domain_of(text).is_some()
+}
+
+/// The trust domain is the SPIFFE URI's authority, which the standard makes the
+/// trust boundary. Deriving it from `iss` instead is explicitly discouraged.
+///
+/// `None` when the authority is absent, which is what makes the string unusable
+/// as an identity rather than an identity with no trust domain.
+pub(crate) fn trust_domain_of(spiffe_id: &str) -> Option<String> {
+    spiffe_id
+        .strip_prefix(SPIFFE_SCHEME)
+        .and_then(|rest| rest.split('/').next())
+        .filter(|domain| !domain.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -392,18 +409,59 @@ mod tests {
             "iat": 1700000000,  // reserved, should be skipped
         }));
         let subject = StandardClaimMap.map_subject(&claims).unwrap();
-        assert_eq!(
-            subject.claims.get("email"),
-            Some(&"alice@corp.com".to_owned())
-        );
+        assert_eq!(subject.claims.get("email"), Some(&json!("alice@corp.com")));
         assert_eq!(
             subject.claims.get("preferred_username"),
-            Some(&"alice".to_owned()),
+            Some(&json!("alice")),
         );
         // Reserved JWT claims aren't propagated as policy-visible
         // subject claims.
         assert!(!subject.claims.contains_key("iat"));
         assert!(!subject.claims.contains_key("sub"));
+    }
+
+    #[test]
+    fn structured_subject_claims_keep_their_shape() {
+        // A nested or list claim must reach `subject.claims` as the JSON it
+        // was, not as a string of that JSON. `praxis-policy-apl-cmf` flattens
+        // it into the policy bag from there, which is what makes
+        // `claim.realm_access.roles contains 'admin'` resolve for a Keycloak
+        // token.
+        let claims = make_claims(json!({
+            "sub": "alice",
+            "realm_access": { "roles": ["admin"] },
+            "projects": ["rhoai-prod", "rhoai-stage"],
+            "quota": 42,
+        }));
+        let subject = StandardClaimMap.map_subject(&claims).unwrap();
+        assert_eq!(
+            subject.claims.get("realm_access"),
+            Some(&json!({ "roles": ["admin"] })),
+            "a nested object must not be flattened to a string here"
+        );
+        assert_eq!(
+            subject.claims.get("projects"),
+            Some(&json!(["rhoai-prod", "rhoai-stage"])),
+        );
+        assert_eq!(subject.claims.get("quota"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn a_string_claim_is_not_confused_with_a_one_element_array() {
+        // The ambiguity stringification used to create: a claim whose value
+        // is literally the text `["a"]` and a claim whose value is the array
+        // `["a"]` both serialized to the same five characters, so nothing
+        // downstream could tell them apart. Preserving `Value` keeps them
+        // distinct.
+        let as_string = StandardClaimMap
+            .map_subject(&make_claims(json!({ "sub": "alice", "x": "[\"a\"]" })))
+            .unwrap();
+        let as_array = StandardClaimMap
+            .map_subject(&make_claims(json!({ "sub": "alice", "x": ["a"] })))
+            .unwrap();
+        assert_eq!(as_string.claims.get("x"), Some(&json!("[\"a\"]")));
+        assert_eq!(as_array.claims.get("x"), Some(&json!(["a"])));
+        assert_ne!(as_string.claims.get("x"), as_array.claims.get("x"));
     }
 
     // ---- map_client -------------------------------------------------------
@@ -574,6 +632,49 @@ mod tests {
                 !client.claims.contains_key(reserved),
                 "{reserved} was consumed and must not reappear as a policy claim"
             );
+        }
+    }
+
+    // ---- workload identity ------------------------------------------------
+
+    /// The scheme alone is not a SPIFFE ID. The authority carries the trust
+    /// domain, which the standard makes mandatory, so an authority-less string
+    /// declines rather than filing an identity whose trust boundary is `""`.
+    #[test]
+    fn a_spiffe_id_with_no_authority_declines() {
+        for id in ["spiffe:///ns/default/sa/agent", "spiffe://", "spiffe:///"] {
+            let claims = make_claims(json!({"sub": id}));
+            assert!(
+                StandardClaimMap.map_workload(&claims).is_none(),
+                "`{id}` names no trust domain, so it is not an identity"
+            );
+        }
+    }
+
+    /// Checked per candidate, like the prefix itself: an authority-less `sub`
+    /// does not poison the `spiffe_id` fallback behind it.
+    #[test]
+    fn an_authority_less_sub_still_falls_back_to_the_spiffe_id_claim() {
+        let claims = make_claims(json!({
+            "sub": "spiffe:///ns/default/sa/agent",
+            "spiffe_id": "spiffe://corp.example/ns/default/sa/agent",
+        }));
+        let workload = StandardClaimMap.map_workload(&claims).unwrap();
+        assert_eq!(workload.trust_domain.as_deref(), Some("corp.example"));
+    }
+
+    /// The authority is the whole identifier when there is no path, and every
+    /// accepted identity has one.
+    #[test]
+    fn the_trust_domain_is_the_uri_authority() {
+        for (id, domain) in [
+            ("spiffe://example.org", Some("example.org")),
+            ("spiffe://example.org/ns/a/sa/b", Some("example.org")),
+            ("spiffe://", None),
+            ("https://example.org/ns/a", None),
+        ] {
+            assert_eq!(trust_domain_of(id).as_deref(), domain, "{id}");
+            assert_eq!(is_spiffe_id(id), domain.is_some(), "{id}");
         }
     }
 

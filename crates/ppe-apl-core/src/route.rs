@@ -136,10 +136,7 @@ pub async fn evaluate_pre(
                     args_modified = true;
                 }
             },
-            FieldOutcome::Deny {
-                reason,
-                stage_index: _,
-            } => {
+            FieldOutcome::Deny { reason, .. } => {
                 return RouteDecision {
                     decision: Decision::Deny {
                         reason: Some(reason),
@@ -228,10 +225,7 @@ pub async fn evaluate_post(
                         result_modified = true;
                     }
                 },
-                FieldOutcome::Deny {
-                    reason,
-                    stage_index: _,
-                } => {
+                FieldOutcome::Deny { reason, .. } => {
                     return RouteDecision {
                         decision: Decision::Deny {
                             reason: Some(reason),

@@ -493,10 +493,10 @@ mod tests {
     #[test]
     fn actor_with_user_or_client_subject_is_allowed() {
         for s in [DelegationSubject::User, DelegationSubject::Client] {
-            assert!(reject_unsupported_actor_combo(&s, Some(&TokenRole::Client)).is_ok());
+            reject_unsupported_actor_combo(&s, Some(&TokenRole::Client)).unwrap();
         }
         // No actor at all is always fine.
-        assert!(reject_unsupported_actor_combo(&DelegationSubject::CallerWorkload, None).is_ok());
+        reject_unsupported_actor_combo(&DelegationSubject::CallerWorkload, None).unwrap();
     }
 
     #[test]

@@ -222,12 +222,16 @@ impl PluginConfig {
                 .or_else(|| m.resource.as_ref().and_then(|r| r.server_id.as_deref()))
                 .or_else(|| m.prompt.as_ref().and_then(|p| p.server_id.as_deref()))
         });
-        let tenant_id = extensions
+        // `claim_str` renders a scalar claim, so a numeric tenant id still
+        // matches the text an operator configured. A structured claim names
+        // no single tenant and yields `None`, which `check_set` treats as
+        // no-match.
+        let tenant_claim = extensions
             .security
             .as_ref()
             .and_then(|s| s.subject.as_ref())
-            .and_then(|sub| sub.claims.get("tenant"))
-            .map(std::string::String::as_str);
+            .and_then(|sub| sub.claim_str("tenant"));
+        let tenant_id = tenant_claim.as_deref();
         let entity_name = extensions
             .meta
             .as_ref()
@@ -749,7 +753,8 @@ mod tests {
         }]);
         let with_tenant = |tenant: &str| {
             let mut sub = SubjectExtension::default();
-            sub.claims.insert("tenant".to_owned(), tenant.to_owned());
+            sub.claims
+                .insert("tenant".to_owned(), serde_json::json!(tenant));
             Extensions {
                 security: Some(Arc::new(SecurityExtension {
                     subject: Some(sub),
@@ -763,5 +768,29 @@ mod tests {
             !cfg.passes_conditions(&with_tenant("other")),
             "a different tenant must not satisfy the condition"
         );
+    }
+
+    /// A numeric tenant claim still matches the text an operator configured.
+    /// Before subject claims held `Value` the claim map stringified it, so a
+    /// deployment whose `IdP` mints `"tenant": 42` matched `tenant_ids: ["42"]`.
+    /// A condition that quietly stopped matching would stop running the plugin
+    /// it scopes — including one that enforces something.
+    #[test]
+    fn a_numeric_tenant_claim_still_matches_configured_text() {
+        let cfg = cfg_with(vec![PluginCondition {
+            tenant_ids: Some(["42".to_owned()].into()),
+            ..Default::default()
+        }]);
+        let mut sub = SubjectExtension::default();
+        sub.claims
+            .insert("tenant".to_owned(), serde_json::json!(42));
+        let ext = Extensions {
+            security: Some(Arc::new(SecurityExtension {
+                subject: Some(sub),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert!(cfg.passes_conditions(&ext));
     }
 }

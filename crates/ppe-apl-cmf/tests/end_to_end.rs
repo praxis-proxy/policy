@@ -106,7 +106,7 @@ fn alice_hr() -> SecurityExtension {
             roles: HashSet::from(["hr".to_owned()]),
             permissions: HashSet::from(["view_ssn".to_owned()]),
             teams: HashSet::from(["compliance".to_owned()]),
-            claims: HashMap::from([("iss".to_owned(), "auth.corp".to_owned())]),
+            claims: HashMap::from([("iss".to_owned(), serde_json::json!("auth.corp"))]),
         }),
         this_workload: Some(WorkloadIdentity {
             client_id: Some("hr-tool".into()),

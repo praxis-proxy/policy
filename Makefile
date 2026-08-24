@@ -28,6 +28,7 @@ help:
 	@echo "Lint & format:"
 	@echo "  fmt               Format Rust code (cargo fmt --all)"
 	@echo "  lint              CI lint gate: fmt --check + clippy -D warnings"
+	@echo "  lint-extra        Extra lint checks: typos + taplo fmt --check"
 	@echo "  clippy            Run clippy on the workspace (-D warnings)"
 	@echo "  lint-fix          Auto-fix: cargo fmt + clippy --fix"
 	@echo "  machete           Report unused dependencies (advisory)"
@@ -38,9 +39,14 @@ help:
 	@echo "Supply chain & coverage:"
 	@echo "  audit             cargo deny check (advisories, licenses, bans, sources)"
 	@echo "  coverage          Coverage summary, gated at COVERAGE_FLOOR percent"
+	@echo "  mutants           Run mutation testing (cargo-mutants)"
+	@echo "  semver            Check semver compatibility (cargo-semver-checks)"
 	@echo ""
 	@echo "Docs:"
 	@echo "  doc               cargo doc with warnings denied"
+	@echo ""
+	@echo "Setup:"
+	@echo "  setup-hooks       Install git pre-commit hook"
 	@echo ""
 	@echo "CI:"
 	@echo "  ci                What CI runs: lint + test"
@@ -101,10 +107,29 @@ lint-fix:
 # Advisory, not part of the blocking gate: machete is wrong in both directions. It
 # reports macro- and derive-only crates as unused, and it misses a genuinely
 # unused dependency whose name appears in a comment.
+# Extra lint checks: spell checker and TOML formatting. Not part of the
+# blocking CI gate; run manually or by lint-extra CI.
+.PHONY: lint-extra
+lint-extra:
+	@command -v typos >/dev/null 2>&1 || $(CARGO) install typos-cli --locked
+	@typos
+	@command -v taplo >/dev/null 2>&1 || $(CARGO) install taplo-cli --locked
+	@taplo fmt --check
+	@echo "lint-extra passed"
+
 .PHONY: machete
 machete:
 	@command -v cargo-machete >/dev/null 2>&1 || $(CARGO) install cargo-machete --locked
 	@cargo machete || true
+
+# =============================================================================
+# Setup
+# =============================================================================
+
+.PHONY: setup-hooks
+setup-hooks:
+	@git config core.hooksPath .hooks
+	@echo "pre-commit hook installed"
 
 # =============================================================================
 # Test
@@ -149,6 +174,18 @@ coverage:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --locked
 	@VALKEY_TESTS_OPTIONAL=1 cargo llvm-cov --workspace --summary-only \
 		--fail-under-lines $(COVERAGE_FLOOR) -- --include-ignored
+
+# Mutation testing. Advisory, not part of the blocking CI gate.
+.PHONY: mutants
+mutants:
+	@command -v cargo-mutants >/dev/null 2>&1 || $(CARGO) install cargo-mutants --locked
+	@cargo mutants --workspace
+
+# Semver compatibility check against the last published version.
+.PHONY: semver
+semver:
+	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
+	@cargo semver-checks
 
 # =============================================================================
 # Docs

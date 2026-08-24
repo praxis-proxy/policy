@@ -509,7 +509,6 @@ async fn dispatch_effect(
                         // downstream rules in this same step list can
                         // read them (`require(delegation.granted.permissions
                         // contains "X")`, etc.).
-                        use crate::attributes::AttributeValue;
                         use crate::step::delegation_bag_keys as bk;
 
                         bag.set(bk::GRANTED, AttributeValue::Bool(true));
@@ -1234,10 +1233,7 @@ async fn dispatch_field_op(
             }
             EffectOutcome::Continue
         },
-        FieldOutcome::Deny {
-            reason,
-            stage_index: _,
-        } => EffectOutcome::Halt(Decision::Deny {
+        FieldOutcome::Deny { reason, .. } => EffectOutcome::Halt(Decision::Deny {
             reason: Some(reason),
             rule_source: fallback_source.to_owned(),
         }),
@@ -1526,10 +1522,7 @@ pub async fn evaluate_pipeline(
                                     replaced = true;
                                 }
                             },
-                            Decision::Deny {
-                                reason,
-                                rule_source: _,
-                            } => {
+                            Decision::Deny { reason, .. } => {
                                 return PipelineEvaluation {
                                     outcome: FieldOutcome::Deny {
                                         reason: reason
@@ -1657,10 +1650,8 @@ fn value_for_hash(v: &serde_json::Value) -> String {
 )]
 mod tests {
     use super::*;
-    use crate::rules::{Condition, Expression, Rule};
     use crate::step::{DelegationInvoker, NoopDelegationInvoker};
     use std::collections::HashSet;
-    use std::sync::Arc;
 
     fn rule(condition: Expression, effect: Effect, source: &str) -> Rule {
         Rule::single(condition, effect, source)
@@ -1694,6 +1685,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::cast_precision_loss,
+        clippy::float_cmp,
         reason = "the lossy conversion is the premise under test"
     )]
     fn large_integers_compare_exactly_not_through_f64() {
@@ -2226,7 +2218,6 @@ mod tests {
         }
     }
 
-    use crate::pipeline::{Stage, TypeCheck};
     use serde_json::json;
 
     fn make_pipeline(stages: Vec<Stage>) -> crate::pipeline::Pipeline {
@@ -2981,10 +2972,7 @@ mod tests {
         }
     }
 
-    use crate::step::{
-        PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver, PluginError, PluginInvocation,
-        PluginInvoker, PluginOutcome,
-    };
+    use crate::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PluginError, PluginOutcome};
     use async_trait::async_trait;
 
     /// PDP resolver that returns the decision baked into it. Doesn't

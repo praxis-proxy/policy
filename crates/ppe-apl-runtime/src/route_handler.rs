@@ -829,7 +829,6 @@ fn pending_violation(p: &praxis_policy_apl_core::step::PendingElicitation) -> Pl
 mod tests {
     use super::*;
     use praxis_policy_core::extensions::HttpExtension;
-    use std::sync::Arc;
 
     fn pending(id: &str) -> praxis_policy_apl_core::step::PendingElicitation {
         praxis_policy_apl_core::step::PendingElicitation {

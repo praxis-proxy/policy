@@ -3,6 +3,7 @@
 
 // SecurityExtension — labels, classification, identity, data policy.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
@@ -48,9 +49,36 @@ pub struct SubjectExtension {
     #[serde(default)]
     pub teams: HashSet<String>,
 
-    /// Raw claims (e.g., JWT claims).
+    /// Raw remaining JWT claims (or equivalent), keyed by claim name.
+    /// `Value` (not `String`) because claim values can be booleans,
+    /// numbers, nested objects, arrays — an `IdP` that nests roles under
+    /// `realm_access.roles` must reach a policy with that shape intact,
+    /// and stringifying here would destroy it for every consumer.
+    /// Matches [`ClientExtension::claims`].
     #[serde(default)]
-    pub claims: HashMap<String, String>,
+    pub claims: HashMap<String, Value>,
+}
+
+impl SubjectExtension {
+    /// A claim's value as a string, when that claim holds a scalar.
+    ///
+    /// Strings borrow; numbers and booleans render (`42`, `true`), which is
+    /// what the pre-`Value` representation produced and what a condition
+    /// comparing against configured text still expects. Objects and arrays
+    /// return `None`: a structured claim does not name a single value, and
+    /// handing back its JSON text is the coercion that used to make a nested
+    /// claim unusable.
+    ///
+    /// Use this for the single-value lookups — a tenant id, a session id —
+    /// and read [`Self::claims`] directly when the shape matters.
+    pub fn claim_str(&self, name: &str) -> Option<Cow<'_, str>> {
+        match self.claims.get(name)? {
+            Value::String(s) => Some(Cow::Borrowed(s.as_str())),
+            Value::Number(n) => Some(Cow::Owned(n.to_string())),
+            Value::Bool(b) => Some(Cow::Owned(b.to_string())),
+            Value::Object(_) | Value::Array(_) | Value::Null => None,
+        }
+    }
 }
 
 /// Security profile for a managed object.
@@ -385,7 +413,7 @@ mod tests {
             roles: ["admin".to_owned(), "hr".to_owned()].into(),
             permissions: ["read_all".to_owned()].into(),
             teams: ["engineering".to_owned()].into(),
-            claims: [("iss".to_owned(), "auth.example.com".to_owned())].into(),
+            claims: [("iss".to_owned(), serde_json::json!("auth.example.com"))].into(),
         };
         assert_eq!(subject.id.as_deref(), Some("alice"));
         assert_eq!(subject.subject_type, Some(SubjectType::User));
@@ -525,5 +553,46 @@ mod tests {
             policy.retention.as_ref().unwrap().max_age_seconds,
             Some(86400)
         );
+    }
+    /// `claim_str` is what the single-value lookups use — a tenant id, a
+    /// session id. A number has to render, because that is what the claim map
+    /// produced before claims held `Value` and what an operator's configured
+    /// text still compares against; silently ceasing to match would turn a
+    /// plugin scoped to that tenant off without saying so.
+    #[test]
+    fn claim_str_renders_scalars_and_refuses_structure() {
+        let mut subject = SubjectExtension::default();
+        subject
+            .claims
+            .insert("tenant".to_owned(), serde_json::json!("acme"));
+        subject
+            .claims
+            .insert("numeric_tenant".to_owned(), serde_json::json!(42));
+        subject
+            .claims
+            .insert("flag".to_owned(), serde_json::json!(true));
+        subject
+            .claims
+            .insert("nested".to_owned(), serde_json::json!({ "a": 1 }));
+        subject
+            .claims
+            .insert("list".to_owned(), serde_json::json!(["a"]));
+        subject
+            .claims
+            .insert("nothing".to_owned(), serde_json::Value::Null);
+
+        assert_eq!(subject.claim_str("tenant").as_deref(), Some("acme"));
+        assert_eq!(subject.claim_str("numeric_tenant").as_deref(), Some("42"));
+        assert_eq!(subject.claim_str("flag").as_deref(), Some("true"));
+        assert!(
+            subject.claim_str("nested").is_none(),
+            "an object names no single value"
+        );
+        assert!(
+            subject.claim_str("list").is_none(),
+            "an array names no single value"
+        );
+        assert!(subject.claim_str("nothing").is_none());
+        assert!(subject.claim_str("absent").is_none());
     }
 }

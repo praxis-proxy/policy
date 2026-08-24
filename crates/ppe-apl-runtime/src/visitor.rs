@@ -447,7 +447,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 kind: cfg.kind.clone(),
                 hooks: cfg.hooks.clone(),
                 capabilities: cfg.capabilities.iter().cloned().collect(),
-                config: plugin_config_to_yaml(&cfg.config),
+                config: plugin_config_to_yaml(cfg.config.as_ref()),
                 on_error: Some(on_error_to_string(&cfg.on_error)),
                 extra: HashMap::new(),
             };
@@ -1037,8 +1037,8 @@ fn strip_non_dsl_keys(apl_block: &serde_yaml::Value) -> serde_yaml::Value {
 /// subset of YAML's value model so this is round-trip safe; failure
 /// here would only happen if `serde_yaml::to_value` rejects a value
 /// `serde_json::Value` already accepted (in practice: never).
-fn plugin_config_to_yaml(cfg: &Option<serde_json::Value>) -> Option<serde_yaml::Value> {
-    cfg.as_ref().and_then(|v| serde_yaml::to_value(v).ok())
+fn plugin_config_to_yaml(cfg: Option<&serde_json::Value>) -> Option<serde_yaml::Value> {
+    cfg.and_then(|val| serde_yaml::to_value(val).ok())
 }
 
 /// Map praxis-policy-core's `OnError` enum onto the string shape praxis-policy-apl-core's

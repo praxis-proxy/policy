@@ -988,7 +988,7 @@ mod tests {
             },
             Effect::Allow,
         ]);
-        assert!(effect.validate_parallel_purity().is_ok());
+        effect.validate_parallel_purity().unwrap();
     }
 
     #[test]
@@ -1050,7 +1050,7 @@ mod tests {
             },
             Effect::Allow,
         ]);
-        assert!(effect.validate_parallel_purity().is_ok());
+        effect.validate_parallel_purity().unwrap();
     }
 
     #[test]

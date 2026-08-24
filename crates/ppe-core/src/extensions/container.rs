@@ -206,23 +206,23 @@ impl Extensions {
     /// Arc pointers, or when the original is `None` but modified is
     /// `Some` (the plugin fabricated a slot it shouldn't have).
     pub fn validate_immutable(&self, modified: &OwnedExtensions) -> bool {
-        fn ptr_eq_opt<T>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
+        fn ptr_eq_opt<T>(a: Option<&Arc<T>>, b: Option<&Arc<T>>) -> bool {
             match (a, b) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
-                (_, None) => true,        // plugin never saw it — not tampering
+                (_, None) => true,        // plugin never saw it - not tampering
                 (None, Some(_)) => false, // plugin fabricated a slot
             }
         }
 
-        ptr_eq_opt(&self.request, &modified.request)
-            && ptr_eq_opt(&self.agent, &modified.agent)
-            && ptr_eq_opt(&self.mcp, &modified.mcp)
-            && ptr_eq_opt(&self.completion, &modified.completion)
-            && ptr_eq_opt(&self.provenance, &modified.provenance)
-            && ptr_eq_opt(&self.llm, &modified.llm)
-            && ptr_eq_opt(&self.framework, &modified.framework)
-            && ptr_eq_opt(&self.meta, &modified.meta)
+        ptr_eq_opt(self.request.as_ref(), modified.request.as_ref())
+            && ptr_eq_opt(self.agent.as_ref(), modified.agent.as_ref())
+            && ptr_eq_opt(self.mcp.as_ref(), modified.mcp.as_ref())
+            && ptr_eq_opt(self.completion.as_ref(), modified.completion.as_ref())
+            && ptr_eq_opt(self.provenance.as_ref(), modified.provenance.as_ref())
+            && ptr_eq_opt(self.llm.as_ref(), modified.llm.as_ref())
+            && ptr_eq_opt(self.framework.as_ref(), modified.framework.as_ref())
+            && ptr_eq_opt(self.meta.as_ref(), modified.meta.as_ref())
         // NOTE: `raw_credentials` is INTENTIONALLY excluded from the
         // immutable check. Framework orchestrators (praxis-policy-apl-runtime's
         // DelegationPluginInvoker) legitimately write
@@ -514,9 +514,6 @@ pub struct OwnedExtensions {
 mod tests {
     use super::*;
     use crate::extensions::security::SubjectExtension;
-    use crate::extensions::{
-        DelegationExtension, HttpExtension, RequestExtension, SecurityExtension,
-    };
 
     fn make_extensions() -> Extensions {
         let mut security = SecurityExtension::default();

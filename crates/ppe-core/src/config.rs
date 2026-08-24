@@ -1581,7 +1581,7 @@ routes:
       tags: [pii]
 "#;
         let config = parse_config(yaml);
-        assert!(config.is_ok());
+        config.unwrap();
     }
 
     // -- Scope matching tests --
@@ -2397,7 +2397,7 @@ routes:
   - tool: search_repos
     meta: { tags: [some-runtime-tag] }
 "#;
-        assert!(parse_config(yaml).is_ok());
+        parse_config(yaml).unwrap();
     }
 
     #[test]
