@@ -15,18 +15,7 @@ use praxis_policy_core::delegation::DelegationSubject;
 use serde::{Deserialize, Serialize};
 
 /// Which subjects cache by default.
-///
-/// `this_workload` and `client` only. Both have a key space bounded by
-/// configuration rather than by the user population — targets times
-/// delegators for the first, clients times targets for the second — and
-/// both see the aggregate traffic of everything behind them, so a single
-/// entry serves a large number of requests.
-///
-/// `user` and `caller_workload` are deliberately absent. Their key space
-/// grows with the caller population, their per-key request rate is the
-/// rate of one principal rather than of the fleet, and they are where
-/// every cache-flooding concern lives. Enabling them is a separate,
-/// deliberate act rather than a side effect of turning the cache on.
+/// See [`CacheConfig::subjects`] for why the default is the narrow pair.
 fn default_subjects() -> Vec<DelegationSubject> {
     vec![DelegationSubject::ThisWorkload, DelegationSubject::Client]
 }
@@ -117,11 +106,19 @@ pub struct CacheConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Which [`DelegationSubject`] modes may cache. See
-    /// [`default_subjects`] for why the default is the narrow pair.
+    /// Which [`DelegationSubject`] modes may cache. Spelled as in a
+    /// delegate step's `subject:` key: `this_workload`, `client`,
+    /// `user`, `caller_workload`.
     ///
-    /// Spelled as in a delegate step's `subject:` key — `this_workload`,
-    /// `client`, `user`, `caller_workload`.
+    /// Defaults to `this_workload` and `client`. Their entry count is
+    /// bounded by configuration rather than by the caller population,
+    /// and each entry serves the aggregate traffic behind it.
+    ///
+    /// `user` and `caller_workload` are absent on purpose. Their entry
+    /// count grows with the caller population, each entry serves one
+    /// principal's traffic rather than the fleet's, and they are where
+    /// the cache-flooding concern lives. Enabling them should be a
+    /// deliberate act rather than a side effect of turning the cache on.
     #[serde(default = "default_subjects")]
     pub subjects: Vec<DelegationSubject>,
 
