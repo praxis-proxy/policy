@@ -1,0 +1,43 @@
+{
+  "description": "Keycloak realm roles and scopes. Works on access tokens: both role mappers are registered with idToken=false, so a resolver pointed at an ID token gets no roles. Covers realm_access.roles into subject roles, scope into permissions, and client_id / azp / clientId as the client anchor, clientId being pre-2023 Keycloak's camelCase spelling. Deliberately omitted: per-client roles, because resource_access.<client-id>.roles embeds the client id an operator chose and no shipped preset can know it; and teams, because Keycloak's default groups claim comes from the microprofile-jwt scope and holds realm roles rather than groups, so mapping it would fill teams with roles. Real group paths need a Group Membership mapper whose claim name the admin types, which has no default. Both are reachable with a hand-written claim_map. A realm running the lightweight-access-token policy strips realm_access unless each mapper opts in, which leaves roles empty; on_missing: deny in a hand-written map is how to make that loud. A present but unusable client_id declines rather than falling through to the next anchor candidate, matching the standard preset.",
+  "claim_map": {
+    "subject": {
+      "id": "sub",
+      "roles": [
+        {
+          "path": "realm_access.roles",
+          "array_only": true
+        }
+      ],
+      "permissions": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      }
+    },
+    "client": {
+      "client_id": [
+        {
+          "path": "client_id",
+          "stop_if_present": true
+        },
+        "azp",
+        "clientId"
+      ],
+      "authorized_scopes": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      },
+      "authorized_audiences": "aud"
+    }
+  }
+}

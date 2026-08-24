@@ -1,0 +1,37 @@
+{
+  "description": "Cognito groups and scopes. Covers sub, cognito:groups into subject teams, scope into permissions, and client_id as the client anchor. Cognito never mints azp, so client_id is the only anchor candidate. Deliberately omitted: roles, because cognito:roles and cognito:preferred_role hold IAM role ARNs rather than application roles, and filling roles with ARNs would leave a policy author gating on something that is not a role; and the client audience, because an access token carries no aud unless resource binding was requested and a machine-to-machine token can never carry one. cognito:groups appears in both the ID token and the access token. Application roles need a hand-written claim_map over a custom claim.",
+  "claim_map": {
+    "subject": {
+      "id": "sub",
+      "permissions": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      },
+      "teams": [
+        {
+          "path": "cognito:groups",
+          "array_only": true
+        }
+      ]
+    },
+    "client": {
+      "client_id": [
+        "client_id"
+      ],
+      "authorized_scopes": {
+        "paths": [
+          {
+            "path": "scope",
+            "string_only": true
+          }
+        ],
+        "split": "whitespace"
+      }
+    }
+  }
+}

@@ -184,19 +184,17 @@ impl ClaimMapper for StandardClaimMap {
         let spiffe_id = claims
             .get("sub")
             .and_then(Value::as_str)
-            .filter(|s| s.starts_with("spiffe://"))
+            .filter(|s| is_spiffe_id(s))
             .or_else(|| claims.get("spiffe_id").and_then(Value::as_str))
-            // Guard the `spiffe_id` fallback with the SAME prefix check as
-            // `sub`: a non-SPIFFE `sub` must not smuggle in an arbitrary
-            // `spiffe_id` claim and be accepted as a workload identity.
-            .filter(|s| s.starts_with("spiffe://"))
+            // Guard the `spiffe_id` fallback with the SAME check as `sub`: a
+            // non-SPIFFE `sub` must not smuggle in an arbitrary `spiffe_id`
+            // claim and be accepted as a workload identity.
+            .filter(|s| is_spiffe_id(s))
             .map(str::to_owned)?;
 
-        // Trust domain — pull from the SPIFFE-ID host part.
-        let trust_domain = spiffe_id
-            .strip_prefix("spiffe://")
-            .and_then(|rest| rest.split('/').next())
-            .map(str::to_owned);
+        // The URI authority, which `is_spiffe_id` already required, so this
+        // cannot be `None`.
+        let trust_domain = trust_domain_of(&spiffe_id);
 
         Some(WorkloadIdentity {
             spiffe_id: Some(spiffe_id),
@@ -287,6 +285,31 @@ impl ClaimMapper for StandardClaimMap {
 
         Some(subject)
     }
+}
+
+/// Every SPIFFE ID starts here, and no configuration can turn the check off.
+const SPIFFE_SCHEME: &str = "spiffe://";
+
+/// Whether a string is usable as a SPIFFE ID.
+///
+/// The scheme alone is not enough: the authority carries the trust domain, and
+/// the SPIFFE standard makes it mandatory. `spiffe:///ns/default/sa/agent` names
+/// no trust boundary, so it is not an identity this plugin can file.
+pub(crate) fn is_spiffe_id(text: &str) -> bool {
+    trust_domain_of(text).is_some()
+}
+
+/// The trust domain is the SPIFFE URI's authority, which the standard makes the
+/// trust boundary. Deriving it from `iss` instead is explicitly discouraged.
+///
+/// `None` when the authority is absent, which is what makes the string unusable
+/// as an identity rather than an identity with no trust domain.
+pub(crate) fn trust_domain_of(spiffe_id: &str) -> Option<String> {
+    spiffe_id
+        .strip_prefix(SPIFFE_SCHEME)
+        .and_then(|rest| rest.split('/').next())
+        .filter(|domain| !domain.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -609,6 +632,49 @@ mod tests {
                 !client.claims.contains_key(reserved),
                 "{reserved} was consumed and must not reappear as a policy claim"
             );
+        }
+    }
+
+    // ---- workload identity ------------------------------------------------
+
+    /// The scheme alone is not a SPIFFE ID. The authority carries the trust
+    /// domain, which the standard makes mandatory, so an authority-less string
+    /// declines rather than filing an identity whose trust boundary is `""`.
+    #[test]
+    fn a_spiffe_id_with_no_authority_declines() {
+        for id in ["spiffe:///ns/default/sa/agent", "spiffe://", "spiffe:///"] {
+            let claims = make_claims(json!({"sub": id}));
+            assert!(
+                StandardClaimMap.map_workload(&claims).is_none(),
+                "`{id}` names no trust domain, so it is not an identity"
+            );
+        }
+    }
+
+    /// Checked per candidate, like the prefix itself: an authority-less `sub`
+    /// does not poison the `spiffe_id` fallback behind it.
+    #[test]
+    fn an_authority_less_sub_still_falls_back_to_the_spiffe_id_claim() {
+        let claims = make_claims(json!({
+            "sub": "spiffe:///ns/default/sa/agent",
+            "spiffe_id": "spiffe://corp.example/ns/default/sa/agent",
+        }));
+        let workload = StandardClaimMap.map_workload(&claims).unwrap();
+        assert_eq!(workload.trust_domain.as_deref(), Some("corp.example"));
+    }
+
+    /// The authority is the whole identifier when there is no path, and every
+    /// accepted identity has one.
+    #[test]
+    fn the_trust_domain_is_the_uri_authority() {
+        for (id, domain) in [
+            ("spiffe://example.org", Some("example.org")),
+            ("spiffe://example.org/ns/a/sa/b", Some("example.org")),
+            ("spiffe://", None),
+            ("https://example.org/ns/a", None),
+        ] {
+            assert_eq!(trust_domain_of(id).as_deref(), domain, "{id}");
+            assert_eq!(is_spiffe_id(id), domain.is_some(), "{id}");
         }
     }
 
