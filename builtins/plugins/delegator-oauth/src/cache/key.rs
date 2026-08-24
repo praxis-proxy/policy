@@ -785,7 +785,8 @@ mod tests {
         let secret = secret();
         let payload =
             DelegationPayload::new("", "billing-api").with_subject(DelegationSubject::ThisWorkload);
-        assert!(derive(&secret, delegator(), &payload).is_ok());
+        derive(&secret, delegator(), &payload)
+            .expect("this_workload has no inbound credential by design");
     }
 
     #[test]

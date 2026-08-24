@@ -433,7 +433,7 @@ mod tests {
             max_entries: 0,
             ..enabled_config()
         };
-        assert!(DelegatedTokenCache::new(config).is_err());
+        DelegatedTokenCache::new(config).unwrap_err();
     }
 
     #[tokio::test]
@@ -552,7 +552,7 @@ mod tests {
                 Err(MintFailed)
             })
             .await;
-        assert!(failed.is_err());
+        failed.unwrap_err();
 
         // The next caller must reach the IdP, not inherit the failure.
         let recovered = cache

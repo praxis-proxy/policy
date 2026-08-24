@@ -318,7 +318,8 @@ mod tests {
             subjects: Vec::new(),
             ..CacheConfig::default()
         };
-        assert!(cfg.validate().is_ok());
+        cfg.validate()
+            .expect("a disabled cache tolerates settings nothing reads");
     }
 
     #[test]
