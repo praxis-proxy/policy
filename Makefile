@@ -41,6 +41,11 @@ help:
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
 	@echo ""
+	@echo "Benchmarks (on demand — not part of make ci; see docs/benchmarks.md):"
+	@echo "  bench             Criterion suite (ppe-benches / issue #19)"
+	@echo "  bench-percentiles p50/p95/p99 from target/criterion samples"
+	@echo "  bench-heap        dhat per-decision + policy-size footprint"
+	@echo ""
 	@echo "Supply chain & coverage:"
 	@echo "  audit             cargo deny check (advisories, licenses, bans, sources)"
 	@echo "  coverage          Coverage summary, gated at COVERAGE_FLOOR percent"
@@ -55,6 +60,8 @@ help:
 	@echo ""
 	@echo "CI:"
 	@echo "  ci                What CI runs: lint + test"
+	@echo "                    (benches compile via clippy --all-targets;"
+	@echo "                     make bench is on-demand — docs/benchmarks.md)"
 	@echo ""
 	@echo "Release:"
 	@echo "  release-dry       Preview a release (no changes)"
@@ -156,6 +163,29 @@ setup-hooks:
 test:
 	@$(CARGO) test --workspace
 	@$(CARGO) test --workspace --all-features
+
+# =============================================================================
+# Benchmarks (issue #19) — on demand, never part of `make ci`
+# =============================================================================
+#
+# Wall-clock benches do not gate PRs: CI runners are noisy and a flaky
+# p99 gate would train people to ignore failures. Clippy --all-targets
+# still *compiles* the suite so bitrot is caught. See docs/benchmarks.md.
+
+.PHONY: bench
+bench:
+	@echo "Criterion suite (ppe-benches) — on demand, not a CI gate ..."
+	@$(CARGO) bench -p ppe-benches
+	@echo "HTML reports under target/criterion/; write-up in docs/benchmarks.md"
+
+.PHONY: bench-percentiles
+bench-percentiles:
+	@python3 tools/bench_percentiles.py
+
+.PHONY: bench-heap
+bench-heap:
+	@echo "dhat heap_profile (per-decision + policy-size) ..."
+	@$(CARGO) bench -p ppe-benches --features dhat-heap --bench heap_profile
 
 # =============================================================================
 # Supply chain & coverage
