@@ -23,6 +23,8 @@
 //! and the scopes a route requires, it exchanges at the configured endpoint and
 //! returns a token scoped to that audience alone.
 
+/// Reuse of live delegated tokens: key derivation and cache settings.
+pub mod cache;
 /// Plugin configuration and its validation.
 pub mod config;
 /// The delegation hook handler.
@@ -30,6 +32,7 @@ pub mod delegator;
 /// Constructs the delegator from configuration.
 pub mod factory;
 
+pub use cache::{CacheConfig, StalenessConfig};
 pub use config::{ClientSecretSource, OAuthDelegatorConfig};
 pub use delegator::OAuthDelegator;
 pub use factory::{KIND, OAuthDelegatorFactory};
