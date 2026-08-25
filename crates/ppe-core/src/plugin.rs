@@ -150,6 +150,8 @@ pub trait Plugin: Send + Sync {
 /// plugins:
 ///   - name: apl-policy
 ///     kind: builtin
+///     # Validated at load; see the `hooks` field for the names that
+///     # dispatch and what a host with its own hooks has to do first.
 ///     hooks: [cmf.tool_pre_invoke, cmf.tool_post_invoke]
 ///     mode: sequential
 ///     priority: 10
@@ -184,6 +186,22 @@ pub struct PluginConfig {
     pub version: Option<String>,
 
     /// Hook names this plugin handles.
+    ///
+    /// Validated at config load: a name no hook answers to refuses the
+    /// config rather than loading a plugin that never fires. The names
+    /// PPE dispatches are the constants in
+    /// [`cmf::constants`][crate::cmf::constants] plus
+    /// [`identity::HOOK_IDENTITY_RESOLVE`][crate::identity::HOOK_IDENTITY_RESOLVE],
+    /// [`delegation::HOOK_TOKEN_DELEGATE`][crate::delegation::HOOK_TOKEN_DELEGATE],
+    /// and [`elicitation::HOOK_ELICIT`][crate::elicitation::HOOK_ELICIT].
+    ///
+    /// A host with its own hooks describes them through
+    /// [`register_hook_metadata`][crate::hooks::register_hook_metadata]
+    /// **before** loading config that names them. Registering afterwards is
+    /// too late: the load has already refused.
+    ///
+    /// An empty list is not a typo, and plugins that register their handler
+    /// in Rust need nothing here.
     #[serde(default)]
     pub hooks: Vec<String>,
 

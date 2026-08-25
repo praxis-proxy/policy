@@ -9,6 +9,7 @@ A complete end-to-end example showing how to build plugins, load config, and inv
 - **Defining hook types and payloads** — `ToolPreInvoke` and `ToolPostInvoke` hooks with a shared `ToolInvokePayload`
 - **Building plugins** — three plugins (`IdentityResolver`, `PiiGuard`, `AuditLogger`) implementing `Plugin` + `HookHandler<H>` for different hook types
 - **Multi-hook registration** — a single plugin instance (e.g., `IdentityResolver`) registered for multiple hooks (`demo.tool_pre_invoke` and `demo.tool_post_invoke`) via the factory pattern
+- **Host-owned hooks** — the demo declares its own hook names with `define_hooks!` and registers their metadata before loading the config that names them, which is the ordering the loader requires
 - **Plugin factories** — `PluginFactory` implementations that create plugin instances and wire up typed handler adapters
 - **YAML config loading** — `plugin_demo.yaml` declares plugins, policy groups, and routing rules
 - **Policy groups and tag-based routing** — the `pii` policy group activates `PiiGuard` only for tools tagged with `pii`

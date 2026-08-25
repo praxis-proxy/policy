@@ -43,8 +43,8 @@
 // matching route's entity_name is what AplRouteHandler intercepts.
 //
 // `HOOK_PRE` / `HOOK_POST` are exposed as legacy aliases for the
-// tool-family pair, for callers that wired against the v0 constants —
-// the per-entity dispatch is the load-bearing path now.
+// tool-family pair, for callers that wired against the v0 constants.
+// The per-entity dispatch is the load-bearing path now.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Weak};

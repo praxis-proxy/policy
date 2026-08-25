@@ -762,7 +762,7 @@ fn validate_declared_hooks(config: &PolicyConfig) -> Result<(), Box<PluginError>
                 continue;
             }
             let suggestion = nearest_known_hook(hook)
-                .map_or_else(String::new, |near| format!(" — did you mean '{near}'?"));
+                .map_or_else(String::new, |near| format!("; did you mean '{near}'?"));
             return Err(Box::new(PluginError::Config {
                 message: format!(
                     "plugin '{}' declares unknown hook '{}'{}",

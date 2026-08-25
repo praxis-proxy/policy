@@ -116,7 +116,7 @@ pub struct HookMetadata {
 }
 
 impl HookMetadata {
-    /// The wildcard default — `entity_type: None`, `phase: Unphased`.
+    /// The wildcard default, `entity_type: None` and `phase: Unphased`.
     /// [`matches`][Self::matches] treats `Unphased` as "matches any
     /// phase", so a caller substituting this for an absent registry
     /// entry lets the hook dispatch on the first registered entry.
@@ -211,7 +211,7 @@ const fn concat_hook_tables<const N: usize>() -> [(&'static str, HookMetadata); 
 
 const BUILTIN_METADATA_ROWS: [(&str, HookMetadata); HOOK_COUNT] = concat_hook_tables();
 
-/// Built-in hook metadata — the authority for which hooks
+/// Built-in hook metadata, the authority for which hooks
 /// `praxis-policy-core` dispatches. Every enumeration of hook names is a
 /// projection of this table, and the config loader validates declared
 /// `hooks:` entries against the registry it seeds. Hosts register
@@ -234,7 +234,7 @@ fn registry() -> &'static RwLock<HashMap<String, HookMetadata>> {
 
 /// Look up metadata for a hook name. `None` means the registry holds
 /// no entry, which is distinct from an entry whose phase is
-/// [`HookPhase::Unphased`] — a hook deliberately outside the request
+/// [`HookPhase::Unphased`], a hook deliberately outside the request
 /// lifecycle. A caller that wants the old permissive behavior asks for
 /// it: `.unwrap_or_else(HookMetadata::permissive)`.
 pub fn lookup(hook_name: &str) -> Option<HookMetadata> {
@@ -248,6 +248,16 @@ pub fn lookup(hook_name: &str) -> Option<HookMetadata> {
 /// host re-registering the same hook with the same metadata is fine.
 /// Re-registering with different metadata overwrites the previous
 /// entry; intentional for hosts that need to customize defaults.
+///
+/// # Ordering
+///
+/// Call this **before** loading config that names the hook. The config
+/// loader validates every declared `hooks:` entry against this registry,
+/// so a hook registered afterwards is unknown at the moment it is
+/// checked and the load refuses. A host declaring several hooks can emit
+/// them with [`define_hooks!`][crate::define_hooks] and register the
+/// resulting slice in a loop; `praxis-policy-core`'s own tables are
+/// seeded on first access and need no call.
 ///
 /// Thread-safe; intended to be called at startup. Concurrent calls
 /// are serialized via the registry's `RwLock`.
