@@ -45,6 +45,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Config validation runs on every load path.** `PolicyEngine::load_config` and `from_config` take a pre-built `PolicyConfig` and ran neither `validate_config` nor the top-level `groups:` merge, so a host building its config in Rust got no duplicate-plugin-name check, no route-shape check, and no group resolution — routes silently lost the plugins and `authentication:` their group was meant to supply. Both now normalize and validate the way the YAML paths do. **Breaking**: a programmatic config with a duplicate plugin name or a malformed route now fails where it previously loaded with the offending piece inert.
+
 - **`hooks::metadata::lookup` returns `Option<HookMetadata>`.** It used to substitute a wildcard for a name the registry did not hold, so an absent hook and a deliberately unphased one both read as `Unphased` and a caller reading phase could not tell a missing entry from a real one. `HookMetadata::unknown()` is renamed `permissive()` to match: the wildcard is now a default a caller opts into, not the shape of a failed lookup. **Breaking** for Rust callers; `lookup(name).unwrap_or_else(HookMetadata::permissive)` restores the old behavior exactly.
 
 - **`Plugin::initialize_with` is what the engine calls.** It receives the host services the plugin's capabilities allow, and its default forwards to `initialize`, so a plugin needing nothing from the host is untouched. Override exactly one: the default body of `initialize_with` is what calls `initialize`, so overriding it replaces that call.

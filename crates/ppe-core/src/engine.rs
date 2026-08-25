@@ -278,6 +278,23 @@ pub struct PolicyEngine {
     http_transport: std::sync::OnceLock<Arc<dyn crate::http::HttpTransport>>,
 }
 
+/// Fold top-level `groups:` into `global.policies` and validate, the two
+/// steps `config::parse_config` applies to YAML. Every config-load entry
+/// point runs this, including the ones that take a `PolicyConfig` a host
+/// built in Rust: without it such a host got no duplicate-plugin-name
+/// check, no route-shape check, no hook-name check, and no group
+/// resolution, so its routes quietly lost the plugins and
+/// `authentication:` a group was meant to supply.
+///
+/// Idempotent. `merge_groups_into_policies` returns early once `groups:`
+/// is empty and validation is a read, so the paths that already
+/// normalized before calling in pay a map lookup to repeat it.
+fn normalize_and_validate(mut config: PolicyConfig) -> Result<PolicyConfig, Box<PluginError>> {
+    crate::config::merge_groups_into_policies(&mut config);
+    crate::config::validate_config(&config)?;
+    Ok(config)
+}
+
 /// Emit warnings for YAML settings that the runtime doesn't currently
 /// honor. Called once per `load_config` / `from_config` so operators
 /// who set these knobs aren't silently ignored.
@@ -499,11 +516,13 @@ impl PolicyEngine {
     /// hook names from the config.
     /// # Errors
     ///
-    /// Returns `PluginError::Config` when a plugin's `kind` has no registered
-    /// factory, when a factory rejects the plugin's config, or when a
-    /// registration conflicts with one already present. The existing snapshot is
-    /// left in place, so a failed load does not disturb in-flight requests.
+    /// Returns `PluginError::Config` when the config fails validation, when a
+    /// plugin's `kind` has no registered factory, when a factory rejects the
+    /// plugin's config, or when a registration conflicts with one already
+    /// present. The existing snapshot is left in place, so a failed load does
+    /// not disturb in-flight requests.
     pub fn load_config(&self, policy_config: PolicyConfig) -> Result<(), Box<PluginError>> {
+        let policy_config = normalize_and_validate(policy_config)?;
         warn_on_inactive_settings(&policy_config);
 
         // Build the new snapshot from the current one — copy-on-write so
@@ -597,8 +616,10 @@ impl PolicyEngine {
         // group's plugins + `authentication:`), never rejects the renamed
         // `identity:` key, and never validates references.
         crate::config::reject_renamed_identity_key(&raw)?;
-        crate::config::merge_groups_into_policies(&mut policy_config);
-        crate::config::validate_config(&policy_config)?;
+        // Visitors below read the normalized routes and plugin declarations, so
+        // this runs here rather than being left to `load_config`. Both steps
+        // are idempotent, so repeating them there costs a map lookup.
+        policy_config = normalize_and_validate(policy_config)?;
 
         // Snapshot the parsed routes + plugin declarations before
         // load_config moves the config — visitors get the typed
@@ -743,12 +764,14 @@ impl PolicyEngine {
     /// # Errors
     ///
     /// Returns `PluginError::Config` for the same reasons as
-    /// [`Self::load_config`]: an unknown plugin `kind`, a factory that rejects
-    /// its config, or a conflicting registration.
+    /// [`Self::load_config`]: a config that fails validation, an unknown plugin
+    /// `kind`, a factory that rejects its config, or a conflicting
+    /// registration.
     pub fn from_config(
         policy_config: PolicyConfig,
         factories: &PluginFactoryRegistry,
     ) -> Result<Self, Box<PluginError>> {
+        let policy_config = normalize_and_validate(policy_config)?;
         warn_on_inactive_settings(&policy_config);
 
         let engine = Self::new(PolicyEngineConfig {
@@ -4283,6 +4306,140 @@ routes:
                 handlers: vec![("test_hook", handler)],
             })
         }
+    }
+
+    // -- Every load path normalizes and validates --
+
+    /// A config as a host would hand it over in Rust: deserialized but
+    /// not put through `parse_config`, so nothing has normalized or
+    /// validated it yet.
+    fn unvalidated_config(yaml: &str) -> PolicyConfig {
+        serde_yaml::from_str(yaml).expect("deserialize")
+    }
+
+    fn allow_factories() -> PluginFactoryRegistry {
+        let mut factories = PluginFactoryRegistry::new();
+        factories.register("test/allow", Box::new(AllowPluginFactory));
+        factories
+    }
+
+    const VALID_YAML: &str = r#"
+plugins:
+  - name: allow_plugin
+    kind: test/allow
+    hooks: [test_hook]
+    mode: sequential
+"#;
+
+    const DUPLICATE_NAME_YAML: &str = r#"
+plugins:
+  - name: twice
+    kind: test/allow
+    hooks: [test_hook]
+  - name: twice
+    kind: test/allow
+    hooks: [test_hook]
+"#;
+
+    /// A route joining a top-level `groups:` bundle. Resolving the group
+    /// is what gives the route the group's plugins; skipping the merge
+    /// leaves the route with an unknown-group reference.
+    const GROUP_YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: allow_plugin
+    kind: test/allow
+    hooks: [test_hook]
+groups:
+  privileged:
+    plugins: [allow_plugin]
+routes:
+  - tool: secret_tool
+    groups: [privileged]
+    plugins: [allow_plugin]
+"#;
+
+    #[test]
+    fn a_valid_config_loads_through_every_path() {
+        crate::config::parse_config(VALID_YAML).expect("parse_config");
+
+        // A fresh engine per path: re-loading the same plugin name onto
+        // one engine is a registration conflict, unrelated to validation.
+        let via_yaml = Arc::new(PolicyEngine::default());
+        via_yaml.register_factory("test/allow", Box::new(AllowPluginFactory));
+        via_yaml
+            .load_config_yaml(VALID_YAML)
+            .expect("load_config_yaml");
+
+        let via_typed = Arc::new(PolicyEngine::default());
+        via_typed.register_factory("test/allow", Box::new(AllowPluginFactory));
+        via_typed
+            .load_config(unvalidated_config(VALID_YAML))
+            .expect("load_config");
+
+        PolicyEngine::from_config(unvalidated_config(VALID_YAML), &allow_factories())
+            .expect("from_config");
+    }
+
+    #[test]
+    fn a_duplicate_plugin_name_is_rejected_on_every_path() {
+        let mgr = Arc::new(PolicyEngine::default());
+        mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
+
+        // Every path refuses before any plugin is instantiated, so one
+        // engine serves all of them.
+        for err in [
+            crate::config::parse_config(DUPLICATE_NAME_YAML)
+                .map(|_| ())
+                .unwrap_err(),
+            mgr.load_config_yaml(DUPLICATE_NAME_YAML).unwrap_err(),
+            mgr.load_config(unvalidated_config(DUPLICATE_NAME_YAML))
+                .unwrap_err(),
+            PolicyEngine::from_config(unvalidated_config(DUPLICATE_NAME_YAML), &allow_factories())
+                .map(|_| ())
+                .unwrap_err(),
+        ] {
+            assert!(
+                err.to_string().contains("duplicate plugin name"),
+                "unexpected error: {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_block_resolves_through_the_programmatic_paths() {
+        let mgr = Arc::new(PolicyEngine::default());
+        mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
+
+        // Before the merge, `groups:` is a separate map and the route
+        // joins a group `global.policies` does not hold, so validation
+        // catches it. Both paths now merge first and accept it.
+        mgr.load_config(unvalidated_config(GROUP_YAML))
+            .expect("load_config resolves groups");
+        assert!(
+            mgr.load_runtime()
+                .policy_config
+                .as_ref()
+                .expect("config")
+                .global
+                .policies
+                .contains_key("privileged"),
+        );
+
+        let from_config =
+            PolicyEngine::from_config(unvalidated_config(GROUP_YAML), &allow_factories())
+                .expect("from_config resolves groups");
+        assert!(
+            from_config
+                .load_runtime()
+                .policy_config
+                .as_ref()
+                .expect("config")
+                .global
+                .policies
+                .contains_key("privileged"),
+        );
     }
 
     #[tokio::test]
