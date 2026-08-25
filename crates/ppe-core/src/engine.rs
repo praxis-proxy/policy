@@ -288,7 +288,9 @@ pub struct PolicyEngine {
 ///
 /// Idempotent. `merge_groups_into_policies` returns early once `groups:`
 /// is empty and validation only reads, so a path that already normalized
-/// before calling in pays a map lookup to repeat the work.
+/// before calling in can repeat the work safely. A repeat is a full
+/// `validate_config` walk rather than a single lookup, which is why this
+/// stays on the config-load paths and out of anything per-request.
 fn normalize_and_validate(mut config: PolicyConfig) -> Result<PolicyConfig, Box<PluginError>> {
     crate::config::merge_groups_into_policies(&mut config);
     crate::config::validate_config(&config)?;
@@ -522,8 +524,10 @@ impl PolicyEngine {
     /// present. The existing snapshot is left in place, so a failed load does
     /// not disturb in-flight requests.
     pub fn load_config(&self, policy_config: PolicyConfig) -> Result<(), Box<PluginError>> {
-        let policy_config = normalize_and_validate(policy_config)?;
+        // Warn before validating: an operator whose config both sets an inactive
+        // knob and fails validation should see both, not just the refusal.
         warn_on_inactive_settings(&policy_config);
+        let policy_config = normalize_and_validate(policy_config)?;
 
         // Build the new snapshot from the current one — copy-on-write so
         // concurrent invokes keep using the existing config until we swap.
@@ -618,7 +622,8 @@ impl PolicyEngine {
         crate::config::reject_renamed_identity_key(&raw)?;
         // Visitors below read the normalized routes and plugin declarations, so
         // this runs here rather than being left to `load_config`. Both steps
-        // are idempotent, so repeating them there costs a map lookup.
+        // are idempotent, so `load_config` repeating them is redundant work on
+        // a cold path rather than a behavior difference.
         policy_config = normalize_and_validate(policy_config)?;
 
         // Snapshot the parsed routes + plugin declarations before
@@ -771,8 +776,10 @@ impl PolicyEngine {
         policy_config: PolicyConfig,
         factories: &PluginFactoryRegistry,
     ) -> Result<Self, Box<PluginError>> {
-        let policy_config = normalize_and_validate(policy_config)?;
+        // Warn before validating: an operator whose config both sets an inactive
+        // knob and fails validation should see both, not just the refusal.
         warn_on_inactive_settings(&policy_config);
+        let policy_config = normalize_and_validate(policy_config)?;
 
         let engine = Self::new(PolicyEngineConfig {
             executor: ExecutorConfig::default(),

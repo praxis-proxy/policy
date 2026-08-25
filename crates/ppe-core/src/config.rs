@@ -742,7 +742,12 @@ fn nearest_known_hook(name: &str) -> Option<String> {
             let distance = edit_distance(name, candidate.as_str());
             (distance, candidate)
         })
-        .filter(|(distance, candidate)| distance * 2 <= name.len().max(candidate.as_str().len()))
+        .filter(|(distance, candidate)| {
+            // Char counts on both sides: `distance` counts chars, so comparing it
+            // against a byte length would give a multi-byte name a looser bound.
+            let longest = name.chars().count().max(candidate.as_str().chars().count());
+            distance * 2 <= longest
+        })
         .min_by_key(|(distance, _)| *distance)
         .map(|(_, candidate)| candidate.as_str().to_owned())
 }

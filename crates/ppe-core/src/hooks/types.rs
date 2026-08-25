@@ -84,16 +84,15 @@ pub fn builtin_hook_types() -> Vec<HookType> {
         .collect()
 }
 
-/// Look up a hook type by name. Returns the canonical instance if
-/// it matches a built-in, otherwise creates a new custom `HookType`.
+/// Wrap a hook name, built-in or custom, in a [`HookType`].
+///
+/// `HookType` owns its string and compares by value, so a built-in name and
+/// a custom one produce equivalent values and there is nothing to canonicalize.
+/// An earlier version scanned the metadata table to return "the canonical
+/// instance", which allocated the same string either way; validating the name
+/// is [`crate::config`]'s job, not this function's.
 pub fn hook_type_from_str(name: &str) -> HookType {
-    crate::hooks::metadata::BUILTIN_METADATA
-        .iter()
-        .find(|(builtin, _)| *builtin == name)
-        .map_or_else(
-            || HookType::new(name),
-            |(builtin, _)| HookType::new(*builtin),
-        )
+    HookType::new(name)
 }
 
 #[cfg(test)]
@@ -129,30 +128,55 @@ mod tests {
     }
 
     #[test]
-    fn the_enumeration_is_the_authoritys_key_set() {
+    fn the_enumeration_names_the_hooks_that_dispatch() {
+        // Anchored on names, not on the table's own length or key order:
+        // comparing a projection to the thing it projects cannot fail. Every
+        // name here was wrong in the hand-maintained list this replaced, so
+        // the old list would fail this test.
         let derived: Vec<String> = builtin_hook_types()
             .iter()
             .map(|h| h.as_str().to_owned())
             .collect();
-        let authority: Vec<String> = crate::hooks::metadata::BUILTIN_METADATA
-            .iter()
-            .map(|(name, _)| (*name).to_owned())
-            .collect();
-        assert_eq!(derived, authority);
+        let has = |name: &str| derived.iter().any(|d| d == name);
+        for expected in [
+            // Absent from the old list entirely.
+            "cmf.http_request",
+            "cmf.http_response",
+            "elicit",
+            // The old list spelled the prompt pair `_fetch`.
+            "cmf.prompt_pre_invoke",
+            "cmf.prompt_post_invoke",
+            // The old list spelled these with underscores.
+            "identity.resolve",
+            "token.delegate",
+        ] {
+            assert!(has(expected), "{expected} is not enumerated");
+        }
+        for gone in [
+            "tool_pre_invoke",
+            "identity_resolve",
+            "cmf.prompt_pre_fetch",
+            "cmf.prompt_post_fetch",
+        ] {
+            assert!(!has(gone), "{gone} is still enumerated");
+        }
     }
 
     #[test]
-    fn adding_a_row_to_the_authority_needs_no_second_edit() {
-        // The enumeration is a projection, so its length is the table's.
-        // No count is restated here; a new row shows up on its own.
-        assert_eq!(
-            builtin_hook_types().len(),
-            crate::hooks::metadata::BUILTIN_METADATA.len(),
-        );
+    fn every_enumerated_hook_resolves_in_the_registry() {
+        // The projection and the registry are both fed by the table, so a
+        // name that enumerates but does not resolve means one of the two
+        // stopped reading it.
+        for hook in builtin_hook_types() {
+            assert!(
+                crate::hooks::lookup_hook_metadata(hook.as_str()).is_some(),
+                "{hook} is enumerated but absent from the registry",
+            );
+        }
     }
 
     #[test]
-    fn hook_type_from_str_is_canonical_for_a_builtin_and_custom_otherwise() {
+    fn hook_type_from_str_wraps_builtin_and_custom_names_alike() {
         let builtin = crate::cmf::constants::HOOK_CMF_TOOL_PRE_INVOKE;
         assert_eq!(hook_type_from_str(builtin).as_str(), builtin);
         assert_eq!(

@@ -33,6 +33,7 @@ use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError as CoreError, PluginViolation};
 use praxis_policy_core::extensions::{SecurityExtension, SubjectExtension};
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
+use praxis_policy_core::hooks::HookPhase;
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
@@ -1292,4 +1293,80 @@ async fn multi_hook_plugin_dispatches_per_phase_via_routing_table() {
         },
         d => panic!("expected Deny from post handler, got {d:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// The permissive fallback: a handler registered under a hook name the
+// metadata table does not hold still dispatches. `lookup` returns None for
+// it and `pick_entry` substitutes `HookMetadata::permissive()`, a wildcard
+// matching any entity type and phase. Nothing covered this branch, so a
+// change that dropped the fallback would have looked green.
+// ---------------------------------------------------------------------
+
+/// The hook name under test. Deliberately absent from `BUILTIN_METADATA`,
+/// and never named in `hooks:`, so only the Rust registration knows it.
+const UNREGISTERED_HOOK: &str = "host.hook_with_no_metadata_row";
+
+struct UnlistedHookFactory;
+impl PluginFactory for UnlistedHookFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
+        let plugin = Arc::new(AllowPlugin {
+            cfg: config.clone(),
+        });
+        Ok(PluginInstance {
+            plugin: plugin.clone(),
+            handlers: vec![(
+                UNREGISTERED_HOOK,
+                Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(plugin)),
+            )],
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_unregistered_hook_dispatches_through_the_permissive_fallback() {
+    // Precondition: the table really does not describe this name, so the
+    // test exercises the fallback rather than a registered row.
+    assert!(
+        praxis_policy_core::hooks::lookup_hook_metadata(UNREGISTERED_HOOK).is_none(),
+        "the test hook must have no metadata row for the fallback to be under test",
+    );
+
+    let mgr = build_manager("unlisted", Box::new(UnlistedHookFactory)).await;
+    let plan = plan_for(&mgr, "unlisted");
+    let entry = plan.plugins.get("unlisted").expect("plugin in plan");
+
+    // The wildcard matches every context, so each of these resolves.
+    for (entity, phase) in [
+        (Some("tool"), HookPhase::Pre),
+        (Some("llm"), HookPhase::Post),
+        (None, HookPhase::Unphased),
+    ] {
+        assert!(
+            entry.pick_entry(entity, phase).is_some(),
+            "an unregistered hook must still dispatch for {entity:?}/{phase:?}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_registered_hook_is_filtered_by_its_row() {
+    // The contrast case: a hook the table describes is filtered, which is
+    // what makes the fallback above a fallback rather than the rule.
+    let mgr = build_manager("allow-plugin", Box::new(AllowPluginFactory)).await;
+    let plan = plan_for(&mgr, "allow-plugin");
+    let entry = plan.plugins.get("allow-plugin").expect("plugin in plan");
+
+    assert!(
+        entry.pick_entry(Some("tool"), HookPhase::Pre).is_some(),
+        "cmf.tool_pre_invoke matches its own entity and phase",
+    );
+    assert!(
+        entry.pick_entry(Some("llm"), HookPhase::Pre).is_none(),
+        "cmf.tool_pre_invoke must not match the llm entity",
+    );
+    assert!(
+        entry.pick_entry(Some("tool"), HookPhase::Post).is_none(),
+        "cmf.tool_pre_invoke must not match the post phase",
+    );
 }

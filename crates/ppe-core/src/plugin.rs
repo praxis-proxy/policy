@@ -188,7 +188,11 @@ pub struct PluginConfig {
     /// Hook names this plugin handles.
     ///
     /// Validated at config load: a name no hook answers to refuses the
-    /// config rather than loading a plugin that never fires. The names
+    /// config. What the check guarantees is that the name is one PPE
+    /// dispatches or the host has described, not that this plugin handles
+    /// it: a factory registers its handlers under names of its own
+    /// choosing, and only a factory that reads this field registers under
+    /// what it lists. The names
     /// PPE dispatches are the constants in
     /// [`cmf::constants`][crate::cmf::constants] plus
     /// [`identity::HOOK_IDENTITY_RESOLVE`][crate::identity::HOOK_IDENTITY_RESOLVE],

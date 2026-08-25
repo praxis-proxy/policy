@@ -539,10 +539,12 @@ impl ConfigVisitor for AplConfigVisitor {
         // ENTITY_HTTP; skipping rather than crashing matches visit_routes.
         let installs_pre_handler = http_catchall_should_install(&compiled);
         let installs_post_handler = http_catchall_response_should_install(&compiled);
-        if !installs_pre_handler && compiled.response.is_some() {
+        if !installs_pre_handler && !installs_post_handler && compiled.response.is_some() {
             tracing::warn!(
-                "APL visitor: global.response is set but global.apl has no `args:`/`policy:` steps \
-                 — the entity-less HTTP catch-all handler will not install, so this response can never fire",
+                "APL visitor: global.response is set but global.apl declares no steps \
+                 (`args:`/`policy:` for the request half, `result:`/`post_invocation:` for the \
+                 response half), so no entity-less HTTP handler installs and this response can \
+                 never fire",
             );
         }
         if (installs_pre_handler || installs_post_handler)
