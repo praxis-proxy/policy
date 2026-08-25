@@ -23,7 +23,9 @@
 )]
 use std::sync::Arc;
 
-use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_HTTP_REQUEST};
+use praxis_policy_core::cmf::constants::{
+    ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE,
+};
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::engine::PolicyEngine;
@@ -102,6 +104,65 @@ global:
     pre_invocation:
       - "http.method != 'GET': deny"
 "#;
+
+// The return half: a post-phase step at global scope, which only the
+// response hook can carry. Authorization is an admission check and has
+// nothing to say once the upstream has answered.
+const POST_ONLY: &str = r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  apl:
+    post_invocation:
+      - "http.method != 'GET': deny"
+"#;
+
+#[tokio::test]
+async fn a_global_post_phase_policy_is_annotated_under_the_response_hook() {
+    let mgr = manager_with(POST_ONLY).await;
+    assert!(
+        mgr.has_hooks_for(HOOK_CMF_HTTP_RESPONSE),
+        "a post-phase global policy must install the response handler",
+    );
+
+    let (allowed, _bg) = mgr
+        .invoke_named::<CmfHook>(HOOK_CMF_HTTP_RESPONSE, payload(), http_request("GET"), None)
+        .await;
+    assert!(
+        allowed.continue_processing,
+        "GET must pass; violation = {:?}",
+        allowed.violation
+    );
+
+    let (denied, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_RESPONSE,
+            payload(),
+            http_request("POST"),
+            None,
+        )
+        .await;
+    assert!(
+        !denied.continue_processing,
+        "the post-phase policy must evaluate on the response hook"
+    );
+}
+
+#[tokio::test]
+async fn a_pre_only_global_policy_installs_no_response_handler() {
+    let mgr = manager_with(GET_ONLY).await;
+    assert!(mgr.has_hooks_for(HOOK_CMF_HTTP_REQUEST));
+    assert!(
+        !mgr.has_hooks_for(HOOK_CMF_HTTP_RESPONSE),
+        "a policy that only authorizes gains no response handler",
+    );
+
+    // And firing the request hook alone behaves exactly as before.
+    let (res, _bg) = mgr
+        .invoke_named::<CmfHook>(HOOK_CMF_HTTP_REQUEST, payload(), http_request("POST"), None)
+        .await;
+    assert!(!res.continue_processing);
+}
 
 #[tokio::test]
 async fn global_policy_allows_matching_http_request() {

@@ -35,6 +35,7 @@
 //   * `llm:`      → `cmf.llm_input`           / `cmf.llm_output`
 //   * `prompt:`   → `cmf.prompt_pre_invoke`   / `cmf.prompt_post_invoke`
 //   * `resource:` → `cmf.resource_pre_fetch`  / `cmf.resource_post_fetch`
+//   * entity-less HTTP → `cmf.http_request`   / `cmf.http_response`
 //
 // The mapping lives in [`hook_pair_for_entity`]. Hosts fire
 // `mgr.invoke_named::<CmfHook>("cmf.llm_input", ...)` for LLM
@@ -50,9 +51,9 @@ use std::sync::{Arc, RwLock, Weak};
 
 use praxis_policy_core::cmf::constants::{
     ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL,
-    HOOK_CMF_HTTP_REQUEST, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_POST_INVOKE,
-    HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH,
-    HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
+    HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
+    HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH,
+    HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
 };
 use praxis_policy_core::config::RouteEntry;
 use praxis_policy_core::engine::PolicyEngine;
@@ -83,12 +84,18 @@ pub const HOOK_POST: &str = HOOK_CMF_TOOL_POST_INVOKE;
 /// `cmf.llm_input` / `cmf.llm_output` rather than the tool-family
 /// hooks. Returns `None` for unknown entity types — the visitor logs
 /// + skips those routes.
-fn hook_pair_for_entity(entity_type: &str) -> Option<(&'static str, &'static str)> {
+///
+/// Every install site reads this and passes `Phase::Pre` for the first
+/// element and `Phase::Post` for the second, so the phase a hook is
+/// installed under is decided in one place. A test asserts the pairs
+/// agree with what `praxis-policy-core`'s metadata table records.
+pub fn hook_pair_for_entity(entity_type: &str) -> Option<(&'static str, &'static str)> {
     match entity_type {
         ENTITY_TOOL => Some((HOOK_CMF_TOOL_PRE_INVOKE, HOOK_CMF_TOOL_POST_INVOKE)),
         ENTITY_LLM => Some((HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT)),
         ENTITY_PROMPT => Some((HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_PROMPT_POST_INVOKE)),
         ENTITY_RESOURCE => Some((HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_RESOURCE_POST_FETCH)),
+        ENTITY_HTTP => Some((HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE)),
         _ => None,
     }
 }
@@ -518,19 +525,29 @@ impl ConfigVisitor for AplConfigVisitor {
         // A `response:` block at the global scope is the catch-all denyWith.
         compiled.response = response_subblock(yaml, "global");
 
-        // Install a catch-all handler so the global policy also evaluates for
+        // Install catch-all handlers so the global policy also evaluates for
         // generic (non-MCP/A2A) HTTP requests, which carry no entity.
         // Entity routes still stack `global` via apply_layer in visit_route;
-        // this is the *entity-less* evaluation path. Pre-phase only —
-        // authorization is an admission check, so there is no post handler.
+        // this is the *entity-less* evaluation path. Each half installs only
+        // when the policy declares steps for it: authorization is an
+        // admission check with nothing to say on the way out, and response
+        // filtering has nothing to say on the way in.
+        // The pair, and which half is Pre and which is Post, come from the
+        // same mapping the entity routes below read, so the phase a hook
+        // installs under is decided in one place. `None` is unreachable for
+        // ENTITY_HTTP; skipping rather than crashing matches visit_routes.
+        let http_hooks = hook_pair_for_entity(ENTITY_HTTP);
         let installs_pre_handler = http_catchall_should_install(&compiled);
+        let installs_post_handler = http_catchall_response_should_install(&compiled);
         if !installs_pre_handler && compiled.response.is_some() {
             tracing::warn!(
                 "APL visitor: global.response is set but global.apl has no `args:`/`policy:` steps \
                  — the entity-less HTTP catch-all handler will not install, so this response can never fire",
             );
         }
-        if installs_pre_handler {
+        if let Some((hook_request, hook_response)) =
+            http_hooks.filter(|_| installs_pre_handler || installs_post_handler)
+        {
             let (plugin_registry, pdp_router_arc, session_store) = self.snapshot_dispatch_state();
             // Snapshot the static attribute tree (built above from
             // `attribute_files`, or pre-injected). The entity-less HTTP
@@ -541,24 +558,45 @@ impl ConfigVisitor for AplConfigVisitor {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            let route_arc = Arc::new(compiled.clone());
             // `read_headers` (for `http.*`) is granted to every synthetic policy
             // handler in `install_handler`, so the baseline is passed as-is here.
-            install_handler(
-                mgr,
-                ENTITY_HTTP,
-                ENTITY_NAME_GLOBAL,
-                None,
-                HOOK_CMF_HTTP_REQUEST,
-                Phase::Pre,
-                Arc::new(compiled.clone()),
-                &plugin_registry,
-                &self.dispatch_cache,
-                &session_store,
-                &self.engine,
-                Some(pdp_router_arc),
-                &self.base_capabilities,
-                attribute_tree,
-            );
+            if installs_pre_handler {
+                install_handler(
+                    mgr,
+                    ENTITY_HTTP,
+                    ENTITY_NAME_GLOBAL,
+                    None,
+                    hook_request,
+                    Phase::Pre,
+                    Arc::clone(&route_arc),
+                    &plugin_registry,
+                    &self.dispatch_cache,
+                    &session_store,
+                    &self.engine,
+                    Some(Arc::clone(&pdp_router_arc)),
+                    &self.base_capabilities,
+                    Arc::clone(&attribute_tree),
+                );
+            }
+            if installs_post_handler {
+                install_handler(
+                    mgr,
+                    ENTITY_HTTP,
+                    ENTITY_NAME_GLOBAL,
+                    None,
+                    hook_response,
+                    Phase::Post,
+                    route_arc,
+                    &plugin_registry,
+                    &self.dispatch_cache,
+                    &session_store,
+                    &self.engine,
+                    Some(pdp_router_arc),
+                    &self.base_capabilities,
+                    attribute_tree,
+                );
+            }
         }
 
         self.state
@@ -1131,6 +1169,17 @@ fn http_catchall_should_install(compiled: &CompiledRoute) -> bool {
     let declared = compiled.declared_phases();
     declared.contains(praxis_policy_apl_core::rules::Phase::Args)
         || declared.contains(praxis_policy_apl_core::rules::Phase::Policy)
+}
+
+/// Whether the entity-less HTTP response handler should install. The
+/// mirror of [`http_catchall_should_install`] on the post side, gating on
+/// `result` + `post_policy`, so a `global.apl` that only authorizes gets
+/// no response handler and a host that never fires `cmf.http_response`
+/// sees no change either way.
+fn http_catchall_response_should_install(compiled: &CompiledRoute) -> bool {
+    let declared = compiled.declared_phases();
+    declared.contains(praxis_policy_apl_core::rules::Phase::Result)
+        || declared.contains(praxis_policy_apl_core::rules::Phase::PostPolicy)
 }
 
 /// `response:` is not an APL DSL term (it never enters [`apl_subblock`]'s
