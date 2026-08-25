@@ -150,7 +150,7 @@ pub trait Plugin: Send + Sync {
 /// plugins:
 ///   - name: apl-policy
 ///     kind: builtin
-///     hooks: [tool_pre_invoke, tool_post_invoke]
+///     hooks: [cmf.tool_pre_invoke, cmf.tool_post_invoke]
 ///     mode: sequential
 ///     priority: 10
 ///     on_error: fail

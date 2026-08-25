@@ -26,14 +26,14 @@ global:
 plugins:
   - name: identity-resolver
     kind: builtin/identity
-    hooks: [tool_pre_invoke, tool_post_invoke]
+    hooks: [demo.tool_pre_invoke, demo.tool_post_invoke]
     mode: sequential
     priority: 10
     on_error: fail
 
   - name: pii-guard
     kind: builtin/pii
-    hooks: [tool_pre_invoke]
+    hooks: [demo.tool_pre_invoke]
     mode: sequential
     priority: 20
     on_error: fail
@@ -46,14 +46,14 @@ plugins:
   # registration is identical either way.
   - name: remote-authz
     kind: builtin/remote_authz
-    hooks: [tool_pre_invoke]
+    hooks: [demo.tool_pre_invoke]
     mode: sequential
     priority: 30
     on_error: fail
 
   - name: audit-logger
     kind: builtin/audit
-    hooks: [tool_pre_invoke, tool_post_invoke]
+    hooks: [demo.tool_pre_invoke, demo.tool_post_invoke]
     mode: fire_and_forget
     priority: 100
     on_error: ignore

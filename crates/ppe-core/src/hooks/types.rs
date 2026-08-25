@@ -25,12 +25,12 @@ use serde::{Deserialize, Serialize};
 /// # Examples
 ///
 /// ```
+/// use praxis_policy_core::cmf::constants::HOOK_CMF_TOOL_PRE_INVOKE;
 /// use praxis_policy_core::hooks::HookType;
-/// use praxis_policy_core::hooks::types::hook_names;
 ///
-/// // Use a built-in name constant
-/// let hook = HookType::new(hook_names::TOOL_PRE_INVOKE);
-/// assert_eq!(hook.as_str(), "tool_pre_invoke");
+/// // Use a dispatched hook's name constant
+/// let hook = HookType::new(HOOK_CMF_TOOL_PRE_INVOKE);
+/// assert_eq!(hook.as_str(), "cmf.tool_pre_invoke");
 ///
 /// // Define a custom hook
 /// let custom = HookType::new("generation_pre_call");
@@ -68,62 +68,6 @@ impl From<String> for HookType {
     fn from(s: String) -> Self {
         Self(s)
     }
-}
-
-/// Legacy hook names — typed payloads (`ToolPreInvokePayload`, etc.).
-pub mod hook_names {
-    // Tool lifecycle
-    /// Hook name `tool_pre_invoke`.
-    pub const TOOL_PRE_INVOKE: &str = "tool_pre_invoke";
-    /// Hook name `tool_post_invoke`.
-    pub const TOOL_POST_INVOKE: &str = "tool_post_invoke";
-
-    // Prompt lifecycle
-    /// Hook name `prompt_pre_fetch`.
-    pub const PROMPT_PRE_FETCH: &str = "prompt_pre_fetch";
-    /// Hook name `prompt_post_fetch`.
-    pub const PROMPT_POST_FETCH: &str = "prompt_post_fetch";
-
-    // Resource lifecycle
-    /// Hook name `resource_pre_fetch`.
-    pub const RESOURCE_PRE_FETCH: &str = "resource_pre_fetch";
-    /// Hook name `resource_post_fetch`.
-    pub const RESOURCE_POST_FETCH: &str = "resource_post_fetch";
-
-    // Identity and delegation
-    /// Hook name `identity_resolve`.
-    pub const IDENTITY_RESOLVE: &str = "identity_resolve";
-    /// Hook name `token_delegate`.
-    pub const TOKEN_DELEGATE: &str = "token_delegate";
-}
-
-/// CMF hook names — `MessagePayload` wrapping a CMF Message.
-/// The `cmf.` prefix lets legacy and CMF plugins coexist at the
-/// same interception point. The gateway fires both at each event.
-pub mod cmf_hook_names {
-    // Tool lifecycle
-    /// Hook name `cmf.tool_pre_invoke`.
-    pub const TOOL_PRE_INVOKE: &str = "cmf.tool_pre_invoke";
-    /// Hook name `cmf.tool_post_invoke`.
-    pub const TOOL_POST_INVOKE: &str = "cmf.tool_post_invoke";
-
-    // LLM lifecycle (CMF only — no legacy equivalent)
-    /// Hook name `cmf.llm_input`.
-    pub const LLM_INPUT: &str = "cmf.llm_input";
-    /// Hook name `cmf.llm_output`.
-    pub const LLM_OUTPUT: &str = "cmf.llm_output";
-
-    // Prompt lifecycle
-    /// Hook name `cmf.prompt_pre_fetch`.
-    pub const PROMPT_PRE_FETCH: &str = "cmf.prompt_pre_fetch";
-    /// Hook name `cmf.prompt_post_fetch`.
-    pub const PROMPT_POST_FETCH: &str = "cmf.prompt_post_fetch";
-
-    // Resource lifecycle
-    /// Hook name `cmf.resource_pre_fetch`.
-    pub const RESOURCE_PRE_FETCH: &str = "cmf.resource_pre_fetch";
-    /// Hook name `cmf.resource_post_fetch`.
-    pub const RESOURCE_POST_FETCH: &str = "cmf.resource_post_fetch";
 }
 
 /// Returns all built-in hook types, projected from the hook metadata
@@ -167,8 +111,8 @@ mod tests {
 
     #[test]
     fn test_hook_type_equality() {
-        let a = HookType::new("tool_pre_invoke");
-        let b = HookType::new("tool_pre_invoke");
+        let a = HookType::new("cmf.tool_pre_invoke");
+        let b = HookType::new("cmf.tool_pre_invoke");
         assert_eq!(a, b);
     }
 

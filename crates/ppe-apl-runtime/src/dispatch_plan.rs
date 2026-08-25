@@ -60,7 +60,7 @@ use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
 /// Replaces the prior `step_entry` / `field_entry` slot model, which
 /// used a brittle naming heuristic to classify hooks and silently
 /// collapsed plugins with multiple step-context hooks (e.g. both
-/// `tool_pre_invoke` and `tool_post_invoke`) to a single entry.
+/// `cmf.tool_pre_invoke` and `cmf.tool_post_invoke`) to a single entry.
 #[derive(Clone)]
 pub struct RoutePluginEntry {
     /// The plugin this entry dispatches to.

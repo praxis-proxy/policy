@@ -26,6 +26,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use praxis_policy_core::cmf::constants::ENTITY_TOOL;
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError, PluginViolation};
@@ -40,7 +41,7 @@ use praxis_policy_core::plugin::{Plugin, PluginConfig};
 // Step 1: Define a payload and hook type
 // ---------------------------------------------------------------------------
 
-/// The payload carried through the `tool_pre_invoke` hook.
+/// The payload carried through the `demo.tool_pre_invoke` hook.
 #[derive(Debug, Clone)]
 struct ToolInvokePayload {
     tool_name: String,
@@ -49,20 +50,32 @@ struct ToolInvokePayload {
 }
 praxis_policy_core::impl_plugin_payload!(ToolInvokePayload);
 
-/// Hook type for `tool_pre_invoke` — runs before a tool executes.
+// This demo is a host, so it declares its own hook names and their
+// routing metadata the same way praxis-policy-core declares its.
+praxis_policy_core::define_hooks! {
+    /// This host's hook rows, registered at startup.
+    DEMO_HOOK_METADATA;
+
+    /// Runs before a tool executes.
+    HOOK_DEMO_TOOL_PRE_INVOKE: "demo.tool_pre_invoke" => entity: Some(ENTITY_TOOL), phase: Pre;
+    /// Runs after a tool executes.
+    HOOK_DEMO_TOOL_POST_INVOKE: "demo.tool_post_invoke" => entity: Some(ENTITY_TOOL), phase: Post;
+}
+
+/// Hook type for `demo.tool_pre_invoke`.
 struct ToolPreInvoke;
 impl HookTypeDef for ToolPreInvoke {
     type Payload = ToolInvokePayload;
     type Result = PluginResult<ToolInvokePayload>;
-    const NAME: &'static str = "tool_pre_invoke";
+    const NAME: &'static str = HOOK_DEMO_TOOL_PRE_INVOKE;
 }
 
-/// Hook type for `tool_post_invoke` — runs after a tool executes.
+/// Hook type for `demo.tool_post_invoke`.
 struct ToolPostInvoke;
 impl HookTypeDef for ToolPostInvoke {
     type Payload = ToolInvokePayload;
     type Result = PluginResult<ToolInvokePayload>;
-    const NAME: &'static str = "tool_post_invoke";
+    const NAME: &'static str = HOOK_DEMO_TOOL_POST_INVOKE;
 }
 
 // ---------------------------------------------------------------------------
@@ -315,11 +328,11 @@ impl PluginFactory for IdentityFactory {
             plugin: plugin.clone(),
             handlers: vec![
                 (
-                    "tool_pre_invoke",
+                    "demo.tool_pre_invoke",
                     Arc::new(TypedHandlerAdapter::<ToolPreInvoke, _>::new(plugin.clone())),
                 ),
                 (
-                    "tool_post_invoke",
+                    "demo.tool_post_invoke",
                     Arc::new(TypedHandlerAdapter::<ToolPostInvoke, _>::new(plugin)),
                 ),
             ],
@@ -336,7 +349,7 @@ impl PluginFactory for PiiGuardFactory {
         Ok(PluginInstance {
             plugin: plugin.clone(),
             handlers: vec![(
-                "tool_pre_invoke",
+                "demo.tool_pre_invoke",
                 Arc::new(TypedHandlerAdapter::<ToolPreInvoke, _>::new(plugin)),
             )],
         })
@@ -353,11 +366,11 @@ impl PluginFactory for AuditLoggerFactory {
             plugin: plugin.clone(),
             handlers: vec![
                 (
-                    "tool_pre_invoke",
+                    "demo.tool_pre_invoke",
                     Arc::new(TypedHandlerAdapter::<ToolPreInvoke, _>::new(plugin.clone())),
                 ),
                 (
-                    "tool_post_invoke",
+                    "demo.tool_post_invoke",
                     Arc::new(TypedHandlerAdapter::<ToolPostInvoke, _>::new(plugin)),
                 ),
             ],
@@ -379,7 +392,7 @@ impl PluginFactory for RemoteAuthzFactory {
         Ok(PluginInstance {
             plugin: plugin.clone(),
             handlers: vec![(
-                "tool_pre_invoke",
+                "demo.tool_pre_invoke",
                 Arc::new(TypedHandlerAdapter::<ToolPreInvoke, _>::new(plugin)),
             )],
         })
@@ -434,6 +447,13 @@ async fn main() {
     println!("--- Loading config from {config_path} ---\n");
     let yaml = std::fs::read_to_string(config_path)
         .unwrap_or_else(|e| panic!("Failed to read {config_path}: {e}"));
+
+    // A host owning its own hooks describes them before loading config
+    // that names them, or the loader has nothing to validate the
+    // `hooks:` entries against and refuses the config.
+    for (name, meta) in DEMO_HOOK_METADATA {
+        praxis_policy_core::hooks::register_hook_metadata(*name, *meta);
+    }
     let policy_config = praxis_policy_core::config::parse_config(&yaml).unwrap();
 
     let mgr = PolicyEngine::default();
@@ -448,9 +468,9 @@ async fn main() {
 
     println!("\nPlugins loaded: {}", mgr.plugin_count());
     println!(
-        "Hooks registered: tool_pre_invoke={}, tool_post_invoke={}\n",
-        mgr.has_hooks_for("tool_pre_invoke"),
-        mgr.has_hooks_for("tool_post_invoke"),
+        "Hooks registered: demo.tool_pre_invoke={}, demo.tool_post_invoke={}\n",
+        mgr.has_hooks_for("demo.tool_pre_invoke"),
+        mgr.has_hooks_for("demo.tool_post_invoke"),
     );
 
     // --- Scenario 1: PII tool without clearance ---

@@ -89,7 +89,7 @@ pub struct RouteDecision {
 }
 
 /// Run the **pre-invocation** phases: `args` then `policy`. Used by
-/// orchestrators bound to a `tool_pre_invoke`-style hook — by the time
+/// orchestrators bound to a pre-invocation hook — by the time
 /// post-invoke fires, the tool has produced a response, so result/
 /// `post_policy` belong to [`evaluate_post`].
 ///
@@ -181,7 +181,7 @@ pub async fn evaluate_pre(
 
 /// Run the **post-invocation** phases: `result` (if a response payload
 /// is present) then `post_policy`. Used by orchestrators bound to a
-/// `tool_post_invoke`-style hook.
+/// post-invocation hook.
 ///
 /// On a phase Deny, halts. `result_modified` is set if any result field
 /// was rewritten or omitted; `args_modified` is always `false` (this

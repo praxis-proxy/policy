@@ -1117,7 +1117,7 @@ mod tests {
 plugins:
   - name: rate_limiter
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
     mode: sequential
     priority: 5
     config:
@@ -1135,7 +1135,7 @@ plugins:
 plugins:
   - name: test
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 "#;
         let config = parse_config(yaml).unwrap();
         assert!(!config.routing_enabled());
@@ -1154,7 +1154,7 @@ global:
 plugins:
   - name: identity
     kind: builtin
-    hooks: [identity_resolve]
+    hooks: [identity.resolve]
 routes:
   - tool: get_compensation
     meta:
@@ -1170,10 +1170,10 @@ routes:
 plugins:
   - name: dup
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: dup
     kind: builtin
-    hooks: [tool_post_invoke]
+    hooks: [cmf.tool_post_invoke]
 "#;
         assert!(
             parse_config(yaml)
@@ -1227,7 +1227,7 @@ plugin_settings:
 plugins:
   - name: known
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: get_compensation
     plugins:
@@ -1267,10 +1267,10 @@ routes: []
 plugins:
   - name: a
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: b
     kind: builtin
-    hooks: [tool_post_invoke]
+    hooks: [cmf.tool_post_invoke]
 "#;
         let config = parse_config(yaml).unwrap();
         let resolved = resolve_plugins_for_entity(&config, "tool", "anything", None, &no_tags());
@@ -1294,7 +1294,7 @@ global:
 plugins:
   - name: identity
     kind: builtin
-    hooks: [identity_resolve]
+    hooks: [identity.resolve]
   - name: apl_policy
     kind: builtin
     hooks: [cmf.tool_pre_invoke]
@@ -1324,7 +1324,7 @@ global:
 plugins:
   - name: identity
     kind: builtin
-    hooks: [identity_resolve]
+    hooks: [identity.resolve]
 routes:
   - tool: get_compensation
 "#;
@@ -1343,10 +1343,10 @@ plugin_settings:
 plugins:
   - name: specific
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: general
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: "hr-*"
     plugins:
@@ -1371,7 +1371,7 @@ plugin_settings:
 plugins:
   - name: rate_limiter
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: get_compensation
     plugins:
@@ -1392,7 +1392,7 @@ plugin_settings:
 plugins:
   - name: rate_limiter
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
     config:
       max_requests: 100
 routes:
@@ -1419,10 +1419,10 @@ plugin_settings:
 plugins:
   - name: rate_limiter
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: pii_scanner
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: get_compensation
     plugins:
@@ -1455,13 +1455,13 @@ global:
 plugins:
   - name: a
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: b
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: c
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: get_compensation
     meta:
@@ -1575,7 +1575,7 @@ routes:
 plugins:
   - name: test
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - meta:
       tags: [pii]
@@ -1594,10 +1594,10 @@ plugin_settings:
 plugins:
   - name: scoped_plugin
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: global_plugin
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: get_compensation
     meta:
@@ -1658,10 +1658,10 @@ global:
 plugins:
   - name: pii_plugin
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: runtime_plugin
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: get_compensation
     meta:
@@ -1692,7 +1692,7 @@ plugin_settings:
 plugins:
   - name: conditional_plugin
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: get_compensation
     when: "args.include_ssn == true"
@@ -1721,10 +1721,10 @@ global:
 plugins:
   - name: global_plugin
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
   - name: route_plugin
     kind: builtin
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
 routes:
   - tool: get_compensation
     when: "args.sensitive == true"
@@ -1922,7 +1922,7 @@ routes:
     fn resolve_identity_returns_empty_when_route_has_no_identity_block() {
         let yaml = r#"
 plugins:
-  - { name: rate_limiter, kind: builtin, hooks: [tool_pre_invoke] }
+  - { name: rate_limiter, kind: builtin, hooks: [cmf.tool_pre_invoke] }
 routes:
   - tool: get_weather
     plugins:

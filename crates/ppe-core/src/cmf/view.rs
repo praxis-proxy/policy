@@ -155,7 +155,7 @@ pub struct MessageView<'a> {
     kind: ViewKind,
     /// The parent message role.
     role: Role,
-    /// Optional hook location (e.g., "`tool_pre_invoke`").
+    /// Optional hook location (e.g., "`cmf.tool_pre_invoke`").
     hook: Option<&'a str>,
     /// Optional extensions (for security/http context).
     extensions: Option<&'a Extensions>,
@@ -222,7 +222,8 @@ impl<'a> MessageView<'a> {
 
     // -- Phase helpers --
 
-    /// Whether this is a pre-execution hook (`tool_pre_invoke`, `prompt_pre_fetch`, etc.).
+    /// Whether this is a pre-execution hook (`cmf.tool_pre_invoke`,
+    /// `cmf.prompt_pre_invoke`, etc.).
     pub fn is_pre(&self) -> bool {
         self.hook.is_some_and(|h| h.contains("pre"))
     }
@@ -701,11 +702,11 @@ mod tests {
     #[test]
     fn test_view_hook_pre_post() {
         let msg = make_test_message();
-        let pre_views: Vec<_> = msg.iter_views(Some("tool_pre_invoke"), None).collect();
+        let pre_views: Vec<_> = msg.iter_views(Some("cmf.tool_pre_invoke"), None).collect();
         assert!(pre_views[0].is_pre());
         assert!(!pre_views[0].is_post());
 
-        let post_views: Vec<_> = msg.iter_views(Some("tool_post_invoke"), None).collect();
+        let post_views: Vec<_> = msg.iter_views(Some("cmf.tool_post_invoke"), None).collect();
         assert!(post_views[0].is_post());
         assert!(!post_views[0].is_pre());
     }
@@ -771,7 +772,7 @@ mod tests {
     #[test]
     fn test_to_dict_tool_call() {
         let msg = make_test_message();
-        let views: Vec<_> = msg.iter_views(Some("tool_pre_invoke"), None).collect();
+        let views: Vec<_> = msg.iter_views(Some("cmf.tool_pre_invoke"), None).collect();
         let dict = views[2].to_dict(true, false); // tool call
 
         assert_eq!(dict["kind"], "tool_call");

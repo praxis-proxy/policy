@@ -209,7 +209,7 @@ mod tests {
         let registry = registry_with(PluginDeclaration {
             name: "rate_limiter".into(),
             kind: "native".into(),
-            hooks: vec!["tool_pre_invoke".into()],
+            hooks: vec!["cmf.tool_pre_invoke".into()],
             capabilities: vec!["read_subject".into()],
             config: Some(yaml("max_requests: 100")),
             on_error: Some("fail".into()),
@@ -220,7 +220,7 @@ mod tests {
         let eff = EffectivePlugin::resolve("rate_limiter", &registry, &overrides).unwrap();
         assert_eq!(eff.name, "rate_limiter");
         assert_eq!(eff.kind, "native");
-        assert_eq!(eff.hooks, &["tool_pre_invoke".to_owned()]);
+        assert_eq!(eff.hooks, &["cmf.tool_pre_invoke".to_owned()]);
         assert_eq!(eff.capabilities.as_slice(), &["read_subject".to_owned()]);
         assert_eq!(eff.on_error, Some("fail"));
         assert!(matches!(eff.capabilities, CapsView::Global(_)));
@@ -231,7 +231,7 @@ mod tests {
         let registry = registry_with(PluginDeclaration {
             name: "rate_limiter".into(),
             kind: "native".into(),
-            hooks: vec!["tool_pre_invoke".into()],
+            hooks: vec!["cmf.tool_pre_invoke".into()],
             capabilities: vec!["read_subject".into()],
             config: Some(yaml("max_requests: 100")),
             on_error: Some("fail".into()),
@@ -249,7 +249,7 @@ mod tests {
 
         let eff = EffectivePlugin::resolve("rate_limiter", &registry, &overrides).unwrap();
         // Hooks NOT overridable — still the global value.
-        assert_eq!(eff.hooks, &["tool_pre_invoke".to_owned()]);
+        assert_eq!(eff.hooks, &["cmf.tool_pre_invoke".to_owned()]);
         // Capabilities/config/on_error — overridden.
         assert_eq!(
             eff.capabilities.as_slice(),
@@ -269,7 +269,7 @@ mod tests {
         let registry = registry_with(PluginDeclaration {
             name: "audit".into(),
             kind: "native".into(),
-            hooks: vec!["tool_post_invoke".into()],
+            hooks: vec!["cmf.tool_post_invoke".into()],
             capabilities: vec!["read_labels".into()],
             config: Some(yaml("log_level: info")),
             on_error: Some("ignore".into()),

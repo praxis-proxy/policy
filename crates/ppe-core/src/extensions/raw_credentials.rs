@@ -64,8 +64,8 @@
 //   `read_delegated_tokens` for delegated ones. The two are
 //   independently scoped; neither unlocks the other.
 // - **The hook is one of the two that model a raw token** —
-//   `identity_resolve` (`IdentityPayload.raw_token`) and
-//   `token_delegate` (`DelegationPayload.bearer_token`). Every other
+//   `identity.resolve` (`IdentityPayload.raw_token`) and
+//   `token.delegate` (`DelegationPayload.bearer_token`). Every other
 //   hook gets nothing, even for a plugin holding both capabilities.
 // - **Fail closed on both sides of the gate.** No declared capability
 //   means no DTO and no token bytes — silently, not as an error.

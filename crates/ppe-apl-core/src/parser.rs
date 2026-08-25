@@ -4941,13 +4941,13 @@ routes:
 plugins:
   - name: rate_limiter
     kind: native
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
     capabilities: [read_subject]
     config:
       max_requests: 100
   - name: audit
     kind: native
-    hooks: [tool_post_invoke]
+    hooks: [cmf.tool_post_invoke]
 routes:
   get_compensation:
     pre_invocation:
@@ -4957,7 +4957,7 @@ routes:
         assert_eq!(cfg.plugins.len(), 2);
         let rl = cfg.plugins.get("rate_limiter").unwrap();
         assert_eq!(rl.kind, "native");
-        assert_eq!(rl.hooks, vec!["tool_pre_invoke".to_owned()]);
+        assert_eq!(rl.hooks, vec!["cmf.tool_pre_invoke".to_owned()]);
         assert_eq!(rl.capabilities, vec!["read_subject".to_owned()]);
         // The route should still compile (uses plugin(rate_limiter)).
         assert!(cfg.routes.contains_key("get_compensation"));
@@ -4969,7 +4969,7 @@ routes:
 plugins:
   - name: rate_limiter
     kind: native
-    hooks: [tool_pre_invoke]
+    hooks: [cmf.tool_pre_invoke]
     config:
       max_requests: 100
 routes:
@@ -5001,7 +5001,7 @@ routes:
         .unwrap();
         assert_eq!(eff.on_error, Some("ignore"));
         // Hooks NOT overridable — still from the global declaration.
-        assert_eq!(eff.hooks, &["tool_pre_invoke".to_owned()]);
+        assert_eq!(eff.hooks, &["cmf.tool_pre_invoke".to_owned()]);
     }
 
     #[test]
