@@ -179,7 +179,7 @@ struct RuntimeSnapshot {
     /// `scope` (None vs `Some("virtual-server-A")`) lets two virtual
     /// servers / gateways with the same tool name carry distinct
     /// orchestrators. Matching mirrors praxis-policy-core's existing
-    /// `find_matching_route` semantics: a scoped request first tries the
+    /// `resolve_route` semantics: a scoped request first tries the
     /// exact `(et, en, Some(req_scope), hook)` annotation; on miss it falls
     /// back to the unscoped `(et, en, None, hook)` default. An unscoped
     /// request only matches `(et, en, None, hook)`. Net effect: None-scope
@@ -1483,7 +1483,7 @@ impl PolicyEngine {
         {
             // Scoped lookup first (specific wins); unscoped lookup
             // falls back as a "global default" — matches the
-            // specificity tiebreaker `find_matching_route` uses.
+            // specificity tiebreaker `resolve_route` uses.
             // Lookup is keyed on the hook name as well, so a route
             // can install distinct handlers per phase.
             let scoped = meta.scope.as_ref().and_then(|s| {
@@ -1573,19 +1573,19 @@ impl PolicyEngine {
         // the `plugins:` block, which in APL-driven routes means
         // "per-route overrides" rather than "binding"). For every
         // other hook, the generic plugins-block resolution applies.
+        // Match once and hand the route to both resolvers, rather than letting
+        // each one scan the route table again.
+        let matched = config::resolve_route(
+            policy_config,
+            config::RouteQuery::named(entity_type, entity_name).with_scope(request_scope),
+        );
         let resolved = if hook_name == crate::identity::HOOK_IDENTITY_RESOLVE {
-            config::resolve_identity_plugins_for_route(
-                policy_config,
-                entity_type,
-                entity_name,
-                request_scope,
-            )
+            config::resolve_identity_plugins_for_route(policy_config, matched.as_ref())
         } else {
             config::resolve_plugins_for_entity(
                 policy_config,
                 entity_type,
-                entity_name,
-                request_scope,
+                matched.as_ref(),
                 &meta.tags,
             )
         };

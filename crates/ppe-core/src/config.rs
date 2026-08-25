@@ -1240,6 +1240,16 @@ const SPECIFICITY_GLOB: usize = 300;
 const SPECIFICITY_WHEN_ONLY: usize = 10;
 const SPECIFICITY_WILDCARD: usize = 0;
 
+/// Specificity for an `http:` selector. An `http:` route only ever competes
+/// with other `http:` routes, so paths order on their own scale and the name
+/// buckets above are left alone.
+///
+/// An exact path outranks every prefix, however long, and among prefixes the
+/// longer one wins. The per-character weight sits above the scope and `when:`
+/// bonuses so prefix length decides before either tiebreaker does.
+const SPECIFICITY_EXACT_PATH: usize = usize::MAX / 2;
+const SPECIFICITY_PATH_PREFIX_STEP: usize = 1000;
+
 /// Score a single entity matcher (tool / resource / prompt / llm) against
 /// a request entity name, returning the specificity bucket if it matches
 /// or `None` if it doesn't (or the matcher is absent). Replaces four
@@ -1256,6 +1266,67 @@ fn score_entity_match(matcher: Option<&StringOrList>, entity_name: &str) -> Opti
         StringOrList::Single(_) => SPECIFICITY_EXACT_NAME,
     };
     Some(score)
+}
+
+/// Whether a request path matches a declared prefix at a segment boundary.
+///
+/// Mirrors the host router's reading in `filter/src/path_match.rs`: one
+/// trailing slash on the prefix is insignificant, and an empty or root prefix
+/// matches every path. A path that
+/// is not absolute matches nothing, which is the one deliberate difference from
+/// the host: PPE matches only a path it can read as a request line, so an
+/// `OPTIONS *` request resolves no route rather than the catch-all.
+fn path_prefix_matches(path: &str, prefix: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    let trimmed = prefix.strip_suffix('/').unwrap_or(prefix);
+    if trimmed.is_empty() || path == trimmed {
+        return true;
+    }
+    path.starts_with(trimmed) && path.as_bytes().get(trimmed.len()) == Some(&b'/')
+}
+
+/// The effective length of a declared prefix, which is what orders two prefixes
+/// that both match one path, as the host's own prefix specificity does. A trailing slash is insignificant here too, and the
+/// root counts as one character.
+fn path_prefix_specificity(prefix: &str) -> usize {
+    let trimmed = prefix.strip_suffix('/').unwrap_or(prefix);
+    if trimmed.is_empty() { 1 } else { trimmed.len() }
+}
+
+/// Whether a request method satisfies a selector's `method:` narrowing. An
+/// absent narrowing accepts any method, and comparison ignores ASCII case the
+/// way the host's own method conditions do.
+fn http_method_matches(accepted: Option<&StringOrList>, method: Option<&str>) -> bool {
+    let Some(accepted) = accepted else {
+        return true;
+    };
+    let Some(method) = method else {
+        return false;
+    };
+    accepted
+        .as_names()
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(method))
+}
+
+/// Score an `http:` selector against a request path and method, or `None` when
+/// it does not match. The method narrowing gates the match without contributing
+/// to the score.
+fn score_http_match(selector: &HttpSelector, path: &str, method: Option<&str>) -> Option<usize> {
+    if !path.starts_with('/') || !http_method_matches(selector.method(), method) {
+        return None;
+    }
+    if let Some(prefix) = selector.path_prefix() {
+        return path_prefix_matches(path, prefix)
+            .then(|| path_prefix_specificity(prefix).saturating_mul(SPECIFICITY_PATH_PREFIX_STEP));
+    }
+    selector
+        .exact_paths()
+        .iter()
+        .any(|declared| declared == path)
+        .then_some(SPECIFICITY_EXACT_PATH)
 }
 
 /// The static bundle-membership tags a route declares: its `meta.tags`
@@ -1334,20 +1405,112 @@ fn rendered_methods(method: Option<&StringOrList>) -> Option<String> {
     Some(methods.join(","))
 }
 
+/// The name a matching name selector resolves to: the matched element for a
+/// list, the pattern as written for a single. Drawn from the names the route
+/// contributes, so a resolved name cannot differ from an annotated one.
+fn matched_selector_name(selector: &StringOrList, entity_name: &str) -> Option<String> {
+    let names = selector_names(selector);
+    match selector {
+        // List elements match by equality, so the matched element is the name.
+        StringOrList::List(_) => names.into_iter().find(|name| name == entity_name),
+        // A single pattern contributes itself, glob or not.
+        StringOrList::Single(_) => names.into_iter().next(),
+    }
+}
+
+/// The name a matching `http:` selector resolves to. A prefix contributes one
+/// rendered name; the exact shapes render one name per declared path, in order,
+/// so the matched path picks its own name out of that list.
+fn matched_http_name(selector: &HttpSelector, path: &str) -> Option<String> {
+    let names = http_selector_names(selector);
+    if selector.path_prefix().is_some() {
+        return names.into_iter().next();
+    }
+    let matched = selector
+        .exact_paths()
+        .iter()
+        .position(|declared| declared == path)?;
+    names.into_iter().nth(matched)
+}
+
+/// The request description route resolution matches against.
+///
+/// The four name selectors match against `name`. A generic HTTP request matches
+/// on its path and method instead, because a path is never the name a request
+/// arrives under.
+#[derive(Debug, Clone, Copy)]
+pub struct RouteQuery<'a> {
+    entity_type: &'a str,
+    name: &'a str,
+    path: &'a str,
+    method: Option<&'a str>,
+    scope: Option<&'a str>,
+}
+
+impl<'a> RouteQuery<'a> {
+    /// A request matched by entity name, which is every entity type but generic
+    /// HTTP. The path is left empty, so an HTTP query built this way matches no
+    /// `http:` route.
+    pub fn named(entity_type: &'a str, name: &'a str) -> Self {
+        Self {
+            entity_type,
+            name,
+            path: "",
+            method: None,
+            scope: None,
+        }
+    }
+
+    /// A generic HTTP request. The path must already be normalized: matching
+    /// reads it as given, and a path that is not absolute matches nothing.
+    pub fn http(path: &'a str, method: Option<&'a str>) -> Self {
+        Self {
+            entity_type: ENTITY_HTTP,
+            name: "",
+            path,
+            method,
+            scope: None,
+        }
+    }
+
+    /// Narrow the query to the request's scope.
+    #[must_use]
+    pub fn with_scope(mut self, scope: Option<&'a str>) -> Self {
+        self.scope = scope;
+        self
+    }
+}
+
+/// A route that matched a request, with the name the request resolved to.
+///
+/// The name is the selector value that matched rather than anything the request
+/// carried, so it is config rather than traffic: a request path never becomes a
+/// cache key or an annotation key.
+#[derive(Debug, Clone)]
+pub struct MatchedRoute<'a> {
+    /// The route that won.
+    pub route: &'a RouteEntry,
+
+    /// The resolved name, which is one of the names
+    /// [`route_entity_identity`] contributes for this route.
+    pub name: String,
+}
+
 /// Resolve which plugins should fire for a given entity.
 ///
-/// When routing is disabled, returns all plugin names. When enabled,
-/// matches the entity against routes and collects plugins from the
-/// `all` group, defaults, matching groups (via merged tags), and the
-/// route itself.
+/// When routing is disabled, returns all plugin names. When enabled, collects
+/// plugins from the `all` group, the entity type's defaults, the matched route's
+/// groups (via merged tags), and the route itself.
 ///
-/// `request_scope` and `request_tags` come from the host's
-/// `MetaExtension` on the request.
+/// The caller matches the route once with [`resolve_route`] and passes the
+/// result in. `entity_type` is still needed on its own, because the entity
+/// type's defaults apply whether or not a route matched.
+///
+/// `request_tags` comes from the host's `MetaExtension` on the request.
 pub fn resolve_plugins_for_entity(
     config: &PolicyConfig,
     entity_type: &str,
-    entity_name: &str,
-    request_scope: Option<&str>,
+    matched: Option<&MatchedRoute<'_>>,
     request_tags: &HashSet<String>,
 ) -> Vec<ResolvedPlugin> {
     if !config.routing_enabled() {
@@ -1374,8 +1537,8 @@ pub fn resolve_plugins_for_entity(
         collect_plugin_refs(&default_group.plugins, &mut resolved, None);
     }
 
-    // 3. Find matching route (with scope check)
-    if let Some(route) = find_matching_route(config, entity_type, entity_name, request_scope) {
+    // 3. Layer the matched route: its groups and tags, then its own plugins.
+    if let Some(route) = matched.map(|m| m.route) {
         // Merge tags: route's static membership (meta.tags + groups: sugar)
         // + host's runtime tags.
         let mut merged_tags: HashSet<String> = request_tags.clone();
@@ -1444,16 +1607,13 @@ pub fn resolve_plugins_for_entity(
 /// `replace_inherited: true` + empty `steps: []`).
 pub fn resolve_identity_plugins_for_route(
     config: &PolicyConfig,
-    entity_type: &str,
-    entity_name: &str,
-    request_scope: Option<&str>,
+    matched: Option<&MatchedRoute<'_>>,
 ) -> Vec<ResolvedPlugin> {
-    // Route-level block is the override authority. Find the matching
-    // route up-front; absence means there's no route to inherit
-    // identity FOR (still consult global identity though, since the
-    // host might be doing per-route hook routing on entity_type
-    // alone with no specific route).
-    let route = find_matching_route(config, entity_type, entity_name, request_scope);
+    // Route-level block is the override authority. No matched route means
+    // there's no route to inherit identity FOR (still consult global identity
+    // though, since the host might be doing per-route hook routing on the
+    // entity type alone with no specific route).
+    let route = matched.map(|m| m.route);
     let route_identity = route.and_then(|r| r.identity.as_ref());
 
     // Check the override flag before doing any inheritance work —
@@ -1537,36 +1697,27 @@ fn collect_plugin_refs(
     }
 }
 
-/// Find the best matching route for an entity by specificity.
+/// Find the best matching route for a request, with the name it resolved to.
 ///
-/// Scope matching: if a route declares a scope, the request must
-/// have the same scope. No scope on the route matches any request.
-fn find_matching_route<'a>(
+/// Scope matching: if a route declares a scope, the request must have the same
+/// scope. No scope on the route matches any request. Among matches the highest
+/// specificity wins, and the first declared breaks a tie.
+pub fn resolve_route<'a>(
     config: &'a PolicyConfig,
-    entity_type: &str,
-    entity_name: &str,
-    request_scope: Option<&str>,
-) -> Option<&'a RouteEntry> {
-    let mut best: Option<(usize, &RouteEntry)> = None;
+    query: RouteQuery<'_>,
+) -> Option<MatchedRoute<'a>> {
+    let mut best: Option<(usize, MatchedRoute<'a>)> = None;
 
     for route in &config.routes {
         let route_scope = route.meta.as_ref().and_then(|m| m.scope.as_deref());
-        let scope_bonus = match (route_scope, request_scope) {
+        let scope_bonus = match (route_scope, query.scope) {
             (None, _) => 0,                          // route is global
             (Some(rs), Some(rq)) if rs == rq => 100, // scopes match
             (Some(_), _) => continue,                // scope mismatch — skip
         };
 
-        let entity_matcher = match entity_type {
-            "tool" => route.tool.as_ref(),
-            "resource" => route.resource.as_ref(),
-            "prompt" => route.prompt.as_ref(),
-            "llm" => route.llm.as_ref(),
-            _ => continue,
-        };
-        let base_specificity = match score_entity_match(entity_matcher, entity_name) {
-            Some(score) => score,
-            None => continue,
+        let Some((base_specificity, name)) = score_route_match(route, query) else {
+            continue;
         };
 
         let when_bonus = if route.when.is_some() {
@@ -1574,14 +1725,37 @@ fn find_matching_route<'a>(
         } else {
             0
         };
-        let total = base_specificity + scope_bonus + when_bonus;
+        let total = base_specificity.saturating_add(scope_bonus + when_bonus);
 
-        if best.is_none_or(|(s, _)| total > s) {
-            best = Some((total, route));
+        if best.as_ref().is_none_or(|(s, _)| total > *s) {
+            best = Some((total, MatchedRoute { route, name }));
         }
     }
 
-    best.map(|(_, route)| route)
+    best.map(|(_, matched)| matched)
+}
+
+/// Score one route against a query, with the name it would resolve to, or
+/// `None` when it does not match.
+///
+/// HTTP scores on its own scale in its own arm, so the four name selectors keep
+/// the buckets and the arithmetic they have.
+fn score_route_match(route: &RouteEntry, query: RouteQuery<'_>) -> Option<(usize, String)> {
+    if query.entity_type == ENTITY_HTTP {
+        let selector = route.http.as_ref()?;
+        let score = score_http_match(selector, query.path, query.method)?;
+        return Some((score, matched_http_name(selector, query.path)?));
+    }
+
+    let matcher = match query.entity_type {
+        ENTITY_TOOL => route.tool.as_ref(),
+        ENTITY_RESOURCE => route.resource.as_ref(),
+        ENTITY_PROMPT => route.prompt.as_ref(),
+        ENTITY_LLM => route.llm.as_ref(),
+        _ => None,
+    }?;
+    let score = score_entity_match(Some(matcher), query.name)?;
+    Some((score, matched_selector_name(matcher, query.name)?))
 }
 
 #[cfg(test)]
@@ -1602,6 +1776,36 @@ mod tests {
     // Helper: empty tags for tests that don't need them
     fn no_tags() -> HashSet<String> {
         HashSet::new()
+    }
+
+    /// Match once, then layer, which is what the engine does. Keeps the
+    /// resolution call sites below reading as one step.
+    fn plugins_for(
+        config: &PolicyConfig,
+        entity_type: &str,
+        entity_name: &str,
+        request_scope: Option<&str>,
+        request_tags: &HashSet<String>,
+    ) -> Vec<ResolvedPlugin> {
+        let matched = resolve_route(
+            config,
+            RouteQuery::named(entity_type, entity_name).with_scope(request_scope),
+        );
+        resolve_plugins_for_entity(config, entity_type, matched.as_ref(), request_tags)
+    }
+
+    /// The identity-hook counterpart of `plugins_for`.
+    fn identity_for(
+        config: &PolicyConfig,
+        entity_type: &str,
+        entity_name: &str,
+        request_scope: Option<&str>,
+    ) -> Vec<ResolvedPlugin> {
+        let matched = resolve_route(
+            config,
+            RouteQuery::named(entity_type, entity_name).with_scope(request_scope),
+        );
+        resolve_identity_plugins_for_route(config, matched.as_ref())
     }
 
     #[test]
@@ -1871,7 +2075,7 @@ plugins:
     hooks: [cmf.tool_post_invoke]
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved = resolve_plugins_for_entity(&config, "tool", "anything", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "anything", None, &no_tags());
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b"]);
     }
@@ -1902,8 +2106,7 @@ routes:
       tags: [pii]
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &no_tags());
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"identity"));
         assert!(names.contains(&"apl_policy"));
@@ -1927,8 +2130,7 @@ routes:
   - tool: get_compensation
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "unknown_tool", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "unknown_tool", None, &no_tags());
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["identity"]);
     }
@@ -1954,8 +2156,7 @@ routes:
       - specific
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "hr-compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "hr-compensation", None, &no_tags());
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"specific"));
         assert!(!names.contains(&"general"));
@@ -1976,8 +2177,7 @@ routes:
       - rate_limiter
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &no_tags());
         assert_eq!(resolved[0].name, "rate_limiter");
         assert!(resolved[0].config_overrides.is_none());
     }
@@ -2001,8 +2201,7 @@ routes:
             max_requests: 10
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &no_tags());
         assert_eq!(resolved[0].name, "rate_limiter");
         assert!(resolved[0].config_overrides.is_some());
         let overrides = resolved[0].config_overrides.as_ref().unwrap();
@@ -2030,8 +2229,7 @@ routes:
             sensitivity: high
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &no_tags());
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[0].name, "rate_limiter");
         assert!(resolved[0].config_overrides.is_none());
@@ -2066,8 +2264,7 @@ routes:
       tags: [pii]
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &no_tags());
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
     }
@@ -2209,7 +2406,7 @@ routes:
         let config = parse_config(yaml).unwrap();
 
         // With matching scope — scoped route wins (more specific)
-        let resolved = resolve_plugins_for_entity(
+        let resolved = plugins_for(
             &config,
             "tool",
             "get_compensation",
@@ -2221,14 +2418,13 @@ routes:
         assert!(!names.contains(&"global_plugin"));
 
         // Without scope — global route matches
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &no_tags());
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"global_plugin"));
         assert!(!names.contains(&"scoped_plugin"));
 
         // With different scope — global route matches (scoped doesn't)
-        let resolved = resolve_plugins_for_entity(
+        let resolved = plugins_for(
             &config,
             "tool",
             "get_compensation",
@@ -2271,8 +2467,7 @@ routes:
         let mut host_tags = HashSet::new();
         host_tags.insert("runtime_tag".to_owned());
 
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &host_tags);
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &host_tags);
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
 
         // Both route's static tag (pii) and host's runtime tag activate their groups
@@ -2298,8 +2493,7 @@ routes:
       - conditional_plugin
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &no_tags());
         assert_eq!(resolved[0].name, "conditional_plugin");
         assert_eq!(
             resolved[0].when.as_deref(),
@@ -2330,8 +2524,7 @@ routes:
       - route_plugin
 "#;
         let config = parse_config(yaml).unwrap();
-        let resolved =
-            resolve_plugins_for_entity(&config, "tool", "get_compensation", None, &no_tags());
+        let resolved = plugins_for(&config, "tool", "get_compensation", None, &no_tags());
 
         // global_plugin has no when clause (from all group)
         let global = resolved.iter().find(|r| r.name == "global_plugin").unwrap();
@@ -2512,7 +2705,7 @@ routes:
       - corp-jwt
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "unmatched_tool", None);
+        let resolved = identity_for(&cfg, "tool", "unmatched_tool", None);
         assert!(resolved.is_empty());
     }
 
@@ -2527,7 +2720,7 @@ routes:
       - rate_limiter
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "get_weather", None);
+        let resolved = identity_for(&cfg, "tool", "get_weather", None);
         assert!(resolved.is_empty());
     }
 
@@ -2546,7 +2739,7 @@ routes:
       - agent-context
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "get_weather", None);
+        let resolved = identity_for(&cfg, "tool", "get_weather", None);
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["spiffe-attestor", "corp-jwt", "agent-context"]);
     }
@@ -2568,7 +2761,7 @@ routes:
           audience: my-tool
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "get_weather", None);
+        let resolved = identity_for(&cfg, "tool", "get_weather", None);
         assert_eq!(resolved.len(), 1);
         let overrides = resolved[0]
             .config_overrides
@@ -2597,7 +2790,7 @@ routes:
   - tool: get_weather
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "get_weather", None);
+        let resolved = identity_for(&cfg, "tool", "get_weather", None);
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["corp-jwt"]);
     }
@@ -2622,7 +2815,7 @@ routes:
       - agent-context
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "get_weather", None);
+        let resolved = identity_for(&cfg, "tool", "get_weather", None);
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["corp-jwt", "agent-context"]);
     }
@@ -2654,7 +2847,7 @@ routes:
       - agent-context
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "get_compensation", None);
+        let resolved = identity_for(&cfg, "tool", "get_compensation", None);
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["corp-jwt", "workday-saml", "agent-context"]);
     }
@@ -2687,7 +2880,7 @@ routes:
         - legacy-basic-auth
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "legacy_endpoint", None);
+        let resolved = identity_for(&cfg, "tool", "legacy_endpoint", None);
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["legacy-basic-auth"]);
     }
@@ -2712,7 +2905,7 @@ routes:
       steps: []
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "anonymous_endpoint", None);
+        let resolved = identity_for(&cfg, "tool", "anonymous_endpoint", None);
         assert!(resolved.is_empty());
     }
 
@@ -2738,13 +2931,13 @@ routes:
 "#;
         let cfg = parse_config(yaml).unwrap();
 
-        let tagged = resolve_identity_plugins_for_route(&cfg, "tool", "with_tag", None);
+        let tagged = identity_for(&cfg, "tool", "with_tag", None);
         assert_eq!(
             tagged.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["workday-saml"],
         );
 
-        let untagged = resolve_identity_plugins_for_route(&cfg, "tool", "without_tag", None);
+        let untagged = identity_for(&cfg, "tool", "without_tag", None);
         assert!(
             untagged.is_empty(),
             "tag bundle should NOT apply to untagged routes"
@@ -2778,7 +2971,7 @@ routes:
         let cfg = parse_config(yaml).unwrap();
         let no_runtime = HashSet::new();
         let names = |entity: &str| {
-            resolve_plugins_for_entity(&cfg, "tool", entity, None, &no_runtime)
+            plugins_for(&cfg, "tool", entity, None, &no_runtime)
                 .iter()
                 .map(|r| r.name.clone())
                 .collect::<Vec<_>>()
@@ -2815,7 +3008,7 @@ routes:
     groups: finance
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "via_groups", None);
+        let resolved = identity_for(&cfg, "tool", "via_groups", None);
         assert_eq!(
             resolved.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["workday-saml"],
@@ -2845,7 +3038,7 @@ routes:
     groups: [grp-b]
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "both", None);
+        let resolved = identity_for(&cfg, "tool", "both", None);
         let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert!(
             names.contains(&"a"),
@@ -2872,7 +3065,7 @@ routes:
     groups: finance
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "pay", None);
+        let resolved = identity_for(&cfg, "tool", "pay", None);
         assert_eq!(
             resolved.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["workday-saml"],
@@ -2901,7 +3094,7 @@ routes:
     groups: [new-loc, old-loc]
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "mixed", None);
+        let resolved = identity_for(&cfg, "tool", "mixed", None);
         let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"a"), "top-level groups applies: {names:?}");
         assert!(
@@ -2930,7 +3123,7 @@ routes:
     groups: dup
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let resolved = resolve_identity_plugins_for_route(&cfg, "tool", "t", None);
+        let resolved = identity_for(&cfg, "tool", "t", None);
         assert_eq!(
             resolved.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             vec!["canonical"],
@@ -3000,8 +3193,8 @@ routes:
 
     #[test]
     fn resolve_identity_scope_filtering_matches_other_route_resolution() {
-        // Identity routing uses the same `find_matching_route`
-        // scope-aware matcher as the generic `plugins:` resolution,
+        // Identity routing uses the same scope-aware matcher as the
+        // generic `plugins:` resolution,
         // so requests for a different scope shouldn't pick up
         // identity from this route.
         let yaml = r#"
@@ -3015,12 +3208,10 @@ routes:
       - corp-jwt
 "#;
         let cfg = parse_config(yaml).unwrap();
-        let matching =
-            resolve_identity_plugins_for_route(&cfg, "tool", "get_weather", Some("tenant-a"));
+        let matching = identity_for(&cfg, "tool", "get_weather", Some("tenant-a"));
         assert_eq!(matching.len(), 1);
 
-        let non_matching =
-            resolve_identity_plugins_for_route(&cfg, "tool", "get_weather", Some("tenant-b"));
+        let non_matching = identity_for(&cfg, "tool", "get_weather", Some("tenant-b"));
         assert!(non_matching.is_empty());
     }
 
@@ -3308,7 +3499,7 @@ global:
         .expect("`global.defaults.http` must parse");
 
         assert!(cfg.global.defaults.contains_key("http"));
-        let resolved = resolve_plugins_for_entity(&cfg, "http", "*", None, &no_tags());
+        let resolved = plugins_for(&cfg, "http", "*", None, &no_tags());
         assert_eq!(
             resolved.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
             ["corp-jwt"],
@@ -3824,5 +4015,450 @@ routes:
             written[0], written[2],
             "a repeated method is the same set, so it is the same name"
         );
+    }
+    // ---- matching a request to a route ------------------------------------
+
+    /// A routing-enabled config written as just its `routes:` block, so a case
+    /// reads as the selectors it declares.
+    fn routed_config(routes: &str) -> PolicyConfig {
+        let yaml =
+            format!("plugin_settings:\n  routing_enabled: true\nplugins: []\nroutes:\n{routes}");
+        parse_config(&yaml).expect("every route in the case must parse")
+    }
+
+    /// The name a generic HTTP request resolves to, or `None` when no `http:`
+    /// route matched it.
+    fn http_name(config: &PolicyConfig, path: &str, method: Option<&str>) -> Option<String> {
+        resolve_route(config, RouteQuery::http(path, method)).map(|matched| matched.name)
+    }
+
+    /// The prefix a request matched, which is how a case tells two prefix
+    /// routes apart.
+    fn matched_prefix(config: &PolicyConfig, path: &str) -> Option<String> {
+        resolve_route(config, RouteQuery::http(path, Some("GET")))?
+            .route
+            .http
+            .as_ref()
+            .and_then(HttpSelector::path_prefix)
+            .map(str::to_owned)
+    }
+
+    /// A request under a prefix resolves the route, and the name it resolves to
+    /// is the selector's, not the path it arrived on. Keying on the path would
+    /// make the cache and the annotation table grow with traffic.
+    #[test]
+    fn a_request_under_a_prefix_resolves_to_the_prefix_not_to_its_own_path() {
+        let cfg = routed_config("  - http: { path_prefix: /v1/files }\n");
+
+        let matched = resolve_route(&cfg, RouteQuery::http("/v1/files/q3.pdf", Some("GET")))
+            .expect("a file under the prefix must match");
+        let (entity_type, names) =
+            route_entity_identity(matched.route).expect("the route declares `http:`");
+
+        assert_eq!(
+            entity_type, ENTITY_HTTP,
+            "an `http:` route is an http entity"
+        );
+        assert!(
+            names.contains(&matched.name),
+            "the resolved name must be one the route contributes: {names:?}"
+        );
+        assert!(
+            !matched.name.contains("q3.pdf"),
+            "no part of the request path belongs in the resolved name: {}",
+            matched.name
+        );
+    }
+
+    /// A list dispatches per element, so the element that matched is the name.
+    #[test]
+    fn a_list_selector_resolves_to_the_matched_element() {
+        let cfg = routed_config("  - http: [/livez, /readyz]\n");
+
+        assert_eq!(
+            http_name(&cfg, "/readyz", Some("GET")).as_deref(),
+            Some("/readyz"),
+            "the matched element is the name"
+        );
+        assert_eq!(
+            http_name(&cfg, "/livez", None).as_deref(),
+            Some("/livez"),
+            "each element routes on its own"
+        );
+        assert_eq!(
+            http_name(&cfg, "/healthz", Some("GET")),
+            None,
+            "a list matches by equality, so an undeclared path matches nothing"
+        );
+    }
+
+    /// The host router's reading: `/api` covers `/api`, `/api/`, and `/api/v1`,
+    /// and stops at the segment boundary rather than at the character.
+    #[test]
+    fn a_prefix_matches_only_at_a_segment_boundary() {
+        let mut resolved = Vec::new();
+        for declared in ["/api", "/api/"] {
+            let cfg = routed_config(&format!("  - http: {{ path_prefix: {declared} }}\n"));
+            for path in ["/api", "/api/", "/api/v1"] {
+                assert!(
+                    http_name(&cfg, path, Some("GET")).is_some(),
+                    "`{declared}` must match {path}"
+                );
+            }
+            assert!(
+                http_name(&cfg, "/apikeys", Some("GET")).is_none(),
+                "`{declared}` must not match /apikeys"
+            );
+            resolved.push(http_name(&cfg, "/api/v1", Some("GET")));
+        }
+
+        assert_eq!(
+            resolved[0], resolved[1],
+            "a trailing slash on the prefix changes neither the match nor the name"
+        );
+    }
+
+    /// Among prefixes that both match, the longer one wins whichever order they
+    /// are declared in, which is what makes ordering independent of the file.
+    #[test]
+    fn the_longer_prefix_wins_in_either_declaration_order() {
+        for routes in [
+            "  - http: { path_prefix: /v1 }\n  - http: { path_prefix: /v1/files }\n",
+            "  - http: { path_prefix: /v1/files }\n  - http: { path_prefix: /v1 }\n",
+        ] {
+            let cfg = routed_config(routes);
+            assert_eq!(
+                matched_prefix(&cfg, "/v1/files/q3.pdf").as_deref(),
+                Some("/v1/files"),
+                "the longer prefix must win, declared first or second"
+            );
+            assert_eq!(
+                matched_prefix(&cfg, "/v1/other").as_deref(),
+                Some("/v1"),
+                "a path outside the longer prefix still falls to the shorter one"
+            );
+        }
+    }
+
+    /// An exact path outranks every prefix that also covers it.
+    #[test]
+    fn an_exact_path_beats_every_prefix() {
+        let cfg = routed_config(
+            "  - http: { path_prefix: /v1/files }\n  - http: { path_prefix: /v1 }\n  - http: /v1/files\n",
+        );
+
+        let matched = resolve_route(&cfg, RouteQuery::http("/v1/files", Some("GET")))
+            .expect("the exact path is declared");
+        assert_eq!(
+            matched
+                .route
+                .http
+                .as_ref()
+                .map(HttpSelector::exact_paths)
+                .unwrap_or_default(),
+            ["/v1/files"],
+            "the exact route must win over both prefixes"
+        );
+
+        assert_eq!(
+            matched_prefix(&cfg, "/v1/files/q3.pdf").as_deref(),
+            Some("/v1/files"),
+            "an exact path matches by equality, so a file under it still takes the prefix"
+        );
+    }
+
+    /// The root prefix is the catch-all an operator writes when a route should
+    /// cover whatever the narrower ones did not.
+    #[test]
+    fn the_root_prefix_matches_every_absolute_path() {
+        let cfg = routed_config("  - http: { path_prefix: / }\n");
+
+        for path in ["/", "/healthz", "/v1/files/q3.pdf", "/a//b"] {
+            assert!(
+                http_name(&cfg, path, Some("GET")).is_some(),
+                "the catch-all must match {path}"
+            );
+        }
+    }
+
+    /// A `method:` narrowing gates the match. Its absence accepts any method,
+    /// and a method is compared without regard to case, the way the host's own
+    /// method conditions compare it.
+    #[test]
+    fn a_method_narrows_the_match_and_its_absence_accepts_any_method() {
+        let narrowed = routed_config("  - http: { path_prefix: /v1/files, method: GET }\n");
+
+        assert!(
+            http_name(&narrowed, "/v1/files/q3.pdf", Some("GET")).is_some(),
+            "the declared method must match"
+        );
+        assert!(
+            http_name(&narrowed, "/v1/files/q3.pdf", Some("get")).is_some(),
+            "case is not what distinguishes two methods"
+        );
+        assert!(
+            http_name(&narrowed, "/v1/files/q3.pdf", Some("DELETE")).is_none(),
+            "a method the route does not accept must not match it"
+        );
+        assert!(
+            http_name(&narrowed, "/v1/files/q3.pdf", None).is_none(),
+            "a request with no method cannot satisfy a narrowing"
+        );
+
+        let open = routed_config("  - http: { path_prefix: /v1/files }\n");
+        for method in [Some("GET"), Some("POST"), Some("PATCH"), None] {
+            assert!(
+                http_name(&open, "/v1/files/q3.pdf", method).is_some(),
+                "an absent `method:` accepts {method:?}"
+            );
+        }
+    }
+
+    /// A method list accepts any of its methods and nothing else.
+    #[test]
+    fn a_method_list_accepts_any_of_its_methods() {
+        let cfg = routed_config("  - http: { path: /ping, method: [GET, HEAD] }\n");
+
+        for method in ["GET", "HEAD"] {
+            assert!(
+                http_name(&cfg, "/ping", Some(method)).is_some(),
+                "{method} is in the list"
+            );
+        }
+        assert!(
+            http_name(&cfg, "/ping", Some("POST")).is_none(),
+            "POST is not in the list"
+        );
+    }
+
+    /// Matching reads a request line, so anything that is not an absolute path
+    /// matches nothing, catch-all included. That is what keeps `OPTIONS *` from
+    /// picking up a route it was never written for.
+    #[test]
+    fn a_path_that_is_not_absolute_matches_no_route() {
+        let cfg = routed_config("  - http: { path_prefix: / }\n  - http: \"*\"\n");
+
+        for path in ["*", "", "v1/files", "http://host/v1"] {
+            assert!(
+                resolve_route(&cfg, RouteQuery::http(path, Some("OPTIONS"))).is_none(),
+                "`{path}` is not a path a route can match"
+            );
+        }
+    }
+
+    /// Nothing matching resolves nothing, which is what lets the caller keep
+    /// using the reserved global name rather than inventing one.
+    #[test]
+    fn a_request_matching_no_http_route_resolves_nothing_and_still_gets_its_default() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - { name: http-default, kind: builtin, hooks: [cmf.http_request] }
+global:
+  defaults:
+    http:
+      plugins: [http-default]
+routes:
+  - http: /healthz
+"#,
+        )
+        .expect("the fixture must parse");
+
+        let matched = resolve_route(&cfg, RouteQuery::http("/v1/files", Some("GET")));
+        assert!(
+            matched.is_none(),
+            "no declared path covers /v1/files, so nothing resolves"
+        );
+
+        let resolved = resolve_plugins_for_entity(&cfg, ENTITY_HTTP, matched.as_ref(), &no_tags());
+        assert_eq!(
+            resolved.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["http-default"],
+            "the entity type's default applies whether or not a route matched"
+        );
+    }
+
+    /// An `http:` route stacks the same way every other route does: the `all`
+    /// group, then the entity-type default, then its tag bundles, then its own
+    /// plugins. Its `authentication:` list layers on top of the global one.
+    #[test]
+    fn an_http_route_layers_groups_defaults_and_authentication_like_any_other() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - { name: audit, kind: builtin, hooks: [cmf.http_request] }
+  - { name: http-default, kind: builtin, hooks: [cmf.http_request] }
+  - { name: pii-scan, kind: builtin, hooks: [cmf.http_request] }
+  - { name: route-plugin, kind: builtin, hooks: [cmf.http_request] }
+  - { name: corp-jwt, kind: builtin, hooks: [identity.resolve] }
+  - { name: files-jwt, kind: builtin, hooks: [identity.resolve] }
+  - { name: files-attestor, kind: builtin, hooks: [identity.resolve] }
+global:
+  authentication: [corp-jwt]
+  policies:
+    all:
+      plugins: [audit]
+    files:
+      plugins: [pii-scan]
+      authentication: [files-jwt]
+  defaults:
+    http:
+      plugins: [http-default]
+routes:
+  - http: { path_prefix: /v1/files }
+    groups: files
+    plugins: [route-plugin]
+    authentication: [files-attestor]
+"#,
+        )
+        .expect("the fixture must parse");
+
+        let matched = resolve_route(&cfg, RouteQuery::http("/v1/files/q3.pdf", Some("GET")))
+            .expect("the prefix covers the request");
+
+        let plugins = resolve_plugins_for_entity(&cfg, ENTITY_HTTP, Some(&matched), &no_tags());
+        assert_eq!(
+            plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["audit", "http-default", "pii-scan", "route-plugin"],
+            "the layering an entity route gets applies to an http route too"
+        );
+
+        let identity = resolve_identity_plugins_for_route(&cfg, Some(&matched));
+        assert_eq!(
+            identity.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["corp-jwt", "files-jwt", "files-attestor"],
+            "global, then tag bundle, then the route's own steps"
+        );
+    }
+
+    /// A scoped route needs the request's scope and outranks an unscoped route
+    /// of the same shape; a scope that does not match is skipped outright.
+    #[test]
+    fn a_scoped_http_route_wins_its_bucket_and_a_mismatched_scope_is_skipped() {
+        let cfg = routed_config(
+            "  - http: { path_prefix: /v1 }\n    meta: { scope: tenant-a }\n  - http: { path_prefix: /v1 }\n",
+        );
+        let scope_of = |scope: Option<&str>| {
+            let matched = resolve_route(
+                &cfg,
+                RouteQuery::http("/v1/files", Some("GET")).with_scope(scope),
+            )
+            .unwrap_or_else(|| panic!("the unscoped route covers {scope:?} at least"));
+            matched
+                .route
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.scope.clone())
+        };
+
+        assert_eq!(
+            scope_of(Some("tenant-a")).as_deref(),
+            Some("tenant-a"),
+            "the scoped route wins for its own scope"
+        );
+        assert_eq!(
+            scope_of(None),
+            None,
+            "an unscoped request cannot reach a scoped route"
+        );
+        assert_eq!(
+            scope_of(Some("tenant-b")),
+            None,
+            "another tenant falls to the unscoped route"
+        );
+
+        let scoped_only =
+            routed_config("  - http: { path_prefix: /v1 }\n    meta: { scope: tenant-a }\n");
+        assert!(
+            resolve_route(
+                &scoped_only,
+                RouteQuery::http("/v1/files", Some("GET")).with_scope(Some("tenant-b")),
+            )
+            .is_none(),
+            "a scope mismatch is a hard skip, not a lower score"
+        );
+    }
+
+    /// The summed score still gives a `when:`-carrying route its bonus, so a
+    /// broad glob with `when:` outranks a narrower glob without one. Adding the
+    /// path scale must not have moved that.
+    #[test]
+    fn a_when_clause_still_outranks_a_narrower_glob() {
+        let cfg = routed_config("  - tool: \"hr-*\"\n    when: \"true\"\n  - tool: \"hr-get-*\"\n");
+
+        let matched = resolve_route(&cfg, RouteQuery::named(ENTITY_TOOL, "hr-get-comp"))
+            .expect("both globs cover the tool");
+        assert_eq!(
+            matched.name, "hr-*",
+            "a `when:` route still beats a narrower glob without one"
+        );
+    }
+
+    /// The name a request resolves to is always one the route contributes, for
+    /// every selector shape. This is the property that lets an orchestrator's
+    /// annotation key and a resolved name be the same string without either
+    /// side knowing how the other spells it.
+    #[test]
+    fn every_selector_shape_resolves_to_a_name_its_route_contributes() {
+        let cases = [
+            (
+                "tool: get_weather",
+                RouteQuery::named(ENTITY_TOOL, "get_weather"),
+            ),
+            (
+                "tool: [tool_a, tool_b]",
+                RouteQuery::named(ENTITY_TOOL, "tool_b"),
+            ),
+            (
+                r#"tool: "hr-*""#,
+                RouteQuery::named(ENTITY_TOOL, "hr-compensation"),
+            ),
+            (r#"tool: "*""#, RouteQuery::named(ENTITY_TOOL, "anything")),
+            (
+                "resource: hr://employees/1",
+                RouteQuery::named(ENTITY_RESOURCE, "hr://employees/1"),
+            ),
+            (
+                "prompt: summarize_email",
+                RouteQuery::named(ENTITY_PROMPT, "summarize_email"),
+            ),
+            ("llm: gpt-4", RouteQuery::named(ENTITY_LLM, "gpt-4")),
+            ("http: /healthz", RouteQuery::http("/healthz", Some("GET"))),
+            ("http: [/livez, /readyz]", RouteQuery::http("/readyz", None)),
+            (
+                "http: { path: /ping, method: [GET, HEAD] }",
+                RouteQuery::http("/ping", Some("HEAD")),
+            ),
+            (
+                "http: { path_prefix: /v1/files }",
+                RouteQuery::http("/v1/files/q3.pdf", Some("GET")),
+            ),
+            (
+                "http: { path_prefix: /v1, method: GET }",
+                RouteQuery::http("/v1/x", Some("get")),
+            ),
+            (
+                "http: { path_prefix: / }",
+                RouteQuery::http("/anything", Some("POST")),
+            ),
+        ];
+
+        for (selector, query) in cases {
+            let cfg = routed_config(&format!("  - {selector}\n"));
+            let matched = resolve_route(&cfg, query)
+                .unwrap_or_else(|| panic!("`{selector}` must match the request written for it"));
+            let (_, contributed) = route_entity_identity(matched.route)
+                .unwrap_or_else(|| panic!("`{selector}` declares a selector"));
+
+            assert!(
+                contributed.contains(&matched.name),
+                "`{selector}` resolved to `{}`, which is not among {contributed:?}",
+                matched.name
+            );
+        }
     }
 }
