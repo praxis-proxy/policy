@@ -25,7 +25,7 @@
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use hashbrown::HashMap;
 use tracing::{error, info, warn};
@@ -247,6 +247,21 @@ pub struct PolicyEngine {
     /// so callers can use 0 as a "never observed" sentinel.
     generation: AtomicU64,
 
+    /// Serialises writers on `runtime`. Every mutation is a load, clone,
+    /// store, so the lock has to span the whole sequence: a writer that clones
+    /// a snapshot another writer has already replaced publishes one missing
+    /// that change, and the losing call still returns `Ok`.
+    ///
+    /// Guards `()` because the data lives in the `ArcSwap`. Readers never take
+    /// it, so the invoke path is lock-free.
+    ///
+    /// Held across the copy-on-write in `mutate_runtime`,
+    /// `try_mutate_runtime`, and `load_config`, and released before the
+    /// routing cache is cleared. Nothing under it re-enters a mutating
+    /// method, which is what keeps `load_config` safe: config visitors reach
+    /// `annotate_route` after it has returned, not during.
+    runtime_write: Mutex<()>,
+
     /// Tracks in-flight fire-and-forget background tasks across all
     /// invocations so `shutdown()` can wait for them to drain before
     /// returning. Without this, audit/telemetry tasks spawned by recent
@@ -386,6 +401,7 @@ impl PolicyEngine {
             route_cache_full_warned: AtomicBool::new(false),
             initialized: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            runtime_write: Mutex::new(()),
             task_tracker: tokio_util::task::TaskTracker::new(),
             visitors: RwLock::new(Vec::new()),
             http_transport: std::sync::OnceLock::new(),
@@ -397,14 +413,26 @@ impl PolicyEngine {
         self.runtime.load_full()
     }
 
+    /// Take the runtime writer lock, ignoring poisoning. A panic inside a
+    /// mutation closure leaves the `ArcSwap` holding whatever was last
+    /// published, which is a complete snapshot either way, so there is no
+    /// half-applied state for the next writer to inherit.
+    fn lock_runtime_writer(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.runtime_write
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Apply a mutation to the runtime snapshot via copy-on-write.
     /// Clones the current snapshot, runs the closure on the clone, and
     /// atomically swaps it in. Concurrent readers continue using the old
-    /// snapshot; subsequent readers see the new one.
+    /// snapshot; subsequent readers see the new one. Writers serialise on
+    /// `runtime_write` for the length of the call.
     fn mutate_runtime<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut RuntimeSnapshot) -> R,
     {
+        let _writer = self.lock_runtime_writer();
         let current = self.runtime.load_full();
         let mut next = (*current).clone();
         let result = f(&mut next);
@@ -418,11 +446,14 @@ impl PolicyEngine {
 
     /// Like `mutate_runtime` but the mutation can fail — the new snapshot
     /// is only published on `Ok`. On `Err`, the original snapshot is
-    /// untouched, so a partially-mutated clone is silently discarded.
+    /// untouched, so a partially-mutated clone is silently discarded. An
+    /// `Err` releases the writer lock without storing, so a rejected
+    /// mutation publishes nothing and holds up no other writer.
     fn try_mutate_runtime<F, T, E>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&mut RuntimeSnapshot) -> Result<T, E>,
     {
+        let _writer = self.lock_runtime_writer();
         let current = self.runtime.load_full();
         let mut next = (*current).clone();
         let result = f(&mut next)?;
@@ -510,7 +541,11 @@ impl PolicyEngine {
         // concurrent invokes keep using the existing config until we swap.
         // We can't use mutate_runtime here because we need to atomically
         // ALSO build a new executor + new cache cap from the same config —
-        // the snapshot fields are coupled.
+        // the snapshot fields are coupled. Takes the writer lock by hand for
+        // the reason mutate_runtime takes it, before the factories lock so
+        // every mutation path acquires in one order.
+        let writer = self.lock_runtime_writer();
+
         let factories = self
             .factories
             .read()
@@ -530,6 +565,7 @@ impl PolicyEngine {
         // go through that helper because it has to swap registry + executor
         // + cache-cap atomically as one snapshot.
         self.generation.fetch_add(1, Ordering::Release);
+        drop(writer);
 
         // Clear routing cache — config changed.
         self.clear_routing_cache();
@@ -2630,6 +2666,72 @@ mod tests {
         assert!(INVOKE_COUNT.load(Ordering::SeqCst) >= n);
         // Late registration is now visible.
         assert_eq!(mgr.plugin_count(), 2);
+    }
+
+    /// N OS threads register N distinct plugins at the same instant, and all N
+    /// have to survive. A registration lost to a concurrent one still returns
+    /// `Ok`, so the count is the only thing that catches it.
+    ///
+    /// The barrier is load-bearing: it lines every thread up on the same
+    /// snapshot, which is what makes the loss reliable rather than occasional.
+    /// So are the real threads. The sibling test above runs on
+    /// `current_thread`, where a load and a store cannot interleave, so
+    /// nothing here survives being rewritten as `tokio::spawn`.
+    #[test]
+    fn concurrent_registration_loses_no_plugins() {
+        let mgr = Arc::new(PolicyEngine::default());
+        let n = 16_usize;
+        let barrier = std::sync::Barrier::new(n);
+
+        std::thread::scope(|s| {
+            for i in 0..n {
+                let mgr = Arc::clone(&mgr);
+                let barrier = &barrier;
+                s.spawn(move || {
+                    let cfg = make_config(&format!("p{i}"), 10, PluginMode::Sequential);
+                    let plugin: Arc<AllowPlugin> = Arc::new(AllowPlugin { cfg: cfg.clone() });
+                    barrier.wait();
+                    mgr.register_handler::<TestHook, _>(plugin, cfg)
+                        .expect("registration must succeed");
+                });
+            }
+        });
+
+        assert_eq!(
+            mgr.plugin_count(),
+            n,
+            "every registration that returned Ok must be present in the snapshot",
+        );
+        assert_eq!(
+            mgr.config_generation(),
+            n as u64,
+            "generation bumps exactly once per published mutation",
+        );
+    }
+
+    /// A rejected mutation must publish nothing and leave the generation
+    /// alone, so a downstream cache keyed on the generation does not evict
+    /// and rebuild over a registration that never happened.
+    #[test]
+    fn failed_registration_publishes_nothing() {
+        let mgr = PolicyEngine::default();
+        let cfg = make_config("dupe", 10, PluginMode::Sequential);
+        let plugin: Arc<AllowPlugin> = Arc::new(AllowPlugin { cfg: cfg.clone() });
+        mgr.register_handler::<TestHook, _>(plugin, cfg.clone())
+            .expect("first registration must succeed");
+
+        let generation_after_first = mgr.config_generation();
+
+        let dupe: Arc<AllowPlugin> = Arc::new(AllowPlugin { cfg: cfg.clone() });
+        mgr.register_handler::<TestHook, _>(dupe, cfg)
+            .expect_err("a duplicate name must be rejected");
+
+        assert_eq!(mgr.plugin_count(), 1, "the rejected plugin must not appear");
+        assert_eq!(
+            mgr.config_generation(),
+            generation_after_first,
+            "a failed mutation must not bump the generation",
+        );
     }
 
     #[tokio::test]
