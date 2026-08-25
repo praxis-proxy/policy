@@ -1,7 +1,7 @@
 ---
 title: "fix: one authority for which hooks exist"
 type: fix
-status: draft
+status: completed
 date: 2026-08-24
 origin: docs/brainstorms/2026-08-24-cmf-hook-registry-requirements.md
 ---
