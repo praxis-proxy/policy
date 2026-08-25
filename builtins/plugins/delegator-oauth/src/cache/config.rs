@@ -14,7 +14,6 @@ use std::time::Duration;
 use praxis_policy_core::delegation::DelegationSubject;
 use serde::{Deserialize, Serialize};
 
-/// Which subjects cache by default.
 /// See [`CacheConfig::subjects`] for why the default is the narrow pair.
 fn default_subjects() -> Vec<DelegationSubject> {
     vec![DelegationSubject::ThisWorkload, DelegationSubject::Client]
@@ -203,16 +202,34 @@ impl CacheConfig {
                 "cache.ttl_ceiling_seconds is 0, so no entry could ever be served".to_owned(),
             );
         }
-        // A floor at or above the ceiling means the margin consumes the
-        // whole permitted lifetime. That is the silent-zero-hit-rate
-        // configuration; `serve_window` would return `None` for every
-        // mint, so refuse it at startup where it is one message rather
-        // than at runtime where it is a graph.
-        if self.staleness.floor_seconds >= self.ttl_ceiling_seconds {
+        // Whether the margin leaves anything to serve. A token minted at
+        // the ceiling is the longest-lived one this config will ever
+        // hold, and `u8::MAX` is its least favourable jitter draw, so if
+        // that entry cannot be served then some share of entries never
+        // can, whatever lifetime the `IdP` reports. That is the
+        // silent-zero-hit-rate configuration, and it belongs at startup
+        // where it is one message rather than at runtime where it is a
+        // graph.
+        //
+        // Probing `serve_window` rather than restating its condition is
+        // deliberate: a restatement drifts, and every term has to be in
+        // it. Comparing `floor_seconds` against the ceiling alone would
+        // admit `floor: 250, jitter: 100, ceiling: 300`, which leaves
+        // half of all entries unservable, and would admit a large
+        // `fraction` against a small floor for the same reason.
+        if self
+            .serve_window(Duration::from_secs(self.ttl_ceiling_seconds), u8::MAX)
+            .is_none()
+        {
             return Err(format!(
-                "cache.staleness.floor_seconds ({}) is at or above cache.ttl_ceiling_seconds \
-                 ({}), so every entry would be stale before it could be served",
-                self.staleness.floor_seconds, self.ttl_ceiling_seconds
+                "cache.staleness leaves no window in which to serve a token: fraction {}, \
+                 floor_seconds {} and jitter_seconds {} together cover the whole of \
+                 cache.ttl_ceiling_seconds ({}), so some or all entries would be stale \
+                 before they could be served",
+                self.staleness.fraction,
+                self.staleness.floor_seconds,
+                self.staleness.jitter_seconds,
+                self.ttl_ceiling_seconds
             ));
         }
         Ok(())
@@ -331,6 +348,76 @@ mod tests {
         };
         let err = cfg.validate().expect_err("must be rejected at startup");
         assert!(err.contains("floor_seconds"), "{err}");
+    }
+
+    /// Jitter is part of the margin, so a floor that clears the ceiling
+    /// on its own can still be pushed past it by the jitter draw. Here
+    /// the margin runs 250..350s against a 300s ceiling, so every entry
+    /// whose jitter byte is above about half is minted and never served.
+    #[test]
+    fn rejects_a_floor_the_jitter_pushes_over_the_ceiling() {
+        let cfg = CacheConfig {
+            ttl_ceiling_seconds: 300,
+            staleness: StalenessConfig {
+                fraction: 0.20,
+                floor_seconds: 250,
+                jitter_seconds: 100,
+            },
+            ..enabled()
+        };
+        let err = cfg.validate().expect_err("half the entries never serve");
+        assert!(err.contains("jitter_seconds"), "{err}");
+    }
+
+    /// The same defect reached through `fraction` rather than the floor,
+    /// which a check written only against `floor_seconds` would miss.
+    #[test]
+    fn rejects_a_fraction_the_jitter_pushes_over_the_ceiling() {
+        let cfg = CacheConfig {
+            ttl_ceiling_seconds: 300,
+            staleness: StalenessConfig {
+                fraction: 0.99,
+                floor_seconds: 30,
+                jitter_seconds: 5,
+            },
+            ..enabled()
+        };
+        cfg.validate()
+            .expect_err("0.99 of the lifetime plus jitter leaves nothing");
+    }
+
+    /// The boundary the two tests above sit past. Nothing here is
+    /// unservable, so it must not be refused.
+    #[test]
+    fn accepts_a_margin_that_just_fits() {
+        let cfg = CacheConfig {
+            ttl_ceiling_seconds: 300,
+            staleness: StalenessConfig {
+                fraction: 0.20,
+                floor_seconds: 250,
+                jitter_seconds: 49,
+            },
+            ..enabled()
+        };
+        cfg.validate()
+            .expect("a 250..299s margin still leaves a second to serve");
+        assert!(
+            cfg.serve_window(Duration::from_secs(300), u8::MAX)
+                .is_some(),
+            "the least favourable draw must still be servable"
+        );
+    }
+
+    #[test]
+    fn the_default_config_is_servable() {
+        // Guards against a default that validates but caches nothing.
+        let cfg = enabled();
+        cfg.validate()
+            .expect("defaults must describe a usable cache");
+        assert!(
+            cfg.serve_window(Duration::from_secs(cfg.ttl_ceiling_seconds), u8::MAX)
+                .is_some()
+        );
     }
 
     #[test]
