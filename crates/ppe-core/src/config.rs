@@ -16,6 +16,7 @@
 // the routes and global sections are ignored. When routing is
 // enabled, conditions on individual plugins are ignored.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -1136,6 +1137,12 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
             }
         }
 
+        // The name a route contributes, per entity type and scope, and the
+        // first route that contributed it. Bucketing keeps the duplicate check
+        // linear in the number of routes.
+        let mut claimed_names: HashMap<(&str, Option<&str>), HashMap<String, usize>> =
+            HashMap::new();
+
         for (i, route) in config.routes.iter().enumerate() {
             let declared: Vec<&str> = [
                 ("tool", route.tool.is_some()),
@@ -1172,6 +1179,38 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
                 return Err(Box::new(PluginError::Config {
                     message: format!("route {i} {defect}"),
                 }));
+            }
+
+            // Two routes contributing one name under the same entity type and
+            // scope would put one route's annotations under the other's key,
+            // because the annotation table is keyed on exactly that triple.
+            // Compare the resolved names rather than the written selectors:
+            // `["/a", "/b"]` and `["/b", "/c"]` are different selectors that
+            // both contribute `/b`.
+            if let Some((entity_type, names)) = route_entity_identity(route) {
+                let scope = route.meta.as_ref().and_then(|m| m.scope.as_deref());
+                let claimed = claimed_names.entry((entity_type, scope)).or_default();
+                for name in names {
+                    match claimed.entry(name) {
+                        // A route repeating a name inside its own list still
+                        // resolves to itself, so only another route collides.
+                        Entry::Occupied(first) if *first.get() != i => {
+                            return Err(Box::new(PluginError::Config {
+                                message: format!(
+                                    "routes {} and {i} both resolve to the \
+                                     {entity_type} name '{}'; two routes cannot \
+                                     share a name within one entity type and scope",
+                                    first.get(),
+                                    first.key()
+                                ),
+                            }));
+                        },
+                        Entry::Occupied(_) => {},
+                        Entry::Vacant(slot) => {
+                            slot.insert(i);
+                        },
+                    }
+                }
             }
 
             for plugin_ref in &route.plugins {
@@ -3437,8 +3476,14 @@ plugin_settings:
   routing_enabled: true
 plugins: []
 routes:
+  # Distinct scopes, since two routes resolving to one name in one scope is
+  # rejected and both spellings resolve to the same name.
   - http: { path_prefix: /api }
+    meta:
+      scope: tenant-a
   - http: { path_prefix: "/api/" }
+    meta:
+      scope: tenant-b
 "#,
         )
         .expect("both spellings must parse");
@@ -3838,6 +3883,152 @@ routes:
         assert!(cfg.routes[0].http.is_some());
     }
 
+    // ---- no two routes resolve to one name --------------------------------
+
+    /// Load a config written as just its `routes:` block and return the error
+    /// text, so a duplicate case reads as the selectors it declares.
+    fn duplicate_error(routes: &str) -> String {
+        let yaml =
+            format!("plugin_settings:\n  routing_enabled: true\nplugins: []\nroutes:\n{routes}");
+        parse_config(&yaml)
+            .expect_err("two routes resolving to one name must fail")
+            .to_string()
+    }
+
+    /// Load a config written as just its `routes:` block, expecting success.
+    fn routes_load(routes: &str) -> PolicyConfig {
+        let yaml =
+            format!("plugin_settings:\n  routing_enabled: true\nplugins: []\nroutes:\n{routes}");
+        parse_config(&yaml).expect("these routes are distinct and must load")
+    }
+
+    #[test]
+    fn two_routes_declaring_one_http_selector_name_both_indices_and_the_name() {
+        let err = duplicate_error(
+            r#"  - http: { path_prefix: /v1/files }
+    meta:
+      scope: tenant-a
+  - http: { path_prefix: /v1/files }
+    meta:
+      scope: tenant-a
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("/v1/files"), "{err}");
+        assert!(err.contains("http"), "{err}");
+    }
+
+    /// The case a comparison of written selectors would pass: two different
+    /// lists that both contribute `/b`.
+    #[test]
+    fn two_http_lists_overlapping_in_one_element_name_that_element() {
+        let err = duplicate_error(
+            r#"  - http: [/a, /b]
+  - http: [/b, /c]
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("'/b'"), "{err}");
+    }
+
+    #[test]
+    fn two_http_map_forms_rendering_one_name_collide() {
+        let err = duplicate_error(
+            r#"  - http: { path_prefix: /api, method: [POST, GET] }
+  - http: { path_prefix: /api/, method: [GET, POST] }
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("/api"), "{err}");
+    }
+
+    /// The method is part of the rendered name, so narrowing by a different
+    /// method leaves two routes distinct.
+    #[test]
+    fn two_http_map_forms_differing_only_in_method_load() {
+        let cfg = routes_load(
+            r#"  - http: { path_prefix: /api, method: GET }
+  - http: { path_prefix: /api, method: POST }
+"#,
+        );
+        assert_eq!(cfg.routes.len(), 2);
+    }
+
+    #[test]
+    fn one_selector_under_two_scopes_loads() {
+        let cfg = routes_load(
+            r#"  - http: { path_prefix: /v1/files }
+    meta:
+      scope: tenant-a
+  - http: { path_prefix: /v1/files }
+    meta:
+      scope: tenant-b
+  - http: { path_prefix: /v1/files }
+"#,
+        );
+        assert_eq!(cfg.routes.len(), 3);
+    }
+
+    #[test]
+    fn one_name_under_two_entity_types_loads() {
+        let cfg = routes_load(
+            r#"  - tool: /healthz
+  - prompt: /healthz
+  - http: /healthz
+"#,
+        );
+        assert_eq!(cfg.routes.len(), 3);
+    }
+
+    /// The check reads the names every selector contributes, so it is not
+    /// specific to `http:`.
+    #[test]
+    fn two_tool_routes_declaring_one_name_collide() {
+        let err = duplicate_error(
+            r#"  - tool: get_compensation
+  - tool: get_compensation
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("get_compensation"), "{err}");
+        assert!(err.contains("tool"), "{err}");
+    }
+
+    #[test]
+    fn two_tool_lists_overlapping_in_one_element_name_that_element() {
+        let err = duplicate_error(
+            r#"  - tool: [a, b]
+  - tool: [b, c]
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("'b'"), "{err}");
+    }
+
+    /// A list repeating an element still resolves to the route that declared
+    /// it, so it is not a collision with another route.
+    #[test]
+    fn a_list_repeating_one_element_loads() {
+        let cfg = routes_load(
+            r#"  - tool: [a, a]
+"#,
+        );
+        assert_eq!(cfg.routes.len(), 1);
+    }
+
+    /// A glob and a wildcard contribute the pattern as written, so two routes
+    /// spelling the same pattern collide the way two exact names do.
+    #[test]
+    fn two_routes_declaring_one_glob_collide() {
+        let err = duplicate_error(
+            r#"  - tool: "hr-*"
+  - tool: "hr-*"
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("hr-*"), "{err}");
+    }
+
     // ---- the names a route is known by ------------------------------------
 
     /// The identity of each route in a config written as just its `routes:`
@@ -4000,10 +4191,18 @@ routes:
     /// orphan the annotation installed under the old spelling.
     #[test]
     fn the_order_a_method_list_is_written_in_does_not_change_the_name() {
+        // Each spelling takes its own scope, since they all resolve to one
+        // name and two routes cannot share a name within a scope.
         let names = identities(
             r#"  - http: { path_prefix: /v1/files, method: [GET, POST] }
+    meta:
+      scope: tenant-a
   - http: { path_prefix: /v1/files, method: [POST, GET] }
+    meta:
+      scope: tenant-b
   - http: { path_prefix: /v1/files, method: [POST, GET, POST] }
+    meta:
+      scope: tenant-c
 "#,
         );
         let written: Vec<Vec<String>> = names
