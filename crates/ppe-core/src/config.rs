@@ -704,10 +704,80 @@ pub(crate) fn reject_renamed_identity_key(raw: &serde_yaml::Value) -> Result<(),
     Ok(())
 }
 
+/// Levenshtein distance, for suggesting the name an operator meant.
+/// Two rows rather than the full matrix; the strings are hook names, so
+/// both stay short.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = Vec::with_capacity(b_chars.len() + 1);
+        // The cell to the left of the one being filled, carried forward
+        // rather than read back out of the row.
+        let mut left = i + 1;
+        cur.push(left);
+        for ((cb, up_left), up) in b_chars.iter().zip(prev.iter()).zip(prev.iter().skip(1)) {
+            left = (up_left + usize::from(ca != *cb)).min(up + 1).min(left + 1);
+            cur.push(left);
+        }
+        prev = cur;
+    }
+    prev.last().copied().unwrap_or(0)
+}
+
+/// The dispatched hook name closest to `name`, or `None` when nothing is
+/// close enough to be worth printing. The bound is relative to length:
+/// `tool_pre_invoke` is four edits from `cmf.tool_pre_invoke` and
+/// `cmf.prompt_pre_fetch` is six from `cmf.prompt_pre_invoke`, both
+/// worth suggesting, while a genuinely unrelated name should get no
+/// suggestion rather than the least-bad match in the table.
+///
+/// Candidates are the built-in hooks. A host's own hook name is checked
+/// against the registry but not suggested, since guessing at names PPE
+/// does not define would point an operator at the wrong thing.
+fn nearest_known_hook(name: &str) -> Option<String> {
+    crate::hooks::builtin_hook_types()
+        .into_iter()
+        .map(|candidate| {
+            let distance = edit_distance(name, candidate.as_str());
+            (distance, candidate)
+        })
+        .filter(|(distance, candidate)| distance * 2 <= name.len().max(candidate.as_str().len()))
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, candidate)| candidate.as_str().to_owned())
+}
+
+/// Reject a `hooks:` entry naming a hook nothing dispatches. The field
+/// carried free strings that nothing checked, so a typo loaded clean and
+/// the plugin never fired.
+///
+/// Checked against the runtime registry, not the built-in table, so a
+/// host that registered its own hook metadata passes. That fixes the
+/// ordering: registration has to happen before the config naming those
+/// hooks loads.
+fn validate_declared_hooks(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
+    for plugin in &config.plugins {
+        for hook in &plugin.hooks {
+            if crate::hooks::lookup_hook_metadata(hook).is_some() {
+                continue;
+            }
+            let suggestion = nearest_known_hook(hook)
+                .map_or_else(String::new, |near| format!(" — did you mean '{near}'?"));
+            return Err(Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' declares unknown hook '{}'{}",
+                    plugin.name, hook, suggestion,
+                ),
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a parsed config for structural correctness.
 ///
-/// This checks only the *structural* plugin activation lists
-/// (`route.plugins` / `policy_group.plugins` sequences). It deliberately
+/// This checks declared hook names plus the *structural* plugin activation
+/// lists (`route.plugins` / `policy_group.plugins` sequences). It deliberately
 /// does NOT validate APL plugin references — neither `plugin(...)` / `run(...)`
 /// policy steps nor the APL per-plugin override *map* (which
 /// [`deserialize_plugin_refs`] folds into an empty structural `Vec`, leaving
@@ -716,6 +786,8 @@ pub(crate) fn reject_renamed_identity_key(raw: &serde_yaml::Value) -> Result<(),
 /// and skipped (see `praxis-policy-apl-runtime::dispatch_plan`). Keeping praxis-policy-core's validation
 /// free of APL semantics is intentional.
 pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
+    validate_declared_hooks(config)?;
+
     let mut seen_names = HashSet::new();
     for plugin in &config.plugins {
         if !seen_names.insert(&plugin.name) {
@@ -1162,6 +1234,111 @@ routes:
 "#;
         let config = parse_config(yaml).unwrap();
         assert!(config.routing_enabled());
+    }
+
+    #[test]
+    fn a_declared_hook_that_nothing_dispatches_is_rejected() {
+        let yaml = r#"
+plugins:
+  - name: apl-policy
+    kind: builtin
+    hooks: [tool_pre_invoke]
+"#;
+        let err = parse_config(yaml).unwrap_err().to_string();
+        assert!(err.contains("apl-policy"), "{err}");
+        assert!(err.contains("tool_pre_invoke"), "{err}");
+        // The exact mistake the removed constants and the old example
+        // taught, so the suggestion has to land on the dispatched name.
+        assert!(err.contains("'cmf.tool_pre_invoke'"), "{err}");
+    }
+
+    #[test]
+    fn the_wrong_prompt_spelling_suggests_the_dispatched_one() {
+        let yaml = r#"
+plugins:
+  - name: watcher
+    kind: builtin
+    hooks: [cmf.prompt_pre_fetch]
+"#;
+        let err = parse_config(yaml).unwrap_err().to_string();
+        assert!(err.contains("'cmf.prompt_pre_invoke'"), "{err}");
+    }
+
+    #[test]
+    fn a_name_close_to_nothing_gets_no_suggestion() {
+        let yaml = r#"
+plugins:
+  - name: odd
+    kind: builtin
+    hooks: [wildly_unrelated_hook_name]
+"#;
+        let err = parse_config(yaml).unwrap_err().to_string();
+        assert!(err.contains("wildly_unrelated_hook_name"), "{err}");
+        assert!(!err.contains("did you mean"), "{err}");
+    }
+
+    #[test]
+    fn a_host_registered_hook_passes_validation() {
+        let name = "test_config.host_registered_hook";
+        crate::hooks::register_hook_metadata(name, crate::hooks::HookMetadata::permissive());
+        let yaml = format!(
+            r#"
+plugins:
+  - name: host-plugin
+    kind: builtin
+    hooks: [{name}]
+"#
+        );
+        parse_config(&yaml).expect("a registered hook is known");
+    }
+
+    #[test]
+    fn the_shipped_family_hook_names_pass_validation() {
+        // The names shipped plugin code and operator YAML already declare.
+        for hook in [
+            crate::identity::HOOK_IDENTITY_RESOLVE,
+            crate::delegation::HOOK_TOKEN_DELEGATE,
+            crate::elicitation::HOOK_ELICIT,
+        ] {
+            let yaml = format!(
+                r#"
+plugins:
+  - name: shipped
+    kind: builtin
+    hooks: [{hook}]
+"#
+            );
+            parse_config(&yaml).unwrap_or_else(|e| panic!("{hook} rejected: {e}"));
+        }
+    }
+
+    #[test]
+    fn every_hook_the_authority_holds_passes_validation() {
+        for hook in crate::hooks::builtin_hook_types() {
+            let yaml = format!(
+                r#"
+plugins:
+  - name: declaring
+    kind: builtin
+    hooks: [{}]
+"#,
+                hook.as_str()
+            );
+            parse_config(&yaml).unwrap_or_else(|e| panic!("{hook} rejected: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_plugin_declaring_no_hooks_loads() {
+        let yaml = r#"
+plugins:
+  - name: quiet
+    kind: builtin
+    hooks: []
+  - name: silent
+    kind: builtin
+"#;
+        parse_config(yaml).expect("an empty hooks list is not a typo");
     }
 
     #[test]

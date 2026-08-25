@@ -2045,6 +2045,7 @@ mod tests {
     use super::*;
     use crate::context::PluginContext;
     use crate::error::PluginViolation;
+    use crate::hooks::metadata::{HookMetadata, register_hook_metadata};
     use crate::plugin::{OnError, PluginMode};
     use async_trait::async_trait;
 
@@ -2153,6 +2154,14 @@ mod tests {
     }
 
     // -- Helpers --
+
+    /// The engine's fixtures declare `test_hook`, a hook this crate does
+    /// not dispatch. Registering its metadata is what a host does for its
+    /// own hooks, and it has to happen before config naming them loads or
+    /// the loader has nothing to validate the `hooks:` entries against.
+    fn register_fixture_hooks() {
+        register_hook_metadata(TestHook::NAME, HookMetadata::permissive());
+    }
 
     fn make_config(name: &str, priority: i32, mode: PluginMode) -> PluginConfig {
         make_config_with_on_error(name, priority, mode, OnError::Fail)
@@ -4023,6 +4032,7 @@ mod tests {
     /// types other than tool in routing" gap.
     #[tokio::test]
     async fn test_routing_works_for_all_entity_types() {
+        register_fixture_hooks();
         use std::sync::Arc as StdArc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4362,6 +4372,7 @@ routes:
 
     #[test]
     fn a_valid_config_loads_through_every_path() {
+        register_fixture_hooks();
         crate::config::parse_config(VALID_YAML).expect("parse_config");
 
         // A fresh engine per path: re-loading the same plugin name onto
@@ -4384,6 +4395,7 @@ routes:
 
     #[test]
     fn a_duplicate_plugin_name_is_rejected_on_every_path() {
+        register_fixture_hooks();
         let mgr = Arc::new(PolicyEngine::default());
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
 
@@ -4409,6 +4421,7 @@ routes:
 
     #[test]
     fn a_group_block_resolves_through_the_programmatic_paths() {
+        register_fixture_hooks();
         let mgr = Arc::new(PolicyEngine::default());
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
 
@@ -4444,6 +4457,7 @@ routes:
 
     #[tokio::test]
     async fn test_from_config_creates_manager() {
+        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: allow_plugin
@@ -4469,6 +4483,7 @@ plugin_settings:
 
     #[tokio::test]
     async fn test_from_config_invokes_correctly() {
+        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: denier
@@ -4500,6 +4515,7 @@ plugins:
 
     #[tokio::test]
     async fn test_from_config_unknown_kind_rejected() {
+        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: mystery
@@ -4518,6 +4534,7 @@ plugins:
 
     #[tokio::test]
     async fn test_from_config_multiple_plugins() {
+        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: gate
@@ -4559,6 +4576,7 @@ plugins:
 
     #[tokio::test]
     async fn test_routing_cache_populated_on_first_invoke() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4626,6 +4644,7 @@ routes:
     /// and the call is (wrongly) allowed.
     #[tokio::test]
     async fn load_config_yaml_folds_top_level_group_into_route_resolution() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4719,6 +4738,7 @@ routes:
 
     #[tokio::test]
     async fn test_routing_cache_different_entities_separate() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4773,6 +4793,7 @@ routes:
 
     #[tokio::test]
     async fn test_routing_cache_cleared() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4814,6 +4835,7 @@ routes:
 
     #[tokio::test]
     async fn test_unregister_invalidates_routing_cache() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4886,6 +4908,7 @@ routes:
 
     #[tokio::test]
     async fn test_routing_cache_rejects_inserts_at_capacity() {
+        register_fixture_hooks();
         // Cap of 2 — verifies bound holds AND uncached requests still resolve correctly.
         let yaml = r#"
 plugin_settings:
@@ -4963,6 +4986,7 @@ routes:
 
     #[tokio::test]
     async fn test_register_handler_invalidates_routing_cache() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -5010,6 +5034,7 @@ routes:
 
     #[tokio::test]
     async fn test_routing_cache_scope_creates_separate_entries() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -5066,6 +5091,7 @@ routes:
 
     #[tokio::test]
     async fn test_route_override_creates_new_instance() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -5292,6 +5318,7 @@ routes:
     /// increments a counter inside its `initialize()`.
     #[tokio::test]
     async fn test_route_override_initializes_new_instance() {
+        register_fixture_hooks();
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         static INIT_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -5528,6 +5555,7 @@ routes:
 
     #[tokio::test]
     async fn a_route_override_instance_receives_host_services() {
+        register_fixture_hooks();
         // The failure this pins: an override instance built by
         // `create_override_instance` got the no-op default `initialize()`,
         // so a plugin that fetches during init — `identity-jwt` with a
@@ -5562,6 +5590,7 @@ routes:
 
     #[tokio::test]
     async fn build_override_entries_hands_the_new_instance_host_services() {
+        register_fixture_hooks();
         // The host-facing entry point to the same path. It has no caller
         // inside this crate, so nothing else would catch a regression.
         let (mgr, log) = host_probe_engine(HOST_PROBE_YAML);
@@ -5578,6 +5607,7 @@ routes:
 
     #[tokio::test]
     async fn an_override_that_drops_perform_http_withholds_the_transport() {
+        register_fixture_hooks();
         // Capabilities come from the merged config, so narrowing them on a
         // route narrows what that route's instance may reach. `Ok(false)`
         // rather than `Err(())`: the host wired a transport, and the fix is
@@ -5603,6 +5633,7 @@ routes:
     /// per-route blast radius is the point of having overrides.
     #[tokio::test]
     async fn test_route_override_circuit_breaker_isolated_from_base() {
+        register_fixture_hooks();
         struct ErrorOnInvokeFactory;
         impl crate::factory::PluginFactory for ErrorOnInvokeFactory {
             fn create(
@@ -5671,6 +5702,7 @@ routes:
 
     #[tokio::test]
     async fn test_register_factory_then_load_config() {
+        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: my_plugin
@@ -5727,6 +5759,7 @@ plugin_settings:
 
     #[tokio::test]
     async fn test_routing_full_flow_different_tools_different_plugins() {
+        register_fixture_hooks();
         // Setup: identity fires for all, apl_policy fires for pii tools,
         // rate_limiter fires only for get_compensation route
         let yaml = r#"
@@ -5802,6 +5835,7 @@ routes:
 
     #[tokio::test]
     async fn test_routing_disabled_fires_all_plugins() {
+        register_fixture_hooks();
         // Same plugins but routing disabled — all fire regardless of entity
         let yaml = r#"
 plugins:
@@ -5840,6 +5874,7 @@ plugins:
 
     #[tokio::test]
     async fn test_routing_no_meta_fires_all_plugins() {
+        register_fixture_hooks();
         // Routing enabled but no meta on extensions → fallback to all
         let yaml = r#"
 plugin_settings:
@@ -5891,6 +5926,7 @@ routes:
 
     #[tokio::test]
     async fn test_routing_wildcard_catches_unmatched() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -5958,6 +5994,7 @@ routes:
 
     #[tokio::test]
     async fn test_routing_host_tags_activate_policy_groups() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -6020,6 +6057,7 @@ routes:
 
     #[tokio::test]
     async fn test_routing_works_with_typed_invoke() {
+        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -6583,6 +6621,7 @@ global:
     /// nothing checked it reports the configured names rather than an empty list.
     #[test]
     fn plugin_names_lists_what_was_registered() {
+        register_fixture_hooks();
         let mgr = Arc::new(PolicyEngine::default());
         assert!(
             mgr.plugin_names().is_empty(),
