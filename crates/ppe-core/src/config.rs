@@ -21,6 +21,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::cmf::constants::{ENTITY_HTTP, ENTITY_LLM, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL};
 use crate::error::PluginError;
 use crate::plugin::PluginConfig;
 
@@ -725,7 +726,23 @@ impl HttpSelector {
                     None
                 }
             },
-            Self::Match(m) => match (&m.path, &m.path_prefix) {
+            Self::Match(m) => {
+                // An empty method, or an empty method list, narrows the route to
+                // nothing. Reject it rather than loading a route that can never
+                // match.
+                if let Some(StringOrList::List(methods)) = &m.method
+                    && methods.is_empty()
+                {
+                    return Some(
+                        "declares an empty `http.method:` list, which matches nothing".to_owned(),
+                    );
+                }
+                if let Some(method) = &m.method
+                    && method.as_names().iter().any(|name| name.is_empty())
+                {
+                    return Some("declares an empty method under `http.method:`".to_owned());
+                }
+                match (&m.path, &m.path_prefix) {
                 (Some(_), Some(_)) => Some(
                     "declares both `path:` and `path_prefix:` under `http:`, which ask for \
                      different matches; keep one"
@@ -742,6 +759,7 @@ impl HttpSelector {
                     "declares an empty `http.path_prefix:`; write `/` for the catch-all".to_owned(),
                 ),
                 _ => None,
+                }
             },
         }
     }
@@ -1208,11 +1226,11 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
 /// `global.defaults` accepts, since a default applies per entity type. Named
 /// from the entity-type constants so the two spellings cannot drift.
 const SELECTOR_KEYS: &[&str] = &[
-    crate::cmf::constants::ENTITY_TOOL,
-    crate::cmf::constants::ENTITY_RESOURCE,
-    crate::cmf::constants::ENTITY_PROMPT,
-    crate::cmf::constants::ENTITY_LLM,
-    crate::cmf::constants::ENTITY_HTTP,
+    ENTITY_TOOL,
+    ENTITY_RESOURCE,
+    ENTITY_PROMPT,
+    ENTITY_LLM,
+    ENTITY_HTTP,
 ];
 
 /// Specificity scores for route matching.
@@ -1254,6 +1272,66 @@ fn route_static_tags(route: &RouteEntry) -> impl Iterator<Item = &str> {
         .flat_map(|m| m.tags.iter().map(String::as_str));
     let group_tags = route.groups.iter().flat_map(StringOrList::as_names);
     meta_tags.chain(group_tags)
+}
+
+/// The entity type a route selects on and the names it contributes, or `None`
+/// when it declares no selector.
+///
+/// This is the one mapping from a route to the names it is known by: the key an
+/// orchestrator annotates under and the name a request resolves to both come
+/// from here, so neither can drift from the other. Precedence is `tool`,
+/// `resource`, `prompt`, `llm`, then `http`, and a list selector contributes
+/// one name per element so each element routes on its own.
+pub fn route_entity_identity(route: &RouteEntry) -> Option<(&'static str, Vec<String>)> {
+    if let Some(tool) = &route.tool {
+        return Some((ENTITY_TOOL, selector_names(tool)));
+    }
+    if let Some(resource) = &route.resource {
+        return Some((ENTITY_RESOURCE, selector_names(resource)));
+    }
+    if let Some(prompt) = &route.prompt {
+        return Some((ENTITY_PROMPT, selector_names(prompt)));
+    }
+    if let Some(llm) = &route.llm {
+        return Some((ENTITY_LLM, selector_names(llm)));
+    }
+    if let Some(http) = &route.http {
+        return Some((ENTITY_HTTP, http_selector_names(http)));
+    }
+    None
+}
+
+/// The names a name selector contributes: the pattern as written, or one name
+/// per list element.
+fn selector_names(selector: &StringOrList) -> Vec<String> {
+    selector.as_names().into_iter().map(str::to_owned).collect()
+}
+
+/// The names an `http:` selector contributes. An exact path narrowed by nothing
+/// contributes the path itself, since that is the path a request arrives on.
+/// Every other shape renders the fields the match consumed ahead of the path,
+/// which no request path can equal because a path starts with `/`.
+fn http_selector_names(selector: &HttpSelector) -> Vec<String> {
+    match (selector.path_prefix(), rendered_methods(selector.method())) {
+        (Some(prefix), None) => vec![format!("prefix:{prefix}")],
+        (Some(prefix), Some(methods)) => vec![format!("{methods} prefix:{prefix}")],
+        (None, None) => selector.exact_paths().to_vec(),
+        (None, Some(methods)) => selector
+            .exact_paths()
+            .iter()
+            .map(|path| format!("{methods} path:{path}"))
+            .collect(),
+    }
+}
+
+/// The method set a selector narrows by, or `None` when it accepts any method.
+/// Sorted and deduplicated so the rendering follows the set matching reads
+/// rather than the order it was written in, and holds across reloads.
+fn rendered_methods(method: Option<&StringOrList>) -> Option<String> {
+    let mut methods = method?.as_names();
+    methods.sort_unstable();
+    methods.dedup();
+    Some(methods.join(","))
 }
 
 /// Resolve which plugins should fire for a given entity.
@@ -3446,6 +3524,51 @@ routes:
         assert!(err.contains("both `path:` and `path_prefix:`"), "{err}");
     }
 
+    /// An empty method list narrows a route to nothing, so it is a defect
+    /// rather than a route that quietly never matches.
+    #[test]
+    fn an_http_map_declaring_an_empty_method_list_is_rejected() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http:
+      path_prefix: /v1
+      method: []
+"#,
+        )
+        .expect_err("no method can match an empty list")
+        .to_string();
+        assert!(err.contains("route 0"), "{err}");
+        assert!(err.contains("empty `http.method:` list"), "{err}");
+    }
+
+    #[test]
+    fn an_http_map_declaring_an_empty_method_is_rejected() {
+        for method in ["\"\"", "[GET, \"\"]"] {
+            let err = parse_config(&format!(
+                r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http:
+      path_prefix: /v1
+      method: {method}
+"#
+            ))
+            .expect_err("an empty method name matches nothing")
+            .to_string();
+            assert!(err.contains("route 0"), "{method}: {err}");
+            assert!(
+                err.contains("empty method under `http.method:`"),
+                "{method}: {err}"
+            );
+        }
+    }
+
     /// A typo inside the map form is a key nothing reads, and the map's own
     /// parse names it rather than reporting the whole selector as malformed.
     #[test]
@@ -3522,5 +3645,184 @@ routes:
         )
         .expect("routes are inert while routing is disabled");
         assert!(cfg.routes[0].http.is_some());
+    }
+
+    // ---- the names a route is known by ------------------------------------
+
+    /// The identity of each route in a config written as just its `routes:`
+    /// block, so a case reads as the selectors it declares.
+    fn identities(routes: &str) -> Vec<Option<(&'static str, Vec<String>)>> {
+        let yaml =
+            format!("plugin_settings:\n  routing_enabled: true\nplugins: []\nroutes:\n{routes}");
+        parse_config(&yaml)
+            .expect("every route in the case must parse")
+            .routes
+            .iter()
+            .map(route_entity_identity)
+            .collect()
+    }
+
+    /// The entity type each selector reports and the names it contributes. A
+    /// list contributes one name per element so each element routes on its own,
+    /// and a glob or wildcard contributes the pattern as written. These are the
+    /// shapes the integration fixtures declare, so an annotation key does not
+    /// move.
+    #[test]
+    fn every_selector_reports_its_entity_type_and_the_names_it_contributes() {
+        let found = identities(
+            r#"  - tool: get_weather
+  - resource: hr://employees/*
+  - prompt: summarize_email
+  - llm: gpt-4
+  - http: /healthz
+  - tool: [tool_a, tool_b]
+  - tool: "hr-*"
+  - tool: "*"
+"#,
+        );
+
+        assert_eq!(
+            found,
+            vec![
+                Some((ENTITY_TOOL, vec!["get_weather".to_owned()])),
+                Some((ENTITY_RESOURCE, vec!["hr://employees/*".to_owned()])),
+                Some((ENTITY_PROMPT, vec!["summarize_email".to_owned()])),
+                Some((ENTITY_LLM, vec!["gpt-4".to_owned()])),
+                Some((ENTITY_HTTP, vec!["/healthz".to_owned()])),
+                Some((ENTITY_TOOL, vec!["tool_a".to_owned(), "tool_b".to_owned()])),
+                Some((ENTITY_TOOL, vec!["hr-*".to_owned()])),
+                Some((ENTITY_TOOL, vec!["*".to_owned()])),
+            ]
+        );
+    }
+
+    /// A configuration cannot declare two selectors on one route, but a host
+    /// can build such a route in Rust, so the order the arms are tried in is
+    /// pinned rather than incidental. Dropping the winner hands the identity to
+    /// the next selector down, and dropping the last leaves nothing to route.
+    #[test]
+    fn the_selectors_are_tried_in_a_fixed_order() {
+        fn entity_of(route: &RouteEntry) -> &'static str {
+            route_entity_identity(route)
+                .expect("a selector is still declared")
+                .0
+        }
+
+        let mut route = RouteEntry {
+            tool: Some(StringOrList::Single(Pattern::new("t".to_owned()))),
+            resource: Some(StringOrList::Single(Pattern::new("r".to_owned()))),
+            prompt: Some(StringOrList::Single(Pattern::new("p".to_owned()))),
+            llm: Some(StringOrList::Single(Pattern::new("l".to_owned()))),
+            http: Some(HttpSelector::exact("/h")),
+            ..RouteEntry::default()
+        };
+
+        assert_eq!(entity_of(&route), ENTITY_TOOL);
+        route.tool = None;
+        assert_eq!(entity_of(&route), ENTITY_RESOURCE);
+        route.resource = None;
+        assert_eq!(entity_of(&route), ENTITY_PROMPT);
+        route.prompt = None;
+        assert_eq!(entity_of(&route), ENTITY_LLM);
+        route.llm = None;
+        assert_eq!(entity_of(&route), ENTITY_HTTP);
+        route.http = None;
+        assert!(
+            route_entity_identity(&route).is_none(),
+            "a route selecting nothing contributes no name"
+        );
+    }
+
+    /// An exact path with nothing narrowing it is the path a request arrives
+    /// on, so it is contributed verbatim. Every other shape renders the fields
+    /// the match consumed, distinctly per shape and never starting with `/`, so
+    /// a rendering cannot collide with a request path. The spellings below are
+    /// internal and free to change with this test.
+    #[test]
+    fn an_http_selector_renders_a_name_no_request_path_can_equal() {
+        let names: Vec<Vec<String>> = identities(
+            r#"  - http: /healthz
+  - http: [/livez, /readyz]
+  - http: { path: /healthz, method: GET }
+  - http: { path_prefix: /v1/files }
+  - http: { path_prefix: /v1/files, method: GET }
+  - http: { path_prefix: / }
+"#,
+        )
+        .into_iter()
+        .map(|identity| identity.expect("an `http:` selector is declared").1)
+        .collect();
+
+        assert_eq!(names[0], ["/healthz"], "an exact path is contributed as is");
+        assert_eq!(
+            names[1],
+            ["/livez", "/readyz"],
+            "an exact list contributes one path per element"
+        );
+        assert_eq!(names[2], ["GET path:/healthz"]);
+        assert_eq!(names[3], ["prefix:/v1/files"]);
+        assert_eq!(names[4], ["GET prefix:/v1/files"]);
+        assert_eq!(names[5], ["prefix:/"]);
+
+        let rendered: Vec<&str> = names[2..]
+            .iter()
+            .map(|names| names[0].as_str())
+            .collect::<Vec<_>>();
+        for name in &rendered {
+            assert!(
+                !name.starts_with('/'),
+                "a rendered name a request path could equal would collide with it: {name}"
+            );
+        }
+        let distinct: HashSet<&str> = rendered.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            rendered.len(),
+            "each shape must render distinctly: {rendered:?}"
+        );
+    }
+
+    /// The declared methods are part of what the match reads, so two routes
+    /// differing only there are known by different names and cannot land on one
+    /// annotation.
+    #[test]
+    fn narrowing_by_a_different_method_yields_a_different_name() {
+        let names = identities(
+            r#"  - http: { path_prefix: /v1/files, method: GET }
+  - http: { path_prefix: /v1/files, method: POST }
+  - http: { path_prefix: /v1/files }
+"#,
+        );
+        let distinct: HashSet<Vec<String>> = names
+            .into_iter()
+            .map(|identity| identity.expect("an `http:` selector is declared").1)
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "each method narrowing names its own route"
+        );
+    }
+
+    /// A method list is a set to the matcher, so the order it is written in must
+    /// not change the name. Otherwise reordering a list in the config would
+    /// orphan the annotation installed under the old spelling.
+    #[test]
+    fn the_order_a_method_list_is_written_in_does_not_change_the_name() {
+        let names = identities(
+            r#"  - http: { path_prefix: /v1/files, method: [GET, POST] }
+  - http: { path_prefix: /v1/files, method: [POST, GET] }
+  - http: { path_prefix: /v1/files, method: [POST, GET, POST] }
+"#,
+        );
+        let written: Vec<Vec<String>> = names
+            .into_iter()
+            .map(|identity| identity.expect("an `http:` selector is declared").1)
+            .collect();
+        assert_eq!(written[0], written[1]);
+        assert_eq!(
+            written[0], written[2],
+            "a repeated method is the same set, so it is the same name"
+        );
     }
 }

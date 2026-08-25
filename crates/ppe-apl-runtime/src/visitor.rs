@@ -27,6 +27,11 @@
 // then construct one `AplRouteHandler` per phase (Pre, Post) and call
 // `annotate_route` for each `(entity_type, entity_name, scope, hook)`.
 //
+// The `(entity_type, entity_name)` pairs come from
+// `praxis_policy_core::config::route_entity_identity`, the one place a
+// route maps to the names it is known by, so the key annotated here is
+// the key a request resolves to.
+//
 // # Hook names per entity type
 //
 // Each entity type binds to its own CMF hook pair:
@@ -35,7 +40,10 @@
 //   * `llm:`      → `cmf.llm_input`           / `cmf.llm_output`
 //   * `prompt:`   → `cmf.prompt_pre_invoke`   / `cmf.prompt_post_invoke`
 //   * `resource:` → `cmf.resource_pre_fetch`  / `cmf.resource_post_fetch`
-//   * entity-less HTTP → `cmf.http_request`   / `cmf.http_response`
+//   * `http:`     → `cmf.http_request`        / `cmf.http_response`
+//
+// The global HTTP catch-all installs under the same pair, under the
+// reserved global name rather than a route's own.
 //
 // The mapping lives in [`hook_pair_for_entity`]. Hosts fire
 // `mgr.invoke_named::<CmfHook>("cmf.llm_input", ...)` for LLM
@@ -55,7 +63,7 @@ use praxis_policy_core::cmf::constants::{
     HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH,
     HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
 };
-use praxis_policy_core::config::RouteEntry;
+use praxis_policy_core::config::{RouteEntry, route_entity_identity};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::plugin::PluginConfig;
 use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
@@ -665,10 +673,10 @@ impl ConfigVisitor for AplConfigVisitor {
         // without inherited layers contributes nothing — skip.
         reject_legacy_apl_keys("route", yaml)?;
         let route_apl = apl_subblock(yaml);
-        let (entity_type, entity_names) = if let Some(e) = entity_identity(parsed) {
-            e
-        } else {
-            tracing::warn!("APL visitor: route has no tool/resource/prompt/llm match — skipping",);
+        let Some((entity_type, entity_names)) = route_entity_identity(parsed) else {
+            tracing::warn!(
+                "APL visitor: route declares no tool/resource/prompt/llm/http selector, skipping",
+            );
             return Ok(());
         };
         if let Some(block) = &route_apl {
@@ -786,10 +794,10 @@ impl ConfigVisitor for AplConfigVisitor {
 
             let route_arc = Arc::new(effective);
 
-            // Resolve the entity-specific CMF hook pair. The visitor's
-            // entity_identity() already filtered out unknown types, but
-            // hook_pair_for_entity returning None would just skip the
-            // annotation rather than crash — defense in depth.
+            // Resolve the entity-specific CMF hook pair. `route_entity_identity`
+            // only names entity types this maps, but hook_pair_for_entity
+            // returning None would just skip the annotation rather than crash,
+            // as defense in depth.
             let (hook_pre, hook_post) = if let Some(pair) = hook_pair_for_entity(entity_type) {
                 pair
             } else {
@@ -934,33 +942,6 @@ fn install_handler(
         Arc::new(handler),
         plugin_config,
     );
-}
-
-/// Pick the route's entity identities from the first non-None match
-/// field. v0: tool > resource > prompt > llm precedence. A list-form
-/// match (`tool: [a, b]`) yields one annotation per element so each
-/// request gets routed by its specific name.
-fn entity_identity(route: &RouteEntry) -> Option<(&'static str, Vec<String>)> {
-    if let Some(t) = &route.tool {
-        return Some(("tool", names_of(t)));
-    }
-    if let Some(r) = &route.resource {
-        return Some(("resource", names_of(r)));
-    }
-    if let Some(p) = &route.prompt {
-        return Some(("prompt", names_of(p)));
-    }
-    if let Some(l) = &route.llm {
-        return Some(("llm", names_of(l)));
-    }
-    None
-}
-
-fn names_of(sol: &praxis_policy_core::config::StringOrList) -> Vec<String> {
-    match sol {
-        praxis_policy_core::config::StringOrList::Single(p) => vec![p.as_str().to_owned()],
-        praxis_policy_core::config::StringOrList::List(v) => v.clone(),
-    }
 }
 
 /// Warn when an APL block carries a global-only wiring key
@@ -1249,7 +1230,13 @@ fn response_subblock(yaml: &serde_yaml::Value, route_key: &str) -> Option<DenyRe
     reason = "tests"
 )]
 mod tests {
-    use super::{apl_subblock, http_catchall_should_install, response_subblock};
+    use std::sync::Arc;
+
+    use super::{
+        AplConfigVisitor, ConfigVisitor as _, DispatchCache, PolicyEngine, RouteEntry,
+        apl_subblock, http_catchall_should_install, response_subblock,
+    };
+    use crate::session_store::MemorySessionStore;
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage, TypeCheck};
     use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
 
@@ -1517,5 +1504,34 @@ mod tests {
 
         // Must not panic; it warns on `unused` and stays silent on `used`.
         warn_unreferenced_plugin_overrides(&route);
+    }
+
+    /// A route naming no selector has no name to annotate under, so the visitor
+    /// reports it and moves on rather than installing a handler nothing can
+    /// reach. Observed through the engine generation, which only an annotation
+    /// bumps.
+    #[test]
+    fn a_route_with_no_selector_is_skipped_rather_than_annotated() {
+        let engine = Arc::new(PolicyEngine::default());
+        let visitor = AplConfigVisitor::new(
+            Arc::new(DispatchCache::new()),
+            Arc::new(MemorySessionStore::new()),
+            Arc::downgrade(&engine),
+        );
+        let before = engine.config_generation();
+
+        visitor
+            .visit_route(
+                &engine,
+                &yaml("apl:\n  pre_invocation:\n    - \"deny\"\n"),
+                &RouteEntry::default(),
+            )
+            .expect("a selector-less route is skipped, not a load failure");
+
+        assert_eq!(
+            engine.config_generation(),
+            before,
+            "nothing may be annotated for a route with no name"
+        );
     }
 }

@@ -25,8 +25,10 @@
 // Each visitor sees the **raw YAML** so it can find its own block
 // (e.g. `apl:`) under any section without praxis-policy-core having to know
 // about it. Parsed sibling data is passed alongside (`RouteEntry` for
-// routes) for convenience — e.g. APL needs to know whether a route
-// matches `tool:` or `resource:` to build the annotation key.
+// routes) for convenience: an orchestrator building an annotation key
+// reads which selector a route declares from
+// `crate::config::route_entity_identity` rather than inspecting the
+// selector fields itself.
 //
 // # Why visit per-section rather than per-whole-config
 //
@@ -135,8 +137,11 @@ pub trait ConfigVisitor: Send + Sync {
     /// Visit one route entry. `yaml` is the raw value at `routes[i]`
     /// (so orchestrator can find its own block like `apl:`); `parsed`
     /// is the typed `RouteEntry` praxis-policy-core deserialized (so the
-    /// orchestrator can read `tool`/`resource`/`prompt`/`llm`/`http`,
-    /// `meta.scope`, `meta.tags`, etc. without re-parsing).
+    /// orchestrator can read `meta.scope`, `meta.tags`, etc. without
+    /// re-parsing). For the selector a route declares and the names it
+    /// contributes, call [`crate::config::route_entity_identity`] rather
+    /// than reading `tool`/`resource`/`prompt`/`llm`/`http` directly, so
+    /// every annotation key comes from one mapping.
     /// # Errors
     ///
     /// Returns `VisitorError` when the implementor rejects this section. The
