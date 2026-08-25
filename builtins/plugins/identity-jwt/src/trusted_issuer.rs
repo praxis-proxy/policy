@@ -34,10 +34,9 @@ use jsonwebtoken::{Algorithm, DecodingKey};
 ///
 /// # Update discipline (refresh)
 ///
-/// When the periodic refresh task lands, the intended pattern is
-/// **whole-store replacement** — the refresh fetches a fresh JWKS,
-/// builds a new `KeyStore`, and replaces the old one atomically
-/// (`*shared.write().await = new_store`). Do **not** merge new
+/// Refresh does **whole-store replacement** — it fetches a fresh
+/// JWKS, builds a new `KeyStore`, and replaces the old one
+/// atomically (`*shared.write() = new_store`). Do **not** merge new
 /// keys into the existing `by_kid` map: that grows unbounded as
 /// the `IdP` rotates kids in and out over the deployment's lifetime
 /// (every kid the `IdP` ever published stays in our map forever).
@@ -155,15 +154,15 @@ pub struct TrustedIssuer {
     /// lands here so the verify path can pick the one matching the
     /// inbound token's header.
     ///
-    /// Wrapped in `Arc<RwLock<...>>` so the background JWKS
-    /// refresh task can atomically swap in a fresh `KeyStore`
+    /// Wrapped in `Arc<RwLock<...>>` so an on-demand JWKS refresh
+    /// can atomically swap in a fresh `KeyStore`
     /// without blocking concurrent verifies (read guards are held
     /// for the duration of one `decode()`, which is sync — no
     /// `.await` between acquisition and release, so no deadlock
     /// risk and no contention beyond a few µs per request).
     ///
     /// Empty during the soft-fail boot path (initial JWKS fetch
-    /// failed, refresh task will retry). Verify checks for this
+    /// failed, a later verify will retry). Verify checks for this
     /// and returns `auth.jwks_unavailable` rather than the
     /// `auth.unknown_kid` it would otherwise produce.
     pub keys: std::sync::Arc<std::sync::RwLock<KeyStore>>,
@@ -177,6 +176,176 @@ pub struct TrustedIssuer {
     /// Clock-skew tolerance for `exp` / `nbf` claims, in seconds.
     /// Defaults applied in `JwtIdentityResolver::new`.
     pub leeway_seconds: u64,
+
+    /// Where this issuer's keys came from, so it can re-fetch them.
+    ///
+    /// The verify path refreshes on demand — an unknown `kid` means the
+    /// `IdP` rolled, an empty store means the boot fetch failed — and
+    /// both need the source to fetch again. There is no background task
+    /// holding a copy any more; see [`RefreshGate`] for why.
+    pub source: crate::config::DecodingKeySource,
+
+    /// Coordinates on-demand refresh for this issuer.
+    pub refresh: RefreshGate,
+}
+
+/// Bounds how often one issuer's keys may be re-fetched, and collapses
+/// concurrent attempts into one.
+///
+/// Refresh is triggered from the verify path rather than a timer,
+/// because a timer needs a background task and a background task cannot
+/// be relied upon: it binds to whichever runtime spawned it, which for a
+/// host that initializes on a short-lived runtime means the task is
+/// cancelled before it ever ticks. Triggering from a request needs no
+/// runtime of its own, and recovers on the first token that needs the
+/// new key rather than at the next tick.
+///
+/// Two bounds, both load-bearing:
+///
+///   * **Single-flight.** A rotation makes every in-flight token fail at
+///     once. Without this, each would fetch, and the `IdP` would take a
+///     stampede at exactly the moment it just rolled its keys.
+///   * **A floor between attempts.** An unknown `kid` is reachable with
+///     an unauthenticated request, so a stream of invented `kid`s would
+///     otherwise be an amplification attack pointed at your own `IdP`.
+#[derive(Debug, Default)]
+pub struct RefreshGate {
+    /// Held for the duration of a fetch. Losers wait, then re-check the
+    /// store: the winner has usually already fixed things, so they
+    /// proceed rather than fetching again.
+    pub(crate) fetching: tokio::sync::Mutex<()>,
+
+    /// When the last attempt *started*, successful or not.
+    ///
+    /// Recorded before the fetch rather than after, so a burst of
+    /// concurrent callers sees the floor immediately instead of all
+    /// deciding they are first.
+    last_attempt: std::sync::Mutex<Option<std::time::Instant>>,
+
+    /// When a fetch last actually replaced the key set.
+    ///
+    /// Distinct from `last_attempt`: the floor is about how often we may
+    /// *try*, and staleness is about how long ago we last *succeeded*. A
+    /// run of failures must not make the keys look fresh.
+    last_success: std::sync::Mutex<Option<std::time::Instant>>,
+
+    /// Bumped every time the key set is replaced.
+    ///
+    /// This is how a caller that queued behind the single-flight lock
+    /// learns whether the winner actually refreshed. A timestamp cannot
+    /// answer that: "was the last success recent" also says yes when the
+    /// boot fetch was recent, which would swallow the very first refresh
+    /// after a rotation and leave the caller denying a token the `IdP`
+    /// can perfectly well vouch for.
+    generation: std::sync::atomic::AtomicU64,
+
+    /// The `ETag` of the document the current `KeyStore` came from, when
+    /// the `IdP` sent one.
+    ///
+    /// Fed back as `If-None-Match`, which turns the common refresh — keys
+    /// stale, `IdP` has not rotated — into a `304` with no body. That is
+    /// what makes refreshing from a request path affordable at all: the
+    /// alternative is re-downloading and re-parsing a document that has
+    /// not changed, on a request that already had its answer.
+    etag: std::sync::Mutex<Option<String>>,
+}
+
+impl RefreshGate {
+    /// Whether a refresh may start now, recording the attempt if so.
+    ///
+    /// `min_interval` is the floor. A store that has never been fetched
+    /// is always allowed through, so the first token after a failed boot
+    /// fetch recovers immediately rather than waiting out an interval it
+    /// did nothing to earn.
+    pub(crate) fn claim_attempt(&self, min_interval: std::time::Duration) -> bool {
+        let mut last = self
+            .last_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = std::time::Instant::now();
+        match *last {
+            Some(prev) if now.duration_since(prev) < min_interval => false,
+            _ => {
+                *last = Some(now);
+                true
+            },
+        }
+    }
+
+    /// Record that a fetch replaced the key set.
+    pub(crate) fn mark_success(&self) {
+        self.mark_current();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Record that the key set was confirmed current without changing.
+    ///
+    /// The `304` case. It resets the staleness clock — the keys really
+    /// are current, and without this every later request would try to
+    /// refresh again — but must *not* bump the generation, because a
+    /// caller queued on the single-flight lock reads that to decide
+    /// whether re-validating is worth anything, and nothing changed.
+    pub(crate) fn mark_current(&self) {
+        *self
+            .last_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
+    }
+
+    /// The validator for the document behind the current key set.
+    pub(crate) fn etag(&self) -> Option<String> {
+        self.etag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Record the validator a fetched document arrived with.
+    ///
+    /// `None` clears it: an `IdP` that stops sending `ETag` must not
+    /// leave a stale validator behind, or every later refresh would send
+    /// an `If-None-Match` the peer cannot match and might answer `304`
+    /// to, freezing the key set.
+    pub(crate) fn set_etag(&self, etag: Option<String>) {
+        *self
+            .etag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = etag;
+    }
+
+    /// The current key-set generation.
+    ///
+    /// Read *before* queueing on the single-flight lock and compared
+    /// after acquiring it: a change means the winner refreshed while
+    /// this caller waited, so it should re-validate rather than fetch
+    /// again.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether the key set is older than `max_age`, so a verify should
+    /// refresh it proactively rather than waiting for a token to fail.
+    ///
+    /// `None` means the source cannot refresh at all. A store that has
+    /// never been successfully fetched is stale by definition — that is
+    /// the failed-boot-fetch case, and it is what makes the first
+    /// request after an `IdP` recovers try again.
+    pub(crate) fn is_stale(&self, max_age: Option<std::time::Duration>) -> bool {
+        let Some(max_age) = max_age else {
+            return false;
+        };
+        // Bind before matching: holding the guard as a match scrutinee
+        // would keep the lock for the whole expression.
+        let last = *self
+            .last_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match last {
+            None => true,
+            Some(t) => std::time::Instant::now().duration_since(t) >= max_age,
+        }
+    }
 }
 
 // Manual `Debug` impl — `jsonwebtoken::DecodingKey` doesn't derive
@@ -191,6 +360,7 @@ impl std::fmt::Debug for TrustedIssuer {
             .field("algorithms", &self.algorithms)
             .field("leeway_seconds", &self.leeway_seconds)
             .field("keys", &self.keys)
+            .field("source", &self.source)
             .finish()
     }
 }

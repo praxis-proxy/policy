@@ -41,10 +41,6 @@ rust-version.workspace = true
 [dependencies]
 praxis-policy-core = { workspace = true }
 
-# `reqwest` for the backchannel + token-endpoint POSTs. Same TLS stance
-# as praxis-policy-plugin-delegator-oauth: rustls, no native-tls/openssl link.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
 # `base64` to decode the JWT payload segment for the approver claim
 # (claims extraction only — see the validate notes in approver.rs).
 base64 = "0.22"
@@ -59,11 +55,12 @@ chrono = { workspace = true }
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 [dev-dependencies]
+# The `HttpTransport` test double. A dev-dependency so the feature is
+# enabled for test builds only; resolver 3 keeps it out of the normal
+# build of this crate.
+praxis-policy-core = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serde_json = { workspace = true }
-# `mockito` stands up an HTTP server in-process so tests can assert the
-# CIBA request shapes and simulate OP responses without a real Keycloak.
-mockito = "1"
 
 [lints]
 workspace = true

@@ -18,6 +18,23 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+[features]
+# Test doubles for the seams a host normally fills — currently
+# `http_testing::FakeTransport`.
+#
+# Off by default and never enabled by a normal build: a `FakeTransport`
+# answers only what it was scripted with, so one reaching production
+# would fail every outbound call, and identity failures are fail-closed.
+# Keeping it behind a feature also keeps it out of the published API
+# surface, where it would be bound by semver for no one's benefit.
+#
+# Downstream plugin authors testing against the `HttpTransport` seam
+# enable it as a dev-dependency:
+#
+#     [dev-dependencies]
+#     praxis-policy-core = { version = "0.1", features = ["test-util"] }
+test-util = []
+
 [dependencies]
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -25,6 +42,11 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+# Types for the outbound-HTTP seam (`http` module). Types only — no
+# client, no runtime, no TLS. PPE never performs HTTP itself; a host
+# installs an `HttpTransport`.
+http = { workspace = true }
+bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

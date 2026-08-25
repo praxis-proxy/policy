@@ -75,7 +75,10 @@ pub use claim_map_config::{
     MergeMode, OnMissing, SplitMode,
 };
 pub use claim_path::ClaimPath;
-pub use config::{DecodingKeySource, JwtIdentityResolverConfig, TrustedIssuerConfig};
+pub use config::{
+    DecodingKeySource, JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError,
+    TrustedIssuerConfig,
+};
 pub use configured_mapper::ConfiguredClaimMap;
 pub use factory::{JwtIdentityFactory, KIND};
 pub use presets::{DEFAULT_PRESET, Preset};

@@ -27,6 +27,9 @@ use super::raw_credentials::RawCredentialsExtension;
 use super::request::RequestExtension;
 use super::routing::{CAP_WRITE_CANDIDATE_CONSTRAINT, CandidateConstraintExtension};
 use super::security::SecurityExtension;
+use crate::host::{HostServices, HttpRequestError, HttpTransportSlot};
+use crate::http::{HttpRequest, HttpResponse};
+use crate::http_retry::RetryPolicy;
 
 /// Typed container for all message extensions.
 ///
@@ -122,10 +125,39 @@ pub struct Extensions {
     #[serde(skip)]
     /// Permits appending to the delegation chain.
     pub delegation_write_token: Option<WriteToken>,
+
+    /// The host's HTTP transport, as this plugin may see it. Set by
+    /// `filter_extensions` from the plugin's `perform_http` grant, NOT
+    /// serialized.
+    ///
+    /// Unlike the write tokens above, this *is* carried across `clone()`.
+    /// A write token is a one-shot authorization validated at the merge
+    /// boundary, so propagating it through a clone would widen write
+    /// authority. A transport handle is a borrowed service whose gate was
+    /// already applied when the filtered view was built; dropping it on
+    /// clone would only surprise a plugin that already holds the right.
+    ///
+    /// Opaque on purpose: the `Arc` inside cannot be taken out, so the
+    /// only way to use the transport is [`HostServices::http_request`],
+    /// which re-checks the capability on every call.
+    #[serde(skip)]
+    pub http_transport: HttpTransportSlot,
+}
+
+#[async_trait::async_trait]
+impl HostServices for Extensions {
+    async fn http_request(
+        &self,
+        req: HttpRequest,
+        retry: RetryPolicy,
+    ) -> Result<HttpResponse, HttpRequestError> {
+        crate::host::run_request(&self.http_transport, req, retry).await
+    }
 }
 
 impl Clone for Extensions {
-    /// All Arc bumps — zero data copies. Write tokens are NOT cloned.
+    /// All Arc bumps — zero data copies. Write tokens are NOT cloned;
+    /// the transport handle is (see the field docs for why they differ).
     fn clone(&self) -> Self {
         Self {
             request: self.request.clone(),
@@ -142,6 +174,7 @@ impl Clone for Extensions {
             framework: self.framework.clone(),
             meta: self.meta.clone(),
             custom: self.custom.clone(),
+            http_transport: self.http_transport.clone(),
             http_write_token: None,
             labels_write_token: None,
             delegation_write_token: None,

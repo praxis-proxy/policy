@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::container::Extensions;
+use crate::host::HttpTransportSlot;
 
 use super::security::{SecurityExtension, SubjectExtension};
 use super::tiers::{AccessPolicy, Capability, MutabilityTier, SlotPolicy};
@@ -315,6 +316,25 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         ..Default::default()
     };
 
+    // Capability-gated: the host's HTTP transport.
+    //
+    // Not a slot — it gates an action, so it has no `SlotPolicy` and no
+    // read/write split. A plugin either may reach outside the process or
+    // may not.
+    //
+    // The withheld case is carried rather than dropped: a plugin denied
+    // the transport gets `ServiceError::NotPermitted` naming
+    // `perform_http`, instead of the "no host installed one" message
+    // that would send an operator to the wrong place. That distinction
+    // is the whole reason this is a `ServiceSlot` and not an `Option`.
+    if extensions.http_transport.is_available() {
+        filtered.http_transport = if capabilities.contains(&cap_str(Capability::PerformHttp)) {
+            extensions.http_transport.clone()
+        } else {
+            HttpTransportSlot::withheld()
+        };
+    }
+
     // Capability-gated: delegation
     if extensions.delegation.is_some() {
         let policy = slot_policy(SlotName::Delegation);
@@ -522,6 +542,158 @@ fn build_filtered_subject(
 mod tests {
     use super::*;
     use crate::extensions::meta::MetaExtension;
+
+    // ---- host services: the outbound-HTTP gate -------------------------
+    //
+    // `perform_http` gates an action, not a slot, so it has no
+    // `SlotPolicy` and is filtered by hand. These pin the three states a
+    // plugin can observe, and in particular that "withheld" survives
+    // filtering as its own thing — collapsing it into "absent" would
+    // tell an operator the host forgot to wire a transport when in fact
+    // their own config withheld it.
+
+    use crate::host::{HostServices as _, HttpRequestError, ServiceError};
+    use crate::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
+    use async_trait::async_trait;
+
+    #[derive(Debug)]
+    struct StubTransport;
+
+    #[async_trait]
+    impl HttpTransport for StubTransport {
+        async fn execute(&self, _req: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+            Ok(HttpResponse::new(200, bytes::Bytes::new()))
+        }
+    }
+
+    /// Ask for the transport the only way a plugin can: by using it.
+    async fn reachable(ext: &Extensions) -> Result<(), HttpRequestError> {
+        ext.http_request(
+            crate::http::HttpRequest::get("https://example.test/probe"),
+            crate::http_retry::RetryPolicy::none(),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    fn extensions_with_transport() -> Extensions {
+        Extensions {
+            http_transport: HttpTransportSlot::installed(Arc::new(StubTransport)),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn perform_http_grants_the_transport() {
+        let ext = extensions_with_transport();
+        let caps: HashSet<String> = ["perform_http".to_owned()].into();
+        let filtered = filter_extensions(&ext, &caps);
+        assert!(
+            reachable(&filtered).await.is_ok(),
+            "a plugin declaring perform_http must reach the host transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_perform_http_the_transport_is_withheld_not_absent() {
+        // The distinction is the whole reason this is a ServiceSlot: the
+        // fix for "withheld" is one line of plugin config, and the fix
+        // for "absent" is in the embedding host. Reporting the wrong one
+        // sends an operator to a file they cannot fix this in.
+        let ext = extensions_with_transport();
+        let caps: HashSet<String> = ["read_headers".to_owned()].into();
+        let filtered = filter_extensions(&ext, &caps);
+        let err = reachable(&filtered)
+            .await
+            .expect_err("no perform_http means no transport");
+        assert!(
+            matches!(
+                err,
+                HttpRequestError::Unavailable(ServiceError::NotPermitted { .. })
+            ),
+            "expected NotPermitted, got {err:?}"
+        );
+        assert!(err.to_string().contains("perform_http"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn no_installed_transport_reports_the_host_not_the_capability() {
+        // Even holding the capability, a plugin cannot conjure a
+        // transport the host never installed.
+        let ext = Extensions::default();
+        let caps: HashSet<String> = ["perform_http".to_owned()].into();
+        let filtered = filter_extensions(&ext, &caps);
+        let err = reachable(&filtered)
+            .await
+            .expect_err("nothing was installed");
+        assert!(
+            matches!(
+                err,
+                HttpRequestError::Unavailable(ServiceError::NotInstalled { .. })
+            ),
+            "expected NotInstalled, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plugin_with_no_capabilities_gets_no_transport() {
+        // Secure by default, matching how every other gated slot behaves
+        // when the capability set is empty.
+        let ext = extensions_with_transport();
+        let filtered = filter_extensions(&ext, &HashSet::new());
+        assert!(reachable(&filtered).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn every_holder_shares_one_transport_instance() {
+        // Centralization is the whole reason this seam exists: one pool,
+        // one TLS trust store, one circuit breaker for the process. That
+        // holds only if the handle is a refcount bump rather than a copy
+        // of the transport. Swap `Arc` for anything that duplicates and
+        // every plugin quietly gets its own pool.
+        let transport: Arc<dyn HttpTransport> = Arc::new(StubTransport);
+        let ext = Extensions {
+            http_transport: HttpTransportSlot::installed(Arc::clone(&transport)),
+            ..Default::default()
+        };
+        let caps: HashSet<String> = ["perform_http".to_owned()].into();
+
+        // The real chain: engine seeds the request, the executor filters
+        // per plugin, the plugin's view gets cloned onward.
+        let a = filter_extensions(&ext, &caps);
+        let b = filter_extensions(&ext, &caps);
+        let c = a.clone();
+
+        for (name, view) in [("plugin a", &a), ("plugin b", &b), ("a clone", &c)] {
+            assert!(
+                reachable(view).await.is_ok(),
+                "{name} could not reach the transport"
+            );
+        }
+
+        // Handles outstanding, one object: the original plus the slot on
+        // `ext` plus three filtered/cloned views.
+        assert_eq!(Arc::strong_count(&transport), 5);
+    }
+
+    #[tokio::test]
+    async fn the_transport_survives_a_clone_but_write_tokens_do_not() {
+        // A write token is a one-shot authorization checked at the merge
+        // boundary, so cloning must not widen it. A transport handle is
+        // a borrowed service whose gate already ran; dropping it on
+        // clone would only break a plugin that legitimately holds it.
+        let mut ext = extensions_with_transport();
+        ext.http_write_token = Some(super::super::guarded::WriteToken::new());
+        let cloned = ext.clone();
+        assert!(
+            reachable(&cloned).await.is_ok(),
+            "the transport must survive a clone"
+        );
+        assert!(
+            cloned.http_write_token.is_none(),
+            "a write token must not survive a clone"
+        );
+    }
 
     fn make_full_extensions() -> Extensions {
         let mut security = SecurityExtension::default();

@@ -54,6 +54,19 @@ pub mod extensions;
 pub mod factory;
 /// Hook types, payloads, and the handler traits.
 pub mod hooks;
+/// Host-provided services and the carriers that lend them to a plugin.
+pub mod host;
+/// The outbound-HTTP seam. Types and a trait; PPE performs no HTTP itself.
+pub mod http;
+/// Which IP addresses an outbound policy call must not reach. The shared
+/// range table; a transport enforces it where it dials.
+pub mod http_addr;
+/// Retry policy for outbound HTTP, keyed to whether a repeat is safe.
+pub mod http_retry;
+/// A scripted `HttpTransport` for tests, including the failure paths a
+/// mock server cannot produce. Requires the `test-util` feature.
+#[cfg(any(test, feature = "test-util"))]
+pub mod http_testing;
 /// The identity resolution hook and its payload.
 pub mod identity;
 /// The `Plugin` trait and its trusted configuration.

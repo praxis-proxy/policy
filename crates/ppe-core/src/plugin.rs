@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::PluginError;
+use crate::host::InitExtensions;
 
 /// Core plugin interface — lifecycle management only.
 ///
@@ -83,8 +84,46 @@ pub trait Plugin: Send + Sync {
     /// Called before any hook invocations. Use this to establish
     /// connections, load resources, or validate configuration.
     /// Default implementation does nothing.
+    ///
+    /// Implement this when initialization needs nothing from the host.
+    /// A plugin that must reach a host service — an outbound HTTP call
+    /// to fetch signing keys, say — implements
+    /// [`initialize_with`](Self::initialize_with) instead.
     async fn initialize(&self) -> Result<(), Box<PluginError>> {
         Ok(())
+    }
+
+    /// One-time initialization, with the host services this plugin is
+    /// permitted to borrow.
+    ///
+    /// This is the method the engine calls. The default forwards to
+    /// [`initialize`](Self::initialize), so a plugin needing no host
+    /// services implements that one and never names [`InitExtensions`].
+    ///
+    /// `ext` carries only what this plugin's capabilities allow, and
+    /// only for the duration of the call. Borrow per use and store
+    /// nothing: the grants are re-evaluated on every request, so a
+    /// handle stashed here would outlive a capability an operator later
+    /// revoked. At request time the same services arrive through
+    /// `Extensions`, which implements the same
+    /// [`HostServices`](crate::host::HostServices) trait.
+    ///
+    /// # Implementing
+    ///
+    /// Override **exactly one** of this and [`initialize`](Self::initialize).
+    /// The default body here is what calls `initialize`, so overriding
+    /// this one replaces it — if you implement both, call
+    /// `self.initialize().await` yourself or its work silently never
+    /// runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError` when initialization fails. Returning an
+    /// error aborts engine startup and shuts down the plugins that
+    /// already initialized, so the engine never comes up half-started.
+    async fn initialize_with(&self, ext: &InitExtensions) -> Result<(), Box<PluginError>> {
+        let _ = ext;
+        self.initialize().await
     }
 
     /// Graceful shutdown.

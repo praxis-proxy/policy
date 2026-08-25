@@ -107,6 +107,25 @@ pub enum Capability {
     /// `read_inbound_credentials`; the two are independently scoped and
     /// neither unlocks the other.
     ReadDelegatedTokens,
+
+    /// Perform outbound HTTP through the host's transport
+    /// (`HostServices::http_transport`).
+    ///
+    /// Gates an *action*, not a slot, so it is the first capability here
+    /// that authorizes reaching outside the process rather than reading
+    /// or writing request state. Held by the plugins that must talk to
+    /// an `IdP`: a JWKS fetch, a token exchange, a CIBA backchannel.
+    ///
+    /// Withholding it does not merely hide data — it stops the call. A
+    /// plugin without it gets `ServiceError::NotPermitted` naming this
+    /// capability, rather than a silent degraded path, because a plugin
+    /// that quietly skipped its `IdP` call would fail open.
+    ///
+    /// The grant is all-or-nothing over destinations. Which hosts a
+    /// plugin may reach is the embedding host's egress policy to
+    /// enforce inside its `HttpTransport`; this capability only decides
+    /// whether the plugin may ask at all.
+    PerformHttp,
 }
 
 /// Access policy for an extension slot.

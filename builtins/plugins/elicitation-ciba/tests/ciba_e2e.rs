@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Praxis Contributors
 
 // Integration tests for the CIBA elicitation handler against a mock OP
-// (mockito). Exercises the real request shapes and the lifecycle mapping
+// (a scripted transport). Exercises the real request shapes and the
+// lifecycle mapping
 // for dispatch → check → validate without a live Keycloak.
 
 #![allow(
@@ -15,7 +16,7 @@
     clippy::unwrap_used,
     reason = "test and example code"
 )]
-use std::collections::HashSet;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use serde_json::json;
@@ -26,6 +27,9 @@ use praxis_policy_core::elicitation::{
 };
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::HookHandler as _;
+use praxis_policy_core::host::HttpTransportSlot;
+use praxis_policy_core::http::{HttpTransport, HttpTransportError};
+use praxis_policy_core::http_testing::FakeTransport;
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
 use praxis_policy_plugin_elicitation_ciba::CibaApprover;
@@ -34,7 +38,7 @@ use praxis_policy_plugin_elicitation_ciba::CibaApprover;
 // Harness
 // ---------------------------------------------------------------------
 
-fn approver(server_url: &str) -> CibaApprover {
+fn approver() -> CibaApprover {
     let cfg = PluginConfig {
         name: "manager-approver".to_owned(),
         kind: "elicitation/ciba".to_owned(),
@@ -45,23 +49,46 @@ fn approver(server_url: &str) -> CibaApprover {
         mode: PluginMode::Sequential,
         priority: 10,
         on_error: OnError::Fail,
-        capabilities: HashSet::new(),
+        // A CIBA backchannel is an outbound call, so the plugin declares
+        // `perform_http`.
+        capabilities: ["perform_http".to_owned()].into(),
         tags: Vec::new(),
         conditions: Vec::new(),
         config: Some(json!({
-            "backchannel_endpoint": format!("{server_url}/ciba/auth"),
-            "token_endpoint": format!("{server_url}/token"),
+            "backchannel_endpoint": format!("{OP_URL}{AUTH_PATH}"),
+            "token_endpoint": format!("{OP_URL}{TOKEN_PATH}"),
             "client_id": "praxis-policy-gateway",
             "client_secret_source": { "kind": "literal", "secret": "shh" },
-            // mockito serves http:// — allow it for the test only.
             "insecure_http": true,
         })),
     };
     CibaApprover::new(cfg).expect("construct approver")
 }
 
-async fn run(approver: &CibaApprover, payload: ElicitationPayload) -> ElicitationPayload {
-    let ext = Extensions::default();
+/// Endpoint paths the scripted `OP` answers on.
+const AUTH_PATH: &str = "/ciba/auth";
+const TOKEN_PATH: &str = "/token";
+
+/// Base URL for the scripted transport. Never resolved — the transport
+/// is programmed, not dialled.
+const OP_URL: &str = "https://op.example.test";
+
+/// `Extensions` carrying the host transport, as the executor would build
+/// them for a plugin holding `perform_http`.
+fn ext_with(http: &Arc<FakeTransport>) -> Extensions {
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    Extensions {
+        http_transport: HttpTransportSlot::installed(transport),
+        ..Default::default()
+    }
+}
+
+async fn run(
+    approver: &CibaApprover,
+    http: &Arc<FakeTransport>,
+    payload: ElicitationPayload,
+) -> ElicitationPayload {
+    let ext = ext_with(http);
     let mut ctx = PluginContext::new();
     let result = approver.handle(&payload, &ext, &mut ctx).await;
     assert!(
@@ -72,6 +99,48 @@ async fn run(approver: &CibaApprover, payload: ElicitationPayload) -> Elicitatio
     result
         .modified_payload
         .expect("handler returned an ElicitationPayload")
+}
+
+/// Decode one `application/x-www-form-urlencoded` value.
+fn form_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            },
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(b) => out.push(b),
+                    Err(_) => out.push(bytes[i]),
+                }
+                i += 3;
+            },
+            b => {
+                out.push(b);
+                i += 1;
+            },
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// One field from the form body the approver actually sent.
+///
+/// Asserting on the recorded request rather than a server-side matcher
+/// means a failure names the value that was wrong, instead of reporting
+/// an unmatched mock.
+fn sent_field(http: &FakeTransport, key: &str) -> Option<String> {
+    let req = http.last_request()?;
+    let body = String::from_utf8_lossy(&req.body).into_owned();
+    body.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (form_decode(k) == key).then(|| form_decode(v))
+    })
 }
 
 /// Build a fake `id_token` whose payload carries `preferred_username`.
@@ -88,29 +157,31 @@ fn fake_id_token(username: &str) -> String {
 
 #[tokio::test]
 async fn dispatch_posts_backchannel_and_returns_auth_req_id() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server
-        .mock("POST", "/ciba/auth")
-        // Assert the CIBA request shape: login_hint + binding_message.
-        // The purpose "Approve raise" is sanitized to a Keycloak-valid,
-        // space-free correlation code before it goes on the wire.
-        .match_body(mockito::Matcher::AllOf(vec![
-            mockito::Matcher::UrlEncoded("login_hint".into(), "alice@corp.com".into()),
-            mockito::Matcher::UrlEncoded("binding_message".into(), "Approve-raise".into()),
-            mockito::Matcher::UrlEncoded("scope".into(), "openid".into()),
-        ]))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "auth_req_id": "REQ-123", "expires_in": 300, "interval": 5 }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(
+        AUTH_PATH,
+        200,
+        &json!({ "auth_req_id": "REQ-123", "expires_in": 300, "interval": 5 }).to_string(),
+    ));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
         .with_purpose("Approve raise");
-    let out = run(&app, payload).await;
+    let out = run(&app, &http, payload).await;
 
-    m.assert_async().await;
+    // The CIBA request shape, asserted on what was actually sent. The
+    // purpose "Approve raise" is sanitized to a Keycloak-valid,
+    // space-free correlation code before it goes on the wire — a space
+    // here would be rejected by the OP, so the sanitizer is load-bearing.
+    assert_eq!(
+        sent_field(&http, "login_hint").as_deref(),
+        Some("alice@corp.com")
+    );
+    assert_eq!(
+        sent_field(&http, "binding_message").as_deref(),
+        Some("Approve-raise")
+    );
+    assert_eq!(sent_field(&http, "scope").as_deref(), Some("openid"));
+
     assert_eq!(out.id.as_deref(), Some("REQ-123"));
     assert_eq!(out.status, Some(ElicitationStatusKind::Pending));
     assert_eq!(out.approver.as_deref(), Some("alice@corp.com"));
@@ -119,47 +190,34 @@ async fn dispatch_posts_backchannel_and_returns_auth_req_id() {
 
 #[tokio::test]
 async fn check_authorization_pending_maps_to_pending() {
-    let mut server = mockito::Server::new_async().await;
-    let m = server
-        .mock("POST", "/token")
-        .match_body(mockito::Matcher::UrlEncoded(
-            "auth_req_id".into(),
-            "REQ-123".into(),
-        ))
-        .with_status(400)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "error": "authorization_pending" }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(
+        TOKEN_PATH,
+        400,
+        &json!({ "error": "authorization_pending" }).to_string(),
+    ));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
-    let out = run(&app, payload).await;
+    let out = run(&app, &http, payload).await;
 
-    m.assert_async().await;
+    assert_eq!(http.call_count_for(TOKEN_PATH), 1);
     assert_eq!(out.status, Some(ElicitationStatusKind::Pending));
     assert!(out.outcome.is_none());
 }
 
 #[tokio::test]
 async fn check_success_maps_to_resolved_approved() {
-    let mut server = mockito::Server::new_async().await;
-    let _m = server
-        .mock("POST", "/token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({ "access_token": "at", "id_token": fake_id_token("alice@corp.com") })
-                .to_string(),
-        )
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(
+        TOKEN_PATH,
+        200,
+        &json!({ "access_token": "at", "id_token": fake_id_token("alice@corp.com") }).to_string(),
+    ));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
-    let out = run(&app, payload).await;
+    let out = run(&app, &http, payload).await;
 
     assert_eq!(out.status, Some(ElicitationStatusKind::Resolved));
     assert_eq!(out.outcome, Some(ElicitationOutcomeKind::Approved));
@@ -167,18 +225,16 @@ async fn check_success_maps_to_resolved_approved() {
 
 #[tokio::test]
 async fn check_access_denied_maps_to_resolved_denied() {
-    let mut server = mockito::Server::new_async().await;
-    let _m = server
-        .mock("POST", "/token")
-        .with_status(400)
-        .with_body(json!({ "error": "access_denied" }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(
+        TOKEN_PATH,
+        400,
+        &json!({ "error": "access_denied" }).to_string(),
+    ));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
-    let out = run(&app, payload).await;
+    let out = run(&app, &http, payload).await;
 
     assert_eq!(out.status, Some(ElicitationStatusKind::Resolved));
     assert_eq!(out.outcome, Some(ElicitationOutcomeKind::Denied));
@@ -186,18 +242,16 @@ async fn check_access_denied_maps_to_resolved_denied() {
 
 #[tokio::test]
 async fn check_expired_token_maps_to_expired() {
-    let mut server = mockito::Server::new_async().await;
-    let _m = server
-        .mock("POST", "/token")
-        .with_status(400)
-        .with_body(json!({ "error": "expired_token" }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(
+        TOKEN_PATH,
+        400,
+        &json!({ "error": "expired_token" }).to_string(),
+    ));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
-    let out = run(&app, payload).await;
+    let out = run(&app, &http, payload).await;
 
     assert_eq!(out.status, Some(ElicitationStatusKind::Expired));
 }
@@ -206,25 +260,26 @@ async fn check_expired_token_maps_to_expired() {
 async fn full_flow_dispatch_check_validate_approves() {
     // One approver instance across all three ops, so the in-memory
     // correlation store carries the expected approver + cached token.
-    let mut server = mockito::Server::new_async().await;
-    let _auth = server
-        .mock("POST", "/ciba/auth")
-        .with_status(200)
-        .with_body(json!({ "auth_req_id": "REQ-9", "expires_in": 300 }).to_string())
-        .create_async()
-        .await;
-    let _tok = server
-        .mock("POST", "/token")
-        .with_status(200)
-        .with_body(json!({ "id_token": fake_id_token("alice@corp.com") }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(
+                AUTH_PATH,
+                200,
+                &json!({ "auth_req_id": "REQ-9", "expires_in": 300 }).to_string(),
+            )
+            .json(
+                TOKEN_PATH,
+                200,
+                &json!({ "id_token": fake_id_token("alice@corp.com") }).to_string(),
+            ),
+    );
 
-    let app = approver(&server.url());
+    let app = approver();
 
     // 1. dispatch — login_hint = the resolved approver.
     let d = run(
         &app,
+        &http,
         ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
             .with_purpose("Approve raise"),
     )
@@ -234,6 +289,7 @@ async fn full_flow_dispatch_check_validate_approves() {
     // 2. check — approved.
     let c = run(
         &app,
+        &http,
         ElicitationPayload::new(ElicitationOp::Check, "approval", "").with_elicitation_id(&id),
     )
     .await;
@@ -242,6 +298,7 @@ async fn full_flow_dispatch_check_validate_approves() {
     // 3. validate — token's preferred_username matches the login_hint.
     let v = run(
         &app,
+        &http,
         ElicitationPayload::new(ElicitationOp::Validate, "approval", "").with_elicitation_id(&id),
     )
     .await;
@@ -251,35 +308,35 @@ async fn full_flow_dispatch_check_validate_approves() {
 
 #[tokio::test]
 async fn validate_rejects_approver_mismatch() {
-    let mut server = mockito::Server::new_async().await;
-    let _auth = server
-        .mock("POST", "/ciba/auth")
-        .with_status(200)
-        .with_body(json!({ "auth_req_id": "REQ-x", "expires_in": 300 }).to_string())
-        .create_async()
-        .await;
-    // The token comes back naming a DIFFERENT user than the login_hint.
-    let _tok = server
-        .mock("POST", "/token")
-        .with_status(200)
-        .with_body(json!({ "id_token": fake_id_token("mallory@corp.com") }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(AUTH_PATH, 200, &json!({ "auth_req_id": "REQ-x", "expires_in": 300 }).to_string())
+            // The token comes back naming a DIFFERENT user than the
+            // login_hint — the impersonation case `validate` exists to catch.
+            .json(
+                TOKEN_PATH,
+                200,
+                &json!({ "id_token": fake_id_token("mallory@corp.com") }).to_string(),
+            ),
+    );
 
-    let app = approver(&server.url());
+    let app = approver();
     let d = run(
         &app,
+        &http,
         ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
     )
     .await;
     let id = d.id.unwrap();
     let _ = run(
         &app,
+        &http,
         ElicitationPayload::new(ElicitationOp::Check, "approval", "").with_elicitation_id(&id),
     )
     .await;
     let v = run(
         &app,
+        &http,
         ElicitationPayload::new(ElicitationOp::Validate, "approval", "").with_elicitation_id(&id),
     )
     .await;
@@ -295,9 +352,10 @@ async fn validate_rejects_approver_mismatch() {
 /// Run a payload and require a denial, returning the violation.
 async fn deny_for(
     app: &CibaApprover,
+    http: &Arc<FakeTransport>,
     payload: ElicitationPayload,
 ) -> praxis_policy_core::error::PluginViolation {
-    let ext = Extensions::default();
+    let ext = ext_with(http);
     let mut ctx = PluginContext::new();
     let result = app.handle(&payload, &ext, &mut ctx).await;
     assert!(
@@ -307,14 +365,18 @@ async fn deny_for(
     result.violation.expect("a deny carries a violation")
 }
 
-/// A URL whose port has been released, so connecting is refused rather than
-/// hanging until the timeout.
-fn closed_endpoint() -> String {
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free loopback port");
-        listener.local_addr().expect("the bound address").port()
-    };
-    format!("http://127.0.0.1:{port}")
+/// A transport that refuses every connection.
+///
+/// Scripted rather than dialled: `Connect` specifically, not `Timeout`,
+/// because it proves nothing was sent. That distinction decides whether
+/// a failed dispatch merely never happened or may have already asked a
+/// human.
+fn unreachable_op() -> Arc<FakeTransport> {
+    Arc::new(
+        FakeTransport::new()
+            .fail(AUTH_PATH, HttpTransportError::Connect("refused".into()))
+            .fail(TOKEN_PATH, HttpTransportError::Connect("refused".into())),
+    )
 }
 
 /// An unreachable OP on dispatch must deny, not report pending. Reporting
@@ -322,10 +384,11 @@ fn closed_endpoint() -> String {
 /// created, so the request would sit until it expired with nobody notified.
 #[tokio::test]
 async fn a_dispatch_that_cannot_reach_the_op_denies_rather_than_reporting_pending() {
-    let app = approver(&closed_endpoint());
+    let http = unreachable_op();
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
         .with_purpose("Approve raise");
-    let violation = deny_for(&app, payload).await;
+    let violation = deny_for(&app, &http, payload).await;
     assert_eq!(violation.code, "elicitation.op_unreachable");
     assert!(
         violation.reason.contains("backchannel"),
@@ -340,10 +403,11 @@ async fn a_dispatch_that_cannot_reach_the_op_denies_rather_than_reporting_pendin
 /// human decision that nobody made.
 #[tokio::test]
 async fn a_check_that_cannot_reach_the_op_denies_rather_than_inventing_an_outcome() {
-    let app = approver(&closed_endpoint());
+    let http = unreachable_op();
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
-    let violation = deny_for(&app, payload).await;
+    let violation = deny_for(&app, &http, payload).await;
     assert_eq!(violation.code, "elicitation.op_unreachable");
     assert!(
         violation.reason.contains("token poll"),
@@ -356,19 +420,16 @@ async fn a_check_that_cannot_reach_the_op_denies_rather_than_inventing_an_outcom
 /// never registered and the caller has to stop rather than poll.
 #[tokio::test]
 async fn a_rejected_backchannel_request_denies_with_its_status() {
-    let mut server = mockito::Server::new_async().await;
-    let _m = server
-        .mock("POST", "/ciba/auth")
-        .with_status(400)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "error": "invalid_request" }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(
+        AUTH_PATH,
+        400,
+        &json!({ "error": "invalid_request" }).to_string(),
+    ));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
         .with_purpose("Approve raise");
-    let violation = deny_for(&app, payload).await;
+    let violation = deny_for(&app, &http, payload).await;
     assert_eq!(violation.code, "elicitation.op_rejected");
     assert!(
         violation.reason.contains("400"),
@@ -382,20 +443,17 @@ async fn a_rejected_backchannel_request_denies_with_its_status() {
 /// dispatched request: there would be no id for the agent to poll with.
 #[tokio::test]
 async fn a_backchannel_success_with_no_auth_req_id_denies() {
-    let mut server = mockito::Server::new_async().await;
-    let _m = server
-        .mock("POST", "/ciba/auth")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "expires_in": 300 }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(
+        AUTH_PATH,
+        200,
+        &json!({ "expires_in": 300 }).to_string(),
+    ));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
         .with_purpose("Approve raise");
     assert_eq!(
-        deny_for(&app, payload).await.code,
+        deny_for(&app, &http, payload).await.code,
         "elicitation.bad_response"
     );
 }
@@ -406,20 +464,13 @@ async fn a_backchannel_success_with_no_auth_req_id_denies() {
 /// approver recorded.
 #[tokio::test]
 async fn a_successful_poll_with_an_unparseable_body_denies() {
-    let mut server = mockito::Server::new_async().await;
-    let _m = server
-        .mock("POST", "/token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("not json at all")
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(TOKEN_PATH, 200, "not json at all"));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
     assert_eq!(
-        deny_for(&app, payload).await.code,
+        deny_for(&app, &http, payload).await.code,
         "elicitation.bad_response"
     );
 }
@@ -431,19 +482,16 @@ async fn a_successful_poll_with_an_unparseable_body_denies() {
 /// error to pending would make the caller poll forever.
 #[tokio::test]
 async fn an_unrecognized_poll_error_denies_instead_of_becoming_a_lifecycle_state() {
-    let mut server = mockito::Server::new_async().await;
-    let _m = server
-        .mock("POST", "/token")
-        .with_status(400)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "error": "invalid_grant" }).to_string())
-        .create_async()
-        .await;
+    let http = Arc::new(FakeTransport::new().json(
+        TOKEN_PATH,
+        400,
+        &json!({ "error": "invalid_grant" }).to_string(),
+    ));
 
-    let app = approver(&server.url());
+    let app = approver();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
-    let violation = deny_for(&app, payload).await;
+    let violation = deny_for(&app, &http, payload).await;
     assert_eq!(violation.code, "elicitation.op_rejected");
     assert!(
         violation.reason.contains("invalid_grant"),
@@ -468,29 +516,25 @@ async fn an_unrecognized_poll_error_denies_instead_of_becoming_a_lifecycle_state
 /// quietly succeeding against a still-live mock.
 #[tokio::test]
 async fn a_second_check_after_approval_replays_instead_of_repolling() {
-    let mut server = mockito::Server::new_async().await;
-    let _dispatch = server
-        .mock("POST", "/ciba/auth")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(json!({ "auth_req_id": "REQ-123", "expires_in": 300 }).to_string())
-        .create_async()
-        .await;
-    let poll = server
-        .mock("POST", "/token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({ "access_token": "at", "id_token": fake_id_token("alice@corp.com") })
-                .to_string(),
-        )
-        .expect(1)
-        .create_async()
-        .await;
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(
+                AUTH_PATH,
+                200,
+                &json!({ "auth_req_id": "REQ-123", "expires_in": 300 }).to_string(),
+            )
+            .json(
+                TOKEN_PATH,
+                200,
+                &json!({ "access_token": "at", "id_token": fake_id_token("alice@corp.com") })
+                    .to_string(),
+            ),
+    );
 
-    let app = approver(&server.url());
+    let app = approver();
     let dispatched = run(
         &app,
+        &http,
         ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
             .with_purpose("Approve raise"),
     )
@@ -501,10 +545,10 @@ async fn a_second_check_after_approval_replays_instead_of_repolling() {
         ElicitationPayload::new(ElicitationOp::Check, "approval", "").with_elicitation_id("REQ-123")
     };
 
-    let first = run(&app, check()).await;
+    let first = run(&app, &http, check()).await;
     assert_eq!(first.outcome, Some(ElicitationOutcomeKind::Approved));
 
-    let second = run(&app, check()).await;
+    let second = run(&app, &http, check()).await;
     assert_eq!(
         second.outcome,
         Some(ElicitationOutcomeKind::Approved),
@@ -512,8 +556,11 @@ async fn a_second_check_after_approval_replays_instead_of_repolling() {
     );
     assert_eq!(second.status, Some(ElicitationStatusKind::Resolved));
 
-    // Exactly one poll reached the OP across both checks.
-    poll.assert_async().await;
+    // Exactly one poll reached the OP across both checks. The
+    // `auth_req_id` is single-use, so a second poll would come back
+    // `invalid_grant` and turn an approval the human already gave into a
+    // denial.
+    assert_eq!(http.call_count_for(TOKEN_PATH), 1);
 }
 
 // ---------------------------------------------------------------------
@@ -531,7 +578,7 @@ fn config_err(config: serde_json::Value) -> String {
         mode: PluginMode::Sequential,
         priority: 10,
         on_error: OnError::Fail,
-        capabilities: HashSet::new(),
+        capabilities: std::collections::HashSet::new(),
         tags: Vec::new(),
         conditions: Vec::new(),
         config: Some(config),
@@ -569,7 +616,7 @@ async fn each_incomplete_ciba_config_is_refused_at_load() {
         mode: PluginMode::Sequential,
         priority: 10,
         on_error: OnError::Fail,
-        capabilities: HashSet::new(),
+        capabilities: std::collections::HashSet::new(),
         tags: Vec::new(),
         conditions: Vec::new(),
         config: Some(base.clone()),
@@ -606,4 +653,171 @@ async fn each_incomplete_ciba_config_is_refused_at_load() {
             "{field} = {value}: the message must contain {expected:?}, got: {err}"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// the non-idempotency rule
+// ---------------------------------------------------------------------
+
+/// A timed-out dispatch is never repeated.
+///
+/// Registering a CIBA request asks a human to approve something. Repeat
+/// one that already landed and the same policy decision produces two
+/// approval prompts — confusing at best, and at worst two people
+/// approving what one action needed.
+#[tokio::test]
+async fn a_timed_out_dispatch_is_not_retried() {
+    let http = Arc::new(FakeTransport::new().fail(AUTH_PATH, HttpTransportError::Timeout));
+    let app = approver();
+    let violation = deny_for(
+        &app,
+        &http,
+        ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+    )
+    .await;
+
+    assert_eq!(violation.code, "elicitation.op_timeout");
+    assert_eq!(
+        http.call_count_for(AUTH_PATH),
+        1,
+        "exactly one attempt: a repeat could ask a human twice"
+    );
+}
+
+/// A timed-out poll is never repeated either.
+///
+/// This one looks idempotent and is not. A successful poll spends the
+/// single-use `auth_req_id`; repeat a timed-out one and the spent id
+/// comes back `invalid_grant`, turning an approval the human already
+/// gave into a denial.
+#[tokio::test]
+async fn a_timed_out_poll_is_not_retried() {
+    let http = Arc::new(FakeTransport::new().fail(TOKEN_PATH, HttpTransportError::Timeout));
+    let app = approver();
+    let violation = deny_for(
+        &app,
+        &http,
+        ElicitationPayload::new(ElicitationOp::Check, "approval", "")
+            .with_elicitation_id("REQ-123"),
+    )
+    .await;
+
+    assert_eq!(violation.code, "elicitation.op_timeout");
+    assert_eq!(
+        http.call_count_for(TOKEN_PATH),
+        1,
+        "a repeat would spend an auth_req_id whose result may already exist"
+    );
+}
+
+/// A refused connection *is* retried, because nothing was sent.
+#[tokio::test]
+async fn a_refused_dispatch_is_retried() {
+    let http = Arc::new(
+        FakeTransport::new()
+            .fail(AUTH_PATH, HttpTransportError::Connect("refused".into()))
+            .json(
+                AUTH_PATH,
+                200,
+                &json!({ "auth_req_id": "REQ-9", "expires_in": 300 }).to_string(),
+            ),
+    );
+    let app = approver();
+    let out = run(
+        &app,
+        &http,
+        ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+    )
+    .await;
+
+    assert_eq!(out.id.as_deref(), Some("REQ-9"));
+    assert_eq!(http.call_count_for(AUTH_PATH), 2);
+}
+
+/// Without `perform_http`, dispatch denies and issues no request.
+#[tokio::test]
+async fn without_a_transport_dispatch_denies_without_calling_out() {
+    let http = Arc::new(FakeTransport::new().json(AUTH_PATH, 200, "{}"));
+    let app = approver();
+    // No transport on the extensions at all, as a host that installed
+    // none would produce.
+    let mut ctx = PluginContext::new();
+    let result = app
+        .handle(
+            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+            &Extensions::default(),
+            &mut ctx,
+        )
+        .await;
+
+    assert!(!result.continue_processing);
+    assert_eq!(
+        result.violation.expect("a deny carries a violation").code,
+        "elicitation.no_transport"
+    );
+    assert_eq!(
+        http.call_count(),
+        0,
+        "nothing may reach the OP without a transport"
+    );
+}
+
+/// A malformed payload is rejected on its own terms, not blamed on a
+/// missing capability.
+///
+/// Ordering: resolving the transport before checking arguments would
+/// answer a payload with no `login_hint` by complaining about
+/// `perform_http`, sending an operator to fix the wrong file.
+#[tokio::test]
+async fn a_bad_request_is_reported_as_such_even_with_no_transport() {
+    let app = approver();
+    let mut ctx = PluginContext::new();
+    let result = app
+        .handle(
+            // Dispatch with an empty login hint.
+            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", ""),
+            &Extensions::default(),
+            &mut ctx,
+        )
+        .await;
+
+    assert!(!result.continue_processing);
+    assert_eq!(
+        result.violation.expect("a deny carries a violation").code,
+        "elicitation.bad_request",
+        "argument validation must run before the transport is required"
+    );
+}
+
+/// Same for CIBA: a refusal by the host is its own outcome.
+///
+/// It matters more here than elsewhere, because the alternative reading
+/// — "the OP is unreachable" — invites an operator to wait for an outage
+/// to pass, when nothing was ever sent and nothing will be until their
+/// egress config changes.
+#[tokio::test]
+async fn a_host_refusal_is_reported_as_egress_denied() {
+    let http = Arc::new(FakeTransport::new().fail(
+        AUTH_PATH,
+        HttpTransportError::Rejected("egress policy".into()),
+    ));
+    let app = approver();
+    let violation = deny_for(
+        &app,
+        &http,
+        ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+    )
+    .await;
+
+    assert_eq!(violation.code, "elicitation.egress_denied");
+    assert!(
+        violation.reason.contains("egress policy"),
+        "the host's reason must survive: {}",
+        violation.reason
+    );
+    assert_eq!(
+        http.call_count_for(AUTH_PATH),
+        1,
+        "a refusal is not retried"
+    );
 }
