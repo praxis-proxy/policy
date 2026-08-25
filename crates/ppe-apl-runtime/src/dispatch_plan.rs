@@ -455,7 +455,8 @@ pub(crate) fn warn_if_delegating_without_identity(
     engine: &PolicyEngine,
 ) {
     let unvalidated = delegate_steps_exchanging_caller_credentials(route);
-    if unvalidated.is_empty() || engine.route_has_identity_resolution(entity_type, entity_name, scope)
+    if unvalidated.is_empty()
+        || engine.route_has_identity_resolution(entity_type, entity_name, scope)
     {
         return;
     }
