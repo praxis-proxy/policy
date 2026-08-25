@@ -171,6 +171,8 @@ const HOOK_TABLES: &[&[(&str, HookMetadata)]] = &[
     ELICITATION_HOOK_METADATA,
 ];
 
+/// How many rows the per-module tables hold between them, so the flat
+/// table's size comes from the tables rather than being restated.
 #[allow(
     clippy::indexing_slicing,
     reason = "const context; bounds are the loop conditions"
@@ -185,9 +187,8 @@ const HOOK_COUNT: usize = {
     total
 };
 
-/// Flatten [`HOOK_TABLES`] at compile time. `Iterator` is not available in
-/// const context and neither is slice indexing through `get`, hence the
-/// index arithmetic.
+/// Flatten [`HOOK_TABLES`] at compile time. Neither `Iterator` nor
+/// `slice::get` is available in const context, hence the index arithmetic.
 #[allow(
     clippy::indexing_slicing,
     reason = "const context; bounds are the loop conditions"
@@ -459,6 +460,17 @@ mod tests {
                     "{name} is declared but missing from the concatenated table",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn no_two_modules_declare_the_same_hook_name() {
+        // Each module owns its names, so a collision would be a bug that
+        // silently gives one hook two rows and lets the later table's
+        // metadata win in the registry.
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in BUILTIN_METADATA {
+            assert!(seen.insert(*name), "{name} is declared by two modules");
         }
     }
 

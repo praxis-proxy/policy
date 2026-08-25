@@ -532,11 +532,11 @@ impl ConfigVisitor for AplConfigVisitor {
         // when the policy declares steps for it: authorization is an
         // admission check with nothing to say on the way out, and response
         // filtering has nothing to say on the way in.
+        //
         // The pair, and which half is Pre and which is Post, come from the
         // same mapping the entity routes below read, so the phase a hook
         // installs under is decided in one place. `None` is unreachable for
         // ENTITY_HTTP; skipping rather than crashing matches visit_routes.
-        let http_hooks = hook_pair_for_entity(ENTITY_HTTP);
         let installs_pre_handler = http_catchall_should_install(&compiled);
         let installs_post_handler = http_catchall_response_should_install(&compiled);
         if !installs_pre_handler && compiled.response.is_some() {
@@ -545,8 +545,8 @@ impl ConfigVisitor for AplConfigVisitor {
                  — the entity-less HTTP catch-all handler will not install, so this response can never fire",
             );
         }
-        if let Some((hook_request, hook_response)) =
-            http_hooks.filter(|_| installs_pre_handler || installs_post_handler)
+        if (installs_pre_handler || installs_post_handler)
+            && let Some((hook_request, hook_response)) = hook_pair_for_entity(ENTITY_HTTP)
         {
             let (plugin_registry, pdp_router_arc, session_store) = self.snapshot_dispatch_state();
             // Snapshot the static attribute tree (built above from

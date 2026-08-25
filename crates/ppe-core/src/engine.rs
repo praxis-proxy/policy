@@ -287,8 +287,8 @@ pub struct PolicyEngine {
 /// `authentication:` a group was meant to supply.
 ///
 /// Idempotent. `merge_groups_into_policies` returns early once `groups:`
-/// is empty and validation is a read, so the paths that already
-/// normalized before calling in pay a map lookup to repeat it.
+/// is empty and validation only reads, so a path that already normalized
+/// before calling in pays a map lookup to repeat the work.
 fn normalize_and_validate(mut config: PolicyConfig) -> Result<PolicyConfig, Box<PluginError>> {
     crate::config::merge_groups_into_policies(&mut config);
     crate::config::validate_config(&config)?;
@@ -2157,8 +2157,8 @@ mod tests {
 
     /// The engine's fixtures declare `test_hook`, a hook this crate does
     /// not dispatch. Registering its metadata is what a host does for its
-    /// own hooks, and it has to happen before config naming them loads or
-    /// the loader has nothing to validate the `hooks:` entries against.
+    /// own hooks, and it has to happen before any config naming it loads,
+    /// or the loader has nothing to check the `hooks:` entry against.
     fn register_fixture_hooks() {
         register_hook_metadata(TestHook::NAME, HookMetadata::permissive());
     }
