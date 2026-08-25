@@ -16,8 +16,14 @@ use crate::hooks::trait_def::PluginResult;
 
 use super::payload::ElicitationPayload;
 
-/// Hook name for Elicitation handlers.
-pub const HOOK_ELICIT: &str = "elicit";
+crate::define_hooks! {
+    /// The elicitation family's row in the built-in hook metadata table.
+    ELICITATION_HOOK_METADATA;
+
+    /// Hook name for Elicitation handlers. Unphased: the three operations
+    /// share one name and are distinguished by the payload, not a phase.
+    HOOK_ELICIT: "elicit" => entity: None, phase: Unphased;
+}
 
 crate::define_hook! {
     /// Elicitation hook — drives a human-in-the-loop step through a

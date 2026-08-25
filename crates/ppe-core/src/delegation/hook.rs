@@ -17,8 +17,14 @@ use crate::hooks::trait_def::PluginResult;
 
 use super::payload::DelegationPayload;
 
-/// Primary hook name for `TokenDelegate` handlers.
-pub const HOOK_TOKEN_DELEGATE: &str = "token.delegate";
+crate::define_hooks! {
+    /// The delegation family's row in the built-in hook metadata table.
+    DELEGATION_HOOK_METADATA;
+
+    /// Primary hook name for `TokenDelegate` handlers. Unphased: it fires
+    /// inside authorization, not at a request-lifecycle boundary.
+    HOOK_TOKEN_DELEGATE: "token.delegate" => entity: None, phase: Unphased;
+}
 
 crate::define_hook! {
     /// Token-delegation hook.

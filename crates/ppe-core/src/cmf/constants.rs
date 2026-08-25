@@ -119,27 +119,41 @@ pub const ENTITY_NAME_GLOBAL: &str = "*";
 // type — pre-invocation (called from APL's policy / args phase) and
 // post-invocation (called from APL's post_policy / result phase).
 //
-// Used as keys in `hooks::metadata`'s routing table and from plugin
-// declarations.
-/// Hook name `cmf.tool_pre_invoke`.
-pub const HOOK_CMF_TOOL_PRE_INVOKE: &str = "cmf.tool_pre_invoke";
-/// Hook name `cmf.tool_post_invoke`.
-pub const HOOK_CMF_TOOL_POST_INVOKE: &str = "cmf.tool_post_invoke";
-/// Hook name `cmf.llm_input`.
-pub const HOOK_CMF_LLM_INPUT: &str = "cmf.llm_input";
-/// Hook name `cmf.llm_output`.
-pub const HOOK_CMF_LLM_OUTPUT: &str = "cmf.llm_output";
-/// Hook name `cmf.prompt_pre_invoke`.
-pub const HOOK_CMF_PROMPT_PRE_INVOKE: &str = "cmf.prompt_pre_invoke";
-/// Hook name `cmf.prompt_post_invoke`.
-pub const HOOK_CMF_PROMPT_POST_INVOKE: &str = "cmf.prompt_post_invoke";
-/// Hook name `cmf.resource_pre_fetch`.
-pub const HOOK_CMF_RESOURCE_PRE_FETCH: &str = "cmf.resource_pre_fetch";
-/// Hook name `cmf.resource_post_fetch`.
-pub const HOOK_CMF_RESOURCE_POST_FETCH: &str = "cmf.resource_post_fetch";
+// Declared with `define_hooks!` so each name arrives with the routing
+// metadata `hooks::metadata` needs. Plugin declarations name these
+// strings in `hooks:`, and the config loader validates against the
+// table these rows seed.
+crate::define_hooks! {
+    /// The CMF family's rows in the built-in hook metadata table.
+    CMF_HOOK_METADATA;
 
-/// Generic HTTP request hook. Hosts fire this for non-MCP/A2A HTTP
-/// requests; the catch-all `global` policy (if any) is annotated under
-/// it via [`ENTITY_HTTP`] / [`ENTITY_NAME_GLOBAL`]. Pre-invocation only —
-/// authorization is an admission check, so there is no post counterpart.
-pub const HOOK_CMF_HTTP_REQUEST: &str = "cmf.http_request";
+    /// Hook name `cmf.tool_pre_invoke`.
+    HOOK_CMF_TOOL_PRE_INVOKE: "cmf.tool_pre_invoke" => entity: Some(ENTITY_TOOL), phase: Pre;
+    /// Hook name `cmf.tool_post_invoke`.
+    HOOK_CMF_TOOL_POST_INVOKE: "cmf.tool_post_invoke" => entity: Some(ENTITY_TOOL), phase: Post;
+    /// Hook name `cmf.llm_input`.
+    HOOK_CMF_LLM_INPUT: "cmf.llm_input" => entity: Some(ENTITY_LLM), phase: Pre;
+    /// Hook name `cmf.llm_output`.
+    HOOK_CMF_LLM_OUTPUT: "cmf.llm_output" => entity: Some(ENTITY_LLM), phase: Post;
+    /// Hook name `cmf.prompt_pre_invoke`.
+    HOOK_CMF_PROMPT_PRE_INVOKE: "cmf.prompt_pre_invoke" => entity: Some(ENTITY_PROMPT), phase: Pre;
+    /// Hook name `cmf.prompt_post_invoke`.
+    HOOK_CMF_PROMPT_POST_INVOKE: "cmf.prompt_post_invoke" => entity: Some(ENTITY_PROMPT), phase: Post;
+    /// Hook name `cmf.resource_pre_fetch`.
+    HOOK_CMF_RESOURCE_PRE_FETCH: "cmf.resource_pre_fetch" => entity: Some(ENTITY_RESOURCE), phase: Pre;
+    /// Hook name `cmf.resource_post_fetch`.
+    HOOK_CMF_RESOURCE_POST_FETCH: "cmf.resource_post_fetch" => entity: Some(ENTITY_RESOURCE), phase: Post;
+
+    /// Generic HTTP request hook, fired for non-MCP/A2A HTTP requests on
+    /// the way in. The catch-all `global` policy (if any) is annotated
+    /// under it via [`ENTITY_HTTP`] / [`ENTITY_NAME_GLOBAL`]. This half
+    /// carries authorization, which is an admission check and so belongs
+    /// entirely before the request is forwarded.
+    HOOK_CMF_HTTP_REQUEST: "cmf.http_request" => entity: Some(ENTITY_HTTP), phase: Pre;
+    /// Generic HTTP response hook, the return half of
+    /// [`HOOK_CMF_HTTP_REQUEST`]. Authorization cannot live here, but
+    /// response filtering can: redaction, label propagation, and any
+    /// check that needs the body the upstream actually returned. A host
+    /// that only authorizes never fires it, and nothing changes for it.
+    HOOK_CMF_HTTP_RESPONSE: "cmf.http_response" => entity: Some(ENTITY_HTTP), phase: Post;
+}

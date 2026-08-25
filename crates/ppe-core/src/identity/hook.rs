@@ -29,10 +29,16 @@ use crate::hooks::trait_def::PluginResult;
 
 use super::payload::IdentityPayload;
 
-/// Primary hook name for `IdentityResolve` handlers. Used as the
-/// registry key when a host registers the handler via the standard
-/// `register_handler` path.
-pub const HOOK_IDENTITY_RESOLVE: &str = "identity.resolve";
+crate::define_hooks! {
+    /// The identity family's row in the built-in hook metadata table.
+    IDENTITY_HOOK_METADATA;
+
+    /// Primary hook name for `IdentityResolve` handlers. Used as the
+    /// registry key when a host registers the handler via the standard
+    /// `register_handler` path. Unphased: it fires once at request entry,
+    /// before any phase exists.
+    HOOK_IDENTITY_RESOLVE: "identity.resolve" => entity: None, phase: Unphased;
+}
 
 crate::define_hook! {
     /// Identity-resolve hook.

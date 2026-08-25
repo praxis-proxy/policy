@@ -10,12 +10,14 @@
 // - [`PluginResult`] — result type with separate payload and extension modifications.
 // - [`Extensions`] — capability-gated extension view passed to handlers.
 // - [`define_hook!`] — macro for declaring new hook types with handler traits.
-// - [`hook_names`] / [`cmf_hook_names`] — string constants for built-in hooks.
+// - [`define_hooks!`] — macro co-declaring a hook name and its routing metadata.
 //
 // Hook types are open — hosts define their own using define_hook! alongside the built-ins.
 
 /// Adapters that erase a typed handler behind the dispatch trait.
 pub mod adapter;
+/// The `define_hooks!` macro, which co-declares a hook name and its metadata.
+pub mod declare;
 /// The `define_hook!` macro, which declares a hook in one place.
 pub mod macros;
 /// Hook descriptions used for introspection.

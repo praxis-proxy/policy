@@ -71,14 +71,10 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
-use crate::cmf::constants::{
-    ENTITY_LLM, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL, HOOK_CMF_LLM_INPUT,
-    HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE,
-    HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE,
-    HOOK_CMF_TOOL_PRE_INVOKE,
-};
-use crate::delegation::HOOK_TOKEN_DELEGATE;
-use crate::identity::HOOK_IDENTITY_RESOLVE;
+use crate::cmf::constants::CMF_HOOK_METADATA;
+use crate::delegation::hook::DELEGATION_HOOK_METADATA;
+use crate::elicitation::hook::ELICITATION_HOOK_METADATA;
+use crate::identity::hook::IDENTITY_HOOK_METADATA;
 
 /// Lifecycle position a hook occupies for dispatcher purposes.
 ///
@@ -160,87 +156,64 @@ impl HookMetadata {
     }
 }
 
-/// Built-in hook metadata. Plugin authors and hosts can register
-/// additional entries via [`register_hook_metadata`]. The 8 CMF step
-/// hooks (entity × pre/post) are the complete CMF-routable surface
-/// today; identity + delegation are unphased.
-const BUILTIN_METADATA: &[(&str, HookMetadata)] = &[
-    // CMF tool
-    (
-        HOOK_CMF_TOOL_PRE_INVOKE,
-        HookMetadata {
-            entity_type: Some(ENTITY_TOOL),
-            phase: HookPhase::Pre,
-        },
-    ),
-    (
-        HOOK_CMF_TOOL_POST_INVOKE,
-        HookMetadata {
-            entity_type: Some(ENTITY_TOOL),
-            phase: HookPhase::Post,
-        },
-    ),
-    // CMF llm
-    (
-        HOOK_CMF_LLM_INPUT,
-        HookMetadata {
-            entity_type: Some(ENTITY_LLM),
-            phase: HookPhase::Pre,
-        },
-    ),
-    (
-        HOOK_CMF_LLM_OUTPUT,
-        HookMetadata {
-            entity_type: Some(ENTITY_LLM),
-            phase: HookPhase::Post,
-        },
-    ),
-    // CMF prompt
-    (
-        HOOK_CMF_PROMPT_PRE_INVOKE,
-        HookMetadata {
-            entity_type: Some(ENTITY_PROMPT),
-            phase: HookPhase::Pre,
-        },
-    ),
-    (
-        HOOK_CMF_PROMPT_POST_INVOKE,
-        HookMetadata {
-            entity_type: Some(ENTITY_PROMPT),
-            phase: HookPhase::Post,
-        },
-    ),
-    // CMF resource
-    (
-        HOOK_CMF_RESOURCE_PRE_FETCH,
-        HookMetadata {
-            entity_type: Some(ENTITY_RESOURCE),
-            phase: HookPhase::Pre,
-        },
-    ),
-    (
-        HOOK_CMF_RESOURCE_POST_FETCH,
-        HookMetadata {
-            entity_type: Some(ENTITY_RESOURCE),
-            phase: HookPhase::Post,
-        },
-    ),
-    // Non-CMF families (entity-agnostic, not phase-bound).
-    (
-        HOOK_IDENTITY_RESOLVE,
-        HookMetadata {
-            entity_type: None,
-            phase: HookPhase::Unphased,
-        },
-    ),
-    (
-        HOOK_TOKEN_DELEGATE,
-        HookMetadata {
-            entity_type: None,
-            phase: HookPhase::Unphased,
-        },
-    ),
+/// The per-module hook tables, in declaration order. Each is emitted by
+/// that module's `define_hooks!` invocation, so a hook cannot have a
+/// constant without a row. What a new module *can* still get wrong is
+/// being left out of this list, which makes every hook it owns
+/// unregistered at once rather than one of them quietly.
+const HOOK_TABLES: &[&[(&str, HookMetadata)]] = &[
+    CMF_HOOK_METADATA,
+    IDENTITY_HOOK_METADATA,
+    DELEGATION_HOOK_METADATA,
+    ELICITATION_HOOK_METADATA,
 ];
+
+#[allow(
+    clippy::indexing_slicing,
+    reason = "const context; bounds are the loop conditions"
+)]
+const HOOK_COUNT: usize = {
+    let mut total = 0;
+    let mut i = 0;
+    while i < HOOK_TABLES.len() {
+        total += HOOK_TABLES[i].len();
+        i += 1;
+    }
+    total
+};
+
+/// Flatten [`HOOK_TABLES`] at compile time. `Iterator` is not available in
+/// const context and neither is slice indexing through `get`, hence the
+/// index arithmetic.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "const context; bounds are the loop conditions"
+)]
+const fn concat_hook_tables<const N: usize>() -> [(&'static str, HookMetadata); N] {
+    let mut out = [("", HookMetadata::unknown()); N];
+    let mut table = 0;
+    let mut written = 0;
+    while table < HOOK_TABLES.len() {
+        let rows = HOOK_TABLES[table];
+        let mut row = 0;
+        while row < rows.len() {
+            out[written] = rows[row];
+            written += 1;
+            row += 1;
+        }
+        table += 1;
+    }
+    out
+}
+
+const BUILTIN_METADATA_ROWS: [(&str, HookMetadata); HOOK_COUNT] = concat_hook_tables();
+
+/// Built-in hook metadata — the authority for which hooks
+/// `praxis-policy-core` dispatches. Every enumeration of hook names is a
+/// projection of this table, and the config loader validates declared
+/// `hooks:` entries against the registry it seeds. Hosts register
+/// additional entries via [`register_hook_metadata`].
+pub(crate) const BUILTIN_METADATA: &[(&str, HookMetadata)] = &BUILTIN_METADATA_ROWS;
 
 /// Runtime-registered additions to the metadata table. Hosts /
 /// plugin authors call [`register_hook_metadata`] to populate.
@@ -294,6 +267,13 @@ pub fn register_hook_metadata(hook_name: impl Into<String>, meta: HookMetadata) 
 )]
 mod tests {
     use super::*;
+    use crate::cmf::constants::{
+        ENTITY_LLM, ENTITY_TOOL, HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE,
+        HOOK_CMF_LLM_OUTPUT, HOOK_CMF_TOOL_PRE_INVOKE,
+    };
+    use crate::delegation::HOOK_TOKEN_DELEGATE;
+    use crate::elicitation::HOOK_ELICIT;
+    use crate::identity::HOOK_IDENTITY_RESOLVE;
 
     #[test]
     fn cmf_tool_pre_invoke_is_pre_phase_for_tool_entity() {
@@ -387,6 +367,98 @@ mod tests {
         };
         // Request didn't specify entity_type — hook still matches.
         assert!(tool_pre.matches(None, HookPhase::Pre));
+    }
+
+    #[test]
+    fn cmf_http_request_is_pre_phase_for_http_entity() {
+        let meta = lookup(HOOK_CMF_HTTP_REQUEST);
+        assert_eq!(meta.entity_type, Some(crate::cmf::constants::ENTITY_HTTP));
+        assert_eq!(meta.phase, HookPhase::Pre);
+    }
+
+    #[test]
+    fn cmf_http_response_is_post_phase_for_http_entity() {
+        let meta = lookup(HOOK_CMF_HTTP_RESPONSE);
+        assert_eq!(meta.entity_type, Some(crate::cmf::constants::ENTITY_HTTP));
+        assert_eq!(meta.phase, HookPhase::Post);
+    }
+
+    #[test]
+    fn elicit_is_unphased_no_entity() {
+        let meta = lookup(HOOK_ELICIT);
+        assert_eq!(meta.entity_type, None);
+        assert_eq!(meta.phase, HookPhase::Unphased);
+    }
+
+    #[test]
+    fn http_hooks_match_entity_typed_dispatch_as_before() {
+        let request = lookup(HOOK_CMF_HTTP_REQUEST);
+        let response = lookup(HOOK_CMF_HTTP_RESPONSE);
+        // The visitor installs both under ENTITY_HTTP, so entity-typed
+        // dispatch has to keep matching and the other entities must not.
+        assert!(request.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Pre));
+        assert!(!request.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Post));
+        assert!(!request.matches(Some(ENTITY_TOOL), HookPhase::Pre));
+        assert!(response.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Post));
+        assert!(!response.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Pre));
+    }
+
+    #[test]
+    fn authority_holds_every_declared_hook() {
+        // The per-module tables come from the same `define_hooks!`
+        // invocations as the constants, so completeness is structural.
+        // What this guards is the one gap that leaves: a module table
+        // dropped from HOOK_TABLES, which unregisters every hook it owns.
+        assert_eq!(CMF_HOOK_METADATA.len(), 10);
+        assert_eq!(IDENTITY_HOOK_METADATA.len(), 1);
+        assert_eq!(DELEGATION_HOOK_METADATA.len(), 1);
+        assert_eq!(ELICITATION_HOOK_METADATA.len(), 1);
+        assert_eq!(BUILTIN_METADATA.len(), 13);
+        for table in HOOK_TABLES {
+            for (name, _) in *table {
+                assert!(
+                    BUILTIN_METADATA.iter().any(|(n, _)| n == name),
+                    "{name} is declared but missing from the concatenated table",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_hook_constant_keeps_its_import_path() {
+        // Names the constants rather than iterating the authority on
+        // purpose: what is under test is the *path* each one resolves at,
+        // which the table cannot express. Rewriting the declarations as a
+        // macro must not move any of them.
+        use crate::cmf::constants::{
+            HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
+            HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH,
+            HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
+        };
+        use crate::delegation::HOOK_TOKEN_DELEGATE;
+        use crate::elicitation::HOOK_ELICIT;
+        use crate::identity::HOOK_IDENTITY_RESOLVE;
+
+        for name in [
+            HOOK_CMF_TOOL_PRE_INVOKE,
+            HOOK_CMF_TOOL_POST_INVOKE,
+            HOOK_CMF_LLM_INPUT,
+            HOOK_CMF_LLM_OUTPUT,
+            HOOK_CMF_PROMPT_PRE_INVOKE,
+            HOOK_CMF_PROMPT_POST_INVOKE,
+            HOOK_CMF_RESOURCE_PRE_FETCH,
+            HOOK_CMF_RESOURCE_POST_FETCH,
+            HOOK_CMF_HTTP_REQUEST,
+            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_IDENTITY_RESOLVE,
+            HOOK_TOKEN_DELEGATE,
+            HOOK_ELICIT,
+        ] {
+            assert!(
+                BUILTIN_METADATA.iter().any(|(n, _)| *n == name),
+                "{name} resolved but is not in the authority",
+            );
+        }
     }
 
     #[test]
