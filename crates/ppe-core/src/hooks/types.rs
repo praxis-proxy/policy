@@ -9,8 +9,9 @@
 //
 // The framework does not prescribe a fixed set of hook points. Each
 // host places `invoke_hook()` calls at sites appropriate to its
-// processing pipeline. The constants below cover the standard
-// MCP/CMF lifecycle but hosts may register additional types.
+// processing pipeline. The names PPE itself dispatches live with the
+// modules that own them, declared by `define_hooks!`; the enumerations
+// here are projections over the table those declarations build.
 
 use std::fmt;
 
@@ -125,37 +126,30 @@ pub mod cmf_hook_names {
     pub const RESOURCE_POST_FETCH: &str = "cmf.resource_post_fetch";
 }
 
-/// Returns all built-in hook types with their canonical string values.
+/// Returns all built-in hook types, projected from the hook metadata
+/// table.
 ///
-/// Called once during `PolicyEngine` initialization to populate the
-/// hook registry. Hosts add their own hook types after this.
+/// Derived rather than written out: a hand-maintained copy drifted from
+/// the table for months, and because nothing read it there was nothing
+/// to fail. Adding a hook to the authority extends this with no second
+/// edit.
 pub fn builtin_hook_types() -> Vec<HookType> {
-    vec![
-        // Legacy (typed payloads)
-        HookType::new("tool_pre_invoke"),
-        HookType::new("tool_post_invoke"),
-        HookType::new("prompt_pre_fetch"),
-        HookType::new("prompt_post_fetch"),
-        HookType::new("resource_pre_fetch"),
-        HookType::new("resource_post_fetch"),
-        HookType::new("identity_resolve"),
-        HookType::new("token_delegate"),
-        // CMF (MessagePayload)
-        HookType::new("cmf.tool_pre_invoke"),
-        HookType::new("cmf.tool_post_invoke"),
-        HookType::new("cmf.llm_input"),
-        HookType::new("cmf.llm_output"),
-        HookType::new("cmf.prompt_pre_fetch"),
-        HookType::new("cmf.prompt_post_fetch"),
-        HookType::new("cmf.resource_pre_fetch"),
-        HookType::new("cmf.resource_post_fetch"),
-    ]
+    crate::hooks::metadata::BUILTIN_METADATA
+        .iter()
+        .map(|(name, _)| HookType::new(*name))
+        .collect()
 }
 
 /// Look up a hook type by name. Returns the canonical instance if
 /// it matches a built-in, otherwise creates a new custom `HookType`.
 pub fn hook_type_from_str(name: &str) -> HookType {
-    HookType::new(name)
+    crate::hooks::metadata::BUILTIN_METADATA
+        .iter()
+        .find(|(builtin, _)| *builtin == name)
+        .map_or_else(
+            || HookType::new(name),
+            |(builtin, _)| HookType::new(*builtin),
+        )
 }
 
 #[cfg(test)]
@@ -191,9 +185,35 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_hook_types_count() {
-        let builtins = builtin_hook_types();
-        // 8 legacy + 8 CMF
-        assert_eq!(builtins.len(), 16);
+    fn the_enumeration_is_the_authoritys_key_set() {
+        let derived: Vec<String> = builtin_hook_types()
+            .iter()
+            .map(|h| h.as_str().to_owned())
+            .collect();
+        let authority: Vec<String> = crate::hooks::metadata::BUILTIN_METADATA
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        assert_eq!(derived, authority);
+    }
+
+    #[test]
+    fn adding_a_row_to_the_authority_needs_no_second_edit() {
+        // The enumeration is a projection, so its length is the table's.
+        // No count is restated here; a new row shows up on its own.
+        assert_eq!(
+            builtin_hook_types().len(),
+            crate::hooks::metadata::BUILTIN_METADATA.len(),
+        );
+    }
+
+    #[test]
+    fn hook_type_from_str_is_canonical_for_a_builtin_and_custom_otherwise() {
+        let builtin = crate::cmf::constants::HOOK_CMF_TOOL_PRE_INVOKE;
+        assert_eq!(hook_type_from_str(builtin).as_str(), builtin);
+        assert_eq!(
+            hook_type_from_str("host.custom_hook").as_str(),
+            "host.custom_hook",
+        );
     }
 }
