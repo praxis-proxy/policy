@@ -62,11 +62,12 @@
 // # Custom hook metadata
 //
 // Hosts and plugin authors can register metadata for custom hook
-// names via [`register_hook_metadata`]. Unregistered hooks return
-// [`HookMetadata::unknown`] from `lookup` — entity_type `None`, phase
-// `Unphased`. That conservative default matches any dispatch context,
-// so custom hooks dispatch on the first registered entry. Authors
-// who want phase-aware behavior must register metadata explicitly.
+// names via [`register_hook_metadata`]. `lookup` returns `None` for a
+// name the registry does not hold, leaving the fallback to the caller:
+// [`HookMetadata::permissive`] is the wildcard that matches any
+// dispatch context, so a caller opting into it lets unregistered hooks
+// dispatch on the first registered entry. Authors who want phase-aware
+// behavior register metadata explicitly.
 
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
@@ -115,11 +116,13 @@ pub struct HookMetadata {
 }
 
 impl HookMetadata {
-    /// Default — `entity_type: None`, `phase: Unphased`. Used as
-    /// the fallback for hook names not in the registry. The
-    /// `matches` function treats `Unphased` as "matches any phase,"
-    /// so unknown hooks dispatch on the first registered entry.
-    pub const fn unknown() -> Self {
+    /// The wildcard default — `entity_type: None`, `phase: Unphased`.
+    /// [`matches`][Self::matches] treats `Unphased` as "matches any
+    /// phase", so a caller substituting this for an absent registry
+    /// entry lets the hook dispatch on the first registered entry.
+    /// Deliberate, not the result of a failed lookup: `lookup` returns
+    /// `None` and the caller chooses this.
+    pub const fn permissive() -> Self {
         Self {
             entity_type: None,
             phase: HookPhase::Unphased,
@@ -190,7 +193,7 @@ const HOOK_COUNT: usize = {
     reason = "const context; bounds are the loop conditions"
 )]
 const fn concat_hook_tables<const N: usize>() -> [(&'static str, HookMetadata); N] {
-    let mut out = [("", HookMetadata::unknown()); N];
+    let mut out = [("", HookMetadata::permissive()); N];
     let mut table = 0;
     let mut written = 0;
     while table < HOOK_TABLES.len() {
@@ -229,16 +232,16 @@ fn registry() -> &'static RwLock<HashMap<String, HookMetadata>> {
     })
 }
 
-/// Look up metadata for a hook name. Returns
-/// [`HookMetadata::unknown`] for names not in the registry —
-/// equivalent to "no phase, no `entity_type` filter," which lets
-/// unregistered hooks still dispatch via the conservative wildcard
-/// in [`HookMetadata::matches`].
-pub fn lookup(hook_name: &str) -> HookMetadata {
+/// Look up metadata for a hook name. `None` means the registry holds
+/// no entry, which is distinct from an entry whose phase is
+/// [`HookPhase::Unphased`] — a hook deliberately outside the request
+/// lifecycle. A caller that wants the old permissive behavior asks for
+/// it: `.unwrap_or_else(HookMetadata::permissive)`.
+pub fn lookup(hook_name: &str) -> Option<HookMetadata> {
     let r = registry()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    r.get(hook_name).copied().unwrap_or(HookMetadata::unknown())
+    r.get(hook_name).copied()
 }
 
 /// Register or override metadata for a hook name. Idempotent — a
@@ -277,37 +280,62 @@ mod tests {
 
     #[test]
     fn cmf_tool_pre_invoke_is_pre_phase_for_tool_entity() {
-        let meta = lookup(HOOK_CMF_TOOL_PRE_INVOKE);
+        let meta = lookup(HOOK_CMF_TOOL_PRE_INVOKE).expect("registered");
         assert_eq!(meta.entity_type, Some(ENTITY_TOOL));
         assert_eq!(meta.phase, HookPhase::Pre);
     }
 
     #[test]
     fn cmf_llm_output_is_post_phase_for_llm_entity() {
-        let meta = lookup(HOOK_CMF_LLM_OUTPUT);
+        let meta = lookup(HOOK_CMF_LLM_OUTPUT).expect("registered");
         assert_eq!(meta.entity_type, Some(ENTITY_LLM));
         assert_eq!(meta.phase, HookPhase::Post);
     }
 
     #[test]
     fn identity_resolve_is_unphased_no_entity() {
-        let meta = lookup(HOOK_IDENTITY_RESOLVE);
+        let meta = lookup(HOOK_IDENTITY_RESOLVE).expect("registered");
         assert_eq!(meta.entity_type, None);
         assert_eq!(meta.phase, HookPhase::Unphased);
     }
 
     #[test]
     fn token_delegate_is_unphased_no_entity() {
-        let meta = lookup(HOOK_TOKEN_DELEGATE);
+        let meta = lookup(HOOK_TOKEN_DELEGATE).expect("registered");
         assert_eq!(meta.entity_type, None);
         assert_eq!(meta.phase, HookPhase::Unphased);
     }
 
     #[test]
-    fn unknown_hook_returns_universal_default() {
-        let meta = lookup("custom.unrecognized_hook");
-        assert_eq!(meta.entity_type, None);
-        assert_eq!(meta.phase, HookPhase::Unphased);
+    fn an_unregistered_hook_has_no_entry() {
+        assert_eq!(lookup("custom.unrecognized_hook"), None);
+    }
+
+    #[test]
+    fn an_unphased_hook_is_distinguishable_from_an_absent_one() {
+        // The three unphased hooks used to be indistinguishable from a
+        // name nobody registered, which is how a missing row read as a
+        // deliberate choice.
+        for name in [HOOK_IDENTITY_RESOLVE, HOOK_TOKEN_DELEGATE, HOOK_ELICIT] {
+            let meta = lookup(name).expect("registered");
+            assert_eq!(meta.phase, HookPhase::Unphased, "{name}");
+        }
+        assert_eq!(lookup("identity.resolve_typo"), None);
+    }
+
+    #[test]
+    fn every_builtin_hook_is_registered() {
+        for (name, meta) in BUILTIN_METADATA {
+            assert_eq!(lookup(name).as_ref(), Some(meta), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_host_registered_hook_becomes_present() {
+        let name = "test_custom.registered_at_runtime";
+        assert_eq!(lookup(name), None);
+        register_hook_metadata(name, HookMetadata::permissive());
+        assert_eq!(lookup(name), Some(HookMetadata::permissive()));
     }
 
     #[test]
@@ -371,29 +399,29 @@ mod tests {
 
     #[test]
     fn cmf_http_request_is_pre_phase_for_http_entity() {
-        let meta = lookup(HOOK_CMF_HTTP_REQUEST);
+        let meta = lookup(HOOK_CMF_HTTP_REQUEST).expect("registered");
         assert_eq!(meta.entity_type, Some(crate::cmf::constants::ENTITY_HTTP));
         assert_eq!(meta.phase, HookPhase::Pre);
     }
 
     #[test]
     fn cmf_http_response_is_post_phase_for_http_entity() {
-        let meta = lookup(HOOK_CMF_HTTP_RESPONSE);
+        let meta = lookup(HOOK_CMF_HTTP_RESPONSE).expect("registered");
         assert_eq!(meta.entity_type, Some(crate::cmf::constants::ENTITY_HTTP));
         assert_eq!(meta.phase, HookPhase::Post);
     }
 
     #[test]
     fn elicit_is_unphased_no_entity() {
-        let meta = lookup(HOOK_ELICIT);
+        let meta = lookup(HOOK_ELICIT).expect("registered");
         assert_eq!(meta.entity_type, None);
         assert_eq!(meta.phase, HookPhase::Unphased);
     }
 
     #[test]
     fn http_hooks_match_entity_typed_dispatch_as_before() {
-        let request = lookup(HOOK_CMF_HTTP_REQUEST);
-        let response = lookup(HOOK_CMF_HTTP_RESPONSE);
+        let request = lookup(HOOK_CMF_HTTP_REQUEST).expect("registered");
+        let response = lookup(HOOK_CMF_HTTP_RESPONSE).expect("registered");
         // The visitor installs both under ENTITY_HTTP, so entity-typed
         // dispatch has to keep matching and the other entities must not.
         assert!(request.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Pre));
@@ -471,7 +499,7 @@ mod tests {
                 phase: HookPhase::Pre,
             },
         );
-        let meta = lookup(name);
+        let meta = lookup(name).expect("registered");
         assert_eq!(meta.entity_type, Some("custom"));
         assert_eq!(meta.phase, HookPhase::Pre);
     }
