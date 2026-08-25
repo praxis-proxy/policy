@@ -1303,7 +1303,7 @@ async fn multi_hook_plugin_dispatches_per_phase_via_routing_table() {
 // change that dropped the fallback would have looked green.
 // ---------------------------------------------------------------------
 
-/// The hook name under test. Deliberately absent from `BUILTIN_METADATA`,
+/// The hook name under test. Deliberately absent from `BUILTIN_HOOK_METADATA`,
 /// and never named in `hooks:`, so only the Rust registration knows it.
 const UNREGISTERED_HOOK: &str = "host.hook_with_no_metadata_row";
 

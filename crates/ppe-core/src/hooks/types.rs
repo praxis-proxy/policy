@@ -78,7 +78,7 @@ impl From<String> for HookType {
 /// to fail. Adding a hook to the authority extends this with no second
 /// edit.
 pub fn builtin_hook_types() -> Vec<HookType> {
-    crate::hooks::metadata::BUILTIN_METADATA
+    crate::hooks::metadata::BUILTIN_HOOK_METADATA
         .iter()
         .map(|(name, _)| HookType::new(*name))
         .collect()

@@ -210,23 +210,23 @@ const fn concat_hook_tables<const N: usize>() -> [(&'static str, HookMetadata); 
     out
 }
 
-const BUILTIN_METADATA_ROWS: [(&str, HookMetadata); HOOK_COUNT] = concat_hook_tables();
+const BUILTIN_HOOK_METADATA_ROWS: [(&str, HookMetadata); HOOK_COUNT] = concat_hook_tables();
 
 /// Built-in hook metadata, the authority for which hooks
 /// `praxis-policy-core` dispatches. Every enumeration of hook names is a
 /// projection of this table, and the config loader validates declared
 /// `hooks:` entries against the registry it seeds. Hosts register
 /// additional entries via [`register_hook_metadata`].
-pub(crate) const BUILTIN_METADATA: &[(&str, HookMetadata)] = &BUILTIN_METADATA_ROWS;
+pub(crate) const BUILTIN_HOOK_METADATA: &[(&str, HookMetadata)] = &BUILTIN_HOOK_METADATA_ROWS;
 
 /// Runtime-registered additions to the metadata table. Hosts /
 /// plugin authors call [`register_hook_metadata`] to populate.
-/// Initialized with the `BUILTIN_METADATA` on first access.
+/// Initialized from `BUILTIN_HOOK_METADATA` on first access.
 fn registry() -> &'static RwLock<HashMap<String, HookMetadata>> {
     static REGISTRY: OnceLock<RwLock<HashMap<String, HookMetadata>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         let mut map: HashMap<String, HookMetadata> = HashMap::new();
-        for (name, meta) in BUILTIN_METADATA {
+        for (name, meta) in BUILTIN_HOOK_METADATA {
             map.insert((*name).to_owned(), *meta);
         }
         RwLock::new(map)
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn every_builtin_hook_is_registered() {
-        for (name, meta) in BUILTIN_METADATA {
+        for (name, meta) in BUILTIN_HOOK_METADATA {
             assert_eq!(lookup(name).as_ref(), Some(meta), "{name}");
         }
     }
@@ -452,11 +452,11 @@ mod tests {
         assert_eq!(IDENTITY_HOOK_METADATA.len(), 1);
         assert_eq!(DELEGATION_HOOK_METADATA.len(), 1);
         assert_eq!(ELICITATION_HOOK_METADATA.len(), 1);
-        assert_eq!(BUILTIN_METADATA.len(), 13);
+        assert_eq!(BUILTIN_HOOK_METADATA.len(), 13);
         for table in HOOK_TABLES {
             for (name, _) in *table {
                 assert!(
-                    BUILTIN_METADATA.iter().any(|(n, _)| n == name),
+                    BUILTIN_HOOK_METADATA.iter().any(|(n, _)| n == name),
                     "{name} is declared but missing from the concatenated table",
                 );
             }
@@ -469,7 +469,7 @@ mod tests {
         // silently gives one hook two rows and lets the later table's
         // metadata win in the registry.
         let mut seen = std::collections::HashSet::new();
-        for (name, _) in BUILTIN_METADATA {
+        for (name, _) in BUILTIN_HOOK_METADATA {
             assert!(seen.insert(*name), "{name} is declared by two modules");
         }
     }
@@ -505,7 +505,7 @@ mod tests {
             HOOK_ELICIT,
         ] {
             assert!(
-                BUILTIN_METADATA.iter().any(|(n, _)| *n == name),
+                BUILTIN_HOOK_METADATA.iter().any(|(n, _)| *n == name),
                 "{name} resolved but is not in the authority",
             );
         }
