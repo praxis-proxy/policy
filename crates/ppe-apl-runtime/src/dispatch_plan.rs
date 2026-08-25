@@ -224,38 +224,6 @@ impl RouteDispatchPlan {
         // caps and on_error overrides aren't exposed on delegation
         // entries — the on_error lives in the IR step itself and is
         // honored by the evaluator).
-        // A route that exchanges the caller's own credential depends on
-        // something having validated it first. Identity resolution is a
-        // separate hook the host invokes at request entry, and it is
-        // per-route configuration — `route.identity` is optional, and a
-        // route with no identity block resolves no identity plugins at
-        // all. Nothing then rejects a token the IdP never signed before
-        // the delegator exchanges it.
-        //
-        // A warning rather than a hard error: the host, not this crate,
-        // decides how identity is established, and a deployment may
-        // legitimately validate upstream of PPE. But it is silent
-        // otherwise, and the failure it precedes (a delegation minted
-        // against an unvalidated credential) does not look like a
-        // configuration problem when it surfaces.
-        let unvalidated = delegate_steps_exchanging_caller_credentials(route);
-        if !unvalidated.is_empty()
-            && let Some((entity_type, entity_name, scope)) = split_route_key(&route.route_key)
-            && !engine.route_has_identity_resolution(entity_type, entity_name, scope)
-        {
-            tracing::warn!(
-                alarm = "delegation_without_identity_resolution",
-                route = %route.route_key,
-                plugins = ?unvalidated,
-                "route delegates the caller's own credential but resolves no identity for it; \
-                 the token handed to the delegator has not been validated by this process, so \
-                 the IdP's rejection of a forged one is the only thing standing between an \
-                 unauthenticated caller and a token exchange. Add an `identity:` block to the \
-                 route (or globally), or use `subject: this_workload` if the delegation should \
-                 not carry the caller's credential at all.",
-            );
-        }
-
         for name in collect_delegate_plugin_names(route) {
             let entries = engine.build_override_entries(&name, None, None, None).await;
             // Pick the first token.delegate entry. Per delegation-hooks
@@ -403,30 +371,6 @@ mod identity_check_tests {
     }
 
     #[test]
-    fn route_key_splits_into_type_and_name() {
-        assert_eq!(
-            split_route_key("tool:get_compensation"),
-            Some(("tool", "get_compensation", None))
-        );
-    }
-
-    #[test]
-    fn route_key_splits_a_scoped_route() {
-        assert_eq!(
-            split_route_key("tool:get_compensation@finance"),
-            Some(("tool", "get_compensation", Some("finance")))
-        );
-    }
-
-    #[test]
-    fn a_malformed_route_key_yields_nothing() {
-        // Rather than guessing at a split, which would ask identity
-        // resolution about a route that does not exist and get a
-        // confident "no identity here" for it.
-        assert_eq!(split_route_key("no-colon-here"), None);
-    }
-
-    #[test]
     fn a_step_with_no_subject_defaults_to_user() {
         // The invoker defaults an unspecified subject to `user`, so an
         // unannotated step does exchange the caller's credential.
@@ -481,15 +425,51 @@ mod identity_check_tests {
     }
 }
 
-/// Split a `route_key` back into the parts identity resolution is keyed
-/// on. Built by the visitor as `entity_type:entity_name` with an
-/// optional `@scope` suffix.
-fn split_route_key(route_key: &str) -> Option<(&str, &str, Option<&str>)> {
-    let (entity_type, rest) = route_key.split_once(':')?;
-    Some(match rest.split_once('@') {
-        Some((entity_name, scope)) => (entity_type, entity_name, Some(scope)),
-        None => (entity_type, rest, None),
-    })
+/// Warn when a route exchanges a credential the caller presented but
+/// resolves no identity for it.
+///
+/// A route that delegates the caller's own credential depends on
+/// something having validated it first. Identity resolution is a
+/// separate hook the host invokes at request entry, and it is per-route
+/// configuration — `route.identity` is optional, and a route with no
+/// identity block resolves no identity plugins at all. Nothing then
+/// rejects a token the `IdP` never signed before the delegator exchanges
+/// it.
+///
+/// A warning rather than a hard error: the host, not this crate, decides
+/// how identity is established, and a deployment may legitimately
+/// validate upstream of PPE. But it is silent otherwise, and the failure
+/// it precedes (a delegation minted against an unvalidated credential)
+/// does not look like a configuration problem when it surfaces.
+///
+/// Called from the visitor's config walk rather than from
+/// [`RouteDispatchPlan::build`], which runs on a route's first request:
+/// a misconfigured route nobody has called yet is exactly the one an
+/// operator wants told about, and at plan-build time the warning would
+/// wait for the traffic it is meant to precede.
+pub(crate) fn warn_if_delegating_without_identity(
+    route: &CompiledRoute,
+    entity_type: &str,
+    entity_name: &str,
+    scope: Option<&str>,
+    engine: &PolicyEngine,
+) {
+    let unvalidated = delegate_steps_exchanging_caller_credentials(route);
+    if unvalidated.is_empty() || engine.route_has_identity_resolution(entity_type, entity_name, scope)
+    {
+        return;
+    }
+    tracing::warn!(
+        alarm = "delegation_without_identity_resolution",
+        route = %route.route_key,
+        plugins = ?unvalidated,
+        "route delegates the caller's own credential but resolves no identity for it; \
+         the token handed to the delegator has not been validated by this process, so \
+         the IdP's rejection of a forged one is the only thing standing between an \
+         unauthenticated caller and a token exchange. Add an `identity:` block to the \
+         route (or globally), or use `subject: this_workload` if the delegation should \
+         not carry the caller's credential at all.",
+    );
 }
 
 /// Delegate steps on this route that exchange a credential the *caller*

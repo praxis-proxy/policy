@@ -720,6 +720,26 @@ impl ConfigVisitor for AplConfigVisitor {
                 continue;
             }
 
+            // Load-time soundness check: a route that delegates the
+            // caller's own credential but resolves no identity for it.
+            // Per entity name rather than once per route, because
+            // identity resolution is keyed on the same
+            // (type, name, scope) triple the annotation is. Run here,
+            // during the config walk, rather than in
+            // `RouteDispatchPlan::build`, which a route reaches only on
+            // its first request — the route nobody has called yet is
+            // precisely the one this is for. `load_config` has already
+            // installed the policy config on the engine snapshot by the
+            // time visitors run, so the identity lookup sees the config
+            // being loaded.
+            crate::dispatch_plan::warn_if_delegating_without_identity(
+                &effective,
+                entity_type,
+                entity_name,
+                scope.as_deref(),
+                mgr.as_ref(),
+            );
+
             // Plugin-mode validation for `parallel:` blocks.
             // `praxis-policy-apl-core::Effect::validate_parallel_purity` already rejected
             // FieldOp / Delegate at parse time; this pass checks that every

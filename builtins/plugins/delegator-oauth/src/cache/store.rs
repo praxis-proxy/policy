@@ -40,10 +40,13 @@
 // after an hour sees a monotonic clock that barely moved and a token
 // that expired long ago.
 //
-// So retirement is monotonic, via [`ServeWindow`], and every read is
-// additionally checked against the wall clock the token's own
-// `expires_at` is expressed in. The failure this avoids is a downstream
-// 401 rather than a credential mix-up, but it costs one comparison.
+// So retirement is monotonic, via [`ServeWindow`], and every read
+// additionally re-runs that decision on the wall clock: both against
+// the token's own `expires_at` and against the serve window the entry
+// was created with, which is where `ttl_ceiling_seconds` lives. The
+// first avoids a downstream 401; the second is what keeps the ceiling
+// meaningful, since a long-lived token stays valid to the `IdP` well
+// past the point the cache was supposed to stop reusing it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,17 +89,47 @@ pub(crate) struct CachedMint {
 }
 
 impl CachedMint {
-    /// Whether this entry is still far enough from the token's own
-    /// expiry to be handed downstream.
+    /// Whether this entry may still be handed downstream.
     ///
     /// Wall-clock, deliberately. [`ServeWindow`] has already made the
     /// monotonic decision; this catches the case where the two clocks
     /// disagree, which in practice means the host suspended.
+    ///
+    /// Both halves of that decision are restated here, not just the
+    /// token's own expiry. A token the `IdP` issued for an hour, held
+    /// under a five-minute `ttl_ceiling_seconds`, is still perfectly
+    /// valid to the `IdP` long after its entry was due to retire, so a
+    /// check against `expires_at` alone would serve it straight through
+    /// the ceiling once the monotonic clock stopped advancing. The
+    /// ceiling is the whole of the bound this cache documents on an
+    /// `IdP`-side revocation, so it has to hold on both clocks.
     fn is_servable_now(&self, config: &CacheConfig) -> bool {
+        let now = Utc::now();
         let floor = chrono::Duration::seconds(
             i64::try_from(config.staleness.floor_seconds).unwrap_or(i64::MAX),
         );
-        Utc::now() + floor <= self.mint.token.expires_at
+        // Checked throughout: a saturated `floor` or `serve_for` would
+        // otherwise panic on overflow, and "cannot be served" is the
+        // answer that keeps a credential out of the response either way.
+        let Some(with_floor) = now.checked_add_signed(floor) else {
+            return false;
+        };
+        if with_floor > self.mint.token.expires_at {
+            return false;
+        }
+        // The monotonic retirement, restated on the wall clock. `None`
+        // is an entry created already expired, which is never servable
+        // however far the clocks have drifted apart.
+        let Some(serve_for) = self.serve_for else {
+            return false;
+        };
+        // Whole seconds, so the wall-clock window is if anything a shade
+        // shorter than the monotonic one rather than longer.
+        let serve_for =
+            chrono::Duration::seconds(i64::try_from(serve_for.as_secs()).unwrap_or(i64::MAX));
+        self.minted_at
+            .checked_add_signed(serve_for)
+            .is_some_and(|retires_at| now <= retires_at)
     }
 }
 
@@ -282,8 +315,9 @@ impl DelegatedTokenCache {
             tracing::debug!(
                 target: "praxis_policy::delegation",
                 cache_key = ?key,
-                "discarding a cached delegated token that the wall clock says has expired; \
-                 the monotonic clock had not retired it yet, which usually means the host suspended",
+                "discarding a cached delegated token that the wall clock says has expired or \
+                 outlived its serve window; the monotonic clock had not retired it yet, which \
+                 usually means the host suspended",
             );
             self.inner.invalidate(&key).await;
         }
@@ -674,6 +708,55 @@ mod tests {
         assert_eq!(second.source, Source::Mint);
         assert_eq!(&*second.mint.token.token, "fresh");
         assert_eq!(mints.load(Ordering::SeqCst), 2);
+    }
+
+    /// The other half of the wall-clock guard: the ceiling. A token the
+    /// `IdP` issued for two hours is still valid to it long after a
+    /// five-minute `ttl_ceiling_seconds` was supposed to retire the
+    /// entry, so `expires_at` cannot catch this one — only the serve
+    /// window can. Without that check a suspended host resumes and
+    /// keeps serving a token straight through the ceiling, which is the
+    /// only bound the cache offers against an `IdP`-side revocation.
+    #[tokio::test]
+    async fn an_entry_past_its_serve_window_is_discarded_though_its_token_lives_on() {
+        let config = CacheConfig {
+            ttl_ceiling_seconds: 300,
+            ..enabled_config()
+        };
+        let cache = DelegatedTokenCache::new(config).unwrap().unwrap();
+        let key = key_for(&cache, "alice-token");
+
+        // What a suspend leaves behind. moka's monotonic clock has
+        // barely moved, so the entry is still in the map with time on
+        // its window, while the wall clock is an hour past a ceiling of
+        // five minutes.
+        let serve_for = cache
+            .config
+            .serve_window(Duration::from_secs(7200), key.jitter_byte());
+        assert!(serve_for.is_some(), "the entry must start out servable");
+        cache
+            .inner
+            .insert(
+                key,
+                CachedMint {
+                    mint: mint_lasting(7200, "past-the-ceiling"),
+                    minted_at: Utc::now() - chrono::Duration::seconds(3600),
+                    serve_for,
+                },
+            )
+            .await;
+
+        let served = cache
+            .get_or_mint::<MintFailed, _>(key, async { Ok(mint_lasting(7200, "fresh")) })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            served.source,
+            Source::Mint,
+            "an entry an hour past a five-minute ceiling must not be served"
+        );
+        assert_eq!(&*served.mint.token.token, "fresh");
     }
 
     /// The bound is the flooding mitigation, so it has to hold against a
