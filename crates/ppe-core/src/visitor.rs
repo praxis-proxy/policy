@@ -135,7 +135,7 @@ pub trait ConfigVisitor: Send + Sync {
     /// Visit one route entry. `yaml` is the raw value at `routes[i]`
     /// (so orchestrator can find its own block like `apl:`); `parsed`
     /// is the typed `RouteEntry` praxis-policy-core deserialized (so the
-    /// orchestrator can read `tool`/`resource`/`prompt`/`llm`,
+    /// orchestrator can read `tool`/`resource`/`prompt`/`llm`/`http`,
     /// `meta.scope`, `meta.tags`, etc. without re-parsing).
     /// # Errors
     ///
@@ -148,6 +148,17 @@ pub trait ConfigVisitor: Send + Sync {
         _parsed: &RouteEntry,
     ) -> Result<(), VisitorError> {
         Ok(())
+    }
+
+    /// Route keys this visitor reads that praxis-policy-core does not model.
+    /// A configuration load rejects a route key nothing recognizes, so an
+    /// orchestrator naming its block something praxis-policy-core has never
+    /// heard of declares it here to stay loadable.
+    ///
+    /// Only consulted on the `load_config_yaml` path, the one that walks
+    /// visitors at all.
+    fn extra_route_keys(&self) -> &[&str] {
+        &[]
     }
 }
 
@@ -201,5 +212,53 @@ routes:
     #[test]
     fn the_visitor_name_is_what_diagnostics_report() {
         assert_eq!(SilentVisitor.name(), "silent");
+    }
+
+    /// A visitor that reads a route key praxis-policy-core does not model, the
+    /// shape an out-of-tree Rego or Cedar orchestrator takes.
+    #[derive(Debug)]
+    struct RegoVisitor;
+
+    impl ConfigVisitor for RegoVisitor {
+        fn name(&self) -> &str {
+            "rego"
+        }
+
+        fn extra_route_keys(&self) -> &[&str] {
+            &["rego"]
+        }
+    }
+
+    const ROUTE_WITH_A_VISITOR_KEY: &str = "
+plugin_settings:
+  routing_enabled: true
+routes:
+  - tool: get_compensation
+    rego:
+      package: hr.authz
+";
+
+    /// The route-key check exists to catch a typo, so it has to take the keys a
+    /// visitor declares on faith. A closed list would turn every out-of-tree
+    /// orchestrator's own block into a load failure.
+    #[test]
+    fn a_route_key_a_visitor_declares_is_accepted() {
+        let mgr = Arc::new(PolicyEngine::default());
+        mgr.register_visitor(Arc::new(RegoVisitor));
+        mgr.load_config_yaml(ROUTE_WITH_A_VISITOR_KEY)
+            .expect("a key the registered visitor consumes must load");
+    }
+
+    /// The other half of the same behavior: with nobody consuming the key it is
+    /// a typo again, named in the failure.
+    #[test]
+    fn the_same_route_key_is_rejected_when_no_visitor_claims_it() {
+        let mgr = Arc::new(PolicyEngine::default());
+        let err = mgr
+            .load_config_yaml(ROUTE_WITH_A_VISITOR_KEY)
+            .expect_err("an unclaimed route key must fail the load")
+            .to_string();
+        assert!(err.contains("rego"), "the key as written: {err}");
+        assert!(err.contains("route 0"), "the route index: {err}");
     }
 }

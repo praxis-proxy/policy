@@ -152,8 +152,9 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub policies: HashMap<String, PolicyGroup>,
 
-    /// Per-entity-type default policy groups.
-    /// Keys are `tool`, `resource`, `prompt`, `llm`.
+    /// Per-entity-type default policy groups. Keys are `tool`, `resource`,
+    /// `prompt`, `llm`, and `http`; anything else is rejected at load, since a
+    /// misspelled entity type would be inert rather than wrong.
     #[serde(default)]
     pub defaults: HashMap<String, PolicyGroup>,
 
@@ -287,8 +288,8 @@ where
 
 /// A per-entity routing rule.
 ///
-/// Matches one entity type (tool, resource, prompt, or LLM) and
-/// determines which plugins fire.
+/// Matches one entity type (tool, resource, prompt, LLM, or generic HTTP
+/// request) and determines which plugins fire.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouteEntry {
     /// Match a tool by exact name, list, or glob.
@@ -306,6 +307,12 @@ pub struct RouteEntry {
     /// Match an LLM by exact model name, list, or glob.
     #[serde(default)]
     pub llm: Option<StringOrList>,
+
+    /// Match generic HTTP requests by path, and optionally by method.
+    /// Requires `plugin_settings.routing_enabled: true` like every other
+    /// route selector. See [`HttpSelector`] for the three shapes.
+    #[serde(default)]
+    pub http: Option<HttpSelector>,
 
     /// Operational metadata — tags, scope, properties.
     #[serde(default)]
@@ -608,6 +615,218 @@ impl StringOrList {
     }
 }
 
+/// A generic HTTP request matcher on a route.
+///
+/// Three YAML shapes. A bare string and a list hold **exact** paths, matched by
+/// equality, which keeps `http:` consistent with the name selectors and makes
+/// breadth explicit. The map form asks for a segment-boundary prefix with
+/// `path_prefix:`, or an exact path with `path:`, and may narrow either by
+/// `method:`.
+///
+/// ```yaml
+/// http: /healthz                                   # one exact path
+/// http: [/healthz, /readyz]                        # several exact paths
+/// http: { path_prefix: /v1/files, method: GET }    # a prefix, GET only
+/// ```
+///
+/// A path is matched by equality or by prefix, never by glob, so this does not
+/// reuse [`Pattern`]: the segment-boundary reading is the host router's, and a
+/// glob dialect here would disagree with it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum HttpSelector {
+    /// One exact path.
+    Path(String),
+    /// Several exact paths.
+    Paths(Vec<String>),
+    /// A prefix or exact path, optionally narrowed by method.
+    Match(HttpMatch),
+}
+
+/// The map form of [`HttpSelector`]. Exactly one of `path:` / `path_prefix:`
+/// is required, which is reported per route at load rather than here, so the
+/// message can name the route.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HttpMatch {
+    /// Exact path, matched by equality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+
+    /// Segment-boundary prefix. One trailing slash is dropped at parse time,
+    /// so `/api/` and `/api` are the same selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_prefix: Option<String>,
+
+    /// Methods this selector accepts. Absent accepts any method.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<StringOrList>,
+}
+
+/// The keys the map form of `http:` accepts.
+const HTTP_MATCH_KEYS: &[&str] = &["path", "path_prefix", "method"];
+
+impl HttpSelector {
+    /// A selector matching one exact path, for a host building a route in Rust
+    /// rather than in YAML.
+    pub fn exact(path: impl Into<String>) -> Self {
+        Self::Path(path.into())
+    }
+
+    /// A selector matching a segment-boundary prefix, normalized the way a
+    /// parsed one is.
+    pub fn prefix(prefix: &str) -> Self {
+        Self::Match(HttpMatch {
+            path_prefix: Some(trim_prefix_slash(prefix)),
+            ..HttpMatch::default()
+        })
+    }
+
+    /// The paths this selector matches by equality. Empty for a prefix
+    /// selector.
+    pub fn exact_paths(&self) -> &[String] {
+        match self {
+            Self::Path(path) => std::slice::from_ref(path),
+            Self::Paths(paths) => paths,
+            Self::Match(m) => m.path.as_slice(),
+        }
+    }
+
+    /// The segment-boundary prefix this selector matches, with one trailing
+    /// slash already dropped unless the prefix is the root.
+    pub fn path_prefix(&self) -> Option<&str> {
+        match self {
+            Self::Path(_) | Self::Paths(_) => None,
+            Self::Match(m) => m.path_prefix.as_deref(),
+        }
+    }
+
+    /// The method matcher, when the map form narrows by method. `None`
+    /// accepts any method.
+    pub fn method(&self) -> Option<&StringOrList> {
+        match self {
+            Self::Path(_) | Self::Paths(_) => None,
+            Self::Match(m) => m.method.as_ref(),
+        }
+    }
+
+    /// What is wrong with this selector, phrased for the operator, or `None`
+    /// when it is well formed. The caller prefixes the route it came from.
+    fn defect(&self) -> Option<String> {
+        match self {
+            Self::Path(path) => path
+                .is_empty()
+                .then(|| "declares an empty `http:` path".to_owned()),
+            Self::Paths(paths) => {
+                if paths.is_empty() {
+                    Some("declares an empty `http:` list, which matches nothing".to_owned())
+                } else if paths.iter().any(String::is_empty) {
+                    Some("declares an empty path in its `http:` list".to_owned())
+                } else {
+                    None
+                }
+            },
+            Self::Match(m) => match (&m.path, &m.path_prefix) {
+                (Some(_), Some(_)) => Some(
+                    "declares both `path:` and `path_prefix:` under `http:`, which ask for \
+                     different matches; keep one"
+                        .to_owned(),
+                ),
+                (None, None) => Some(
+                    "declares neither `path:` nor `path_prefix:` under `http:`; one is required"
+                        .to_owned(),
+                ),
+                (Some(path), None) if path.is_empty() => {
+                    Some("declares an empty `http.path:`".to_owned())
+                },
+                (None, Some(prefix)) if prefix.is_empty() => Some(
+                    "declares an empty `http.path_prefix:`; write `/` for the catch-all".to_owned(),
+                ),
+                _ => None,
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HttpSelector {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        // Two-stage through opaque YAML so each shape gets an error naming the
+        // key or entry at fault, which an untagged enum cannot do.
+        match serde_yaml::Value::deserialize(deserializer)? {
+            serde_yaml::Value::String(path) => Ok(Self::Path(path)),
+            serde_yaml::Value::Sequence(items) => {
+                let mut paths = Vec::with_capacity(items.len());
+                for (i, item) in items.into_iter().enumerate() {
+                    match item {
+                        serde_yaml::Value::String(path) => paths.push(path),
+                        _ => {
+                            return Err(D::Error::custom(format!(
+                                "`http:` list entry [{i}] must be a path string"
+                            )));
+                        },
+                    }
+                }
+                Ok(Self::Paths(paths))
+            },
+            serde_yaml::Value::Mapping(map) => {
+                let mut parsed = HttpMatch::default();
+                for (key, value) in map {
+                    let Some(key) = key.as_str() else {
+                        return Err(D::Error::custom("`http:` map keys must be strings"));
+                    };
+                    match key {
+                        "path" => parsed.path = Some(http_selector_path(key, &value)?),
+                        "path_prefix" => {
+                            parsed.path_prefix =
+                                Some(trim_prefix_slash(&http_selector_path(key, &value)?));
+                        },
+                        "method" => {
+                            parsed.method = Some(serde_yaml::from_value(value).map_err(|e| {
+                                D::Error::custom(format!(
+                                    "`http.method:` must be a method name or a list of them: {e}"
+                                ))
+                            })?);
+                        },
+                        other => {
+                            return Err(D::Error::custom(format!(
+                                "unknown key `{other}` under `http:` (accepts {})",
+                                HTTP_MATCH_KEYS.join(", ")
+                            )));
+                        },
+                    }
+                }
+                Ok(Self::Match(parsed))
+            },
+            _ => Err(D::Error::custom(
+                "`http:` must be a path, a list of paths, or a map with `path:` or \
+                 `path_prefix:` (and optional `method:`)",
+            )),
+        }
+    }
+}
+
+/// Read one path-valued key of the `http:` map form.
+fn http_selector_path<E: serde::de::Error>(
+    key: &str,
+    value: &serde_yaml::Value,
+) -> Result<String, E> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| E::custom(format!("`http.{key}:` must be a path string")))
+}
+
+/// Drop one trailing slash from a declared prefix so `/api/` and `/api` are
+/// the same selector. The root keeps its slash, since dropping it would leave
+/// nothing for diagnostics to name.
+fn trim_prefix_slash(prefix: &str) -> String {
+    match prefix.strip_suffix('/') {
+        Some(trimmed) if !trimmed.is_empty() => trimmed.to_owned(),
+        _ => prefix.to_owned(),
+    }
+}
+
 /// Load and parse a PPE config from a YAML file.
 /// # Errors
 ///
@@ -623,10 +842,12 @@ pub fn load_config(path: &Path) -> Result<PolicyConfig, Box<PluginError>> {
 /// Parse a PPE config from a YAML string.
 /// # Errors
 ///
-/// Returns `PluginError::Config` when the YAML does not deserialize, and when it
-/// carries a renamed legacy key. That second case is rejected rather than
-/// ignored: an unknown field is dropped silently, so a stale `identity:` block
-/// would leave its authentication steps unrun, which fails open.
+/// Returns `PluginError::Config` when the YAML does not deserialize, when it
+/// carries a renamed legacy key, and when a route carries a key nothing reads.
+/// Those two are rejected rather than ignored: an unknown field is dropped
+/// silently, so a stale `identity:` block would leave its authentication steps
+/// unrun and a misspelled selector would leave a route matching nothing, both
+/// of which fail open.
 pub fn parse_config(yaml: &str) -> Result<PolicyConfig, Box<PluginError>> {
     // Scan the raw YAML for renamed legacy keys before the typed parse:
     // `RouteEntry` / `GlobalConfig` / `PolicyGroup` silently ignore unknown
@@ -636,6 +857,10 @@ pub fn parse_config(yaml: &str) -> Result<PolicyConfig, Box<PluginError>> {
         message: format!("failed to parse config YAML: {e}"),
     })?;
     reject_renamed_identity_key(&raw)?;
+    // No visitor is registered on this path, so only praxis-policy-core's own
+    // route keys are accepted. A host whose visitor reads route keys of its
+    // own loads through `PolicyEngine::load_config_yaml`, which unions them in.
+    reject_unknown_route_keys(&raw, &[])?;
     let mut config: PolicyConfig =
         serde_yaml::from_value(raw).map_err(|e| PluginError::Config {
             message: format!("failed to parse config YAML: {e}"),
@@ -699,6 +924,80 @@ pub(crate) fn reject_renamed_identity_key(raw: &serde_yaml::Value) -> Result<(),
             if route.get("identity").is_some() {
                 return Err(renamed(&format!("routes[{i}]")));
             }
+        }
+    }
+    Ok(())
+}
+
+/// The route keys a configuration may carry.
+///
+/// Larger than [`RouteEntry`]'s typed fields on purpose: a route shares its
+/// mapping with the orchestrator blocks the typed struct deliberately ignores,
+/// so `deny_unknown_fields` would reject every APL-annotated route in the tree.
+/// `apl:` and `response:` are those blocks; the rest are the APL terms an
+/// operator may write flat on the route with no `apl:` wrapper.
+const KNOWN_ROUTE_KEYS: &[&str] = &[
+    // Typed `RouteEntry` fields.
+    "tool",
+    "resource",
+    "prompt",
+    "llm",
+    "http",
+    "meta",
+    "groups",
+    "when",
+    "plugins",
+    "authentication",
+    // Orchestrator blocks praxis-policy-core carries but does not model.
+    "apl",
+    "response",
+    // APL terms accepted flat on a route, without the `apl:` wrapper.
+    "pre_invocation",
+    "post_invocation",
+    "authorization",
+    "args",
+    "result",
+    "pdp",
+    "session_store",
+];
+
+/// Reject a route key nothing reads, naming the key and the route.
+///
+/// An unknown field is dropped by the typed parse, so a misspelled selector
+/// used to load clean and leave the route matching nothing. `extra_route_keys`
+/// carries the keys registered visitors consume, so a host orchestrator reading
+/// a key praxis-policy-core has never heard of stays loadable.
+///
+/// # Errors
+///
+/// Returns `PluginError::Config` naming the first unrecognized key and the
+/// index of the route carrying it.
+pub(crate) fn reject_unknown_route_keys(
+    raw: &serde_yaml::Value,
+    extra_route_keys: &[&str],
+) -> Result<(), Box<PluginError>> {
+    let Some(routes) = raw.get("routes").and_then(|r| r.as_sequence()) else {
+        return Ok(());
+    };
+    for (i, route) in routes.iter().enumerate() {
+        let Some(map) = route.as_mapping() else {
+            continue; // Shape is the typed parse's to report.
+        };
+        for key in map.keys() {
+            let Some(key) = key.as_str() else {
+                return Err(Box::new(PluginError::Config {
+                    message: format!("route {i} has a key that is not a string"),
+                }));
+            };
+            if KNOWN_ROUTE_KEYS.contains(&key) || extra_route_keys.contains(&key) {
+                continue;
+            }
+            return Err(Box::new(PluginError::Config {
+                message: format!(
+                    "route {i} has unknown key `{key}`; a route accepts {}",
+                    KNOWN_ROUTE_KEYS.join(", ")
+                ),
+            }));
         }
     }
     Ok(())
@@ -805,27 +1104,55 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     if config.routing_enabled() {
         let plugin_names: HashSet<&str> = config.plugins.iter().map(|p| p.name.as_str()).collect();
 
-        for (i, route) in config.routes.iter().enumerate() {
-            let count = [
-                route.tool.is_some(),
-                route.resource.is_some(),
-                route.prompt.is_some(),
-                route.llm.is_some(),
-            ]
-            .iter()
-            .filter(|&&m| m)
-            .count();
-
-            if count == 0 {
+        // A `global.defaults` key that names no entity type never applies to
+        // anything, so a typo there would be silently inert rather than wrong.
+        for entity_type in config.global.defaults.keys() {
+            if !SELECTOR_KEYS.contains(&entity_type.as_str()) {
                 return Err(Box::new(PluginError::Config {
                     message: format!(
-                        "route {i} has no entity matcher (need tool, resource, prompt, or llm)"
+                        "global.defaults key '{entity_type}' is not an entity type (expected one \
+                         of {})",
+                        SELECTOR_KEYS.join(", ")
                     ),
                 }));
             }
-            if count > 1 {
+        }
+
+        for (i, route) in config.routes.iter().enumerate() {
+            let declared: Vec<&str> = [
+                ("tool", route.tool.is_some()),
+                ("resource", route.resource.is_some()),
+                ("prompt", route.prompt.is_some()),
+                ("llm", route.llm.is_some()),
+                ("http", route.http.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(name, present)| present.then_some(name))
+            .collect();
+
+            if declared.is_empty() {
                 return Err(Box::new(PluginError::Config {
-                    message: format!("route {i} has multiple entity matchers (need exactly one)"),
+                    message: format!(
+                        "route {i} has no entity matcher (need one of {})",
+                        SELECTOR_KEYS.join(", ")
+                    ),
+                }));
+            }
+            if declared.len() > 1 {
+                return Err(Box::new(PluginError::Config {
+                    message: format!(
+                        "route {i} has multiple entity matchers ({}); need exactly one of {}",
+                        declared.join(", "),
+                        SELECTOR_KEYS.join(", ")
+                    ),
+                }));
+            }
+
+            if let Some(http) = &route.http
+                && let Some(defect) = http.defect()
+            {
+                return Err(Box::new(PluginError::Config {
+                    message: format!("route {i} {defect}"),
                 }));
             }
 
@@ -876,6 +1203,17 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
 
     Ok(())
 }
+
+/// The selector keys a route may declare, one per entity type, and the keys
+/// `global.defaults` accepts, since a default applies per entity type. Named
+/// from the entity-type constants so the two spellings cannot drift.
+const SELECTOR_KEYS: &[&str] = &[
+    crate::cmf::constants::ENTITY_TOOL,
+    crate::cmf::constants::ENTITY_RESOURCE,
+    crate::cmf::constants::ENTITY_PROMPT,
+    crate::cmf::constants::ENTITY_LLM,
+    crate::cmf::constants::ENTITY_HTTP,
+];
 
 /// Specificity scores for route matching.
 const SPECIFICITY_EXACT_NAME: usize = 1000;
@@ -2745,5 +3083,444 @@ routes:
             !s.matches("get_compensation"),
             "the default matcher must not admit an arbitrary name"
         );
+    }
+
+    // ---- the `http:` selector ---------------------------------------------
+
+    /// Collect the exact paths a selector matches, for comparison against what
+    /// the config declared.
+    fn exact_paths_of(selector: &HttpSelector) -> Vec<&str> {
+        selector
+            .exact_paths()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    }
+
+    /// The three shapes and what each asks for: a bare string and a list are
+    /// exact paths, the map form is a prefix or an exact path, optionally
+    /// narrowed by method. Each also serializes back to what was written, so a
+    /// config round-trips through a tool that reads and rewrites it.
+    #[test]
+    fn every_http_selector_shape_parses_and_serializes_back() {
+        let yaml = r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: /healthz
+  - http: [/livez, /readyz]
+  - http:
+      path_prefix: /v1/files
+      method: GET
+  - http:
+      path: /v1/files/manifest
+      method: [GET, HEAD]
+"#;
+        let cfg = parse_config(yaml).expect("every `http:` shape must parse");
+
+        let scalar = cfg.routes[0].http.as_ref().expect("scalar form");
+        assert_eq!(exact_paths_of(scalar), ["/healthz"]);
+        assert_eq!(scalar.path_prefix(), None);
+        assert!(scalar.method().is_none(), "no method narrows a bare path");
+
+        let list = cfg.routes[1].http.as_ref().expect("list form");
+        assert_eq!(exact_paths_of(list), ["/livez", "/readyz"]);
+        assert_eq!(list.path_prefix(), None);
+
+        let prefix = cfg.routes[2].http.as_ref().expect("prefix form");
+        assert!(
+            prefix.exact_paths().is_empty(),
+            "a prefix selector matches no path by equality"
+        );
+        assert_eq!(prefix.path_prefix(), Some("/v1/files"));
+        assert!(prefix.method().expect("method matcher").matches("GET"));
+
+        let exact_map = cfg.routes[3].http.as_ref().expect("map form with `path:`");
+        assert_eq!(exact_paths_of(exact_map), ["/v1/files/manifest"]);
+        assert_eq!(exact_map.path_prefix(), None);
+        assert_eq!(
+            exact_map.method().expect("method matcher").as_names(),
+            ["GET", "HEAD"]
+        );
+
+        assert_eq!(
+            serde_yaml::to_string(scalar).expect("serialize").trim(),
+            "/healthz"
+        );
+        assert_eq!(
+            serde_yaml::to_string(list).expect("serialize"),
+            "- /livez\n- /readyz\n"
+        );
+        assert_eq!(
+            serde_yaml::to_string(prefix).expect("serialize"),
+            "path_prefix: /v1/files\nmethod: GET\n"
+        );
+    }
+
+    /// A trailing slash on a prefix is insignificant, matching how the host's
+    /// router reads one, so both spellings land on the same selector.
+    #[test]
+    fn a_trailing_slash_on_a_prefix_parses_to_the_same_selector() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: { path_prefix: /api }
+  - http: { path_prefix: "/api/" }
+"#,
+        )
+        .expect("both spellings must parse");
+
+        let written = cfg.routes[0].http.as_ref().expect("without slash");
+        let with_slash = cfg.routes[1].http.as_ref().expect("with slash");
+        assert_eq!(written.path_prefix(), Some("/api"));
+        assert_eq!(with_slash.path_prefix(), written.path_prefix());
+        assert_eq!(
+            serde_yaml::to_string(with_slash).expect("serialize"),
+            serde_yaml::to_string(written).expect("serialize"),
+        );
+    }
+
+    /// The root prefix keeps its slash. Trimming it would leave an empty string
+    /// for a diagnostic to name, and the catch-all is the one prefix an operator
+    /// is most likely to read back out of an error message.
+    #[test]
+    fn the_root_prefix_keeps_its_slash() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: { path_prefix: "/" }
+"#,
+        )
+        .expect("the catch-all prefix must parse");
+        assert_eq!(
+            cfg.routes[0]
+                .http
+                .as_ref()
+                .expect("prefix form")
+                .path_prefix(),
+            Some("/")
+        );
+    }
+
+    /// `http` is an entity type like the other four, so a default declared for
+    /// it is found by the same lookup the resolvers already do.
+    #[test]
+    fn a_global_default_for_http_is_reachable_by_entity_type() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: corp-jwt
+    kind: builtin
+    hooks: [cmf.http_request]
+global:
+  defaults:
+    http:
+      plugins: [corp-jwt]
+"#,
+        )
+        .expect("`global.defaults.http` must parse");
+
+        assert!(cfg.global.defaults.contains_key("http"));
+        let resolved = resolve_plugins_for_entity(&cfg, "http", "*", None, &no_tags());
+        assert_eq!(
+            resolved.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["corp-jwt"],
+            "an http default has to reach an http request"
+        );
+    }
+
+    /// A misspelled entity type under `global.defaults` applies to nothing, so
+    /// it fails at load rather than sitting there inert.
+    #[test]
+    fn a_global_default_for_an_unknown_entity_type_is_rejected() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+global:
+  defaults:
+    htp:
+      plugins: []
+"#,
+        )
+        .expect_err("an unknown entity type must fail the load")
+        .to_string();
+        assert!(err.contains("htp"), "{err}");
+        assert!(err.contains("not an entity type"), "{err}");
+        assert!(
+            err.contains("http"),
+            "the message names the real types: {err}"
+        );
+    }
+
+    #[test]
+    fn a_route_declaring_http_beside_tool_names_both() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_compensation
+    http: /v1/compensation
+"#,
+        )
+        .expect_err("two selectors on one route must fail")
+        .to_string();
+        assert!(err.contains("multiple entity matchers"), "{err}");
+        assert!(err.contains("tool"), "{err}");
+        assert!(err.contains("http"), "{err}");
+    }
+
+    #[test]
+    fn a_route_with_no_selector_names_http_among_the_alternatives() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - meta:
+      tags: [pii]
+"#,
+        )
+        .expect_err("a route with no selector must fail")
+        .to_string();
+        assert!(err.contains("no entity matcher"), "{err}");
+        assert!(err.contains("http"), "{err}");
+    }
+
+    /// A misspelled selector used to load clean: serde drops the unknown key
+    /// and the route then matched nothing at all.
+    #[test]
+    fn a_misspelled_route_key_names_the_key_and_the_route() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_weather
+  - htp: /v1/files
+"#,
+        )
+        .expect_err("an unknown route key must fail the load")
+        .to_string();
+        assert!(err.contains("route 1"), "the route index: {err}");
+        assert!(err.contains("htp"), "the key as written: {err}");
+    }
+
+    /// The renamed-key check runs first, so a stale `identity:` block still
+    /// gets the message that tells the operator what to rename it to.
+    #[test]
+    fn a_stale_identity_key_still_reports_the_rename() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_weather
+    identity:
+      - corp-jwt
+"#,
+        )
+        .expect_err("a renamed key must fail the load")
+        .to_string();
+        assert!(err.contains("renamed to `authentication`"), "{err}");
+    }
+
+    /// A route shares its mapping with the orchestrator blocks praxis-policy-core
+    /// carries but does not model, so the key check has to accept them.
+    #[test]
+    fn a_route_carrying_orchestrator_blocks_loads() {
+        parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_weather
+    apl:
+      authorization:
+        pre_invocation:
+          - "require(authenticated)"
+    response:
+      status: 403
+"#,
+        )
+        .expect("`apl:` and `response:` are route siblings, not typos");
+    }
+
+    /// The same orchestrator terms written flat on the route, with no `apl:`
+    /// wrapper, plus the per-plugin override map form of `plugins:`.
+    #[test]
+    fn a_route_written_in_the_flat_orchestrator_form_loads() {
+        parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_weather
+    pre_invocation:
+      - "plugin(deny-gate)"
+    post_invocation: []
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+    args: {}
+    result: {}
+    pdp: []
+    session_store:
+      kind: memory
+    plugins:
+      deny-gate:
+        on_error: ignore
+"#,
+        )
+        .expect("the flat orchestrator form must keep loading");
+    }
+
+    #[test]
+    fn an_empty_http_list_is_rejected() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: []
+"#,
+        )
+        .expect_err("a selector that matches nothing must fail")
+        .to_string();
+        assert!(err.contains("route 0"), "{err}");
+        assert!(err.contains("empty `http:` list"), "{err}");
+    }
+
+    #[test]
+    fn an_http_map_declaring_neither_path_nor_prefix_is_rejected() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http:
+      method: GET
+"#,
+        )
+        .expect_err("a method alone selects nothing")
+        .to_string();
+        assert!(err.contains("route 0"), "{err}");
+        assert!(err.contains("neither `path:` nor `path_prefix:`"), "{err}");
+    }
+
+    #[test]
+    fn an_http_map_declaring_both_path_and_prefix_is_rejected() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http:
+      path: /v1/files
+      path_prefix: /v1
+"#,
+        )
+        .expect_err("equality and prefix ask for different matches")
+        .to_string();
+        assert!(err.contains("route 0"), "{err}");
+        assert!(err.contains("both `path:` and `path_prefix:`"), "{err}");
+    }
+
+    /// A typo inside the map form is a key nothing reads, and the map's own
+    /// parse names it rather than reporting the whole selector as malformed.
+    #[test]
+    fn an_unknown_key_inside_the_http_map_names_the_key() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http:
+      path_prefx: /v1/files
+"#,
+        )
+        .expect_err("an unknown key under `http:` must fail")
+        .to_string();
+        assert!(err.contains("path_prefx"), "{err}");
+        assert!(err.contains("path_prefix"), "the accepted keys: {err}");
+    }
+
+    #[test]
+    fn an_http_selector_of_the_wrong_shape_is_reported() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: 8080
+"#,
+        )
+        .expect_err("a number is not a path")
+        .to_string();
+        assert!(err.contains("`http:`"), "{err}");
+
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: [/healthz, 8080]
+"#,
+        )
+        .expect_err("a number is not a path")
+        .to_string();
+        assert!(err.contains("list entry [1]"), "{err}");
+    }
+
+    /// A host may build a route in Rust instead of YAML, so the constructors
+    /// have to normalize a prefix the same way the parse does.
+    #[test]
+    fn a_selector_built_in_rust_matches_a_parsed_one() {
+        let built = HttpSelector::prefix("/api/");
+        assert_eq!(built.path_prefix(), Some("/api"));
+        assert!(built.exact_paths().is_empty());
+        assert!(built.method().is_none());
+
+        let built = HttpSelector::exact("/healthz");
+        assert_eq!(exact_paths_of(&built), ["/healthz"]);
+        assert_eq!(built.path_prefix(), None);
+    }
+
+    /// Routes are only read when routing is enabled, and the selector follows
+    /// that rule rather than inventing one of its own.
+    #[test]
+    fn an_http_route_with_routing_disabled_is_left_alone() {
+        let cfg = parse_config(
+            r#"
+plugins: []
+routes:
+  - http: []
+"#,
+        )
+        .expect("routes are inert while routing is disabled");
+        assert!(cfg.routes[0].http.is_some());
     }
 }

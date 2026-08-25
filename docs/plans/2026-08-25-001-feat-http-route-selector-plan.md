@@ -338,8 +338,11 @@ key comes from, so the two cannot disagree.
 - Plugin `conditions:` gating on HTTP. `plugin.rs:296-308` builds `MatchContext`
   from a hardcoded tool, prompt, and resource match. Untouched.
 - The `assertions:` feature itself. This work is its prerequisite.
-- Segment-aware glob semantics, host, scheme, or header matching, regular
-  expressions, and path parameter capture. All rejected in origin.
+- Glob dispatch for the four MCP selectors. Pre-existing, unchanged here.
+- Wildcard syntax inside an `http:` selector, host, scheme, or header matching,
+  regular expressions, and path parameter capture. All out of scope in origin. Note
+  that segment-boundary matching is *in* scope and is what D1 adopts; what is out
+  is a wildcard dialect for paths.
 - Any praxis-side change. The host contract is documented here and needs its own
   praxis issue.
 - Any change to `require_protocol_metadata` or to how a host classifies traffic.

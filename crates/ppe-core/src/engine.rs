@@ -620,6 +620,20 @@ impl PolicyEngine {
         // group's plugins + `authentication:`), never rejects the renamed
         // `identity:` key, and never validates references.
         crate::config::reject_renamed_identity_key(&raw)?;
+        // Registered visitors are read before the route-key check so a key an
+        // orchestrator declares is accepted rather than rejected as a typo.
+        let visitors = {
+            let v = self
+                .visitors
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            v.clone()
+        };
+        let visitor_route_keys: Vec<&str> = visitors
+            .iter()
+            .flat_map(|v| v.extra_route_keys().iter().copied())
+            .collect();
+        crate::config::reject_unknown_route_keys(&raw, &visitor_route_keys)?;
         // Visitors below read the normalized routes and plugin declarations, so
         // this runs here rather than being left to `load_config`. Both steps
         // are idempotent, so `load_config` repeating them is redundant work on
@@ -638,16 +652,9 @@ impl PolicyEngine {
 
         // Visitor walk. No-op when no visitors registered — the common
         // case for hosts that don't use the orchestrator extension point.
-        let visitors = {
-            let v = self
-                .visitors
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if v.is_empty() {
-                return Ok(());
-            }
-            v.clone()
-        };
+        if visitors.is_empty() {
+            return Ok(());
+        }
 
         let mgr: Arc<PolicyEngine> = Arc::clone(self);
         let global_yaml = raw
