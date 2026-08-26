@@ -77,7 +77,7 @@ sha2 = "0.10"
 
 # 32 bytes for the per-process HMAC secret. Already in the tree
 # transitively; named here because the cache needs it directly.
-getrandom = "0.3"
+getrandom = "0.4"
 
 # The bounded, coalescing store behind the delegated-token cache.
 #
