@@ -334,6 +334,49 @@ impl Effect {
         }
     }
 
+    /// Count the `Elicit` nodes reachable in this effect subtree.
+    ///
+    /// Used by the config-load validator to reject a phase that can reach more
+    /// than one elicitation. Elicitation retry state is carried in a *single*
+    /// per-request key (the agent echoes one id), so two elicit steps in one
+    /// phase share that key: the second step would skip its own dispatch and
+    /// resolve against the first step's id — a stronger `require_approval`
+    /// silently satisfied by a weaker `confirm`. Correct multi-elicit needs a
+    /// per-step id the current single-id retry protocol cannot carry, so the
+    /// safe posture is to reject the configuration at load rather than
+    /// mis-evaluate it at runtime.
+    ///
+    /// A PDP's `on_allow` / `on_deny` arms are counted *together* even though
+    /// only one runs per evaluation: the PDP verdict can flip between the
+    /// initial request and the retry (its inputs change), so across the two
+    /// round-trips both arms can fire and collide on the shared retry id — the
+    /// same hazard. Summing them is the deliberate conservative choice, so a
+    /// policy with an elicit in each PDP arm is rejected rather than silently
+    /// exposed to a verdict-flip. `When` arms are likewise summed (the compiler
+    /// cannot prove two conditions disjoint).
+    pub fn count_elicits(&self) -> usize {
+        match self {
+            Effect::Elicit(_) => 1,
+            Effect::Sequential(effects) | Effect::Parallel(effects) => {
+                effects.iter().map(Effect::count_elicits).sum()
+            },
+            Effect::When { body, .. } => body.iter().map(Effect::count_elicits).sum(),
+            Effect::Pdp {
+                on_allow, on_deny, ..
+            } => {
+                on_allow.iter().map(Effect::count_elicits).sum::<usize>()
+                    + on_deny.iter().map(Effect::count_elicits).sum::<usize>()
+            },
+            Effect::Allow
+            | Effect::Deny { .. }
+            | Effect::Plugin { .. }
+            | Effect::Taint { .. }
+            | Effect::Restrict { .. }
+            | Effect::FieldOp { .. }
+            | Effect::Delegate(_) => 0,
+        }
+    }
+
     /// Walk the effect tree rejecting any `FieldOp` / `Delegate` that
     /// lives directly or transitively under a `Parallel` node. Returns
     /// the path string of the first violation found (or `Ok(())` if
@@ -1037,6 +1080,43 @@ mod tests {
             inner_parallel,
         ])]);
         assert!(outer.validate_parallel_purity().is_err());
+    }
+
+    #[test]
+    fn count_elicits_sums_through_control_flow() {
+        let elicit = |name: &str| {
+            Effect::Elicit(crate::step::ElicitStep {
+                kind: crate::step::ElicitKind::Approval,
+                plugin_name: name.into(),
+                channel: None,
+                from: "user.manager".into(),
+                purpose: None,
+                scope: None,
+                timeout: None,
+                config_override: None,
+                on_error: None,
+                source: "test".into(),
+            })
+        };
+        // No elicit.
+        assert_eq!(Effect::Allow.count_elicits(), 0);
+        // One at top level.
+        assert_eq!(elicit("a").count_elicits(), 1);
+        // Two under a When body count as two (same evaluation walk).
+        assert_eq!(
+            Effect::When {
+                condition: crate::rules::Expression::Always,
+                body: vec![elicit("a"), elicit("b")],
+                source: "test".into(),
+            }
+            .count_elicits(),
+            2
+        );
+        // And nested through Sequential.
+        assert_eq!(
+            Effect::Sequential(vec![elicit("a"), Effect::Allow, elicit("b")]).count_elicits(),
+            2
+        );
     }
 
     #[test]

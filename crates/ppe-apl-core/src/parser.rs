@@ -1463,14 +1463,42 @@ fn parse_step_map(m: &serde_yaml::Mapping, source: &str) -> Result<Step, ParseEr
         // since they take a list body and would otherwise be parsed
         // as predicates. The shorthand recognises only predicate-
         // shaped keys.
+        //
+        // `restrict` / `taint` / `when` / `do` are step keywords too, not
+        // attribute names, so a sequence body under one of them is a
+        // malformed step, not a predicate on an attribute of that name.
+        // Excluding them here lets each fall through to its real handler (or
+        // the explicit rejection below) and produce a loud error, instead of
+        // silently compiling to `IsTrue("restrict")` etc. — a rule that can
+        // never fire, which drops the intended constraint/deny.
         let trimmed = key.trim();
         if trimmed != "delegate"
             && trimmed != "sequential"
             && trimmed != "parallel"
+            && trimmed != "restrict"
+            && trimmed != "taint"
+            && trimmed != "when"
+            && trimmed != "do"
             && !is_known_pdp_dialect(trimmed)
         {
             return parse_shorthand_multi_effect(trimmed, items, source);
         }
+    }
+
+    // Reserved step keywords with no single-key map form. `when:`+`do:` pairs
+    // are handled above; a lone `when:` / `do:`, or a `taint:` map, is an
+    // author error. Reject it with a pointer to the right shape rather than
+    // letting it fall through to the PDP-dialect path and become a confusing
+    // `Custom("when")` call that only fails at request time.
+    if matches!(key.trim(), "taint" | "when" | "do") {
+        return Err(ParseError::Rule {
+            rule: key.to_owned(),
+            msg: format!(
+                "`{}` is not a valid step map key: write `taint(label)` as a string step, \
+                 and pair `when:` with `do:` in one map",
+                key.trim()
+            ),
+        });
     }
 
     // `delegate:` is a special non-PDP step shape — branch before the
@@ -2673,6 +2701,42 @@ fn parse_taint_scope(s: &str, src: &str) -> Result<TaintScope, ParseError> {
     }
 }
 
+/// Deserialize a `HashMap<String, V>` that rejects duplicate keys instead of
+/// silently keeping the last one.
+///
+/// `serde_yaml` catches duplicate keys only in `Value`/`Mapping`-typed positions
+/// and in derived named struct fields; a plain `HashMap` field replays every
+/// entry to `HashMap::insert`, so a repeated key is silently last-wins. On a
+/// policy that means a whole route, redaction pipeline, or plugin override can
+/// vanish with no diagnostic — a fail-open the engine's `deny_unknown_fields`
+/// philosophy exists to prevent. This visitor errors on the first repeat.
+fn deserialize_unique_string_map<'de, D, V>(deserializer: D) -> Result<HashMap<String, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: serde::Deserialize<'de>,
+{
+    use serde::de::{Error as _, MapAccess, Visitor};
+    struct UniqueMapVisitor<V>(std::marker::PhantomData<V>);
+    impl<'de, V: serde::Deserialize<'de>> Visitor<'de> for UniqueMapVisitor<V> {
+        type Value = HashMap<String, V>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a map with unique keys")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+            let mut map: HashMap<String, V> =
+                HashMap::with_capacity(access.size_hint().unwrap_or(0));
+            while let Some((key, value)) = access.next_entry::<String, V>()? {
+                if map.contains_key(&key) {
+                    return Err(A::Error::custom(format!("duplicate key `{key}`")));
+                }
+                map.insert(key, value);
+            }
+            Ok(map)
+        }
+    }
+    deserializer.deserialize_map(UniqueMapVisitor(std::marker::PhantomData))
+}
+
 /// Top-level config — only the bits the parser understands.
 ///
 /// `policy_evaluator:`, `imports:`, `global:`, `defaults:`, `tags:`,
@@ -2685,7 +2749,7 @@ fn parse_taint_scope(s: &str, src: &str) -> Result<TaintScope, ParseError> {
 #[derive(Debug, Default, Deserialize)]
 pub struct ConfigYaml {
     /// The `routes:` block, keyed by route.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_unique_string_map")]
     pub routes: HashMap<String, RouteYaml>,
 
     /// Root `plugins:` block — full declarations.
@@ -2718,17 +2782,17 @@ pub struct RouteYaml {
     pub authorization: Option<AuthorizationYaml>,
 
     /// `args:` field → pipe-chain string. Compiled to per-field pipelines.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_unique_string_map")]
     pub args: HashMap<String, String>,
 
     /// `result:` field → pipe-chain string. Compiled to per-field pipelines.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_unique_string_map")]
     pub result: HashMap<String, String>,
 
     /// Per-route plugin overrides — only the spec-overridable keys
     /// (config / capabilities / `on_error`). Merged on top of the root
     /// `plugins:` declaration at dispatch time.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_unique_string_map")]
     pub plugins: HashMap<String, PluginOverride>,
 
     /// Anything else on the route (meta, taint, when) — stashed. Also
@@ -2930,6 +2994,34 @@ fn compile_apl_blocks(source: &str, raw: RouteYaml) -> Result<CompiledRoute, Par
         });
     }
     route.plugin_overrides = raw.plugins;
+
+    // Reject a phase that reaches more than one elicitation. Elicit retry
+    // state rides a single per-request id (the agent echoes one), so two
+    // elicit steps in one phase would share it and the second would resolve
+    // against the first's id — a stronger `require_approval` silently
+    // satisfied by a weaker `confirm`. This per-block check covers every
+    // dispatch path; cross-layer stacking (a global elicit plus a route one)
+    // is caught again on the fully-stacked route at annotation time.
+    for (phase, effects) in [
+        ("pre_invocation", &route.policy),
+        ("post_invocation", &route.post_policy),
+    ] {
+        let elicits: usize = effects
+            .iter()
+            .map(crate::rules::Effect::count_elicits)
+            .sum();
+        if elicits > 1 {
+            return Err(ParseError::Rule {
+                rule: format!("{source}.{phase}"),
+                msg: format!(
+                    "{phase} reaches {elicits} elicitation steps; at most one elicitation per \
+                     phase is supported (they would share one retry id and resolve against \
+                     each other)"
+                ),
+            });
+        }
+    }
+
     Ok(route)
 }
 
@@ -3613,6 +3705,37 @@ do:
     }
 
     #[test]
+    fn restrict_with_sequence_body_errors_not_misparses() {
+        // Regression: `- restrict: [allow]` (a sequence body under the
+        // `restrict` step keyword) must not be swallowed by the predicate
+        // shorthand as `IsTrue("restrict")` — a rule that can never fire and
+        // silently discards the intended constraint. It now reaches the real
+        // restrict handler and errors on the non-map body.
+        let err = parse_step_yaml("restrict:\n  - allow").unwrap_err();
+        // It must reach the restrict handler (which rejects a non-map body),
+        // not compile to a predicate rule on an attribute named `restrict`.
+        assert!(
+            format!("{err}").to_lowercase().contains("restrict"),
+            "expected a restrict-handler error, got {err}"
+        );
+    }
+
+    #[test]
+    fn reserved_step_keyword_as_map_key_errors() {
+        // `taint:` map and a lone `do:` / `when:` single-key map are author
+        // errors — previously they compiled to `IsTrue("taint")` etc. and
+        // never fired. They must now be rejected with a pointer to the right
+        // shape.
+        for yaml in ["taint:\n  - deny", "do:\n  - deny", "when:\n  - deny"] {
+            let err = parse_step_yaml(yaml).unwrap_err();
+            assert!(
+                format!("{err}").contains("not a valid step map key"),
+                "expected a helpful rejection for {yaml:?}, got {err}"
+            );
+        }
+    }
+
+    #[test]
     fn shorthand_multi_effect_map_with_nested_delegate() {
         // Map-form effects (like `delegate:`) work inside a shorthand
         // list, exercising the parse_effect_value path.
@@ -4186,6 +4309,77 @@ routes:
             route
                 .declared_phases()
                 .contains(crate::rules::Phase::Policy)
+        );
+    }
+
+    #[test]
+    fn two_elicit_steps_in_one_phase_rejected() {
+        // Two elicitations in one phase share a single retry id; the second
+        // would resolve against the first's approval. Reject at load.
+        let yaml = r#"
+routes:
+  payroll:
+    pre_invocation:
+      - "confirm(approver, from: user.sub)"
+      - "require_approval(approver, from: user.manager)"
+"#;
+        let err = compile_config(yaml).unwrap_err();
+        assert!(
+            format!("{err}").contains("at most one elicitation per phase"),
+            "expected multi-elicit rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn single_elicit_per_phase_compiles() {
+        // One elicit in pre and one in post is fine — separate phases,
+        // separate evaluation walks.
+        let yaml = r#"
+routes:
+  payroll:
+    pre_invocation:
+      - "require_approval(approver, from: user.manager)"
+    post_invocation:
+      - "confirm(auditor, from: user.sub)"
+"#;
+        compile_config(yaml).expect("one elicit per phase must compile");
+    }
+
+    #[test]
+    fn duplicate_route_key_is_rejected_not_last_wins() {
+        // Two routes with the same key: serde would keep the last and silently
+        // drop the first's authorization block — a fail-open. It must error.
+        let yaml = r#"
+routes:
+  dup:
+    pre_invocation:
+      - "require(authenticated)"
+  dup:
+    result:
+      ssn: "redact"
+"#;
+        let err = compile_config(yaml).unwrap_err();
+        assert!(
+            format!("{err}").contains("duplicate key"),
+            "expected duplicate-key error, got {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_field_pipeline_key_is_rejected() {
+        // `result:` with the same field twice would silently drop one pipeline.
+        // Dropping a `redact` in favor of a passthrough leaks the field.
+        let yaml = r#"
+routes:
+  r:
+    result:
+      ssn: "redact"
+      ssn: "hash"
+"#;
+        let err = compile_config(yaml).unwrap_err();
+        assert!(
+            format!("{err}").contains("duplicate key"),
+            "expected duplicate-key error, got {err}"
         );
     }
 

@@ -1093,11 +1093,15 @@ fn dispatch_parallel<'a>(
 
         // Aggregate in input order: append every branch's taints; pick
         // the first Halt (by branch index, not wall-clock order) as the
-        // overall result. Aborted / panicked branches contribute no
-        // taints — they didn't run to completion. A panicked branch is
-        // *not* converted into a Halt; we log via `tracing::warn!` and
-        // continue. (A misbehaving plugin shouldn't take down the
-        // parallel block any more than it would the host process.)
+        // overall result. Aborted branches contribute no taints — they
+        // were short-circuit cancelled. A *panicked* branch is converted
+        // into a fail-closed Halt: we cannot know whether the branch it
+        // ran would have denied, and the engine's contract everywhere
+        // else is that an effect which cannot complete denies rather than
+        // permits (a plugin `Err` halts at line 497, and the concurrent
+        // executor phase halts on a panicking branch under `on_error:
+        // fail`). Swallowing the panic here would make a guard branch's
+        // deny vanish — fail-open in the one phase whose job is to block.
         let mut first_halt: Option<Decision> = None;
         for (idx, outcome) in outcomes.into_iter().enumerate() {
             match outcome {
@@ -1124,14 +1128,19 @@ fn dispatch_parallel<'a>(
                     // post-config-extension.
                 },
                 BranchOutcome::Panicked(msg) => {
-                    // A panicking branch is a misbehaving plugin/effect;
-                    // dropping its output (no Halt, no taints) keeps the
-                    // parallel block's other branches intact rather than
-                    // taking the whole block down. praxis-policy-apl-core has no
-                    // tracing dep — host integrations that care can
-                    // surface the panic via praxis-policy-core's plugin error
-                    // path. `idx`/`msg` are eaten here.
-                    let _ = (idx, msg);
+                    // A panicking branch is a misbehaving plugin/effect. It
+                    // fails closed: a panic is a more severe failure than a
+                    // plugin `Err` (which already halts), so it must not be
+                    // treated more leniently. The first panic, in branch
+                    // index order, stands in as the phase's deny if no
+                    // earlier branch already produced a Halt. `msg` carries
+                    // the panic payload into the audit reason.
+                    if first_halt.is_none() {
+                        first_halt = Some(Decision::Deny {
+                            reason: Some(format!("parallel branch {idx} panicked: {msg}")),
+                            rule_source: "parallel.branch_panic".to_owned(),
+                        });
+                    }
                 },
             }
         }
@@ -1175,6 +1184,7 @@ async fn dispatch_field_op(
 
     // Pick the right side of the payload based on the path prefix.
     // Out-of-phase ops drop silently (see the doc comment).
+    #[derive(Clone, Copy)]
     enum Side {
         Args,
         Result,
@@ -1201,43 +1211,58 @@ async fn dispatch_field_op(
         });
     };
 
-    let Some(current) = get_dotted(root, subpath).cloned() else {
-        return EffectOutcome::Continue; // missing field → silent no-op
+    // Fan out over arrays on the path so a `do:`-embedded field op like
+    // `result.rows.ssn | redact` reaches every element's leaf instead of
+    // silently no-op'ing on the array. An object-only path expands to itself.
+    // An over-large shape fails closed (deny) rather than half-redacting.
+    let Some(paths) = crate::route::expand_field_paths(root, subpath) else {
+        return EffectOutcome::Halt(Decision::Deny {
+            reason: Some(format!(
+                "FieldOp path `{path}` expands to too many elements to redact safely"
+            )),
+            rule_source: fallback_source.to_owned(),
+        });
     };
 
     let pipeline = crate::pipeline::Pipeline {
         stages: stages.to_vec(),
     };
-    // `subpath`, not `path`: the field name a pipeline reports to a
-    // plugin is relative to the args / result root, matching what the
-    // `args:` / `result:` section pipelines pass. The prefixed `path`
-    // stays in use for deny messages, where the reader wants the side
-    // spelled out.
-    let eval = evaluate_pipeline(&pipeline, &current, bag, plugins, subpath, phase).await;
-    taints.extend(eval.taints);
     let mark_modified = |side: Side, args: &mut bool, result: &mut bool| match side {
         Side::Args => *args = true,
         Side::Result => *result = true,
     };
-    match eval.outcome {
-        FieldOutcome::Pass => EffectOutcome::Continue,
-        FieldOutcome::Replace(new_val) => {
-            if set_dotted(root, subpath, new_val) {
-                mark_modified(side, args_modified, result_modified);
-            }
-            EffectOutcome::Continue
-        },
-        FieldOutcome::Omit => {
-            if remove_dotted(root, subpath) {
-                mark_modified(side, args_modified, result_modified);
-            }
-            EffectOutcome::Continue
-        },
-        FieldOutcome::Deny { reason, .. } => EffectOutcome::Halt(Decision::Deny {
-            reason: Some(reason),
-            rule_source: fallback_source.to_owned(),
-        }),
+    for concrete in paths {
+        let Some(current) = get_dotted(root, &concrete).cloned() else {
+            continue; // missing field on this element → silent no-op
+        };
+        // `subpath`, not `path`: the field name a pipeline reports to a
+        // plugin is relative to the args / result root, matching what the
+        // `args:` / `result:` section pipelines pass. The prefixed `path`
+        // stays in use for deny messages, where the reader wants the side
+        // spelled out.
+        let eval = evaluate_pipeline(&pipeline, &current, bag, plugins, subpath, phase).await;
+        taints.extend(eval.taints);
+        match eval.outcome {
+            FieldOutcome::Pass => {},
+            FieldOutcome::Replace(new_val) => {
+                if set_dotted(root, &concrete, new_val) {
+                    mark_modified(side, args_modified, result_modified);
+                }
+            },
+            FieldOutcome::Omit => {
+                if remove_dotted(root, &concrete) {
+                    mark_modified(side, args_modified, result_modified);
+                }
+            },
+            FieldOutcome::Deny { reason, .. } => {
+                return EffectOutcome::Halt(Decision::Deny {
+                    reason: Some(reason),
+                    rule_source: fallback_source.to_owned(),
+                });
+            },
+        }
     }
+    EffectOutcome::Continue
 }
 
 /// Result of running a pipeline against one field's value.
@@ -3120,6 +3145,21 @@ mod tests {
         }
     }
 
+    /// Invoker that panics on any plugin call — models a misbehaving plugin
+    /// unwinding inside a `parallel:` branch.
+    struct PanicPlugins;
+    #[async_trait]
+    impl PluginInvoker for PanicPlugins {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _bag: &AttributeBag,
+            _invocation: PluginInvocation<'_>,
+        ) -> Result<PluginOutcome, PluginError> {
+            panic!("plugin blew up mid-branch");
+        }
+    }
+
     fn pdp_step(decision_diagnostic_label: &str) -> Effect {
         Effect::Pdp {
             call: PdpCall {
@@ -4060,6 +4100,48 @@ mod tests {
                 assert_eq!(reason.as_deref(), Some("branch 1 denied"));
             },
             other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_panicked_branch_fails_closed() {
+        // A branch that panics (misbehaving plugin) must halt the phase, not
+        // be silently dropped — a swallowed panic would let a guard branch's
+        // deny vanish (fail-open). The surviving Allow branch must not rescue
+        // the request.
+        let mut bag = AttributeBag::new();
+        let mut payload = crate::route::RoutePayload::new(json!({}));
+
+        let rule = Rule {
+            condition: Expression::Always,
+            effects: vec![Effect::Parallel(vec![
+                Effect::Plugin {
+                    name: "guard".into(),
+                },
+                Effect::Allow,
+            ])],
+            source: "test.policy[0]".into(),
+        };
+
+        let eval = evaluate_effects(
+            &vec![Effect::from(rule)],
+            &mut bag,
+            &(Arc::new(FakePdp {
+                decision: Decision::Allow,
+            }) as Arc<dyn PdpResolver>),
+            &(Arc::new(PanicPlugins) as Arc<dyn PluginInvoker>),
+            &noop_delegations(),
+            &noop_elicitations(),
+            crate::step::DispatchPhase::Pre,
+            &mut payload,
+        )
+        .await;
+
+        match eval.decision {
+            Decision::Deny { rule_source, .. } => {
+                assert_eq!(rule_source, "parallel.branch_panic");
+            },
+            other => panic!("panicked branch must deny, got {other:?}"),
         }
     }
 
