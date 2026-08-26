@@ -6714,6 +6714,81 @@ routes:
         assert!(sec.has_label("PLUGIN_ADDED"));
     }
 
+    /// Handler holding `read_labels` that returns a NON-superset label set: it
+    /// drops the canonical `ORIGINAL` and substitutes `LAUNDERED`. A `read_labels`
+    /// plugin saw the real labels, so an absent one is a removal attempt.
+    struct LabelLaunderHandler;
+
+    #[async_trait]
+    impl AnyHookHandler for LabelLaunderHandler {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            let mut ext = extensions.cow_copy();
+            let mut laundered = std::collections::HashSet::new();
+            laundered.insert("LAUNDERED".to_owned());
+            if let Some(ref mut sec) = ext.security {
+                sec.labels = crate::extensions::MonotonicSet::from_set(laundered);
+            }
+            let mut result: PluginResult<TestPayload> = PluginResult::allow();
+            result.modified_extensions = Some(ext);
+            Ok(crate::executor::erase_result(result))
+        }
+        fn hook_type_name(&self) -> &'static str {
+            "test_hook"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_executor_drops_whole_edit_on_read_labels_laundering() {
+        // The commit relocated the label-laundering defense out of merge_security
+        // and into the executor's `labels_ok`. Pin it end-to-end: a `read_labels`
+        // plugin that returns a non-superset (drops ORIGINAL, adds LAUNDERED) must
+        // have its WHOLE edit dropped, not folded. If `labels_ok` were gone,
+        // merge_security's folding would still refuse the removal but would ADD
+        // LAUNDERED, so the discriminating assertion is that LAUNDERED never lands.
+        let mgr = PolicyEngine::default();
+        let mut config = make_config("label-launderer", 10, PluginMode::Sequential);
+        config.capabilities = ["append_labels".to_owned(), "read_labels".to_owned()].into();
+        let plugin = Arc::new(AllowPlugin {
+            cfg: config.clone(),
+        });
+        let handler: Arc<dyn AnyHookHandler> = Arc::new(LabelLaunderHandler);
+        mgr.register_raw::<TestHook>(plugin, config, handler)
+            .unwrap();
+        mgr.initialize().await.unwrap();
+
+        let mut security = crate::extensions::SecurityExtension::default();
+        security.add_label("ORIGINAL");
+        let ext = Extensions {
+            security: Some(Arc::new(security)),
+            ..Default::default()
+        };
+
+        let payload: Box<dyn PluginPayload> = Box::new(TestPayload {
+            value: "test".into(),
+        });
+        let (result, _) = mgr.invoke_by_name("test_hook", payload, ext, None).await;
+
+        assert!(result.continue_processing);
+        let modified = result
+            .modified_extensions
+            .as_ref()
+            .expect("accumulated extensions present");
+        let sec = modified.security.as_ref().expect("security slot present");
+        assert!(
+            sec.has_label("ORIGINAL"),
+            "the canonical label survives the refused removal"
+        );
+        assert!(
+            !sec.has_label("LAUNDERED"),
+            "the whole laundering edit is dropped by labels_ok, not folded in"
+        );
+    }
+
     #[tokio::test]
     async fn test_executor_rejects_immutable_tampering() {
         let mgr = PolicyEngine::default();
