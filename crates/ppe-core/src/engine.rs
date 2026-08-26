@@ -4290,6 +4290,13 @@ mod tests {
     /// Routing must work for `resource`, `prompt`, and `llm` entity types
     /// — not just `tool`. Closes the review's "no test verifying entity
     /// types other than tool in routing" gap.
+    ///
+    /// The `http` rows share the table because they share the dispatch
+    /// question, but they answer it from the request line rather than from a
+    /// name, so each row carries the path the request arrives on. The
+    /// segment-boundary rows mirror the host router's own suite: a prefix that
+    /// matches a path only where a `/` follows it, and a trailing slash on the
+    /// declared prefix that changes nothing.
     #[tokio::test]
     async fn test_routing_works_for_all_entity_types() {
         register_fixture_hooks();
@@ -4318,21 +4325,137 @@ mod tests {
             }
         }
 
-        // Each row: (entity_type, route field name, route value, request entity_name, should_match)
+        // Each row: (entity_type, route field name, route value, request
+        // entity_name, request path, should_match). The path is `None` for the
+        // four name selectors, which never read the request line.
         // We build a fresh engine per entity type so routes don't bleed.
-        for (entity_type, route_field, route_value, request_name, should_match) in [
-            ("resource", "resource", "my_resource", "my_resource", true),
+        for (entity_type, route_field, route_value, request_name, request_path, should_match) in [
+            (
+                "resource",
+                "resource",
+                "my_resource",
+                "my_resource",
+                None,
+                true,
+            ),
             (
                 "resource",
                 "resource",
                 "my_resource",
                 "other_resource",
+                None,
                 false,
             ),
-            ("prompt", "prompt", "my_prompt", "my_prompt", true),
-            ("prompt", "prompt", "my_prompt", "other_prompt", false),
-            ("llm", "llm", "gpt-4", "gpt-4", true),
-            ("llm", "llm", "gpt-4", "claude", false),
+            ("prompt", "prompt", "my_prompt", "my_prompt", None, true),
+            ("prompt", "prompt", "my_prompt", "other_prompt", None, false),
+            ("llm", "llm", "gpt-4", "gpt-4", None, true),
+            ("llm", "llm", "gpt-4", "claude", None, false),
+            // An exact `http:` path matches by equality, like the name
+            // selectors, and the request arrives under the reserved name.
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "/healthz",
+                ENTITY_NAME_GLOBAL,
+                Some("/healthz"),
+                true,
+            ),
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "/healthz",
+                ENTITY_NAME_GLOBAL,
+                Some("/healthzz"),
+                false,
+            ),
+            // A prefix matches the prefix itself, a trailing slash on the
+            // path, and any deeper segment.
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api }",
+                ENTITY_NAME_GLOBAL,
+                Some("/api"),
+                true,
+            ),
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api }",
+                ENTITY_NAME_GLOBAL,
+                Some("/api/"),
+                true,
+            ),
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api }",
+                ENTITY_NAME_GLOBAL,
+                Some("/api/v1"),
+                true,
+            ),
+            // And stops at the segment boundary, which is the whole point of
+            // matching paths the way the router does rather than by glob.
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api }",
+                ENTITY_NAME_GLOBAL,
+                Some("/apikeys"),
+                false,
+            ),
+            // A trailing slash on the declared prefix is insignificant.
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api/ }",
+                ENTITY_NAME_GLOBAL,
+                Some("/api"),
+                true,
+            ),
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api/ }",
+                ENTITY_NAME_GLOBAL,
+                Some("/api/v1"),
+                true,
+            ),
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api/ }",
+                ENTITY_NAME_GLOBAL,
+                Some("/apikeys"),
+                false,
+            ),
+            // The root prefix is the catch-all.
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: / }",
+                ENTITY_NAME_GLOBAL,
+                Some("/anything/at/all"),
+                true,
+            ),
+            // A declared method narrows the match; every request below is a
+            // GET, so the POST-only route does not match.
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api, method: GET }",
+                ENTITY_NAME_GLOBAL,
+                Some("/api/v1"),
+                true,
+            ),
+            (
+                ENTITY_HTTP,
+                ENTITY_HTTP,
+                "{ path_prefix: /api, method: POST }",
+                ENTITY_NAME_GLOBAL,
+                Some("/api/v1"),
+                false,
+            ),
         ] {
             let yaml = format!(
                 r#"
@@ -4387,6 +4510,15 @@ routes:
                     entity_name: Some(request_name.into()),
                     ..Default::default()
                 })),
+                // An HTTP request is matched from its request line, so the row
+                // supplies one. Every HTTP row is a GET.
+                http: request_path.map(|path| {
+                    std::sync::Arc::new(crate::extensions::HttpExtension {
+                        method: Some("GET".into()),
+                        path: Some(path.into()),
+                        ..Default::default()
+                    })
+                }),
                 ..Default::default()
             };
             let _ = mgr.invoke_by_name("test_hook", p, ext, None).await;
@@ -4395,7 +4527,7 @@ routes:
             assert_eq!(
                 counter.load(Ordering::SeqCst),
                 expected,
-                "entity_type={entity_type} route_field={route_field} route_value={route_value} request_name={request_name} expected fire={should_match}",
+                "entity_type={entity_type} route_field={route_field} route_value={route_value} request_name={request_name} request_path={request_path:?} expected fire={should_match}",
             );
         }
     }

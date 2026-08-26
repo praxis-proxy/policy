@@ -59,6 +59,25 @@ fn http_request(method: &str) -> Extensions {
     }
 }
 
+/// The same request with a path on it, which is what a host supplies once it
+/// carries the request line. A configuration declaring no `http:` route must
+/// not read it differently for being there.
+fn http_request_with_path(method: &str, path: &str) -> Extensions {
+    let mut meta = MetaExtension::default();
+    meta.entity_type = Some(ENTITY_HTTP.to_owned());
+    meta.entity_name = Some(ENTITY_NAME_GLOBAL.to_owned());
+    let http = HttpExtension {
+        method: Some(method.to_owned()),
+        path: Some(path.to_owned()),
+        ..Default::default()
+    };
+    Extensions {
+        meta: Some(Arc::new(meta)),
+        http: Some(Arc::new(http)),
+        ..Default::default()
+    }
+}
+
 fn payload() -> MessagePayload {
     MessagePayload {
         message: Message::text(Role::User, "hi"),
@@ -423,5 +442,108 @@ routes:
     assert_eq!(
         v.details.get(DETAIL_HTTP_BODY),
         Some(&serde_json::json!("route"))
+    );
+}
+
+// =====================================================================
+// A request line on a configuration that declares no `http:` route
+// =====================================================================
+
+/// A request carrying a path is governed by the same global policy as one
+/// without, since nothing in this configuration selects on a path.
+#[tokio::test]
+async fn a_request_carrying_a_path_is_governed_by_the_global_policy_unchanged() {
+    let mgr = manager_with(GET_ONLY).await;
+
+    for path in ["/v1/files/q3.pdf", "/healthz", "/"] {
+        let (allowed, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request_with_path("GET", path),
+                None,
+            )
+            .await;
+        assert!(
+            allowed.continue_processing,
+            "GET {path} must be allowed; violation = {:?}",
+            allowed.violation
+        );
+
+        let (denied, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request_with_path("POST", path),
+                None,
+            )
+            .await;
+        assert!(
+            !denied.continue_processing,
+            "POST {path} must be denied, exactly as it is with no path at all"
+        );
+    }
+}
+
+/// The path the host populated is what a global rule reads. Nothing normalizes
+/// it on the way to the attribute bag.
+#[tokio::test]
+async fn a_global_rule_reads_the_path_the_host_populated() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  apl:
+    pre_invocation:
+      - "http.path == '/admin/./x': deny"
+"#;
+    let mgr = manager_with(YAML).await;
+
+    let (denied, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_REQUEST,
+            payload(),
+            http_request_with_path("GET", "/admin/./x"),
+            None,
+        )
+        .await;
+    assert!(
+        !denied.continue_processing,
+        "the rule matches the path as written, dot segment included"
+    );
+
+    let (allowed, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_REQUEST,
+            payload(),
+            http_request_with_path("GET", "/admin/x"),
+            None,
+        )
+        .await;
+    assert!(
+        allowed.continue_processing,
+        "and the resolved spelling is a different string to a policy author;          violation = {:?}",
+        allowed.violation
+    );
+}
+
+/// A path no route could have answered for is not denied over. Nothing here
+/// selects on a path, so there is nothing for an unreadable one to defeat.
+#[tokio::test]
+async fn an_unreadable_path_still_allows_when_no_route_selects_on_one() {
+    let mgr = manager_with(GET_ONLY).await;
+
+    let (res, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_REQUEST,
+            payload(),
+            http_request_with_path("GET", "/a/%zz"),
+            None,
+        )
+        .await;
+    assert!(
+        res.continue_processing,
+        "the global policy still decides; violation = {:?}",
+        res.violation
     );
 }
