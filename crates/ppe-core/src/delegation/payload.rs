@@ -33,12 +33,15 @@
 //
 // # Caching
 //
-// Not implemented yet. The spec describes a `TokenCacheControl` trait
-// that wraps this hook with `get_or_mint(audience, scopes)`
-// semantics — outbound callers ask the trait for a token; the trait
-// hits the cache first and only dispatches through the hook on cache
-// miss. That layer comes later. For now, every
-// `mgr.invoke_named::<TokenDelegateHook>(...)` re-runs the chain.
+// Not done here. A handler may reuse a token it already minted, and
+// `praxis-policy-plugin-delegator-oauth` does, but the key deciding when two
+// delegations are the same belongs to the handler: only it knows what
+// went into its own mint, so a generic wrapper that dropped a field the
+// handler used would serve a token minted under different terms.
+//
+// Keying on audience and scopes alone is the trap to avoid. Neither
+// names a principal, so one entry would serve every caller of a route.
+// See `cache::key` in the OAuth delegator for a derivation that holds.
 //
 // # Rejection
 //
@@ -313,8 +316,15 @@ pub struct DelegationPayload {
     pub delegation_update: Option<DelegationExtension>,
 
     /// What kind of principal the minted token represents.
+    ///
+    /// "The cache" here is [`DelegationKey`], which keys
+    /// `raw_credentials.delegated_tokens` within a single request — not
+    /// a handler's own cross-request token cache, which has its own key.
+    ///
     /// Handlers populating `delegated_token` should also set this
-    /// so `apply_to_extensions` keys the cache correctly:
+    /// so `apply_to_extensions` keys the request-scoped map correctly:
+    ///
+    /// [`DelegationKey`]: crate::extensions::raw_credentials::DelegationKey
     ///
     ///   * `OnBehalfOfUser` — token speaks for the original user
     ///     (RFC 8693 on-behalf-of / actor-token, UCAN delegation).

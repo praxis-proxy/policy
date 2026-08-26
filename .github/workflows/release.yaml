@@ -15,6 +15,10 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -25,8 +29,11 @@ jobs:
   verify:
     name: verify packaging
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -47,8 +54,11 @@ jobs:
   tag-matches-manifest:
     name: tag matches manifest version
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Compare
         # The tag name reaches a shell here, so it goes through the environment
         # rather than being interpolated into the script.
@@ -67,9 +77,12 @@ jobs:
     name: publish to crates.io
     needs: [verify, tag-matches-manifest]
     runs-on: ubuntu-24.04
+    timeout-minutes: 300
     environment: crates-io
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |

@@ -463,6 +463,37 @@ impl PolicyEngine {
         self.generation.load(Ordering::Acquire)
     }
 
+    /// Whether any identity-resolve plugin is configured for a route.
+    ///
+    /// A narrow accessor rather than a getter for `policy_config`: the
+    /// caller needs a yes or no, and handing out the whole config would
+    /// give every reader a stake in its shape.
+    ///
+    /// Exists for a config-time soundness check. A route that delegates
+    /// a credential the caller presented, but resolves no identity, hands
+    /// the delegator a token nothing has validated — see the
+    /// `delegation_without_identity_resolution` alarm in
+    /// praxis-policy-apl-runtime.
+    pub fn route_has_identity_resolution(
+        &self,
+        entity_type: &str,
+        entity_name: &str,
+        request_scope: Option<&str>,
+    ) -> bool {
+        self.load_runtime()
+            .policy_config
+            .as_ref()
+            .is_some_and(|policy_config| {
+                !config::resolve_identity_plugins_for_route(
+                    policy_config,
+                    entity_type,
+                    entity_name,
+                    request_scope,
+                )
+                .is_empty()
+            })
+    }
+
     /// Register a plugin factory for a given `kind` name.
     ///
     /// The host calls this to tell the engine how to create plugins

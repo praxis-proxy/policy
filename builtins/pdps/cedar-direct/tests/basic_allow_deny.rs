@@ -175,6 +175,56 @@ async fn forbid_attribution_carries_policy_id() {
     assert!(decision.diagnostics.iter().any(|d| d == "blocklist"));
 }
 
+/// A permit that would fire plus a sibling `when` that errors at
+/// evaluation. Cedar still Allows on the permit; we must Deny. A lone
+/// erroring policy also Denies (default-deny), so that fixture would
+/// not catch the override going missing. The reason must say
+/// fail-closed and name the evaluation error.
+#[tokio::test]
+async fn evaluation_error_denies_even_when_a_permit_fired() {
+    const POLICY: &str = r#"
+        @id("allow-all")
+        permit(principal, action, resource);
+
+        @id("dept")
+        permit(principal, action, resource)
+        when { principal.department == "eng" };
+    "#;
+
+    let resolver = CedarDirectResolver::from_policy_text(POLICY).expect("policy parses");
+    let decision = resolver
+        .evaluate(&read_doc_call(), &alice_bag())
+        .await
+        .expect("evaluate");
+
+    match decision.decision {
+        Decision::Deny {
+            reason,
+            rule_source,
+        } => {
+            assert_eq!(
+                rule_source, "allow-all",
+                "rule_source should be the firing permit when fail-closed overrides"
+            );
+            let reason = reason.expect("fail-closed deny carries a reason");
+            assert!(
+                reason.contains("fail-closed"),
+                "reason must say fail-closed: {reason}"
+            );
+            assert!(
+                reason.contains("department"),
+                "reason must name the evaluation error: {reason}"
+            );
+        },
+        other => panic!("expected Deny on a partially failed Allow, got {other:?}"),
+    }
+    assert_eq!(
+        decision.diagnostics,
+        vec!["allow-all".to_owned()],
+        "firing policies should still flow into diagnostics on fail-closed"
+    );
+}
+
 /// Missing `subject.id` in the bag is a configuration fault (identity
 /// hook didn't populate it). Resolver returns a Dispatch error rather
 /// than silently building a malformed Cedar request.
