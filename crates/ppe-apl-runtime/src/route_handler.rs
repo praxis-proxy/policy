@@ -740,7 +740,23 @@ fn extensions_changed(before: &Extensions, after: &Extensions) -> bool {
         (None, None) => false,
         _ => true,
     };
-    security_changed || delegation_changed || raw_creds_changed
+    // `http` and `custom` are mutable slots too: a route plugin holding
+    // `write_headers` rewrites request/response headers, and a plugin may
+    // stash data in `custom`. Omitting them here left `modified_extensions`
+    // None when a plugin's *only* edit was a header write, so the executor
+    // never merged it and the upstream call never saw the change. (The
+    // `candidate_constraint` slot is handled by the force-`Some` above.)
+    let http_changed = match (before.http.as_ref(), after.http.as_ref()) {
+        (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+        (None, None) => false,
+        _ => true,
+    };
+    let custom_changed = match (before.custom.as_ref(), after.custom.as_ref()) {
+        (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+        (None, None) => false,
+        _ => true,
+    };
+    security_changed || delegation_changed || raw_creds_changed || http_changed || custom_changed
 }
 
 /// Extract the elicitation id an agent echoes on retry from the
@@ -1014,6 +1030,33 @@ mod tests {
         let before = Extensions::default();
         let after = Extensions {
             delegation: Some(Arc::new(DelegationExtension::default())),
+            ..Extensions::default()
+        };
+        assert!(extensions_changed(&before, &after));
+    }
+
+    /// A route plugin whose only edit is an HTTP header write (via
+    /// `write_headers`) must be detected — otherwise the header rewrite is
+    /// dropped at this boundary and never reaches the upstream request.
+    #[test]
+    fn an_http_change_alone_is_detected() {
+        use praxis_policy_core::extensions::HttpExtension;
+        let before = Extensions::default();
+        let after = Extensions {
+            http: Some(Arc::new(HttpExtension::default())),
+            ..Extensions::default()
+        };
+        assert!(
+            extensions_changed(&before, &after),
+            "a header write must not be mistaken for no change"
+        );
+    }
+
+    #[test]
+    fn a_custom_change_alone_is_detected() {
+        let before = Extensions::default();
+        let after = Extensions {
+            custom: Some(Arc::new(std::collections::HashMap::new())),
             ..Extensions::default()
         };
         assert!(extensions_changed(&before, &after));

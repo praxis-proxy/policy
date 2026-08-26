@@ -804,6 +804,34 @@ impl ConfigVisitor for AplConfigVisitor {
                 return Err(err_msg.into());
             }
 
+            // Reject a phase that can reach more than one elicitation. Retry
+            // state for an elicit step is carried in a single per-request key
+            // (the agent echoes one id), so two elicit steps in the same phase
+            // share it: the second resolves against the first's id instead of
+            // dispatching its own — a stronger `require_approval` silently
+            // satisfied by a weaker `confirm`. Checked on the fully-stacked
+            // route so an elicit inherited from a global / tag layer plus one on
+            // the route also trips it. Correct multi-elicit needs a per-step id
+            // the current single-id protocol cannot carry, so this is rejected
+            // at load rather than mis-evaluated at runtime.
+            for (phase, effects) in [
+                ("pre_invocation", &effective.policy),
+                ("post_invocation", &effective.post_policy),
+            ] {
+                let elicits: usize = effects
+                    .iter()
+                    .map(praxis_policy_apl_core::Effect::count_elicits)
+                    .sum();
+                if elicits > 1 {
+                    let err_msg = format!(
+                        "route '{route_key}': {phase} reaches {elicits} elicitation steps; \
+                         at most one elicitation per phase is supported (they would share one \
+                         retry id and resolve against each other)"
+                    );
+                    return Err(err_msg.into());
+                }
+            }
+
             let route_arc = Arc::new(effective);
 
             // Resolve the entity-specific CMF hook pair. The visitor's

@@ -42,7 +42,7 @@ use chrono::SecondsFormat;
 use tokio::sync::Mutex;
 
 use praxis_policy_core::delegation::{
-    DelegationPayload, DelegationSubject, TokenDelegateHook,
+    AttenuationConfig, DelegationPayload, DelegationSubject, TokenDelegateHook,
     payload::{AuthEnforcedBy, TargetType},
 };
 use praxis_policy_core::engine::PolicyEngine;
@@ -113,17 +113,22 @@ impl DelegationInvoker for DelegationPluginInvoker {
 
         // Read step args first — the subject / actor role selection below
         // reads from them. Step `config_override` is a yaml map per the IR;
-        // extract a few well-known keys onto the typed DelegationPayload
-        // builders. Unknown keys still flow through to the plugin via the
-        // per-call config-override pathway (plugins consume them from their
-        // `cfg.config`). Recognized keys: `target` (required), `subject`,
-        // `actor`, `audience`, `permissions`, `target_type`,
-        // `auth_enforced_by`; everything else stays opaque.
+        // each recognized key is lifted onto the typed DelegationPayload.
+        // Recognized keys: `target` (required), `subject`, `actor`,
+        // `audience`, `permissions`, `target_type`, `auth_enforced_by`, and
+        // `attenuation`. Any other key is intentionally dropped — the payload
+        // has no untyped input channel, so an unrecognized key does not reach
+        // the plugin (an earlier comment here claimed otherwise; it did not).
         //
         // There is deliberately no `mode` key: the delegation mode is
         // *derived* from `subject` by the handler rather than declared, so a
         // route can't claim on-behalf-of-user while handing over a workload
         // SVID.
+        //
+        // `attenuation` is load-bearing: it *narrows* the minted credential's
+        // scope, so silently dropping it would mint a broader token than the
+        // author asked for — a fail-open. A malformed `attenuation:` errors
+        // (fail closed) rather than being ignored.
         let cfg = step.config_override.as_ref().and_then(|v| v.as_mapping());
 
         // Resolve who the exchange is *for*. Defaults to the user
@@ -213,6 +218,9 @@ impl DelegationInvoker for DelegationPluginInvoker {
             .and_then(|v| v.as_str())
         {
             payload = payload.with_auth_enforced_by(auth_enforced_by_from_str(enforcer));
+        }
+        if let Some(attenuation) = attenuation_from_cfg(cfg)? {
+            payload = payload.with_route_attenuation(attenuation);
         }
 
         // Dispatch. The plan's pre-resolved entry already has any
@@ -378,6 +386,23 @@ fn target_type_from_str(s: &str) -> TargetType {
     }
 }
 
+/// Parse the optional `attenuation:` block into a typed `AttenuationConfig`.
+///
+/// Attenuation *narrows* the minted credential's scope, so a present-but-
+/// malformed block fails closed (returns `InvalidConfig`) rather than being
+/// silently ignored, which would mint a broader token than the author asked
+/// for. An absent block yields `None` (no narrowing requested).
+fn attenuation_from_cfg(
+    cfg: Option<&serde_yaml::Mapping>,
+) -> Result<Option<AttenuationConfig>, DelegationError> {
+    let Some(att) = cfg.and_then(|m| m.get(serde_yaml::Value::String("attenuation".into()))) else {
+        return Ok(None);
+    };
+    serde_yaml::from_value(att.clone())
+        .map(Some)
+        .map_err(|e| DelegationError::InvalidConfig(format!("invalid `attenuation:` block: {e}")))
+}
+
 fn auth_enforced_by_from_str(s: &str) -> AuthEnforcedBy {
     match s.to_ascii_lowercase().as_str() {
         "caller" => AuthEnforcedBy::Caller,
@@ -423,6 +448,46 @@ mod tests {
         );
         assert_eq!(s("subject: workload"), DelegationSubject::CallerWorkload); // legacy alias
         assert_eq!(s("subject: this_workload"), DelegationSubject::ThisWorkload);
+    }
+
+    #[test]
+    fn attenuation_block_parses_onto_typed_config() {
+        let att = attenuation_from_cfg(Some(&cfg(
+            "attenuation:\n  actions: [read]\n  ttl_seconds: 300\n  capabilities: [comp.read]",
+        )))
+        .expect("valid attenuation parses")
+        .expect("attenuation present");
+        assert_eq!(att.actions, vec!["read".to_owned()]);
+        assert_eq!(att.ttl_seconds, Some(300));
+        assert_eq!(att.capabilities, vec!["comp.read".to_owned()]);
+    }
+
+    #[test]
+    fn attenuation_absent_is_none() {
+        assert!(
+            attenuation_from_cfg(Some(&cfg("target: hr-service")))
+                .unwrap()
+                .is_none()
+        );
+        assert!(attenuation_from_cfg(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_attenuation_fails_closed() {
+        // A present-but-malformed block must error rather than be dropped:
+        // dropping it would mint a broader token than the author asked for.
+        let err = attenuation_from_cfg(Some(&cfg("attenuation:\n  ttl_seconds: not-a-number")))
+            .expect_err("malformed attenuation must fail closed");
+        assert!(matches!(err, DelegationError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn attenuation_typo_key_fails_closed() {
+        // A misspelled key must not deserialize into an empty (no-op) config
+        // that silently widens the token — it is a hard error.
+        let err = attenuation_from_cfg(Some(&cfg("attenuation:\n  actionss: [read]")))
+            .expect_err("unknown attenuation key must fail closed");
+        assert!(matches!(err, DelegationError::InvalidConfig(_)));
     }
 
     #[test]
