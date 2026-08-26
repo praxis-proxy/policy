@@ -332,13 +332,6 @@ mod tests {
         assert!(truthy("3 != delegation.depth", &bag));
     }
 
-    /// `StringSet` is yielded in sorted order so indexing returns a
-    /// stable value across runs. `"compensation" < "PII"` (ASCII;
-    /// uppercase letters sort before lowercase, but both labels here
-    /// are different cases so ordering is alphanumeric on the first
-    /// char). Pinning the order keeps an author who reaches for
-    /// `session.labels[0]` from getting different answers between
-    /// builds.
     #[test]
     fn whole_valued_float_in_int_list_matches() {
         // Guard the float-stays-float change against the `in` operator: a
@@ -358,6 +351,13 @@ mod tests {
         );
     }
 
+    /// `StringSet` is yielded in sorted order so indexing returns a
+    /// stable value across runs. `"compensation" < "PII"` (ASCII;
+    /// uppercase letters sort before lowercase, but both labels here
+    /// are different cases so ordering is alphanumeric on the first
+    /// char). Pinning the order keeps an author who reaches for
+    /// `session.labels[0]` from getting different answers between
+    /// builds.
     #[test]
     fn string_set_yields_sorted_order_for_stable_indexing() {
         let mut bag = AttributeBag::new();
