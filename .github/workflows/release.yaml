@@ -44,6 +44,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-release-verify-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-release-verify-
+      # `make lint` runs rustfmt from nightly, which rust-toolchain.toml does
+      # not cover. See the note in ci.yml.
+      - run: rustup toolchain install nightly --component rustfmt --profile minimal
       - run: make lint
       - run: make test
       # Proves every publishable crate packages cleanly before anything is

@@ -16,6 +16,10 @@ name: CI
 # No toolchain action is needed. rust-toolchain.toml pins the channel and its
 # components, and rustup installs from that file on the first cargo invocation,
 # so the toolchain stays declared in exactly one place.
+#
+# `make lint` formats with nightly rustfmt, which that file cannot declare: it
+# pins one channel and nightly is a second. The lint job installs it explicitly,
+# so a job running `make lint` or `make fmt` needs that step.
 
 on:
   push:
@@ -53,6 +57,10 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-lint-
+      # `make lint` runs rustfmt from nightly, which rust-toolchain.toml does
+      # not cover. Without this the job fails on a missing cargo-fmt before it
+      # lints anything.
+      - run: rustup toolchain install nightly --component rustfmt --profile minimal
       - run: make lint
 
   test:
