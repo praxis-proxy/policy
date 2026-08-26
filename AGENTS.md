@@ -36,7 +36,7 @@ cargo test -p praxis-policy-core --lib -- test_name
 
 ## Architecture
 
-14-crate workspace implementing a policy engine for
+16-crate workspace implementing a policy engine for
 AI agent traffic. The engine decides who may call
 which tool, what data comes back, and where that
 data goes next.
@@ -53,6 +53,7 @@ crates/
   ppe-apl-cmf   canonical message format transforms
   ppe-apl-runtime  host runtime, plugin invokers,
                    route handler, session management
+  ppe-pdp-diff  differential tests across cedar/cel/opa
 
 builtins/
   plugins/      identity-jwt, delegator-oauth,

@@ -272,6 +272,24 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_pdp_kind_is_in_the_differential_harness() {
+        // Source of truth is the harness crate, not a local copy. A new
+        // factory in `builtin_pdp_factories` that is not on that list means
+        // the dialect was added to the router/facade without the differential
+        // harness — which is what issue #25 forbids.
+        use praxis_policy_pdp_diff::HARNESS_PDP_KINDS;
+        for factory in builtin_pdp_factories() {
+            assert!(
+                HARNESS_PDP_KINDS.contains(&factory.kind()),
+                "kind '{}' is registered in builtin_pdp_factories but not in \
+                 the ppe-pdp-diff harness. Add a Dialect arm and catalog \
+                 coverage there; registering it on PdpRouter is not enough.",
+                factory.kind()
+            );
+        }
+    }
+
+    #[test]
     fn session_store_factories_track_enabled_features() {
         let expected = usize::from(cfg!(feature = "valkey"));
         assert_eq!(

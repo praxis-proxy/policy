@@ -2328,6 +2328,7 @@ dependencies = [
  "praxis-policy-core",
  "praxis-policy-pdp-cedar-direct",
  "praxis-policy-pdp-cel",
+ "praxis-policy-pdp-diff",
  "praxis-policy-pdp-opa",
  "praxis-policy-plugin-delegator-oauth",
  "praxis-policy-plugin-elicitation-ciba",
@@ -2441,6 +2442,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "praxis-policy-pdp-diff"
+version = "0.1.0"
+dependencies = [
+ "praxis-policy-apl-core",
+ "praxis-policy-pdp-cedar-direct",
+ "praxis-policy-pdp-cel",
+ "praxis-policy-pdp-opa",
+ "serde_yaml",
+ "tokio",
 ]
 
 [[package]]

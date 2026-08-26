@@ -153,6 +153,9 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 # Server-side HTTP mock, for exercising the bundled transport against a
 # real socket rather than only its error paths.
 mockito = "1"
+# Test-only: `every_builtin_pdp_kind_is_in_the_differential_harness` imports
+# `HARNESS_PDP_KINDS` from here so the facade cannot drift from the harness.
+praxis-policy-pdp-diff = { path = "../ppe-pdp-diff" }
 
 [lints]
 workspace = true
