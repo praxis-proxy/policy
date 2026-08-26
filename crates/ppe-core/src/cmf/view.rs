@@ -19,6 +19,7 @@ use super::content::*;
 use super::enums::{ContentType, Role};
 use super::message::Message;
 use crate::hooks::payload::Extensions;
+use crate::hooks::{HookPhase, lookup_hook_metadata};
 
 /// Type of content a view represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -222,15 +223,25 @@ impl<'a> MessageView<'a> {
 
     // -- Phase helpers --
 
+    /// Whether this view's hook is registered under `phase`.
+    ///
+    /// Reads the metadata registry, not the name: `cmf.llm_input` is
+    /// `Pre` without spelling it, and `express_lane` spells it without
+    /// being it. An unregistered name has no phase.
+    fn phase_is(&self, phase: HookPhase) -> bool {
+        self.hook
+            .is_some_and(|h| lookup_hook_metadata(h).is_some_and(|meta| meta.phase == phase))
+    }
+
     /// Whether this is a pre-execution hook (`cmf.tool_pre_invoke`,
-    /// `cmf.prompt_pre_invoke`, etc.).
+    /// `cmf.llm_input`, `cmf.http_request`, etc.).
     pub fn is_pre(&self) -> bool {
-        self.hook.is_some_and(|h| h.contains("pre"))
+        self.phase_is(HookPhase::Pre)
     }
 
     /// Whether this is a post-execution hook.
     pub fn is_post(&self) -> bool {
-        self.hook.is_some_and(|h| h.contains("post"))
+        self.phase_is(HookPhase::Post)
     }
 
     // -- Universal properties --
@@ -709,6 +720,45 @@ mod tests {
         let post_views: Vec<_> = msg.iter_views(Some("cmf.tool_post_invoke"), None).collect();
         assert!(post_views[0].is_post());
         assert!(!post_views[0].is_pre());
+    }
+
+    /// `is_pre` / `is_post` must agree with the registered phase for
+    /// every dispatched hook. Four carry a phase their name does not
+    /// spell, and walking the table covers hooks added later.
+    #[test]
+    fn phase_accessors_agree_with_the_hook_authority() {
+        let msg = make_test_message();
+        for hook in crate::hooks::builtin_hook_types() {
+            let name = hook.to_string();
+            let meta = lookup_hook_metadata(&name).expect("a built-in hook is registered");
+            let views: Vec<_> = msg.iter_views(Some(&name), None).collect();
+            let view = &views[0];
+            let (pre, post) = match meta.phase {
+                HookPhase::Pre => (true, false),
+                HookPhase::Post => (false, true),
+                // Outside the request lifecycle: neither half applies.
+                HookPhase::Unphased => (false, false),
+            };
+            assert_eq!(view.is_pre(), pre, "is_pre for {name} ({:?})", meta.phase);
+            assert_eq!(
+                view.is_post(),
+                post,
+                "is_post for {name} ({:?})",
+                meta.phase
+            );
+        }
+    }
+
+    /// A name that spells a phase without being registered under one
+    /// reports neither half.
+    #[test]
+    fn a_name_merely_spelling_a_phase_carries_none() {
+        let msg = make_test_message();
+        for name in ["host.express_lane", "cmf.tool_pre_invoke_typo", "post_hoc"] {
+            let views: Vec<_> = msg.iter_views(Some(name), None).collect();
+            assert!(!views[0].is_pre(), "{name} must not read as pre-phase");
+            assert!(!views[0].is_post(), "{name} must not read as post-phase");
+        }
     }
 
     #[test]
@@ -1496,14 +1546,19 @@ mod tests {
                 ..Default::default()
             },
         };
-        let view = MessageView::new(&part, Role::User, Some("cmf.resource_pre_read"), Some(&ext));
+        let view = MessageView::new(
+            &part,
+            Role::User,
+            Some("cmf.resource_pre_fetch"),
+            Some(&ext),
+        );
         let dict = view.to_dict(true, true);
 
         // Core fields, including the mime type only a resource or media part has.
         assert_eq!(dict["kind"], "resource");
         assert_eq!(dict["role"], "user");
         assert_eq!(dict["action"], "read");
-        assert_eq!(dict["hook"], "cmf.resource_pre_read");
+        assert_eq!(dict["hook"], "cmf.resource_pre_fetch");
         assert_eq!(dict["is_pre"], true);
         assert_eq!(dict["is_post"], false);
         assert_eq!(dict["uri"], "file:///ledger.csv");

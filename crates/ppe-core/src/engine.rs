@@ -2162,12 +2162,34 @@ mod tests {
 
     // -- Helpers --
 
-    /// The engine's fixtures declare `test_hook`, a hook this crate does
-    /// not dispatch. Registering its metadata is what a host does for its
-    /// own hooks, and it has to happen before any config naming it loads,
-    /// or the loader has nothing to check the `hooks:` entry against.
+    /// The fixtures declare `test_hook`, which this crate does not
+    /// dispatch, so its metadata has to be registered the way a host
+    /// registers its own.
+    ///
+    /// No test calls this directly. Every helper that builds or parses a
+    /// fixture config calls it, so a test is registered by producing its
+    /// config. The registry is process-wide, so a test relying on a
+    /// separate call passed beside the tests that made one and failed
+    /// when run alone.
     fn register_fixture_hooks() {
         register_hook_metadata(TestHook::NAME, HookMetadata::permissive());
+    }
+
+    /// Parse fixture YAML into a validated config.
+    ///
+    /// Registration has to precede the parse, not just the load:
+    /// validation reads the registry, so an unregistered `test_hook` is
+    /// refused here.
+    fn parse_fixture_config(yaml: &str) -> Result<PolicyConfig, Box<PluginError>> {
+        register_fixture_hooks();
+        crate::config::parse_config(yaml)
+    }
+
+    /// Load fixture YAML into `engine`, registering first for the same
+    /// reason [`parse_fixture_config`] does.
+    fn load_fixture_yaml(engine: &Arc<PolicyEngine>, yaml: &str) -> Result<(), Box<PluginError>> {
+        register_fixture_hooks();
+        engine.load_config_yaml(yaml)
     }
 
     fn make_config(name: &str, priority: i32, mode: PluginMode) -> PluginConfig {
@@ -2180,6 +2202,9 @@ mod tests {
         mode: PluginMode,
         on_error: OnError,
     ) -> PluginConfig {
+        // The config below names `test_hook`, so its metadata has to
+        // exist by the time a load validates it.
+        register_fixture_hooks();
         PluginConfig {
             name: name.to_owned(),
             kind: "test".to_owned(),
@@ -4039,7 +4064,6 @@ mod tests {
     /// types other than tool in routing" gap.
     #[tokio::test]
     async fn test_routing_works_for_all_entity_types() {
-        register_fixture_hooks();
         use std::sync::Arc as StdArc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4096,7 +4120,7 @@ routes:
       - target
 "#
             );
-            let policy_config = crate::config::parse_config(&yaml).unwrap();
+            let policy_config = parse_fixture_config(&yaml).unwrap();
 
             let mgr = PolicyEngine::default();
             let counter = StdArc::new(AtomicUsize::new(0));
@@ -4329,8 +4353,10 @@ routes:
 
     /// A config as a host would hand it over in Rust: deserialized but
     /// not put through `parse_config`, so nothing has normalized or
-    /// validated it yet.
+    /// validated it yet. Registers the fixture hooks, since the load it
+    /// is handed to validates it.
     fn unvalidated_config(yaml: &str) -> PolicyConfig {
+        register_fixture_hooks();
         serde_yaml::from_str(yaml).expect("deserialize")
     }
 
@@ -4379,16 +4405,13 @@ routes:
 
     #[test]
     fn a_valid_config_loads_through_every_path() {
-        register_fixture_hooks();
-        crate::config::parse_config(VALID_YAML).expect("parse_config");
+        parse_fixture_config(VALID_YAML).expect("parse_config");
 
         // A fresh engine per path: re-loading the same plugin name onto
         // one engine is a registration conflict, unrelated to validation.
         let via_yaml = Arc::new(PolicyEngine::default());
         via_yaml.register_factory("test/allow", Box::new(AllowPluginFactory));
-        via_yaml
-            .load_config_yaml(VALID_YAML)
-            .expect("load_config_yaml");
+        load_fixture_yaml(&via_yaml, VALID_YAML).expect("load_config_yaml");
 
         let via_typed = Arc::new(PolicyEngine::default());
         via_typed.register_factory("test/allow", Box::new(AllowPluginFactory));
@@ -4402,17 +4425,16 @@ routes:
 
     #[test]
     fn a_duplicate_plugin_name_is_rejected_on_every_path() {
-        register_fixture_hooks();
         let mgr = Arc::new(PolicyEngine::default());
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
 
         // Every path refuses before any plugin is instantiated, so one
         // engine serves all of them.
         for err in [
-            crate::config::parse_config(DUPLICATE_NAME_YAML)
+            parse_fixture_config(DUPLICATE_NAME_YAML)
                 .map(|_| ())
                 .unwrap_err(),
-            mgr.load_config_yaml(DUPLICATE_NAME_YAML).unwrap_err(),
+            load_fixture_yaml(&mgr, DUPLICATE_NAME_YAML).unwrap_err(),
             mgr.load_config(unvalidated_config(DUPLICATE_NAME_YAML))
                 .unwrap_err(),
             PolicyEngine::from_config(unvalidated_config(DUPLICATE_NAME_YAML), &allow_factories())
@@ -4428,7 +4450,6 @@ routes:
 
     #[test]
     fn a_group_block_resolves_through_the_programmatic_paths() {
-        register_fixture_hooks();
         let mgr = Arc::new(PolicyEngine::default());
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
 
@@ -4464,7 +4485,6 @@ routes:
 
     #[tokio::test]
     async fn test_from_config_creates_manager() {
-        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: allow_plugin
@@ -4476,7 +4496,7 @@ plugins:
 plugin_settings:
   plugin_timeout: 60
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
 
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
@@ -4490,7 +4510,6 @@ plugin_settings:
 
     #[tokio::test]
     async fn test_from_config_invokes_correctly() {
-        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: denier
@@ -4499,7 +4518,7 @@ plugins:
     mode: sequential
     priority: 10
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
 
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/deny", Box::new(DenyPluginFactory));
@@ -4522,14 +4541,13 @@ plugins:
 
     #[tokio::test]
     async fn test_from_config_unknown_kind_rejected() {
-        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: mystery
     kind: unknown/type
     hooks: [test_hook]
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let factories = PluginFactoryRegistry::new(); // empty — no factories
 
         let result = PolicyEngine::from_config(policy_config, &factories);
@@ -4541,7 +4559,6 @@ plugins:
 
     #[tokio::test]
     async fn test_from_config_multiple_plugins() {
-        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: gate
@@ -4555,7 +4572,7 @@ plugins:
     mode: sequential
     priority: 10
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
 
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
@@ -4583,7 +4600,6 @@ plugins:
 
     #[tokio::test]
     async fn test_routing_cache_populated_on_first_invoke() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4600,7 +4616,7 @@ plugins:
 routes:
   - tool: get_compensation
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
 
@@ -4651,7 +4667,6 @@ routes:
     /// and the call is (wrongly) allowed.
     #[tokio::test]
     async fn load_config_yaml_folds_top_level_group_into_route_resolution() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4669,7 +4684,7 @@ routes:
 "#;
         let mgr = Arc::new(PolicyEngine::default());
         mgr.register_factory("test/deny", Box::new(DenyPluginFactory));
-        mgr.load_config_yaml(yaml).expect("config must load");
+        load_fixture_yaml(&mgr, yaml).expect("config must load");
 
         let ext = Extensions {
             meta: Some(Arc::new(crate::hooks::payload::MetaExtension {
@@ -4734,7 +4749,7 @@ routes:
         let mgr = Arc::new(PolicyEngine::default());
         let recorder = Arc::new(RecordingVisitor::default());
         mgr.register_visitor(recorder.clone());
-        mgr.load_config_yaml(yaml).expect("config must load");
+        load_fixture_yaml(&mgr, yaml).expect("config must load");
 
         let seen = recorder.bundles.lock().unwrap();
         assert!(
@@ -4745,7 +4760,6 @@ routes:
 
     #[tokio::test]
     async fn test_routing_cache_different_entities_separate() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4762,7 +4776,7 @@ routes:
   - tool: get_compensation
   - tool: send_email
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
 
@@ -4800,7 +4814,6 @@ routes:
 
     #[tokio::test]
     async fn test_routing_cache_cleared() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4816,7 +4829,7 @@ plugins:
 routes:
   - tool: get_compensation
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
 
@@ -4842,7 +4855,6 @@ routes:
 
     #[tokio::test]
     async fn test_unregister_invalidates_routing_cache() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -4858,7 +4870,7 @@ plugins:
 routes:
   - tool: get_compensation
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
 
@@ -4915,7 +4927,6 @@ routes:
 
     #[tokio::test]
     async fn test_routing_cache_rejects_inserts_at_capacity() {
-        register_fixture_hooks();
         // Cap of 2 — verifies bound holds AND uncached requests still resolve correctly.
         let yaml = r#"
 plugin_settings:
@@ -4935,7 +4946,7 @@ routes:
   - tool: b
   - tool: c
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
 
@@ -4993,7 +5004,6 @@ routes:
 
     #[tokio::test]
     async fn test_register_handler_invalidates_routing_cache() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -5009,7 +5019,7 @@ plugins:
 routes:
   - tool: get_compensation
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
 
@@ -5041,7 +5051,6 @@ routes:
 
     #[tokio::test]
     async fn test_routing_cache_scope_creates_separate_entries() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -5057,7 +5066,7 @@ plugins:
 routes:
   - tool: get_compensation
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mut factories = PluginFactoryRegistry::new();
         factories.register("test/allow", Box::new(AllowPluginFactory));
 
@@ -5098,7 +5107,6 @@ routes:
 
     #[tokio::test]
     async fn test_route_override_creates_new_instance() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -5117,7 +5125,7 @@ routes:
           config:
             max_requests: 10
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
 
         // Use register_factory + load_config so engine owns factories
         let mgr = PolicyEngine::default();
@@ -5325,7 +5333,6 @@ routes:
     /// increments a counter inside its `initialize()`.
     #[tokio::test]
     async fn test_route_override_initializes_new_instance() {
-        register_fixture_hooks();
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         static INIT_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -5398,7 +5405,7 @@ routes:
           config:
             max_requests: 10
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
 
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/init_tracking", Box::new(InitTrackingFactory));
@@ -5535,7 +5542,7 @@ routes:
                 log: Arc::clone(&log),
             }),
         );
-        mgr.load_config(crate::config::parse_config(yaml).unwrap())
+        mgr.load_config(parse_fixture_config(yaml).unwrap())
             .unwrap();
         (mgr, log)
     }
@@ -5562,7 +5569,6 @@ routes:
 
     #[tokio::test]
     async fn a_route_override_instance_receives_host_services() {
-        register_fixture_hooks();
         // The failure this pins: an override instance built by
         // `create_override_instance` got the no-op default `initialize()`,
         // so a plugin that fetches during init — `identity-jwt` with a
@@ -5597,7 +5603,6 @@ routes:
 
     #[tokio::test]
     async fn build_override_entries_hands_the_new_instance_host_services() {
-        register_fixture_hooks();
         // The host-facing entry point to the same path. It has no caller
         // inside this crate, so nothing else would catch a regression.
         let (mgr, log) = host_probe_engine(HOST_PROBE_YAML);
@@ -5614,7 +5619,6 @@ routes:
 
     #[tokio::test]
     async fn an_override_that_drops_perform_http_withholds_the_transport() {
-        register_fixture_hooks();
         // Capabilities come from the merged config, so narrowing them on a
         // route narrows what that route's instance may reach. `Ok(false)`
         // rather than `Err(())`: the host wired a transport, and the fix is
@@ -5640,7 +5644,6 @@ routes:
     /// per-route blast radius is the point of having overrides.
     #[tokio::test]
     async fn test_route_override_circuit_breaker_isolated_from_base() {
-        register_fixture_hooks();
         struct ErrorOnInvokeFactory;
         impl crate::factory::PluginFactory for ErrorOnInvokeFactory {
             fn create(
@@ -5675,7 +5678,7 @@ routes:
           config:
             something: changed
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
 
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/error_on_invoke", Box::new(ErrorOnInvokeFactory));
@@ -5709,7 +5712,6 @@ routes:
 
     #[tokio::test]
     async fn test_register_factory_then_load_config() {
-        register_fixture_hooks();
         let yaml = r#"
 plugins:
   - name: my_plugin
@@ -5721,7 +5723,7 @@ plugins:
 plugin_settings:
   plugin_timeout: 45
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
 
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
@@ -5766,7 +5768,6 @@ plugin_settings:
 
     #[tokio::test]
     async fn test_routing_full_flow_different_tools_different_plugins() {
-        register_fixture_hooks();
         // Setup: identity fires for all, apl_policy fires for pii tools,
         // rate_limiter fires only for get_compensation route
         let yaml = r#"
@@ -5804,7 +5805,7 @@ routes:
     plugins:
       - rate_limiter
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
         mgr.register_factory("test/deny", Box::new(DenyPluginFactory));
@@ -5842,7 +5843,6 @@ routes:
 
     #[tokio::test]
     async fn test_routing_disabled_fires_all_plugins() {
-        register_fixture_hooks();
         // Same plugins but routing disabled — all fire regardless of entity
         let yaml = r#"
 plugins:
@@ -5857,7 +5857,7 @@ plugins:
     mode: sequential
     priority: 20
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
         mgr.register_factory("test/deny", Box::new(DenyPluginFactory));
@@ -5881,7 +5881,6 @@ plugins:
 
     #[tokio::test]
     async fn test_routing_no_meta_fires_all_plugins() {
-        register_fixture_hooks();
         // Routing enabled but no meta on extensions → fallback to all
         let yaml = r#"
 plugin_settings:
@@ -5904,7 +5903,7 @@ routes:
     plugins:
       - denier
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
         mgr.register_factory("test/deny", Box::new(DenyPluginFactory));
@@ -5933,7 +5932,6 @@ routes:
 
     #[tokio::test]
     async fn test_routing_wildcard_catches_unmatched() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -5965,7 +5963,7 @@ routes:
     plugins:
       - fallback_plugin
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
         mgr.register_factory("test/deny", Box::new(DenyPluginFactory));
@@ -6001,7 +5999,6 @@ routes:
 
     #[tokio::test]
     async fn test_routing_host_tags_activate_policy_groups() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -6025,7 +6022,7 @@ plugins:
 routes:
   - tool: get_compensation
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
         mgr.register_factory("test/deny", Box::new(DenyPluginFactory));
@@ -6064,7 +6061,6 @@ routes:
 
     #[tokio::test]
     async fn test_routing_works_with_typed_invoke() {
-        register_fixture_hooks();
         let yaml = r#"
 plugin_settings:
   routing_enabled: true
@@ -6091,7 +6087,7 @@ routes:
       tags: [pii]
   - tool: send_email
 "#;
-        let policy_config = crate::config::parse_config(yaml).unwrap();
+        let policy_config = parse_fixture_config(yaml).unwrap();
         let mgr = PolicyEngine::default();
         mgr.register_factory("test/allow", Box::new(AllowPluginFactory));
         mgr.register_factory("test/deny", Box::new(DenyPluginFactory));
@@ -6449,8 +6445,7 @@ plugin_settings:
   parallel_execution_within_band: true
   fail_on_plugin_error: true
 "#;
-        mgr.load_config_yaml(yaml)
-            .expect("inactive settings warn, they do not fail the load");
+        load_fixture_yaml(&mgr, yaml).expect("inactive settings warn, they do not fail the load");
     }
 
     /// `groups:` at the top level and `global.policies:` are two spellings of
@@ -6498,7 +6493,7 @@ global:
         let mgr = Arc::new(PolicyEngine::default());
         let recorder = Arc::new(BundleRecorder::default());
         mgr.register_visitor(recorder.clone());
-        mgr.load_config_yaml(yaml).expect("config must load");
+        load_fixture_yaml(&mgr, yaml).expect("config must load");
 
         let seen = recorder.seen.lock().unwrap();
         assert!(
@@ -6590,9 +6585,8 @@ global:
         ] {
             let mgr = Arc::new(PolicyEngine::default());
             mgr.register_visitor(Arc::new(Refuser(section)));
-            let err = mgr
-                .load_config_yaml(yaml)
-                .expect_err("a refusing visitor must abort the load");
+            let err =
+                load_fixture_yaml(&mgr, yaml).expect_err("a refusing visitor must abort the load");
             let msg = err.to_string();
             assert!(
                 msg.contains("refuser"),
@@ -6628,7 +6622,6 @@ global:
     /// nothing checked it reports the configured names rather than an empty list.
     #[test]
     fn plugin_names_lists_what_was_registered() {
-        register_fixture_hooks();
         let mgr = Arc::new(PolicyEngine::default());
         assert!(
             mgr.plugin_names().is_empty(),
@@ -6645,7 +6638,7 @@ plugins:
     kind: test/allow
     hooks: [test_hook]
 "#;
-        mgr.load_config_yaml(yaml).expect("config must load");
+        load_fixture_yaml(&mgr, yaml).expect("config must load");
         let mut names = mgr.plugin_names();
         names.sort();
         assert_eq!(names, vec!["first".to_owned(), "second".to_owned()]);
