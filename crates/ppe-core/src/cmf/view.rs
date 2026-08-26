@@ -722,9 +722,31 @@ mod tests {
         assert!(!post_views[0].is_pre());
     }
 
-    /// `is_pre` / `is_post` must agree with the registered phase for
-    /// every dispatched hook. Four carry a phase their name does not
-    /// spell, and walking the table covers hooks added later.
+    /// The four hooks whose name does not spell their phase, which is
+    /// what the substring match got wrong. Written out rather than read
+    /// from the table, so this fails if either the accessor or the
+    /// registered phase moves.
+    #[test]
+    fn phase_accessors_hold_for_the_hooks_no_name_spells() {
+        let msg = make_test_message();
+        for (name, pre, post) in [
+            ("cmf.llm_input", true, false),
+            ("cmf.llm_output", false, true),
+            ("cmf.http_request", true, false),
+            ("cmf.http_response", false, true),
+        ] {
+            let views: Vec<_> = msg.iter_views(Some(name), None).collect();
+            assert_eq!(views[0].is_pre(), pre, "is_pre for {name}");
+            assert_eq!(views[0].is_post(), post, "is_post for {name}");
+        }
+    }
+
+    /// Every dispatched hook reports the phase it is registered under.
+    ///
+    /// Both sides read the registry, so this cannot catch a hook whose
+    /// name disagrees with its row. What it does catch is the accessors
+    /// themselves: an inverted phase, a hook name not threaded into the
+    /// view, or `Unphased` reported as a phase.
     #[test]
     fn phase_accessors_agree_with_the_hook_authority() {
         let msg = make_test_message();
