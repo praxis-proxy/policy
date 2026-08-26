@@ -32,6 +32,15 @@
 // route maps to the names it is known by, so the key annotated here is
 // the key a request resolves to.
 //
+// # A policy body replaces the route's plugin chain
+//
+// An annotated route dispatches its compiled body instead of the plugin
+// lineup praxis-policy-core would have resolved, so the `all` group, the
+// entity-type defaults, tag bundles, and the route's own `plugins:` list only
+// run for those requests when a policy step names them. That has always held
+// for entity routes, and an `http:` route carrying a body is the same
+// substitution.
+//
 // # Hook names per entity type
 //
 // Each entity type binds to its own CMF hook pair:
@@ -934,14 +943,28 @@ fn install_handler(
     if let Some(pdp) = pdp {
         handler = handler.with_pdp(pdp);
     }
-    mgr.annotate_route(
+    let replaced = mgr.annotate_route(
         entity_type.to_owned(),
         entity_name.to_owned(),
-        scope,
+        scope.clone(),
         hook_name.to_owned(),
         Arc::new(handler),
         plugin_config,
     );
+    if replaced {
+        // A handler already stood at these coordinates and has just been
+        // dropped. Nothing in the table records where it came from, so saying
+        // so is the only way an operator learns one policy body silently lost
+        // to another.
+        tracing::warn!(
+            entity_type,
+            entity_name,
+            scope = scope.as_deref(),
+            hook_name,
+            "APL visitor: replaced an existing policy handler at these route \
+             coordinates; only the later one evaluates",
+        );
+    }
 }
 
 /// Warn when an APL block carries a global-only wiring key
@@ -1233,12 +1256,21 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        AplConfigVisitor, ConfigVisitor as _, DispatchCache, PolicyEngine, RouteEntry,
-        apl_subblock, http_catchall_should_install, response_subblock,
+        AplConfigVisitor, ConfigVisitor as _, DispatchCache, ENTITY_HTTP, ENTITY_NAME_GLOBAL,
+        ENTITY_TOOL, HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE, HOOK_CMF_TOOL_PRE_INVOKE,
+        PluginConfig, PolicyEngine, RouteEntry, apl_subblock, http_catchall_should_install,
+        response_subblock,
     };
     use crate::session_store::MemorySessionStore;
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage, TypeCheck};
     use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
+    use praxis_policy_core::cmf::enums::Role;
+    use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
+    use praxis_policy_core::error::PluginViolation;
+    use praxis_policy_core::extensions::{Extensions, HttpExtension, MetaExtension};
+    use praxis_policy_core::factory::{PluginFactory, PluginInstance};
+    use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
+    use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 
     fn yaml(s: &str) -> serde_yaml::Value {
         serde_yaml::from_str(s).expect("valid yaml")
@@ -1532,6 +1564,488 @@ mod tests {
             engine.config_generation(),
             before,
             "nothing may be annotated for a route with no name"
+        );
+    }
+
+    // -- Dispatch end to end --
+    //
+    // A compiled policy body reaches a request through the annotation the
+    // visitor installed, so these drive a real engine rather than inspecting
+    // the visitor's own state. Every fixture sets
+    // `plugin_settings.routing_enabled: true`, which the `http:` selector
+    // requires and which defaults off.
+
+    /// A plugin that denies whatever reaches it, so a structural chain that
+    /// runs when it should not is visible as a denial with this code.
+    const CHAIN_VIOLATION: &str = "test.structural.chain.fired";
+
+    struct ChainDeny {
+        cfg: PluginConfig,
+    }
+
+    #[async_trait::async_trait]
+    impl praxis_policy_core::plugin::Plugin for ChainDeny {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+    }
+
+    impl HookHandler<CmfHook> for ChainDeny {
+        async fn handle(
+            &self,
+            _payload: &MessagePayload,
+            _extensions: &praxis_policy_core::extensions::Extensions,
+            _ctx: &mut praxis_policy_core::context::PluginContext,
+        ) -> PluginResult<MessagePayload> {
+            PluginResult::deny(PluginViolation::new(
+                CHAIN_VIOLATION,
+                "the route's plugin chain ran",
+            ))
+        }
+    }
+
+    struct ChainDenyFactory;
+
+    impl PluginFactory for ChainDenyFactory {
+        fn create(
+            &self,
+            config: &PluginConfig,
+        ) -> Result<PluginInstance, Box<praxis_policy_core::error::PluginError>> {
+            let plugin = Arc::new(ChainDeny {
+                cfg: config.clone(),
+            });
+            let handler: Arc<dyn praxis_policy_core::registry::AnyHookHandler> =
+                Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+            Ok(PluginInstance {
+                plugin,
+                handlers: vec![(HOOK_CMF_HTTP_REQUEST, handler)],
+            })
+        }
+    }
+
+    /// An initialized engine with the APL visitor walked over `yaml`.
+    async fn engine_with(yaml: &str) -> Arc<PolicyEngine> {
+        let mgr = Arc::new(PolicyEngine::default());
+        mgr.register_factory("test/chain-deny", Box::new(ChainDenyFactory));
+        crate::register_apl(&mgr, crate::AplOptions::in_process());
+        mgr.load_config_yaml(yaml).expect("the fixture must load");
+        mgr.initialize().await.expect("initialize");
+        mgr
+    }
+
+    fn payload() -> MessagePayload {
+        MessagePayload {
+            message: Message::text(Role::User, "hi"),
+        }
+    }
+
+    /// A generic HTTP request as a host presents one: the reserved entity
+    /// coordinates plus the request line on its own slot.
+    fn http_request(method: &str, path: Option<&str>) -> Extensions {
+        Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_HTTP.to_owned()),
+                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                ..Default::default()
+            })),
+            http: Some(Arc::new(HttpExtension {
+                method: Some(method.to_owned()),
+                path: path.map(str::to_owned),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn tool_request(name: &str) -> Extensions {
+        Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_TOOL.to_owned()),
+                entity_name: Some(name.to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Two `http:` routes, one carrying a body and one carrying nothing.
+    const HTTP_ROUTE_BODIES: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      pre_invocation:
+        - "http.method == 'DELETE': deny"
+  - http: /healthz
+    plugins: []
+"#;
+
+    #[tokio::test]
+    async fn an_http_prefix_route_evaluates_its_policy_body() {
+        let mgr = engine_with(HTTP_ROUTE_BODIES).await;
+
+        let (denied, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("DELETE", Some("/v1/files/q3.pdf")),
+                None,
+            )
+            .await;
+        assert!(
+            !denied.continue_processing,
+            "the route's body must evaluate for a path its prefix matches"
+        );
+
+        let (allowed, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("GET", Some("/v1/files/q3.pdf")),
+                None,
+            )
+            .await;
+        assert!(
+            allowed.continue_processing,
+            "the body allows a GET; violation = {:?}",
+            allowed.violation
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exact_http_route_with_no_body_inherits_nothing() {
+        let mgr = engine_with(HTTP_ROUTE_BODIES).await;
+
+        let (result, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("DELETE", Some("/healthz")),
+                None,
+            )
+            .await;
+        assert!(
+            result.continue_processing,
+            "the exact route resolved and carries nothing, so the sibling \
+             route's body must not reach it; violation = {:?}",
+            result.violation
+        );
+    }
+
+    /// A route carrying both a policy body and a `plugins:` list. The plugin
+    /// denies, so an allowed request proves the body replaced the chain.
+    const HTTP_ROUTE_BODY_AND_CHAIN: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: chain-deny
+    kind: test/chain-deny
+    hooks: [cmf.http_request]
+    mode: sequential
+routes:
+  - http:
+      path_prefix: /v1/files
+    plugins: [chain-deny]
+    apl:
+      pre_invocation:
+        - "http.method == 'DELETE': deny"
+"#;
+
+    /// The same route without a body, so the chain the test below asserts is
+    /// absent is one that demonstrably runs when nothing replaces it.
+    #[tokio::test]
+    async fn an_http_route_without_a_body_runs_its_structural_plugin_chain() {
+        const YAML: &str = "
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: chain-deny
+    kind: test/chain-deny
+    hooks: [cmf.http_request]
+    mode: sequential
+routes:
+  - http:
+      path_prefix: /v1/files
+    plugins: [chain-deny]
+";
+        let mgr = engine_with(YAML).await;
+
+        let (denied, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("GET", Some("/v1/files/q3.pdf")),
+                None,
+            )
+            .await;
+        let violation = denied.violation.expect("the chain denies");
+        assert_eq!(
+            violation.code, CHAIN_VIOLATION,
+            "an http: route with no body resolves its plugins the ordinary way"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_route_body_replaces_the_structural_plugin_chain() {
+        let mgr = engine_with(HTTP_ROUTE_BODY_AND_CHAIN).await;
+
+        let (allowed, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("GET", Some("/v1/files/q3.pdf")),
+                None,
+            )
+            .await;
+        assert!(
+            allowed.continue_processing,
+            "the annotated body is the whole lineup, so the route's own \
+             plugins: list must not run; violation = {:?}",
+            allowed.violation
+        );
+
+        let (denied, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("DELETE", Some("/v1/files/q3.pdf")),
+                None,
+            )
+            .await;
+        let violation = denied
+            .violation
+            .expect("the body's denial carries a violation");
+        assert_ne!(
+            violation.code, CHAIN_VIOLATION,
+            "the denial must come from the policy body, not from the chain"
+        );
+    }
+
+    /// A glob route under one of the four MCP selectors. The annotation is
+    /// installed under the pattern as written, and the lookup is exact
+    /// equality, so a request named by a glob never reaches the body.
+    const GLOB_TOOL_ROUTE: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - tool: "hr-*"
+    apl:
+      pre_invocation:
+        - "deny"
+"#;
+
+    #[tokio::test]
+    async fn a_glob_tool_route_still_does_not_evaluate_its_policy_body() {
+        let mgr = engine_with(GLOB_TOOL_ROUTE).await;
+
+        let (allowed, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_TOOL_PRE_INVOKE,
+                payload(),
+                tool_request("hr-lookup"),
+                None,
+            )
+            .await;
+        assert!(
+            allowed.continue_processing,
+            "a name the glob matches does not equal the pattern the handler is \
+             installed under, so the body does not evaluate; violation = {:?}",
+            allowed.violation
+        );
+
+        // The handler exists and its body denies, so the line above is the
+        // lookup and not a missing installation.
+        let (denied, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_TOOL_PRE_INVOKE,
+                payload(),
+                tool_request("hr-*"),
+                None,
+            )
+            .await;
+        assert!(
+            !denied.continue_processing,
+            "the body is installed under the pattern as written"
+        );
+    }
+
+    /// A list selector contributes one name per element.
+    const LIST_TOOL_ROUTE: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - tool: [alpha, beta]
+    apl:
+      pre_invocation:
+        - "deny"
+"#;
+
+    #[tokio::test]
+    async fn a_list_tool_route_dispatches_for_every_element() {
+        let mgr = engine_with(LIST_TOOL_ROUTE).await;
+
+        for name in ["alpha", "beta"] {
+            let (denied, _bg) = mgr
+                .invoke_named::<CmfHook>(
+                    HOOK_CMF_TOOL_PRE_INVOKE,
+                    payload(),
+                    tool_request(name),
+                    None,
+                )
+                .await;
+            assert!(
+                !denied.continue_processing,
+                "{name} is one of the names the list contributes"
+            );
+        }
+
+        let (allowed, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_TOOL_PRE_INVOKE,
+                payload(),
+                tool_request("gamma"),
+                None,
+            )
+            .await;
+        assert!(
+            allowed.continue_processing,
+            "a name the list does not contain reaches no handler; violation = {:?}",
+            allowed.violation
+        );
+    }
+
+    /// One `http:` route declaring both halves.
+    const HTTP_ROUTE_BOTH_HALVES: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      pre_invocation:
+        - "http.method == 'DELETE': deny"
+      post_invocation:
+        - "http.method == 'TRACE': deny"
+"#;
+
+    #[tokio::test]
+    async fn both_http_halves_resolve_the_same_route() {
+        let mgr = engine_with(HTTP_ROUTE_BOTH_HALVES).await;
+        assert!(
+            mgr.has_hooks_for(HOOK_CMF_HTTP_REQUEST) && mgr.has_hooks_for(HOOK_CMF_HTTP_RESPONSE),
+            "a route declaring both halves installs both"
+        );
+
+        let (denied_in, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("DELETE", Some("/v1/files/q3.pdf")),
+                None,
+            )
+            .await;
+        assert!(!denied_in.continue_processing, "the request half enforces");
+
+        let (denied_out, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_RESPONSE,
+                payload(),
+                http_request("TRACE", Some("/v1/files/q3.pdf")),
+                None,
+            )
+            .await;
+        assert!(
+            !denied_out.continue_processing,
+            "the response half resolves the same route given the request line"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_invocation_without_the_request_line_behaves_as_before() {
+        let mgr = engine_with(HTTP_ROUTE_BOTH_HALVES).await;
+
+        let (result, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_RESPONSE,
+                payload(),
+                http_request("TRACE", None),
+                None,
+            )
+            .await;
+        assert!(
+            result.continue_processing,
+            "with no request line nothing resolves and the global policy \
+             governs, which is what a host that never set it gets today; \
+             violation = {:?}",
+            result.violation
+        );
+    }
+
+    /// A global HTTP policy alongside an explicit catch-all route. The two
+    /// occupy different annotation keys, and each rule below belongs to only
+    /// one of them.
+    const GLOBAL_PLUS_CATCHALL_ROUTE: &str = r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  apl:
+    pre_invocation:
+      - "http.method == 'PATCH': deny"
+routes:
+  - http:
+      path_prefix: /
+    apl:
+      pre_invocation:
+        - "http.method == 'DELETE': deny"
+"#;
+
+    #[tokio::test]
+    async fn an_explicit_catchall_route_and_the_global_policy_both_survive() {
+        let mgr = engine_with(GLOBAL_PLUS_CATCHALL_ROUTE).await;
+
+        let (denied, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("DELETE", Some("/anything/at/all")),
+                None,
+            )
+            .await;
+        assert!(
+            !denied.continue_processing,
+            "the route governs every path it resolves"
+        );
+
+        // Nothing resolves without a request line, which is where the
+        // implicit install under the reserved name applies. Its own rule
+        // still fires there, so the route did not replace its handler.
+        let (denied_global, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("PATCH", None),
+                None,
+            )
+            .await;
+        assert!(
+            !denied_global.continue_processing,
+            "the implicit catch-all still governs what resolves nothing"
+        );
+
+        let (allowed, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_REQUEST,
+                payload(),
+                http_request("DELETE", None),
+                None,
+            )
+            .await;
+        assert!(
+            allowed.continue_processing,
+            "the route's rule is the route's alone; violation = {:?}",
+            allowed.violation
         );
     }
 }

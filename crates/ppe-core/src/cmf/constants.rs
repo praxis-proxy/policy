@@ -149,11 +149,24 @@ crate::define_hooks! {
     /// under it via [`ENTITY_HTTP`] / [`ENTITY_NAME_GLOBAL`]. This half
     /// carries authorization, which is an admission check and so belongs
     /// entirely before the request is forwarded.
+    ///
+    /// A route selecting on `http:` is matched from the request line, so a
+    /// host that also puts `method` and `path` on the HTTP extension at the
+    /// identity invocation unlocks that route's own `authentication:` list. A
+    /// host that supplies no request line there behaves exactly as it does
+    /// today, with the global list governing, and the engine warns once when
+    /// a route's list could not apply so a deployment can tell which of the
+    /// two it is in.
     HOOK_CMF_HTTP_REQUEST: "cmf.http_request" => entity: Some(ENTITY_HTTP), phase: Pre;
     /// Generic HTTP response hook, the return half of
     /// [`HOOK_CMF_HTTP_REQUEST`]. Authorization cannot live here, but
     /// response filtering can: redaction, label propagation, and any
     /// check that needs the body the upstream actually returned. A host
     /// that only authorizes never fires it, and nothing changes for it.
+    ///
+    /// The request line on this invocation is what makes both halves of one
+    /// exchange resolve one route. Without it the response half resolves
+    /// nothing and the global policy governs the way out, which is what a
+    /// host that never set it gets today.
     HOOK_CMF_HTTP_RESPONSE: "cmf.http_response" => entity: Some(ENTITY_HTTP), phase: Post;
 }

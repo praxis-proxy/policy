@@ -1501,6 +1501,15 @@ impl PolicyEngine {
     /// The underlying `plugins:` chain for this route is *not* removed —
     /// those plugins stay discoverable via [`find_plugin_entries`](Self::find_plugin_entries)
     /// so the orchestrator can dispatch into them by name.
+    ///
+    /// An annotation is the entire lineup for its coordinates: resolution
+    /// returns the handler alone, so the `all` group, the entity-type
+    /// defaults, tag bundles, and the route's own `plugins:` list stop firing
+    /// for those requests unless the handler dispatches into them by name.
+    ///
+    /// Returns whether an annotation was already installed under the same
+    /// `(entity_type, entity_name, scope, hook_name)` and has been replaced. A
+    /// host may replace deliberately, so this reports rather than refuses.
     pub fn annotate_route<H>(
         &self,
         entity_type: impl Into<String>,
@@ -1509,7 +1518,8 @@ impl PolicyEngine {
         hook_name: impl Into<String>,
         handler: Arc<H>,
         config: crate::plugin::PluginConfig,
-    ) where
+    ) -> bool
+    where
         H: crate::plugin::Plugin + crate::registry::AnyHookHandler + 'static,
     {
         let key = AnnotationKey {
@@ -1523,9 +1533,7 @@ impl PolicyEngine {
             plugin_ref,
             handler,
         };
-        self.mutate_runtime(|snap| {
-            snap.route_annotations.insert(key, entry);
-        });
+        self.mutate_runtime(|snap| snap.route_annotations.insert(key, entry).is_some())
     }
 
     /// Remove a route annotation for a specific hook. No-op when no
@@ -7433,6 +7441,133 @@ routes:
             "the entity type and the hook belong in the same line, got {traced:?}"
         );
         drop(sink);
+    }
+
+    /// A root-prefix `http:` route alongside nothing else, so the only other
+    /// name in play is the reserved global one.
+    const HTTP_CATCHALL_ROUTE_YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /
+    plugins: []
+"#;
+
+    /// An annotation is the whole lineup for its coordinates, so a route's own
+    /// `plugins:` list stops firing for the requests it answers unless the
+    /// handler dispatches into it by name.
+    #[tokio::test]
+    async fn an_annotated_http_route_dispatches_instead_of_its_plugin_chain() {
+        let (mgr, chain) = recording_engine(HTTP_ROUTES_YAML).await;
+        let (entity_type, resolved_name) = first_route_identity(HTTP_ROUTES_YAML);
+        let annotated: Ledger = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let cfg = make_config("policy-body", 0, PluginMode::Sequential);
+        mgr.annotate_route(
+            entity_type,
+            resolved_name,
+            None,
+            "test_hook",
+            Arc::new(RecordingHandler::new(cfg.clone(), &annotated)),
+            cfg,
+        );
+
+        let result = dispatch(&mgr, "test_hook", http_request(Some("/v1/files/q3.pdf"))).await;
+        assert!(result.continue_processing, "the handler allows the request");
+
+        assert_eq!(
+            plugins_that_fired(&annotated),
+            vec!["policy-body".to_owned()],
+            "the annotated handler answers for everything the route resolves"
+        );
+        assert!(
+            plugins_that_fired(&chain).is_empty(),
+            "the route's plugin list is replaced rather than appended to, got {:?}",
+            plugins_that_fired(&chain)
+        );
+    }
+
+    /// The annotation table overwrites from any source, so a second install at
+    /// one coordinate says so and the later handler is the one that evaluates.
+    #[tokio::test]
+    async fn a_second_annotation_at_one_coordinate_reports_the_replacement() {
+        let (mgr, _chain) = recording_engine(HTTP_ROUTES_YAML).await;
+        let (entity_type, resolved_name) = first_route_identity(HTTP_ROUTES_YAML);
+        let annotated: Ledger = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut reported = Vec::new();
+        for tag in ["first", "second"] {
+            let cfg = make_config(tag, 0, PluginMode::Sequential);
+            reported.push(mgr.annotate_route(
+                entity_type,
+                resolved_name.clone(),
+                None,
+                "test_hook",
+                Arc::new(RecordingHandler::new(cfg.clone(), &annotated)),
+                cfg,
+            ));
+        }
+        assert_eq!(
+            reported,
+            vec![false, true],
+            "the first install is new, the second replaces it"
+        );
+
+        let result = dispatch(&mgr, "test_hook", http_request(Some("/v1/files/q3.pdf"))).await;
+        assert!(result.continue_processing, "the handler allows the request");
+        assert_eq!(
+            plugins_that_fired(&annotated),
+            vec!["second".to_owned()],
+            "the later handler is the one kept"
+        );
+    }
+
+    /// An explicit catch-all `http:` route derives its own name, so it and the
+    /// reserved global name are different keys: the route governs what it
+    /// resolves and the reserved name governs what resolves nothing.
+    #[tokio::test]
+    async fn a_root_prefix_route_does_not_share_the_reserved_global_annotation() {
+        let (mgr, _chain) = recording_engine(HTTP_CATCHALL_ROUTE_YAML).await;
+        let (entity_type, route_name) = first_route_identity(HTTP_CATCHALL_ROUTE_YAML);
+        assert_ne!(
+            route_name, ENTITY_NAME_GLOBAL,
+            "a root prefix is not the reserved name, so the two cannot collide"
+        );
+
+        let annotated: Ledger = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut reported = Vec::new();
+        for (tag, name) in [
+            ("route", route_name.as_str()),
+            ("catch-all", ENTITY_NAME_GLOBAL),
+        ] {
+            let cfg = make_config(tag, 0, PluginMode::Sequential);
+            reported.push(mgr.annotate_route(
+                entity_type,
+                name,
+                None,
+                "test_hook",
+                Arc::new(RecordingHandler::new(cfg.clone(), &annotated)),
+                cfg,
+            ));
+        }
+        assert_eq!(
+            reported,
+            vec![false, false],
+            "neither install landed on the other's key"
+        );
+
+        // A request carrying a path resolves the route. One that named no path
+        // resolves nothing, which is where the reserved name applies.
+        for ext in [http_request(Some("/anything/at/all")), http_request(None)] {
+            let result = dispatch(&mgr, "test_hook", ext).await;
+            assert!(result.continue_processing, "both handlers allow");
+        }
+        assert_eq!(
+            plugins_that_fired(&annotated),
+            vec!["route".to_owned(), "catch-all".to_owned()],
+            "the route answers what it resolves; the reserved name answers the rest"
+        );
     }
 
     // -- Capturing what the engine emits --
