@@ -378,9 +378,16 @@ fn create_plugin_instances(
 
 /// Register instances produced by `create_plugin_instances` into
 /// `target_registry`. `instances` is zipped against `plugin_configs`, so it
-/// has to be the vector that call returned for these same configs: a
-/// shorter one silently drops the tail, a reordered one pairs each plugin
-/// with the wrong config.
+/// has to be the slice that call returned for these same configs: a shorter
+/// one silently drops the tail, a reordered one pairs each plugin with the
+/// wrong config.
+///
+/// Borrows rather than consumes, and hands the registry `Arc` clones, so
+/// the caller keeps the last reference to every instance. That matters on
+/// the error path: `register_multi_handler` takes ownership and drops what
+/// it was given when it rejects a name, and the entries past the failure
+/// are never reached at all. Owning them here would run those plugins'
+/// `Drop` — host code — inside whatever lock the caller holds.
 ///
 /// Returns on the first duplicate-name registration. On error,
 /// `target_registry` is in a partial state — both callers discard it on
@@ -389,11 +396,15 @@ fn create_plugin_instances(
 fn register_instances_into(
     target_registry: &mut PluginRegistry,
     plugin_configs: &[crate::plugin::PluginConfig],
-    instances: Vec<crate::factory::PluginInstance>,
+    instances: &[crate::factory::PluginInstance],
 ) -> Result<(), Box<PluginError>> {
     for (plugin_config, instance) in plugin_configs.iter().zip(instances) {
         target_registry
-            .register_multi_handler(instance.plugin, plugin_config.clone(), instance.handlers)
+            .register_multi_handler(
+                Arc::clone(&instance.plugin),
+                plugin_config.clone(),
+                instance.handlers.clone(),
+            )
             .map_err(|msg| Box::new(PluginError::Config { message: msg }))?;
 
         info!(
@@ -618,15 +629,25 @@ impl PolicyEngine {
         let current = self.runtime.load_full();
         let mut new_registry = current.registry.clone();
 
-        register_instances_into(&mut new_registry, &policy_config.plugins, instances)?;
-
-        self.runtime
-            .store(Arc::new(snapshot_from_config(new_registry, policy_config)));
-        // Same generation bump as mutate_runtime — load_config doesn't
-        // go through that helper because it has to swap registry + executor
-        // + cache-cap atomically as one snapshot.
-        self.generation.fetch_add(1, Ordering::Release);
+        let registered =
+            register_instances_into(&mut new_registry, &policy_config.plugins, &instances);
+        if registered.is_ok() {
+            self.runtime
+                .store(Arc::new(snapshot_from_config(new_registry, policy_config)));
+            // Same generation bump as mutate_runtime — load_config doesn't
+            // go through that helper because it has to swap registry + executor
+            // + cache-cap atomically as one snapshot.
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+        // Released before `instances`, `new_registry` and `current` fall out
+        // of scope, the same discipline try_mutate_runtime follows. A
+        // rejected load holds the only references to plugins the factories
+        // just built, and dropping one runs host `Drop` code that is free to
+        // re-enter the engine. No `?` above, so nothing unwinds past here
+        // still holding the lock.
         drop(writer);
+        drop(current);
+        registered?;
 
         // Clear routing cache — config changed.
         self.clear_routing_cache();
@@ -857,7 +878,7 @@ impl PolicyEngine {
         let resolved = resolve_factories(&policy_config.plugins, factories)?;
         let instances = create_plugin_instances(&policy_config.plugins, &resolved)?;
         let mut new_registry = PluginRegistry::new();
-        register_instances_into(&mut new_registry, &policy_config.plugins, instances)?;
+        register_instances_into(&mut new_registry, &policy_config.plugins, &instances)?;
 
         engine
             .runtime
@@ -2935,6 +2956,88 @@ plugins:
         done_rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("a re-entrant handler Drop deadlocked against runtime_write");
+    }
+
+    /// Builds plugins whose `Drop` re-enters the engine, so a load that is
+    /// rejected after instantiation has host teardown to run.
+    struct DropReentrantFactory {
+        engine: std::sync::Weak<PolicyEngine>,
+    }
+
+    impl crate::factory::PluginFactory for DropReentrantFactory {
+        fn create(
+            &self,
+            config: &PluginConfig,
+        ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            let plugin = Arc::new(DropReentrantHandler {
+                cfg: config.clone(),
+                engine: self.engine.clone(),
+            });
+            Ok(crate::factory::PluginInstance {
+                plugin: Arc::clone(&plugin) as Arc<dyn Plugin>,
+                handlers: vec![("test_hook", plugin)],
+            })
+        }
+    }
+
+    /// A name conflict rejects the load with the factories' plugins already
+    /// built, and `load_config` holds the only references to them: the
+    /// registry drops what it refused, the entries past the conflict are
+    /// never registered, and the partial clone drops unpublished. All of
+    /// that is host `Drop` code, so none of it may run under
+    /// `runtime_write`.
+    ///
+    /// The config collides with a plugin registered beforehand rather than
+    /// with itself — `parse_config` rejects a name repeated inside one
+    /// document, so an in-file duplicate never reaches the registry. The
+    /// conflict lands on the first entry, leaving one instance refused by
+    /// the registry and one never reached.
+    #[test]
+    fn a_rejected_load_drops_its_plugins_outside_the_writer_lock() {
+        let engine = Arc::new(PolicyEngine::default());
+        engine.register_factory(
+            "test/drop_reentrant",
+            Box::new(DropReentrantFactory {
+                engine: Arc::downgrade(&engine),
+            }),
+        );
+
+        let taken = make_config("taken", 5, PluginMode::Sequential);
+        let sitting: Arc<AllowPlugin> = Arc::new(AllowPlugin { cfg: taken.clone() });
+        engine
+            .register_handler::<TestHook, _>(sitting, taken)
+            .expect("the conflicting name has to be registered first");
+
+        let yaml = r"
+plugins:
+  - name: taken
+    kind: test/drop_reentrant
+    hooks: [test_hook]
+    mode: sequential
+    priority: 10
+  - name: never_reached
+    kind: test/drop_reentrant
+    hooks: [test_hook]
+    mode: sequential
+    priority: 20
+";
+        let policy_config = crate::config::parse_config(yaml).unwrap();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let loader = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            let _ = done_tx.send(loader.load_config(policy_config).is_err());
+        });
+
+        let rejected = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a rejected load deadlocked dropping its own plugins");
+        assert!(rejected, "a conflicting plugin name must reject the load");
+        assert_eq!(
+            engine.plugin_count(),
+            1,
+            "a rejected load publishes nothing, leaving the earlier plugin",
+        );
     }
 
     /// A rejected mutation must publish nothing and leave the generation
