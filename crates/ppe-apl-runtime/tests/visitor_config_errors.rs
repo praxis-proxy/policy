@@ -255,4 +255,3 @@ fn loads(yaml: &str) {
     register_apl(&mgr, AplOptions::in_process());
     mgr.load_config_yaml(yaml).expect("this config must load");
 }
-

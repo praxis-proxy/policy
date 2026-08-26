@@ -935,24 +935,6 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
 /// the subsequent validation pass succeeds. We use it only to
 /// select the right `DecodingKey`; validation re-enforces `iss`
 /// against the matched config.
-/// Strip a leading `Bearer` auth-scheme from a header value, if present.
-///
-/// The `Bearer` scheme name is case-insensitive per RFC 9110 §11.1 (`bearer`,
-/// `BEARER`, `Bearer` are all the same scheme), and the scheme is followed by
-/// one or more spaces before the token. A value that does not carry the scheme
-/// (a bare token) is returned unchanged, so hosts that pre-strip still work.
-fn strip_bearer_prefix(value: &str) -> &str {
-    // Split on the first space: the scheme is everything before it. Requiring
-    // a space means a bare token (no scheme, e.g. host pre-stripped) and a
-    // token that merely starts with "bearer" both fall through untouched.
-    match value.split_once(' ') {
-        Some((scheme, after)) if scheme.eq_ignore_ascii_case("bearer") => {
-            after.trim_start_matches(' ')
-        },
-        _ => value,
-    }
-}
-
 fn peek_issuer(token: &str) -> Option<String> {
     // Exactly three dot-separated segments, matching the previous length check.
     let mut segments = token.split('.');
@@ -969,6 +951,24 @@ fn peek_issuer(token: &str) -> Option<String> {
         .ok()?;
     let value: Value = serde_json::from_slice(&payload_bytes).ok()?;
     value.get("iss")?.as_str().map(String::from)
+}
+
+/// Strip a leading `Bearer` auth-scheme from a header value, if present.
+///
+/// The `Bearer` scheme name is case-insensitive per RFC 9110 §11.1 (`bearer`,
+/// `BEARER`, `Bearer` are all the same scheme), and the scheme is followed by
+/// one or more spaces before the token. A value that does not carry the scheme
+/// (a bare token) is returned unchanged, so hosts that pre-strip still work.
+fn strip_bearer_prefix(value: &str) -> &str {
+    // Split on the first space: the scheme is everything before it. Requiring
+    // a space means a bare token (no scheme, e.g. host pre-stripped) and a
+    // token that merely starts with "bearer" both fall through untouched.
+    match value.split_once(' ') {
+        Some((scheme, after)) if scheme.eq_ignore_ascii_case("bearer") => {
+            after.trim_start_matches(' ')
+        },
+        _ => value,
+    }
 }
 
 /// Reason `validate_token` couldn't verify the JWT. Wraps the

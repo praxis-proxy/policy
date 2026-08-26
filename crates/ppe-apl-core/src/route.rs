@@ -370,7 +370,7 @@ fn segment_get<'a>(value: &'a serde_json::Value, seg: &str) -> Option<&'a serde_
 
 /// Read `root.a.b.c` from a JSON value via dot-separated path. Returns
 /// `None` if any segment is missing. Object segments index by key; a numeric
-/// segment indexes into an array (so a path expanded by [`expand_field_paths`]
+/// segment indexes into an array (so a path expanded by `expand_field_paths`
 /// resolves).
 ///
 /// Public because host bridges read fields back out of their own payload
