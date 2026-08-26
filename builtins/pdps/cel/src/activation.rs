@@ -161,18 +161,21 @@ fn node_to_value(node: Node) -> Value {
 
 /// Convert one `AttributeValue` to a `cel::Value`.
 ///
-/// CEL's type model distinguishes `int` and `double` strictly:
-/// `delegation.depth <= 2` errors if `delegation.depth` is a double
-/// and `2` is an int (the literal). To shield authors from that
-/// asymmetry, an `f64` whose value is a whole number and fits a `i64`
-/// is yielded as `Value::Int`. The same logic applies to the
-/// author-supplied yaml args (see `yaml_to_value`) — both surfaces
-/// now agree.
+/// An `f64` is yielded as `Value::Float`, never silently narrowed to an int.
+/// CEL's `==` / `<=` / `<` and friends already compare an int literal against
+/// a double operand (verified against the pinned `cel` version's ordering
+/// impls and pinned by test), so `delegation.depth <= 2` works with a
+/// double-valued `depth`. Narrowing a whole-valued double to an int used to be
+/// done "to help literal comparison", but it broke float *arithmetic*: a
+/// `confidence` of exactly `1.0` became `int 1`, and `confidence * 100.0` then
+/// errored with "no such overload" (int × double) — so the maximum confidence
+/// was denied while a lower one was allowed, an outcome inversion driven purely
+/// by whether the value happened to be integral.
 fn attr_to_value(attr: &AttributeValue) -> Value {
     match attr {
         AttributeValue::Bool(b) => Value::from(*b),
         AttributeValue::Int(i) => Value::from(*i),
-        AttributeValue::Float(f) => float_to_value(*f),
+        AttributeValue::Float(f) => Value::from(*f),
         AttributeValue::String(s) => Value::from(s.clone()),
         // StringSet → list(string). Sort before yielding so authors
         // who reach for `session.labels[0]` (or any other
@@ -189,34 +192,11 @@ fn attr_to_value(attr: &AttributeValue) -> Value {
     }
 }
 
-/// Yield an `f64` as `Value::Int` when it represents a whole number
-/// in `i64` range, otherwise `Value::Float`. Used by both
-/// `attr_to_value` (bag scalars) and `yaml_to_value` (author args) so
-/// `delegation.depth: 2` works against the literal `2` regardless of
-/// whether the bag populated it as `Int(2)` or `Float(2.0)`.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    reason = "the conversion is guarded to finite, integral, in-range values; the \
-              bound casts are deliberate and explained below"
-)]
-fn float_to_value(f: f64) -> Value {
-    // The upper bound is strict on purpose. `i64::MAX as f64` cannot represent
-    // 2^63 - 1 and rounds up to exactly 2^63, so `<=` against it would admit
-    // 2^63, which is one past the last i64 and saturates on conversion. `<` is
-    // then exactly the right test. `i64::MIN as f64` is exact at -2^63, so the
-    // lower bound stays inclusive.
-    if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < i64::MAX as f64 {
-        Value::from(f as i64)
-    } else {
-        Value::from(f)
-    }
-}
-
 /// Convert a `serde_yaml::Value` (author-supplied `cel:` args) to a
-/// `cel::Value`. Numbers without a fractional part map to `Int`, otherwise
-/// `Float`. Non-string mapping keys are skipped (CEL map keys here are
-/// always strings for author ergonomics).
+/// `cel::Value`. An integer literal maps to `Int`, a fractional one to
+/// `Float`; a float is never narrowed to an int (same reasoning as
+/// `attr_to_value`). Non-string mapping keys are skipped (CEL map keys here
+/// are always strings for author ergonomics).
 fn yaml_to_value(v: &serde_yaml::Value) -> Value {
     match v {
         serde_yaml::Value::Null => Value::Null,
@@ -225,7 +205,7 @@ fn yaml_to_value(v: &serde_yaml::Value) -> Value {
             if let Some(i) = n.as_i64() {
                 Value::from(i)
             } else {
-                float_to_value(n.as_f64().unwrap_or(f64::NAN))
+                Value::from(n.as_f64().unwrap_or(f64::NAN))
             }
         },
         serde_yaml::Value::String(s) => Value::from(s.clone()),
@@ -304,21 +284,33 @@ mod tests {
         assert!(truthy("session.labels.exists(l, l == 'PII')", &bag));
     }
 
-    /// An `f64` whose value is a whole number is yielded as an int so
-    /// authors can compare against integer literals without CEL's
-    /// strict int-vs-double type rules blowing up. A genuinely
-    /// fractional `f64` still arrives as a float (so `confidence > 0.9`
-    /// behaves correctly).
+    /// A double-valued bag scalar compares correctly against an integer
+    /// literal without being narrowed to an int — CEL's ordering handles the
+    /// mixed comparison. Narrowing is deliberately not done because it breaks
+    /// float arithmetic (see `whole_valued_float_keeps_arithmetic`).
     #[test]
-    fn whole_number_float_arrives_as_int_for_literal_compare() {
+    fn double_scalar_compares_against_int_literal() {
         let mut bag = AttributeBag::new();
         bag.set("delegation.depth", 2.0_f64);
         bag.set("intent.confidence", 0.92_f64);
-        // Compare-with-int-literal: requires the bag value to be int.
         assert!(truthy("delegation.depth == 2", &bag));
         assert!(truthy("delegation.depth <= 2", &bag));
         // Genuine doubles still compare to double literals.
         assert!(truthy("intent.confidence > 0.9", &bag));
+    }
+
+    /// Regression: a whole-valued double (`1.0`) must stay a double so that
+    /// float arithmetic on it still resolves. Narrowing it to `int 1` made
+    /// `confidence * 100.0` fail with "no such overload" and denied the
+    /// maximum-confidence case while allowing lower ones.
+    #[test]
+    fn whole_valued_float_keeps_arithmetic() {
+        let mut bag = AttributeBag::new();
+        bag.set("intent.confidence", 1.0_f64);
+        assert!(truthy("intent.confidence * 100.0 >= 90.0", &bag));
+        // And the sub-1.0 case is unchanged.
+        bag.set("intent.confidence", 0.92_f64);
+        assert!(truthy("intent.confidence * 100.0 >= 90.0", &bag));
     }
 
     /// `StringSet` is yielded in sorted order so indexing returns a
@@ -328,6 +320,25 @@ mod tests {
     /// char). Pinning the order keeps an author who reaches for
     /// `session.labels[0]` from getting different answers between
     /// builds.
+    #[test]
+    fn whole_valued_float_in_int_list_matches() {
+        // Guard the float-stays-float change against the `in` operator: a
+        // whole-valued double must still be found in an int list (CEL's `in`
+        // uses cross-type equality), so membership doesn't invert on int-vs-
+        // double the way the old narrowing avoided for `==` but broke for `*`.
+        let mut bag = AttributeBag::new();
+        bag.set("delegation.depth", 2.0_f64);
+        assert!(
+            truthy("delegation.depth in [1, 2, 3]", &bag),
+            "float 2.0 in int list"
+        );
+        bag.set("intent.confidence", 1.0_f64);
+        assert!(
+            truthy("intent.confidence in [0.5, 1.0]", &bag),
+            "float in float list"
+        );
+    }
+
     #[test]
     fn string_set_yields_sorted_order_for_stable_indexing() {
         let mut bag = AttributeBag::new();
