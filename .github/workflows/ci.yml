@@ -16,6 +16,10 @@ name: CI
 # No toolchain action is needed. rust-toolchain.toml pins the channel and its
 # components, and rustup installs from that file on the first cargo invocation,
 # so the toolchain stays declared in exactly one place.
+#
+# `make lint` formats with nightly rustfmt, which that file cannot declare: it
+# pins one channel and nightly is a second. The lint job installs it explicitly,
+# so a job running `make lint` or `make fmt` needs that step.
 
 on:
   push:
@@ -24,7 +28,9 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,8 +40,13 @@ jobs:
   lint:
     name: fmt and clippy
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -46,13 +57,22 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-lint-
+      # `make lint` runs rustfmt from nightly, which rust-toolchain.toml does
+      # not cover. Without this the job fails on a missing cargo-fmt before it
+      # lints anything.
+      - run: rustup toolchain install nightly --component rustfmt --profile minimal
       - run: make lint
 
   test:
     name: test
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -68,8 +88,13 @@ jobs:
   doc:
     name: docs build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |

@@ -82,6 +82,13 @@ pub struct OAuthDelegatorConfig {
     /// subject authenticates with the client secret as before.
     #[serde(default = "default_workload_assertion_type")]
     pub workload_assertion_type: String,
+
+    /// Reuse of live delegated tokens. Off unless an operator turns it
+    /// on, so an upgrade changes no behaviour; see
+    /// [`CacheConfig`](crate::cache::CacheConfig) for what enabling it
+    /// costs as well as what it saves.
+    #[serde(default)]
+    pub cache: crate::cache::CacheConfig,
 }
 
 /// Where the gateway's OAuth client secret is loaded from. Three

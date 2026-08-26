@@ -1093,7 +1093,7 @@ is recorded as follow-up work in Scope Boundaries rather than as an open questio
 
 ## Sources & References
 
-- **Origin document:** [docs/brainstorms/2026-08-20-configurable-claim-mapping-requirements.md](docs/brainstorms/2026-08-20-configurable-claim-mapping-requirements.md)
+- **Origin document:** [docs/brainstorms/2026-08-20-configurable-claim-mapping-requirements.md](../brainstorms/2026-08-20-configurable-claim-mapping-requirements.md)
 - Upstream issue: [praxis-proxy/policy#27](https://github.com/praxis-proxy/policy/issues/27)
 - Prerequisite, merged: [preserve JSON shape in subject claims (#9)](https://github.com/praxis-proxy/policy/pull/9) — `d0f0536`
 - Code: `builtins/plugins/identity-jwt/src/claim_map.rs`, `src/config.rs`, `src/resolver.rs`, `src/factory.rs`

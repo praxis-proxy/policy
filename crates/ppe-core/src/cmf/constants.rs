@@ -161,9 +161,12 @@ crate::define_hooks! {
     HOOK_CMF_HTTP_REQUEST: "cmf.http_request" => entity: Some(ENTITY_HTTP), phase: Pre;
     /// Generic HTTP response hook, the return half of
     /// [`HOOK_CMF_HTTP_REQUEST`]. Authorization cannot live here, but
-    /// response filtering can: redaction, label propagation, and any
-    /// check that needs the body the upstream actually returned. A host
-    /// that only authorizes never fires it, and nothing changes for it.
+    /// response filtering can: a handler reads the response headers and
+    /// the extensions, which covers stripping a header, enforcing a
+    /// content type, and attaching labels. Not body redaction, since
+    /// [`HttpExtension`][crate::extensions::http::HttpExtension] carries
+    /// no body and the payload on this path is unused. A host that only
+    /// authorizes never fires it, and nothing changes for it.
     ///
     /// The request line on this invocation is what makes both halves of one
     /// exchange resolve one route. Without it the response half resolves

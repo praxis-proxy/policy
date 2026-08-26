@@ -4,9 +4,7 @@
 # Pin the toolchain so local builds, CI, and the release pipeline agree. This
 # version is also the project MSRV, mirrored in Cargo.toml `rust-version` and
 # clippy.toml `msrv`. Bump all three together.
-#
-# `rustfmt` and `llvm-tools-preview` are present because formatting and coverage
-# both run on this pinned stable toolchain rather than on nightly.
+
 [toolchain]
 channel = "1.96.0"
 components = ["clippy", "rustfmt", "rust-analyzer", "llvm-tools-preview"]

@@ -143,6 +143,10 @@ async fn a_global_post_phase_policy_is_annotated_under_the_response_hook() {
         mgr.has_hooks_for(HOOK_CMF_HTTP_RESPONSE),
         "a post-phase global policy must install the response handler",
     );
+    assert!(
+        !mgr.has_hooks_for(HOOK_CMF_HTTP_REQUEST),
+        "a post-only global policy gains no request handler",
+    );
 
     let (allowed, _bg) = mgr
         .invoke_named::<CmfHook>(HOOK_CMF_HTTP_RESPONSE, payload(), http_request("GET"), None)
