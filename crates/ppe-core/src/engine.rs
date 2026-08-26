@@ -2319,6 +2319,39 @@ mod tests {
         }
     }
 
+    /// A blocking plugin that halts (`continue_processing=false`) but attaches NO
+    /// violation. This is exactly the shape the executor must synthesize a deny
+    /// for, rather than letting it fall through to the allow / modification path.
+    struct SilentBlockPlugin {
+        cfg: PluginConfig,
+    }
+
+    #[async_trait]
+    impl Plugin for SilentBlockPlugin {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+        async fn initialize(&self) -> Result<(), Box<PluginError>> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+            Ok(())
+        }
+    }
+
+    impl HookHandler<TestHook> for SilentBlockPlugin {
+        async fn handle(
+            &self,
+            _payload: &TestPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> PluginResult<TestPayload> {
+            let mut r = PluginResult::allow();
+            r.continue_processing = false; // block, but attach no violation
+            r
+        }
+    }
+
     /// Handler that always returns an error (for testing `on_error` behavior).
     struct ErrorHandler;
 
@@ -2492,6 +2525,38 @@ mod tests {
 
         assert!(!result.continue_processing);
         assert_eq!(result.violation.as_ref().unwrap().code, "denied");
+    }
+
+    #[tokio::test]
+    async fn test_blocking_plugin_without_violation_synthesizes_deny() {
+        // A sequential (blocking) plugin that returns continue_processing=false
+        // with NO violation must still deny, not fall through to allow. The
+        // executor synthesizes a `plugin_deny` violation naming the plugin.
+        let mgr = PolicyEngine::default();
+        let config = make_config("silent-blocker", 10, PluginMode::Sequential);
+        let plugin = Arc::new(SilentBlockPlugin {
+            cfg: config.clone(),
+        });
+        mgr.register_handler::<TestHook, _>(plugin, config).unwrap();
+        mgr.initialize().await.unwrap();
+
+        let payload: Box<dyn PluginPayload> = Box::new(TestPayload {
+            value: "test".into(),
+        });
+        let (result, _) = mgr
+            .invoke_by_name("test_hook", payload, Extensions::default(), None)
+            .await;
+
+        assert!(
+            !result.continue_processing,
+            "a blocking plugin without a violation must still deny"
+        );
+        let v = result
+            .violation
+            .as_ref()
+            .expect("a deny must carry a synthesized violation");
+        assert_eq!(v.code, "plugin_deny");
+        assert_eq!(v.plugin_name.as_deref(), Some("silent-blocker"));
     }
 
     #[tokio::test]
