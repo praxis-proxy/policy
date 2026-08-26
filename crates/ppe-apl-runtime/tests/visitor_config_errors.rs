@@ -26,23 +26,9 @@ use std::sync::Arc;
 use praxis_policy_apl_runtime::{AplOptions, register_apl};
 use praxis_policy_core::engine::PolicyEngine;
 
-/// Load with the APL visitor installed and no factories registered, and return
-/// the error text. Registering none is the point for most cases here: it is what
-/// an operator hits when they name a `kind` the host never wired up.
-fn load_err(yaml: &str) -> String {
-    let mgr = Arc::new(PolicyEngine::default());
-    register_apl(&mgr, AplOptions::in_process());
-    match mgr.load_config_yaml(yaml) {
-        Ok(()) => panic!("this config must not load"),
-        Err(e) => format!("{e}"),
-    }
-}
-
-fn loads(yaml: &str) {
-    let mgr = Arc::new(PolicyEngine::default());
-    register_apl(&mgr, AplOptions::in_process());
-    mgr.load_config_yaml(yaml).expect("this config must load");
-}
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 /// The control. Everything below differs from this by one deliberate mistake, so
 /// without it a rejection could be attributable to something else in the block.
@@ -51,7 +37,7 @@ fn a_config_with_no_wiring_block_loads() {
     loads("plugin_settings:\n  routing_enabled: true\n");
 }
 
-// ---- global.apl.pdp ----------------------------------------------------
+// global.apl.pdp
 
 #[test]
 fn a_pdp_entry_that_is_not_a_mapping_is_rejected_with_its_index() {
@@ -100,7 +86,7 @@ fn the_reported_index_identifies_which_pdp_entry_failed() {
     );
 }
 
-// ---- global.apl.session_store ------------------------------------------
+// global.apl.session_store
 
 #[test]
 fn a_session_store_that_is_not_a_mapping_is_rejected() {
@@ -129,7 +115,7 @@ fn a_session_store_kind_with_no_registered_factory_is_rejected() {
     );
 }
 
-// ---- renamed and misplaced keys ----------------------------------------
+// renamed and misplaced keys
 
 /// `identity:` was renamed to `authentication:`, and a stale one is rejected
 /// rather than ignored. An unknown field is dropped silently, which would leave
@@ -172,7 +158,7 @@ fn a_visitor_error_is_attributed_to_the_visitor() {
     );
 }
 
-// ---- global.apl.attribute_files ----------------------------------------
+// global.apl.attribute_files
 
 /// `attribute_files` supplies the static `data.*` tree a policy reads. Every way
 /// of getting it wrong has to fail the load.
@@ -217,3 +203,56 @@ fn an_attribute_file_that_does_not_exist_is_rejected() {
 fn an_empty_attribute_files_list_loads() {
     loads("global:\n  apl:\n    attribute_files: []\n");
 }
+
+// Cross-layer elicitation stacking
+
+/// The parser rejects two elicits written in a single route block; the visitor
+/// adds the case the parser cannot see, because it only exists once layers are
+/// stacked: an elicit inherited from the `global` layer plus one on the route,
+/// landing in the same phase. Both would share the one per-request elicitation
+/// id, so the second (a weaker `confirm`) would resolve against the first's
+/// (`require_approval`) approval. It must be rejected at load, not mis-evaluated.
+#[test]
+fn a_global_and_route_elicit_in_one_phase_is_rejected() {
+    let e = load_err(
+        "plugin_settings:\n  routing_enabled: true\nglobal:\n  apl:\n    pre_invocation:\n      - \"require_approval(manager-approver, from: user.manager)\"\nroutes:\n  - tool: get_compensation\n    apl:\n      pre_invocation:\n        - \"confirm(user-confirm, from: user.sub)\"\n",
+    );
+    assert!(
+        e.contains("at most one elicitation per phase"),
+        "a global+route elicit stacked into one phase must be rejected: {e}"
+    );
+}
+
+/// The control: the same two elicits split across the pre and post phases are
+/// separate evaluation walks with separate ids, so the config loads. Without it,
+/// the rejection above could be coming from having two elicits at all rather
+/// than two in one phase.
+#[test]
+fn a_global_pre_elicit_and_route_post_elicit_load() {
+    loads(
+        "plugin_settings:\n  routing_enabled: true\nglobal:\n  apl:\n    pre_invocation:\n      - \"require_approval(manager-approver, from: user.manager)\"\nroutes:\n  - tool: get_compensation\n    apl:\n      post_invocation:\n        - \"confirm(user-confirm, from: user.sub)\"\n",
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// Load with the APL visitor installed and no factories registered, and return
+/// the error text. Registering none is the point for most cases here: it is what
+/// an operator hits when they name a `kind` the host never wired up.
+fn load_err(yaml: &str) -> String {
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    match mgr.load_config_yaml(yaml) {
+        Ok(()) => panic!("this config must not load"),
+        Err(e) => format!("{e}"),
+    }
+}
+
+fn loads(yaml: &str) {
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(yaml).expect("this config must load");
+}
+
