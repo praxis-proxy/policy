@@ -1115,5 +1115,46 @@ mod tests {
             ),
             "a replaced delegation chain must be detected"
         );
+
+        // The production arm for http/custom is `Some(a) -> Some(b)` with a
+        // replaced Arc (a plugin rewriting an already-present slot). The
+        // slot-appears tests above only hit the `None -> Some` arm; cover the
+        // replaced-Arc arm too so a regression there (e.g. value-equality) is
+        // caught.
+        use praxis_policy_core::extensions::HttpExtension;
+        let http = Arc::new(HttpExtension::default());
+        let with_http = |c: &Arc<HttpExtension>| Extensions {
+            http: Some(Arc::clone(c)),
+            ..Extensions::default()
+        };
+        assert!(
+            !extensions_changed(&with_http(&http), &with_http(&http)),
+            "the same http Arc on both sides is not a change"
+        );
+        assert!(
+            extensions_changed(
+                &with_http(&http),
+                &with_http(&Arc::new(HttpExtension::default()))
+            ),
+            "a replaced http slot (a header rewrite) must be detected"
+        );
+
+        type CustomMap = std::collections::HashMap<String, serde_json::Value>;
+        let custom: Arc<CustomMap> = Arc::new(CustomMap::new());
+        let with_custom = |c: &Arc<CustomMap>| Extensions {
+            custom: Some(Arc::clone(c)),
+            ..Extensions::default()
+        };
+        assert!(
+            !extensions_changed(&with_custom(&custom), &with_custom(&custom)),
+            "the same custom Arc on both sides is not a change"
+        );
+        assert!(
+            extensions_changed(
+                &with_custom(&custom),
+                &with_custom(&Arc::new(CustomMap::new()))
+            ),
+            "a replaced custom slot must be detected"
+        );
     }
 }
