@@ -1447,6 +1447,116 @@ mod tests {
     }
 
     #[test]
+    fn expand_field_paths_fails_closed_on_wide_array() {
+        // The *width* bound (MAX_EXPANDED_PATHS) must fail closed too, not just
+        // the depth bound covered above: a single array wide enough to exceed
+        // the leaf cap returns None so the caller denies rather than
+        // half-redacting a huge result and passing the tail through.
+        let mut rows = Vec::with_capacity(super::MAX_EXPANDED_PATHS + 2);
+        for i in 0..(super::MAX_EXPANDED_PATHS + 2) {
+            rows.push(json!({ "ssn": i }));
+        }
+        let root = json!({ "rows": serde_json::Value::Array(rows) });
+        assert_eq!(
+            expand_field_paths(&root, "rows.ssn"),
+            None,
+            "a wide array past the leaf cap must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_result_over_large_fanout_denies() {
+        // When a result field path fans out past the bound, evaluate_post must
+        // DENY (fail closed) rather than pass the un-redacted tail through. Use
+        // a shape nested past MAX_FANOUT_DEPTH (cheap) to trip the bound.
+        let mut route = CompiledRoute::new("ping");
+        route.result.push(field_rule(
+            "rows.leaf",
+            vec![Stage::Redact { condition: None }],
+        ));
+
+        let mut nested = json!({ "leaf": "secret" });
+        for _ in 0..(super::MAX_FANOUT_DEPTH + 5) {
+            nested = serde_json::Value::Array(vec![nested]);
+        }
+        let mut bag = AttributeBag::new();
+        let mut payload = RoutePayload::with_result(json!({}), json!({ "rows": nested }));
+
+        let r = evaluate_route(
+            &route,
+            &mut bag,
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        match r.decision {
+            Decision::Deny {
+                reason,
+                rule_source,
+            } => {
+                let reason = reason.unwrap_or_default();
+                assert!(reason.contains("result field"), "reason: {reason}");
+                assert!(
+                    reason.contains("too many elements to redact safely"),
+                    "reason: {reason}"
+                );
+                assert_eq!(rule_source, "test.rows.leaf");
+            },
+            other => panic!("over-large result fan-out must deny, got {other:?}"),
+        }
+        assert!(
+            !r.result_modified,
+            "nothing may be redacted on a fail-closed deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_args_over_large_fanout_denies() {
+        // Same fail-closed guarantee on the args (pre) phase.
+        let mut route = CompiledRoute::new("ping");
+        route.args.push(field_rule(
+            "rows.leaf",
+            vec![Stage::Redact { condition: None }],
+        ));
+
+        let mut nested = json!({ "leaf": "secret" });
+        for _ in 0..(super::MAX_FANOUT_DEPTH + 5) {
+            nested = serde_json::Value::Array(vec![nested]);
+        }
+        let mut bag = AttributeBag::new();
+        let mut payload = RoutePayload::new(json!({ "rows": nested }));
+
+        let r = evaluate_route(
+            &route,
+            &mut bag,
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        match r.decision {
+            Decision::Deny { reason, .. } => {
+                let reason = reason.unwrap_or_default();
+                assert!(reason.contains("args field"), "reason: {reason}");
+                assert!(
+                    reason.contains("too many elements to redact safely"),
+                    "reason: {reason}"
+                );
+            },
+            other => panic!("over-large args fan-out must deny, got {other:?}"),
+        }
+        assert!(
+            !r.args_modified,
+            "nothing may be redacted on a fail-closed deny"
+        );
+    }
+
+    #[test]
     fn dotted_helpers_index_into_arrays() {
         let mut v = json!({ "rows": [ { "ssn": "a" }, { "ssn": "b" } ] });
         // Read through an array index.
