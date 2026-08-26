@@ -30,7 +30,8 @@ pub enum PluginError {
         plugin_name: String,
         /// What went wrong.
         message: String,
-        /// Business-logic error code (e.g., `"invalid_token"`).
+        /// The underlying error that caused this failure, if any — the
+        /// error-chain `source` for `{:?}`/`Display` walking.
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
         /// Business-logic error code set by the plugin.
@@ -82,7 +83,7 @@ impl PluginError {
     /// Box this error for use in `Result<T, Box<PluginError>>`.
     ///
     /// Public APIs return `Result<T, Box<PluginError>>` rather than
-    /// `Result<T, Box<PluginError>>` because the enum is large (~184 bytes
+    /// `Result<T, PluginError>` because the enum is large (~184 bytes
     /// — `details: HashMap` and the `source: Box<dyn Error>` push it
     /// well past clippy's `result_large_err` threshold). Boxing keeps
     /// `Result<T, _>` pointer-sized on the success path; the

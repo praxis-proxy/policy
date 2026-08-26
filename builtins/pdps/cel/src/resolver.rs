@@ -209,8 +209,8 @@ impl CelResolver {
     /// eager-compile knob of its own.
     /// # Errors
     ///
-    /// Returns `BuildError` when the block is not a mapping or a setting is out
-    /// of range, such as a zero cache cap.
+    /// Returns `BuildError` when the block is not a mapping, carries an unknown
+    /// key, or gives `on_error` a value other than `deny` / `allow`.
     pub fn from_config(value: &serde_yaml::Value) -> Result<Self, BuildError> {
         let map = value
             .as_mapping()

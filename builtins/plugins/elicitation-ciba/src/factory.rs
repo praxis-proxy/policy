@@ -14,7 +14,7 @@
 //           backchannel_endpoint: https://kc/realms/corp/protocol/openid-connect/ext/ciba/auth
 //           token_endpoint:       https://kc/realms/corp/protocol/openid-connect/token
 //           client_id: praxis-policy-gateway
-//           client_secret_source: { kind: env, name: CIBA_CLIENT_SECRET }
+//           client_secret_source: { kind: env_var, name: CIBA_CLIENT_SECRET }
 //
 // Then policy routes name it: `require_approval(manager-approver, from: claim.manager, ...)`.
 //

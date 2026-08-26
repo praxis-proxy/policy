@@ -15,7 +15,7 @@
 //         config:
 //           token_endpoint: https://idp.example.com/token
 //           client_id: praxis-gateway
-//           client_secret_source: { kind: env, var: OAUTH_CLIENT_SECRET }
+//           client_secret_source: { kind: env_var, name: OAUTH_CLIENT_SECRET }
 //
 // The `kind: delegator/oauth` string is part of this crate's public
 // API. Hosts call
