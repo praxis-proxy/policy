@@ -313,6 +313,25 @@ mod tests {
         assert!(truthy("intent.confidence * 100.0 >= 90.0", &bag));
     }
 
+    /// The float-stays-float change relies on CEL comparing an int literal
+    /// against a double operand in *either* operand order. The existing tests
+    /// only cover `depth <op> 2`; pin the reversed `2 <op> depth` form too, so a
+    /// one-sided comparison impl can't silently break the half of author
+    /// policies that write the literal on the left.
+    #[test]
+    fn mixed_int_float_comparison_is_order_independent() {
+        let mut bag = AttributeBag::new();
+        bag.set("delegation.depth", 2.0_f64);
+        assert!(truthy("2 == delegation.depth", &bag));
+        assert!(truthy("2 <= delegation.depth", &bag));
+        assert!(truthy("2 >= delegation.depth", &bag));
+        assert!(truthy("3 > delegation.depth", &bag));
+        assert!(truthy("1 < delegation.depth", &bag));
+        // A true inequality must resolve to a value, not a "no such overload"
+        // error; asserted via its positive form so an error can't pass as false.
+        assert!(truthy("3 != delegation.depth", &bag));
+    }
+
     /// `StringSet` is yielded in sorted order so indexing returns a
     /// stable value across runs. `"compensation" < "PII"` (ASCII;
     /// uppercase letters sort before lowercase, but both labels here
