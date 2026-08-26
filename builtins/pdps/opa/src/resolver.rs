@@ -1025,6 +1025,51 @@ msg := "not a decision"
         assert_eq!(out.decision, Decision::Allow);
     }
 
+    /// The collision check must be prefix-*boundary* aware, not a bare string
+    /// prefix: a global `data.authz` must not be judged to contain
+    /// `data.authznext` just because one string-prefixes the other. A
+    /// sibling-prefix package is a genuinely separate `data` subtree and stays
+    /// allowed; a naive `starts_with` would wrongly reject it (fail-closed, but
+    /// a spurious denial of a legitimate inline module).
+    #[tokio::test]
+    async fn inline_module_in_prefix_sibling_package_is_allowed() {
+        let global = "package authz\nallow if input.subject.id == \"alice\"\n";
+        let r = resolver(&[global], OnError::Deny);
+        // `authznext` shares the `authz` string prefix but is a different subtree.
+        let inline = "package authznext\nallow if input.subject.id == \"alice\"\n";
+        let out = r
+            .evaluate(&call("data.authznext.allow", Some(inline)), &bag("alice"))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.decision,
+            Decision::Allow,
+            "a prefix-sibling package must not collide with a global package"
+        );
+    }
+
+    /// The symmetric case: an inline module whose package is a *parent* of a
+    /// global package (inline `data.authz`, global `data.authz.sub`) still feeds
+    /// a `data` subtree the operator policy reads, so it is rejected fail-closed.
+    /// This exercises the `b.strip_prefix(a)` arm of `packages_share_subtree`,
+    /// which the sub-package test (child-of-global) does not.
+    #[tokio::test]
+    async fn inline_module_that_is_parent_of_global_collides() {
+        let global = "package authz.sub\nallow if input.subject.id == \"alice\"\n";
+        let r = resolver(&[global], OnError::Allow);
+        let inline = "package authz\nallow := true\n";
+        let out = r
+            .evaluate(&call("data.authz.allow", Some(inline)), &bag("alice"))
+            .await
+            .unwrap();
+        match out.decision {
+            Decision::Deny { reason, .. } => {
+                assert!(reason.unwrap_or_default().contains("collides"));
+            },
+            other => panic!("parent-package collision must deny, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn missing_query_is_dispatch_error() {
         let r = resolver(&[ALLOW_WITH_DEFAULT], OnError::Deny);
