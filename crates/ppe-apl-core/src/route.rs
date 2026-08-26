@@ -458,11 +458,15 @@ pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option
     walk(root, &segs, "", 0, &mut out).then_some(out)
 }
 
-/// Maximum array-nesting depth `expand_field_paths` will fan out through before
-/// failing closed. Comfortably above any real tool-result shape and at
-/// `serde_json`'s own default recursion limit, so a parsed payload never trips
-/// it in practice; the guard exists for host-constructed payloads that bypass
-/// the parser.
+/// Maximum recursion depth `expand_field_paths` will descend before failing
+/// closed. The walk increments depth on every hop, so this bounds the sum of a
+/// path's segment count and the array-nesting levels fanned through, not array
+/// nesting alone. 128 is comfortably above any real (path, tool-result) shape
+/// and sits near `serde_json`'s own default parse-recursion limit, so in
+/// practice only a host-constructed payload that bypasses the parser (or a
+/// pathologically deep one right at the parse limit reached under a
+/// multi-segment path) can trip it; when it does, the caller denies rather than
+/// recursing without bound.
 const MAX_FANOUT_DEPTH: usize = 128;
 
 /// Maximum number of concrete leaf paths one field rule may fan out into before
