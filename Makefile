@@ -42,7 +42,7 @@ help:
 	@echo "  test              Run all workspace tests"
 	@echo ""
 	@echo "Supply chain & coverage:"
-	@echo "  audit             cargo audit + cargo deny check (advisories, licenses, bans, sources)"
+	@echo "  audit             cargo deny check (advisories, licenses, bans, sources)"
 	@echo "  coverage          Coverage summary, gated at COVERAGE_FLOOR percent"
 	@echo "  mutants           Run mutation testing (cargo-mutants)"
 	@echo "  semver            Check semver compatibility (cargo-semver-checks)"
@@ -153,10 +153,13 @@ test:
 # Supply chain & coverage
 # =============================================================================
 
+# `cargo deny check` covers advisories against the same RustSec database that
+# cargo-audit reads, and honors the reviewed exceptions in deny.toml. cargo-audit
+# reads audit.toml instead, so running both meant a second ignore list that had
+# to agree with the first, and without one it re-reported every accepted
+# dev-only advisory.
 .PHONY: audit
 audit:
-	@command -v cargo-audit >/dev/null 2>&1 || $(CARGO) install cargo-audit --locked
-	@cargo audit
 	@command -v cargo-deny >/dev/null 2>&1 || $(CARGO) install cargo-deny --locked
 	@cargo deny check
 
