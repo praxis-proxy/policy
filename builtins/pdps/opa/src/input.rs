@@ -130,8 +130,11 @@ fn attr_to_value(attr: &AttributeValue) -> Value {
 }
 
 /// Yield an `f64` as a JSON integer when it is a whole number in `i64` range,
-/// otherwise a JSON float. Keeps parity with CEL's `float_to_value` so a bag
-/// value populated as `Float(2.0)` reads as `2` for an author. A non-finite
+/// otherwise a JSON float, so a bag value populated as `Float(2.0)` reads as
+/// `2` for an author. Rego has a single unified `number` type, so narrowing a
+/// whole-valued float never breaks arithmetic or comparison here the way it did
+/// in CEL. CEL for that reason stopped narrowing and now keeps every float a
+/// double, so the two PDPs deliberately diverge on this point. A non-finite
 /// float has no JSON representation and becomes `null`.
 #[allow(
     clippy::cast_possible_truncation,
