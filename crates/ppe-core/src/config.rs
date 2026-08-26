@@ -805,6 +805,33 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     if config.routing_enabled() {
         let plugin_names: HashSet<&str> = config.plugins.iter().map(|p| p.name.as_str()).collect();
 
+        // Validate the `authentication:` step names the same way `plugins:`
+        // names are validated. An unresolvable step name is silently skipped at
+        // dispatch (`filter_entries_by_route` finds no matching entry and drops
+        // it with no error), so a typo leaves that authentication step unrun —
+        // the exact fail-open `parse_config` guards against for the renamed
+        // `identity:` key. Global, group, and route authentication all share
+        // one shape, so one check covers all three.
+        let validate_identity = |identity: &Option<crate::identity::RouteIdentityConfig>,
+                                 context: &str|
+         -> Result<(), Box<PluginError>> {
+            if let Some(identity) = identity {
+                for step in &identity.steps {
+                    if !plugin_names.contains(step.name.as_str()) {
+                        return Err(Box::new(PluginError::Config {
+                            message: format!(
+                                "{context} authentication references unknown plugin '{}'",
+                                step.name
+                            ),
+                        }));
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        validate_identity(&config.global.identity, "global")?;
+
         for (i, route) in config.routes.iter().enumerate() {
             let count = [
                 route.tool.is_some(),
@@ -857,6 +884,8 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
                     }
                 }
             }
+
+            validate_identity(&route.identity, &format!("route {i}"))?;
         }
 
         for (group_name, group) in &config.global.policies {
@@ -871,6 +900,8 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
                     }));
                 }
             }
+
+            validate_identity(&group.identity, &format!("policy group '{group_name}'"))?;
         }
     }
 
@@ -1441,6 +1472,68 @@ routes: []
                 .to_string()
                 .contains("unknown plugin 'nonexistent'")
         );
+    }
+
+    #[test]
+    fn test_route_unknown_authentication_step_rejected() {
+        // A typo'd authentication step name must be rejected at load, not
+        // silently skipped at dispatch — an unrun authentication step is a
+        // fail-open.
+        let yaml = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: corp-jwt
+    kind: builtin
+    hooks: [identity_resolve]
+routes:
+  - tool: get_compensation
+    authentication:
+      - corp-jtw
+"#;
+        assert!(
+            parse_config(yaml)
+                .unwrap_err()
+                .to_string()
+                .contains("authentication references unknown plugin 'corp-jtw'")
+        );
+    }
+
+    #[test]
+    fn test_global_unknown_authentication_step_rejected() {
+        let yaml = r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  authentication:
+    - missing-resolver
+plugins: []
+routes: []
+"#;
+        assert!(
+            parse_config(yaml)
+                .unwrap_err()
+                .to_string()
+                .contains("global authentication references unknown plugin 'missing-resolver'")
+        );
+    }
+
+    #[test]
+    fn test_known_authentication_step_accepted() {
+        // The positive control: a correctly-named step passes validation.
+        let yaml = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: corp-jwt
+    kind: builtin
+    hooks: [identity_resolve]
+routes:
+  - tool: get_compensation
+    authentication:
+      - corp-jwt
+"#;
+        parse_config(yaml).expect("a correctly-named authentication step must validate");
     }
 
     #[test]

@@ -102,9 +102,17 @@ impl Default for PolicyEngineConfig {
 /// decisions from `PluginRef.trusted_config` — never from the plugin.
 /// Cache key for resolved routing entries.
 ///
-/// Includes entity type, name, hook name, and scope so that
-/// the same tool on different scopes or at different hook points
-/// caches separately.
+/// Includes entity type, name, hook name, scope, and the request's tag set
+/// so that the same tool on different scopes, at different hook points, or
+/// carrying different host-injected tags caches separately.
+///
+/// `tags` is load-bearing: `meta.tags` activate policy groups during
+/// resolution, so two otherwise-identical requests with different tags resolve
+/// to different plugin lineups. Omitting them from the key let a tagged
+/// request hit an untagged cache entry (or vice versa) and run the wrong
+/// lineup — a fail-open when the tag would have activated a denier. Tags are
+/// held sorted and deduplicated so the key is independent of `HashSet`
+/// iteration order.
 ///
 /// Custom Hash/Eq implementations hash on `&str` slices so that
 /// `raw_entry` lookups with borrowed strings produce the same hash
@@ -115,6 +123,7 @@ struct RouteCacheKey {
     entity_name: String,
     hook_name: String,
     scope: Option<String>,
+    tags: Vec<String>,
 }
 
 impl Hash for RouteCacheKey {
@@ -123,6 +132,10 @@ impl Hash for RouteCacheKey {
         self.entity_name.as_str().hash(state);
         self.hook_name.as_str().hash(state);
         self.scope.as_deref().hash(state);
+        self.tags.len().hash(state);
+        for tag in &self.tags {
+            tag.as_str().hash(state);
+        }
     }
 }
 
@@ -132,6 +145,7 @@ impl PartialEq for RouteCacheKey {
             && self.entity_name == other.entity_name
             && self.hook_name == other.hook_name
             && self.scope == other.scope
+            && self.tags == other.tags
     }
 }
 
@@ -1679,6 +1693,15 @@ impl PolicyEngine {
 
         let request_scope = meta.scope.as_deref();
 
+        // Canonical (sorted, deduped) view of the request tags. Tags activate
+        // policy groups during resolution, so they are part of the cache
+        // identity; sorting makes the key independent of `HashSet` order.
+        let request_tags: Vec<&str> = {
+            let mut t: Vec<&str> = meta.tags.iter().map(String::as_str).collect();
+            t.sort_unstable();
+            t
+        };
+
         // Fast path: zero-allocation cache lookup with raw_entry
         let hash = {
             use std::hash::BuildHasher as _;
@@ -1687,6 +1710,10 @@ impl PolicyEngine {
             entity_name.hash(&mut hasher);
             hook_name.hash(&mut hasher);
             request_scope.hash(&mut hasher);
+            request_tags.len().hash(&mut hasher);
+            for tag in &request_tags {
+                tag.hash(&mut hasher);
+            }
             hasher.finish()
         };
         {
@@ -1705,6 +1732,12 @@ impl PolicyEngine {
                     && key.entity_name == entity_name
                     && key.hook_name == hook_name
                     && key.scope.as_deref() == request_scope
+                    && key.tags.len() == request_tags.len()
+                    && key
+                        .tags
+                        .iter()
+                        .zip(request_tags.iter())
+                        .all(|(a, b)| a == b)
             }) {
                 return Arc::clone(cached);
             }
@@ -1767,6 +1800,7 @@ impl PolicyEngine {
             entity_name: entity_name.to_owned(),
             hook_name: hook_name.to_owned(),
             scope: meta.scope.clone(),
+            tags: request_tags.iter().map(|t| (*t).to_owned()).collect(),
         };
         // Decide under the lock; log outside it so I/O doesn't block readers.
         // One warn per fill cycle — prevents log spam under DoS.
@@ -6507,10 +6541,11 @@ routes:
             .await;
         assert!(r1.continue_processing);
 
-        // Clear cache so new tags take effect
-        mgr.clear_routing_cache();
-
-        // With urgent tag from host → denier also fires → denied
+        // With urgent tag from host → denier also fires → denied. No cache
+        // clear between the two invokes: the tag set is part of the route
+        // cache key, so the tagged request must not collide with the untagged
+        // entry the first invoke populated. A stale hit here would run the
+        // untagged (allow-only) lineup and fail open.
         let p2: Box<dyn PluginPayload> = Box::new(TestPayload { value: "t".into() });
         let (r2, _) = mgr
             .invoke_by_name(
@@ -6521,6 +6556,18 @@ routes:
             )
             .await;
         assert!(!r2.continue_processing);
+
+        // And back to no tag → cached untagged (allow) entry still stands.
+        let p3: Box<dyn PluginPayload> = Box::new(TestPayload { value: "t".into() });
+        let (r3, _) = mgr
+            .invoke_by_name(
+                "test_hook",
+                p3,
+                make_meta("tool", "get_compensation", None, &[]),
+                None,
+            )
+            .await;
+        assert!(r3.continue_processing, "untagged request stays allowed");
     }
 
     #[tokio::test]
@@ -7108,10 +7155,11 @@ plugins:
         assert_eq!(names, vec!["first".to_owned(), "second".to_owned()]);
     }
 
-    /// The route cache is keyed on all four fields. `Hash` is derived and used;
-    /// `PartialEq` is hand-written, so a field omitted there would make two
+    /// The route cache is keyed on all five fields. `Hash` and `PartialEq` are
+    /// both hand-written, so a field omitted from either would make two
     /// distinct routes collide in the cache and one would be served the other's
-    /// filtered entry list.
+    /// filtered entry list. `tags` in particular are load-bearing — they
+    /// activate policy groups.
     #[test]
     fn the_route_cache_key_distinguishes_every_field() {
         let base = RouteCacheKey {
@@ -7119,6 +7167,7 @@ plugins:
             entity_name: "get_x".into(),
             hook_name: "cmf.tool_pre_invoke".into(),
             scope: None,
+            tags: vec![],
         };
         assert_eq!(base, base.clone(), "a key equals itself");
 
@@ -7137,6 +7186,10 @@ plugins:
             },
             RouteCacheKey {
                 scope: Some("read".into()),
+                ..base.clone()
+            },
+            RouteCacheKey {
+                tags: vec!["urgent".into()],
                 ..base.clone()
             },
         ];
