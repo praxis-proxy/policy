@@ -3833,6 +3833,100 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn field_op_in_do_fans_out_redact_over_result_array() {
+        // Regression guard for the dispatch_field_op fan-out: a do:-embedded
+        // `result.rows.ssn | redact` must reach EVERY row, not silently no-op
+        // because `rows` is an array. Only the route.rs result-section path had
+        // array coverage; the evaluator's FieldOp path did not.
+        let mut bag = AttributeBag::new();
+        let rule = Rule {
+            condition: Expression::Always,
+            effects: vec![Effect::FieldOp {
+                path: "result.rows.ssn".into(),
+                stages: vec![Stage::Redact { condition: None }],
+            }],
+            source: "demo.policy[0]".into(),
+        };
+        let steps = vec![Effect::from(rule)];
+        let mut payload = crate::route::RoutePayload::with_result(
+            json!({}),
+            json!({ "rows": [
+                { "ssn": "111-11-1111", "name": "a" },
+                { "ssn": "222-22-2222", "name": "b" }
+            ]}),
+        );
+
+        let eval = evaluate_effects(
+            &steps,
+            &mut bag,
+            &(Arc::new(FakePdp {
+                decision: Decision::Allow,
+            }) as Arc<dyn PdpResolver>),
+            &null_plugins(),
+            &noop_delegations(),
+            &noop_elicitations(),
+            crate::step::DispatchPhase::Post,
+            &mut payload,
+        )
+        .await;
+
+        assert_eq!(eval.decision, Decision::Allow);
+        assert!(eval.result_modified, "the fan-out redaction must register");
+        let result = payload.result.as_ref().unwrap();
+        assert_eq!(result["rows"][0]["ssn"], json!("[REDACTED]"));
+        assert_eq!(result["rows"][1]["ssn"], json!("[REDACTED]"));
+        assert_eq!(
+            result["rows"][0]["name"],
+            json!("a"),
+            "non-targeted fields untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn field_op_in_do_fans_out_omit_over_result_array() {
+        // Omit drives remove_dotted through the fan-out, a distinct path from
+        // redact's set_dotted: every row's `ssn` key must be removed.
+        let mut bag = AttributeBag::new();
+        let rule = Rule {
+            condition: Expression::Always,
+            effects: vec![Effect::FieldOp {
+                path: "result.rows.ssn".into(),
+                stages: vec![Stage::Omit],
+            }],
+            source: "demo.policy[0]".into(),
+        };
+        let steps = vec![Effect::from(rule)];
+        let mut payload = crate::route::RoutePayload::with_result(
+            json!({}),
+            json!({ "rows": [
+                { "ssn": "111-11-1111", "name": "a" },
+                { "ssn": "222-22-2222", "name": "b" }
+            ]}),
+        );
+
+        let eval = evaluate_effects(
+            &steps,
+            &mut bag,
+            &(Arc::new(FakePdp {
+                decision: Decision::Allow,
+            }) as Arc<dyn PdpResolver>),
+            &null_plugins(),
+            &noop_delegations(),
+            &noop_elicitations(),
+            crate::step::DispatchPhase::Post,
+            &mut payload,
+        )
+        .await;
+
+        assert_eq!(eval.decision, Decision::Allow);
+        assert!(eval.result_modified, "the fan-out omit must register");
+        let result = payload.result.as_ref().unwrap();
+        assert!(result["rows"][0].get("ssn").is_none(), "row 0 ssn omitted");
+        assert!(result["rows"][1].get("ssn").is_none(), "row 1 ssn omitted");
+        assert_eq!(result["rows"][0]["name"], json!("a"));
+    }
+
     /// A plugin stage learns which field it's operating on from the
     /// invocation's `name`. That name is relative to the args / result
     /// root at every call site, so an invoker can look the field up in
