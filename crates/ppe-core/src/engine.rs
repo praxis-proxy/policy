@@ -257,9 +257,10 @@ pub struct PolicyEngine {
     ///
     /// Held across the copy-on-write in `mutate_runtime`,
     /// `try_mutate_runtime`, and `load_config`, and released before the
-    /// routing cache is cleared. Nothing under it re-enters a mutating
-    /// method, which is what keeps `load_config` safe: config visitors reach
-    /// `annotate_route` after it has returned, not during.
+    /// routing cache is cleared. It is not reentrant, so no host-supplied
+    /// callback may run beneath it: `load_config` calls every
+    /// `PluginFactory::create` before taking it, and config visitors reach
+    /// `annotate_route` after `load_config` has returned, not during.
     runtime_write: Mutex<()>,
 
     /// Tracks in-flight fire-and-forget background tasks across all
@@ -324,33 +325,73 @@ fn warn_on_inactive_settings(cfg: &PolicyConfig) {
     }
 }
 
-/// Instantiate every plugin in `plugin_configs` via the matching factory
-/// and register the resulting handlers into `target_registry`. Shared by
-/// `PolicyEngine::from_config` (fresh registry) and `load_config` (clone
-/// of the existing registry) so the instantiation loop lives in one place.
+/// Look up the factory for every entry in `plugin_configs`, in config
+/// order. Returns on the first `kind` with no registered factory.
 ///
-/// Returns on the first failure (factory missing, factory.create error, or
-/// duplicate-name registration). On error, `target_registry` is in a
-/// partial state — both callers discard it on failure (`load_config` builds
-/// the new registry on a clone and only swaps on Ok; `from_config` bails
-/// before publishing the snapshot).
-fn instantiate_plugins_into(
-    target_registry: &mut PluginRegistry,
+/// Split from `create_plugin_instances` so a caller can release the
+/// engine's `factories` lock before any factory runs — see that function
+/// for what happens if it doesn't. Resolving first also means an unknown
+/// `kind` is reported before any factory has run, so a rejected config
+/// leaves behind no half-built plugins.
+fn resolve_factories(
     plugin_configs: &[crate::plugin::PluginConfig],
     factories: &PluginFactoryRegistry,
+) -> Result<Vec<Arc<dyn crate::factory::PluginFactory>>, Box<PluginError>> {
+    plugin_configs
+        .iter()
+        .map(|plugin_config| {
+            factories.get(&plugin_config.kind).ok_or_else(|| {
+                Box::new(PluginError::Config {
+                    message: format!(
+                        "no factory registered for plugin kind '{}' (plugin '{}')",
+                        plugin_config.kind, plugin_config.name
+                    ),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Create one plugin instance per entry in `plugin_configs`, using the
+/// factories `resolve_factories` returned for those same configs.
+///
+/// Must run with no engine lock held. `factory.create` is host code and is
+/// free to re-enter the engine: `register_handler`, `annotate_route` and
+/// `unregister_plugin` take `runtime_write`, `register_factory` takes the
+/// `factories` write side, and neither lock is reentrant, so a caller
+/// holding either across this function deadlocks against a factory that
+/// calls back. `RwLock` gives no guarantee for a recursive read either — a
+/// waiting writer can park a second `factories.read()` behind it.
+///
+/// Returns on the first factory that rejects its config; instances already
+/// created are dropped.
+fn create_plugin_instances(
+    plugin_configs: &[crate::plugin::PluginConfig],
+    factories: &[Arc<dyn crate::factory::PluginFactory>],
+) -> Result<Vec<crate::factory::PluginInstance>, Box<PluginError>> {
+    plugin_configs
+        .iter()
+        .zip(factories)
+        .map(|(plugin_config, factory)| factory.create(plugin_config))
+        .collect()
+}
+
+/// Register instances produced by `create_plugin_instances` into
+/// `target_registry`. `instances` is zipped against `plugin_configs`, so it
+/// has to be the vector that call returned for these same configs: a
+/// shorter one silently drops the tail, a reordered one pairs each plugin
+/// with the wrong config.
+///
+/// Returns on the first duplicate-name registration. On error,
+/// `target_registry` is in a partial state — both callers discard it on
+/// failure (`load_config` builds the new registry on a clone and only swaps
+/// on Ok; `from_config` bails before publishing the snapshot).
+fn register_instances_into(
+    target_registry: &mut PluginRegistry,
+    plugin_configs: &[crate::plugin::PluginConfig],
+    instances: Vec<crate::factory::PluginInstance>,
 ) -> Result<(), Box<PluginError>> {
-    for plugin_config in plugin_configs {
-        let factory = factories
-            .get(&plugin_config.kind)
-            .ok_or_else(|| PluginError::Config {
-                message: format!(
-                    "no factory registered for plugin kind '{}' (plugin '{}')",
-                    plugin_config.kind, plugin_config.name
-                ),
-            })?;
-
-        let instance = factory.create(plugin_config)?;
-
+    for (plugin_config, instance) in plugin_configs.iter().zip(instances) {
         target_registry
             .register_multi_handler(instance.plugin, plugin_config.clone(), instance.handlers)
             .map_err(|msg| Box::new(PluginError::Config { message: msg }))?;
@@ -432,7 +473,7 @@ impl PolicyEngine {
     where
         F: FnOnce(&mut RuntimeSnapshot) -> R,
     {
-        let _writer = self.lock_runtime_writer();
+        let writer = self.lock_runtime_writer();
         let current = self.runtime.load_full();
         let mut next = (*current).clone();
         let result = f(&mut next);
@@ -441,6 +482,12 @@ impl PolicyEngine {
         // config_generation() — external cache consumers that observe a
         // higher generation are guaranteed to see the new snapshot.
         self.generation.fetch_add(1, Ordering::Release);
+        // Release before `current` falls out of scope. The store above
+        // usually leaves this the last reference to the old snapshot, and
+        // dropping it drops the registry, whose plugin `Drop` impls are host
+        // code: one that re-enters the engine would block on this lock.
+        drop(writer);
+        drop(current);
         result
     }
 
@@ -453,15 +500,24 @@ impl PolicyEngine {
     where
         F: FnOnce(&mut RuntimeSnapshot) -> Result<T, E>,
     {
-        let _writer = self.lock_runtime_writer();
+        let writer = self.lock_runtime_writer();
         let current = self.runtime.load_full();
         let mut next = (*current).clone();
-        let result = f(&mut next)?;
-        self.runtime.store(Arc::new(next));
-        // Same Release-ordered bump as mutate_runtime — only on Ok, since
-        // Err leaves the snapshot untouched.
-        self.generation.fetch_add(1, Ordering::Release);
-        Ok(result)
+        let result = f(&mut next);
+        if result.is_ok() {
+            self.runtime.store(Arc::new(next));
+            // Same Release-ordered bump as mutate_runtime — only on Ok, since
+            // Err leaves the snapshot untouched.
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+        // Released before `next` and `current` fall out of scope, for the
+        // reason mutate_runtime releases early: both can hold the last
+        // reference to a plugin, and a `Drop` impl is host code. `next`
+        // survives to here on the `Err` path — no `?` above — so a rejected
+        // mutation drops whatever it built with the lock already gone.
+        drop(writer);
+        drop(current);
+        result
     }
 
     /// Monotonic counter that increments on every runtime snapshot swap
@@ -537,27 +593,32 @@ impl PolicyEngine {
     pub fn load_config(&self, policy_config: PolicyConfig) -> Result<(), Box<PluginError>> {
         warn_on_inactive_settings(&policy_config);
 
+        // Resolve under the factories read lock, then drop it and
+        // instantiate holding nothing, per `create_plugin_instances`. A
+        // factory that registers something on its way through publishes it
+        // here, so the clone below picks it up rather than swapping a
+        // snapshot taken before it existed.
+        let factories = {
+            let registry = self
+                .factories
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            resolve_factories(&policy_config.plugins, &registry)?
+        };
+        let instances = create_plugin_instances(&policy_config.plugins, &factories)?;
+
         // Build the new snapshot from the current one — copy-on-write so
         // concurrent invokes keep using the existing config until we swap.
         // We can't use mutate_runtime here because we need to atomically
         // ALSO build a new executor + new cache cap from the same config —
         // the snapshot fields are coupled. Takes the writer lock by hand for
-        // the reason mutate_runtime takes it, before the factories lock so
-        // every mutation path acquires in one order.
+        // the reason mutate_runtime takes it.
         let writer = self.lock_runtime_writer();
 
-        let factories = self
-            .factories
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let current = self.runtime.load_full();
         let mut new_registry = current.registry.clone();
 
-        instantiate_plugins_into(&mut new_registry, &policy_config.plugins, &factories)?;
-
-        // Drop the factories read lock before taking other locks
-        // (route_cache write below) to avoid lock-ordering hazards.
-        drop(factories);
+        register_instances_into(&mut new_registry, &policy_config.plugins, instances)?;
 
         self.runtime
             .store(Arc::new(snapshot_from_config(new_registry, policy_config)));
@@ -793,8 +854,10 @@ impl PolicyEngine {
         });
 
         // Instantiate into a fresh registry, then publish atomically.
+        let resolved = resolve_factories(&policy_config.plugins, factories)?;
+        let instances = create_plugin_instances(&policy_config.plugins, &resolved)?;
         let mut new_registry = PluginRegistry::new();
-        instantiate_plugins_into(&mut new_registry, &policy_config.plugins, factories)?;
+        register_instances_into(&mut new_registry, &policy_config.plugins, instances)?;
 
         engine
             .runtime
@@ -2707,6 +2770,171 @@ mod tests {
             n as u64,
             "generation bumps exactly once per published mutation",
         );
+    }
+
+    /// A factory that reaches back into the engine on its way through
+    /// `create`, once per lock a host factory can plausibly hit:
+    /// `register_handler` takes `runtime_write`, `register_factory` takes
+    /// the `factories` write side. The shape of a host plugin that installs
+    /// a companion handler and the factory for its own sub-kind while being
+    /// built.
+    struct ReentrantFactory {
+        engine: std::sync::Weak<PolicyEngine>,
+    }
+
+    impl crate::factory::PluginFactory for ReentrantFactory {
+        fn create(
+            &self,
+            config: &PluginConfig,
+        ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            let engine = self.engine.upgrade().expect("engine outlives the factory");
+            let side_cfg = make_config(
+                &format!("{}_companion", config.name),
+                10,
+                PluginMode::Sequential,
+            );
+            let side: Arc<AllowPlugin> = Arc::new(AllowPlugin {
+                cfg: side_cfg.clone(),
+            });
+            engine
+                .register_handler::<TestHook, _>(side, side_cfg)
+                .expect("re-entrant registration must succeed");
+            engine.register_factory("test/reentrant_spawned", Box::new(AllowPluginFactory));
+            AllowPluginFactory.create(config)
+        }
+    }
+
+    /// Neither `runtime_write` nor the `factories` `RwLock` is reentrant, so
+    /// a factory that calls back into the engine deadlocks against either
+    /// one `load_config` is still holding while it runs `create`. The load
+    /// runs on its own thread so the timeout reports that as a failure
+    /// instead of hanging the test binary.
+    ///
+    /// The count also pins the ordering that makes the fix correct — the
+    /// registry is cloned after the factories run, so what a factory
+    /// registered mid-create is in the published snapshot, not overwritten
+    /// by it.
+    #[test]
+    fn load_config_holds_no_lock_across_factory_create() {
+        let engine = Arc::new(PolicyEngine::default());
+        engine.register_factory(
+            "test/reentrant",
+            Box::new(ReentrantFactory {
+                engine: Arc::downgrade(&engine),
+            }),
+        );
+
+        let yaml = r"
+plugins:
+  - name: main_plugin
+    kind: test/reentrant
+    hooks: [test_hook]
+    mode: sequential
+    priority: 10
+";
+        let policy_config = crate::config::parse_config(yaml).unwrap();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let loader = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            let _ = done_tx.send(loader.load_config(policy_config).is_ok());
+        });
+
+        let loaded = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("load_config deadlocked against a re-entrant factory");
+        assert!(loaded, "load_config must succeed");
+
+        assert_eq!(
+            engine.plugin_count(),
+            2,
+            "both the configured plugin and the one its factory registered \
+             must be in the published snapshot",
+        );
+    }
+
+    /// An annotation handler whose `Drop` reaches back into the engine.
+    /// Host annotation handlers own host resources, so their teardown is
+    /// host code like any other callback.
+    struct DropReentrantHandler {
+        cfg: PluginConfig,
+        engine: std::sync::Weak<PolicyEngine>,
+    }
+
+    #[async_trait]
+    impl Plugin for DropReentrantHandler {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+        async fn initialize(&self) -> Result<(), Box<PluginError>> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::registry::AnyHookHandler for DropReentrantHandler {
+        async fn invoke(
+            &self,
+            _payload: &dyn crate::prelude::PluginPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            Err(Box::new(PluginError::Config {
+                message: "this handler exists to be dropped, not invoked".to_owned(),
+            }))
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            "test_hook"
+        }
+    }
+
+    impl Drop for DropReentrantHandler {
+        fn drop(&mut self) {
+            let Some(engine) = self.engine.upgrade() else {
+                return;
+            };
+            // Any mutating call reaches `runtime_write`; this one is a
+            // no-op on a key that was never annotated.
+            engine.remove_route_annotation("tool", "never_annotated", None, "test_hook");
+        }
+    }
+
+    /// A discarded annotation drops the handler the old snapshot held, and
+    /// that teardown is host code. `runtime_write` has to be released
+    /// before the old snapshot falls out of scope, or a handler whose
+    /// `Drop` calls back blocks on the lock its own release is holding.
+    ///
+    /// `remove_route_annotation` is the reachable path: the closure drops
+    /// the entry from the clone while the snapshot being replaced still
+    /// mirrors it, so the last reference goes with that snapshot, inside
+    /// `mutate_runtime`.
+    #[test]
+    fn a_dropped_annotation_handler_can_re_enter_the_engine() {
+        let engine = Arc::new(PolicyEngine::default());
+        let cfg = make_config("annotated", 10, PluginMode::Sequential);
+        let handler = Arc::new(DropReentrantHandler {
+            cfg: cfg.clone(),
+            engine: Arc::downgrade(&engine),
+        });
+
+        engine.annotate_route("tool", "t1", None, "test_hook", handler, cfg);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let remover = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            // Drops the sole remaining reference — the annotation the line
+            // above published — and with it the handler.
+            remover.remove_route_annotation("tool", "t1", None, "test_hook");
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a re-entrant handler Drop deadlocked against runtime_write");
     }
 
     /// A rejected mutation must publish nothing and leave the generation
