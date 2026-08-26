@@ -259,9 +259,12 @@ default 10 000 entries and leave every HTTP request on the slow path permanently
 - R28c. The selector requires routing to be enabled, and that is stated wherever
   the selector is documented rather than left to be discovered. The setting
   defaults off.
-- R29. No existing configuration changes behavior. The work is additive: a
+- R29. No existing configuration changes how it *resolves or dispatches*. A
   configuration that declares no `http:` route resolves and dispatches exactly as
-  it does today, and the four MCP selectors are untouched.
+  it does today, and the four MCP selectors are untouched. One load-time
+  exception, and it is the point of R3 rather than a regression: a route carrying
+  a key nothing consumes used to load with that key inert and now fails, naming
+  it.
 - R30. The engine's account of the global-policy-plus-routes overlap and the
   host's startup warning about the same overlap agree with each other. The two
   are mitigations of one condition approached from opposite directions.

@@ -1,7 +1,7 @@
 ---
 title: "feat: an HTTP request can match a route"
 type: feat
-status: draft
+status: completed
 date: 2026-08-25
 origin: docs/brainstorms/2026-08-25-http-route-selector-requirements.md
 ---
@@ -132,7 +132,7 @@ Restated from origin. Cited by unit below.
 - R28. Declaring `http:` routes without a catch-all is reported at load.
 - R28b. Which route a request resolved to is discoverable from what the engine emits; a path resolving to a prefix does not explain itself the way an entity name does.
 - R28c. The selector requires routing to be enabled, stated wherever the selector is documented. The setting defaults off.
-- R29. No existing configuration changes behavior. The work is additive and the four MCP selectors are untouched.
+- R29. No existing configuration changes how it resolves or dispatches, and the four MCP selectors are untouched. A route carrying a key nothing consumes now fails at load, which is R3's point rather than a regression.
 - R30. The engine's account of the global-plus-routes overlap and the host's startup warning agree.
 
 ---
@@ -904,10 +904,11 @@ verification, so identity-propagation work does not need to wait for them.
   `filter_entries_by_route` is private and free to change. Breaking for the crate.
   The two resolvers have no caller in this tree or in praxis; `annotate_route` has
   one, in the APL visitor, which U7 updates.
-- **Behavior of existing configurations: none.** The four MCP selectors keep their
-  scoring, their dispatch, and their pre-existing glob-dispatch gap. A
-  configuration that declares no `http:` route resolves and dispatches exactly as
-  it does today. This is the main change from the earlier draft, which widened the
+- **Behavior of existing configurations: none at resolution or dispatch.** The
+  four MCP selectors keep their scoring, their dispatch, and their pre-existing
+  glob-dispatch gap. A configuration that declares no `http:` route resolves and
+  dispatches exactly as it does today. It can newly fail at *load*, in one case:
+  a route carrying a key nothing consumes, which R3 sets out to catch. This is the main change from the earlier draft, which widened the
   glob fix to every entity type and accepted a behavior change for it.
 - **Cost per request.** The removed duplicate resolution is a per-cache-miss
   saving. Normalization is a per-request cost paid on hits too, though a clean
