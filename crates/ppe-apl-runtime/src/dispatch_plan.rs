@@ -338,6 +338,176 @@ fn walk_effects<F: FnMut(&Effect)>(effects: &[Effect], visit: &mut F) {
 /// Separate from [`collect_plugin_names`] because delegate plugins
 /// resolve under a different hook family (`token.delegate`) and the
 /// dispatch plan keeps them in a separate map.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "tests assert on known-good values"
+)]
+mod identity_check_tests {
+    use super::*;
+
+    fn delegate_step(plugin: &str, subject: Option<&str>) -> Effect {
+        let config_override = subject.map(|s| {
+            let mut m = serde_yaml::Mapping::new();
+            m.insert(
+                serde_yaml::Value::String("subject".into()),
+                serde_yaml::Value::String(s.into()),
+            );
+            serde_yaml::Value::Mapping(m)
+        });
+        Effect::Delegate(praxis_policy_apl_core::step::DelegateStep {
+            plugin_name: plugin.to_owned(),
+            config_override,
+            on_error: None,
+            source: "test".to_owned(),
+        })
+    }
+
+    fn route_with(steps: Vec<Effect>) -> CompiledRoute {
+        let mut route = CompiledRoute::new("tool:get_compensation");
+        route.policy = steps;
+        route
+    }
+
+    #[test]
+    fn a_step_with_no_subject_defaults_to_user() {
+        // The invoker defaults an unspecified subject to `user`, so an
+        // unannotated step does exchange the caller's credential.
+        let route = route_with(vec![delegate_step("oauth", None)]);
+        assert_eq!(
+            delegate_steps_exchanging_caller_credentials(&route),
+            vec!["oauth".to_owned()]
+        );
+    }
+
+    #[test]
+    fn caller_credential_subjects_are_reported() {
+        for subject in ["user", "client", "caller_workload"] {
+            let route = route_with(vec![delegate_step("oauth", Some(subject))]);
+            assert_eq!(
+                delegate_steps_exchanging_caller_credentials(&route),
+                vec!["oauth".to_owned()],
+                "subject {subject} exchanges a credential the caller presented"
+            );
+        }
+    }
+
+    #[test]
+    fn this_workload_is_not_reported() {
+        // No inbound credential exists for this subject, so identity
+        // resolution has nothing to say about it and warning would be
+        // noise on a correct config.
+        for subject in ["this_workload", "gateway"] {
+            let route = route_with(vec![delegate_step("oauth", Some(subject))]);
+            assert!(
+                delegate_steps_exchanging_caller_credentials(&route).is_empty(),
+                "subject {subject} carries no caller credential"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mixed_route_reports_only_the_steps_that_need_identity() {
+        let route = route_with(vec![
+            delegate_step("gateway-oauth", Some("this_workload")),
+            delegate_step("user-oauth", Some("user")),
+        ]);
+        assert_eq!(
+            delegate_steps_exchanging_caller_credentials(&route),
+            vec!["user-oauth".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_route_with_no_delegation_reports_nothing() {
+        assert!(delegate_steps_exchanging_caller_credentials(&route_with(Vec::new())).is_empty());
+    }
+}
+
+/// Warn when a route exchanges a credential the caller presented but
+/// resolves no identity for it.
+///
+/// A route that delegates the caller's own credential depends on
+/// something having validated it first. Identity resolution is a
+/// separate hook the host invokes at request entry, and it is per-route
+/// configuration — `route.identity` is optional, and a route with no
+/// identity block resolves no identity plugins at all. Nothing then
+/// rejects a token the `IdP` never signed before the delegator exchanges
+/// it.
+///
+/// A warning rather than a hard error: the host, not this crate, decides
+/// how identity is established, and a deployment may legitimately
+/// validate upstream of PPE. But it is silent otherwise, and the failure
+/// it precedes (a delegation minted against an unvalidated credential)
+/// does not look like a configuration problem when it surfaces.
+///
+/// Called from the visitor's config walk rather than from
+/// [`RouteDispatchPlan::build`], which runs on a route's first request:
+/// a misconfigured route nobody has called yet is exactly the one an
+/// operator wants told about, and at plan-build time the warning would
+/// wait for the traffic it is meant to precede.
+pub(crate) fn warn_if_delegating_without_identity(
+    route: &CompiledRoute,
+    entity_type: &str,
+    entity_name: &str,
+    scope: Option<&str>,
+    engine: &PolicyEngine,
+) {
+    let unvalidated = delegate_steps_exchanging_caller_credentials(route);
+    if unvalidated.is_empty()
+        || engine.route_has_identity_resolution(entity_type, entity_name, scope)
+    {
+        return;
+    }
+    tracing::warn!(
+        alarm = "delegation_without_identity_resolution",
+        route = %route.route_key,
+        plugins = ?unvalidated,
+        "route delegates the caller's own credential but resolves no identity for it; \
+         the token handed to the delegator has not been validated by this process, so \
+         the IdP's rejection of a forged one is the only thing standing between an \
+         unauthenticated caller and a token exchange. Add an `identity:` block to the \
+         route (or globally), or use `subject: this_workload` if the delegation should \
+         not carry the caller's credential at all.",
+    );
+}
+
+/// Delegate steps on this route that exchange a credential the *caller*
+/// presented, and therefore depend on something having validated it.
+///
+/// `subject: this_workload` is excluded: that delegation has no inbound
+/// credential by design — the instance authenticates as itself with its
+/// own client credentials — so identity resolution is irrelevant to it.
+/// `user` is the default when a step names no subject, matching the
+/// invoker.
+fn delegate_steps_exchanging_caller_credentials(route: &CompiledRoute) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut visit = |e: &Effect| {
+        let Effect::Delegate(ds) = e else {
+            return;
+        };
+        let subject = ds
+            .config_override
+            .as_ref()
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|m| m.get(serde_yaml::Value::String("subject".into())))
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or("user");
+        // `gateway` is the deprecated spelling of `this_workload`.
+        if matches!(subject, "this_workload" | "gateway") {
+            return;
+        }
+        if seen.insert(ds.plugin_name.clone()) {
+            out.push(ds.plugin_name.clone());
+        }
+    };
+    walk_effects(&route.policy, &mut visit);
+    walk_effects(&route.post_policy, &mut visit);
+    out
+}
+
 pub(crate) fn collect_delegate_plugin_names(route: &CompiledRoute) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();

@@ -59,12 +59,52 @@ base64 = "0.22"
 # Secret-clearing wrapper for client credentials in memory.
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
+# Cache-key derivation: HMAC-SHA256 under a per-process secret, so a key
+# is safe to log and a caller who controls the anchor bytes still cannot
+# steer the output.
+#
+# Deliberately not blake3, which is the obvious pick for a keyed hash.
+# `sha2` is already in the tree, and with it `digest`, `crypto-common`,
+# `subtle`, `typenum`, `generic-array` and `block-buffer` — so `hmac`
+# adds one crate and nothing transitive, where blake3 brings a new tree.
+# Its speed advantage is real and irrelevant at this size: one hash of a
+# couple of kilobytes per delegation, against an IdP round trip.
+#
+# Pinned to 0.12 rather than 0.13 for the same reason: 0.13 pairs with
+# `digest` 0.11 and would pull a second `sha2` alongside the existing one.
+hmac = "0.12"
+sha2 = "0.10"
+
+# 32 bytes for the per-process HMAC secret. Already in the tree
+# transitively; named here because the cache needs it directly.
+getrandom = "0.3"
+
+# The bounded, coalescing store behind the delegated-token cache.
+#
+# Two of its guarantees are acceptance criteria rather than conveniences,
+# which is why this is a dependency instead of a few hundred lines here.
+# `try_get_with` "guarantees that concurrent calls on the same
+# not-existing key are coalesced into one evaluation", so N concurrent
+# requests for one uncached key produce one exchange. And on `Err` it
+# "does not insert a value", so a failed or indeterminate mint cannot be
+# cached even by mistake.
+#
+# The alternative shape, a `HashMap<Key, Arc<Mutex<()>>>` guarding a
+# separate map, is what `oauth2-broker` does; its guard map is only ever
+# inserted into, never pruned, so the structure protecting the cache
+# grows without the bound that protects the cache. moka's coalescing
+# lives inside the bounded map, so `max_entries` covers both.
+moka = { version = "0.12", features = ["future"] }
+
 [dev-dependencies]
 # The `HttpTransport` test double. A dev-dependency so the feature is
 # enabled for test builds only; resolver 3 keeps it out of the normal
 # build of this crate.
 praxis-policy-core = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# `HttpResponse::new` takes `Bytes`, so a test transport that builds its
+# own responses needs the type by name. Already in the tree.
+bytes = { workspace = true }
 
 [lints]
 workspace = true

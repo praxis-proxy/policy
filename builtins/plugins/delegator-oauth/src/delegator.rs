@@ -57,6 +57,8 @@ use praxis_policy_core::http::{HttpRequest, HttpTransportError, form_urlencode};
 use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
+use super::cache::key::{CacheKey, DelegatorIdentity, derive as derive_cache_key};
+use super::cache::store::{DelegatedTokenCache, Mint, Served, Source};
 use super::config::OAuthDelegatorConfig;
 
 /// RFC 8693 token-exchange grant type — the value of
@@ -96,6 +98,12 @@ pub struct OAuthDelegator {
     /// warning has fired, so it logs at most once per delegator instead of
     /// on every request (and skips the per-request JWT decode thereafter).
     warned_missing_act: std::sync::atomic::AtomicBool,
+    /// Live delegated tokens, when the operator enabled reuse.
+    ///
+    /// `None` rather than a cache that always misses, so a delegator
+    /// with caching off runs the same code it ran before the cache
+    /// existed rather than a disabled version of the new code.
+    cache: Option<DelegatedTokenCache>,
 }
 
 impl std::fmt::Debug for OAuthDelegator {
@@ -177,12 +185,26 @@ impl OAuthDelegator {
 
         let timeout = typed.timeout();
 
+        // Built here rather than lazily so a cache an operator cannot
+        // have (bad settings, no CSPRNG) fails the config load with a
+        // message naming the plugin, instead of failing the first
+        // delegation to reach it.
+        let cache = DelegatedTokenCache::new(typed.cache.clone()).map_err(|e| {
+            Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' (praxis-policy-plugin-delegator-oauth) cache: {e}",
+                    cfg.name
+                ),
+            })
+        })?;
+
         Ok(Self {
             cfg,
             typed,
             client_secret: Zeroizing::new(secret),
             timeout,
             warned_missing_act: std::sync::atomic::AtomicBool::new(false),
+            cache,
         })
     }
 
@@ -381,44 +403,27 @@ impl Plugin for OAuthDelegator {
     }
 }
 
-impl HookHandler<TokenDelegateHook> for OAuthDelegator {
-    async fn handle(
+impl OAuthDelegator {
+    /// One RFC 8693 exchange (or RFC 6749 client-credentials grant),
+    /// returning the minted credential.
+    ///
+    /// Split out of `handle` so the cache can wrap it. This is the
+    /// expensive, `IdP`-touching part, and it is exactly the unit a
+    /// cache hit stands in for. It makes no caching decisions itself,
+    /// which is what lets the cached and uncached paths run identical
+    /// code.
+    ///
+    /// Takes `ext` because the transport is reached through it, so this
+    /// is also the only part of the delegation that touches the network.
+    async fn exchange(
         &self,
         payload: &DelegationPayload,
         ext: &Extensions,
-        _ctx: &mut PluginContext,
-    ) -> PluginResult<DelegationPayload> {
-        // `subject: this_workload` means *we* are the principal. There
-        // is no inbound credential to exchange — this instance's identity
-        // is its OAuth client identity, which it already proves via the
-        // Basic auth header below. The standard grant for "give me a
-        // token as myself" is client_credentials, not token exchange.
+    ) -> Result<Mint, PluginViolation> {
         let as_this_workload = *payload.subject() == DelegationSubject::ThisWorkload;
-
-        // `subject: caller_workload` means the calling agent acts as
-        // itself, and `bearer` is its JWT-SVID. An SVID is a *client
-        // credential*, not a `subject_token` — an authorization server
-        // won't accept it as an exchange subject — so leg 1 below trades
-        // it for an ordinary IdP token that the exchange (leg 2) can
-        // then scope down.
         let is_workload = *payload.subject() == DelegationSubject::CallerWorkload;
-
         let bearer = payload.bearer_token();
-        if bearer.is_empty() && !as_this_workload {
-            return PluginResult::deny(PluginViolation::new(
-                "delegation.bad_request",
-                "DelegationPayload carried an empty bearer_token — outbound \
-                 caller didn't populate the credential before invoking the hook",
-            ));
-        }
         let audience = payload.target_audience().unwrap_or("");
-        if audience.is_empty() {
-            return PluginResult::deny(PluginViolation::new(
-                "delegation.bad_request",
-                "target_audience missing — RFC 8693 token exchange requires \
-                 an audience to scope the minted credential",
-            ));
-        }
 
         let scope = Self::requested_scopes(payload);
 
@@ -430,7 +435,7 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
         let subject_token: Cow<str> = if is_workload {
             match self.mint_base_token(bearer, ext).await {
                 Ok(token) => Cow::Owned(token),
-                Err(violation) => return PluginResult::deny(violation),
+                Err(violation) => return Err(violation),
             }
         } else {
             Cow::Borrowed(bearer)
@@ -493,13 +498,13 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
             Ok(r) => match r.header("authorization", self.basic_auth_header()) {
                 Ok(r) => r,
                 Err(e) => {
-                    return PluginResult::deny(PluginViolation::new(
+                    return Err(PluginViolation::new(
                         "delegation.bad_request",
                         format!("could not attach client credentials: {e}"),
                     ));
                 },
             },
-            Err(v) => return PluginResult::deny(*v),
+            Err(v) => return Err(*v),
         };
 
         let response = match ext
@@ -508,7 +513,7 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
         {
             Ok(r) => r,
             Err(e) => {
-                return PluginResult::deny(self.violation_for("token-exchange POST", &e));
+                return Err(self.violation_for("token-exchange POST", &e));
             },
         };
 
@@ -531,13 +536,13 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
                     format!("IdP returned {status}: {body}"),
                 ),
             };
-            return PluginResult::deny(PluginViolation::new(code, reason));
+            return Err(PluginViolation::new(code, reason));
         }
 
         let parsed = match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {
             Ok(p) => p,
             Err(e) => {
-                return PluginResult::deny(PluginViolation::new(
+                return Err(PluginViolation::new(
                     "delegation.bad_response",
                     format!("IdP response wasn't valid token-exchange JSON: {e}"),
                 ));
@@ -576,7 +581,7 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
                 .map(String::as_str)
                 .collect();
             if !missing.is_empty() {
-                return PluginResult::deny(PluginViolation::new(
+                return Err(PluginViolation::new(
                     "delegation.scope_too_broad",
                     format!(
                         "IdP granted narrower scopes than requested. \
@@ -646,21 +651,122 @@ impl HookHandler<TokenDelegateHook> for OAuthDelegator {
             expires_at,
         );
 
-        let mut updated = payload.clone();
-        updated.delegated_token = Some(token);
-        updated.delegation_mode = Some(payload.subject().default_mode());
-        updated.minted_at = Some(Utc::now());
-        if let Some(issued) = parsed.issued_token_type {
-            updated.metadata.insert(
-                "issued_token_type".into(),
-                serde_json::Value::String(issued),
-            );
-        } else {
-            updated.metadata.insert(
-                "issued_token_type".into(),
-                serde_json::Value::String(DEFAULT_ISSUED_TOKEN_TYPE.into()),
-            );
+        Ok(Mint {
+            token,
+            issued_token_type: parsed
+                .issued_token_type
+                .unwrap_or_else(|| DEFAULT_ISSUED_TOKEN_TYPE.to_owned()),
+        })
+    }
+
+    /// The cache and the key to use for this delegation, or `None` when
+    /// it must not be cached.
+    ///
+    /// Three ways to get `None`, and they are deliberately not
+    /// distinguished by the caller: no cache configured, a subject mode
+    /// the operator did not opt in, or a payload the key derivation
+    /// refuses. All three mean the same thing here — go to the `IdP` —
+    /// and only the third is worth a log line.
+    fn cache_for(&self, payload: &DelegationPayload) -> Option<(&DelegatedTokenCache, CacheKey)> {
+        let cache = self.cache.as_ref()?;
+        if !cache.config().caches_subject(payload.subject()) {
+            return None;
         }
+        let identity = DelegatorIdentity {
+            instance: &self.cfg.name,
+            token_endpoint: &self.typed.token_endpoint,
+            client_id: &self.typed.client_id,
+        };
+        match derive_cache_key(cache.secret(), identity, payload) {
+            Ok(key) => Some((cache, key)),
+            Err(reason) => {
+                tracing::debug!(
+                    target: "praxis_policy::delegation",
+                    plugin = %self.cfg.name,
+                    target_name = %payload.target_name(),
+                    ?reason,
+                    "delegation is not cacheable; minting",
+                );
+                None
+            },
+        }
+    }
+}
+
+impl HookHandler<TokenDelegateHook> for OAuthDelegator {
+    async fn handle(
+        &self,
+        payload: &DelegationPayload,
+        ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<DelegationPayload> {
+        // `subject: this_workload` means *we* are the principal. There
+        // is no inbound credential to exchange — this instance's identity
+        // is its OAuth client identity, which it already proves via the
+        // Basic auth header below. The standard grant for "give me a
+        // token as myself" is client_credentials, not token exchange.
+        let as_this_workload = *payload.subject() == DelegationSubject::ThisWorkload;
+
+        let bearer = payload.bearer_token();
+        if bearer.is_empty() && !as_this_workload {
+            return PluginResult::deny(PluginViolation::new(
+                "delegation.bad_request",
+                "DelegationPayload carried an empty bearer_token — outbound \
+                 caller didn't populate the credential before invoking the hook",
+            ));
+        }
+        let audience = payload.target_audience().unwrap_or("");
+        if audience.is_empty() {
+            return PluginResult::deny(PluginViolation::new(
+                "delegation.bad_request",
+                "target_audience missing — RFC 8693 token exchange requires \
+                 an audience to scope the minted credential",
+            ));
+        }
+
+        // The cached and uncached paths differ only in whether the
+        // exchange runs behind the cache. Both end with a `Served`, so
+        // everything below this is the same code it was before.
+        let served = match self.cache_for(payload) {
+            Some((cache, key)) => match cache.get_or_mint(key, self.exchange(payload, ext)).await {
+                Ok(served) => served,
+                // One failed exchange may be reported to several
+                // coalesced waiters, hence the `Arc`. Nothing was
+                // cached: `get_or_mint` does not store an `Err`.
+                Err(violation) => return PluginResult::deny((*violation).clone()),
+            },
+            None => match self.exchange(payload, ext).await {
+                Ok(mint) => Served {
+                    mint,
+                    source: Source::Mint,
+                    minted_at: Utc::now(),
+                },
+                Err(violation) => return PluginResult::deny(violation),
+            },
+        };
+
+        let mut updated = payload.clone();
+        updated.delegated_token = Some(served.mint.token);
+        updated.delegation_mode = Some(payload.subject().default_mode());
+        // From the mint, not from now. A cached token that claimed to
+        // have been minted on every request it served would put a false
+        // timestamp in the audit trail.
+        updated.minted_at = Some(served.minted_at);
+        updated.metadata.insert(
+            "issued_token_type".into(),
+            serde_json::Value::String(served.mint.issued_token_type),
+        );
+        // So a hit rate is observable without a debug build.
+        updated.metadata.insert(
+            "delegated_token_source".into(),
+            serde_json::Value::String(
+                match served.source {
+                    Source::Cache => "cache",
+                    Source::Mint => "mint",
+                }
+                .to_owned(),
+            ),
+        );
 
         PluginResult::modify_payload(updated)
     }

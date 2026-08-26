@@ -8,6 +8,11 @@ SHELL := /bin/bash
 
 CARGO ?= cargo
 
+# rustfmt runs on nightly to match the rest of the org and the tree's committed
+# formatting (see the `style: apply nightly rustfmt formatting` commit). Stable
+# rustfmt would reformat it. Override to pin a specific nightly.
+NIGHTLY ?= nightly
+
 # `make release LEVEL=patch` or `make release VERSION=0.1.1`. VERSION wins.
 RELEASE_ARG = $(if $(VERSION),$(VERSION),$(if $(LEVEL),$(LEVEL),patch))
 
@@ -26,7 +31,7 @@ help:
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
-	@echo "  fmt               Format Rust code (cargo fmt --all)"
+	@echo "  fmt               Format Rust code (nightly rustfmt)"
 	@echo "  lint              CI lint gate: fmt --check + clippy -D warnings"
 	@echo "  lint-extra        Extra lint checks: typos + taplo fmt --check"
 	@echo "  clippy            Run clippy on the workspace (-D warnings)"
@@ -37,7 +42,7 @@ help:
 	@echo "  test              Run all workspace tests"
 	@echo ""
 	@echo "Supply chain & coverage:"
-	@echo "  audit             cargo deny check (advisories, licenses, bans, sources)"
+	@echo "  audit             cargo audit + cargo deny check (advisories, licenses, bans, sources)"
 	@echo "  coverage          Coverage summary, gated at COVERAGE_FLOOR percent"
 	@echo "  mutants           Run mutation testing (cargo-mutants)"
 	@echo "  semver            Check semver compatibility (cargo-semver-checks)"
@@ -84,7 +89,7 @@ clean:
 
 .PHONY: fmt
 fmt:
-	@$(CARGO) fmt --all
+	@$(CARGO) +$(NIGHTLY) fmt --all
 
 .PHONY: clippy
 clippy:
@@ -95,13 +100,13 @@ clippy:
 .PHONY: lint
 lint:
 	@echo "fmt --check + clippy -D warnings ..."
-	@$(CARGO) fmt --all -- --check
+	@$(CARGO) +$(NIGHTLY) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
 	@echo "lint passed"
 
 .PHONY: lint-fix
 lint-fix:
-	@$(CARGO) fmt --all
+	@$(CARGO) +$(NIGHTLY) fmt --all
 	@$(CARGO) clippy --workspace --all-targets --fix --allow-dirty --allow-staged -- -D warnings
 
 # Advisory, not part of the blocking gate: machete is wrong in both directions. It
@@ -150,6 +155,8 @@ test:
 
 .PHONY: audit
 audit:
+	@command -v cargo-audit >/dev/null 2>&1 || $(CARGO) install cargo-audit --locked
+	@cargo audit
 	@command -v cargo-deny >/dev/null 2>&1 || $(CARGO) install cargo-deny --locked
 	@cargo deny check
 

@@ -1,22 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Praxis Contributors
 
-# Formatting configuration, adopted from Praxis but restricted to options that
-# work on the pinned stable toolchain.
-#
-# Praxis's file relies on nightly-only options (group_imports,
-# imports_granularity, wrap_comments, format_code_in_doc_comments,
-# normalize_comments, reorder_impl_items, format_macro_matchers,
-# condense_wildcard_suffixes,
-# normalize_doc_attributes, blank_lines_upper_bound, hex_literal_case). On
-# stable those are warned about and ignored, so copying them would give the
-# appearance of a shared style without the effect. They are omitted here rather
-# than carried as dead configuration.
-#
-# `max_width` stays at the source tree's 100 rather than Praxis's 120 so the
-# imported code is already conformant and `cargo fmt --check` is meaningful from
-# the first commit. Widening to match Praxis is a whole-tree reformat and belongs
-# in its own commit, not mixed into the port.
 edition = "2024"
 max_width = 100
 newline_style = "Unix"
