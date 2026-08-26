@@ -311,7 +311,8 @@ pub struct RouteEntry {
     pub llm: Option<StringOrList>,
 
     /// Match generic HTTP requests by path, and optionally by method.
-    /// Requires `plugin_settings.routing_enabled: true` like every other
+    /// Requires `plugin_settings.routing_enabled: true`, which defaults to
+    /// false and leaves the route inert until it is set, like every other
     /// route selector. See [`HttpSelector`] for the three shapes.
     #[serde(default)]
     pub http: Option<HttpSelector>,
@@ -634,6 +635,10 @@ impl StringOrList {
 /// A path is matched by equality or by prefix, never by glob, so this does not
 /// reuse [`Pattern`]: the segment-boundary reading is the host router's, and a
 /// glob dialect here would disagree with it.
+///
+/// Nothing here resolves until `plugin_settings.routing_enabled: true` is set.
+/// It defaults to false, and an `http:` route declared without it is reported
+/// at load rather than left to be discovered.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum HttpSelector {
@@ -1259,6 +1264,53 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     }
 
     Ok(())
+}
+
+/// What a declared set of `http:` routes leaves ungoverned, one message per
+/// gap, empty when there is nothing to report. Only `http:` routes are
+/// examined, so a configuration that declares none is never reported on.
+///
+/// Kept separate from emission so a test reads the findings rather than a log
+/// line. [`crate::engine`] emits these once per config load.
+pub(crate) fn http_routing_gaps(config: &PolicyConfig) -> Vec<String> {
+    let selectors: Vec<&HttpSelector> = config
+        .routes
+        .iter()
+        .filter_map(|r| r.http.as_ref())
+        .collect();
+    if selectors.is_empty() {
+        return Vec::new();
+    }
+    // Inert beats uncovered: with routing off no route resolves at all, so
+    // naming the missing catch-all on top of it would send an operator to the
+    // wrong line of their config.
+    if !config.routing_enabled() {
+        return vec![format!(
+            "config declares `http:` routes (count={}) but \
+             `plugin_settings.routing_enabled` is false, which is the default, so none of them \
+             resolves and every request is governed by the global policy",
+            selectors.len(),
+        )];
+    }
+    if selectors.iter().copied().any(is_http_catch_all) {
+        return Vec::new();
+    }
+    vec![format!(
+        "config declares `http:` routes (count={}) but none of them matches every request, so a \
+         request matching none of them resolves no route and is governed by the global policy \
+         instead; a route selecting `http: {{path_prefix: /}}` is what governs the rest",
+        selectors.len(),
+    )]
+}
+
+/// Whether a selector matches every request, which is what makes a route the
+/// explicit catch-all. A `method:` narrowing leaves the other methods
+/// uncovered, so a narrowed root prefix is not one.
+fn is_http_catch_all(selector: &HttpSelector) -> bool {
+    selector.method().is_none()
+        && selector
+            .path_prefix()
+            .is_some_and(|prefix| prefix.trim_matches('/').is_empty())
 }
 
 /// The selector keys a route may declare, one per entity type, and the keys
@@ -3520,6 +3572,126 @@ routes:
                 .expect("prefix form")
                 .path_prefix(),
             Some("/")
+        );
+    }
+
+    // ---- what an `http:` route set leaves ungoverned -----------------------
+
+    /// Routes covering three paths and everything else. Nothing falls through,
+    /// so a load has nothing to say.
+    #[test]
+    fn http_routes_with_a_catch_all_leave_no_gap_to_report() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: /healthz
+  - http: { path_prefix: /v1/files }
+  - http: { path_prefix: "/" }
+"#,
+        )
+        .expect("the fixture must load");
+        assert!(
+            http_routing_gaps(&cfg).is_empty(),
+            "an explicit catch-all governs what the other routes do not"
+        );
+    }
+
+    /// The overlap the selector exists inside: three scoped paths and no route
+    /// for the rest, which the global policy governs instead. An operator who
+    /// scoped those three and stopped has to be told.
+    #[test]
+    fn http_routes_without_a_catch_all_report_the_fallback_to_global() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: /healthz
+  - http: { path_prefix: /v1/files }
+  - http: { path: /v1/admin, method: POST }
+"#,
+        )
+        .expect("the fixture must load");
+        let gaps = http_routing_gaps(&cfg);
+        assert_eq!(gaps.len(), 1, "one gap, reported once: {gaps:?}");
+        assert!(gaps[0].contains("count=3"), "{}", gaps[0]);
+        assert!(
+            gaps[0].contains("global policy"),
+            "the message names where the rest of the traffic goes: {}",
+            gaps[0]
+        );
+    }
+
+    /// A root prefix narrowed by `method:` covers one method and leaves the
+    /// others falling through, so it is not the catch-all.
+    #[test]
+    fn a_root_prefix_narrowed_by_method_is_not_the_catch_all() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - http: { path_prefix: "/", method: GET }
+"#,
+        )
+        .expect("the fixture must load");
+        assert_eq!(
+            http_routing_gaps(&cfg).len(),
+            1,
+            "a GET-only root prefix governs no other method"
+        );
+    }
+
+    /// Routing off is the default, and it makes every `http:` route inert
+    /// rather than merely incomplete. That is the line to fix, so it is the
+    /// only one reported.
+    #[test]
+    fn http_routes_with_routing_disabled_are_reported_as_inert() {
+        let cfg = parse_config(
+            r#"
+plugins: []
+routes:
+  - http: { path_prefix: /v1/files }
+"#,
+        )
+        .expect("routing off still loads");
+        let gaps = http_routing_gaps(&cfg);
+        assert_eq!(gaps.len(), 1, "one gap, not two: {gaps:?}");
+        assert!(gaps[0].contains("routing_enabled"), "{}", gaps[0]);
+        assert!(
+            !gaps[0].contains("path_prefix"),
+            "the missing catch-all is not the problem to fix first: {}",
+            gaps[0]
+        );
+    }
+
+    /// A configuration that declares no `http:` route is what every deployment
+    /// running today has, so the report has to stay silent for it, glob route
+    /// included.
+    #[test]
+    fn a_config_with_no_http_route_reports_no_gap() {
+        let cfg = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_compensation
+  - tool: "hr-*"
+  - resource: "file:///etc/*"
+  - llm: gpt-4
+  - prompt: summarize
+"#,
+        )
+        .expect("the fixture must load");
+        assert!(
+            http_routing_gaps(&cfg).is_empty(),
+            "nothing about the four name selectors is reported here"
         );
     }
 

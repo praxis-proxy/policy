@@ -39,7 +39,9 @@
 // entity-type defaults, tag bundles, and the route's own `plugins:` list only
 // run for those requests when a policy step names them. That has always held
 // for entity routes, and an `http:` route carrying a body is the same
-// substitution.
+// substitution. `visit_route` names each `http:` route whose own `plugins:`
+// list that silences, so a specific configuration reports it rather than
+// leaving an operator to find this paragraph.
 //
 // # Hook names per entity type
 //
@@ -52,7 +54,9 @@
 //   * `http:`     → `cmf.http_request`        / `cmf.http_response`
 //
 // The global HTTP catch-all installs under the same pair, under the
-// reserved global name rather than a route's own.
+// reserved global name rather than a route's own. An `http:` route
+// resolves only under `plugin_settings.routing_enabled: true`, which
+// defaults to false; the global catch-all installs either way.
 //
 // The mapping lives in [`hook_pair_for_entity`]. Hosts fire
 // `mgr.invoke_named::<CmfHook>("cmf.llm_input", ...)` for LLM
@@ -72,7 +76,7 @@ use praxis_policy_core::cmf::constants::{
     HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH,
     HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
 };
-use praxis_policy_core::config::{RouteEntry, route_entity_identity};
+use praxis_policy_core::config::{PluginRouteRef, RouteEntry, route_entity_identity};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::plugin::PluginConfig;
 use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
@@ -777,6 +781,22 @@ impl ConfigVisitor for AplConfigVisitor {
                 continue;
             }
 
+            // A handler is about to install, so the substitution is certain
+            // from here. Reported once per route: the body and the `plugins:`
+            // list are the same for every name the selector contributes.
+            if idx == 0 {
+                let displaced = displaced_plugin_chain(entity_type, parsed);
+                if !displaced.is_empty() {
+                    tracing::warn!(
+                        route = %route_key,
+                        plugins = %displaced.join(", "),
+                        "APL visitor: this `http:` route's policy body dispatches in place of its \
+                         plugin chain, so the plugins it lists run only where a policy step names \
+                         them",
+                    );
+                }
+            }
+
             // Plugin-mode validation for `parallel:` blocks.
             // `praxis-policy-apl-core::Effect::validate_parallel_purity` already rejected
             // FieldOp / Delegate at parse time; this pass checks that every
@@ -965,6 +985,19 @@ fn install_handler(
              coordinates; only the later one evaluates",
         );
     }
+}
+
+/// The `plugins:` an `http:` route lists that its compiled policy body stands
+/// in for. Empty for every other selector and for a route listing none, so a
+/// configuration declaring no `http:` route gains no diagnostic.
+///
+/// Called where a handler is about to install, which is what makes the
+/// substitution certain rather than possible.
+fn displaced_plugin_chain<'a>(entity_type: &str, route: &'a RouteEntry) -> Vec<&'a str> {
+    if entity_type != ENTITY_HTTP {
+        return Vec::new();
+    }
+    route.plugins.iter().map(PluginRouteRef::name).collect()
 }
 
 /// Warn when an APL block carries a global-only wiring key
@@ -1258,14 +1291,15 @@ mod tests {
     use super::{
         AplConfigVisitor, ConfigVisitor as _, DispatchCache, ENTITY_HTTP, ENTITY_NAME_GLOBAL,
         ENTITY_TOOL, HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE, HOOK_CMF_TOOL_PRE_INVOKE,
-        PluginConfig, PolicyEngine, RouteEntry, apl_subblock, http_catchall_should_install,
-        response_subblock,
+        PluginConfig, PluginRouteRef, PolicyEngine, RouteEntry, apl_subblock,
+        displaced_plugin_chain, http_catchall_should_install, response_subblock,
     };
     use crate::session_store::MemorySessionStore;
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage, TypeCheck};
     use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
     use praxis_policy_core::cmf::enums::Role;
     use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
+    use praxis_policy_core::config::{HttpSelector, Pattern, StringOrList};
     use praxis_policy_core::error::PluginViolation;
     use praxis_policy_core::extensions::{Extensions, HttpExtension, MetaExtension};
     use praxis_policy_core::factory::{PluginFactory, PluginInstance};
@@ -1386,6 +1420,48 @@ mod tests {
             response_subblock(&v, "tool:*").is_none(),
             "malformed response: block must be ignored, not panic or propagate an error"
         );
+    }
+
+    /// The report an operator gets for the one case where something they wrote
+    /// stops firing: an `http:` route whose policy body stands in for the
+    /// `plugins:` it also lists.
+    #[test]
+    fn an_http_route_listing_plugins_names_them_as_displaced() {
+        let route = RouteEntry {
+            http: Some(HttpSelector::prefix("/v1/files")),
+            plugins: vec![
+                PluginRouteRef::Name("corp-jwt".to_owned()),
+                PluginRouteRef::Name("audit".to_owned()),
+            ],
+            ..RouteEntry::default()
+        };
+        assert_eq!(
+            displaced_plugin_chain(ENTITY_HTTP, &route),
+            ["corp-jwt", "audit"],
+            "the report names what stops firing, in the order it was written"
+        );
+    }
+
+    /// Nothing an operator wrote is displaced, so there is nothing to say.
+    #[test]
+    fn an_http_route_listing_no_plugins_displaces_nothing() {
+        let route = RouteEntry {
+            http: Some(HttpSelector::exact("/healthz")),
+            ..RouteEntry::default()
+        };
+        assert!(displaced_plugin_chain(ENTITY_HTTP, &route).is_empty());
+    }
+
+    /// The substitution is as old as entity routes, so reporting it for one
+    /// would be new noise on a configuration nobody edited.
+    #[test]
+    fn an_entity_route_listing_plugins_is_not_reported() {
+        let route = RouteEntry {
+            tool: Some(StringOrList::Single(Pattern::new("get_compensation"))),
+            plugins: vec![PluginRouteRef::Name("corp-jwt".to_owned())],
+            ..RouteEntry::default()
+        };
+        assert!(displaced_plugin_chain(ENTITY_TOOL, &route).is_empty());
     }
 
     #[test]

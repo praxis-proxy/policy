@@ -17,6 +17,34 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`http:`, a route selector for generic HTTP requests.** L7 traffic carries
+  no entity, so it resolved no route at all: no route-level plugins, no group
+  membership, no static tags, no route-level `authentication:`. A route can now
+  select on the request line, in three shapes. A bare path (`http: /healthz`)
+  and a list (`http: [/livez, /readyz]`) match exact paths; the map form asks
+  for a segment-boundary prefix (`http: {path_prefix: /v1/files}`) or an exact
+  path (`http: {path: /v1/files/manifest}`), either optionally narrowed by
+  `method:`. It requires `plugin_settings.routing_enabled: true`, which
+  defaults to false and leaves an `http:` route inert until it is set; a load
+  now reports that state, and reports a set of `http:` routes that declares no
+  catch-all, naming that a request matching none of them is governed by the
+  global policy instead. A prefix matches at segment boundaries exactly as the
+  gateway's own router reads one, so `/api` covers `/api`, `/api/`, and
+  `/api/v1` but not `/apikeys`, and a trailing slash is insignificant. An exact
+  path outranks every prefix, the longer prefix wins among prefixes, and
+  neither depends on declaration order.
+
+  Two things worth knowing before writing the first one. An `http:` route
+  carrying a policy body dispatches that body in place of its structural plugin
+  chain, the same way an entity route does, so the `plugins:` the route also
+  lists run only where a policy step names them; a load names each `http:`
+  route that applies to. And a route's `authentication:` list applies only
+  where the host supplies the request line at the identity hook. Where it does
+  not, the global list governs exactly as it does today, and the engine now
+  warns once naming the route, so which of the two a deployment is in is
+  readable from what the engine emits rather than from the host's source.
+  ([#40](https://github.com/praxis-proxy/policy/issues/40))
+
 - **`cmf.http_response`, the return half of the L7 path.** `cmf.http_request` had no counterpart because authorization is an admission check that belongs entirely before the request is forwarded. Response filtering is not: redaction, label propagation, and any check that needs the body the upstream actually returned all belong after. A `global.apl` carrying `result:` or `post_invocation:` steps now installs a `Post`-phase handler under the same `http` / `*` coordinates the request hook uses; a policy that only authorizes gains nothing and installs nothing. PPE defining and routing a hook does not oblige a host to fire it, so a host that never does sees no change. For the host that does adopt it: a `global.apl` whose post steps were previously inert on the entity-less HTTP path becomes live the moment the hook is fired, and `result.*` keys do not exist for a request carrying no entity, so a step reading one denies. Check what the global post block does before firing.
 
 - **One declaration per hook, holding both its name and its routing metadata.** `define_hooks!` emits a hook's `pub const` and its `hooks::metadata` row together, so a name without a row is unrepresentable rather than something to test for. A host declaring its own hooks can use it too, then register the resulting slice at startup. `crates/ppe-core/examples/plugin_demo.rs` shows the pattern.
@@ -46,6 +74,60 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Roles and permissions are readable as whole sets.** `subject.roles`, `subject.permissions`, `client.roles`, and `client.permissions` join `subject.teams` as `StringSet` bag keys, so a policy can write `"hr" in subject.roles` rather than enumerating `role.<name>` booleans. The flattened boolean keys are unchanged. ([#7](https://github.com/praxis-proxy/policy/pull/7))
 
 ### Changed
+
+- **Both route resolvers take the route already matched.**
+  `resolve_plugins_for_entity` and `resolve_identity_plugins_for_route` receive
+  the matched route instead of matching a second time, and the identity
+  resolver no longer takes an entity type, because a matched route carries the
+  one it matched under. The engine used to match once for the annotation lookup
+  and again inside each resolver on every cache miss; matching once is also
+  what lets the name a request resolved to be the only key the annotation table
+  and the route cache ever see, so a request path never becomes a cache key.
+  The layering each resolver does (global, entity-type default, group and tag
+  bundles, then the route) is unchanged. **Breaking** for Rust callers, of
+  which there were none outside this repository's engine; no configuration
+  resolves differently.
+  ([#40](https://github.com/praxis-proxy/policy/issues/40))
+
+- **`annotate_route` reports whether it replaced a handler.** The annotation
+  table was a plain insert, so a second handler at the same `(entity_type,
+  entity_name, scope, hook_name)` dropped the first with nothing recording that
+  either existed. It now returns whether it replaced one, and the APL visitor
+  warns naming the coordinates. The later handler still wins, since a host may
+  replace deliberately. **Breaking** for a Rust caller that binds the return
+  type; ignoring the value compiles unchanged.
+  ([#40](https://github.com/praxis-proxy/policy/issues/40))
+
+- **A path normalizer and a route-resolution error are public surface.**
+  `praxis_policy_core::http_path::normalize_match_path` produces the path
+  matching runs against: query and fragment removed, semicolon path parameters
+  stripped, duplicate slashes collapsed, and `.` / `..` resolved including
+  their percent-encoded spellings, with nothing ever percent-decoded so an
+  encoded separator stays inside its own segment. The rules are the gateway's,
+  duplicated on purpose because the dependency cannot run the other way, and
+  the module names its source so the two can be compared. What a policy reads
+  is untouched: `http.path` and `meta.entity_name` reach the attribute bag as
+  the host set them, and the normalized form is never written back. A path that
+  breaks those rules matches no `http:` route, and where at least one `http:`
+  route is declared it is denied with the stable code
+  `unreadable_request_path` and a `400`, because the engine and the gateway's
+  router would otherwise be reading two different paths for one request. With
+  no `http:` route declared, nothing about such a request changes.
+  ([#40](https://github.com/praxis-proxy/policy/issues/40))
+
+- **A route key nothing reads fails at load, naming the key and the route.**
+  `RouteEntry` ignores unknown fields, so a misspelled selector left a route
+  matching nothing and a stale key sat there looking effective. A raw-YAML scan
+  now refuses a route key nothing consumes, and `ConfigVisitor` gained a method
+  reporting the extra route keys its visitor reads, so an orchestrator's own
+  block stays loadable. `deny_unknown_fields` cannot do this job: a route
+  mapping legitimately carries `apl:`, `response:`, and the flat APL terms the
+  visitor accepts alongside the keys the typed struct models. **Breaking**
+  where a route carries a key nothing consumes, which was inert before and is a
+  typo either way. A host whose visitor reads route keys of its own must load
+  through `load_config_yaml`: `parse_config` and `load_config(path)` register no
+  visitor, so they scan with the built-in list alone.
+  ([#40](https://github.com/praxis-proxy/policy/issues/40))
 
 - **A declared hook name is validated at config load.** `hooks:` carried free strings that nothing checked, so a typo loaded clean and nothing said so. What a typo cost depended on the plugin: a factory that derives its handler names from `config.hooks` (the `audit-logger` and `pii-scanner` reference plugins) registered under the misspelling and never fired, while one that hardcodes its hook name (`identity-jwt`, `delegator-oauth`, `elicitation-ciba`) fired correctly and left the `hooks:` list as decoration that disagreed with reality. Both are now refused, because a `hooks:` entry naming a hook nothing dispatches is a config error either way. An unknown name now refuses the config, naming the plugin, the name, and the nearest name that does dispatch: `tool_pre_invoke` suggests `cmf.tool_pre_invoke`, which is the exact mistake the removed constants and the old `PluginConfig` example taught. A name close to nothing in the table gets no suggestion rather than the least-bad match. **Breaking for existing config** carrying a misspelled or inert hook name. Validation reads the runtime registry, so a host with its own hooks passes once it has registered their metadata — which it must do *before* loading config that names them; registering afterwards is too late and the load refuses.
 

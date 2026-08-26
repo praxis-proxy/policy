@@ -351,12 +351,18 @@ fn normalize_and_validate(mut config: PolicyConfig) -> Result<PolicyConfig, Box<
 }
 
 /// Emit warnings for YAML settings that the runtime doesn't currently
-/// honor. Called once per `load_config` / `from_config` so operators
-/// who set these knobs aren't silently ignored.
+/// honor, and for what a declared set of `http:` routes leaves ungoverned.
+/// Called once per `load_config` / `from_config` so operators who set these
+/// knobs aren't silently ignored.
 ///
 /// `user_patterns` / `content_types` on `PluginCondition` are not warned
 /// — they were wired up alongside this fix and now actually filter.
 fn warn_on_inactive_settings(cfg: &PolicyConfig) {
+    // Reported here rather than from validation, which runs more than once on
+    // the visitor load path, so an operator reads each gap once per load.
+    for gap in crate::config::http_routing_gaps(cfg) {
+        warn!("{gap}");
+    }
     if !cfg.plugin_dirs.is_empty() {
         warn!(
             "config sets `plugin_dirs` (count={}) but the runtime does not \
