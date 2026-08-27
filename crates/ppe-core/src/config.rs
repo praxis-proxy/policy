@@ -1485,7 +1485,7 @@ plugin_settings:
 plugins:
   - name: corp-jwt
     kind: builtin
-    hooks: [identity_resolve]
+    hooks: [identity.resolve]
 routes:
   - tool: get_compensation
     authentication:
@@ -1527,7 +1527,7 @@ plugin_settings:
 plugins:
   - name: corp-jwt
     kind: builtin
-    hooks: [identity_resolve]
+    hooks: [identity.resolve]
 routes:
   - tool: get_compensation
     authentication:
