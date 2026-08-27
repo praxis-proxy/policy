@@ -558,8 +558,8 @@ impl ConfigVisitor for AplConfigVisitor {
         // same mapping the entity routes below read, so the phase a hook
         // installs under is decided in one place. `None` is unreachable for
         // ENTITY_HTTP; skipping rather than crashing matches visit_routes.
-        let installs_pre_handler = http_catchall_should_install(&compiled);
-        let installs_post_handler = http_catchall_response_should_install(&compiled);
+        let installs_pre_handler = declares_pre_phase(&compiled);
+        let installs_post_handler = declares_post_phase(&compiled);
         if !installs_pre_handler && !installs_post_handler && compiled.response.is_some() {
             tracing::warn!(
                 "APL visitor: global.response is set but global.apl declares no steps \
@@ -843,8 +843,8 @@ impl ConfigVisitor for AplConfigVisitor {
 
             // Each half installs only when the effective route declares steps
             // for it, the way the global catch-all already decides.
-            let installs_pre = http_catchall_should_install(&effective);
-            let installs_post = http_catchall_response_should_install(&effective);
+            let installs_pre = declares_pre_phase(&effective);
+            let installs_post = declares_post_phase(&effective);
 
             let route_arc = Arc::new(effective);
 
@@ -1229,25 +1229,26 @@ fn apl_subblock(yaml: &serde_yaml::Value) -> Option<serde_yaml::Value> {
     }
 }
 
-/// Whether the Pre-phase handler should install for a compiled layer. Read
-/// for the entity-less HTTP catch-all and, in `visit_routes`, for every
-/// route's own effective layers, so one rule decides both. Gate on both
+/// Whether a compiled layer declares Pre-phase steps, which is what decides
+/// whether the Pre-phase handler installs. Read for the entity-less HTTP
+/// catch-all and, in `visit_routes`, for every route's own effective layers,
+/// so one rule decides both. Gate on both
 /// Pre-phase steps (`args` + `policy`, via
 /// [`CompiledRoute::declared_phases`]), not `policy` alone: an operator
 /// whose `global.apl` has only an `args:` admission block (no `policy:`)
 /// must still get the catch-all installed, or entity-less HTTP traffic
 /// silently bypasses it entirely (fail-open by omission).
-fn http_catchall_should_install(compiled: &CompiledRoute) -> bool {
+fn declares_pre_phase(compiled: &CompiledRoute) -> bool {
     let declared = compiled.declared_phases();
     declared.contains(praxis_policy_apl_core::rules::Phase::Args)
         || declared.contains(praxis_policy_apl_core::rules::Phase::Policy)
 }
 
-/// Whether the Post-phase handler should install. The mirror of
-/// [`http_catchall_should_install`] on the post side, gating on `result` +
+/// Whether a compiled layer declares Post-phase steps. The mirror of
+/// [`declares_pre_phase`] on the post side, gating on `result` +
 /// `post_policy`, so a layer that only authorizes gets no post handler and
 /// a host that never fires the post hook sees no change either way.
-fn http_catchall_response_should_install(compiled: &CompiledRoute) -> bool {
+fn declares_post_phase(compiled: &CompiledRoute) -> bool {
     let declared = compiled.declared_phases();
     declared.contains(praxis_policy_apl_core::rules::Phase::Result)
         || declared.contains(praxis_policy_apl_core::rules::Phase::PostPolicy)
@@ -1323,8 +1324,8 @@ mod tests {
     use super::{
         AplConfigVisitor, ConfigVisitor as _, DispatchCache, ENTITY_HTTP, ENTITY_NAME_GLOBAL,
         ENTITY_TOOL, HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE, HOOK_CMF_TOOL_PRE_INVOKE,
-        PluginConfig, PluginRouteRef, PolicyEngine, RouteEntry, apl_subblock,
-        displaced_plugin_chain, http_catchall_should_install, response_subblock,
+        PluginConfig, PluginRouteRef, PolicyEngine, RouteEntry, apl_subblock, declares_pre_phase,
+        displaced_plugin_chain, response_subblock,
     };
     use crate::session_store::MemorySessionStore;
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage, TypeCheck};
@@ -1370,7 +1371,7 @@ mod tests {
         let mut route = CompiledRoute::new("global");
         route.args.push(field_rule("http.method"));
         assert!(
-            http_catchall_should_install(&route),
+            declares_pre_phase(&route),
             "an args-only global block must still install the catch-all handler"
         );
     }
@@ -1379,21 +1380,21 @@ mod tests {
     fn http_catchall_installs_for_policy_only_global_block() {
         let mut route = CompiledRoute::new("global");
         route.policy.push(deny_effect());
-        assert!(http_catchall_should_install(&route));
+        assert!(declares_pre_phase(&route));
     }
 
     #[test]
     fn http_catchall_does_not_install_for_empty_or_post_only_global_block() {
         let empty = CompiledRoute::new("global");
         assert!(
-            !http_catchall_should_install(&empty),
+            !declares_pre_phase(&empty),
             "an empty global block has nothing to evaluate; installing would be a no-op handler"
         );
 
         let mut post_only = CompiledRoute::new("global");
         post_only.post_policy.push(deny_effect());
         assert!(
-            !http_catchall_should_install(&post_only),
+            !declares_pre_phase(&post_only),
             "post_policy never runs on the Pre-phase-only catch-all, so it must not gate installation"
         );
     }
