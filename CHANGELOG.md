@@ -39,7 +39,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `/api/v1` but not `/apikeys`, and a trailing slash is insignificant. An exact
   path outranks every prefix, the longer prefix wins among prefixes, and a
   route narrowed by `method:` outranks the same path left open for the methods
-  it names. None of the three depends on declaration order.
+  it names. None of the three depends on declaration order. An exact path is
+  matched with one trailing slash treated as insignificant, so `/admin` covers
+  `/admin/` as well as the `/admin//` and `/admin/.` that normalization rewrites.
 
   Two things worth knowing before writing the first one. An `http:` route
   carrying a policy body dispatches that body in place of its structural plugin
@@ -157,6 +159,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **The `hooks::types::hook_names` and `hooks::types::cmf_hook_names` modules.** Sixteen `pub const`s that no dispatch site read. Six of `hook_names` shadowed CMF hooks under names nothing fires; two spelled identity and delegation `identity_resolve` / `token_delegate`, which no handler answers to. `cmf_hook_names` duplicated `cmf::constants` and got the prompt pair wrong, teaching `cmf.prompt_pre_fetch` where the dispatched name is `cmf.prompt_pre_invoke`. Because nothing consumed them they drifted unnoticed for months. **Breaking**, with no replacement needed: `praxis_policy_core::cmf::constants` holds the CMF names and is the supported import path, alongside `identity::HOOK_IDENTITY_RESOLVE`, `delegation::HOOK_TOKEN_DELEGATE`, and `elicitation::HOOK_ELICIT`. Those constants keep their paths and their values. The values are operator-facing, since a `hooks:` list in YAML names them as strings, so they are fixed as public API rather than free to rename.
 
 ### Fixed
+
+- **An exact-path route matches the spellings of its path that normalization treats as equal.** `http: /admin` matched `/admin`, `/admin//`, `/admin/.`, and `/admin/x/..`, and missed `/admin/`, the spelling a browser sends: normalization keeps one trailing slash so PPE reads a request the way the gateway that chose its upstream does, and the exact comparison then compared bytes. One trailing slash is now insignificant on both sides of that comparison, as it already is for a prefix. Normalization is unchanged, so `http.path` reads what it always did. A request on `/admin/` that reached the global policy now reaches the `/admin` route, and every spelling resolves the single name the route declares.
 
 - **A route narrowed by `method:` now outranks the same path left open.** The narrowing gated the match without scoring, so two routes on one path resolved by declaration order: a broad `path_prefix: /api` written above `{path_prefix: /api, method: DELETE}` took the `DELETE` request, and swapping the two lines changed which policy ran. A present `method:` now adds to the score, below the per-character prefix weight so it breaks a tie within one path rather than reordering two paths, and below the scope bonus so a scoped route keeps winning its own scope. A configuration that pairs a broad route with a method-narrowed one moves those methods to the narrower policy.
 

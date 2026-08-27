@@ -655,7 +655,8 @@ pub enum HttpSelector {
 /// message can name the route.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HttpMatch {
-    /// Exact path, matched by equality.
+    /// Exact path, matched by equality with one trailing slash treated as
+    /// insignificant on both sides.
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
 
@@ -688,8 +689,8 @@ impl HttpSelector {
         })
     }
 
-    /// The paths this selector matches by equality. Empty for a prefix
-    /// selector.
+    /// The paths this selector matches by equality, one trailing slash aside.
+    /// Empty for a prefix selector.
     pub fn exact_paths(&self) -> &[String] {
         match self {
             Self::Path(path) => std::slice::from_ref(path),
@@ -1378,18 +1379,37 @@ fn path_prefix_matches(path: &str, prefix: &str) -> bool {
     if !path.starts_with('/') {
         return false;
     }
-    let trimmed = prefix.strip_suffix('/').unwrap_or(prefix);
+    let trimmed = without_trailing_slash(prefix);
     if trimmed.is_empty() || path == trimmed {
         return true;
     }
     path.starts_with(trimmed) && path.as_bytes().get(trimmed.len()) == Some(&b'/')
 }
 
+/// A path with one trailing slash dropped, which is what makes `/admin` and
+/// `/admin/` the same path to both the prefix and the exact comparisons. The
+/// root becomes empty, so it stays distinct from every other path.
+fn without_trailing_slash(path: &str) -> &str {
+    path.strip_suffix('/').unwrap_or(path)
+}
+
+/// Whether a request path is a spelling of a declared exact path.
+///
+/// One trailing slash is insignificant on both sides, the way it is for a
+/// prefix. Normalization keeps `/admin/` verbatim so PPE reads a request the
+/// way the host's gateway does, and rewrites `/admin//` and `/admin/.` to
+/// `/admin`; stripping here is what makes a route declared `/admin` match all
+/// of them rather than falling through to the broader global policy on the one
+/// spelling a browser sends.
+fn exact_path_matches(path: &str, declared: &str) -> bool {
+    without_trailing_slash(declared) == without_trailing_slash(path)
+}
+
 /// The effective length of a declared prefix, which is what orders two prefixes
 /// that both match one path, as the host's own prefix specificity does. A trailing slash is insignificant here too, and the
 /// root counts as one character.
 fn path_prefix_specificity(prefix: &str) -> usize {
-    let trimmed = prefix.strip_suffix('/').unwrap_or(prefix);
+    let trimmed = without_trailing_slash(prefix);
     if trimmed.is_empty() { 1 } else { trimmed.len() }
 }
 
@@ -1425,7 +1445,7 @@ fn score_http_match(selector: &HttpSelector, path: &str, method: Option<&str>) -
         selector
             .exact_paths()
             .iter()
-            .any(|declared| declared == path)
+            .any(|declared| exact_path_matches(path, declared))
             .then_some(SPECIFICITY_EXACT_PATH)
     }?;
     let method_bonus = if selector.method().is_some() {
@@ -1528,6 +1548,10 @@ fn matched_selector_name(selector: &StringOrList, entity_name: &str) -> Option<S
 /// The name a matching `http:` selector resolves to. A prefix contributes one
 /// rendered name; the exact shapes render one name per declared path, in order,
 /// so the matched path picks its own name out of that list.
+///
+/// The name is the path as declared, not as the request spelled it, so every
+/// equivalent spelling of one path resolves to one name. The cache and the
+/// annotation table then key on the config rather than on the traffic.
 fn matched_http_name(selector: &HttpSelector, path: &str) -> Option<String> {
     let names = http_selector_names(selector);
     if selector.path_prefix().is_some() {
@@ -1536,7 +1560,7 @@ fn matched_http_name(selector: &HttpSelector, path: &str) -> Option<String> {
     let matched = selector
         .exact_paths()
         .iter()
-        .position(|declared| declared == path)?;
+        .position(|declared| exact_path_matches(path, declared))?;
     names.into_iter().nth(matched)
 }
 
@@ -4551,6 +4575,106 @@ routes:
             matched_prefix(&cfg, "/v1/files/q3.pdf").as_deref(),
             Some("/v1/files"),
             "an exact path matches by equality, so a file under it still takes the prefix"
+        );
+    }
+
+    /// The spellings of one path that normalization treats as equivalent all
+    /// resolve the exact route declared for it. `/admin/` is the one a browser
+    /// sends, and missing it dropped the request through to whatever broader
+    /// policy the config declares.
+    #[test]
+    fn an_exact_path_matches_every_spelling_of_its_path() {
+        let cfg = routed_config("  - http: /admin\n");
+
+        for spelling in ["/admin", "/admin/", "/admin//", "/admin/.", "/admin/x/.."] {
+            let path = crate::http_path::normalize_match_path(spelling)
+                .expect("every spelling is a readable path");
+            assert_eq!(
+                http_name(&cfg, &path, Some("GET")).as_deref(),
+                Some("/admin"),
+                "`{spelling}` must resolve the exact route, under the declared name"
+            );
+        }
+
+        assert!(
+            http_name(&cfg, "/adminx", Some("GET")).is_none(),
+            "an exact path is not a prefix"
+        );
+        assert!(
+            http_name(&cfg, "/admin/settings", Some("GET")).is_none(),
+            "a path under an exact path is a different path"
+        );
+    }
+
+    /// A declared path written with a trailing slash matches the same set, so
+    /// which spelling the operator wrote does not change what the route covers.
+    #[test]
+    fn a_declared_trailing_slash_matches_the_same_spellings() {
+        let cfg = routed_config("  - http: \"/admin/\"\n");
+
+        for spelling in ["/admin", "/admin/", "/admin//", "/admin/.", "/admin/x/.."] {
+            let path = crate::http_path::normalize_match_path(spelling)
+                .expect("every spelling is a readable path");
+            assert_eq!(
+                http_name(&cfg, &path, Some("GET")).as_deref(),
+                Some("/admin/"),
+                "`{spelling}` must resolve the route declared as `/admin/`"
+            );
+        }
+
+        assert!(
+            http_name(&cfg, "/adminx", Some("GET")).is_none(),
+            "the trailing slash does not make the path a prefix"
+        );
+    }
+
+    /// The root as an exact path matches the root and nothing else, which is
+    /// what keeps it distinct from the `path_prefix: /` catch-all.
+    #[test]
+    fn the_root_as_an_exact_path_is_not_the_catch_all() {
+        let exact = routed_config("  - http: \"/\"\n");
+        let catch_all = routed_config("  - http: { path_prefix: / }\n");
+
+        assert_eq!(
+            http_name(&exact, "/", Some("GET")).as_deref(),
+            Some("/"),
+            "the root resolves the exact route"
+        );
+        for path in ["/healthz", "/v1/files/q3.pdf"] {
+            assert!(
+                http_name(&exact, path, Some("GET")).is_none(),
+                "an exact `/` must not answer for {path}"
+            );
+            assert!(
+                http_name(&catch_all, path, Some("GET")).is_some(),
+                "the catch-all still answers for {path}"
+            );
+        }
+    }
+
+    /// Every spelling resolves one name, so the annotation table and the route
+    /// cache stay keyed on the config rather than growing with the traffic.
+    #[test]
+    fn every_spelling_of_an_exact_path_resolves_one_name() {
+        let cfg = routed_config("  - http: { path: /admin, method: GET }\n");
+
+        let names: Vec<Option<String>> = ["/admin", "/admin/", "/admin//", "/admin/."]
+            .iter()
+            .map(|spelling| {
+                let path = crate::http_path::normalize_match_path(spelling)
+                    .expect("every spelling is a readable path");
+                http_name(&cfg, &path, Some("GET"))
+            })
+            .collect();
+
+        assert_eq!(
+            names[0].as_deref(),
+            Some("GET path:/admin"),
+            "the name renders the path as declared"
+        );
+        assert!(
+            names.iter().all(|name| *name == names[0]),
+            "one path is one cache key, whatever the request spelled: {names:?}"
         );
     }
 

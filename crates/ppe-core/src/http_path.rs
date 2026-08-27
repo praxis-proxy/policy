@@ -581,9 +581,12 @@ mod tests {
 
     #[test]
     fn a_trailing_slash_is_preserved_as_the_gateway_preserves_it() {
-        // The prefix matcher treats a trailing slash as insignificant, so
-        // keeping it here costs nothing and keeps the two normalizers
-        // agreeing.
+        // Both route matchers treat a trailing slash as insignificant: the
+        // prefix matcher strips it from the prefix, and the exact comparison
+        // strips it from the declared path and the request path alike. So
+        // keeping it here costs no match and keeps the two normalizers
+        // agreeing, which is what makes PPE read a request the way the
+        // gateway that chose its upstream did.
         assert_eq!(normalized("/a/"), "/a/", "a trailing slash survives");
         assert_eq!(
             normalized("/a//"),
