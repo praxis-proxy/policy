@@ -37,7 +37,8 @@ crate::define_hooks! {
     /// registry key when a host registers the handler via the standard
     /// `register_handler` path. Unphased: it fires once at request entry,
     /// before any phase exists.
-    HOOK_IDENTITY_RESOLVE: "identity.resolve" => entity: None, phase: Unphased;
+    HOOK_IDENTITY_RESOLVE: "identity.resolve" =>
+        family: IdentityHook, entity: None, phase: Unphased;
 }
 
 crate::define_hook! {

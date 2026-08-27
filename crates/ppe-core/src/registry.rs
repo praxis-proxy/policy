@@ -13,6 +13,10 @@
 //   config loader → engine → PluginRef → executor
 // The plugin is just a recipient, not a source.
 //
+// Registration also refuses a handler whose hook family is not the one
+// the hook name's metadata row records, so a plugin cannot take a hook
+// whose payload it cannot read. See `check_handler_family`.
+//
 // The registry supports two registration paths:
 //
 // 1. **Typed** (`register::<H>()`) — for Rust plugins implementing
@@ -233,6 +237,37 @@ pub struct PluginRegistry {
     hook_index: HashMap<HookType, Vec<HookEntry>>,
 }
 
+/// Refuse a handler built for a family other than the one the hook name
+/// expects. The row's `family` comes off the hook type, and
+/// [`AnyHookHandler::hook_type_name`] reports the type the handler was
+/// built for, so the two are comparable without a `TypeId`.
+///
+/// Load-time rather than compile-time: `register_for_names::<H>` never
+/// consults `H`, and the config-driven factory path names no hook type at
+/// all, so the registry is where the pairing can be checked.
+///
+/// A row with `family: None`, and a name with no row at all, accept any
+/// family. The hook registry is open by design and a host declares its own
+/// hooks, so neither absence is treated as a refusal.
+fn check_handler_family(
+    plugin_name: &str,
+    hook_name: &str,
+    handler: &dyn AnyHookHandler,
+) -> Result<(), String> {
+    let Some(expected) = crate::hooks::lookup_hook_metadata(hook_name).and_then(|meta| meta.family)
+    else {
+        return Ok(());
+    };
+    let reported = handler.hook_type_name();
+    if reported == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "plugin '{plugin_name}' declares hook '{hook_name}', which belongs to the \
+         '{expected}' hook family, but its handler serves '{reported}'"
+    ))
+}
+
 impl PluginRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
@@ -260,8 +295,9 @@ impl PluginRegistry {
     /// # Errors
     ///
     /// Returns the conflict message when a plugin of the same name is already
-    /// registered. Registration is all-or-nothing: no hook name is recorded when
-    /// any of them conflicts.
+    /// registered, or when a handler's hook family is not the one a hook name's
+    /// metadata row expects. Registration is all-or-nothing: no hook name is
+    /// recorded when any of them conflicts or is refused.
     pub fn register<H: HookTypeDef>(
         &mut self,
         plugin: Arc<dyn Plugin>,
@@ -291,8 +327,9 @@ impl PluginRegistry {
     /// # Errors
     ///
     /// Returns the conflict message when a plugin of the same name is already
-    /// registered. Registration is all-or-nothing: no hook name is recorded when
-    /// any of them conflicts.
+    /// registered, or when a handler's hook family is not the one a hook name's
+    /// metadata row expects. Registration is all-or-nothing: no hook name is
+    /// recorded when any of them conflicts or is refused.
     pub fn register_for_names<H: HookTypeDef>(
         &mut self,
         plugin: Arc<dyn Plugin>,
@@ -312,8 +349,9 @@ impl PluginRegistry {
     /// # Errors
     ///
     /// Returns the conflict message when a plugin of the same name is already
-    /// registered. Registration is all-or-nothing: no hook name is recorded when
-    /// any of them conflicts.
+    /// registered, or when a handler's hook family is not the one a hook name's
+    /// metadata row expects. Registration is all-or-nothing: no hook name is
+    /// recorded when any of them conflicts or is refused.
     pub fn register_for_names_with_handler(
         &mut self,
         plugin: Arc<dyn Plugin>,
@@ -335,8 +373,9 @@ impl PluginRegistry {
     /// # Errors
     ///
     /// Returns the conflict message when a plugin of the same name is already
-    /// registered. Registration is all-or-nothing: no hook name is recorded when
-    /// any of them conflicts.
+    /// registered, or when a handler's hook family is not the one a hook name's
+    /// metadata row expects. Registration is all-or-nothing: no hook name is
+    /// recorded when any of them conflicts or is refused.
     pub fn register_multi_handler(
         &mut self,
         plugin: Arc<dyn Plugin>,
@@ -347,6 +386,12 @@ impl PluginRegistry {
 
         if self.plugins.contains_key(&name) {
             return Err(format!("plugin '{name}' is already registered"));
+        }
+
+        // Every pair checked before anything is recorded, so a refused
+        // handler leaves the registry as it was.
+        for (hook_name, handler) in &handlers {
+            check_handler_family(&name, hook_name, handler.as_ref())?;
         }
 
         let plugin_ref = Arc::new(PluginRef::new(plugin, config));
@@ -372,7 +417,9 @@ impl PluginRegistry {
         Ok(())
     }
 
-    /// Internal: register handler under one or more hook names.
+    /// Internal: register handler under one or more hook names. Both the
+    /// typed paths and `register_for_names_with_handler` funnel through
+    /// here, so the family check covers every one of them.
     fn register_for_names_inner(
         &mut self,
         plugin: Arc<dyn Plugin>,
@@ -384,6 +431,12 @@ impl PluginRegistry {
 
         if self.plugins.contains_key(&name) {
             return Err(format!("plugin '{name}' is already registered"));
+        }
+
+        // Every name checked before anything is recorded, so a refused
+        // handler leaves the registry as it was.
+        for hook_name in names {
+            check_handler_family(&name, hook_name, handler.as_ref())?;
         }
 
         let plugin_ref = Arc::new(PluginRef::new(plugin, config));
@@ -537,8 +590,14 @@ pub fn group_by_mode(entries: &[HookEntry]) -> GroupedHookEntries {
 )]
 mod tests {
     use super::*;
+    use crate::cmf::constants::HOOK_CMF_TOOL_PRE_INVOKE;
+    use crate::cmf::{CmfHook, MessagePayload};
     use crate::error::PluginError;
     use crate::hooks::PluginResult;
+    use crate::hooks::adapter::TypedHandlerAdapter;
+    use crate::hooks::metadata::{HookMetadata, HookPhase, register_hook_metadata};
+    use crate::hooks::trait_def::HookHandler;
+    use crate::http_hook::{HOOK_HTTP_REQUEST, HttpHook};
     use async_trait::async_trait;
 
     // -- Test payload and hook type --
@@ -615,6 +674,48 @@ mod tests {
         }
     }
 
+    impl HookHandler<CmfHook> for TestPlugin {
+        async fn handle(
+            &self,
+            _payload: &MessagePayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> PluginResult<MessagePayload> {
+            PluginResult::allow()
+        }
+    }
+
+    /// The plugin and the type-erased CMF handler a real registration
+    /// carries: `TypedHandlerAdapter` reports `CmfHook::NAME`, which is what
+    /// the family check compares against a hook name's row.
+    fn cmf_plugin(config: &PluginConfig) -> (Arc<TestPlugin>, Arc<dyn AnyHookHandler>) {
+        let plugin = Arc::new(TestPlugin::new(config.clone()));
+        let handler: Arc<dyn AnyHookHandler> =
+            Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        (plugin, handler)
+    }
+
+    /// A handler reporting whichever family a test needs, for the cases
+    /// where no real hook type has that name.
+    struct FamilyHandler(&'static str);
+
+    #[async_trait]
+    impl AnyHookHandler for FamilyHandler {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            let result: PluginResult<TestPayload> = PluginResult::allow();
+            Ok(crate::executor::erase_result(result))
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            self.0
+        }
+    }
+
     // -- Tests --
 
     #[test]
@@ -642,8 +743,9 @@ mod tests {
     fn test_register_for_multiple_names() {
         let mut reg = PluginRegistry::new();
         let config = make_config("cmf-plugin", vec![], 10);
-        let plugin = Arc::new(TestPlugin::new(config.clone()));
-        let handler: Arc<dyn AnyHookHandler> = Arc::new(TestHandler);
+        // A real CMF handler, since the CMF rows name the family they
+        // carry and registration checks the handler against it.
+        let (plugin, handler) = cmf_plugin(&config);
 
         reg.register_for_names_inner(
             plugin,
@@ -736,6 +838,160 @@ mod tests {
 
         let plugin_ref = PluginRef::new(plugin, trusted);
         assert_eq!(plugin_ref.priority(), 100);
+    }
+
+    #[test]
+    fn a_cmf_handler_is_refused_for_an_http_hook_name() {
+        // The hazard the family check closes: the HTTP hooks carry no chat
+        // message, so a CMF handler on one would scan nothing and report
+        // clean. The refusal names the plugin, the hook, and both families.
+        let mut reg = PluginRegistry::new();
+        let config = make_config("pii-scan", vec![HOOK_HTTP_REQUEST], 10);
+        let (plugin, handler) = cmf_plugin(&config);
+
+        let err = reg
+            .register_for_names_inner(plugin, config, handler, &[HOOK_HTTP_REQUEST])
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            "plugin 'pii-scan' declares hook 'http.request', which belongs to the \
+             'http' hook family, but its handler serves 'cmf'"
+        );
+    }
+
+    #[test]
+    fn a_cmf_handler_registers_for_the_cmf_names_it_serves() {
+        let mut reg = PluginRegistry::new();
+        let config = make_config("pii-scan", vec![HOOK_CMF_TOOL_PRE_INVOKE], 10);
+        let (plugin, handler) = cmf_plugin(&config);
+
+        reg.register_for_names_inner(plugin, config, handler, &[HOOK_CMF_TOOL_PRE_INVOKE])
+            .unwrap();
+
+        assert!(reg.has_hooks_for(&HookType::new(HOOK_CMF_TOOL_PRE_INVOKE)));
+    }
+
+    #[test]
+    fn a_refused_name_leaves_no_part_of_the_registration_behind() {
+        // Registration is all-or-nothing, so the name that would have been
+        // accepted must not be recorded either.
+        let mut reg = PluginRegistry::new();
+        let config = make_config("pii-scan", vec![], 10);
+        let (plugin, handler) = cmf_plugin(&config);
+
+        reg.register_for_names_inner(
+            plugin,
+            config,
+            handler,
+            &[HOOK_CMF_TOOL_PRE_INVOKE, HOOK_HTTP_REQUEST],
+        )
+        .unwrap_err();
+
+        assert_eq!(reg.plugin_count(), 0);
+        assert!(!reg.has_hooks_for(&HookType::new(HOOK_CMF_TOOL_PRE_INVOKE)));
+        assert!(!reg.has_hooks_for(&HookType::new(HOOK_HTTP_REQUEST)));
+    }
+
+    #[test]
+    fn a_host_hook_registers_with_its_own_family_and_its_own_handler() {
+        // The registry is open: a host declaring a hook and a handler for it
+        // registers without praxis-policy-core knowing either.
+        let hook = "test_registry.host_owned";
+        register_hook_metadata(
+            hook,
+            HookMetadata {
+                family: Some("test_registry"),
+                entity_type: None,
+                phase: HookPhase::Unphased,
+            },
+        );
+        let mut reg = PluginRegistry::new();
+        let config = make_config("host-plugin", vec![hook], 10);
+        let plugin = Arc::new(TestPlugin::new(config.clone()));
+        let handler: Arc<dyn AnyHookHandler> = Arc::new(FamilyHandler("test_registry"));
+
+        reg.register_for_names_inner(plugin, config, handler, &[hook])
+            .unwrap();
+
+        assert!(reg.has_hooks_for(&HookType::new(hook)));
+    }
+
+    #[test]
+    fn a_permissive_row_accepts_a_handler_of_any_family() {
+        // `permissive()` records no family, which is what lets a host restore
+        // the open behavior for a hook rather than closing the registry.
+        let hook = "test_registry.permissive";
+        register_hook_metadata(hook, HookMetadata::permissive());
+        let mut reg = PluginRegistry::new();
+
+        for (name, family) in [("as-cmf", CmfHook::NAME), ("as-http", HttpHook::NAME)] {
+            let config = make_config(name, vec![hook], 10);
+            let plugin = Arc::new(TestPlugin::new(config.clone()));
+            let handler: Arc<dyn AnyHookHandler> = Arc::new(FamilyHandler(family));
+            reg.register_for_names_inner(plugin, config, handler, &[hook])
+                .unwrap();
+        }
+
+        assert_eq!(reg.entries_for_hook(&HookType::new(hook)).len(), 2);
+    }
+
+    #[test]
+    fn a_hook_name_with_no_row_at_all_still_registers() {
+        let hook = "test_registry.no_row";
+        assert!(crate::hooks::lookup_hook_metadata(hook).is_none());
+        let mut reg = PluginRegistry::new();
+        let config = make_config("unrowed", vec![], 10);
+        let (plugin, handler) = cmf_plugin(&config);
+
+        reg.register_for_names_inner(plugin, config, handler, &[hook])
+            .unwrap();
+
+        assert!(reg.has_hooks_for(&HookType::new(hook)));
+    }
+
+    #[test]
+    fn a_multi_handler_registration_takes_one_family_per_name() {
+        // The config-driven factory path: each name arrives paired with the
+        // handler that serves it.
+        let mut reg = PluginRegistry::new();
+        let config = make_config("both-families", vec![], 10);
+        let (plugin, cmf) = cmf_plugin(&config);
+        let http: Arc<dyn AnyHookHandler> = Arc::new(FamilyHandler(HttpHook::NAME));
+
+        reg.register_multi_handler(
+            plugin,
+            config,
+            vec![(HOOK_CMF_TOOL_PRE_INVOKE, cmf), (HOOK_HTTP_REQUEST, http)],
+        )
+        .unwrap();
+
+        assert!(reg.has_hooks_for(&HookType::new(HOOK_CMF_TOOL_PRE_INVOKE)));
+        assert!(reg.has_hooks_for(&HookType::new(HOOK_HTTP_REQUEST)));
+    }
+
+    #[test]
+    fn a_multi_handler_registration_is_refused_whole_when_one_pair_mismatches() {
+        // The path a YAML-declared plugin travels: the factory wraps one
+        // handler type for every name the operator listed.
+        let mut reg = PluginRegistry::new();
+        let config = make_config("pii-scan", vec![], 10);
+        let (plugin, cmf) = cmf_plugin(&config);
+
+        let err = reg
+            .register_multi_handler(
+                plugin,
+                config,
+                vec![
+                    (HOOK_CMF_TOOL_PRE_INVOKE, Arc::clone(&cmf)),
+                    (HOOK_HTTP_REQUEST, cmf),
+                ],
+            )
+            .unwrap_err();
+
+        assert!(err.contains("http.request"), "{err}");
+        assert_eq!(reg.plugin_count(), 0);
+        assert!(!reg.has_hooks_for(&HookType::new(HOOK_CMF_TOOL_PRE_INVOKE)));
     }
 
     #[tokio::test]

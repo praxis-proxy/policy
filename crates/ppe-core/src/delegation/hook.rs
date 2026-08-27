@@ -23,7 +23,8 @@ crate::define_hooks! {
 
     /// Primary hook name for `TokenDelegate` handlers. Unphased: it fires
     /// inside authorization, not at a request-lifecycle boundary.
-    HOOK_TOKEN_DELEGATE: "token.delegate" => entity: None, phase: Unphased;
+    HOOK_TOKEN_DELEGATE: "token.delegate" =>
+        family: TokenDelegateHook, entity: None, phase: Unphased;
 }
 
 crate::define_hook! {

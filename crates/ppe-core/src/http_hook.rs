@@ -37,7 +37,7 @@ crate::define_hooks! {
     /// two it is in.
     ///
     /// [`ENTITY_NAME_GLOBAL`]: crate::cmf::constants::ENTITY_NAME_GLOBAL
-    HOOK_HTTP_REQUEST: "http.request" => entity: Some(ENTITY_HTTP), phase: Pre;
+    HOOK_HTTP_REQUEST: "http.request" => family: HttpHook, entity: Some(ENTITY_HTTP), phase: Pre;
     /// Generic HTTP response hook, the return half of
     /// [`HOOK_HTTP_REQUEST`]. Authorization cannot live here, but
     /// response filtering can: a handler reads the response headers and
@@ -50,7 +50,7 @@ crate::define_hooks! {
     /// exchange resolve one route. Without it the response half resolves
     /// nothing and the global policy governs the way out, which is what a
     /// host that never set it gets today.
-    HOOK_HTTP_RESPONSE: "http.response" => entity: Some(ENTITY_HTTP), phase: Post;
+    HOOK_HTTP_RESPONSE: "http.response" => family: HttpHook, entity: Some(ENTITY_HTTP), phase: Post;
 }
 
 /// The payload the HTTP hooks carry.

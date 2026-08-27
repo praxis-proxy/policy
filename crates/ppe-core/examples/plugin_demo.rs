@@ -56,10 +56,14 @@ praxis_policy_core::define_hooks! {
     /// This host's hook rows, registered at startup.
     DEMO_HOOK_METADATA;
 
-    /// Runs before a tool executes.
-    HOOK_DEMO_TOOL_PRE_INVOKE: "demo.tool_pre_invoke" => entity: Some(ENTITY_TOOL), phase: Pre;
+    /// Runs before a tool executes. `family:` names the hook type whose
+    /// payload the name carries, so registering a handler built for
+    /// another one is refused rather than discovered at dispatch.
+    HOOK_DEMO_TOOL_PRE_INVOKE: "demo.tool_pre_invoke" =>
+        family: ToolPreInvoke, entity: Some(ENTITY_TOOL), phase: Pre;
     /// Runs after a tool executes.
-    HOOK_DEMO_TOOL_POST_INVOKE: "demo.tool_post_invoke" => entity: Some(ENTITY_TOOL), phase: Post;
+    HOOK_DEMO_TOOL_POST_INVOKE: "demo.tool_post_invoke" =>
+        family: ToolPostInvoke, entity: Some(ENTITY_TOOL), phase: Post;
 }
 
 /// Hook type for `demo.tool_pre_invoke`.

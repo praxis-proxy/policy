@@ -36,6 +36,10 @@
 //
 // Each entry maps a hook name to `HookMetadata`:
 //
+//   * `family` — the hook type whose payload the name carries
+//     (`Some("cmf")`, `Some("http")`), taken from the type itself so
+//     the row cannot drift from it. Registration refuses a handler
+//     built for another family; `None` accepts any.
 //   * `entity_type` — `Some("tool")`, `Some("llm")`, etc. for hooks
 //     tied to an entity type; `None` for hook families that apply
 //     regardless of entity (`identity.resolve`, `token.delegate`).
@@ -112,6 +116,15 @@ pub enum HookPhase {
 /// See module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookMetadata {
+    /// Hook family whose payload this name carries, as a handler reports
+    /// it from [`hook_type_name`][hook_type_name]. `register_for_names`
+    /// and `register_multi_handler` refuse a handler from another family,
+    /// which is what stops a plugin registering on a hook whose payload it
+    /// cannot read. `None` accepts any family: the hook registry is open,
+    /// so a host declaring its own hooks need not name a type.
+    ///
+    /// [hook_type_name]: crate::registry::AnyHookHandler::hook_type_name
+    pub family: Option<&'static str>,
     /// Entity type the hook applies to (`"tool"`, `"llm"`, `"prompt"`,
     /// `"resource"`). `None` means "applies regardless of `entity_type`"
     /// — used for hooks that don't tie to MCP's entity-type taxonomy.
@@ -121,14 +134,16 @@ pub struct HookMetadata {
 }
 
 impl HookMetadata {
-    /// The wildcard default, `entity_type: None` and `phase: Unphased`.
-    /// [`matches`][Self::matches] treats `Unphased` as "matches any
-    /// phase", so a caller substituting this for an absent registry
-    /// entry lets the hook dispatch on the first registered entry.
+    /// The wildcard default: `family: None`, `entity_type: None` and
+    /// `phase: Unphased`. [`matches`][Self::matches] treats `Unphased` as
+    /// "matches any phase", so a caller substituting this for an absent
+    /// registry entry lets the hook dispatch on the first registered entry,
+    /// and `family: None` lets a handler of any family register for it.
     /// Deliberate, not the result of a failed lookup: `lookup` returns
     /// `None` and the caller chooses this.
     pub const fn permissive() -> Self {
         Self {
+            family: None,
             entity_type: None,
             phase: HookPhase::Unphased,
         }
@@ -287,13 +302,15 @@ pub fn register_hook_metadata(hook_name: impl Into<String>, meta: HookMetadata) 
 )]
 mod tests {
     use super::*;
+    use crate::cmf::CmfHook;
     use crate::cmf::constants::{
         ENTITY_HTTP, ENTITY_LLM, ENTITY_TOOL, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_TOOL_PRE_INVOKE,
     };
-    use crate::delegation::HOOK_TOKEN_DELEGATE;
-    use crate::elicitation::HOOK_ELICIT;
-    use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
-    use crate::identity::HOOK_IDENTITY_RESOLVE;
+    use crate::delegation::{HOOK_TOKEN_DELEGATE, TokenDelegateHook};
+    use crate::elicitation::{ElicitationHook, HOOK_ELICIT};
+    use crate::hooks::trait_def::HookTypeDef as _;
+    use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook};
+    use crate::identity::{HOOK_IDENTITY_RESOLVE, IdentityHook};
 
     #[test]
     fn cmf_tool_pre_invoke_is_pre_phase_for_tool_entity() {
@@ -358,6 +375,7 @@ mod tests {
     #[test]
     fn matches_filters_by_entity_type_when_set() {
         let tool_pre = HookMetadata {
+            family: None,
             entity_type: Some(ENTITY_TOOL),
             phase: HookPhase::Pre,
         };
@@ -368,6 +386,7 @@ mod tests {
     #[test]
     fn matches_allows_any_entity_when_hook_entity_is_none() {
         let universal = HookMetadata {
+            family: None,
             entity_type: None,
             phase: HookPhase::Pre,
         };
@@ -379,6 +398,7 @@ mod tests {
     #[test]
     fn matches_phase_exactly_unless_unphased() {
         let tool_pre = HookMetadata {
+            family: None,
             entity_type: Some(ENTITY_TOOL),
             phase: HookPhase::Pre,
         };
@@ -389,6 +409,7 @@ mod tests {
     #[test]
     fn matches_unphased_is_wildcard_in_either_direction() {
         let unphased = HookMetadata {
+            family: None,
             entity_type: None,
             phase: HookPhase::Unphased,
         };
@@ -396,6 +417,7 @@ mod tests {
         assert!(unphased.matches(Some(ENTITY_LLM), HookPhase::Post));
 
         let tool_pre = HookMetadata {
+            family: None,
             entity_type: Some(ENTITY_TOOL),
             phase: HookPhase::Pre,
         };
@@ -407,6 +429,7 @@ mod tests {
     #[test]
     fn matches_request_without_entity_type_doesnt_filter_on_it() {
         let tool_pre = HookMetadata {
+            family: None,
             entity_type: Some(ENTITY_TOOL),
             phase: HookPhase::Pre,
         };
@@ -544,11 +567,38 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_row_names_the_family_its_hooks_carry() {
+        // The row reads the name off the hook type, so it cannot name a
+        // family the type does not have. What is still possible is a row
+        // left without one, which would accept a handler of any family.
+        for (table, family) in [
+            (CMF_HOOK_METADATA, CmfHook::NAME),
+            (HTTP_HOOK_METADATA, HttpHook::NAME),
+            (IDENTITY_HOOK_METADATA, IdentityHook::NAME),
+            (DELEGATION_HOOK_METADATA, TokenDelegateHook::NAME),
+            (ELICITATION_HOOK_METADATA, ElicitationHook::NAME),
+        ] {
+            for (name, meta) in table {
+                assert_eq!(meta.family, Some(family), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn permissive_metadata_names_no_family() {
+        // `None` is what keeps the open registry open: a host restoring
+        // permissive behavior for a hook must not start failing the
+        // registrations that behavior used to accept.
+        assert_eq!(HookMetadata::permissive().family, None);
+    }
+
+    #[test]
     fn register_hook_metadata_overrides_default() {
         let name = "test_custom.overridden_meta";
         register_hook_metadata(
             name,
             HookMetadata {
+                family: None,
                 entity_type: Some("custom"),
                 phase: HookPhase::Pre,
             },

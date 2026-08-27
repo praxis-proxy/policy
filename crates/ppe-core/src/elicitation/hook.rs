@@ -22,7 +22,7 @@ crate::define_hooks! {
 
     /// Hook name for Elicitation handlers. Unphased: the three operations
     /// share one name and are distinguished by the payload, not a phase.
-    HOOK_ELICIT: "elicit" => entity: None, phase: Unphased;
+    HOOK_ELICIT: "elicit" => family: ElicitationHook, entity: None, phase: Unphased;
 }
 
 crate::define_hook! {

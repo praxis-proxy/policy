@@ -1072,7 +1072,8 @@ impl PolicyEngine {
     /// # Errors
     ///
     /// Returns `PluginError::Config` when a plugin of the same name is already
-    /// registered for this hook.
+    /// registered for this hook, or when the hook's metadata row names a family
+    /// other than the one the handler serves.
     pub fn register_handler<H, P>(
         &self,
         plugin: Arc<P>,
@@ -1110,7 +1111,8 @@ impl PolicyEngine {
     /// # Errors
     ///
     /// Returns `PluginError::Config` when a plugin of the same name is already
-    /// registered under any of the given hook names.
+    /// registered under any of the given hook names, or when one of those names
+    /// expects a family other than the one the handler serves.
     pub fn register_handler_for_names<H, P>(
         &self,
         plugin: Arc<P>,
@@ -1141,7 +1143,8 @@ impl PolicyEngine {
     /// # Errors
     ///
     /// Returns `PluginError::Config` when a plugin of the same name is already
-    /// registered for this hook.
+    /// registered for this hook, or when the hook's metadata row names a family
+    /// other than the one the handler serves.
     pub fn register_raw<H: HookTypeDef>(
         &self,
         plugin: Arc<dyn Plugin>,
@@ -7614,6 +7617,11 @@ plugins:
     struct RecordingHandler {
         cfg: PluginConfig,
         ledger: Ledger,
+        /// The hook family this fixture reports. Registration refuses a
+        /// handler whose family is not the one the hook's row names, so a
+        /// fixture standing in on a built-in hook has to report that hook's
+        /// family rather than the fixture one.
+        family: &'static str,
     }
 
     impl RecordingHandler {
@@ -7621,7 +7629,13 @@ plugins:
             Self {
                 cfg,
                 ledger: Arc::clone(ledger),
+                family: TestHook::NAME,
             }
+        }
+
+        fn serving(mut self, family: &'static str) -> Self {
+            self.family = family;
+            self
         }
     }
 
@@ -7656,7 +7670,7 @@ plugins:
         }
 
         fn hook_type_name(&self) -> &'static str {
-            "test_hook"
+            self.family
         }
     }
 
@@ -7667,18 +7681,22 @@ plugins:
             &self,
             config: &PluginConfig,
         ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
-            let handler: Arc<dyn AnyHookHandler> =
-                Arc::new(RecordingHandler::new(config.clone(), &self.0));
             // The hook names a `PluginInstance` carries are `'static`, so the
-            // two the fixtures bind to are named rather than echoed back.
+            // two the fixtures bind to are named rather than echoed back. One
+            // handler per name, since each reports the family of the hook it
+            // is registered under.
             let handlers = config
                 .hooks
                 .iter()
-                .map(|hook| match hook.as_str() {
-                    crate::identity::HOOK_IDENTITY_RESOLVE => {
-                        (crate::identity::HOOK_IDENTITY_RESOLVE, Arc::clone(&handler))
-                    },
-                    _ => (TestHook::NAME, Arc::clone(&handler)),
+                .map(|hook| -> (&'static str, Arc<dyn AnyHookHandler>) {
+                    let recorder = RecordingHandler::new(config.clone(), &self.0);
+                    match hook.as_str() {
+                        crate::identity::HOOK_IDENTITY_RESOLVE => (
+                            crate::identity::HOOK_IDENTITY_RESOLVE,
+                            Arc::new(recorder.serving(crate::identity::IdentityHook::NAME)),
+                        ),
+                        _ => (TestHook::NAME, Arc::new(recorder)),
+                    }
                 })
                 .collect();
             Ok(crate::factory::PluginInstance {
@@ -8300,6 +8318,44 @@ routes:
       path_prefix: /
     plugins: []
 "#;
+
+    /// A route annotation does not pass through the registry's family check:
+    /// it lands in `route_annotations`, not the hook index. The pairing the
+    /// registry refuses installs here, which is the bound on what that check
+    /// covers.
+    #[test]
+    fn an_annotation_installs_whatever_family_the_handler_reports() {
+        let mgr = PolicyEngine::default();
+        let ledger: Ledger = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cfg = make_config("cmf-on-http", 0, PluginMode::Sequential);
+        let handler = || {
+            Arc::new(RecordingHandler::new(cfg.clone(), &ledger).serving(crate::cmf::CmfHook::NAME))
+        };
+
+        let replaced = mgr.annotate_route(
+            ENTITY_HTTP,
+            ENTITY_NAME_GLOBAL,
+            None,
+            crate::http_hook::HOOK_HTTP_REQUEST,
+            handler(),
+            cfg.clone(),
+        );
+        assert!(
+            !replaced,
+            "nothing was annotated under those coordinates yet"
+        );
+
+        // The second call reports a replacement, which is only true if the
+        // first one was recorded.
+        assert!(mgr.annotate_route(
+            ENTITY_HTTP,
+            ENTITY_NAME_GLOBAL,
+            None,
+            crate::http_hook::HOOK_HTTP_REQUEST,
+            handler(),
+            cfg,
+        ));
+    }
 
     /// An annotation is the whole lineup for its coordinates, so a route's own
     /// `plugins:` list stops firing for the requests it answers unless the
