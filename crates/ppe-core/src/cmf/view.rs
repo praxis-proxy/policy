@@ -234,7 +234,7 @@ impl<'a> MessageView<'a> {
     }
 
     /// Whether this is a pre-execution hook (`cmf.tool_pre_invoke`,
-    /// `cmf.llm_input`, `cmf.http_request`, etc.).
+    /// `cmf.llm_input`, `http.request`, etc.).
     pub fn is_pre(&self) -> bool {
         self.phase_is(HookPhase::Pre)
     }
@@ -732,8 +732,8 @@ mod tests {
         for (name, pre, post) in [
             ("cmf.llm_input", true, false),
             ("cmf.llm_output", false, true),
-            ("cmf.http_request", true, false),
-            ("cmf.http_response", false, true),
+            ("http.request", true, false),
+            ("http.response", false, true),
         ] {
             let views: Vec<_> = msg.iter_views(Some(name), None).collect();
             assert_eq!(views[0].is_pre(), pre, "is_pre for {name}");

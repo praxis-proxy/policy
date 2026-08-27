@@ -40,9 +40,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use praxis_policy_core::cmf::constants::{
-    ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE,
-};
+use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::context::PluginContext;
@@ -54,6 +52,7 @@ use praxis_policy_core::extensions::{
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
 use praxis_policy_core::identity::{
     HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource,
 };
@@ -414,11 +413,11 @@ plugins:
     hooks: [identity.resolve]
   - name: files-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
   - name: jwt
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -447,11 +446,11 @@ plugins:
     hooks: [identity.resolve]
   - name: group-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
   - name: route-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 global:
   policies:
@@ -475,15 +474,15 @@ plugin_settings:
 plugins:
   - name: files-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
   - name: admin-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
   - name: catch-all-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -515,14 +514,7 @@ async fn a_prefix_route_layers_its_authentication_group_and_plugins() {
     );
 
     clear(&ledger);
-    assert!(
-        fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("GET", "/v1/files/q3.pdf")
-        )
-        .await
-    );
+    assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/v1/files/q3.pdf")).await);
     let mut ran = fired(&ledger);
     ran.sort();
     assert_eq!(
@@ -538,7 +530,7 @@ async fn a_prefix_route_layers_its_authentication_group_and_plugins() {
 async fn an_exact_route_inherits_nothing_while_the_catch_all_governs_the_rest() {
     let (mgr, ledger) = engine_with(WORKED_EXAMPLE).await;
 
-    assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", "/healthz")).await);
+    assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/healthz")).await);
     assert!(
         fired(&ledger).is_empty(),
         "the health route declares nothing, so nothing runs for it; saw {:?}",
@@ -546,7 +538,7 @@ async fn an_exact_route_inherits_nothing_while_the_catch_all_governs_the_rest() 
     );
 
     clear(&ledger);
-    assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", "/metrics")).await);
+    assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/metrics")).await);
     assert_eq!(
         fired(&ledger),
         vec!["jwt".to_owned()],
@@ -568,14 +560,7 @@ async fn the_worked_examples_prefix_route_runs_its_own_authentication_and_body()
     );
 
     clear(&ledger);
-    assert!(
-        fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("GET", "/v1/files/q3.pdf")
-        )
-        .await
-    );
+    assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/v1/files/q3.pdf")).await);
     assert_eq!(
         fired(&ledger),
         vec!["files-audit".to_owned()],
@@ -593,7 +578,7 @@ plugin_settings:
 plugins:
   - name: files-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -603,14 +588,7 @@ routes:
 "#;
     let (mgr, ledger) = engine_with(YAML).await;
 
-    assert!(
-        fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("GET", "/v1/files/q3.pdf")
-        )
-        .await
-    );
+    assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/v1/files/q3.pdf")).await);
     assert_eq!(
         fired(&ledger),
         vec!["files-audit".to_owned()],
@@ -618,14 +596,7 @@ routes:
     );
 
     clear(&ledger);
-    assert!(
-        fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("POST", "/v1/files/q3.pdf")
-        )
-        .await
-    );
+    assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("POST", "/v1/files/q3.pdf")).await);
     assert!(
         fired(&ledger).is_empty(),
         "the same path under another method must not reach the route; saw {:?}",
@@ -643,7 +614,7 @@ async fn many_paths_under_one_prefix_share_a_cache_entry_and_keep_their_own_path
     for n in 0..25 {
         let path = format!("/v1/files/report-{n}.pdf");
         assert!(
-            fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", &path)).await,
+            fire(&mgr, HOOK_HTTP_REQUEST, request("GET", &path)).await,
             "{path} must be allowed"
         );
     }
@@ -684,11 +655,11 @@ plugin_settings:
 plugins:
   - name: body-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
   - name: chain-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -700,14 +671,7 @@ routes:
 "#;
     let (mgr, ledger) = engine_with(YAML).await;
 
-    assert!(
-        fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("GET", "/v1/files/q3.pdf")
-        )
-        .await
-    );
+    assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/v1/files/q3.pdf")).await);
     assert_eq!(
         fired(&ledger),
         vec!["body-audit".to_owned()],
@@ -728,7 +692,7 @@ plugin_settings:
 plugins:
   - name: body-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -740,7 +704,7 @@ routes:
     for spelling in ["/admin", "/admin/", "/admin//"] {
         let (mgr, ledger) = engine_with(YAML).await;
 
-        assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", spelling)).await);
+        assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", spelling)).await);
         assert_eq!(
             fired(&ledger),
             vec!["body-audit".to_owned()],
@@ -828,18 +792,13 @@ routes:
     let (mgr, _ledger) = engine_with(YAML).await;
 
     assert!(
-        !fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("POST", "/v1/files/q3.pdf")
-        )
-        .await,
+        !fire(&mgr, HOOK_HTTP_REQUEST, request("POST", "/v1/files/q3.pdf")).await,
         "the request half resolves the route and applies its request rule"
     );
     assert!(
         fire(
             &mgr,
-            HOOK_CMF_HTTP_REQUEST,
+            HOOK_HTTP_REQUEST,
             request("TRACE", "/v1/files/q3.pdf")
         )
         .await,
@@ -848,7 +807,7 @@ routes:
     assert!(
         !fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             request("TRACE", "/v1/files/q3.pdf")
         )
         .await,
@@ -857,7 +816,7 @@ routes:
     assert!(
         fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             request("POST", "/v1/files/q3.pdf")
         )
         .await,
@@ -883,7 +842,7 @@ routes:
     assert!(
         !fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             response("GET", "/v1/files/q3.pdf", 502)
         )
         .await,
@@ -892,7 +851,7 @@ routes:
     assert!(
         fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             response("GET", "/v1/files/q3.pdf", 200)
         )
         .await,
@@ -901,7 +860,7 @@ routes:
     assert!(
         !fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             response("GET", "/v1/files/q3.pdf", 500)
         )
         .await,
@@ -910,7 +869,7 @@ routes:
     assert!(
         fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             response("GET", "/v1/files/q3.pdf", 499)
         )
         .await,
@@ -938,7 +897,7 @@ routes:
     assert!(
         !fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             response("GET", "/v1/files/q3.pdf", 502)
         )
         .await,
@@ -947,7 +906,7 @@ routes:
     assert!(
         fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             response("GET", "/v1/files/q3.pdf", 503)
         )
         .await,
@@ -976,18 +935,13 @@ routes:
     let (mgr, _ledger) = engine_with(YAML).await;
 
     assert!(
-        fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("GET", "/v1/files/q3.pdf")
-        )
-        .await,
+        fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/v1/files/q3.pdf")).await,
         "no status exists yet, so the comparison is false and the rule is inert"
     );
     assert!(
         !fire(
             &mgr,
-            HOOK_CMF_HTTP_REQUEST,
+            HOOK_HTTP_REQUEST,
             request("TRACE", "/v1/files/q3.pdf")
         )
         .await,
@@ -1014,18 +968,13 @@ routes:
     let (mgr, _ledger) = engine_with(YAML).await;
 
     assert!(
-        fire(
-            &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
-            request("GET", "/v1/files/q3.pdf")
-        )
-        .await,
+        fire(&mgr, HOOK_HTTP_RESPONSE, request("GET", "/v1/files/q3.pdf")).await,
         "a host that sets no status is not denied by the status rule"
     );
     assert!(
         !fire(
             &mgr,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_RESPONSE,
             request("TRACE", "/v1/files/q3.pdf")
         )
         .await,
@@ -1055,19 +1004,19 @@ routes:
     let (mgr, _ledger) = engine_with(YAML).await;
 
     assert!(
-        !fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("POST", "/anything")).await,
+        !fire(&mgr, HOOK_HTTP_REQUEST, request("POST", "/anything")).await,
         "a request that resolves the route is governed by the route's own rule"
     );
     assert!(
-        !fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("TRACE", "/anything")).await,
+        !fire(&mgr, HOOK_HTTP_REQUEST, request("TRACE", "/anything")).await,
         "and by the global layer the route stacks"
     );
     assert!(
-        fire(&mgr, HOOK_CMF_HTTP_REQUEST, request_without_path("POST")).await,
+        fire(&mgr, HOOK_HTTP_REQUEST, request_without_path("POST")).await,
         "a request that resolves no route does not pick up the route's rule"
     );
     assert!(
-        !fire(&mgr, HOOK_CMF_HTTP_REQUEST, request_without_path("TRACE")).await,
+        !fire(&mgr, HOOK_HTTP_REQUEST, request_without_path("TRACE")).await,
         "but the implicit catch-all is still installed and still governs it"
     );
 }
@@ -1085,11 +1034,11 @@ plugin_settings:
 plugins:
   - name: broad-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
   - name: narrow-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -1105,11 +1054,11 @@ plugin_settings:
 plugins:
   - name: broad-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
   - name: narrow-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -1121,14 +1070,7 @@ routes:
 "#;
     for yaml in [BROAD_FIRST, NARROW_FIRST] {
         let (mgr, ledger) = engine_with(yaml).await;
-        assert!(
-            fire(
-                &mgr,
-                HOOK_CMF_HTTP_REQUEST,
-                request("GET", "/v1/files/q3.pdf")
-            )
-            .await
-        );
+        assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/v1/files/q3.pdf")).await);
         assert_eq!(
             fired(&ledger),
             vec!["narrow-audit".to_owned()],
@@ -1148,11 +1090,11 @@ plugin_settings:
 plugins:
   - name: open-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
   - name: delete-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 "#;
     const OPEN: &str = r#"  - http:
@@ -1169,7 +1111,7 @@ plugins:
         let yaml = format!("{PLUGINS}routes:\n{first}{second}");
         let (mgr, ledger) = engine_with(&yaml).await;
 
-        assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("DELETE", "/api/x")).await);
+        assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("DELETE", "/api/x")).await);
         assert_eq!(
             fired(&ledger),
             vec!["delete-audit".to_owned()],
@@ -1177,7 +1119,7 @@ plugins:
         );
 
         clear(&ledger);
-        assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", "/api/x")).await);
+        assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/api/x")).await);
         assert_eq!(
             fired(&ledger),
             vec!["open-audit".to_owned()],
@@ -1196,7 +1138,7 @@ plugin_settings:
 plugins:
   - name: api-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -1211,7 +1153,7 @@ plugin_settings:
 plugins:
   - name: api-audit
     kind: test/record
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     capabilities: [read_headers]
 routes:
   - http:
@@ -1227,7 +1169,7 @@ routes:
             ("/apikeys", false),
         ] {
             clear(&ledger);
-            assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", path)).await);
+            assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", path)).await);
             let ran = fired(&ledger);
             assert_eq!(
                 ran.is_empty(),
@@ -1289,7 +1231,7 @@ async fn a_traversal_does_not_reach_the_prefix_it_climbs_out_of() {
         "/v1/files/.%2e/%2e./admin",
     ] {
         clear(&ledger);
-        assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", path)).await);
+        assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", path)).await);
         assert_eq!(
             fired(&ledger),
             vec!["admin-audit".to_owned()],
@@ -1307,7 +1249,7 @@ async fn an_encoded_separator_stays_inside_its_segment() {
     assert!(
         fire(
             &mgr,
-            HOOK_CMF_HTTP_REQUEST,
+            HOOK_HTTP_REQUEST,
             request("GET", "/admin/x/..%2f..%2fv1%2fok")
         )
         .await
@@ -1328,7 +1270,7 @@ async fn an_unreadable_path_is_denied_rather_than_reaching_the_catch_all() {
 
     let (result, _bg) = mgr
         .invoke_named::<CmfHook>(
-            HOOK_CMF_HTTP_REQUEST,
+            HOOK_HTTP_REQUEST,
             payload(),
             request("GET", "/v1/files/%zz"),
             None,
@@ -1531,20 +1473,15 @@ routes:
     let (mgr, _ledger) = engine_with(YAML).await;
 
     assert!(
-        !fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("POST", "/v1/files/q3.pdf")
-        )
-        .await,
+        !fire(&mgr, HOOK_HTTP_REQUEST, request("POST", "/v1/files/q3.pdf")).await,
         "the covered path is governed by its route"
     );
     assert!(
-        fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("POST", "/elsewhere")).await,
+        fire(&mgr, HOOK_HTTP_REQUEST, request("POST", "/elsewhere")).await,
         "an uncovered path does not pick up the route's rule"
     );
     assert!(
-        !fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("TRACE", "/elsewhere")).await,
+        !fire(&mgr, HOOK_HTTP_REQUEST, request("TRACE", "/elsewhere")).await,
         "it is governed by the global policy instead"
     );
 }
@@ -1560,7 +1497,7 @@ async fn the_transpiled_authorization_policy_still_resolves_its_global_http_poli
     let (mgr, ledger) = engine_with(yaml).await;
 
     assert!(
-        mgr.has_hooks_for(HOOK_CMF_HTTP_REQUEST),
+        mgr.has_hooks_for(HOOK_HTTP_REQUEST),
         "the entity-less HTTP handler must still install"
     );
 
@@ -1577,18 +1514,13 @@ async fn the_transpiled_authorization_policy_still_resolves_its_global_http_poli
     );
 
     assert!(
-        !fire(
-            &mgr,
-            HOOK_CMF_HTTP_REQUEST,
-            request("GET", "/api/tools/run")
-        )
-        .await,
+        !fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/api/tools/run")).await,
         "an unauthenticated request is still denied by the global policy"
     );
     assert!(
         fire(
             &mgr,
-            HOOK_CMF_HTTP_REQUEST,
+            HOOK_HTTP_REQUEST,
             authenticated_request("GET", "/api/tools/run")
         )
         .await,

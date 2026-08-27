@@ -2130,6 +2130,29 @@ plugins:
     }
 
     #[test]
+    fn the_old_cmf_prefixed_http_names_suggest_the_http_family_ones() {
+        // The HTTP hooks moved out of the CMF family, so a config carrying
+        // either old name has to be refused and pointed at the new one
+        // rather than at some unrelated CMF hook.
+        for (old, new) in [
+            ("cmf.http_request", "'http.request'"),
+            ("cmf.http_response", "'http.response'"),
+        ] {
+            let yaml = format!(
+                r#"
+plugins:
+  - name: filter
+    kind: builtin
+    hooks: [{old}]
+"#
+            );
+            let err = parse_config(&yaml).unwrap_err().to_string();
+            assert!(err.contains(old), "{err}");
+            assert!(err.contains(new), "{err}");
+        }
+    }
+
+    #[test]
     fn a_name_close_to_nothing_gets_no_suggestion() {
         let yaml = r#"
 plugins:
@@ -3855,7 +3878,7 @@ plugin_settings:
 plugins:
   - name: corp-jwt
     kind: builtin
-    hooks: [cmf.http_request]
+    hooks: [http.request]
 global:
   defaults:
     http:
@@ -5351,7 +5374,7 @@ routes:
 plugin_settings:
   routing_enabled: true
 plugins:
-  - { name: http-default, kind: builtin, hooks: [cmf.http_request] }
+  - { name: http-default, kind: builtin, hooks: [http.request] }
 global:
   defaults:
     http:
@@ -5386,10 +5409,10 @@ routes:
 plugin_settings:
   routing_enabled: true
 plugins:
-  - { name: audit, kind: builtin, hooks: [cmf.http_request] }
-  - { name: http-default, kind: builtin, hooks: [cmf.http_request] }
-  - { name: pii-scan, kind: builtin, hooks: [cmf.http_request] }
-  - { name: route-plugin, kind: builtin, hooks: [cmf.http_request] }
+  - { name: audit, kind: builtin, hooks: [http.request] }
+  - { name: http-default, kind: builtin, hooks: [http.request] }
+  - { name: pii-scan, kind: builtin, hooks: [http.request] }
+  - { name: route-plugin, kind: builtin, hooks: [http.request] }
   - { name: corp-jwt, kind: builtin, hooks: [identity.resolve] }
   - { name: files-jwt, kind: builtin, hooks: [identity.resolve] }
   - { name: files-attestor, kind: builtin, hooks: [identity.resolve] }

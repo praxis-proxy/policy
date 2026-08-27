@@ -7,7 +7,7 @@
 // one source. `define_hook!` (macros.rs) generates the hook *type* and
 // its handler trait; this generates the *name* and what the dispatcher
 // knows about it. A constant without a metadata row was the drift that
-// let `cmf.http_request` reach production unregistered, and there is no
+// let an HTTP hook reach production unregistered, and there is no
 // way to test for it: Rust has no reflection, so any list a test walks
 // is a second hand-maintained list. Emitting both from one declaration
 // makes the mismatch unrepresentable instead.

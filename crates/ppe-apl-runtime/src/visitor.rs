@@ -51,7 +51,7 @@
 //   * `llm:`      → `cmf.llm_input`           / `cmf.llm_output`
 //   * `prompt:`   → `cmf.prompt_pre_invoke`   / `cmf.prompt_post_invoke`
 //   * `resource:` → `cmf.resource_pre_fetch`  / `cmf.resource_post_fetch`
-//   * `http:`     → `cmf.http_request`        / `cmf.http_response`
+//   * `http:`     → `http.request`            / `http.response`
 //
 // The global HTTP catch-all installs under the same pair, under the
 // reserved global name rather than a route's own. An `http:` route
@@ -72,12 +72,13 @@ use std::sync::{Arc, RwLock, Weak};
 
 use praxis_policy_core::cmf::constants::{
     ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL,
-    HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
-    HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH,
-    HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
+    HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_POST_INVOKE,
+    HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH,
+    HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
 };
 use praxis_policy_core::config::{PluginRouteRef, RouteEntry, route_entity_identity};
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
 use praxis_policy_core::plugin::PluginConfig;
 use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
 
@@ -116,7 +117,7 @@ pub fn hook_pair_for_entity(entity_type: &str) -> Option<(&'static str, &'static
         ENTITY_LLM => Some((HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT)),
         ENTITY_PROMPT => Some((HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_PROMPT_POST_INVOKE)),
         ENTITY_RESOURCE => Some((HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_RESOURCE_POST_FETCH)),
-        ENTITY_HTTP => Some((HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE)),
+        ENTITY_HTTP => Some((HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE)),
         _ => None,
     }
 }
@@ -1303,8 +1304,8 @@ mod tests {
 
     use super::{
         AplConfigVisitor, ConfigVisitor as _, DispatchCache, ENTITY_HTTP, ENTITY_NAME_GLOBAL,
-        ENTITY_TOOL, HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE, HOOK_CMF_TOOL_PRE_INVOKE,
-        PluginConfig, PluginRouteRef, PolicyEngine, RouteEntry, apl_subblock, declares_pre_phase,
+        ENTITY_TOOL, HOOK_CMF_TOOL_PRE_INVOKE, HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, PluginConfig,
+        PluginRouteRef, PolicyEngine, RouteEntry, apl_subblock, declares_pre_phase,
         displaced_plugin_chain, response_subblock,
     };
     use crate::session_store::MemorySessionStore;
@@ -1707,7 +1708,7 @@ mod tests {
                 Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
             Ok(PluginInstance {
                 plugin,
-                handlers: vec![(HOOK_CMF_HTTP_REQUEST, handler)],
+                handlers: vec![(HOOK_HTTP_REQUEST, handler)],
             })
         }
     }
@@ -1777,7 +1778,7 @@ routes:
 
         let (denied, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("DELETE", Some("/v1/files/q3.pdf")),
                 None,
@@ -1790,7 +1791,7 @@ routes:
 
         let (allowed, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("GET", Some("/v1/files/q3.pdf")),
                 None,
@@ -1809,7 +1810,7 @@ routes:
 
         let (result, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("DELETE", Some("/healthz")),
                 None,
@@ -1831,7 +1832,7 @@ plugin_settings:
 plugins:
   - name: chain-deny
     kind: test/chain-deny
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     mode: sequential
 routes:
   - http:
@@ -1852,7 +1853,7 @@ plugin_settings:
 plugins:
   - name: chain-deny
     kind: test/chain-deny
-    hooks: [cmf.http_request]
+    hooks: [http.request]
     mode: sequential
 routes:
   - http:
@@ -1863,7 +1864,7 @@ routes:
 
         let (denied, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("GET", Some("/v1/files/q3.pdf")),
                 None,
@@ -1882,7 +1883,7 @@ routes:
 
         let (allowed, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("GET", Some("/v1/files/q3.pdf")),
                 None,
@@ -1897,7 +1898,7 @@ routes:
 
         let (denied, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("DELETE", Some("/v1/files/q3.pdf")),
                 None,
@@ -2023,13 +2024,13 @@ routes:
     async fn both_http_halves_resolve_the_same_route() {
         let mgr = engine_with(HTTP_ROUTE_BOTH_HALVES).await;
         assert!(
-            mgr.has_hooks_for(HOOK_CMF_HTTP_REQUEST) && mgr.has_hooks_for(HOOK_CMF_HTTP_RESPONSE),
+            mgr.has_hooks_for(HOOK_HTTP_REQUEST) && mgr.has_hooks_for(HOOK_HTTP_RESPONSE),
             "a route declaring both halves installs both"
         );
 
         let (denied_in, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("DELETE", Some("/v1/files/q3.pdf")),
                 None,
@@ -2039,7 +2040,7 @@ routes:
 
         let (denied_out, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_RESPONSE,
+                HOOK_HTTP_RESPONSE,
                 payload(),
                 http_request("TRACE", Some("/v1/files/q3.pdf")),
                 None,
@@ -2057,7 +2058,7 @@ routes:
 
         let (result, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_RESPONSE,
+                HOOK_HTTP_RESPONSE,
                 payload(),
                 http_request("TRACE", None),
                 None,
@@ -2096,7 +2097,7 @@ routes:
 
         let (denied, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("DELETE", Some("/anything/at/all")),
                 None,
@@ -2112,7 +2113,7 @@ routes:
         // still fires there, so the route did not replace its handler.
         let (denied_global, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("PATCH", None),
                 None,
@@ -2125,7 +2126,7 @@ routes:
 
         let (allowed, _bg) = mgr
             .invoke_named::<CmfHook>(
-                HOOK_CMF_HTTP_REQUEST,
+                HOOK_HTTP_REQUEST,
                 payload(),
                 http_request("DELETE", None),
                 None,

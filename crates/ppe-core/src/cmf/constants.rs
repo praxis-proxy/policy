@@ -143,34 +143,4 @@ crate::define_hooks! {
     HOOK_CMF_RESOURCE_PRE_FETCH: "cmf.resource_pre_fetch" => entity: Some(ENTITY_RESOURCE), phase: Pre;
     /// Hook name `cmf.resource_post_fetch`.
     HOOK_CMF_RESOURCE_POST_FETCH: "cmf.resource_post_fetch" => entity: Some(ENTITY_RESOURCE), phase: Post;
-
-    /// Generic HTTP request hook, fired for non-MCP/A2A HTTP requests on
-    /// the way in. The catch-all `global` policy (if any) is annotated
-    /// under it via [`ENTITY_HTTP`] / [`ENTITY_NAME_GLOBAL`]. This half
-    /// carries authorization, which is an admission check and so belongs
-    /// entirely before the request is forwarded.
-    ///
-    /// A route selecting on `http:` is matched from the request line once
-    /// `plugin_settings.routing_enabled: true` is set, which defaults to false,
-    /// so a host that also puts `method` and `path` on the HTTP extension at the
-    /// identity invocation unlocks that route's own `authentication:` list. A
-    /// host that supplies no request line there behaves exactly as it does
-    /// today, with the global list governing, and the engine warns once when
-    /// a route's list could not apply so a deployment can tell which of the
-    /// two it is in.
-    HOOK_CMF_HTTP_REQUEST: "cmf.http_request" => entity: Some(ENTITY_HTTP), phase: Pre;
-    /// Generic HTTP response hook, the return half of
-    /// [`HOOK_CMF_HTTP_REQUEST`]. Authorization cannot live here, but
-    /// response filtering can: a handler reads the response headers and
-    /// the extensions, which covers stripping a header, enforcing a
-    /// content type, and attaching labels. Not body redaction, since
-    /// [`HttpExtension`][crate::extensions::http::HttpExtension] carries
-    /// no body and the payload on this path is unused. A host that only
-    /// authorizes never fires it, and nothing changes for it.
-    ///
-    /// The request line on this invocation is what makes both halves of one
-    /// exchange resolve one route. Without it the response half resolves
-    /// nothing and the global policy governs the way out, which is what a
-    /// host that never set it gets today.
-    HOOK_CMF_HTTP_RESPONSE: "cmf.http_response" => entity: Some(ENTITY_HTTP), phase: Post;
 }

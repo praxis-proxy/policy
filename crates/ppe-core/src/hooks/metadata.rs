@@ -75,6 +75,7 @@ use std::sync::{OnceLock, RwLock};
 use crate::cmf::constants::CMF_HOOK_METADATA;
 use crate::delegation::hook::DELEGATION_HOOK_METADATA;
 use crate::elicitation::hook::ELICITATION_HOOK_METADATA;
+use crate::http_hook::HTTP_HOOK_METADATA;
 use crate::identity::hook::IDENTITY_HOOK_METADATA;
 
 /// Lifecycle position a hook occupies for dispatcher purposes.
@@ -166,6 +167,7 @@ impl HookMetadata {
 /// unregistered at once rather than one of them quietly.
 const HOOK_TABLES: &[&[(&str, HookMetadata)]] = &[
     CMF_HOOK_METADATA,
+    HTTP_HOOK_METADATA,
     IDENTITY_HOOK_METADATA,
     DELEGATION_HOOK_METADATA,
     ELICITATION_HOOK_METADATA,
@@ -282,11 +284,11 @@ pub fn register_hook_metadata(hook_name: impl Into<String>, meta: HookMetadata) 
 mod tests {
     use super::*;
     use crate::cmf::constants::{
-        ENTITY_LLM, ENTITY_TOOL, HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE,
-        HOOK_CMF_LLM_OUTPUT, HOOK_CMF_TOOL_PRE_INVOKE,
+        ENTITY_HTTP, ENTITY_LLM, ENTITY_TOOL, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_TOOL_PRE_INVOKE,
     };
     use crate::delegation::HOOK_TOKEN_DELEGATE;
     use crate::elicitation::HOOK_ELICIT;
+    use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
     use crate::identity::HOOK_IDENTITY_RESOLVE;
 
     #[test]
@@ -409,16 +411,16 @@ mod tests {
     }
 
     #[test]
-    fn cmf_http_request_is_pre_phase_for_http_entity() {
-        let meta = lookup(HOOK_CMF_HTTP_REQUEST).expect("registered");
-        assert_eq!(meta.entity_type, Some(crate::cmf::constants::ENTITY_HTTP));
+    fn http_request_is_pre_phase_for_http_entity() {
+        let meta = lookup(HOOK_HTTP_REQUEST).expect("registered");
+        assert_eq!(meta.entity_type, Some(ENTITY_HTTP));
         assert_eq!(meta.phase, HookPhase::Pre);
     }
 
     #[test]
-    fn cmf_http_response_is_post_phase_for_http_entity() {
-        let meta = lookup(HOOK_CMF_HTTP_RESPONSE).expect("registered");
-        assert_eq!(meta.entity_type, Some(crate::cmf::constants::ENTITY_HTTP));
+    fn http_response_is_post_phase_for_http_entity() {
+        let meta = lookup(HOOK_HTTP_RESPONSE).expect("registered");
+        assert_eq!(meta.entity_type, Some(ENTITY_HTTP));
         assert_eq!(meta.phase, HookPhase::Post);
     }
 
@@ -431,15 +433,15 @@ mod tests {
 
     #[test]
     fn http_hooks_match_entity_typed_dispatch_as_before() {
-        let request = lookup(HOOK_CMF_HTTP_REQUEST).expect("registered");
-        let response = lookup(HOOK_CMF_HTTP_RESPONSE).expect("registered");
+        let request = lookup(HOOK_HTTP_REQUEST).expect("registered");
+        let response = lookup(HOOK_HTTP_RESPONSE).expect("registered");
         // The visitor installs both under ENTITY_HTTP, so entity-typed
         // dispatch has to keep matching and the other entities must not.
-        assert!(request.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Pre));
-        assert!(!request.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Post));
+        assert!(request.matches(Some(ENTITY_HTTP), HookPhase::Pre));
+        assert!(!request.matches(Some(ENTITY_HTTP), HookPhase::Post));
         assert!(!request.matches(Some(ENTITY_TOOL), HookPhase::Pre));
-        assert!(response.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Post));
-        assert!(!response.matches(Some(crate::cmf::constants::ENTITY_HTTP), HookPhase::Pre));
+        assert!(response.matches(Some(ENTITY_HTTP), HookPhase::Post));
+        assert!(!response.matches(Some(ENTITY_HTTP), HookPhase::Pre));
     }
 
     #[test]
@@ -448,7 +450,8 @@ mod tests {
         // invocations as the constants, so completeness is structural.
         // What this guards is the one gap that leaves: a module table
         // dropped from HOOK_TABLES, which unregisters every hook it owns.
-        assert_eq!(CMF_HOOK_METADATA.len(), 10);
+        assert_eq!(CMF_HOOK_METADATA.len(), 8);
+        assert_eq!(HTTP_HOOK_METADATA.len(), 2);
         assert_eq!(IDENTITY_HOOK_METADATA.len(), 1);
         assert_eq!(DELEGATION_HOOK_METADATA.len(), 1);
         assert_eq!(ELICITATION_HOOK_METADATA.len(), 1);
@@ -460,6 +463,30 @@ mod tests {
                     "{name} is declared but missing from the concatenated table",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_old_cmf_prefixed_http_names_are_gone() {
+        // The HTTP hooks carry no CMF payload, so the `cmf.` prefix named
+        // the wrong family. A config still spelling the old name has to
+        // fail the registry lookup rather than resolve to anything.
+        for gone in ["cmf.http_request", "cmf.http_response"] {
+            assert_eq!(lookup(gone), None, "{gone} still resolves");
+        }
+    }
+
+    #[test]
+    fn the_cmf_table_holds_no_http_row() {
+        // The rows moved to the HTTP family's own table, so the CMF table
+        // must name only CMF hooks and the HTTP table only HTTP ones.
+        for (name, meta) in CMF_HOOK_METADATA {
+            assert_ne!(meta.entity_type, Some(ENTITY_HTTP), "{name}");
+            assert!(name.starts_with("cmf."), "{name}");
+        }
+        for (name, meta) in HTTP_HOOK_METADATA {
+            assert_eq!(meta.entity_type, Some(ENTITY_HTTP), "{name}");
+            assert!(name.starts_with("http."), "{name}");
         }
     }
 
@@ -481,12 +508,13 @@ mod tests {
         // which the table cannot express. Rewriting the declarations as a
         // macro must not move any of them.
         use crate::cmf::constants::{
-            HOOK_CMF_HTTP_REQUEST, HOOK_CMF_HTTP_RESPONSE, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
-            HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH,
-            HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
+            HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_POST_INVOKE,
+            HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH,
+            HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
         };
         use crate::delegation::HOOK_TOKEN_DELEGATE;
         use crate::elicitation::HOOK_ELICIT;
+        use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
         use crate::identity::HOOK_IDENTITY_RESOLVE;
 
         for name in [
@@ -498,8 +526,8 @@ mod tests {
             HOOK_CMF_PROMPT_POST_INVOKE,
             HOOK_CMF_RESOURCE_PRE_FETCH,
             HOOK_CMF_RESOURCE_POST_FETCH,
-            HOOK_CMF_HTTP_REQUEST,
-            HOOK_CMF_HTTP_RESPONSE,
+            HOOK_HTTP_REQUEST,
+            HOOK_HTTP_RESPONSE,
             HOOK_IDENTITY_RESOLVE,
             HOOK_TOKEN_DELEGATE,
             HOOK_ELICIT,

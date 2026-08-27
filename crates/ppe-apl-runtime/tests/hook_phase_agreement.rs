@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Praxis Contributors
 
 // The phase a hook is recorded under must be the phase the dispatcher
-// installs it under. Nothing checked that, which is how `cmf.http_request`
+// installs it under. Nothing checked that, which is how the HTTP request hook
 // came to be installed as `Phase::Pre` while the metadata table had no row
 // for it at all and every phase consumer read it as unphased.
 //

@@ -140,8 +140,8 @@ mod tests {
         let has = |name: &str| derived.iter().any(|d| d == name);
         for expected in [
             // Absent from the old list entirely.
-            "cmf.http_request",
-            "cmf.http_response",
+            "http.request",
+            "http.response",
             "elicit",
             // The old list spelled the prompt pair `_fetch`.
             "cmf.prompt_pre_invoke",
@@ -157,6 +157,9 @@ mod tests {
             "identity_resolve",
             "cmf.prompt_pre_fetch",
             "cmf.prompt_post_fetch",
+            // The HTTP pair moved out of the CMF family.
+            "cmf.http_request",
+            "cmf.http_response",
         ] {
             assert!(!has(gone), "{gone} is still enumerated");
         }
