@@ -1,7 +1,7 @@
 ---
 title: "fix: HTTP route matching, install symmetry, and hot-path cost"
 type: fix
-status: active
+status: completed
 date: 2026-08-26
 origin: https://github.com/praxis-proxy/policy/pull/42
 ---
