@@ -975,6 +975,39 @@ pub(crate) fn reject_renamed_identity_key(raw: &serde_yaml::Value) -> Result<(),
     Ok(())
 }
 
+/// Legacy APL config keys, mapped to their replacements.
+///
+/// The one table for these names. A parse that meets an unrecognized key drops
+/// it, and a dropped `policy:` block leaves no authorization enforced, so every
+/// scope that reads route or policy YAML rejects these loudly rather than
+/// letting one through unread.
+pub const RENAMED_APL_KEYS: [(&str, &str); 2] = [
+    (
+        "policy",
+        "authorization.pre_invocation (or flat pre_invocation)",
+    ),
+    (
+        "post_policy",
+        "authorization.post_invocation (or flat post_invocation)",
+    ),
+];
+
+/// The rename message for a legacy APL key written directly in `yaml`, or
+/// `None` when it carries none. Shared so every scope that checks reports the
+/// rename in the same words.
+#[must_use]
+pub fn renamed_apl_key_message(scope: &str, yaml: &serde_yaml::Value) -> Option<String> {
+    let map = yaml.as_mapping()?;
+    RENAMED_APL_KEYS.iter().find_map(|(old, new)| {
+        map.contains_key(serde_yaml::Value::String((*old).to_owned()))
+            .then(|| {
+                format!(
+                    "in `{scope}`: config field `{old}` was renamed to `{new}` — update your config"
+                )
+            })
+    })
+}
+
 /// The route keys a configuration may carry.
 ///
 /// Larger than [`RouteEntry`]'s typed fields on purpose: a route shares its
@@ -1007,17 +1040,19 @@ const KNOWN_ROUTE_KEYS: &[&str] = &[
     "session_store",
 ];
 
-/// Reject a route key nothing reads, naming the key and the route.
+/// Reject the route keys nothing reads, naming every one of them and the route.
 ///
 /// An unknown field is dropped by the typed parse, so a misspelled selector
-/// used to load clean and leave the route matching nothing. `extra_route_keys`
-/// carries the keys registered visitors consume, so a host orchestrator reading
-/// a key praxis-policy-core has never heard of stays loadable.
+/// used to load clean and leave the route matching nothing. A key from
+/// [`RENAMED_APL_KEYS`] gets the rename message instead, since that is the more
+/// specific answer, so that check runs first. `extra_route_keys` carries the
+/// keys registered visitors consume, so a host orchestrator reading a key
+/// praxis-policy-core has never heard of stays loadable.
 ///
 /// # Errors
 ///
-/// Returns `PluginError::Config` naming the first unrecognized key and the
-/// index of the route carrying it.
+/// Returns `PluginError::Config` naming the renamed key, or every unrecognized
+/// key on the first route carrying one, with that route's index.
 pub(crate) fn reject_unknown_route_keys(
     raw: &serde_yaml::Value,
     extra_route_keys: &[&str],
@@ -1029,6 +1064,12 @@ pub(crate) fn reject_unknown_route_keys(
         let Some(map) = route.as_mapping() else {
             continue; // Shape is the typed parse's to report.
         };
+        // A renamed key is also an unrecognized one, so this runs first or the
+        // operator gets sent hunting a typo instead of performing a rename.
+        if let Some(message) = renamed_apl_key_message(&format!("routes[{i}]"), route) {
+            return Err(Box::new(PluginError::Config { message }));
+        }
+        let mut unknown: Vec<&str> = Vec::new();
         for key in map.keys() {
             let Some(key) = key.as_str() else {
                 return Err(Box::new(PluginError::Config {
@@ -1038,9 +1079,16 @@ pub(crate) fn reject_unknown_route_keys(
             if KNOWN_ROUTE_KEYS.contains(&key) || extra_route_keys.contains(&key) {
                 continue;
             }
+            unknown.push(key);
+        }
+        if !unknown.is_empty() {
+            // Every bad key at once: one load reports the whole list rather
+            // than one key per attempt.
+            let label = if unknown.len() == 1 { "key" } else { "keys" };
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "route {i} has unknown key `{key}`; a route accepts {}",
+                    "route {i} has unknown {label} `{}`; a route accepts {}",
+                    unknown.join("`, `"),
                     KNOWN_ROUTE_KEYS.join(", ")
                 ),
             }));
@@ -3899,6 +3947,122 @@ routes:
         .expect_err("a renamed key must fail the load")
         .to_string();
         assert!(err.contains("renamed to `authentication`"), "{err}");
+    }
+
+    /// A stale `policy:` block is a rename, not a typo. The rename check runs
+    /// before the unknown-key scan so the operator is told what to rename it
+    /// to rather than sent looking for a misspelling.
+    #[test]
+    fn a_stale_policy_key_on_a_route_reports_the_rename() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_weather
+    policy:
+      - "require(authenticated)"
+"#,
+        )
+        .expect_err("a renamed key must fail the load")
+        .to_string();
+        assert!(
+            err.contains("renamed to `authorization.pre_invocation"),
+            "the rename, not a typo: {err}"
+        );
+        assert!(!err.contains("unknown key"), "{err}");
+    }
+
+    /// The post-phase half of the same rename. Dropping either block leaves
+    /// no authorization enforced, so both fail the load.
+    #[test]
+    fn a_stale_post_policy_key_on_a_route_reports_the_rename() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_weather
+    post_policy:
+      - "require(authenticated)"
+"#,
+        )
+        .expect_err("a renamed key must fail the load")
+        .to_string();
+        assert!(
+            err.contains("renamed to `authorization.post_invocation"),
+            "{err}"
+        );
+    }
+
+    /// The rename is the more specific diagnostic, so it wins even when the
+    /// route also carries keys nothing reads.
+    #[test]
+    fn a_rename_outranks_the_unknown_keys_beside_it() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_weather
+    policy:
+      - "require(authenticated)"
+    htp: /v1/files
+"#,
+        )
+        .expect_err("a renamed key must fail the load")
+        .to_string();
+        assert!(
+            err.contains("renamed to `authorization.pre_invocation"),
+            "{err}"
+        );
+    }
+
+    /// Three bad keys used to take three loads to find. One load now names
+    /// all of them.
+    #[test]
+    fn every_unknown_key_on_a_route_is_named_in_one_error() {
+        let err = parse_config(
+            r#"
+plugin_settings:
+  routing_enabled: true
+plugins: []
+routes:
+  - tool: get_weather
+    htp: /v1/files
+    mehta:
+      tags: [pii]
+    plugns: []
+"#,
+        )
+        .expect_err("an unknown route key must fail the load")
+        .to_string();
+        for key in ["htp", "mehta", "plugns"] {
+            assert!(err.contains(key), "the error must name `{key}`: {err}");
+        }
+        assert!(err.contains("unknown keys"), "plural: {err}");
+    }
+
+    /// A host orchestrator's own route key stays loadable, which is what the
+    /// visitor-declared extras are for. The same key with no visitor declaring
+    /// it is still a typo.
+    #[test]
+    fn a_visitor_declared_route_key_is_accepted() {
+        let raw: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+routes:
+  - tool: get_weather
+    orchestrator_only: yes
+"#,
+        )
+        .expect("fixture parses");
+        reject_unknown_route_keys(&raw, &["orchestrator_only"])
+            .expect("a visitor-declared key is not a typo");
+        reject_unknown_route_keys(&raw, &[])
+            .expect_err("with no visitor declaring it, the key is unknown");
     }
 
     /// A route shares its mapping with the orchestrator blocks praxis-policy-core

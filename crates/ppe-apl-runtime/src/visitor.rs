@@ -1091,38 +1091,18 @@ fn warn_unreferenced_plugin_overrides(route: &CompiledRoute) {
 /// [`warn_if_global_only_key_at_nonglobal_scope`].
 const GLOBAL_ONLY_NON_DSL_KEYS: [&str; 3] = ["pdp", "session_store", "attribute_files"];
 
-/// Legacy APL config keys, mapped to their replacements. The flat-key path
-/// in [`apl_subblock`] only copies recognized keys into the synthetic block,
-/// so a config still using an old name would otherwise be *silently dropped*
-/// here — a fail-open for `policy` / `post_policy`. We reject them loudly.
-/// (The `apl:`-wrapped form is caught downstream by praxis-policy-apl-core instead.)
-const RENAMED_APL_KEYS: [(&str, &str); 2] = [
-    (
-        "policy",
-        "authorization.pre_invocation (or flat pre_invocation)",
-    ),
-    (
-        "post_policy",
-        "authorization.post_invocation (or flat post_invocation)",
-    ),
-];
-
 /// Fail loudly when a section carries a renamed legacy APL key directly
-/// (flat form). Guards the fail-open where the flat-key filter in
-/// [`apl_subblock`] would otherwise drop an unrecognized `policy:` block.
+/// (flat form). The flat-key path in [`apl_subblock`] only copies recognized
+/// keys into the synthetic block, so a stale `policy:` would otherwise be
+/// silently dropped here, a fail-open. The names and the message come from
+/// praxis-policy-core, which rejects the same keys on a route before any
+/// visitor runs, so the two cannot disagree.
+/// (The `apl:`-wrapped form is caught downstream by praxis-policy-apl-core instead.)
 fn reject_legacy_apl_keys(scope: &str, yaml: &serde_yaml::Value) -> Result<(), VisitorError> {
-    let Some(map) = yaml.as_mapping() else {
-        return Ok(());
-    };
-    for (old, new) in RENAMED_APL_KEYS {
-        if map.contains_key(serde_yaml::Value::String(old.to_owned())) {
-            return Err(format!(
-                "in `{scope}`: config field `{old}` was renamed to `{new}` — update your config",
-            )
-            .into());
-        }
+    match praxis_policy_core::config::renamed_apl_key_message(scope, yaml) {
+        Some(message) => Err(message.into()),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Strip the global-only wiring sub-keys ([`GLOBAL_ONLY_NON_DSL_KEYS`])
