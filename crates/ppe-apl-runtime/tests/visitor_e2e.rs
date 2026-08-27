@@ -926,3 +926,88 @@ routes:
         "deny-gate fired"
     );
 }
+
+// =====================================================================
+// A route installs only the halves it declares
+// =====================================================================
+
+/// A route whose policy body declares only pre-phase steps gains no post
+/// handler. An empty post handler would short-circuit the post hook and
+/// silence whatever the route's own plugin chain had to say there.
+#[tokio::test]
+async fn a_pre_only_entity_route_installs_no_post_handler() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: allow-gate
+    kind: allow-gate
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: get_weather
+    apl:
+      pre_invocation:
+        - "plugin(allow-gate)"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    assert!(
+        mgr.has_hooks_for("cmf.tool_pre_invoke"),
+        "the declared pre half installs"
+    );
+    assert!(
+        !mgr.has_hooks_for("cmf.tool_post_invoke"),
+        "the route declares no post steps, so no post handler installs",
+    );
+}
+
+/// A route listing a plugin alongside a pre-only policy body must still run
+/// that plugin on the post half. The post handler the route used to install
+/// ran no steps and suppressed the chain, so the plugin the operator wrote
+/// onto the route never fired there and its denial never landed.
+#[tokio::test]
+async fn an_entity_route_runs_its_post_half_plugins_beside_a_pre_only_body() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: allow-gate
+    kind: allow-gate
+    hooks: [cmf.tool_pre_invoke]
+  - name: deny-gate
+    kind: deny-gate
+    hooks: [cmf.tool_post_invoke]
+routes:
+  - tool: get_weather
+    plugins: [deny-gate]
+    apl:
+      pre_invocation:
+        - "plugin(allow-gate)"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_weather"))),
+        ..Default::default()
+    };
+    let (pre, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", cmf_payload("hi"), ext.clone(), None)
+        .await;
+    assert!(
+        pre.continue_processing,
+        "the pre half still runs the policy body; violation = {:?}",
+        pre.violation
+    );
+
+    let (post, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_post_invoke", cmf_payload("hi"), ext, None)
+        .await;
+    assert!(
+        !post.continue_processing,
+        "the route's own plugin must run on the post half and deny",
+    );
+    assert_eq!(
+        post.violation.expect("deny expected").reason,
+        "deny-gate fired",
+    );
+}

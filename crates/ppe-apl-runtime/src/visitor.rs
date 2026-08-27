@@ -841,6 +841,11 @@ impl ConfigVisitor for AplConfigVisitor {
                 return Err(err_msg.into());
             }
 
+            // Each half installs only when the effective route declares steps
+            // for it, the way the global catch-all already decides.
+            let installs_pre = http_catchall_should_install(&effective);
+            let installs_post = http_catchall_response_should_install(&effective);
+
             let route_arc = Arc::new(effective);
 
             // Resolve the entity-specific CMF hook pair. `route_entity_identity`
@@ -866,41 +871,48 @@ impl ConfigVisitor for AplConfigVisitor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
 
-            // Install Pre + Post handlers. Each handler instance is bound to
-            // ONE phase so the executor can pick the right entry-point off
-            // the (entity_type, entity_name, scope, hook_name) key.
-            install_handler(
-                mgr,
-                entity_type,
-                entity_name,
-                scope.clone(),
-                hook_pre,
-                Phase::Pre,
-                Arc::clone(&route_arc),
-                &plugin_registry,
-                &self.dispatch_cache,
-                &session_store,
-                &self.engine,
-                Some(Arc::clone(&pdp_router_arc)),
-                &self.base_capabilities,
-                Arc::clone(&attribute_tree),
-            );
-            install_handler(
-                mgr,
-                entity_type,
-                entity_name,
-                scope.clone(),
-                hook_post,
-                Phase::Post,
-                route_arc,
-                &plugin_registry,
-                &self.dispatch_cache,
-                &session_store,
-                &self.engine,
-                Some(Arc::clone(&pdp_router_arc)),
-                &self.base_capabilities,
-                attribute_tree,
-            );
+            // Install the halves the route declares. Each handler instance is
+            // bound to ONE phase so the executor can pick the right entry-point
+            // off the (entity_type, entity_name, scope, hook_name) key. The two
+            // predicates cover all four phases between them, so a route that
+            // reached here declares at least one and installs at least one
+            // handler.
+            if installs_pre {
+                install_handler(
+                    mgr,
+                    entity_type,
+                    entity_name,
+                    scope.clone(),
+                    hook_pre,
+                    Phase::Pre,
+                    Arc::clone(&route_arc),
+                    &plugin_registry,
+                    &self.dispatch_cache,
+                    &session_store,
+                    &self.engine,
+                    Some(Arc::clone(&pdp_router_arc)),
+                    &self.base_capabilities,
+                    Arc::clone(&attribute_tree),
+                );
+            }
+            if installs_post {
+                install_handler(
+                    mgr,
+                    entity_type,
+                    entity_name,
+                    scope.clone(),
+                    hook_post,
+                    Phase::Post,
+                    route_arc,
+                    &plugin_registry,
+                    &self.dispatch_cache,
+                    &session_store,
+                    &self.engine,
+                    Some(Arc::clone(&pdp_router_arc)),
+                    &self.base_capabilities,
+                    attribute_tree,
+                );
+            }
         }
 
         Ok(())
@@ -1217,24 +1229,24 @@ fn apl_subblock(yaml: &serde_yaml::Value) -> Option<serde_yaml::Value> {
     }
 }
 
-/// Whether the entity-less HTTP catch-all handler (Pre-phase only) should
-/// install for a compiled `global` layer. Gate on both Pre-phase steps
-/// (`args` + `policy`, via [`CompiledRoute::declared_phases`]), not
-/// `policy` alone — an operator whose `global.apl` has only an `args:`
-/// admission block (no `policy:`) must still get the catch-all installed,
-/// or entity-less HTTP traffic silently bypasses it entirely (fail-open by
-/// omission).
+/// Whether the Pre-phase handler should install for a compiled layer. Read
+/// for the entity-less HTTP catch-all and, in `visit_routes`, for every
+/// route's own effective layers, so one rule decides both. Gate on both
+/// Pre-phase steps (`args` + `policy`, via
+/// [`CompiledRoute::declared_phases`]), not `policy` alone: an operator
+/// whose `global.apl` has only an `args:` admission block (no `policy:`)
+/// must still get the catch-all installed, or entity-less HTTP traffic
+/// silently bypasses it entirely (fail-open by omission).
 fn http_catchall_should_install(compiled: &CompiledRoute) -> bool {
     let declared = compiled.declared_phases();
     declared.contains(praxis_policy_apl_core::rules::Phase::Args)
         || declared.contains(praxis_policy_apl_core::rules::Phase::Policy)
 }
 
-/// Whether the entity-less HTTP response handler should install. The
-/// mirror of [`http_catchall_should_install`] on the post side, gating on
-/// `result` + `post_policy`, so a `global.apl` that only authorizes gets
-/// no response handler and a host that never fires `cmf.http_response`
-/// sees no change either way.
+/// Whether the Post-phase handler should install. The mirror of
+/// [`http_catchall_should_install`] on the post side, gating on `result` +
+/// `post_policy`, so a layer that only authorizes gets no post handler and
+/// a host that never fires the post hook sees no change either way.
 fn http_catchall_response_should_install(compiled: &CompiledRoute) -> bool {
     let declared = compiled.declared_phases();
     declared.contains(praxis_policy_apl_core::rules::Phase::Result)

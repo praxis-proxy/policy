@@ -28,8 +28,15 @@ use praxis_policy_core::cmf::constants::{
 };
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
+use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::error::{PluginError as CoreError, PluginViolation};
 use praxis_policy_core::extensions::{Extensions, HttpExtension, MetaExtension};
+use praxis_policy_core::factory::{PluginFactory, PluginInstance};
+use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
+use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
+use praxis_policy_core::plugin::{Plugin, PluginConfig};
+use praxis_policy_core::registry::AnyHookHandler;
 
 use praxis_policy_apl_cmf::constants::{DETAIL_HTTP_BODY, DETAIL_HTTP_HEADERS, DETAIL_HTTP_STATUS};
 use praxis_policy_apl_runtime::{AplOptions, register_apl};
@@ -549,5 +556,266 @@ async fn an_unreadable_path_still_allows_when_no_route_selects_on_one() {
         res.continue_processing,
         "the global policy still decides; violation = {:?}",
         res.violation
+    );
+}
+
+// =====================================================================
+// A route installs only the halves it declares
+// =====================================================================
+
+/// A plugin that denies, so a scenario can see whether the response-side
+/// plugin chain ran at all. An empty post handler installed over a route
+/// would suppress it, and the difference is invisible to `has_hooks_for`.
+struct ResponseGate {
+    cfg: PluginConfig,
+}
+
+#[async_trait::async_trait]
+impl Plugin for ResponseGate {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for ResponseGate {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        PluginResult::deny(PluginViolation::new(
+            "policy.forbidden",
+            "response-gate fired",
+        ))
+    }
+}
+
+struct ResponseGateFactory;
+impl PluginFactory for ResponseGateFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
+        let plugin = Arc::new(ResponseGate {
+            cfg: config.clone(),
+        });
+        let adapter: Arc<dyn AnyHookHandler> =
+            Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![(HOOK_CMF_HTTP_RESPONSE, adapter)],
+        })
+    }
+}
+
+async fn manager_with_response_gate(yaml: &str) -> Arc<PolicyEngine> {
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory("response-gate", Box::new(ResponseGateFactory));
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(yaml).expect("load_config_yaml");
+    mgr.initialize().await.expect("initialize");
+    mgr
+}
+
+// A pre-only global policy plus an always-on response-side plugin. The
+// plugin sits in the `all` group so it is activated whether or not a route
+// matched, which is what makes the two configurations comparable.
+const RESPONSE_CHAIN_NO_ROUTE: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: response-gate
+    kind: response-gate
+    hooks: [cmf.http_response]
+global:
+  policies:
+    all:
+      plugins: [response-gate]
+  apl:
+    pre_invocation:
+      - "http.method != 'GET': deny"
+"#;
+
+// The same configuration with a catch-all route added. The route declares no
+// body of its own, so it inherits the global pre-only policy and has nothing
+// to say on the response half.
+const RESPONSE_CHAIN_WITH_CATCHALL: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: response-gate
+    kind: response-gate
+    hooks: [cmf.http_response]
+global:
+  policies:
+    all:
+      plugins: [response-gate]
+  apl:
+    pre_invocation:
+      - "http.method != 'GET': deny"
+routes:
+  - http:
+      path_prefix: /
+"#;
+
+/// Adding a body-less catch-all route must not change what governs the
+/// response half. A route that installs an empty post handler short-circuits
+/// the response-side plugin chain and turns a denial into a silent allow.
+/// `has_hooks_for` cannot witness this, since the plugin is itself registered
+/// for the response hook, so the denial is the assertion.
+#[tokio::test]
+async fn a_bodyless_catchall_route_resolves_the_same_response_chain() {
+    for (label, yaml) in [
+        ("no route", RESPONSE_CHAIN_NO_ROUTE),
+        ("catch-all route", RESPONSE_CHAIN_WITH_CATCHALL),
+    ] {
+        let mgr = manager_with_response_gate(yaml).await;
+        let (res, _bg) = mgr
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_HTTP_RESPONSE,
+                payload(),
+                http_request_with_path("GET", "/v1/files/q3.pdf"),
+                None,
+            )
+            .await;
+        assert!(
+            !res.continue_processing,
+            "{label}: the response-side plugin chain must run and deny",
+        );
+        let v = res
+            .violation
+            .unwrap_or_else(|| panic!("{label}: deny must surface a violation"));
+        assert_eq!(v.code, "policy.forbidden", "{label}: whose denial it is");
+    }
+}
+
+// A route that declares both halves itself, so neither guard may skip.
+const ROUTE_BOTH_HALVES: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /
+    apl:
+      pre_invocation:
+        - "http.method == 'POST': deny"
+      post_invocation:
+        - "http.method == 'TRACE': deny"
+"#;
+
+/// A route declaring both halves still installs both, and each half enforces
+/// only its own rule.
+#[tokio::test]
+async fn a_route_declaring_both_halves_installs_both() {
+    let mgr = manager_with(ROUTE_BOTH_HALVES).await;
+    assert!(mgr.has_hooks_for(HOOK_CMF_HTTP_REQUEST));
+    assert!(mgr.has_hooks_for(HOOK_CMF_HTTP_RESPONSE));
+
+    let (denied_pre, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_REQUEST,
+            payload(),
+            http_request_with_path("POST", "/anything"),
+            None,
+        )
+        .await;
+    assert!(
+        !denied_pre.continue_processing,
+        "the route's request half denies POST"
+    );
+
+    let (allowed_pre, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_REQUEST,
+            payload(),
+            http_request_with_path("TRACE", "/anything"),
+            None,
+        )
+        .await;
+    assert!(
+        allowed_pre.continue_processing,
+        "TRACE is the post rule; violation = {:?}",
+        allowed_pre.violation
+    );
+
+    let (denied_post, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_RESPONSE,
+            payload(),
+            http_request_with_path("TRACE", "/anything"),
+            None,
+        )
+        .await;
+    assert!(
+        !denied_post.continue_processing,
+        "the route's response half denies TRACE"
+    );
+
+    let (allowed_post, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_RESPONSE,
+            payload(),
+            http_request_with_path("POST", "/anything"),
+            None,
+        )
+        .await;
+    assert!(
+        allowed_post.continue_processing,
+        "POST is the pre rule; violation = {:?}",
+        allowed_post.violation
+    );
+}
+
+// A body-less route over a pre-only global body. Layer seeding still stacks
+// `global` into the route, so the request half is governed.
+const BODYLESS_ROUTE_OVER_GLOBAL: &str = r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  apl:
+    pre_invocation:
+      - "http.method != 'GET': deny"
+routes:
+  - http:
+      path_prefix: /
+"#;
+
+/// A route with no `apl:` block still receives the global policy on the half
+/// that declares steps, and gains no handler on the half that does not.
+#[tokio::test]
+async fn a_bodyless_route_still_receives_the_global_policy() {
+    let mgr = manager_with(BODYLESS_ROUTE_OVER_GLOBAL).await;
+    assert!(
+        mgr.has_hooks_for(HOOK_CMF_HTTP_REQUEST),
+        "the inherited global pre-phase policy installs the request handler",
+    );
+    assert!(
+        !mgr.has_hooks_for(HOOK_CMF_HTTP_RESPONSE),
+        "and nothing in either layer declares response steps",
+    );
+
+    let (denied, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_REQUEST,
+            payload(),
+            http_request_with_path("POST", "/v1/files/q3.pdf"),
+            None,
+        )
+        .await;
+    assert!(
+        !denied.continue_processing,
+        "the global rule governs the route's request half"
+    );
+
+    let (allowed, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_HTTP_REQUEST,
+            payload(),
+            http_request_with_path("GET", "/v1/files/q3.pdf"),
+            None,
+        )
+        .await;
+    assert!(
+        allowed.continue_processing,
+        "GET still passes; violation = {:?}",
+        allowed.violation
     );
 }
