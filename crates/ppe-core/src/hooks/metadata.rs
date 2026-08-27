@@ -54,10 +54,14 @@
 //   * `result:` field stage   → looks for `Post` hooks
 //   * `post_invocation:` step      → looks for `Post` hooks
 //
-// A plugin that wants to discriminate "args field stage" from
-// "pre_invocation step" — both Pre context — inspects `PluginContext::hook_name()`
-// itself. The hook-routing layer doesn't slice phase finer than
-// Pre/Post.
+// The hook-routing layer doesn't slice phase finer than Pre/Post, and
+// `PluginContext` carries no hook name, so a plugin cannot tell an "args
+// field stage" from a "pre_invocation step" from inside the handler. What
+// it can read is the payload and the extensions it was handed: a field
+// stage and a step both pass the whole payload, and a family serving two
+// names distinguishes them by what the host populated (the HTTP family by
+// `HttpExtension::status`, set on the response invocation only). A plugin
+// that needs the distinction registers for one hook name per behavior.
 //
 // # Custom hook metadata
 //

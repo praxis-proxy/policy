@@ -51,8 +51,8 @@ use praxis_policy_core::extensions::{
 };
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
-use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
-use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
+use praxis_policy_core::hooks::trait_def::{HookHandler, HookTypeDef as _, PluginResult};
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload};
 use praxis_policy_core::identity::{
     HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource,
 };
@@ -118,8 +118,10 @@ fn clear(ledger: &Ledger) {
 // Test plugins
 // =====================================================================
 
-/// A CMF plugin that records and allows. Registers on whichever hooks its
-/// config declares, so one fixture can bind it to either HTTP half.
+/// A plugin that records and allows. Registers on whichever hooks its config
+/// declares, so one fixture can bind it to either HTTP half or to an entity
+/// hook. It handles both families because the two carry different payloads and
+/// a fixture in this file uses both.
 struct RecordingGate {
     cfg: PluginConfig,
     ledger: Ledger,
@@ -129,6 +131,18 @@ struct RecordingGate {
 impl Plugin for RecordingGate {
     fn config(&self) -> &PluginConfig {
         &self.cfg
+    }
+}
+
+impl HookHandler<HttpHook> for RecordingGate {
+    async fn handle(
+        &self,
+        _payload: &HttpPayload,
+        ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<HttpPayload> {
+        record(&self.ledger, &self.cfg.name, ext);
+        PluginResult::allow()
     }
 }
 
@@ -144,6 +158,12 @@ impl HookHandler<CmfHook> for RecordingGate {
     }
 }
 
+/// Which family a hook name belongs to. The two HTTP names carry
+/// `HttpPayload`; everything else in this file carries a CMF message.
+fn is_http_hook(hook: &str) -> bool {
+    hook == HOOK_HTTP_REQUEST || hook == HOOK_HTTP_RESPONSE
+}
+
 struct RecordingGateFactory(Ledger);
 
 impl PluginFactory for RecordingGateFactory {
@@ -157,8 +177,13 @@ impl PluginFactory for RecordingGateFactory {
             .iter()
             .map(|hook| {
                 let name: &'static str = Box::leak(hook.clone().into_boxed_str());
-                let adapter: Arc<dyn AnyHookHandler> =
-                    Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+                // The handler has to match the payload the hook name carries,
+                // so the adapter is picked per name rather than per plugin.
+                let adapter: Arc<dyn AnyHookHandler> = if is_http_hook(name) {
+                    Arc::new(TypedHandlerAdapter::<HttpHook, _>::new(Arc::clone(&plugin)))
+                } else {
+                    Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)))
+                };
                 (name, adapter)
             })
             .collect();
@@ -290,12 +315,6 @@ fn load_failure(yaml: &str) -> String {
         .to_string()
 }
 
-fn payload() -> MessagePayload {
-    MessagePayload {
-        message: Message::text(Role::User, "hi"),
-    }
-}
-
 /// A generic HTTP request as a host presents one: the reserved entity
 /// coordinates, and the request line on its own slot.
 fn request(method: &str, path: &str) -> Extensions {
@@ -372,9 +391,23 @@ fn entity_request(entity_type: &str, name: &str) -> Extensions {
     }
 }
 
+/// Fire one hook the way a host does, with the payload its family carries.
 async fn fire(mgr: &PolicyEngine, hook: &str, ext: Extensions) -> bool {
+    if is_http_hook(hook) {
+        let (result, _bg) = mgr
+            .invoke_named::<HttpHook>(hook, HttpPayload, ext, None)
+            .await;
+        return result.continue_processing;
+    }
     let (result, _bg) = mgr
-        .invoke_named::<CmfHook>(hook, payload(), ext, None)
+        .invoke_named::<CmfHook>(
+            hook,
+            MessagePayload {
+                message: Message::text(Role::User, "hi"),
+            },
+            ext,
+            None,
+        )
         .await;
     result.continue_processing
 }
@@ -1269,9 +1302,9 @@ async fn an_unreadable_path_is_denied_rather_than_reaching_the_catch_all() {
     let (mgr, ledger) = engine_with(NESTED_PREFIXES).await;
 
     let (result, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_REQUEST,
-            payload(),
+            HttpPayload,
             request("GET", "/v1/files/%zz"),
             None,
         )
@@ -1526,4 +1559,391 @@ async fn the_transpiled_authorization_policy_still_resolves_its_global_http_poli
         .await,
         "and an authenticated one still passes it"
     );
+}
+
+// =====================================================================
+// The payload an HTTP route's plugins receive
+// =====================================================================
+
+/// Denial code the assertion fixture emits when the payload it was handed
+/// belongs to another family.
+const WRONG_PAYLOAD: &str = "test.wrong.payload.family";
+
+/// Records, and denies when the payload it was handed is not the one its
+/// declared hooks carry. Written against the erased interface on purpose: a
+/// typed handler cannot observe the mistake, because the adapter would have
+/// refused the dispatch before the handler ran, and what this asserts is
+/// which payload reached the plugin rather than which one the adapter
+/// accepted.
+struct PayloadAssertion {
+    cfg: PluginConfig,
+    ledger: Ledger,
+    /// True when every hook this plugin declares is an HTTP name.
+    expects_http: bool,
+}
+
+#[async_trait]
+impl Plugin for PayloadAssertion {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+#[async_trait]
+impl AnyHookHandler for PayloadAssertion {
+    async fn invoke(
+        &self,
+        payload: &dyn praxis_policy_core::hooks::payload::PluginPayload,
+        ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<CoreError>> {
+        record(&self.ledger, &self.cfg.name, ext);
+        let matched = if self.expects_http {
+            payload.as_any().is::<HttpPayload>()
+        } else {
+            payload.as_any().is::<MessagePayload>()
+        };
+        Ok(Box::new(praxis_policy_core::executor::ErasedResultFields {
+            continue_processing: matched,
+            modified_payload: None,
+            modified_extensions: None,
+            violation: (!matched).then(|| {
+                praxis_policy_core::error::PluginViolation::new(
+                    WRONG_PAYLOAD,
+                    "the route's plugin was handed another family's payload",
+                )
+            }),
+        }))
+    }
+
+    fn hook_type_name(&self) -> &'static str {
+        if self.expects_http {
+            HttpHook::NAME
+        } else {
+            CmfHook::NAME
+        }
+    }
+}
+
+struct PayloadAssertionFactory(Ledger);
+
+impl PluginFactory for PayloadAssertionFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
+        let plugin = Arc::new(PayloadAssertion {
+            cfg: config.clone(),
+            ledger: Arc::clone(&self.0),
+            expects_http: config.hooks.iter().all(|hook| is_http_hook(hook)),
+        });
+        let handler: Arc<dyn AnyHookHandler> = plugin.clone();
+        let handlers = config
+            .hooks
+            .iter()
+            .map(|hook| {
+                let name: &'static str = Box::leak(hook.clone().into_boxed_str());
+                (name, Arc::clone(&handler))
+            })
+            .collect();
+        Ok(PluginInstance { plugin, handlers })
+    }
+}
+
+/// Appends a label through `modified_extensions`, the channel a handler on
+/// this family has for changing anything: `HttpPayload` carries no fields,
+/// so a header rewrite or a label rides the extensions.
+struct HttpLabelWriter {
+    cfg: PluginConfig,
+}
+
+#[async_trait]
+impl Plugin for HttpLabelWriter {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<HttpHook> for HttpLabelWriter {
+    async fn handle(
+        &self,
+        _payload: &HttpPayload,
+        ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<HttpPayload> {
+        let mut owned = ext.cow_copy();
+        let security = owned.security.get_or_insert_with(Default::default);
+        security.add_label("HTTP-TOUCHED");
+        PluginResult::modify_extensions(owned)
+    }
+}
+
+struct HttpLabelWriterFactory;
+
+impl PluginFactory for HttpLabelWriterFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
+        let plugin = Arc::new(HttpLabelWriter {
+            cfg: config.clone(),
+        });
+        let handler: Arc<dyn AnyHookHandler> =
+            Arc::new(TypedHandlerAdapter::<HttpHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![(HOOK_HTTP_REQUEST, handler)],
+        })
+    }
+}
+
+/// An engine carrying the two fixtures above alongside the recording gate.
+async fn engine_with_payload_fixtures(yaml: &str) -> (Arc<PolicyEngine>, Ledger) {
+    let ledger: Ledger = Arc::new(Mutex::new(Vec::new()));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory(
+        "test/assert-payload",
+        Box::new(PayloadAssertionFactory(Arc::clone(&ledger))),
+    );
+    mgr.register_factory("test/label-writer", Box::new(HttpLabelWriterFactory));
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(yaml).expect("load_config_yaml");
+    mgr.initialize().await.expect("initialize");
+    (mgr, ledger)
+}
+
+/// A plugin an HTTP route's policy step names is handed `HttpPayload`, so a
+/// content-inspecting plugin there reads the exchange rather than a chat
+/// message nothing filled.
+#[tokio::test]
+async fn a_plugin_on_an_http_route_receives_the_http_payload() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: payload-check
+    kind: test/assert-payload
+    hooks: [http.request]
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      pre_invocation:
+        - "plugin(payload-check)"
+"#;
+    let (mgr, ledger) = engine_with_payload_fixtures(YAML).await;
+
+    let (result, _bg) = mgr
+        .invoke_named::<HttpHook>(
+            HOOK_HTTP_REQUEST,
+            HttpPayload,
+            request("GET", "/v1/files/q3.pdf"),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the plugin denies when handed another family's payload; violation = {:?}",
+        result.violation
+    );
+    assert_ne!(
+        result.violation.map(|v| v.code),
+        Some(WRONG_PAYLOAD.to_owned()),
+    );
+    assert_eq!(
+        fired(&ledger),
+        vec!["payload-check".to_owned()],
+        "the route's policy step must have dispatched the plugin at all"
+    );
+}
+
+/// The regression surface that matters most: an MCP route's plugin is still
+/// handed `MessagePayload`, so nothing about the HTTP family moved what the
+/// CMF path dispatches.
+#[tokio::test]
+async fn a_plugin_on_an_mcp_route_still_receives_the_message_payload() {
+    const YAML: &str = r#"
+plugins:
+  - name: payload-check
+    kind: test/assert-payload
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: get_weather
+    apl:
+      pre_invocation:
+        - "plugin(payload-check)"
+"#;
+    let (mgr, ledger) = engine_with_payload_fixtures(YAML).await;
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            MessagePayload {
+                message: Message::text(Role::User, "hi"),
+            },
+            tool_request("get_weather"),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the plugin denies when handed another family's payload; violation = {:?}",
+        result.violation
+    );
+    assert_eq!(fired(&ledger), vec!["payload-check".to_owned()]);
+}
+
+/// A plugin on an HTTP route mutating extensions still has its mutation
+/// persisted, which is what a header rewrite rides: it goes through
+/// `modified_extensions` rather than the payload.
+#[tokio::test]
+async fn an_extension_mutation_on_an_http_route_is_persisted() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: label-writer
+    kind: test/label-writer
+    hooks: [http.request]
+    capabilities: [append_labels, read_headers]
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      pre_invocation:
+        - "plugin(label-writer)"
+"#;
+    let (mgr, _ledger) = engine_with_payload_fixtures(YAML).await;
+
+    let (result, _bg) = mgr
+        .invoke_named::<HttpHook>(
+            HOOK_HTTP_REQUEST,
+            HttpPayload,
+            request("GET", "/v1/files/q3.pdf"),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the plugin allows; violation = {:?}",
+        result.violation
+    );
+    let labels = result
+        .modified_extensions
+        .as_ref()
+        .expect("the plugin's extension mutation must reach the result")
+        .security
+        .as_ref()
+        .map(|s| s.labels.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert!(
+        labels.iter().any(|l| l == "HTTP-TOUCHED"),
+        "the plugin's extension mutation must reach the host; labels = {labels:?}"
+    );
+}
+
+// =====================================================================
+// A field stage on an HTTP route is refused at load
+// =====================================================================
+
+/// `HttpPayload` has no fields, so an `args:` block on an `http:` route
+/// would address nothing. The load names the route and the block rather
+/// than letting the stage read nothing at runtime.
+#[tokio::test]
+async fn an_args_block_on_an_http_route_is_refused_naming_the_route_and_the_block() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      args:
+        city: "str | redact"
+"#;
+    let msg = load_failure(YAML);
+    assert!(
+        msg.contains("args") && msg.contains("prefix:/v1/files"),
+        "the refusal must name the block and the route: {msg}"
+    );
+}
+
+/// The same for the response half's field stage.
+#[tokio::test]
+async fn a_result_block_on_an_http_route_is_refused_naming_the_route_and_the_block() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http: /healthz
+    apl:
+      result:
+        ssn: "str | redact"
+"#;
+    let msg = load_failure(YAML);
+    assert!(
+        msg.contains("result") && msg.contains("http:/healthz"),
+        "the refusal must name the block and the route: {msg}"
+    );
+}
+
+/// An entity route still accepts both field stages, so the refusal is scoped
+/// to the family whose payload has no fields rather than to field stages.
+#[tokio::test]
+async fn an_entity_route_still_accepts_its_field_stages() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - tool: get_weather
+    apl:
+      args:
+        city: "str | redact"
+      result:
+        ssn: "str | redact"
+"#;
+    let (_mgr, _ledger) = engine_with(YAML).await;
+}
+
+/// A `global.defaults.http` block carrying `args:` is refused too. That scope
+/// reaches HTTP routes and nothing else, so a stage declared there is as
+/// unreadable as one on the route.
+#[tokio::test]
+async fn a_default_http_layer_declaring_a_field_stage_is_refused() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  defaults:
+    http:
+      apl:
+        args:
+          city: "str | redact"
+routes:
+  - http: /healthz
+"#;
+    let msg = load_failure(YAML);
+    assert!(
+        msg.contains("args") && msg.contains("global.defaults.http.apl"),
+        "the refusal must name the block and the scope: {msg}"
+    );
+}
+
+/// A `global.apl` carrying `args:` still loads, because those stages are
+/// meaningful for every entity route the global layer stacks onto. Refusing
+/// there would refuse a configuration that is correct elsewhere.
+#[tokio::test]
+async fn a_global_args_block_still_loads_alongside_an_http_route() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  apl:
+    args:
+      city: "str | redact"
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      pre_invocation:
+        - "http.method == 'POST': deny"
+"#;
+    let (_mgr, _ledger) = engine_with(YAML).await;
 }

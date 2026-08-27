@@ -89,14 +89,15 @@ crate::define_hook! {
     /// serves a dozen: [`HOOK_HTTP_REQUEST`] and [`HOOK_HTTP_RESPONSE`]
     /// share this payload. A handler that cares which half it is on reads
     /// [`HttpExtension::status`][status], which the host populates on the
-    /// response invocation only.
+    /// response invocation only. There is no hook name on
+    /// [`PluginContext`][ctx] to read instead.
     ///
-    /// **Nothing dispatches this type yet.** The two names are live and
-    /// carry their metadata rows, but the invoker still dispatches them
-    /// through `CmfHook`, so a host fires them as
-    /// `invoke_named::<CmfHook>("http.request", ...)`. Making the
-    /// dispatch follow this type is the next step.
+    /// A host fires both names as `invoke_named::<HttpHook>(name, ...)`,
+    /// and an APL route selecting on `http:` dispatches the plugins its
+    /// policy steps name through this type too, so a plugin on that path
+    /// receives [`HttpPayload`] rather than a message nothing filled.
     ///
+    /// [ctx]: crate::context::PluginContext
     /// [PluginResult]: crate::hooks::trait_def::PluginResult
     /// [status]: crate::extensions::http::HttpExtension::status
     HttpHook, "http" => {

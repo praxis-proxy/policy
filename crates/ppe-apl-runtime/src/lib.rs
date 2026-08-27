@@ -6,11 +6,12 @@
 //
 // `praxis-policy-apl-core::PluginInvoker` is string-typed by design (so `praxis-policy-apl-core`
 // stays free of PPE deps). The actual typed boundary lives in this
-// crate: one `PluginInvoker` implementation per `HookTypeDef`. The
-// payload type is locked at the impl level — e.g. [`CmfPluginInvoker`]
-// can only dispatch to CMF hooks because every internal call goes
-// through `invoke_named::<CmfHook>`, and the compiler enforces that
-// the payload is `MessagePayload`.
+// crate: [`HookPluginInvoker`] is parameterized over the `HookTypeDef` it
+// dispatches, so the payload is locked to the family and the compiler
+// rejects a mismatched dispatch. A route's entity type picks the parameter
+// ([`CmfPluginInvoker`] for the MCP and A2A entities, [`HttpPluginInvoker`]
+// for generic HTTP), and the generic is erased at `Arc<dyn PluginInvoker>`,
+// which carries no payload.
 //
 // # v0 simplification — single-view-per-Message
 //
@@ -32,15 +33,15 @@
 //! Connects the APL evaluator to the plugin runtime.
 //!
 //! The evaluator's invoker traits are string-typed so the language crate stays
-//! free of runtime dependencies. The typed boundary lives here: one invoker per
-//! hook type, with the payload locked at the impl so the compiler rejects a
-//! mismatched dispatch.
+//! free of runtime dependencies. The typed boundary lives here: the invoker is
+//! parameterized over the hook type it dispatches, so the payload is locked to
+//! the family and the compiler rejects a mismatched dispatch.
 
 /// Loads external attribute trees for the evaluator.
 pub mod attribute_source;
 /// Applies a route's backend candidate constraint.
 pub mod candidate_constraint;
-/// Dispatches plugin steps to CMF hooks.
+/// Dispatches plugin steps to one hook family's hooks.
 pub mod cmf_invoker;
 /// Dispatches delegation steps to the delegation hook.
 pub mod delegation_invoker;
@@ -52,6 +53,8 @@ pub mod elicitation_invoker;
 mod message_projection;
 /// Rejects plugins whose mode is unsafe inside a `parallel:` block.
 pub mod parallel_safety;
+/// What a field stage can address on a hook payload.
+pub mod payload_fields;
 /// Routes a decision point call to the resolver for its dialect.
 pub mod pdp_router;
 /// Wires the runtime into a policy engine.
@@ -67,15 +70,16 @@ pub mod visitor;
 
 pub use attribute_source::{FileAttributeSource, merge_attribute_docs};
 pub use candidate_constraint::{ConstraintConflict, fold_candidate_constraints};
-pub use cmf_invoker::CmfPluginInvoker;
+pub use cmf_invoker::{CmfPluginInvoker, HookPluginInvoker, HttpPluginInvoker};
 pub use delegation_invoker::DelegationPluginInvoker;
 pub use dispatch_plan::{DispatchCache, RouteDispatchPlan, RoutePluginEntry};
 pub use elicitation_invoker::ElicitationPluginInvoker;
+pub use payload_fields::PayloadFields;
 pub use pdp_router::PdpRouter;
 pub use register::{AplOptions, register_apl};
 pub use route_handler::{
     AplRouteHandler, ELICITATION_APPROVED_CODE, ELICITATION_ID_HEADER, ELICITATION_PEEK_HEADER,
-    ELICITATION_PENDING_CODE, Phase,
+    ELICITATION_PENDING_CODE, HookFamily, Phase,
 };
 pub use session_store::{MemorySessionStore, SessionStore, SessionStoreError, SessionStoreFactory};
 pub use visitor::AplConfigVisitor;

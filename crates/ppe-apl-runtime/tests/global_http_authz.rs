@@ -33,7 +33,7 @@ use praxis_policy_core::extensions::{Extensions, HttpExtension, MetaExtension};
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
-use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::registry::AnyHookHandler;
 
@@ -155,7 +155,7 @@ async fn a_global_post_phase_policy_is_annotated_under_the_response_hook() {
     );
 
     let (allowed, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_RESPONSE, payload(), http_request("GET"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_RESPONSE, HttpPayload, http_request("GET"), None)
         .await;
     assert!(
         allowed.continue_processing,
@@ -164,7 +164,7 @@ async fn a_global_post_phase_policy_is_annotated_under_the_response_hook() {
     );
 
     let (denied, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_RESPONSE, payload(), http_request("POST"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_RESPONSE, HttpPayload, http_request("POST"), None)
         .await;
     assert!(
         !denied.continue_processing,
@@ -197,12 +197,12 @@ async fn both_http_halves_install_and_evaluate_independently() {
 
     // The request half still enforces its own rule and not the post one.
     let (denied_pre, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_REQUEST, payload(), http_request("POST"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request("POST"), None)
         .await;
     assert!(!denied_pre.continue_processing, "POST denied on the way in");
 
     let (allowed_pre, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_REQUEST, payload(), http_request("TRACE"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request("TRACE"), None)
         .await;
     assert!(
         allowed_pre.continue_processing,
@@ -211,7 +211,7 @@ async fn both_http_halves_install_and_evaluate_independently() {
 
     // And the response half enforces its rule and not the pre one.
     let (denied_post, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_RESPONSE, payload(), http_request("TRACE"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_RESPONSE, HttpPayload, http_request("TRACE"), None)
         .await;
     assert!(
         !denied_post.continue_processing,
@@ -219,7 +219,7 @@ async fn both_http_halves_install_and_evaluate_independently() {
     );
 
     let (allowed_post, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_RESPONSE, payload(), http_request("POST"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_RESPONSE, HttpPayload, http_request("POST"), None)
         .await;
     assert!(
         allowed_post.continue_processing,
@@ -238,7 +238,7 @@ async fn a_pre_only_global_policy_installs_no_response_handler() {
 
     // And firing the request hook alone behaves exactly as before.
     let (res, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_REQUEST, payload(), http_request("POST"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request("POST"), None)
         .await;
     assert!(!res.continue_processing);
 }
@@ -247,7 +247,7 @@ async fn a_pre_only_global_policy_installs_no_response_handler() {
 async fn global_policy_allows_matching_http_request() {
     let mgr = manager_with(GET_ONLY).await;
     let (res, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_REQUEST, payload(), http_request("GET"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request("GET"), None)
         .await;
     assert!(
         res.continue_processing,
@@ -260,7 +260,7 @@ async fn global_policy_allows_matching_http_request() {
 async fn global_policy_denies_nonmatching_http_request() {
     let mgr = manager_with(GET_ONLY).await;
     let (res, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_REQUEST, payload(), http_request("POST"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request("POST"), None)
         .await;
     assert!(
         !res.continue_processing,
@@ -288,7 +288,7 @@ global:
 "#;
     let mgr = manager_with(YAML).await;
     let (res, _bg) = mgr
-        .invoke_named::<CmfHook>(HOOK_HTTP_REQUEST, payload(), http_request("DELETE"), None)
+        .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request("DELETE"), None)
         .await;
     assert!(!res.continue_processing, "DELETE must be denied");
     let v = res.violation.expect("deny must surface a violation");
@@ -442,9 +442,9 @@ async fn a_request_carrying_a_path_is_governed_by_the_global_policy_unchanged() 
 
     for path in ["/v1/files/q3.pdf", "/healthz", "/"] {
         let (allowed, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request_with_path("GET", path),
                 None,
             )
@@ -456,9 +456,9 @@ async fn a_request_carrying_a_path_is_governed_by_the_global_policy_unchanged() 
         );
 
         let (denied, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request_with_path("POST", path),
                 None,
             )
@@ -485,9 +485,9 @@ global:
     let mgr = manager_with(YAML).await;
 
     let (denied, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_REQUEST,
-            payload(),
+            HttpPayload,
             http_request_with_path("GET", "/admin/./x"),
             None,
         )
@@ -498,9 +498,9 @@ global:
     );
 
     let (allowed, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_REQUEST,
-            payload(),
+            HttpPayload,
             http_request_with_path("GET", "/admin/x"),
             None,
         )
@@ -519,9 +519,9 @@ async fn an_unreadable_path_still_allows_when_no_route_selects_on_one() {
     let mgr = manager_with(GET_ONLY).await;
 
     let (res, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_REQUEST,
-            payload(),
+            HttpPayload,
             http_request_with_path("GET", "/a/%zz"),
             None,
         )
@@ -551,13 +551,13 @@ impl Plugin for ResponseGate {
     }
 }
 
-impl HookHandler<CmfHook> for ResponseGate {
+impl HookHandler<HttpHook> for ResponseGate {
     async fn handle(
         &self,
-        _payload: &MessagePayload,
+        _payload: &HttpPayload,
         _extensions: &Extensions,
         _ctx: &mut PluginContext,
-    ) -> PluginResult<MessagePayload> {
+    ) -> PluginResult<HttpPayload> {
         PluginResult::deny(PluginViolation::new(
             "policy.forbidden",
             "response-gate fired",
@@ -572,7 +572,7 @@ impl PluginFactory for ResponseGateFactory {
             cfg: config.clone(),
         });
         let adapter: Arc<dyn AnyHookHandler> =
-            Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+            Arc::new(TypedHandlerAdapter::<HttpHook, _>::new(Arc::clone(&plugin)));
         Ok(PluginInstance {
             plugin,
             handlers: vec![(HOOK_HTTP_RESPONSE, adapter)],
@@ -643,9 +643,9 @@ async fn a_bodyless_catchall_route_resolves_the_same_response_chain() {
     ] {
         let mgr = manager_with_response_gate(yaml).await;
         let (res, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_RESPONSE,
-                payload(),
+                HttpPayload,
                 http_request_with_path("GET", "/v1/files/q3.pdf"),
                 None,
             )
@@ -684,9 +684,9 @@ async fn a_route_declaring_both_halves_installs_both() {
     assert!(mgr.has_hooks_for(HOOK_HTTP_RESPONSE));
 
     let (denied_pre, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_REQUEST,
-            payload(),
+            HttpPayload,
             http_request_with_path("POST", "/anything"),
             None,
         )
@@ -697,9 +697,9 @@ async fn a_route_declaring_both_halves_installs_both() {
     );
 
     let (allowed_pre, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_REQUEST,
-            payload(),
+            HttpPayload,
             http_request_with_path("TRACE", "/anything"),
             None,
         )
@@ -711,9 +711,9 @@ async fn a_route_declaring_both_halves_installs_both() {
     );
 
     let (denied_post, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_RESPONSE,
-            payload(),
+            HttpPayload,
             http_request_with_path("TRACE", "/anything"),
             None,
         )
@@ -724,9 +724,9 @@ async fn a_route_declaring_both_halves_installs_both() {
     );
 
     let (allowed_post, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_RESPONSE,
-            payload(),
+            HttpPayload,
             http_request_with_path("POST", "/anything"),
             None,
         )
@@ -767,9 +767,9 @@ async fn a_bodyless_route_still_receives_the_global_policy() {
     );
 
     let (denied, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_REQUEST,
-            payload(),
+            HttpPayload,
             http_request_with_path("POST", "/v1/files/q3.pdf"),
             None,
         )
@@ -780,9 +780,9 @@ async fn a_bodyless_route_still_receives_the_global_policy() {
     );
 
     let (allowed, _bg) = mgr
-        .invoke_named::<CmfHook>(
+        .invoke_named::<HttpHook>(
             HOOK_HTTP_REQUEST,
-            payload(),
+            HttpPayload,
             http_request_with_path("GET", "/v1/files/q3.pdf"),
             None,
         )

@@ -112,9 +112,34 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   now fails to load, and the refusal names the replacement. Rust callers rename
   `HOOK_CMF_HTTP_REQUEST` / `HOOK_CMF_HTTP_RESPONSE` to `HOOK_HTTP_REQUEST` /
   `HOOK_HTTP_RESPONSE`, which now live in `praxis_policy_core::http_hook`.
-  Dispatch is unchanged for now: both names still run through `CmfHook`, so a
-  host keeps firing them as `invoke_named::<CmfHook>("http.request", ...)` and
-  only the strings change.
+  ([#40](https://github.com/praxis-proxy/policy/issues/40))
+
+- **A plugin on an HTTP route receives the HTTP payload.** Dispatch follows the
+  route's hook family now, so the plugins an `http:` route's policy steps name
+  are invoked through `HttpHook` and handed an `HttpPayload`. Before this, every
+  APL-dispatched plugin went through `CmfHook`, which meant a scanner named by
+  an HTTP route's policy scanned a chat message the HTTP path never filled and
+  reported clean. **Breaking for a host firing the HTTP hooks**: fire them as
+  `invoke_named::<HttpHook>("http.request", HttpPayload, ...)` rather than
+  through `CmfHook`, and a plugin registered on `http.request` or
+  `http.response` implements `HookHandler<HttpHook>` rather than
+  `HookHandler<CmfHook>`. Nothing about MCP or A2A dispatch changes: an entity
+  route still builds a CMF invoker and its plugins still receive
+  `MessagePayload`, field stages included. A handler that needs to know which
+  half of an exchange fired reads `http.status`, which the host sets on the
+  response invocation only; `PluginContext` carries no hook name, and the hook
+  metadata documentation no longer claims it does.
+  ([#40](https://github.com/praxis-proxy/policy/issues/40))
+
+- **An `args:` or `result:` block on an `http:` route is refused at load.** A
+  field stage addresses a path inside a message, and a generic HTTP request
+  carries none, so such a stage would read nothing and rewrite nothing. The load
+  now fails naming the declaration and the block, and points at
+  `pre_invocation:` / `post_invocation:` with the `http.*` attributes instead.
+  It covers both scopes that reach HTTP routes and nothing else: a route's own
+  `apl:` block and `global.defaults.http.apl`. A `global.apl` carrying `args:`
+  still loads, because those stages are meaningful for the entity routes the
+  global layer also stacks onto.
   ([#40](https://github.com/praxis-proxy/policy/issues/40))
 
 - **A declared hook name is validated at config load.** `hooks:` carried free strings that nothing checked, so a typo loaded clean and nothing said so. What a typo cost depended on the plugin: a factory that derives its handler names from `config.hooks` (the `audit-logger` and `pii-scanner` reference plugins) registered under the misspelling and never fired, while one that hardcodes its hook name (`identity-jwt`, `delegator-oauth`, `elicitation-ciba`) fired correctly and left the `hooks:` list as decoration that disagreed with reality. Both are now refused, because a `hooks:` entry naming a hook nothing dispatches is a config error either way. An unknown name now refuses the config, naming the plugin, the name, and the nearest name that does dispatch: `tool_pre_invoke` suggests `cmf.tool_pre_invoke`, which is the exact mistake the removed constants and the old `PluginConfig` example taught. A name close to nothing in the table gets no suggestion rather than the least-bad match. **Breaking for existing config** carrying a misspelled or inert hook name. Validation reads the runtime registry, so a host with its own hooks passes once it has registered their metadata — which it must do *before* loading config that names them; registering afterwards is too late and the load refuses. The registry is process-wide while `PolicyEngine` is per-instance, so two engines in one process share one hook table and whichever loads first decides what the second accepts. A config can load under one process layout and refuse under another, such as a host embedding PPE twice or a test binary sharing a process across cases. Register every hook a process uses before loading any config, not only before the config that names them.

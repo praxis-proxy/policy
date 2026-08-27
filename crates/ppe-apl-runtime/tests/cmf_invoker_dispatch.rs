@@ -36,7 +36,7 @@ use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::HookPhase;
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
 use praxis_policy_core::hooks::payload::Extensions;
-use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
+use praxis_policy_core::hooks::trait_def::{HookHandler, HookTypeDef as _, PluginResult};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::registry::{HookEntry, PluginRef};
 
@@ -1368,5 +1368,198 @@ async fn a_registered_hook_is_filtered_by_its_row() {
     assert!(
         entry.pick_entry(Some("tool"), HookPhase::Post).is_none(),
         "cmf.tool_pre_invoke must not match the post phase",
+    );
+}
+
+// ---------------------------------------------------------------------
+// The field baseline is the payload's value, not the pipeline's
+//
+// A field stage hands a plugin the whole message, so the invoker reads the
+// field back out afterwards to learn whether the plugin rewrote it. What
+// that readback is compared against decides whether an earlier stage's
+// redaction survives: the pipeline's own `value` may already carry a
+// `mask` / `redact` / `hash` that was never pushed into the payload, so
+// comparing against it would read the payload's untouched original as "the
+// plugin's new value" and hand the pre-redaction plaintext back.
+// ---------------------------------------------------------------------
+
+/// The plugin mutates the payload but leaves the field in focus alone,
+/// while the pipeline is already holding a masked value for it. The field
+/// must be reported unchanged, so the mask stands.
+#[tokio::test]
+async fn an_earlier_stages_redaction_is_not_undone_by_the_readback() {
+    let mgr = build_manager("arg-redactor", Box::new(ArgRewriteFactory { arg: "token" })).await;
+    let plan = plan_for(&mgr, "arg-redactor");
+    let invoker = CmfPluginInvoker::for_request(
+        mgr,
+        Extensions::default(),
+        payload_with_tool_call("London", "unrelated chatter"),
+        plan,
+        Arc::new(MemorySessionStore::new()),
+    )
+    .await
+    .expect("for_request");
+
+    // What an earlier `mask` stage left in the pipeline. The payload still
+    // holds "London", because a pipeline stage writes the payload only at
+    // the end of the phase.
+    let bag = empty_bag();
+    let masked = serde_json::json!("[MASKED]");
+    let outcome = invoker
+        .invoke(
+            "arg-redactor",
+            &bag,
+            PluginInvocation::Field {
+                name: "city",
+                value: &masked,
+                phase: praxis_policy_apl_core::step::DispatchPhase::Pre,
+            },
+        )
+        .await
+        .expect("invoke");
+
+    assert_eq!(
+        outcome.modified_value, None,
+        "the plugin left `city` alone, so the earlier stage's mask must stand; \
+         reporting the payload's \"London\" here would hand the next stage \
+         the plaintext the mask removed"
+    );
+    assert!(
+        invoker.payload_was_modified(),
+        "the plugin's rewrite of another field still has to reach the host"
+    );
+}
+
+/// The contrast case: the plugin does rewrite the field in focus, and the
+/// pipeline is again holding a masked value. The plugin's value must win,
+/// so the baseline is not simply "report nothing when the value differs".
+#[tokio::test]
+async fn a_plugin_rewriting_the_field_is_reported_over_an_earlier_mask() {
+    let mgr = build_manager("arg-redactor", Box::new(ArgRewriteFactory { arg: "city" })).await;
+    let plan = plan_for(&mgr, "arg-redactor");
+    let invoker = CmfPluginInvoker::for_request(
+        mgr,
+        Extensions::default(),
+        payload_with_tool_call("London", "unrelated chatter"),
+        plan,
+        Arc::new(MemorySessionStore::new()),
+    )
+    .await
+    .expect("for_request");
+
+    let bag = empty_bag();
+    let masked = serde_json::json!("[MASKED]");
+    let outcome = invoker
+        .invoke(
+            "arg-redactor",
+            &bag,
+            PluginInvocation::Field {
+                name: "city",
+                value: &masked,
+                phase: praxis_policy_apl_core::step::DispatchPhase::Pre,
+            },
+        )
+        .await
+        .expect("invoke");
+
+    assert_eq!(
+        outcome.modified_value,
+        Some(serde_json::json!("[REDACTED]")),
+        "the plugin rewrote the field in focus, so its value is the field's value"
+    );
+}
+
+// ---------------------------------------------------------------------
+// A payload from another family is dropped, not accepted
+// ---------------------------------------------------------------------
+
+/// Hands back a payload of another family. Written against the erased
+/// interface on purpose: a typed handler cannot express this mistake, and
+/// the erased path is the one a host-supplied handler travels.
+struct ForeignPayloadPlugin {
+    cfg: PluginConfig,
+}
+
+#[async_trait]
+impl Plugin for ForeignPayloadPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+#[async_trait]
+impl praxis_policy_core::registry::AnyHookHandler for ForeignPayloadPlugin {
+    async fn invoke(
+        &self,
+        _payload: &dyn praxis_policy_core::hooks::payload::PluginPayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<CoreError>> {
+        Ok(Box::new(praxis_policy_core::executor::ErasedResultFields {
+            continue_processing: true,
+            modified_payload: Some(Box::new(praxis_policy_core::http_hook::HttpPayload)),
+            modified_extensions: None,
+            violation: None,
+        }))
+    }
+
+    fn hook_type_name(&self) -> &'static str {
+        CmfHook::NAME
+    }
+}
+
+struct ForeignPayloadFactory;
+impl PluginFactory for ForeignPayloadFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
+        let plugin = Arc::new(ForeignPayloadPlugin {
+            cfg: config.clone(),
+        });
+        let handler: Arc<dyn praxis_policy_core::registry::AnyHookHandler> = plugin.clone();
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", handler)],
+        })
+    }
+}
+
+/// The mutation is dropped rather than written over the request's payload,
+/// and the host is told nothing changed. Claiming otherwise would forward an
+/// unmutated payload while asserting it was mutated.
+#[tokio::test]
+async fn a_payload_of_another_family_is_dropped_and_not_reported_as_a_mutation() {
+    let mgr = build_manager("foreign-payload", Box::new(ForeignPayloadFactory)).await;
+    let plan = plan_for(&mgr, "foreign-payload");
+    let invoker = CmfPluginInvoker::for_request(
+        mgr,
+        Extensions::default(),
+        payload_with_text("hello"),
+        plan,
+        Arc::new(MemorySessionStore::new()),
+    )
+    .await
+    .expect("for_request");
+
+    let bag = empty_bag();
+    let outcome = invoker
+        .invoke(
+            "foreign-payload",
+            &bag,
+            PluginInvocation::Step {
+                phase: praxis_policy_apl_core::step::DispatchPhase::Pre,
+            },
+        )
+        .await
+        .expect("invoke");
+
+    assert!(matches!(outcome.decision, Decision::Allow));
+    assert!(
+        !invoker.payload_was_modified(),
+        "nothing was written, so the host must keep forwarding the payload it has"
+    );
+    let current = invoker.current_payload().await;
+    assert_eq!(
+        current.message.content.len(),
+        1,
+        "the request's own payload is untouched"
     );
 }

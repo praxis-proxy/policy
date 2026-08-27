@@ -1,14 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// `CmfPluginInvoker` — `praxis-policy-apl-core::PluginInvoker` impl bound to the CMF
-// hook family. Drives dispatch off a pre-resolved [`RouteDispatchPlan`]
+// `HookPluginInvoker<H>` — `praxis-policy-apl-core::PluginInvoker` impl bound to
+// one hook family. Drives dispatch off a pre-resolved [`RouteDispatchPlan`]
 // (from [`DispatchCache`]) and forwards entries to
-// `PolicyEngine::invoke_entries::<CmfHook>(...)`, which runs the full
+// `PolicyEngine::invoke_entries::<H>(...)`, which runs the full
 // executor pipeline (sequential / transform / audit / concurrent /
 // fire-and-forget; on_error / timeouts / mode / write tokens all
 // honored). Compile-time payload type safety is provided by the
-// `CmfHook: HookTypeDef` bound on `invoke_entries`.
+// `H: HookTypeDef` bound on `invoke_entries`.
+//
+// # One invoker, one family per instance
+//
+// [`CmfPluginInvoker`] and [`HttpPluginInvoker`] are the two aliases in
+// use: a route's entity type picks which one a request builds, so a plugin
+// on an HTTP route is handed an `HttpPayload` rather than a fabricated chat
+// message. The generic is erased the moment the invoker becomes
+// `Arc<dyn PluginInvoker>`, which carries no payload, so the APL evaluator
+// sees one type either way.
 //
 // # Request-scoped vs session-scoped state
 //
@@ -41,8 +50,8 @@
 //
 // # Lifetime model
 //
-// One invoker instance per request. Host pre-builds the
-// `MessagePayload`, hydrates session-scoped state via `for_request`
+// One invoker instance per request. Host pre-builds the family's
+// payload, hydrates session-scoped state via `for_request`
 // (which is async because it awaits `SessionStore::load_labels`), then
 // drives `evaluate_route`. After evaluation, host calls
 // [`current_payload`] for body re-serialization and
@@ -60,10 +69,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use praxis_policy_core::cmf::{CmfHook, MessagePayload};
+use praxis_policy_core::cmf::CmfHook;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::hooks::HookPhase;
 use praxis_policy_core::hooks::payload::Extensions;
+use praxis_policy_core::hooks::trait_def::HookTypeDef;
+use praxis_policy_core::http_hook::HttpHook;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
@@ -73,15 +84,33 @@ use praxis_policy_apl_core::step::{
 };
 
 use crate::dispatch_plan::RouteDispatchPlan;
+use crate::payload_fields::PayloadFields;
 use crate::session_store::{SessionStore, SessionStoreError};
 
-/// Bridges APL plugin dispatch to CMF-family PPE hooks.
+/// The invoker an MCP or A2A route builds: CMF hooks, carrying the request's
+/// chat message.
+pub type CmfPluginInvoker = HookPluginInvoker<CmfHook>;
+
+/// The invoker a generic-HTTP route builds. `HttpPayload` carries no fields,
+/// so a plugin on such a route reads the exchange from its `Extensions`
+/// rather than from a message that was never filled.
+pub type HttpPluginInvoker = HookPluginInvoker<HttpHook>;
+
+/// Bridges APL plugin dispatch to one hook family's PPE hooks.
 ///
-/// Carries the request's `MessagePayload` and `Extensions` for its
+/// Carries the request's `H::Payload` and `Extensions` for its
 /// entire lifetime so plugin mutations accumulate (one plugin's
 /// `[REDACTED]` output is visible to the next plugin in the same
 /// route; one plugin's added label seeds the next plugin's filter view).
-pub struct CmfPluginInvoker {
+///
+/// `H` supplies both halves of the family in one parameter: the typed
+/// dispatch through `invoke_entries::<H>` and, via
+/// [`PayloadFields`](crate::payload_fields), what an
+/// `args:` / `result:` stage can address on the payload.
+pub struct HookPluginInvoker<H: HookTypeDef>
+where
+    H::Payload: PayloadFields,
+{
     engine: Arc<PolicyEngine>,
     /// Per-request extensions under interior mutability. Locked across
     /// awaits — `tokio::sync::Mutex` is required because the executor's
@@ -90,7 +119,7 @@ pub struct CmfPluginInvoker {
     /// Per-request payload under interior mutability. Same reasoning as
     /// `extensions` — accumulated text rewrites have to be visible to
     /// the next dispatch in the same request.
-    payload: Arc<Mutex<MessagePayload>>,
+    payload: Arc<Mutex<H::Payload>>,
     /// Set the moment a plugin's `modified_payload` is accepted into
     /// `payload` above. Request-scoped and sticky: once any plugin in
     /// the request mutates, it stays `true`.
@@ -122,7 +151,10 @@ pub struct CmfPluginInvoker {
     initial_labels: HashSet<String>,
 }
 
-impl CmfPluginInvoker {
+impl<H: HookTypeDef> HookPluginInvoker<H>
+where
+    H::Payload: PayloadFields,
+{
     /// Construct an invoker bound to one request's payload + extensions
     /// and the pre-resolved dispatch plan for the request's route.
     /// Hydrates accumulated session-scoped labels into
@@ -136,7 +168,7 @@ impl CmfPluginInvoker {
     pub async fn for_request(
         engine: Arc<PolicyEngine>,
         mut extensions: Extensions,
-        payload: MessagePayload,
+        payload: H::Payload,
         plan: Arc<RouteDispatchPlan>,
         session_store: Arc<dyn SessionStore>,
     ) -> Result<Self, SessionStoreError> {
@@ -176,9 +208,9 @@ impl CmfPluginInvoker {
     }
 
     /// Snapshot the current payload. Call after route evaluation to
-    /// extract the final (possibly-mutated) `MessagePayload` for body
+    /// extract the final (possibly-mutated) payload for body
     /// re-serialization.
-    pub async fn current_payload(&self) -> MessagePayload {
+    pub async fn current_payload(&self) -> H::Payload {
         self.payload.lock().await.clone()
     }
 
@@ -303,7 +335,10 @@ impl CmfPluginInvoker {
 }
 
 #[async_trait]
-impl PluginInvoker for CmfPluginInvoker {
+impl<H: HookTypeDef> PluginInvoker for HookPluginInvoker<H>
+where
+    H::Payload: PayloadFields,
+{
     async fn invoke(
         &self,
         plugin_name: &str,
@@ -363,15 +398,13 @@ impl PluginInvoker for CmfPluginInvoker {
         // pre-redaction plaintext back to the pipeline, undoing the
         // earlier stage.
         let field_before = match invocation {
-            PluginInvocation::Field { name, phase, .. } => {
-                field_value_from_message(&current_payload.message, name, phase)
-            },
+            PluginInvocation::Field { name, phase, .. } => current_payload.field_value(name, phase),
             PluginInvocation::Step { .. } => None,
         };
 
         let (result, _bg) = self
             .engine
-            .invoke_entries::<CmfHook>(
+            .invoke_entries::<H>(
                 std::slice::from_ref(entry),
                 current_payload,
                 current_extensions,
@@ -396,7 +429,7 @@ impl PluginInvoker for CmfPluginInvoker {
 
         // Persist any plugin-side payload mutation back into the shared
         // request payload. `PluginPayload` only exposes `as_any`, so we
-        // downcast-ref and clone. `MessagePayload: Clone` makes this
+        // downcast-ref and clone. `PayloadFields: Clone` makes this
         // cheap relative to the FFI/invoke cost.
         //
         // Gated on `payload_modified`, not on `modified_payload.is_some()`:
@@ -406,7 +439,7 @@ impl PluginInvoker for CmfPluginInvoker {
         let modified_value = if !result.payload_modified {
             None
         } else if let Some(mp_boxed) = result.modified_payload.as_ref() {
-            if let Some(modified) = mp_boxed.as_any().downcast_ref::<MessagePayload>() {
+            if let Some(modified) = mp_boxed.as_any().downcast_ref::<H::Payload>() {
                 *self.payload.lock().await = modified.clone();
                 // Record the mutation for the host. `Release` so the
                 // flag is visible to `payload_was_modified` even when
@@ -414,7 +447,8 @@ impl PluginInvoker for CmfPluginInvoker {
                 self.payload_modified.store(true, Ordering::Release);
                 match invocation {
                     PluginInvocation::Field { name, phase, .. } => {
-                        let rewritten = field_value_from_message(&modified.message, name, phase)
+                        let rewritten = modified
+                            .field_value(name, phase)
                             .filter(|new_value| field_before.as_ref() != Some(new_value));
                         if rewritten.is_none() {
                             tracing::debug!(
@@ -434,8 +468,10 @@ impl PluginInvoker for CmfPluginInvoker {
                 // payload it already has.
                 tracing::warn!(
                     plugin = %plugin_name,
-                    "CmfPluginInvoker: modified_payload was not MessagePayload \
-                     (downcast failed) — dropping the mutation"
+                    hook_family = %H::NAME,
+                    expected = %std::any::type_name::<H::Payload>(),
+                    "plugin returned a modified payload of another type; \
+                     dropping the mutation"
                 );
                 None
             }
@@ -473,40 +509,6 @@ impl PluginInvoker for CmfPluginInvoker {
             taints,
             modified_value,
         })
-    }
-}
-
-/// Read the value of one pipeline field out of a message.
-///
-/// A plugin dispatched from an `args:` / `result:` stage is handed the
-/// whole message, not the field, so its new value for that field has to
-/// be read back out. The projection matches what APL evaluated against:
-/// Pre addresses args, Post addresses result. `field` is relative to
-/// that root.
-///
-/// Two shapes:
-///   * object projection (a tool call's arguments, a structured tool
-///     result) → look up `field` in it, `None` when absent.
-///   * scalar projection (a text-only message, whose whole content is
-///     the field) → the projection itself.
-///
-/// The caller compares the result against the value the pipeline is
-/// holding: equal, or `None` here, both mean "this plugin didn't change
-/// this field". The plugin's payload mutation is recorded separately, so
-/// reporting no field change never drops it.
-fn field_value_from_message(
-    message: &praxis_policy_core::cmf::Message,
-    field: &str,
-    phase: DispatchPhase,
-) -> Option<serde_json::Value> {
-    let projection = match phase {
-        DispatchPhase::Pre => crate::message_projection::extract_args_from_message(message),
-        DispatchPhase::Post => crate::message_projection::extract_result_from_message(message),
-    };
-    if projection.is_object() {
-        praxis_policy_apl_core::get_dotted(&projection, field).cloned()
-    } else {
-        Some(projection)
     }
 }
 

@@ -45,7 +45,7 @@
 //
 // # Hook names per entity type
 //
-// Each entity type binds to its own CMF hook pair:
+// Each entity type binds to its own hook pair:
 //
 //   * `tool:`     → `cmf.tool_pre_invoke`     / `cmf.tool_post_invoke`
 //   * `llm:`      → `cmf.llm_input`           / `cmf.llm_output`
@@ -90,7 +90,7 @@ use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
 use crate::dispatch_plan::DispatchCache;
 use crate::pdp_router::PdpRouter;
-use crate::route_handler::{AplRouteHandler, Phase};
+use crate::route_handler::{AplRouteHandler, HookFamily, Phase};
 use crate::session_store::{SessionStore, SessionStoreFactory};
 
 /// Legacy alias for the tool-family pre hook. Kept exported for
@@ -101,7 +101,7 @@ pub const HOOK_PRE: &str = HOOK_CMF_TOOL_PRE_INVOKE;
 /// Legacy alias for the tool-family post hook. See `HOOK_PRE`.
 pub const HOOK_POST: &str = HOOK_CMF_TOOL_POST_INVOKE;
 
-/// Resolve the (pre, post) CMF hook pair for an `entity_type`. Drives
+/// Resolve the (pre, post) hook pair for an `entity_type`. Drives
 /// per-entity `annotate_route` calls so an `llm:` route annotates on
 /// `cmf.llm_input` / `cmf.llm_output` rather than the tool-family
 /// hooks. Returns `None` for unknown entity types — the visitor logs
@@ -645,6 +645,9 @@ impl ConfigVisitor for AplConfigVisitor {
         warn_if_global_only_key_at_nonglobal_scope(&source, &apl_block);
         let compiled = compile_policy_block_value(&source, &apl_block)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
+        // A default layer reaches only its own entity type, so a field stage
+        // declared here for `http` is as unreadable as one on the route.
+        reject_field_stages_without_fields(entity_type, &source, &compiled)?;
         self.state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -755,6 +758,11 @@ impl ConfigVisitor for AplConfigVisitor {
                 let source = format!("routes.{route_key}.apl");
                 let route_layer = compile_policy_block_value(&source, block)
                     .map_err(|e| -> VisitorError { Box::new(e) })?;
+                reject_field_stages_without_fields(
+                    entity_type,
+                    &format!("route '{route_key}'"),
+                    &route_layer,
+                )?;
                 effective.apply_layer(route_layer);
             }
 
@@ -849,7 +857,7 @@ impl ConfigVisitor for AplConfigVisitor {
 
             let route_arc = Arc::new(effective);
 
-            // Resolve the entity-specific CMF hook pair. `route_entity_identity`
+            // Resolve the entity-specific hook pair. `route_entity_identity`
             // only names entity types this maps, but hook_pair_for_entity
             // returning None would just skip the annotation rather than crash,
             // as defense in depth.
@@ -859,7 +867,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 tracing::warn!(
                     entity_type,
                     entity_name,
-                    "APL visitor: no CMF hook pair for entity_type — skipping route",
+                    "APL visitor: no hook pair for entity_type — skipping route",
                 );
                 continue;
             };
@@ -920,6 +928,41 @@ impl ConfigVisitor for AplConfigVisitor {
     }
 }
 
+/// Refuse an `args:` or `result:` block declared at a scope that reaches only
+/// a payload with no fields. Today that is the `http:` selector: an HTTP
+/// exchange reaches a policy through its extensions, and `HttpPayload` has
+/// nothing for a field path to address, so such a stage would read nothing and
+/// rewrite nothing.
+///
+/// `scope` is the label the refusal names, already spelled the way its caller
+/// names the declaration. Called for each scope whose reach is one entity
+/// type: a route's own block and `global.defaults.http`. Not for
+/// `global.apl`, whose stages are
+/// meaningful for the entity routes it also stacks onto, so refusing there
+/// would refuse a configuration that is correct for every other selector.
+fn reject_field_stages_without_fields(
+    entity_type: &str,
+    scope: &str,
+    layer: &CompiledRoute,
+) -> Result<(), VisitorError> {
+    if entity_type != ENTITY_HTTP {
+        return Ok(());
+    }
+    let block = if !layer.args.is_empty() {
+        "args"
+    } else if !layer.result.is_empty() {
+        "result"
+    } else {
+        return Ok(());
+    };
+    Err(format!(
+        "{scope}: an `http:` route cannot declare a `{block}:` block, because a \
+         generic HTTP request carries no message for a field path to address. Read the request \
+         from the `http.*` attributes under `pre_invocation:` (or `post_invocation:`) instead."
+    )
+    .into())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_handler(
     mgr: &Arc<PolicyEngine>,
@@ -978,7 +1021,7 @@ fn install_handler(
             if phase == Phase::Pre { "pre" } else { "post" }
         ),
         kind: "builtin".to_owned(),
-        // The annotated handler covers exactly one CMF hook name.
+        // The annotated handler covers exactly one hook name.
         hooks: vec![hook_name.to_owned()],
         capabilities,
         ..Default::default()
@@ -987,6 +1030,10 @@ fn install_handler(
         plugin_config.clone(),
         route,
         phase,
+        // The family decides which payload the handler accepts, and it is
+        // read off the same entity type that chose the hook name above, so
+        // the two cannot disagree.
+        HookFamily::for_entity(entity_type),
         Arc::clone(plugin_registry),
         Arc::clone(dispatch_cache),
         Arc::clone(session_store),
@@ -1319,6 +1366,7 @@ mod tests {
     use praxis_policy_core::factory::{PluginFactory, PluginInstance};
     use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
     use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
+    use praxis_policy_core::http_hook::{HttpHook, HttpPayload};
 
     fn yaml(s: &str) -> serde_yaml::Value {
         serde_yaml::from_str(s).expect("valid yaml")
@@ -1680,13 +1728,13 @@ mod tests {
         }
     }
 
-    impl HookHandler<CmfHook> for ChainDeny {
+    impl HookHandler<HttpHook> for ChainDeny {
         async fn handle(
             &self,
-            _payload: &MessagePayload,
+            _payload: &HttpPayload,
             _extensions: &praxis_policy_core::extensions::Extensions,
             _ctx: &mut praxis_policy_core::context::PluginContext,
-        ) -> PluginResult<MessagePayload> {
+        ) -> PluginResult<HttpPayload> {
             PluginResult::deny(PluginViolation::new(
                 CHAIN_VIOLATION,
                 "the route's plugin chain ran",
@@ -1705,7 +1753,7 @@ mod tests {
                 cfg: config.clone(),
             });
             let handler: Arc<dyn praxis_policy_core::registry::AnyHookHandler> =
-                Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+                Arc::new(TypedHandlerAdapter::<HttpHook, _>::new(Arc::clone(&plugin)));
             Ok(PluginInstance {
                 plugin,
                 handlers: vec![(HOOK_HTTP_REQUEST, handler)],
@@ -1777,9 +1825,9 @@ routes:
         let mgr = engine_with(HTTP_ROUTE_BODIES).await;
 
         let (denied, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("DELETE", Some("/v1/files/q3.pdf")),
                 None,
             )
@@ -1790,9 +1838,9 @@ routes:
         );
 
         let (allowed, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("GET", Some("/v1/files/q3.pdf")),
                 None,
             )
@@ -1809,9 +1857,9 @@ routes:
         let mgr = engine_with(HTTP_ROUTE_BODIES).await;
 
         let (result, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("DELETE", Some("/healthz")),
                 None,
             )
@@ -1863,9 +1911,9 @@ routes:
         let mgr = engine_with(YAML).await;
 
         let (denied, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("GET", Some("/v1/files/q3.pdf")),
                 None,
             )
@@ -1882,9 +1930,9 @@ routes:
         let mgr = engine_with(HTTP_ROUTE_BODY_AND_CHAIN).await;
 
         let (allowed, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("GET", Some("/v1/files/q3.pdf")),
                 None,
             )
@@ -1897,9 +1945,9 @@ routes:
         );
 
         let (denied, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("DELETE", Some("/v1/files/q3.pdf")),
                 None,
             )
@@ -2029,9 +2077,9 @@ routes:
         );
 
         let (denied_in, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("DELETE", Some("/v1/files/q3.pdf")),
                 None,
             )
@@ -2039,9 +2087,9 @@ routes:
         assert!(!denied_in.continue_processing, "the request half enforces");
 
         let (denied_out, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_RESPONSE,
-                payload(),
+                HttpPayload,
                 http_request("TRACE", Some("/v1/files/q3.pdf")),
                 None,
             )
@@ -2057,9 +2105,9 @@ routes:
         let mgr = engine_with(HTTP_ROUTE_BOTH_HALVES).await;
 
         let (result, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_RESPONSE,
-                payload(),
+                HttpPayload,
                 http_request("TRACE", None),
                 None,
             )
@@ -2096,9 +2144,9 @@ routes:
         let mgr = engine_with(GLOBAL_PLUS_CATCHALL_ROUTE).await;
 
         let (denied, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("DELETE", Some("/anything/at/all")),
                 None,
             )
@@ -2112,9 +2160,9 @@ routes:
         // implicit install under the reserved name applies. Its own rule
         // still fires there, so the route did not replace its handler.
         let (denied_global, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("PATCH", None),
                 None,
             )
@@ -2125,9 +2173,9 @@ routes:
         );
 
         let (allowed, _bg) = mgr
-            .invoke_named::<CmfHook>(
+            .invoke_named::<HttpHook>(
                 HOOK_HTTP_REQUEST,
-                payload(),
+                HttpPayload,
                 http_request("DELETE", None),
                 None,
             )

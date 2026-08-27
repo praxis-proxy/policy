@@ -15,6 +15,15 @@
 // on the dispatching hook name. Inside `invoke`, no hook-name plumbing is
 // needed — the handler already knows which phase it's running.
 //
+// # Why the family is fixed at install too
+//
+// The route's entity type decides which hook family its handler is
+// annotated under, and the family decides the payload the executor hands
+// it: a CMF message for the MCP and A2A entities, `HttpPayload` for
+// generic HTTP. So the family is recorded at install alongside the phase,
+// and it selects both the payload `invoke` accepts and the typed invoker
+// the request's plugins are dispatched through.
+//
 // # Lifetime / weak engine handle
 //
 // The handler holds `Weak<PolicyEngine>` because the engine owns the
@@ -28,13 +37,16 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use praxis_policy_core::cmf::MessagePayload;
+use praxis_policy_core::cmf::constants::ENTITY_HTTP;
+use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::executor::ErasedResultFields;
 use praxis_policy_core::extensions::Extensions;
 use praxis_policy_core::hooks::PluginPayload;
+use praxis_policy_core::hooks::trait_def::HookTypeDef;
+use praxis_policy_core::http_hook::HttpHook;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::registry::AnyHookHandler;
 
@@ -49,7 +61,7 @@ use praxis_policy_apl_core::route::{RoutePayload, evaluate_post, evaluate_pre};
 use praxis_policy_apl_core::rules::{CompiledRoute, DenyResponse};
 use praxis_policy_apl_core::step::PdpResolver;
 
-use crate::cmf_invoker::CmfPluginInvoker;
+use crate::cmf_invoker::HookPluginInvoker;
 use crate::delegation_invoker::DelegationPluginInvoker;
 use crate::dispatch_plan::DispatchCache;
 use crate::elicitation_invoker::ElicitationPluginInvoker;
@@ -57,6 +69,7 @@ use crate::message_projection::{
     apply_changed_paths, extract_args_from_message, extract_result_from_message,
     write_args_back_to_message, write_result_back_to_message,
 };
+use crate::payload_fields::PayloadFields;
 use crate::pdp_router::PdpRouter;
 use crate::session_store::SessionStore;
 
@@ -97,6 +110,39 @@ pub enum Phase {
     Post,
 }
 
+/// Which hook family this handler was installed for, and so which payload
+/// the executor hands it. One handler type serves both families, so the
+/// answer is fixed at install from the route's entity type rather than
+/// discovered per request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookFamily {
+    /// The CMF family, carrying a chat message.
+    Cmf,
+    /// The generic-HTTP family, whose payload carries no fields.
+    Http,
+}
+
+impl HookFamily {
+    /// The family a route's entity type belongs to. Every entity type other
+    /// than `http` names an MCP or A2A entity carrying a CMF message.
+    pub fn for_entity(entity_type: &str) -> Self {
+        if entity_type == ENTITY_HTTP {
+            Self::Http
+        } else {
+            Self::Cmf
+        }
+    }
+
+    /// The registered hook type's name, read off the type so this cannot
+    /// drift from what the executor sees on the handler.
+    fn hook_type_name(self) -> &'static str {
+        match self {
+            Self::Cmf => CmfHook::NAME,
+            Self::Http => HttpHook::NAME,
+        }
+    }
+}
+
 /// Synthetic plugin that drives APL evaluation for one route + one phase.
 ///
 /// Implements `Plugin` (so praxis-policy-core treats it like any other plugin —
@@ -107,6 +153,9 @@ pub struct AplRouteHandler {
     config: PluginConfig,
     route: Arc<CompiledRoute>,
     phase: Phase,
+    /// The hook family this handler dispatches. Decides which payload
+    /// `invoke` expects and which typed invoker a request builds.
+    family: HookFamily,
     plugin_registry: Arc<PluginRegistry>,
     dispatch_cache: Arc<DispatchCache>,
     session_store: Arc<dyn SessionStore>,
@@ -130,10 +179,16 @@ pub struct AplRouteHandler {
 impl AplRouteHandler {
     /// Build a handler. Visitor calls this twice per route — once for
     /// each phase — and passes the resulting `Arc` to `annotate_route`.
+    ///
+    /// `family` comes from the route's entity type via
+    /// [`HookFamily::for_entity`] and decides which payload the handler
+    /// accepts, so it has to agree with the hook name the handler is
+    /// annotated under.
     pub fn new(
         config: PluginConfig,
         route: Arc<CompiledRoute>,
         phase: Phase,
+        family: HookFamily,
         plugin_registry: Arc<PluginRegistry>,
         dispatch_cache: Arc<DispatchCache>,
         session_store: Arc<dyn SessionStore>,
@@ -143,6 +198,7 @@ impl AplRouteHandler {
             config,
             route,
             phase,
+            family,
             plugin_registry,
             dispatch_cache,
             session_store,
@@ -203,20 +259,62 @@ impl AnyHookHandler for AplRouteHandler {
         extensions: &Extensions,
         _ctx: &mut PluginContext,
     ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
-        // Downcast to the CMF payload — this handler only registers for
-        // cmf.* hook names, so the executor should always hand us a
-        // MessagePayload. A mismatch indicates a framework wiring bug.
-        let msg_payload = payload
+        // The route's entity type decided the family at install, and the
+        // family decides the payload. Two monomorphizations of the same
+        // evaluation, one trait object out of each.
+        match self.family {
+            HookFamily::Cmf => self.evaluate::<CmfHook>(payload, extensions).await,
+            HookFamily::Http => self.evaluate::<HttpHook>(payload, extensions).await,
+        }
+    }
+
+    fn hook_type_name(&self) -> &'static str {
+        self.family.hook_type_name()
+    }
+}
+
+impl AplRouteHandler {
+    /// Evaluate this route for one invocation of hook family `H`.
+    ///
+    /// Generic so the plugins a policy step names are dispatched through
+    /// `H`, which is what hands an HTTP route's plugins an `HttpPayload`
+    /// instead of a chat message nothing filled. The message-shaped work
+    /// (projecting `args:` / `result:`, folding a pipeline's edits back) is
+    /// gated on the payload actually being a message, which an HTTP route
+    /// is not and cannot become: a field stage on one is refused at load.
+    async fn evaluate<H: HookTypeDef>(
+        &self,
+        payload: &dyn PluginPayload,
+        extensions: &Extensions,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>>
+    where
+        H::Payload: PayloadFields,
+    {
+        // The executor resolves the handler off the hook name, and the
+        // family this handler was installed for fixes the payload that name
+        // carries. A mismatch indicates a framework wiring bug.
+        let typed_payload = payload
             .as_any()
-            .downcast_ref::<MessagePayload>()
+            .downcast_ref::<H::Payload>()
             .ok_or_else(|| {
                 Box::new(PluginError::Config {
                     message: format!(
-                        "AplRouteHandler '{}': payload was not MessagePayload",
-                        self.route.route_key
+                        "AplRouteHandler '{}': the '{}' family expects {}, \
+                         which is not what this invocation carried",
+                        self.route.route_key,
+                        H::NAME,
+                        std::any::type_name::<H::Payload>(),
                     ),
                 })
             })?;
+
+        // The message a field pipeline addresses, when this family carries
+        // one. `None` for a payload with no fields, which is what makes
+        // every projection and write-back below a no-op there.
+        let message: Option<&Message> = typed_payload
+            .as_any()
+            .downcast_ref::<MessagePayload>()
+            .map(|msg| &msg.message);
 
         let engine = self.engine.upgrade().ok_or_else(|| {
             Box::new(PluginError::Config {
@@ -235,14 +333,16 @@ impl AnyHookHandler for AplRouteHandler {
             .get_or_build(&self.route, &self.plugin_registry, &engine)
             .await;
 
-        // CmfPluginInvoker carries the request-scoped payload + extensions
+        // The invoker carries the request-scoped payload + extensions
         // under interior mutability so successive plugin calls accumulate
-        // mutations. Hydration + persistence are no-ops when there's no
+        // mutations. It is bound to `H`, so the plugins a policy step names
+        // are dispatched through this route's own family.
+        // Hydration + persistence are no-ops when there's no
         // session id (the common case for the first request in a session).
         // Wrapped in Arc so it can be erased to `Arc<dyn PluginInvoker>`
         // for the praxis-policy-apl-core entry points (which take `&Arc<dyn PluginInvoker>`
         // so `dispatch_parallel` can clone an owned, 'static reference into
-        // each spawned branch). Inherent-method calls on `CmfPluginInvoker`
+        // each spawned branch). Inherent-method calls on the invoker
         // (e.g. `extensions_arc`, `persist_session`) deref through the Arc.
         // Hydration loads accumulated session labels. A store failure
         // here happens *before* any policy decision, so we fail the
@@ -250,10 +350,10 @@ impl AnyHookHandler for AplRouteHandler {
         // distinguished violation rather than proceeding as if the
         // session carried no taint. Sessionless traffic never reaches
         // the store, so this only denies session-bearing requests.
-        let invoker = match CmfPluginInvoker::for_request(
+        let invoker = match HookPluginInvoker::<H>::for_request(
             Arc::clone(&engine),
             extensions.clone(),
-            msg_payload.clone(),
+            typed_payload.clone(),
             plan,
             Arc::clone(&self.session_store),
         )
@@ -315,7 +415,12 @@ impl AnyHookHandler for AplRouteHandler {
         // as Null on Pre (no upstream response yet); the Post phase
         // would extract from a ToolResult / PromptResult — deferred
         // until result-side handling lands.
-        let args_value = extract_args_from_message(&msg_payload.message);
+        //
+        // A payload carrying no message projects `Null` on both sides. That
+        // is the whole of what a field stage could read there, and a field
+        // stage on such a route is refused at load rather than left to read
+        // it.
+        let args_value = message.map_or(Value::Null, extract_args_from_message);
         let mut route_payload = match self.phase {
             Phase::Pre => RoutePayload::new(args_value),
             Phase::Post => {
@@ -325,7 +430,7 @@ impl AnyHookHandler for AplRouteHandler {
                 // `Value::Null` when the message has no ToolResult /
                 // PromptResult / Resource content (e.g. for hooks that
                 // fire on entities without a structured result).
-                let result_value = extract_result_from_message(&msg_payload.message);
+                let result_value = message.map_or(Value::Null, extract_result_from_message);
                 RoutePayload::with_result(args_value, result_value)
             },
         };
@@ -458,12 +563,12 @@ impl AnyHookHandler for AplRouteHandler {
         // never sets `args_modified`, so the other projection would be
         // unread work on every request.
         let pre_args = match self.phase {
-            Phase::Pre => Some(extract_args_from_message(&msg_payload.message)),
+            Phase::Pre => message.map(extract_args_from_message),
             Phase::Post => None,
         };
         let pre_result = match self.phase {
             Phase::Pre => None,
-            Phase::Post => Some(extract_result_from_message(&msg_payload.message)),
+            Phase::Post => message.map(extract_result_from_message),
         };
         // Which of the three sources changed the payload, in precedence
         // order. Each condition is a signal from the code that performed
@@ -489,11 +594,19 @@ impl AnyHookHandler for AplRouteHandler {
             // exactly the clobbering this merge exists to prevent. Only
             // the Pre phase sets `args_modified`, and only the Pre phase
             // projects `pre_args`, so this holds by construction.
+            //
+            // The fold is message-shaped, so it is gated on the payload
+            // being one. `pre_args` is already `None` for a payload that
+            // carries no message, and a route on such a family cannot
+            // declare the `args:` stage that sets this flag, so the gate
+            // never has anything to skip.
             let mut updated = final_payload.clone();
-            if let Some(pre) = pre_args.as_ref() {
-                let mut merged = extract_args_from_message(&updated.message);
+            if let Some(pre) = pre_args.as_ref()
+                && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
+            {
+                let mut merged = extract_args_from_message(&target.message);
                 apply_changed_paths(&mut merged, pre, &route_payload.args);
-                write_args_back_to_message(&mut updated.message, &merged);
+                write_args_back_to_message(&mut target.message, &merged);
             }
             Some::<Box<dyn PluginPayload>>(Box::new(updated))
         } else if decision.result_modified {
@@ -507,14 +620,15 @@ impl AnyHookHandler for AplRouteHandler {
             // reason: a plugin may have redacted a different part of the
             // same tool result.
             // Same "no pre-projection, no write" rule as the args branch
-            // above, for the same reason.
+            // above, and the same message gate for the same reason.
             let mut updated = final_payload.clone();
             if let (Some(result_value), Some(pre)) =
                 (route_payload.result.as_ref(), pre_result.as_ref())
+                && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
             {
-                let mut merged = extract_result_from_message(&updated.message);
+                let mut merged = extract_result_from_message(&target.message);
                 apply_changed_paths(&mut merged, pre, result_value);
-                write_result_back_to_message(&mut updated.message, &merged);
+                write_result_back_to_message(&mut target.message, &merged);
             }
             Some::<Box<dyn PluginPayload>>(Box::new(updated))
         } else if invoker.payload_was_modified() {
@@ -672,12 +786,6 @@ impl AnyHookHandler for AplRouteHandler {
             violation,
         }))
     }
-
-    fn hook_type_name(&self) -> &'static str {
-        // CmfHook::NAME — kept as a literal here to avoid pulling in the
-        // HookTypeDef trait just for the constant.
-        "cmf"
-    }
 }
 
 /// Attach a route's transpiled `denyWith` (status/body/headers) to a
@@ -829,6 +937,30 @@ fn pending_violation(p: &praxis_policy_apl_core::step::PendingElicitation) -> Pl
 mod tests {
     use super::*;
     use praxis_policy_core::extensions::HttpExtension;
+
+    fn handler_for(entity_type: &str) -> AplRouteHandler {
+        AplRouteHandler::new(
+            PluginConfig::default(),
+            Arc::new(CompiledRoute::new("k")),
+            Phase::Pre,
+            HookFamily::for_entity(entity_type),
+            Arc::new(PluginRegistry::default()),
+            Arc::new(DispatchCache::new()),
+            Arc::new(crate::session_store::MemorySessionStore::new()),
+            Weak::new(),
+        )
+    }
+
+    /// The handler a route installs reports the family it was built for, so a
+    /// registry check reads the truth rather than a literal that was right for
+    /// one family only.
+    #[test]
+    fn a_handler_reports_the_family_its_entity_type_belongs_to() {
+        assert_eq!(handler_for(ENTITY_HTTP).hook_type_name(), HttpHook::NAME);
+        for entity_type in ["tool", "resource", "prompt", "llm"] {
+            assert_eq!(handler_for(entity_type).hook_type_name(), CmfHook::NAME);
+        }
+    }
 
     fn pending(id: &str) -> praxis_policy_apl_core::step::PendingElicitation {
         praxis_policy_apl_core::step::PendingElicitation {
