@@ -143,6 +143,10 @@ and what it says is more expensive or less helpful than intended.
   rather than silently reading nothing.
 - R16. Registering a handler for a hook whose payload it does not accept is
   refused, on the config-driven path as well as the typed one.
+- R17. A handler reports the hook family it was built for, rather than a literal
+  that happens to be right today.
+- R18. A hook registered with permissive metadata accepts a handler of any family,
+  so the open hook registry stays open.
 
 ---
 
@@ -324,6 +328,31 @@ takes a `HookTypeDef` and never consults it, and the config-driven factory path
 takes no type at all, which is the path a YAML-declared plugin travels. Nothing
 about a new hook type can be enforced by the compiler for that path, so U12
 validates the pairing in the registry and the CHANGELOG says load-time.
+
+**D9. The field trait is local to `praxis-policy-apl-runtime`.** Field addressing
+needs `DispatchPhase`, which lives in `praxis-policy-apl-core`, and
+`praxis-policy-core` is a leaf crate depending on no APL crate. So the method
+cannot go on `PluginPayload` without moving an APL concept into the leaf or
+duplicating it, and it would also oblige the identity, delegation, and elicitation
+payloads to carry a method about args/result projection that means nothing to them.
+A local trait is coherent because the trait itself is local, so implementing it for
+those payloads is allowed.
+
+**D10. The field trait reads; the write-back stays message-specific.** An HTTP
+route cannot declare `args:` or `result:` once U11 refuses it at load, so a
+write-back on a fieldless payload is unreachable by construction. Gating the
+existing message write-back on "this payload has fields" keeps the trait to one
+method and does not add an implementation whose only honest body is unreachable.
+
+**D11. Reuse `hook_type_name()` rather than adding a payload discriminator.**
+`AnyHookHandler` already reports the family, and `TypedHandlerAdapter` already
+answers `H::NAME`. A `&'static str` also prints in the refusal message, which a
+`TypeId` cannot.
+
+**D12. The row records `<Type>::NAME`, not a literal.** The hook name and the hook
+type are declared by different macros in different files, so a hand-written family
+string is two places that must agree. Writing the const expression ties them, which
+is the same reason the name and its metadata row are emitted together.
 
 
 ---
@@ -657,7 +686,7 @@ to what HTTP needs.
 fabricated message, and an `args:` or `result:` block on an HTTP route is refused
 at load.
 
-**Requirements:** R10, R15
+**Requirements:** R10, R15, R17
 
 **Dependencies:** U10
 
@@ -667,17 +696,31 @@ at load.
 - Modify: `crates/ppe-apl-runtime/src/visitor.rs` for the load-time refusal
 
 **Approach:**
-- Make the invoker's payload and its typed dispatch follow the hook family rather
-  than being fixed to `MessagePayload` and `invoke_entries::<CmfHook>`. The change
-  stays below `Arc<dyn PluginInvoker>`, which carries no payload, so
-  `praxis-policy-apl-core` is untouched.
-- The three message-specific touchpoints are the field read before the call, the
-  payload write-back, and the field re-read after. Express them as "what this
-  payload can do with a field", where the message answers with a value and the
-  HTTP payload answers with nothing.
+- Add a trait local to `praxis-policy-apl-runtime` answering one question: what is
+  this field's value on this payload, for this phase. `MessagePayload` answers
+  through the existing projection; `HttpPayload` answers `None` (D9). The trait
+  cannot live on `PluginPayload`: its signature needs `DispatchPhase`, which is in
+  `praxis-policy-apl-core`, and `praxis-policy-core` is a leaf crate that depends
+  on no APL crate.
+- Parameterize the invoker over `H: HookTypeDef` where `H::Payload` implements that
+  trait, which supplies both the typed dispatch and the field behavior from one
+  parameter. The generic is erased at `Arc<dyn PluginInvoker>`, which carries no
+  payload, so `praxis-policy-apl-core` is untouched and MCP's dispatch semantics do
+  not move.
+- The construction site (`route_handler.rs:253`) picks the concrete hook type from
+  the route's entity type. One branch, two monomorphizations, one trait object out.
+- Keep the write-back message-specific and gate it on the payload having fields at
+  all (D10). Preserve the `field_before` baseline comparison exactly: it exists so
+  an earlier pipeline stage's redaction is not undone by a readback, and getting it
+  wrong hands pre-redaction plaintext to the next stage.
 - `AplRouteHandler::invoke` stops downcasting unconditionally to `MessagePayload`.
   Its current comment asserts the handler "only registers for cmf.* hook names",
   which U10 makes false.
+- `AplRouteHandler::hook_type_name` returns the literal `"cmf"`
+  (`route_handler.rs:679`). U10 makes that wrong for every HTTP route. Nothing
+  validates it today, so this is latent rather than broken, but it is the same
+  stale-literal shape the hook authority exists to prevent: have it report the
+  family the handler was built for.
 - Because the HTTP payload supports no field stages, refuse an `args:` or
   `result:` block on an HTTP route at load rather than letting it read nothing.
   This is a new load-time error and needs its own CHANGELOG line.
@@ -699,6 +742,11 @@ serves two families rather than a fourth sibling being added.
 - Edge: a plugin returning a modified payload of the wrong type is reported
   rather than silently dropped, which is what the current downcast-failure warning
   does.
+- Edge: an MCP field pipeline whose earlier stage redacted a value still sees the
+  redacted value on readback, not the payload's untouched original. This is the
+  `field_before` invariant and the subtlest thing the unit can break.
+- Edge: the handler installed for an HTTP route reports the HTTP family rather than
+  `"cmf"`.
 
 ---
 
@@ -707,7 +755,7 @@ serves two families rather than a fourth sibling being added.
 **Goal:** A plugin registering for an HTTP hook with a CMF handler is reported,
 rather than passing and reporting clean at runtime.
 
-**Requirements:** R10, R16
+**Requirements:** R10, R16, R18
 
 **Dependencies:** U10. Independent of U11, though the two together are what make
 the guarantee complete.
@@ -716,15 +764,30 @@ the guarantee complete.
 - Modify: `crates/ppe-core/src/hooks/metadata.rs`, `crates/ppe-core/src/registry.rs`
 
 **Approach:**
-- Record on each metadata row which payload its hook carries, so the authority
-  that already knows which hooks exist also knows what they hand a handler.
-- Validate the pairing where registration happens, including
-  `register_for_names_with_handler`, which is the config-driven factory path the
-  hazard actually travels and which takes no hook type at all today.
-- Refuse the registration naming the plugin, the hook, and the mismatch. This is
-  a load-time refusal, not a compile-time one: the type parameter on
-  `register_for_names` is unused and the factory path has no type to check, so
-  nothing here can be enforced by the compiler (D8).
+- The discriminator already exists. `AnyHookHandler::hook_type_name()` returns the
+  family a handler was built for, and `TypedHandlerAdapter<H, P>` returns `H::NAME`
+  for it. No `TypeId` and no new handler method are needed (D11).
+- Add `family: Option<&'static str>` to `HookMetadata`, written in the
+  `define_hooks!` row as `<Type>::NAME` rather than a literal, so the row and the
+  hook type cannot drift apart (D12).
+- `Option` is load-bearing: `HookMetadata::permissive()` is the const wildcard a
+  host opts into, so `None` means "any family accepted". Without that, restoring
+  permissive behavior would start failing registrations and the open hook registry
+  would close.
+- Validate in `register_for_names_inner`, which both the typed and the
+  config-driven paths funnel through. The factory path
+  (`register_for_names_with_handler`) is the one the hazard actually travels and
+  takes no hook type at all today.
+- Refuse naming the plugin, the hook, the family the row expects, and the family
+  the handler reports. This is a load-time refusal, not a compile-time one: the
+  type parameter on `register_for_names` is never consulted and the factory path
+  has no type to check, so nothing here can be enforced by the compiler (D8).
+- Bound the claim honestly. `annotate_route` is generic over the handler type, not
+  a `HookTypeDef`, and inserts into `route_annotations` rather than the hook
+  registry, so it does not pass through this check. That is acceptable, because the
+  hazard is a plugin registering for an HTTP hook name and plugins arrive through
+  the factory path, but the CHANGELOG should not imply the check covers every way a
+  handler can reach a hook.
 
 **Patterns to follow:** the hook-name validation the loader already performs
 against the authority, and its error phrasing.
@@ -737,6 +800,9 @@ against the authority, and its error phrasing.
   registers, so the check does not close the open registry.
 - Happy: every reference plugin still loads, since none of them declares an HTTP
   hook today.
+- Edge: a hook registered with `permissive()` metadata accepts a handler of any
+  family, so the open registry stays open.
+- Edge: a route annotation still installs, since it does not travel this path.
 
 ---
 
@@ -821,7 +887,12 @@ for an HTTP hook name now fails at load instead of passing and reporting clean.
   comparison exactly.
 - U12 has to leave the open hook registry open. A host declaring its own hook and
   its own handler must still register, so the check can only refuse a pairing the
-  authority actually knows to be wrong, never an unrecognized one.
+  authority actually knows to be wrong, never an unrecognized one. `permissive()`
+  carrying no family is what makes that hold.
+- U12 does not cover `annotate_route`, which inserts into `route_annotations`
+  rather than the hook registry and is generic over the handler type rather than a
+  `HookTypeDef`. The hazard travels the factory path, so this is a bound on the
+  claim rather than a gap in it, and the CHANGELOG should say so.
 - The rename in U10 lands in the same release as the hook-name validation from the
   authority work, so an operator upgrading past both gets a refusal naming the new
   name rather than a hook that silently never fires. That is the good outcome and
@@ -854,6 +925,17 @@ for an HTTP hook name now fails at load instead of passing and reporting clean.
 - Whether a dedicated type closes the registration hazard by itself. No (D8): the
   type parameter on `register_for_names` is unused and the factory path has none,
   so U12 validates the pairing in the registry and the claim is load-time.
+- Where U11's field trait lives. In `praxis-policy-apl-runtime`, not on
+  `PluginPayload` (D9): the signature needs `DispatchPhase` from
+  `praxis-policy-apl-core`, and `praxis-policy-core` depends on no APL crate.
+- Whether that trait also owns the write-back. No (D10): an HTTP route cannot
+  declare a field stage, so the write-back is unreachable for a fieldless payload
+  and stays message-specific behind a gate.
+- Whether U12 needs a payload `TypeId` on the row. No (D11): `AnyHookHandler`
+  already reports the family and `TypedHandlerAdapter` already answers `H::NAME`,
+  and a string prints in the refusal where a `TypeId` cannot.
+- Whether the row's family is a literal. No (D12): it is written as `<Type>::NAME`
+  so the row and the type cannot disagree.
 
 ### Needs a decision before the affected unit starts
 
@@ -866,11 +948,8 @@ for an HTTP hook name now fails at load instead of passing and reporting clean.
 - Whether U7 returns a borrow or an index. Both satisfy R8; the choice falls out
   of what the borrow checker allows against `MatchedRoute`'s lifetimes.
 - Whether U6's answer lives on the snapshot or is recomputed by the visitor.
-- How U11 expresses "this payload has no fields": a trait method the payload
-  answers, or the hook family answering on its behalf. Both satisfy R15.
-- Whether the payload discriminator U12 records on a metadata row is a `TypeId` or
-  a name. A `TypeId` is exact and unprintable; a name is legible in the refusal
-  message and can drift from the type it describes.
+- What the field trait is called, and whether `HttpPayload`'s implementation is
+  hand-written or derived from a blanket "no fields" default.
 
 ---
 
