@@ -338,11 +338,11 @@ impl Extensions {
     /// Merge the guarded `http` slot — header maps and the request line.
     ///
     /// `write_headers` authorizes *headers*, which is what the capability is
-    /// named for. The request line (`method`, `path`, `host`, `scheme`) is
-    /// host-populated request identity that policies gate on, so it is always
-    /// preserved from canonical state and never taken from `owned`. `host` in
-    /// particular must come from a validated authority (see `HttpExtension`),
-    /// which a plugin's return value is not.
+    /// named for. The request line (`method`, `path`, `host`, `scheme`) and the
+    /// response `status` are host-populated identity that policies gate on, so
+    /// they are always preserved from canonical state and never taken from
+    /// `owned`. `host` in particular must come from a validated authority (see
+    /// `HttpExtension`), which a plugin's return value is not.
     fn merge_http(&mut self, owned: Option<Guarded<HttpExtension>>, token: Option<&WriteToken>) {
         let Some(owned) = owned else { return };
         if token.is_none() {
@@ -1202,6 +1202,41 @@ mod tests {
         assert_eq!(merged.scheme.as_deref(), Some("https"));
         assert_eq!(
             merged.get_request_header("X-Scanned"),
+            Some("1"),
+            "the header write it was authorized for still lands"
+        );
+    }
+
+    #[test]
+    fn test_http_merge_preserves_the_response_status() {
+        // A response-phase policy gates on the status the upstream returned, so
+        // a header write must not be able to rewrite it.
+        let http = HttpExtension {
+            status: Some(502),
+            ..Default::default()
+        };
+
+        let mut ext = Extensions {
+            http: Some(Arc::new(http)),
+            ..Default::default()
+        };
+        ext.http_write_token = Some(WriteToken::new());
+
+        let mut cow = ext.cow_copy();
+        let token = cow.http_write_token.take().expect("token propagated");
+        {
+            let h = cow.http.as_mut().unwrap().write(&token);
+            h.set_response_header("X-Scanned", "1");
+            h.status = Some(200);
+        }
+        cow.http_write_token = Some(token);
+
+        ext.merge_owned(cow);
+
+        let merged = ext.http.as_ref().unwrap();
+        assert_eq!(merged.status, Some(502));
+        assert_eq!(
+            merged.get_response_header("X-Scanned"),
             Some("1"),
             "the header write it was authorized for still lands"
         );

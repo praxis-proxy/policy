@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// HttpExtension — HTTP request and response headers.
+// HttpExtension — HTTP request and response headers, the request line, and
+// the response status.
 
 use std::collections::HashMap;
 
@@ -11,8 +12,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// Carries both request and response headers separately. The host
 /// populates what's available at each hook point:
-/// - Pre-invoke: `request_headers` filled, `response_headers` empty
-/// - Post-invoke: both filled (request from original, response from upstream)
+/// - Pre-invoke: `request_headers` filled, `response_headers` empty, `status` unset
+/// - Post-invoke: both header maps filled (request from original, response from
+///   upstream) and `status` set to the status the upstream returned
 ///
 /// Capability-gated: requires `read_headers` to see, `write_headers`
 /// to modify (both request and response).
@@ -25,6 +27,12 @@ pub struct HttpExtension {
     /// HTTP response headers (from upstream, populated post-invoke).
     #[serde(default)]
     pub response_headers: HashMap<String, String>,
+
+    /// HTTP response status the upstream returned (e.g. `200`, `502`).
+    /// The host populates this on the response invocation only, so it is
+    /// `None` on the request half, where no status exists yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
 
     /// HTTP request method (e.g. `GET`, `POST`). Set by the host when
     /// the request is HTTP; `None` for non-HTTP transports.
@@ -212,6 +220,36 @@ mod tests {
         let removed = http.remove_request_header("x-remove");
         assert_eq!(removed, Some("value".to_owned()));
         assert!(!http.has_request_header("X-Remove"));
+    }
+
+    #[test]
+    fn test_status_absent_from_serialized_output_when_unset() {
+        // A host that never populates a status must produce the same wire
+        // bytes it produced before the field existed.
+        let mut http = HttpExtension::default();
+        http.set_request_header("Authorization", "Bearer tok");
+        let json = serde_json::to_string(&http).unwrap();
+        assert!(!json.contains("status"), "{json}");
+        assert!(http.status.is_none());
+    }
+
+    #[test]
+    fn test_status_survives_a_roundtrip() {
+        let http = HttpExtension {
+            status: Some(502),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&http).unwrap();
+        let back: HttpExtension = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, Some(502));
+    }
+
+    #[test]
+    fn test_status_defaults_to_none_when_the_field_is_missing() {
+        // A peer serialized before the field existed still deserializes.
+        let back: HttpExtension =
+            serde_json::from_str(r#"{"request_headers":{},"response_headers":{}}"#).unwrap();
+        assert_eq!(back.status, None);
     }
 
     #[test]

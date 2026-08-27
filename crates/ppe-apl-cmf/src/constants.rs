@@ -157,15 +157,19 @@ pub const BAG_HTTP_PATH: &str = "http.path";
 pub const BAG_HTTP_HOST: &str = "http.host";
 /// Bag key `http.scheme`.
 pub const BAG_HTTP_SCHEME: &str = "http.scheme";
+/// Bag key `http.status`, the response status, set on the response half only.
+pub const BAG_HTTP_STATUS: &str = "http.status";
 // Violation `details` keys carrying a transpiled `denyWith` (custom HTTP
 // denial response). Shared between the producer (praxis-policy-apl-runtime route handler)
 // and any consumer (host renderer / tests) so the stringly-typed contract
-// stays coupled to one definition.
-/// Bag key `http.status`.
+// stays coupled to one definition. These name a violation's `details` map, not
+// the attribute bag, which is why `DETAIL_HTTP_STATUS` and `BAG_HTTP_STATUS`
+// can share a spelling without colliding.
+/// Violation `details` key `http.status`.
 pub const DETAIL_HTTP_STATUS: &str = "http.status";
-/// Bag key `http.body`.
+/// Violation `details` key `http.body`.
 pub const DETAIL_HTTP_BODY: &str = "http.body";
-/// Bag key `http.headers`.
+/// Violation `details` key `http.headers`.
 pub const DETAIL_HTTP_HEADERS: &str = "http.headers";
 /// Key prefix for model identity, as in `llm.<name>`.
 pub const BAG_LLM_PREFIX: &str = "llm.";

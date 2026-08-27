@@ -328,6 +328,19 @@ fn authenticated_request(method: &str, path: &str) -> Extensions {
     ext
 }
 
+/// The response half of one exchange: the same request line the host presented
+/// on the way in, plus the status the upstream returned.
+fn response(method: &str, path: &str, status: u16) -> Extensions {
+    let mut ext = request(method, path);
+    ext.http = Some(Arc::new(HttpExtension {
+        method: Some(method.to_owned()),
+        path: Some(path.to_owned()),
+        status: Some(status),
+        ..Default::default()
+    }));
+    ext
+}
+
 /// An HTTP request carrying a method but no path. This is the shape a host
 /// produces before it has attached the request line, and the shape that
 /// resolves no `http:` route however many are declared.
@@ -849,6 +862,174 @@ routes:
         )
         .await,
         "and not the request rule"
+    );
+}
+
+/// A response-phase rule decides on the status the upstream returned.
+#[tokio::test]
+async fn a_post_phase_rule_denies_on_an_upstream_server_error() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      post_invocation:
+        - "http.status >= 500: deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_CMF_HTTP_RESPONSE,
+            response("GET", "/v1/files/q3.pdf", 502)
+        )
+        .await,
+        "a 502 satisfies the rule, so the response is denied"
+    );
+    assert!(
+        fire(
+            &mgr,
+            HOOK_CMF_HTTP_RESPONSE,
+            response("GET", "/v1/files/q3.pdf", 200)
+        )
+        .await,
+        "a 200 does not, so it passes"
+    );
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_CMF_HTTP_RESPONSE,
+            response("GET", "/v1/files/q3.pdf", 500)
+        )
+        .await,
+        "the boundary is inclusive, so a 500 is denied too"
+    );
+    assert!(
+        fire(
+            &mgr,
+            HOOK_CMF_HTTP_RESPONSE,
+            response("GET", "/v1/files/q3.pdf", 499)
+        )
+        .await,
+        "and a 499 is not"
+    );
+}
+
+/// An equality rule reads the status as a number, not as a string. This pins
+/// the bag representation: were it a string, `== 502` would compare a string
+/// against an integer literal and answer false for every status.
+#[tokio::test]
+async fn a_post_phase_rule_matches_a_status_by_equality() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      post_invocation:
+        - "http.status == 502: deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_CMF_HTTP_RESPONSE,
+            response("GET", "/v1/files/q3.pdf", 502)
+        )
+        .await,
+        "the status reaches the bag as a number the literal can equal"
+    );
+    assert!(
+        fire(
+            &mgr,
+            HOOK_CMF_HTTP_RESPONSE,
+            response("GET", "/v1/files/q3.pdf", 503)
+        )
+        .await,
+        "and a different status does not match"
+    );
+}
+
+/// The request half carries no status, and a rule reading one there does not
+/// fire: a missing bag key makes a comparison false, so the deny does not
+/// trigger. A response-phase rule guarding a request-phase concern therefore
+/// admits the request rather than denying it, which is why a status rule
+/// belongs under `post_invocation:`.
+#[tokio::test]
+async fn a_status_rule_on_the_request_half_does_not_fire() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      pre_invocation:
+        - "http.status >= 500: deny"
+        - "http.method == 'TRACE': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    assert!(
+        fire(
+            &mgr,
+            HOOK_CMF_HTTP_REQUEST,
+            request("GET", "/v1/files/q3.pdf")
+        )
+        .await,
+        "no status exists yet, so the comparison is false and the rule is inert"
+    );
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_CMF_HTTP_REQUEST,
+            request("TRACE", "/v1/files/q3.pdf")
+        )
+        .await,
+        "the rule beside it still governs, so the block itself is live"
+    );
+}
+
+/// A host that never populates a status behaves exactly as it did before the
+/// field existed: the response half resolves the same route and its other
+/// rules still decide.
+#[tokio::test]
+async fn a_response_without_a_status_is_governed_as_before() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+routes:
+  - http:
+      path_prefix: /v1/files
+    apl:
+      post_invocation:
+        - "http.status >= 500: deny"
+        - "http.method == 'TRACE': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    assert!(
+        fire(
+            &mgr,
+            HOOK_CMF_HTTP_RESPONSE,
+            request("GET", "/v1/files/q3.pdf")
+        )
+        .await,
+        "a host that sets no status is not denied by the status rule"
+    );
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_CMF_HTTP_RESPONSE,
+            request("TRACE", "/v1/files/q3.pdf")
+        )
+        .await,
+        "and the rule beside it decides exactly as it did before"
     );
 }
 

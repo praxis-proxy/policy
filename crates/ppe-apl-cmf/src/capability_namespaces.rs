@@ -147,11 +147,13 @@ const TABLE: &[CapabilityEntry] = &[
         prefixes: &[
             BAG_HTTP_REQUEST_HEADERS_PREFIX,
             BAG_HTTP_RESPONSE_HEADERS_PREFIX,
-            // The request line rides the same capability as headers.
+            // The request line and the response status ride the same
+            // capability as headers.
             BAG_HTTP_METHOD,
             BAG_HTTP_PATH,
             BAG_HTTP_HOST,
             BAG_HTTP_SCHEME,
+            BAG_HTTP_STATUS,
         ],
     },
     CapabilityEntry {
@@ -281,6 +283,9 @@ mod tests {
         let prefixes = capability_namespaces(CAP_READ_HEADERS);
         assert!(prefixes.contains(&BAG_HTTP_REQUEST_HEADERS_PREFIX));
         assert!(prefixes.contains(&BAG_HTTP_RESPONSE_HEADERS_PREFIX));
+        // The whole `http` slot is gated as one, so the response status is
+        // readable wherever response headers are.
+        assert!(prefixes.contains(&BAG_HTTP_STATUS));
     }
 
     #[test]

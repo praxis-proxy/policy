@@ -23,6 +23,20 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **`cmf.http_response`, the return half of the L7 path.** `cmf.http_request` had no counterpart because authorization is an admission check that belongs entirely before the request is forwarded. Response filtering is not: stripping a header the upstream set, enforcing a content type, and attaching labels all belong after. Header and extension filtering only, since no response body exists in the model yet and the payload is unused on this path. A `global.apl` carrying `result:` or `post_invocation:` steps now installs a `Post`-phase handler under the same `http` / `*` coordinates the request hook uses; a policy that only authorizes gains nothing and installs nothing. PPE defining and routing a hook does not oblige a host to fire it, so a host that never does sees no change. For the host that does adopt it: a `global.apl` whose post steps were previously inert on the entity-less HTTP path becomes live the moment the hook is fired, and `result.*` keys do not exist for a request carrying no entity, so a step reading one denies. Check what the global post block does before firing.
 
+- **`http.status`, the response status a post-phase policy can read.** The HTTP
+  model carried the request line and both header maps but no status, so a rule
+  like `http.status >= 500: deny` had nothing to read and a response-phase policy
+  could not act on what the upstream returned. `HttpExtension` now carries
+  `status: Option<u16>`, and it reaches the attribute bag as an integer under
+  `http.status`, so ordering and equality predicates both compare numerically. The
+  host populates it on the response invocation only, the way `response_headers` is
+  already populated, so the key is absent on the request half. A missing bag key
+  makes a comparison false, which means a status rule placed under
+  `pre_invocation:` is inert rather than denying; keep it under
+  `post_invocation:`. It rides the `read_headers` capability with the rest of the
+  `http` slot, and it is omitted from serialized output when unset, so a host that
+  never sets it is unaffected. ([#40](https://github.com/praxis-proxy/policy/issues/40))
+
 - **`http:`, a route selector for generic HTTP requests.** L7 traffic carries
   no entity, so it resolved no route at all: no route-level plugins, no group
   membership, no static tags, no route-level `authentication:`. A route can now
@@ -53,8 +67,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   warns once naming the route, so which of the two a deployment is in is
   readable from what the engine emits rather than from the host's source.
   ([#40](https://github.com/praxis-proxy/policy/issues/40))
-
-- **`cmf.http_response`, the return half of the L7 path.** `cmf.http_request` had no counterpart because authorization is an admission check that belongs entirely before the request is forwarded. Response filtering is not: redaction, label propagation, and any check that needs the body the upstream actually returned all belong after. A `global.apl` carrying `result:` or `post_invocation:` steps now installs a `Post`-phase handler under the same `http` / `*` coordinates the request hook uses; a policy that only authorizes gains nothing and installs nothing. PPE defining and routing a hook does not oblige a host to fire it, so a host that never does sees no change. For the host that does adopt it: a `global.apl` whose post steps were previously inert on the entity-less HTTP path becomes live the moment the hook is fired, and `result.*` keys do not exist for a request carrying no entity, so a step reading one denies. Check what the global post block does before firing.
 
 - **One declaration per hook, holding both its name and its routing metadata.** `define_hooks!` emits a hook's `pub const` and its `hooks::metadata` row together, so a name without a row is unrepresentable rather than something to test for. A host declaring its own hooks can use it too, then register the resulting slice at startup. `crates/ppe-core/examples/plugin_demo.rs` shows the pattern.
 
