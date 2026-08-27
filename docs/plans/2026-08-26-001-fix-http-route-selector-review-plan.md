@@ -365,6 +365,24 @@ rather than a silent one, and the direction it defaults to is the safe one: a
 payload wrongly claiming no fields loses a pipeline stage it never had, where the
 reverse would hand a plugin a field that does not exist.
 
+**D14. U2's guard fixes entity routes too, in this pass.** Measured rather than
+assumed: a `tool:` route listing `plugins: [deny-gate]` alongside a policy body
+declaring only pre-phase steps installs a post handler that runs no steps, and that
+handler suppresses the route's own plugin chain. Firing the post hook returns
+`continue = true` with no violation before the guard and `continue = false` with the
+plugin's denial after it. So the operator wrote a plugin onto the route and it never
+ran on the post half. That is the same defect as the HTTP case rather than a scope
+widening, and leaving it would require conditioning the guard on the entity type,
+which puts a special case in the one place the rule should be general and is then
+deleted by the follow-up.
+
+The change is one indivisible edit: two predicate bindings and an `if` around each
+`install_handler`, inside a loop over every entity type. It cannot be split into an
+HTTP commit and an entity commit, so traceability comes from the commit message
+naming both effects, a CHANGELOG entry for each, and a test for each. The direction
+is fail-closed, since a previously suppressed deny begins denying, and no test in
+the suite catches the difference today.
+
 ---
 
 ## Scope Boundaries
@@ -441,8 +459,16 @@ each half installs on the route path the way it does on the global catch-all.
   to the merge.
 - Leave the layer-seeding order alone, so a route with no `apl:` block still
   receives the global policy.
-- Treat the entity-route widening as intended and cover it: an entity route
-  declaring only pre-phase steps installs no post handler.
+- Treat the entity-route effect as intended and in scope (D14). It is the same
+  defect: an entity route listing plugins alongside a pre-only policy body installs
+  an empty post handler that suppresses those plugins, so they never run on the post
+  half. The guard un-suppresses them.
+- The edit is indivisible, so give the commit message both effects, and write two
+  CHANGELOG entries: one for the HTTP response chain, one for entity routes whose
+  post-half plugins begin running. Say in the second that a deny there begins
+  denying.
+- Say it in the PR description too. A reviewer reading a diff titled for an HTTP
+  route selector should know before the guard that it reaches MCP dispatch.
 
 **Patterns to follow:** the global catch-all's own two-predicate decision and the
 comment above it.
@@ -452,6 +478,10 @@ comment above it.
   response-side chain.
 - Happy: a route declaring both halves still installs both.
 - Edge: an entity route declaring only pre-phase steps installs no post handler.
+- Edge: an entity route listing plugins alongside a pre-only policy body runs those
+  plugins on the post half. Assert the denial, not just the install: before the
+  guard the post half allows with no violation, and the install flag alone does not
+  show that a plugin was being suppressed.
 - Edge: a body-less route with a global body still receives the global policy on
   the half that declares steps.
 
@@ -854,9 +884,12 @@ deployment relying on the current order-dependence, or on `/admin/` reaching the
 global policy, changes behavior. That is the point of the fix and belongs in the
 CHANGELOG as a behavior change rather than a bug fix.
 
-U2 reaches entity routes through shared code, which is the widest blast radius
-here and the reason it gets its own unit and its own test rather than riding
-along.
+U2 reaches entity routes through shared code, which is the widest blast radius in
+the selector track. An entity route that lists plugins alongside a pre-only policy
+body currently suppresses those plugins on the post half; after the guard they run,
+and a deny among them begins denying. Fail-closed, and a behavior change to all four
+MCP selectors that the CHANGELOG has to name in its own entry rather than fold into
+the HTTP one.
 
 U6, U7, and U8 are internal. No configuration or public signature changes.
 
@@ -930,6 +963,10 @@ for an HTTP hook name now fails at load instead of passing and reporting clean.
   Relocation (D3), with the latch as the fallback if the snapshot shape resists.
 - Whether U2 belongs in this pass or behind the body work. This pass: the fix is
   cheap now, and the exposure grows exactly when the body lands.
+- Whether U2's guard should reach entity routes or stay HTTP-only. It reaches them
+  (D14): the measured behavior is a route's own plugins never running on the post
+  half, which is the same defect rather than a widening, and scoping it out means a
+  special case in shared code that a follow-up deletes.
 - Whether the HTTP hooks get their own type or keep `CmfHook` with a documented
   unused payload. Their own type, and the payload reaches the plugin rather than
   only the host (D6). A doc comment cannot fail a load.
@@ -960,9 +997,7 @@ for an HTTP hook name now fails at load instead of passing and reporting clean.
 
 ### Needs a decision before the affected unit starts
 
-- U2's entity-route widening. The plan treats it as intended and tests it. If it
-  should stay HTTP-only, the guard needs to be conditional on the entity type,
-  which is a worse shape and worth avoiding if the widening is acceptable.
+None. Every choice that changes what gets built is recorded above.
 
 ### Deferred to implementation
 
