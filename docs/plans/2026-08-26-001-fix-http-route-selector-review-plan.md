@@ -38,6 +38,17 @@ existing config's behavior, and all three move it toward the narrower route: the
 method scoring, the case-folded duplicate check, and the exact-path trailing
 slash.
 
+A second track gives the HTTP hooks a payload of their own. Both are typed on the
+chat-message payload that MCP uses, which the HTTP path never fills, so a
+content-scanning plugin written for MCP registers on the response hook, scans a
+message the host had to fabricate, finds nothing, and reports clean. An
+always-passing scanner is worse than no scanner. The four units there give the
+family its own type and names, make plugin dispatch carry that payload rather than
+a fabricated message, check the pairing where handlers register, and add the
+response status a post-phase policy needs and cannot currently read. A dedicated
+type does not fail the bad registration at compile time, which is why the registry
+check is a unit of its own rather than a footnote.
+
 ---
 
 ## Implementation Guidelines
@@ -123,6 +134,15 @@ and what it says is more expensive or less helpful than intended.
 - R12. No existing configuration changes which handlers install or which route it
   resolves to, except where R1, R2, and R3 deliberately move it toward the
   narrower route.
+- R13. The HTTP hooks carry a payload of their own, and it is a struct rather than
+  a unit so a body chunk can land in it later without changing the hook type
+  twice.
+- R14. The HTTP hook names name the family they belong to, and the authority holds
+  their rows outside the CMF family's table.
+- R15. A policy block an HTTP route's payload cannot serve is refused at load
+  rather than silently reading nothing.
+- R16. Registering a handler for a hook whose payload it does not accept is
+  refused, on the config-driven path as well as the typed one.
 
 ---
 
@@ -179,7 +199,7 @@ Both HTTP hooks are typed on `CmfHook`, whose payload is an LLM chat message.
 The HTTP path fills nothing into it: the e2e harness constructs
 `Message::text(Role::User, "hi")` for an HTTP request, and header mutation goes
 through `modified_extensions`. A content-inspecting plugin written for MCP is
-`HookHandler<CmfHook>`, so it registers on `cmf.http_response`, scans the
+`HookHandler<CmfHook>`, so it registers on the HTTP response hook, scans the
 fabricated message, finds nothing, and reports clean. An always-passing scanner
 is worse than no scanner.
 
@@ -187,14 +207,71 @@ There is also no HTTP status code anywhere, on the extension or in the payload,
 so a response-phase policy cannot express "deny on 5xx" or "label 4xx". That is
 close to the first thing anyone writes at that point.
 
-A body is not a payload field. A response is status, then headers, then chunks,
-then trailers, so an owned-body payload forces the proxy to buffer before policy
-runs: unbounded memory on attacker-controlled response sizes, and a deadlock
-rather than a slowdown on SSE, which is how MCP streams. Body inspection needs a
-per-chunk phase a plugin opts into through a capability, with a size cap and
-deny-on-overflow. That is a separate piece of work; U9 only decides the hook type
-and the status field, while the whole CHANGELOG is `[Unreleased]` at 0.1.0 and the
-cost is a search and replace rather than a migration.
+### A dedicated hook type does not fail that registration at compile time
+
+Worth stating plainly, because it is the reason the work below is four units
+rather than one. `register_for_names::<H: HookTypeDef>` takes the hook type and
+never consults it:
+
+```rust
+pub fn register_for_names<H: HookTypeDef>(..., names: &[&str]) -> Result<(), String> {
+    self.register_for_names_inner(plugin, config, handler, names)   // H unused
+}
+```
+
+`register_for_names_with_handler` drops the type parameter entirely, and its own
+doc says why: it is "the config-driven factory path where the hook type is not
+known at compile time". That is the path the hazard travels. The PII scanner
+wraps `TypedHandlerAdapter::<CmfHook, _>` for every name in `cfg.hooks`, so a
+plugin declaring the HTTP response hook in YAML never names a hook type anywhere
+a compiler could check it.
+
+So a new type alone closes nothing. What closes it is the type plus a name-to-type
+check in the registry, which is why U12 exists. After the hook-authority work the
+metadata table is the single place that knows which hooks exist, so it is the
+natural place to record which payload each one carries.
+
+### The dispatcher is payload-agnostic above the invoker
+
+`PluginInvoker`, the boundary the evaluator sees, takes a name, an attribute bag,
+and an invocation discriminator. No payload crosses it, and it is used as
+`Arc<dyn PluginInvoker>` in twenty-five places, so a payload change stays below
+the trait object and never reaches `praxis-policy-apl-core`.
+
+Below it the message-specific surface is small and concentrated: one construction
+site (`route_handler.rs:253`), one typed dispatch (`cmf_invoker.rs:374`), and
+three touchpoints in one method, which read the field before the call, write the
+returned payload back, and re-read the field after.
+
+Per-family invokers are already the pattern. `CmfPluginInvoker` dispatches
+`invoke_entries::<CmfHook>`, `delegation_invoker` dispatches
+`::<TokenDelegateHook>`, and `elicitation_invoker` dispatches
+`::<ElicitationHook>`. Making the CMF invoker's dispatch follow the route's hook
+type is a smaller change than adding a fourth sibling, and it is what lets a
+plugin on an HTTP route receive a payload that does not pretend to hold content.
+
+### Why the payload has to reach the plugin, not just the host
+
+Branching in `AplRouteHandler` to build an empty message would fix the host's
+entry call and nothing else. `invoke_entries::<CmfHook>` would still hand every
+APL-dispatched plugin a `MessagePayload`, so the scanner referenced by an HTTP
+route's policy step would still scan a fabricated message and still report clean.
+That relocates the fabrication from the host into PPE rather than removing it.
+
+Making the dispatch follow the route's hook type also makes "this payload has no
+fields" expressible, which is what allows an `args:` or `result:` block on an
+HTTP route to be refused at load instead of silently reading nothing.
+
+### A body is not a payload field
+
+A response is status, then headers, then chunks, then trailers, so an owned-body
+payload forces the proxy to buffer before policy runs: unbounded memory on
+attacker-controlled response sizes, and a deadlock rather than a slowdown on SSE,
+which is how MCP streams. Body inspection needs a per-chunk phase a plugin opts
+into through a capability, with a size cap and deny-on-overflow. That stays out
+of scope. The units below only give the family its own type, payload, names, and
+status field, while the whole CHANGELOG is `[Unreleased]` at 0.1.0 and the cost is
+a search and replace rather than a migration.
 
 ---
 
@@ -228,6 +305,27 @@ goes.
 so the fix has to keep the non-absolute early return handing back `raw` byte for
 byte, which is documented behavior.
 
+**D6. The payload reaches the plugin, not just the host.** Branching in
+`AplRouteHandler` to synthesize an empty message would fix the host's entry call
+and leave `invoke_entries::<CmfHook>` handing every APL-dispatched plugin a
+`MessagePayload`, so the scanner referenced by an HTTP route's policy step would
+still scan a fabricated message and still report clean. That relocates the
+fabrication instead of removing it. Making the typed dispatch follow the route's
+hook family is confined below `Arc<dyn PluginInvoker>`, which carries no payload,
+so it costs less than the trait-level generalization it looks like.
+
+**D7. Rename the hook names with the type.** A `cmf.` prefix on a hook whose
+payload is not CMF is a name that lies, and the loader's nearest-name suggestion
+already turns a stale name into a legible error. Config-visible and cheapest while
+the CHANGELOG is `[Unreleased]` at 0.1.0.
+
+**D8. Claim a load-time refusal, not a compile-time one.** `register_for_names`
+takes a `HookTypeDef` and never consults it, and the config-driven factory path
+takes no type at all, which is the path a YAML-declared plugin travels. Nothing
+about a new hook type can be enforced by the compiler for that path, so U12
+validates the pairing in the registry and the CHANGELOG says load-time.
+
+
 ---
 
 ## Scope Boundaries
@@ -235,7 +333,8 @@ byte, which is documented behavior.
 In scope: route scoring for `method:`, duplicate detection for case-variant
 methods, exact-path trailing slash, per-half handler install on the route path,
 the rename diagnostic, multi-key reporting, the authentication latch, the two
-name allocations, and the normalizer allocation.
+name allocations, the normalizer allocation, and the HTTP hook family's own type,
+payload, names, status field, and registration check.
 
 Out of scope: body plumbing and a per-chunk inspection phase; the pre-existing
 glob-route policy-body gap the selector's plan already excluded; Cedar and Rego
@@ -243,9 +342,9 @@ annotation paths, which register no annotations today; whether the host supplies
 the request line on the response half and at `identity.resolve`, which is the
 Praxis side of the contract and gates the observable effect of U2 and U7.
 
-U9 is a decision and a CHANGELOG note in this plan. If it resolves toward a
-dedicated hook type, that lands as its own change against the hook authority, not
-inside this one.
+The hook-family work is deliberately not a trait-level generalization. Making
+`PluginInvoker` generic over the payload is unnecessary, because the trait already
+carries no payload, and the MCP dispatch path stays untouched (D6).
 
 ---
 
@@ -474,55 +573,198 @@ error, and a route with three bad keys names all three.
 
 ---
 
-- U9. **Decide the HTTP hook's payload and status** (decision, then a separate
-  change)
+- U9. **A response carries its status**
 
-**Goal:** A plugin that cannot read what an HTTP hook carries cannot register on
-it and report clean, and a response policy can decide on status.
+**Goal:** A response-phase policy can decide on the HTTP status the upstream
+returned.
 
-**Requirements:** R10, R11
+**Requirements:** R11
 
-**Dependencies:** Blocks nothing here. Resolve before hosts write plugins against
-the current type.
+**Dependencies:** None. Independent of U10 through U12 and worth landing first,
+since it is the smallest and the only one visible to policy authors.
 
 **Files:**
-- Decide only, in this plan. Implementation lands against the hook authority.
+- Modify: `crates/ppe-core/src/extensions/http.rs`, the attribute-bag walk, and
+  the HTTP attribute documentation.
 
 **Approach:**
-- Option A: give HTTP its own hook type, so an `HookHandler<CmfHook>` scanner
-  fails to compile rather than silently passing. One type serves both halves. An
-  empty struct rather than `()` leaves room for a body chunk later without
-  changing the type twice; `PluginPayload` needs only
-  `Clone + Send + Sync + 'static`. Not prototyped.
-- Option B: keep `CmfHook`, add a status field, and document on both constants
-  that the payload is unused. Closes the expressiveness gap and not the hazard,
-  since a doc comment cannot fail a build.
-- Either option adds the status field.
+- Add `status: Option<u16>` to `HttpExtension` beside `response_headers`, with the
+  same `skip_serializing_if` treatment the other optional fields get.
+- Surface it in the attribute bag as `http.status` so a predicate can read it.
+  `None` on the request half, since there is no status yet.
+- Document that the host populates it on the response invocation only, the way
+  `response_headers` is already documented.
+
+**Patterns to follow:** `response_headers` for the request/response split, and
+`method` / `path` for an optional scalar reaching the bag.
 
 **Test scenarios:**
-- Under A: a `CmfHook` handler registered on an HTTP hook fails to compile.
-- Under either: a response policy denies on a 5xx status.
+- Happy: a post-phase rule denying on `http.status >= 500` fires for a 502 and
+  not for a 200.
+- Edge: the request half sees no `http.status` key, and a rule reading it denies
+  rather than erroring open.
+- Edge: a host that never sets it behaves exactly as today.
+
+---
+
+- U10. **The HTTP family gets its own hook type, payload, and names**
+
+**Goal:** The HTTP hooks stop borrowing a chat-message payload they never fill.
+
+**Requirements:** R10, R13, R14
+
+**Dependencies:** None. U11 and U12 both build on it.
+
+**Files:**
+- Modify: `crates/ppe-core/src/extensions/http.rs` or a new sibling for the
+  payload, `crates/ppe-core/src/cmf/constants.rs`, `crates/ppe-core/src/hooks/metadata.rs`
+- Modify: `crates/ppe-apl-runtime/src/visitor.rs` and the two HTTP test files
+
+**Approach:**
+- Add `HttpPayload`, an empty struct rather than `()`, through
+  `impl_plugin_payload!`. `PluginPayload` needs only
+  `Clone + Send + Sync + 'static`, so the shape is mechanically fine, and a struct
+  leaves somewhere for a body chunk to land later without changing the hook type
+  twice.
+- Declare `HttpHook` with `define_hook!`, payload `HttpPayload`, result
+  `PluginResult<HttpPayload>`, one type serving both halves the way `CmfHook`
+  serves a dozen names.
+- Rename the two hook names to `http.request` and `http.response` and move their
+  rows out of the CMF family table into an HTTP one (D7). The constants move with
+  them.
+- Update the two HTTP test files, which name the hooks about fifty times between
+  them, and the visitor's hook-pair mapping.
+
+**Patterns to follow:** `identity/hook.rs`, which pairs a `define_hooks!` row with
+a `define_hook!` type for a family of its own, and is the closest existing shape
+to what HTTP needs.
+
+**Test scenarios:**
+- Happy: both HTTP hooks resolve from the authority with their new names and the
+  entity type and phases they had.
+- Happy: a host invoking by name with `HttpHook` and an `HttpPayload` reaches an
+  HTTP route's policy.
+- Edge: the old names are absent from the authority, so a config naming one is
+  refused with the nearest-name suggestion the loader already produces.
+- Edge: the CMF family table no longer contains an HTTP row, and the count test
+  over the authority reflects that.
+
+---
+
+- U11. **Plugin dispatch follows the route's hook type**
+
+**Goal:** A plugin invoked on an HTTP route receives `HttpPayload`, not a
+fabricated message, and an `args:` or `result:` block on an HTTP route is refused
+at load.
+
+**Requirements:** R10, R15
+
+**Dependencies:** U10
+
+**Files:**
+- Modify: `crates/ppe-apl-runtime/src/cmf_invoker.rs`,
+  `crates/ppe-apl-runtime/src/route_handler.rs`
+- Modify: `crates/ppe-apl-runtime/src/visitor.rs` for the load-time refusal
+
+**Approach:**
+- Make the invoker's payload and its typed dispatch follow the hook family rather
+  than being fixed to `MessagePayload` and `invoke_entries::<CmfHook>`. The change
+  stays below `Arc<dyn PluginInvoker>`, which carries no payload, so
+  `praxis-policy-apl-core` is untouched.
+- The three message-specific touchpoints are the field read before the call, the
+  payload write-back, and the field re-read after. Express them as "what this
+  payload can do with a field", where the message answers with a value and the
+  HTTP payload answers with nothing.
+- `AplRouteHandler::invoke` stops downcasting unconditionally to `MessagePayload`.
+  Its current comment asserts the handler "only registers for cmf.* hook names",
+  which U10 makes false.
+- Because the HTTP payload supports no field stages, refuse an `args:` or
+  `result:` block on an HTTP route at load rather than letting it read nothing.
+  This is a new load-time error and needs its own CHANGELOG line.
+
+**Patterns to follow:** `delegation_invoker` and `elicitation_invoker`, which each
+own a typed dispatch for their family. The difference here is that one invoker
+serves two families rather than a fourth sibling being added.
+
+**Test scenarios:**
+- Happy: a plugin referenced by an HTTP route's policy step receives
+  `HttpPayload`, asserted by a fixture plugin that fails if handed anything else.
+- Happy: MCP routes keep receiving `MessagePayload`, and the field stages behave
+  exactly as they do today. This is the regression surface that matters most.
+- Edge: an `args:` block on an HTTP route fails the load naming the route and the
+  block.
+- Edge: a transform plugin on an HTTP route mutating extensions still has its
+  mutation persisted, since header rewriting goes through `modified_extensions`
+  rather than the payload.
+- Edge: a plugin returning a modified payload of the wrong type is reported
+  rather than silently dropped, which is what the current downcast-failure warning
+  does.
+
+---
+
+- U12. **Registration checks the payload a hook name expects**
+
+**Goal:** A plugin registering for an HTTP hook with a CMF handler is reported,
+rather than passing and reporting clean at runtime.
+
+**Requirements:** R10, R16
+
+**Dependencies:** U10. Independent of U11, though the two together are what make
+the guarantee complete.
+
+**Files:**
+- Modify: `crates/ppe-core/src/hooks/metadata.rs`, `crates/ppe-core/src/registry.rs`
+
+**Approach:**
+- Record on each metadata row which payload its hook carries, so the authority
+  that already knows which hooks exist also knows what they hand a handler.
+- Validate the pairing where registration happens, including
+  `register_for_names_with_handler`, which is the config-driven factory path the
+  hazard actually travels and which takes no hook type at all today.
+- Refuse the registration naming the plugin, the hook, and the mismatch. This is
+  a load-time refusal, not a compile-time one: the type parameter on
+  `register_for_names` is unused and the factory path has no type to check, so
+  nothing here can be enforced by the compiler (D8).
+
+**Patterns to follow:** the hook-name validation the loader already performs
+against the authority, and its error phrasing.
+
+**Test scenarios:**
+- Edge: a `TypedHandlerAdapter::<CmfHook, _>` registered for an HTTP hook name is
+  refused naming the plugin and the hook.
+- Edge: the same handler registered for its own CMF names still registers.
+- Edge: a host hook registered with its own metadata and its own handler
+  registers, so the check does not close the open registry.
+- Happy: every reference plugin still loads, since none of them declares an HTTP
+  hook today.
 
 ---
 
 ## Unit Dependency Graph
 
 ```
-U1  U2  U4  U5  U6  U8      independent
-U3 ──► U7                   same function; ordering only, not a data dependency
-U9                          decision, independent of all of the above
+U1  U2  U4  U5  U6  U8  U9    independent
+U3 ──► U7                     same function; ordering only, not a data dependency
+U10 ──► U11                   dispatch needs the type to dispatch on
+    └─► U12                   the registry check needs the payload recorded
 ```
 
-Nothing blocks anything else. Suggested order by risk: U2 and U1 first, since
-they change behavior and want the most review attention; then U3 and U4; then U5;
-then U6, U7, U8, which are cost. U9 is a conversation to have in parallel.
+Within the selector fixes nothing blocks anything else. Suggested order by risk:
+U2 and U1 first, since they change behavior and want the most review attention;
+then U3 and U4; then U5; then U6, U7, U8, which are cost.
+
+The hook-family units are a separate track. U9 is independent and smallest, so it
+can land any time. U10 is a rename plus a type and touches roughly fifty test call
+sites, so it wants to land early in its track and alone. U11 and U12 both depend on
+it and are independent of each other; U11 carries the MCP regression risk and U12
+is what actually closes the registration hazard.
 
 ---
 
 ## System-Wide Impact
 
-`config.rs` carries five of the nine units, so sequencing them as separate commits
-matters more than usual for reviewability.
+`config.rs` carries five of the nine selector units, so sequencing them as
+separate commits matters more than usual for reviewability.
 
 U1, U3, and U4 move requests from a broader policy to a narrower one. A
 deployment relying on the current order-dependence, or on `/admin/` reaching the
@@ -535,8 +777,22 @@ along.
 
 U6, U7, and U8 are internal. No configuration or public signature changes.
 
-U9, under option A, changes a public hook type while the CHANGELOG is
-`[Unreleased]` at 0.1.0.
+U9 adds a field to a public extension. Additive, and a host that never sets it is
+unaffected.
+
+U10 is the widest change in the plan. It renames two hook names, so a config
+naming the old ones is refused, and it changes the hook type a host names when it
+invokes them. Both are config- and API-visible, and both are cheapest now: the
+CHANGELOG is `[Unreleased]` at 0.1.0, and after hosts have written plugins against
+`CmfHook` this becomes a migration rather than a search and replace.
+
+U11 touches the dispatch path every APL route uses, MCP included. Nothing about
+the MCP payload changes, but the code that carries it does, which makes the MCP
+field-stage tests the regression surface that matters most in this plan.
+
+U12 refuses a registration that succeeds today. No shipped plugin declares an HTTP
+hook, so nothing in the tree changes, but a host that registered a CMF handler
+for an HTTP hook name now fails at load instead of passing and reporting clean.
 
 ---
 
@@ -558,6 +814,18 @@ U9, under option A, changes a public hook type while the CHANGELOG is
   clothes.
 - The three instrumentation counters in the probe patch are not tests and must
   come back out before the branch merges.
+- U11 is the one unit that can break MCP. The payload it carries is unchanged, but
+  every APL route's dispatch runs through the code it edits, and the field-stage
+  read-write-reread sequence is subtle: the field baseline exists specifically so
+  an earlier stage's redaction is not undone by a readback. Preserve that
+  comparison exactly.
+- U12 has to leave the open hook registry open. A host declaring its own hook and
+  its own handler must still register, so the check can only refuse a pairing the
+  authority actually knows to be wrong, never an unrecognized one.
+- The rename in U10 lands in the same release as the hook-name validation from the
+  authority work, so an operator upgrading past both gets a refusal naming the new
+  name rather than a hook that silently never fires. That is the good outcome and
+  worth stating in the CHANGELOG entry.
 
 ---
 
@@ -574,12 +842,21 @@ U9, under option A, changes a public hook type while the CHANGELOG is
   Relocation (D3), with the latch as the fallback if the snapshot shape resists.
 - Whether U2 belongs in this pass or behind the body work. This pass: the fix is
   cheap now, and the exposure grows exactly when the body lands.
+- Whether the HTTP hooks get their own type or keep `CmfHook` with a documented
+  unused payload. Their own type, and the payload reaches the plugin rather than
+  only the host (D6). A doc comment cannot fail a load.
+- Whether generalizing the dispatch means generalizing `PluginInvoker`. No: the
+  trait already carries no payload, so the change stays below the trait object and
+  MCP's dispatch semantics are untouched.
+- Whether the hook names move with the type. Yes (D7): a `cmf.` prefix on a
+  non-CMF payload is a name that lies, and renaming is a search and replace now
+  and a migration later.
+- Whether a dedicated type closes the registration hazard by itself. No (D8): the
+  type parameter on `register_for_names` is unused and the factory path has none,
+  so U12 validates the pairing in the registry and the claim is load-time.
 
 ### Needs a decision before the affected unit starts
 
-- U9, option A or B. A closes the hazard at compile time and changes a public
-  type; B closes only the expressiveness gap. Both add status. Cheapest at
-  0.1.0.
 - U2's entity-route widening. The plan treats it as intended and tests it. If it
   should stay HTTP-only, the guard needs to be conditional on the entity type,
   which is a worse shape and worth avoiding if the widening is acceptable.
@@ -589,6 +866,11 @@ U9, under option A, changes a public hook type while the CHANGELOG is
 - Whether U7 returns a borrow or an index. Both satisfy R8; the choice falls out
   of what the borrow checker allows against `MatchedRoute`'s lifetimes.
 - Whether U6's answer lives on the snapshot or is recomputed by the visitor.
+- How U11 expresses "this payload has no fields": a trait method the payload
+  answers, or the hook family answering on its behalf. Both satisfy R15.
+- Whether the payload discriminator U12 records on a metadata row is a `TypeId` or
+  a name. A `TypeId` is exact and unprintable; a name is legible in the refusal
+  message and can drift from the type it describes.
 
 ---
 
