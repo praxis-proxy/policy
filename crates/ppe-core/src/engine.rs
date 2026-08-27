@@ -90,6 +90,26 @@ fn declares_http_route(config: &PolicyConfig) -> bool {
     config.routes.iter().any(|route| route.http.is_some())
 }
 
+/// The names of the `http:` routes that declare `authentication:`. Those lists
+/// are the ones that cannot apply when a request reaches the identity hook with
+/// no readable path, so this is the answer the warning needs.
+///
+/// Depends only on the configuration, so it is computed once when a config
+/// lands on a snapshot rather than per request. Empty when routing is off,
+/// since no route selects anything then.
+fn http_routes_declaring_authentication(config: &PolicyConfig) -> Arc<[String]> {
+    if !config.routing_enabled() {
+        return Arc::from(Vec::new());
+    }
+    config
+        .routes
+        .iter()
+        .filter(|route| route.http.is_some() && route.identity.is_some())
+        .filter_map(config::route_entity_identity)
+        .flat_map(|(_, names)| names)
+        .collect()
+}
+
 /// Configuration for the `PolicyEngine`.
 #[derive(Debug, Clone)]
 pub struct PolicyEngineConfig {
@@ -238,6 +258,14 @@ struct RuntimeSnapshot {
     /// what praxis-policy-apl-runtime's `AplRouteHandler` does via `CmfPluginInvoker` for
     /// `plugin(name)` references inside APL rules).
     route_annotations: HashMap<AnnotationKey, crate::registry::HookEntry>,
+
+    /// The `http:` routes that declare `authentication:`, by the name each
+    /// resolves under. Derived from `policy_config` when the snapshot is built,
+    /// so the identity hook reads an answer instead of walking the route table
+    /// on every request that carries no readable path. Empty for every config
+    /// that has nothing to report, which is the ordinary one. A config
+    /// replacement builds a new snapshot, so the answer cannot go stale.
+    http_routes_declaring_authentication: Arc<[String]>,
 }
 
 /// Composite key for route annotations. Includes the hook name so a single
@@ -503,12 +531,14 @@ fn snapshot_from_config(registry: PluginRegistry, policy_config: PolicyConfig) -
         short_circuit_on_deny: policy_config.plugin_settings.short_circuit_on_deny,
     });
     let route_cache_max_entries = policy_config.plugin_settings.route_cache_max_entries;
+    let http_routes_declaring_authentication = http_routes_declaring_authentication(&policy_config);
     RuntimeSnapshot {
         registry,
         executor,
         policy_config: Some(policy_config),
         route_cache_max_entries,
         route_annotations: HashMap::new(),
+        http_routes_declaring_authentication,
     }
 }
 
@@ -522,6 +552,7 @@ impl PolicyEngine {
             policy_config: None,
             route_cache_max_entries: config.route_cache_max_entries,
             route_annotations: HashMap::new(),
+            http_routes_declaring_authentication: Arc::from(Vec::new()),
         };
         Self {
             runtime: arc_swap::ArcSwap::from_pointee(snapshot),
@@ -1782,7 +1813,7 @@ impl PolicyEngine {
                 },
             };
             self.warn_once_if_route_authentication_is_unreachable(
-                routing_config,
+                &snapshot.http_routes_declaring_authentication,
                 hook_name,
                 normalized.as_deref(),
             );
@@ -2005,33 +2036,24 @@ impl PolicyEngine {
     /// Falling back to the global list is the behavior a host gets today and
     /// stays that way, but doing it silently hides which list authenticated a
     /// request, so the condition is diagnosable from what the engine emits.
+    ///
+    /// Which routes those are is decided when the config lands, so this reads
+    /// the answer off the snapshot. Every check here is O(1), which is what
+    /// keeps the ordinary config, where the answer is empty, off the route
+    /// table entirely.
     fn warn_once_if_route_authentication_is_unreachable(
         &self,
-        routing_config: Option<&PolicyConfig>,
+        unreachable: &[String],
         hook_name: &str,
         normalized_path: Option<&str>,
     ) {
         if hook_name != crate::identity::HOOK_IDENTITY_RESOLVE
+            || unreachable.is_empty()
             || normalized_path.is_some_and(|path| path.starts_with('/'))
             || self
                 .route_authentication_unreachable_warned
                 .load(Ordering::Acquire)
         {
-            return;
-        }
-        let Some(policy_config) = routing_config else {
-            return;
-        };
-        // Scanning the route table is fine here: the latch above means it
-        // happens at most once per fill cycle.
-        let unreachable: Vec<String> = policy_config
-            .routes
-            .iter()
-            .filter(|route| route.http.is_some() && route.identity.is_some())
-            .filter_map(config::route_entity_identity)
-            .flat_map(|(_, names)| names)
-            .collect();
-        if unreachable.is_empty() {
             return;
         }
         if !self
@@ -8041,6 +8063,206 @@ routes:
         assert!(
             warnings[0].contains(&first_route_identity(yaml).1),
             "the warning must name the route whose list could not apply, got {warnings:?}"
+        );
+        drop(sink);
+    }
+
+    /// The load-time answer the request path reads, straight off the snapshot.
+    fn routes_declaring_authentication(mgr: &PolicyEngine) -> Vec<String> {
+        mgr.load_runtime()
+            .http_routes_declaring_authentication
+            .to_vec()
+    }
+
+    /// An engine owning the recording factory, so configs can be loaded and
+    /// replaced through it rather than handed in once at construction.
+    fn reloadable_recording_engine() -> (PolicyEngine, Ledger) {
+        register_fixture_hooks();
+        let ledger: Ledger = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mgr = PolicyEngine::default();
+        mgr.register_factory(
+            "test/record",
+            Box::new(RecordingFactory(Arc::clone(&ledger))),
+        );
+        (mgr, ledger)
+    }
+
+    /// An `http:` route and a global `authentication:` list, with nothing
+    /// declared per route. The ordinary shape, and the one that used to walk
+    /// the route table on every identity hook without a readable path.
+    const HTTP_ROUTE_WITHOUT_ROUTE_AUTHENTICATION_YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  authentication:
+    - global-jwt
+plugins:
+  - name: global-jwt
+    kind: test/record
+    hooks: [identity.resolve]
+    mode: sequential
+routes:
+  - http:
+      path_prefix: /v1/files
+    plugins: []
+"#;
+
+    /// The answer is computed when the config lands, so a config with nothing
+    /// to report leaves the request path an empty slice to look at rather than
+    /// a route table to walk.
+    #[tokio::test]
+    async fn a_config_with_no_route_authentication_leaves_no_answer_to_scan_for() {
+        let (mgr, ledger) = recording_engine(HTTP_ROUTE_WITHOUT_ROUTE_AUTHENTICATION_YAML).await;
+
+        assert!(
+            mgr.load_runtime()
+                .policy_config
+                .as_ref()
+                .is_some_and(declares_http_route),
+            "the fixture must declare an http: route, or an empty answer says \
+             nothing about route-level authentication"
+        );
+        assert!(
+            routes_declaring_authentication(&mgr).is_empty(),
+            "no http: route declares authentication:, so there is nothing for a \
+             request to be warned about and nothing to compute per request"
+        );
+
+        let (events, sink) = capturing();
+        for _ in 0..5 {
+            let result = dispatch(
+                &mgr,
+                crate::identity::HOOK_IDENTITY_RESOLVE,
+                http_request(None),
+            )
+            .await;
+            assert!(result.continue_processing);
+        }
+
+        assert_eq!(
+            plugins_that_fired(&ledger).len(),
+            5,
+            "the global authentication list runs for each request"
+        );
+        assert!(
+            events.matching("global authentication").is_empty(),
+            "nothing to report means nothing reported"
+        );
+        drop(sink);
+    }
+
+    /// Only an `http:` route with its own `authentication:` list can lose that
+    /// list to a missing path, so only those routes are in the answer.
+    #[tokio::test]
+    async fn the_answer_names_only_http_routes_declaring_authentication() {
+        let yaml = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: route-jwt
+    kind: test/record
+    hooks: [identity.resolve]
+    mode: sequential
+routes:
+  - http:
+      path_prefix: /v1/files
+    authentication:
+      - route-jwt
+  - http: /healthz
+    plugins: []
+  - tool: get_weather
+    authentication:
+      - route-jwt
+"#;
+        let (mgr, _ledger) = recording_engine(yaml).await;
+
+        assert_eq!(
+            routes_declaring_authentication(&mgr),
+            vec!["prefix:/v1/files".to_owned()],
+            "an http: route with no authentication: and a tool route with one \
+             both have nothing to lose to a missing request path"
+        );
+    }
+
+    /// A config replacement rebuilds the snapshot, so the answer follows the
+    /// config it was derived from. A stale answer would warn about routes that
+    /// are gone, or stay silent about ones that arrived.
+    #[tokio::test]
+    async fn a_reload_recomputes_which_routes_declare_authentication() {
+        // A load merges its plugins into the registry, so each generation names
+        // its own rather than colliding with the one before it.
+        let config_for = |generation: u8, prefix: &str, declares: bool| {
+            let authentication = if declares {
+                format!("    authentication:\n      - route-jwt-{generation}\n")
+            } else {
+                String::new()
+            };
+            crate::config::parse_config(&format!(
+                r#"
+plugin_settings:
+  routing_enabled: true
+global:
+  authentication:
+    - global-jwt-{generation}
+plugins:
+  - name: global-jwt-{generation}
+    kind: test/record
+    hooks: [identity.resolve]
+    mode: sequential
+  - name: route-jwt-{generation}
+    kind: test/record
+    hooks: [identity.resolve]
+    mode: sequential
+routes:
+  - http:
+      path_prefix: {prefix}
+{authentication}"#
+            ))
+            .expect("the fixture must parse")
+        };
+
+        let (mgr, _ledger) = reloadable_recording_engine();
+        mgr.load_config(config_for(1, "/v1/files", true))
+            .expect("the first config loads");
+        mgr.initialize().await.expect("initialize");
+        assert_eq!(
+            routes_declaring_authentication(&mgr),
+            vec!["prefix:/v1/files".to_owned()]
+        );
+
+        mgr.load_config(config_for(2, "/v1/files", false))
+            .expect("the replacement loads");
+        assert!(
+            routes_declaring_authentication(&mgr).is_empty(),
+            "the route that declared authentication: is gone, so the answer is too"
+        );
+
+        mgr.load_config(config_for(3, "/v2/files", true))
+            .expect("the third config loads");
+        assert_eq!(
+            routes_declaring_authentication(&mgr),
+            vec!["prefix:/v2/files".to_owned()],
+            "the answer names the route the current config declares"
+        );
+
+        let (events, sink) = capturing();
+        let result = dispatch(
+            &mgr,
+            crate::identity::HOOK_IDENTITY_RESOLVE,
+            http_request(None),
+        )
+        .await;
+        assert!(result.continue_processing);
+        let warnings = events.matching("global authentication");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "a reload clears the latch, so the new config warns once, got \
+             {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("prefix:/v2/files") && !warnings[0].contains("/v1/files"),
+            "the warning names the route the reload installed, got {warnings:?}"
         );
         drop(sink);
     }
