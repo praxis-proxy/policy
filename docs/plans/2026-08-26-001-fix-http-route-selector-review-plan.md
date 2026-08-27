@@ -355,6 +355,16 @@ string is two places that must agree. Writing the const expression ties them, wh
 is the same reason the name and its metadata row are emitted together.
 
 
+**D13. The trait carries a default body returning no fields.** A blanket
+`impl<T: PluginPayload>` is not available: it conflicts with `MessagePayload`'s real
+implementation under E0119, and specialization is unstable. A default method body
+gives the same ergonomics, so `HttpPayload`'s implementation is empty and
+`MessagePayload` overrides. The bound on the invoker means a new payload still has
+to name the trait to be carried at all, so the default is a low-friction choice
+rather than a silent one, and the direction it defaults to is the safe one: a
+payload wrongly claiming no fields loses a pipeline stage it never had, where the
+reverse would hand a plugin a field that does not exist.
+
 ---
 
 ## Scope Boundaries
@@ -694,11 +704,18 @@ at load.
 - Modify: `crates/ppe-apl-runtime/src/cmf_invoker.rs`,
   `crates/ppe-apl-runtime/src/route_handler.rs`
 - Modify: `crates/ppe-apl-runtime/src/visitor.rs` for the load-time refusal
+- Modify: `crates/ppe-apl-runtime/src/lib.rs`, whose crate doc states that "the
+  payload type is locked at the impl level" and that `CmfPluginInvoker` "can only
+  dispatch to CMF hooks because every internal call goes through
+  `invoke_named::<CmfHook>`". This unit makes both sentences false, and it is the
+  first thing a reader of the public API sees.
 
 **Approach:**
 - Add a trait local to `praxis-policy-apl-runtime` answering one question: what is
   this field's value on this payload, for this phase. `MessagePayload` answers
   through the existing projection; `HttpPayload` answers `None` (D9). The trait
+  carries a default body returning no fields, so `HttpPayload`'s implementation is
+  empty and `MessagePayload` overrides (D13). The trait
   cannot live on `PluginPayload`: its signature needs `DispatchPhase`, which is in
   `praxis-policy-apl-core`, and `praxis-policy-core` is a leaf crate that depends
   on no APL crate.
@@ -936,6 +953,10 @@ for an HTTP hook name now fails at load instead of passing and reporting clean.
   and a string prints in the refusal where a `TypeId` cannot.
 - Whether the row's family is a literal. No (D12): it is written as `<Type>::NAME`
   so the row and the type cannot disagree.
+- Whether `HttpPayload` gets a hand-written no-fields implementation or inherits
+  one. It inherits a default body (D13). A blanket impl over every payload is not
+  an option: E0119 rejects it against `MessagePayload`'s real implementation, and
+  specialization is unstable.
 
 ### Needs a decision before the affected unit starts
 
@@ -948,8 +969,7 @@ for an HTTP hook name now fails at load instead of passing and reporting clean.
 - Whether U7 returns a borrow or an index. Both satisfy R8; the choice falls out
   of what the borrow checker allows against `MatchedRoute`'s lifetimes.
 - Whether U6's answer lives on the snapshot or is recomputed by the visitor.
-- What the field trait is called, and whether `HttpPayload`'s implementation is
-  hand-written or derived from a blanket "no fields" default.
+- What the field trait is called.
 
 ---
 
