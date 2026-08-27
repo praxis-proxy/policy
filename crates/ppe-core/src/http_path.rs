@@ -108,8 +108,9 @@ pub enum PathError {
 /// The path route matching runs against.
 ///
 /// Borrows when the path is already normal, which is the common case and
-/// must not allocate. A path that is not absolute comes back byte for byte
-/// as given and matches no route.
+/// must not allocate. A query or a fragment is not a rewrite: it is
+/// stripped by taking a shorter borrow of the same string. A path that is
+/// not absolute comes back byte for byte as given and matches no route.
 ///
 /// # Errors
 ///
@@ -129,8 +130,10 @@ pub fn normalize_match_path(raw: &str) -> Result<Cow<'_, str>, PathError> {
     if !path.starts_with('/') {
         return Ok(Cow::Borrowed(raw));
     }
-    if !needs_rewrite(raw) {
-        return Ok(Cow::Borrowed(raw));
+    // Asked of the stripped path, and answered with a borrow of that same
+    // slice, so a request carrying a query allocates nothing.
+    if !needs_rewrite(path) {
+        return Ok(Cow::Borrowed(path));
     }
     Ok(Cow::Owned(rewrite(path)?))
 }
@@ -145,16 +148,16 @@ fn strip_fragment_and_query(raw: &str) -> &str {
 
 /// Whether the path would come out of [`rewrite`] any different.
 ///
-/// Mirrors the gateway's own fast check, plus the three things it does not
-/// strip because it runs on a path the gateway itself produced.
+/// Takes the path with the fragment and the query already stripped, so
+/// neither can appear here. Mirrors the gateway's own fast check, plus the
+/// path parameters and encoded traversals it does not strip because it runs
+/// on a path the gateway itself produced.
 fn needs_rewrite(path: &str) -> bool {
     path.contains("//")
         || path.contains("/./")
         || path.contains("/../")
         || path.ends_with("/.")
         || path.ends_with("/..")
-        || path.contains('?')
-        || path.contains('#')
         || path.contains(';')
         || path.split('/').any(is_traversal_segment)
 }
@@ -337,6 +340,35 @@ mod tests {
             "a query inside a fragment is removed with it"
         );
         assert_eq!(normalized("/?x=1"), "/", "a root path keeps its root");
+    }
+
+    #[test]
+    fn a_query_or_a_fragment_is_stripped_by_borrowing() {
+        // Ordinary traffic carries a query, and the path in front of one is
+        // usually already normal, so dropping it is a shorter borrow rather
+        // than an allocation.
+        for (raw, expected) in [
+            ("/v1/files/q3.pdf?page=2", "/v1/files/q3.pdf"),
+            ("/v1/files/q3.pdf#page-2", "/v1/files/q3.pdf"),
+            ("/v1/files/q3.pdf?page=2#top", "/v1/files/q3.pdf"),
+            ("/?x=1", "/"),
+        ] {
+            let result = normalize_match_path(raw).expect("a readable path");
+            assert!(
+                matches!(result, Cow::Borrowed(_)),
+                "{raw} needs no rewriting once its query and fragment are gone"
+            );
+            assert_eq!(&*result, expected, "{raw} must normalize to `{expected}`");
+        }
+
+        // A query does not make the path in front of it normal. One that
+        // still has to be rewritten allocates, as it must.
+        let result = normalize_match_path("/a//b?x=1").expect("a readable path");
+        assert!(
+            matches!(result, Cow::Owned(_)),
+            "a path needing a rewrite is owned however its query reads"
+        );
+        assert_eq!(&*result, "/a/b", "the rewrite still runs on the path alone");
     }
 
     #[test]
