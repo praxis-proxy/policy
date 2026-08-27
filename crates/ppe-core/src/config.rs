@@ -1511,10 +1511,8 @@ fn score_http_match(selector: &HttpSelector, path: &str, method: Option<&str>) -
         path_prefix_matches(path, prefix)
             .then(|| path_prefix_specificity(prefix).saturating_mul(SPECIFICITY_PATH_PREFIX_STEP))
     } else {
-        selector
-            .exact_paths()
-            .iter()
-            .any(|declared| exact_path_matches(path, declared))
+        matched_exact_path(selector, path)
+            .is_some()
             .then_some(SPECIFICITY_EXACT_PATH)
     }?;
     let method_bonus = if selector.method().is_some() {
@@ -1583,19 +1581,34 @@ fn selector_names(selector: &StringOrList) -> Vec<String> {
 /// already is at parse time. Matching treats that slash as insignificant, so
 /// `/admin` and `/admin/` are one route and must render one name.
 fn http_selector_names(selector: &HttpSelector) -> Vec<String> {
-    match (selector.path_prefix(), rendered_methods(selector.method())) {
-        (Some(prefix), None) => vec![format!("prefix:{prefix}")],
-        (Some(prefix), Some(methods)) => vec![format!("{methods} prefix:{prefix}")],
-        (None, None) => selector
-            .exact_paths()
-            .iter()
-            .map(|path| trim_declared_slash(path))
-            .collect(),
-        (None, Some(methods)) => selector
-            .exact_paths()
-            .iter()
-            .map(|path| format!("{methods} path:{}", trim_declared_slash(path)))
-            .collect(),
+    let methods = rendered_methods(selector.method());
+    if let Some(prefix) = selector.path_prefix() {
+        return vec![rendered_prefix_name(prefix, methods.as_deref())];
+    }
+    selector
+        .exact_paths()
+        .iter()
+        .map(|declared| rendered_exact_name(declared, methods.as_deref()))
+        .collect()
+}
+
+/// The one name a prefix selector renders, for the methods it narrows by or for
+/// none.
+fn rendered_prefix_name(prefix: &str, methods: Option<&str>) -> String {
+    match methods {
+        Some(methods) => format!("{methods} prefix:{prefix}"),
+        None => format!("prefix:{prefix}"),
+    }
+}
+
+/// The one name a declared exact path renders. Both the names a selector
+/// contributes and the name a request resolves to render here, so the resolved
+/// name is the annotation key by construction rather than because two walks of
+/// the path list happen to agree.
+fn rendered_exact_name(declared: &str, methods: Option<&str>) -> String {
+    match methods {
+        Some(methods) => format!("{methods} path:{}", trim_declared_slash(declared)),
+        None => trim_declared_slash(declared),
     }
 }
 
@@ -1628,23 +1641,36 @@ fn matched_selector_name(selector: &StringOrList, entity_name: &str) -> Option<S
     }
 }
 
-/// The name a matching `http:` selector resolves to. A prefix contributes one
-/// rendered name; the exact shapes render one name per declared path, in order,
-/// so the matched path picks its own name out of that list.
+/// The name a matching `http:` selector resolves to: the rendered prefix name
+/// for a prefix, and the rendered name of the declared path the request is a
+/// spelling of for the exact shapes.
 ///
 /// The name is the path as declared, not as the request spelled it, so every
 /// equivalent spelling of one path resolves to one name. The cache and the
 /// annotation table then key on the config rather than on the traffic.
 fn matched_http_name(selector: &HttpSelector, path: &str) -> Option<String> {
-    let names = http_selector_names(selector);
-    if selector.path_prefix().is_some() {
-        return names.into_iter().next();
+    let methods = rendered_methods(selector.method());
+    if let Some(prefix) = selector.path_prefix() {
+        return Some(rendered_prefix_name(prefix, methods.as_deref()));
     }
-    let matched = selector
+    Some(rendered_exact_name(
+        matched_exact_path(selector, path)?,
+        methods.as_deref(),
+    ))
+}
+
+/// The declared exact path a request path is a spelling of, borrowed from the
+/// selector, or `None` when none of them is. Borrowing is what keeps route
+/// resolution from rendering a name per declared path and discarding all but
+/// one: only the borrowed path is rendered. It is also the single place that
+/// decides which declared path a request matched, so scoring and naming cannot
+/// pick different ones.
+fn matched_exact_path<'a>(selector: &'a HttpSelector, path: &str) -> Option<&'a str> {
+    selector
         .exact_paths()
         .iter()
-        .position(|declared| exact_path_matches(path, declared))?;
-    names.into_iter().nth(matched)
+        .map(String::as_str)
+        .find(|declared| exact_path_matches(path, declared))
 }
 
 /// The request description route resolution matches against.
@@ -4958,6 +4984,131 @@ routes:
             assert!(
                 http_name(&catch_all, path, Some("GET")).is_some(),
                 "the catch-all still answers for {path}"
+            );
+        }
+    }
+
+    /// A twenty-path selector, to say what resolving a name against a long
+    /// declared list costs.
+    fn twenty_path_selector() -> HttpSelector {
+        HttpSelector::Paths((0..20).map(|i| format!("/p{i:02}")).collect())
+    }
+
+    /// Resolving a matched name reads the declared path by borrow rather than
+    /// rendering one name per declared path and keeping one. The signature
+    /// binding is the structural half: it only typechecks while the returned
+    /// `&str` borrows from the selector, which a rendered list cannot satisfy.
+    /// The pointer identity is the runtime half, and it holds for each of the
+    /// twenty paths.
+    #[test]
+    fn a_matched_exact_path_is_borrowed_from_the_selector() {
+        let borrows_from_the_selector: for<'a> fn(&'a HttpSelector, &str) -> Option<&'a str> =
+            matched_exact_path;
+        let selector = twenty_path_selector();
+
+        for declared in selector.exact_paths() {
+            let matched = borrows_from_the_selector(&selector, &format!("{declared}/"))
+                .expect("a declared path matches its own trailing-slash spelling");
+            assert!(
+                std::ptr::eq(matched, declared.as_str()),
+                "`{declared}` must be borrowed from the selector, not rendered into a list"
+            );
+        }
+
+        assert!(
+            borrows_from_the_selector(&selector, "/p20").is_none(),
+            "a path the selector does not declare matches none of them"
+        );
+    }
+
+    /// Ten identical requests against a twenty-path selector paired with a
+    /// catch-all resolve the same name every time, and each resolution renders
+    /// only the name it returns: what the scan reads out of the twenty-path
+    /// selector is a borrow of the path that matched.
+    #[test]
+    fn repeated_requests_against_a_long_path_list_render_only_the_matched_name() {
+        let declared = twenty_path_selector();
+        let listed = declared.exact_paths().join(", ");
+        let cfg = routed_config(&format!(
+            "  - http: [{listed}]\n  - http: {{ path_prefix: / }}\n"
+        ));
+
+        for _ in 0..10 {
+            let matched = resolve_route(&cfg, RouteQuery::http("/p07", Some("GET")))
+                .expect("an exact path outranks the catch-all");
+            let selector = matched
+                .route
+                .http
+                .as_ref()
+                .expect("the winning route declares `http:`");
+            assert_eq!(
+                matched.name, "/p07",
+                "every request resolves the declared path as its name"
+            );
+            assert!(
+                std::ptr::eq(
+                    matched_exact_path(selector, "/p07")
+                        .expect("the request path is one the selector declares"),
+                    selector.exact_paths()[7].as_str()
+                ),
+                "the scan hands back the declared path itself, so only one name is rendered"
+            );
+        }
+    }
+
+    /// The name each selector shape resolves to, pinned byte for byte, and
+    /// pinned as one of the names the same route is annotated under. Those names
+    /// key the annotation table and the route cache, so a name that moved on one
+    /// side and not the other leaves a route's policy body under a key no
+    /// request reaches.
+    #[test]
+    fn every_selector_shape_resolves_the_name_it_is_annotated_under() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("/healthz", "/healthz", "/healthz"),
+            ("[/healthz, /readyz]", "/readyz", "/readyz"),
+            ("\"/admin/\"", "/admin/", "/admin"),
+            ("\"/\"", "/", "/"),
+            ("{ path: /admin }", "/admin", "/admin"),
+            ("{ path: /admin, method: GET }", "/admin", "GET path:/admin"),
+            (
+                "{ path: \"/admin/\", method: [get, GET] }",
+                "/admin/",
+                "GET path:/admin",
+            ),
+            (
+                "{ path_prefix: /v1/files }",
+                "/v1/files/q3.pdf",
+                "prefix:/v1/files",
+            ),
+            (
+                "{ path_prefix: /v1/files, method: [post, GET] }",
+                "/v1/files/q3.pdf",
+                "GET,POST prefix:/v1/files",
+            ),
+            ("{ path_prefix: / }", "/anything", "prefix:/"),
+            (
+                "{ path_prefix: /, method: GET }",
+                "/anything",
+                "GET prefix:/",
+            ),
+        ];
+
+        for (declaration, path, expected) in cases {
+            let cfg = routed_config(&format!("  - http: {declaration}\n"));
+
+            assert_eq!(
+                http_name(&cfg, path, Some("GET")).as_deref(),
+                Some(*expected),
+                "`http: {declaration}` must resolve `{expected}` for `{path}`"
+            );
+
+            let (entity_type, annotated) = route_entity_identity(&cfg.routes[0])
+                .expect("every case declares an `http:` selector");
+            assert_eq!(entity_type, ENTITY_HTTP);
+            assert!(
+                annotated.iter().any(|name| name == expected),
+                "`{expected}` must be one of the names `http: {declaration}` is annotated \
+                 under: {annotated:?}"
             );
         }
     }
