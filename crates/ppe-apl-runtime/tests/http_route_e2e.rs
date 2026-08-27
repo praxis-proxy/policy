@@ -923,6 +923,55 @@ routes:
     }
 }
 
+/// A route narrowed by `method:` wins the methods it names whichever order the
+/// two are declared in, so the narrower policy runs rather than whichever route
+/// was written first.
+#[tokio::test]
+async fn a_method_narrowed_route_wins_its_methods_in_either_declaration_order() {
+    const PLUGINS: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: open-audit
+    kind: test/record
+    hooks: [cmf.http_request]
+    capabilities: [read_headers]
+  - name: delete-audit
+    kind: test/record
+    hooks: [cmf.http_request]
+    capabilities: [read_headers]
+"#;
+    const OPEN: &str = r#"  - http:
+      path_prefix: /api
+    plugins: [open-audit]
+"#;
+    const NARROWED: &str = r#"  - http:
+      path_prefix: /api
+      method: DELETE
+    plugins: [delete-audit]
+"#;
+
+    for (first, second) in [(OPEN, NARROWED), (NARROWED, OPEN)] {
+        let yaml = format!("{PLUGINS}routes:\n{first}{second}");
+        let (mgr, ledger) = engine_with(&yaml).await;
+
+        assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("DELETE", "/api/x")).await);
+        assert_eq!(
+            fired(&ledger),
+            vec!["delete-audit".to_owned()],
+            "the narrowed route governs DELETE wherever it sits in the file"
+        );
+
+        clear(&ledger);
+        assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", "/api/x")).await);
+        assert_eq!(
+            fired(&ledger),
+            vec!["open-audit".to_owned()],
+            "a method the narrowing does not name still lands on the open route"
+        );
+    }
+}
+
 /// A prefix matches only at a segment boundary. These are the cases the host
 /// router's own suite covers, run here through a real engine.
 #[tokio::test]

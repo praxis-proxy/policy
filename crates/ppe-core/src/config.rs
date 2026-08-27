@@ -1336,10 +1336,17 @@ const SPECIFICITY_WILDCARD: usize = 0;
 /// buckets above are left alone.
 ///
 /// An exact path outranks every prefix, however long, and among prefixes the
-/// longer one wins. The per-character weight sits above the scope and `when:`
-/// bonuses so prefix length decides before either tiebreaker does.
+/// longer one wins. The per-character weight sits above the scope, `method:`,
+/// and `when:` bonuses so prefix length decides before any tiebreaker does.
 const SPECIFICITY_EXACT_PATH: usize = usize::MAX / 2;
 const SPECIFICITY_PATH_PREFIX_STEP: usize = 1000;
+
+/// The bonus a present `method:` adds to whatever the path scored, so a route
+/// narrowed by method outranks the same path left open for the methods it
+/// names. It sits below the per-character prefix weight, so it breaks a tie
+/// within one path without reordering two different paths, and below the scope
+/// bonus, so a scoped route keeps winning its own scope.
+const SPECIFICITY_METHOD_NARROWED: usize = 50;
 
 /// Score a single entity matcher (tool / resource / prompt / llm) against
 /// a request entity name, returning the specificity bucket if it matches
@@ -1403,21 +1410,30 @@ fn http_method_matches(accepted: Option<&StringOrList>, method: Option<&str>) ->
 }
 
 /// Score an `http:` selector against a request path and method, or `None` when
-/// it does not match. The method narrowing gates the match without contributing
-/// to the score.
+/// it does not match. The method narrowing both gates the match and adds to the
+/// score, so the narrower of two routes on one path wins whichever order they
+/// are declared in. The total saturates, since an exact path already scores
+/// half the range.
 fn score_http_match(selector: &HttpSelector, path: &str, method: Option<&str>) -> Option<usize> {
     if !path.starts_with('/') || !http_method_matches(selector.method(), method) {
         return None;
     }
-    if let Some(prefix) = selector.path_prefix() {
-        return path_prefix_matches(path, prefix)
-            .then(|| path_prefix_specificity(prefix).saturating_mul(SPECIFICITY_PATH_PREFIX_STEP));
-    }
-    selector
-        .exact_paths()
-        .iter()
-        .any(|declared| declared == path)
-        .then_some(SPECIFICITY_EXACT_PATH)
+    let path_score = if let Some(prefix) = selector.path_prefix() {
+        path_prefix_matches(path, prefix)
+            .then(|| path_prefix_specificity(prefix).saturating_mul(SPECIFICITY_PATH_PREFIX_STEP))
+    } else {
+        selector
+            .exact_paths()
+            .iter()
+            .any(|declared| declared == path)
+            .then_some(SPECIFICITY_EXACT_PATH)
+    }?;
+    let method_bonus = if selector.method().is_some() {
+        SPECIFICITY_METHOD_NARROWED
+    } else {
+        0
+    };
+    Some(path_score.saturating_add(method_bonus))
 }
 
 /// The static bundle-membership tags a route declares: its `meta.tags`
@@ -4599,6 +4615,130 @@ routes:
         assert!(
             http_name(&cfg, "/ping", Some("POST")).is_none(),
             "POST is not in the list"
+        );
+    }
+
+    /// A route narrowed by `method:` is the narrower of the two on one path, so
+    /// it wins for the methods it names whichever line it was written on.
+    #[test]
+    fn a_method_narrowed_route_outranks_the_open_path_in_either_order() {
+        for routes in [
+            "  - http: { path_prefix: /api }\n  - http: { path_prefix: /api, method: DELETE }\n",
+            "  - http: { path_prefix: /api, method: DELETE }\n  - http: { path_prefix: /api }\n",
+        ] {
+            let cfg = routed_config(routes);
+            assert_eq!(
+                http_name(&cfg, "/api/x", Some("DELETE")).as_deref(),
+                Some("DELETE prefix:/api"),
+                "the narrowed route must win DELETE, declared first or second"
+            );
+        }
+    }
+
+    /// The bonus applies only where the narrowing matches, so a method the
+    /// narrowed route does not name still lands on the open one.
+    #[test]
+    fn a_method_the_narrowed_route_does_not_name_falls_to_the_open_route() {
+        for routes in [
+            "  - http: { path_prefix: /api }\n  - http: { path_prefix: /api, method: DELETE }\n",
+            "  - http: { path_prefix: /api, method: DELETE }\n  - http: { path_prefix: /api }\n",
+        ] {
+            let cfg = routed_config(routes);
+            for method in [Some("GET"), Some("POST"), None] {
+                assert_eq!(
+                    http_name(&cfg, "/api/x", method).as_deref(),
+                    Some("prefix:/api"),
+                    "{method:?} is not narrowed, so the open route governs it"
+                );
+            }
+        }
+    }
+
+    /// An exact path already scores half the range, so the bonus has to add to
+    /// it rather than wrap it back below the prefixes it is meant to outrank.
+    #[test]
+    fn an_exact_path_narrowed_by_a_method_adds_the_bonus_without_wrapping() {
+        let cfg = routed_config(
+            "  - http: { path: /admin, method: GET }\n  - http: { path_prefix: / }\n",
+        );
+        let selector = cfg.routes[0]
+            .http
+            .as_ref()
+            .expect("the first route declares `http:`");
+
+        let score = score_http_match(selector, "/admin", Some("GET"))
+            .expect("the exact path and the method both match");
+        assert!(
+            score > SPECIFICITY_EXACT_PATH,
+            "the bonus must land above the exact-path score, not wrap past it: {score}"
+        );
+
+        assert_eq!(
+            http_name(&cfg, "/admin", Some("GET")).as_deref(),
+            Some("GET path:/admin"),
+            "a narrowed exact path still outranks the catch-all prefix"
+        );
+    }
+
+    /// Three routes on one prefix are equal on length, so the narrowing orders
+    /// them: a narrowed route takes a method it names, and two narrowings that
+    /// both cover that method score alike, so the tie falls to the first
+    /// declaration the way every other tie does.
+    #[test]
+    fn equal_length_prefixes_order_by_the_narrowing_not_by_the_file() {
+        for routes in [
+            "  - http: { path_prefix: /api }\n  - http: { path_prefix: /api, method: [GET, POST] }\n  - http: { path_prefix: /api, method: GET }\n",
+            "  - http: { path_prefix: /api, method: GET }\n  - http: { path_prefix: /api, method: [GET, POST] }\n  - http: { path_prefix: /api }\n",
+        ] {
+            let cfg = routed_config(routes);
+            let first_naming_get = cfg
+                .routes
+                .iter()
+                .filter_map(|route| route.http.as_ref())
+                .filter(|selector| selector.method().is_some())
+                .find(|selector| http_method_matches(selector.method(), Some("GET")))
+                .and_then(|selector| http_selector_names(selector).into_iter().next())
+                .expect("two of the three routes narrow to GET");
+
+            assert_eq!(
+                http_name(&cfg, "/api/x", Some("GET")).as_deref(),
+                Some(first_naming_get.as_str()),
+                "a narrowed route takes GET, and the first of the two declared breaks their tie"
+            );
+            assert_eq!(
+                http_name(&cfg, "/api/x", Some("POST")).as_deref(),
+                Some("GET,POST prefix:/api"),
+                "only one narrowing names POST"
+            );
+            assert_eq!(
+                http_name(&cfg, "/api/x", Some("DELETE")).as_deref(),
+                Some("prefix:/api"),
+                "no narrowing names DELETE, so the open route governs it"
+            );
+        }
+    }
+
+    /// The bonus sits below the scope bonus, so a scoped route keeps winning its
+    /// own scope against a method-narrowed route on the same path.
+    #[test]
+    fn a_scoped_route_still_outranks_a_method_narrowed_one_on_the_same_path() {
+        let cfg = routed_config(
+            "  - http: { path_prefix: /v1 }\n    meta: { scope: tenant-a }\n  - http: { path_prefix: /v1, method: GET }\n",
+        );
+
+        let matched = resolve_route(
+            &cfg,
+            RouteQuery::http("/v1/files", Some("GET")).with_scope(Some("tenant-a")),
+        )
+        .expect("both routes cover the request");
+        assert_eq!(
+            matched
+                .route
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.scope.as_deref()),
+            Some("tenant-a"),
+            "the scope decides before the narrowing does"
         );
     }
 
