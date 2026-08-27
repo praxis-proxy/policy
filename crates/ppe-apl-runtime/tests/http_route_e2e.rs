@@ -703,6 +703,39 @@ routes:
     );
 }
 
+/// A route declared with a trailing slash runs its body for every spelling of
+/// its path. The annotation key and the resolved name both come from the one
+/// rendering, so canonicalizing the identity cannot orphan the body; this pins
+/// that end to end.
+#[tokio::test]
+async fn a_route_declared_with_a_trailing_slash_runs_its_body_for_every_spelling() {
+    const YAML: &str = r#"
+plugin_settings:
+  routing_enabled: true
+plugins:
+  - name: body-audit
+    kind: test/record
+    hooks: [cmf.http_request]
+    capabilities: [read_headers]
+routes:
+  - http:
+      path: "/admin/"
+    apl:
+      pre_invocation:
+        - "plugin(body-audit)"
+"#;
+    for spelling in ["/admin", "/admin/", "/admin//"] {
+        let (mgr, ledger) = engine_with(YAML).await;
+
+        assert!(fire(&mgr, HOOK_CMF_HTTP_REQUEST, request("GET", spelling)).await);
+        assert_eq!(
+            fired(&ledger),
+            vec!["body-audit".to_owned()],
+            "the body must run for `{spelling}`, whatever the route declared"
+        );
+    }
+}
+
 /// A glob route under one of the entity selectors dispatches exactly as it
 /// does today: its policy body does not evaluate, and its plugin chain does.
 /// This is the regression proving the entity selectors were left alone.

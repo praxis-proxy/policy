@@ -684,7 +684,7 @@ impl HttpSelector {
     /// parsed one is.
     pub fn prefix(prefix: &str) -> Self {
         Self::Match(HttpMatch {
-            path_prefix: Some(trim_prefix_slash(prefix)),
+            path_prefix: Some(trim_declared_slash(prefix)),
             ..HttpMatch::default()
         })
     }
@@ -730,7 +730,7 @@ impl HttpSelector {
                 } else if paths.iter().any(String::is_empty) {
                     Some("declares an empty path in its `http:` list".to_owned())
                 } else {
-                    None
+                    repeated_exact_path(paths)
                 }
             },
             Self::Match(m) => {
@@ -772,6 +772,26 @@ impl HttpSelector {
     }
 }
 
+/// The first path an `http:` list declares under two spellings of one path,
+/// phrased for the operator. Both match the same requests and resolve the same
+/// name, so the second is dead weight the operator did not mean to write.
+///
+/// A path repeated verbatim is left alone, because a list repeating an element
+/// loads for every other selector too and says what it looks like it says. What
+/// this catches is the pair that looks like two paths and is one.
+fn repeated_exact_path(paths: &[String]) -> Option<String> {
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    paths.iter().find_map(|path| {
+        let first = seen.insert(trim_declared_slash(path), path.as_str())?;
+        (first != path.as_str()).then(|| {
+            format!(
+                "declares '{first}' and '{path}' in its `http:` list, which are one path \
+                 because a single trailing slash is insignificant"
+            )
+        })
+    })
+}
+
 impl<'de> Deserialize<'de> for HttpSelector {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error as _;
@@ -804,7 +824,7 @@ impl<'de> Deserialize<'de> for HttpSelector {
                         "path" => parsed.path = Some(http_selector_path(key, &value)?),
                         "path_prefix" => {
                             parsed.path_prefix =
-                                Some(trim_prefix_slash(&http_selector_path(key, &value)?));
+                                Some(trim_declared_slash(&http_selector_path(key, &value)?));
                         },
                         "method" => {
                             parsed.method = Some(serde_yaml::from_value(value).map_err(|e| {
@@ -842,13 +862,14 @@ fn http_selector_path<E: serde::de::Error>(
         .ok_or_else(|| E::custom(format!("`http.{key}:` must be a path string")))
 }
 
-/// Drop one trailing slash from a declared prefix so `/api/` and `/api` are
-/// the same selector. The root keeps its slash, since dropping it would leave
-/// nothing for diagnostics to name.
-fn trim_prefix_slash(prefix: &str) -> String {
-    match prefix.strip_suffix('/') {
+/// Drop one trailing slash from a declared path so `/api/` and `/api` are the
+/// same selector, which is how both the prefix and the exact comparison read
+/// them. The root keeps its slash, since dropping it would leave nothing for
+/// diagnostics to name.
+fn trim_declared_slash(path: &str) -> String {
+    match path.strip_suffix('/') {
         Some(trimmed) if !trimmed.is_empty() => trimmed.to_owned(),
-        _ => prefix.to_owned(),
+        _ => path.to_owned(),
     }
 }
 
@@ -1509,24 +1530,38 @@ fn selector_names(selector: &StringOrList) -> Vec<String> {
 /// contributes the path itself, since that is the path a request arrives on.
 /// Every other shape renders the fields the match consumed ahead of the path,
 /// which no request path can equal because a path starts with `/`.
+///
+/// An exact path is rendered with one trailing slash dropped, the way a prefix
+/// already is at parse time. Matching treats that slash as insignificant, so
+/// `/admin` and `/admin/` are one route and must render one name.
 fn http_selector_names(selector: &HttpSelector) -> Vec<String> {
     match (selector.path_prefix(), rendered_methods(selector.method())) {
         (Some(prefix), None) => vec![format!("prefix:{prefix}")],
         (Some(prefix), Some(methods)) => vec![format!("{methods} prefix:{prefix}")],
-        (None, None) => selector.exact_paths().to_vec(),
+        (None, None) => selector
+            .exact_paths()
+            .iter()
+            .map(|path| trim_declared_slash(path))
+            .collect(),
         (None, Some(methods)) => selector
             .exact_paths()
             .iter()
-            .map(|path| format!("{methods} path:{path}"))
+            .map(|path| format!("{methods} path:{}", trim_declared_slash(path)))
             .collect(),
     }
 }
 
 /// The method set a selector narrows by, or `None` when it accepts any method.
-/// Sorted and deduplicated so the rendering follows the set matching reads
-/// rather than the order it was written in, and holds across reloads.
+/// Uppercased, sorted, and deduplicated so the rendering follows the set
+/// matching reads rather than the order or case it was written in, and holds
+/// across reloads. Matching ignores case, so `GET` and `get` are one set and
+/// must render one name.
 fn rendered_methods(method: Option<&StringOrList>) -> Option<String> {
-    let mut methods = method?.as_names();
+    let mut methods: Vec<String> = method?
+        .as_names()
+        .iter()
+        .map(|name| name.to_ascii_uppercase())
+        .collect();
     methods.sort_unstable();
     methods.dedup();
     Some(methods.join(","))
@@ -4154,6 +4189,73 @@ routes:
         assert!(err.contains("/api"), "{err}");
     }
 
+    /// Matching compares a method without regard to case, so two spellings of
+    /// one method are one route and must be refused rather than both matching.
+    #[test]
+    fn two_http_routes_differing_only_in_method_case_collide() {
+        let err = duplicate_error(
+            r#"  - http: { path_prefix: /api, method: GET }
+  - http: { path_prefix: /api, method: get }
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("GET"), "{err}");
+        assert!(err.contains("/api"), "{err}");
+    }
+
+    /// A method list is a case-insensitive set, so neither its order nor its
+    /// case distinguishes two routes.
+    #[test]
+    fn two_http_method_lists_differing_in_case_and_order_collide() {
+        let err = duplicate_error(
+            r#"  - http: { path_prefix: /api, method: [GET, POST] }
+  - http: { path_prefix: /api, method: [post, get] }
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("GET,POST"), "{err}");
+    }
+
+    /// An exact path matches every spelling of itself, so two routes differing
+    /// only in a trailing slash both match the same requests. Refusing the load
+    /// is what keeps the second from being silently unreachable.
+    #[test]
+    fn two_http_routes_differing_only_in_a_trailing_slash_collide() {
+        let err = duplicate_error(
+            r#"  - http: /admin
+  - http: "/admin/"
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("'/admin'"), "{err}");
+    }
+
+    /// Two spellings of one path inside a single list are the same element
+    /// twice, which is reported against the route that wrote them.
+    #[test]
+    fn one_http_list_repeating_a_path_as_a_slash_variant_is_rejected() {
+        let err = duplicate_error(
+            r#"  - http: [/admin, "/admin/"]
+"#,
+        );
+        assert!(err.contains("route 0"), "{err}");
+        assert!(err.contains("/admin/"), "{err}");
+        assert!(err.contains("one path"), "{err}");
+    }
+
+    /// A path repeated verbatim is left alone. `tool: [a, a]` loads for every
+    /// other selector, and a list that repeats an element says what it looks
+    /// like it says. The refusal above is for the pair that reads as two paths
+    /// and is one.
+    #[test]
+    fn one_http_list_repeating_a_path_verbatim_loads() {
+        let cfg = routes_load(
+            r#"  - http: [/admin, /admin]
+"#,
+        );
+        assert_eq!(cfg.routes.len(), 1);
+    }
+
     /// The method is part of the rendered name, so narrowing by a different
     /// method leaves two routes distinct.
     #[test]
@@ -4607,7 +4709,8 @@ routes:
     }
 
     /// A declared path written with a trailing slash matches the same set, so
-    /// which spelling the operator wrote does not change what the route covers.
+    /// which spelling the operator wrote does not change what the route covers
+    /// or the one name it resolves to.
     #[test]
     fn a_declared_trailing_slash_matches_the_same_spellings() {
         let cfg = routed_config("  - http: \"/admin/\"\n");
@@ -4617,7 +4720,7 @@ routes:
                 .expect("every spelling is a readable path");
             assert_eq!(
                 http_name(&cfg, &path, Some("GET")).as_deref(),
-                Some("/admin/"),
+                Some("/admin"),
                 "`{spelling}` must resolve the route declared as `/admin/`"
             );
         }
@@ -4626,6 +4729,49 @@ routes:
             http_name(&cfg, "/adminx", Some("GET")).is_none(),
             "the trailing slash does not make the path a prefix"
         );
+    }
+
+    /// A lowercase `method:` matches the request the same way an uppercase one
+    /// does, and renders uppercase so both spellings are one name.
+    #[test]
+    fn a_lowercase_method_matches_and_renders_uppercase() {
+        let cfg = routed_config("  - http: { path_prefix: /v1/files, method: get }\n");
+
+        assert_eq!(
+            http_name(&cfg, "/v1/files/q3.pdf", Some("GET")).as_deref(),
+            Some("GET prefix:/v1/files"),
+            "a lowercase declaration matches and renders uppercase"
+        );
+        assert!(
+            http_name(&cfg, "/v1/files/q3.pdf", Some("POST")).is_none(),
+            "the narrowing still gates the methods it does not name"
+        );
+    }
+
+    /// The name a request resolves to is the name the route is annotated under,
+    /// whichever spelling either side used. A mismatch would leave the route's
+    /// policy body keyed under a name no request reaches.
+    #[test]
+    fn a_declared_trailing_slash_resolves_the_name_the_route_is_annotated_under() {
+        let cfg = routed_config("  - http: [\"/admin/\", /healthz]\n");
+        let (entity_type, annotated) =
+            route_entity_identity(&cfg.routes[0]).expect("the route declares an `http:` selector");
+        assert_eq!(entity_type, ENTITY_HTTP);
+        assert_eq!(
+            annotated,
+            vec!["/admin".to_owned(), "/healthz".to_owned()],
+            "the annotation key drops the declared trailing slash"
+        );
+
+        for spelling in ["/admin", "/admin/", "/admin//", "/admin/."] {
+            let path = crate::http_path::normalize_match_path(spelling)
+                .expect("every spelling is a readable path");
+            assert_eq!(
+                http_name(&cfg, &path, Some("GET")).as_deref(),
+                Some(annotated[0].as_str()),
+                "`{spelling}` must resolve the name the route is annotated under"
+            );
+        }
     }
 
     /// The root as an exact path matches the root and nothing else, which is
