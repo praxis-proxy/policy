@@ -409,10 +409,10 @@ pub trait PdpFactory: Send + Sync {
 ///   * `result:` field stages        → `Post`
 ///   * `post_invocation:` steps       → `Post`
 ///
-/// Plugins that need to discriminate `args` vs `policy` (same `Pre`
-/// from the dispatcher's perspective) inspect `PluginContext::hook_name()`
-/// inside their handler — the hook-routing layer doesn't slice phase
-/// finer than Pre/Post.
+/// The hook-routing layer does not slice phase finer than Pre/Post, and
+/// `PluginContext` carries no hook name, so a handler cannot tell an `args`
+/// field stage from a `pre_invocation` step from the inside. A plugin that
+/// needs the distinction registers for one hook name per behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchPhase {
     /// Before the call, addressing arguments.

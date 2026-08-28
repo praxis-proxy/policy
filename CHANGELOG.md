@@ -99,6 +99,26 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **`HookFamily::for_entity` reports an unmapped entity type instead of
+  defaulting to CMF.** It returned `HookFamily` and treated every entity type
+  other than `http` as the CMF family, so a route on an entity type nobody had
+  mapped yet would install a handler that reports the CMF family and hands its
+  plugins a chat message no host filled. The `else` also hid the omission from
+  the compiler: the closed matches elsewhere in the crate flagged a new family,
+  this function did not. It now returns `Option<HookFamily>` over the same
+  entity types `hook_pair_for_entity` maps, and the visitor's install path logs
+  and skips an unmapped one, which is what it already does for an entity type
+  with no hook pair. **Breaking** for a caller that used the returned family
+  directly; the fix is to handle `None` rather than assume CMF.
+
+- **`HookFamily` is `#[non_exhaustive]` and `hook_type_name` is public.** The
+  enum was public and exhaustive, so a third payload family would have been a
+  breaking change for every downstream `match` on it, and its only interesting
+  method was private, so a host could hold one and not ask it anything.
+  `#[non_exhaustive]` is itself **breaking** for a downstream exhaustive
+  `match`, which is the argument for doing it while the enum has two variants
+  rather than at the moment a third one lands.
+
 - **The generic-HTTP hooks are their own family: `http.request` and
   `http.response`.** Both used to be spelled `cmf.http_request` and
   `cmf.http_response` and both were typed on `CmfHook`, whose payload is an LLM

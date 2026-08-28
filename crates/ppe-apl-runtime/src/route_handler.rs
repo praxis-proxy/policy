@@ -37,7 +37,9 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use praxis_policy_core::cmf::constants::ENTITY_HTTP;
+use praxis_policy_core::cmf::constants::{
+    ENTITY_HTTP, ENTITY_LLM, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL,
+};
 use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
@@ -114,7 +116,12 @@ pub enum Phase {
 /// the executor hands it. One handler type serves both families, so the
 /// answer is fixed at install from the route's entity type rather than
 /// discovered per request.
+///
+/// `#[non_exhaustive]`: a third family is a payload shape this crate does
+/// not yet hand out, and adding one must not silently fall into a
+/// downstream `match` arm written for two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HookFamily {
     /// The CMF family, carrying a chat message.
     Cmf,
@@ -123,19 +130,24 @@ pub enum HookFamily {
 }
 
 impl HookFamily {
-    /// The family a route's entity type belongs to. Every entity type other
-    /// than `http` names an MCP or A2A entity carrying a CMF message.
-    pub fn for_entity(entity_type: &str) -> Self {
-        if entity_type == ENTITY_HTTP {
-            Self::Http
-        } else {
-            Self::Cmf
+    /// The family a route's entity type belongs to, or `None` for an entity
+    /// type with no family. The mapped entity types other than `http` name
+    /// MCP or A2A entities carrying a CMF message.
+    ///
+    /// The mapped set is the same one [`crate::visitor::hook_pair_for_entity`]
+    /// covers, so a new entity type is unmapped in both places and the visitor
+    /// logs and skips rather than installing a handler on a guessed payload.
+    pub fn for_entity(entity_type: &str) -> Option<Self> {
+        match entity_type {
+            ENTITY_HTTP => Some(Self::Http),
+            ENTITY_TOOL | ENTITY_LLM | ENTITY_PROMPT | ENTITY_RESOURCE => Some(Self::Cmf),
+            _ => None,
         }
     }
 
     /// The registered hook type's name, read off the type so this cannot
     /// drift from what the executor sees on the handler.
-    fn hook_type_name(self) -> &'static str {
+    pub fn hook_type_name(self) -> &'static str {
         match self {
             Self::Cmf => CmfHook::NAME,
             Self::Http => HttpHook::NAME,
@@ -183,7 +195,8 @@ impl AplRouteHandler {
     /// `family` comes from the route's entity type via
     /// [`HookFamily::for_entity`] and decides which payload the handler
     /// accepts, so it has to agree with the hook name the handler is
-    /// annotated under.
+    /// annotated under. An entity type that maps to no family gets no
+    /// handler at all.
     pub fn new(
         config: PluginConfig,
         route: Arc<CompiledRoute>,
@@ -943,7 +956,7 @@ mod tests {
             PluginConfig::default(),
             Arc::new(CompiledRoute::new("k")),
             Phase::Pre,
-            HookFamily::for_entity(entity_type),
+            HookFamily::for_entity(entity_type).expect("mapped entity type"),
             Arc::new(PluginRegistry::default()),
             Arc::new(DispatchCache::new()),
             Arc::new(crate::session_store::MemorySessionStore::new()),
@@ -959,6 +972,16 @@ mod tests {
         assert_eq!(handler_for(ENTITY_HTTP).hook_type_name(), HttpHook::NAME);
         for entity_type in ["tool", "resource", "prompt", "llm"] {
             assert_eq!(handler_for(entity_type).hook_type_name(), CmfHook::NAME);
+        }
+    }
+
+    /// An entity type this does not map gets no family rather than the CMF
+    /// one, so a route on a new entity type cannot be handed a chat message
+    /// by omission.
+    #[test]
+    fn an_unmapped_entity_type_has_no_family() {
+        for entity_type in ["webhook", "agent", ""] {
+            assert_eq!(HookFamily::for_entity(entity_type), None);
         }
     }
 

@@ -980,6 +980,21 @@ fn install_handler(
     base_capabilities: &std::collections::HashSet<String>,
     attribute_tree: Arc<AttributeTree>,
 ) {
+    // The family decides which payload the handler accepts, and it is read off
+    // the same entity type that chose the hook name, so the two cannot
+    // disagree. An entity type with no family has no hook pair either, so the
+    // install sites never reach this; skipping and logging matches what they
+    // already do when `hook_pair_for_entity` returns `None`.
+    let Some(family) = HookFamily::for_entity(entity_type) else {
+        tracing::warn!(
+            entity_type,
+            entity_name,
+            hook_name,
+            "APL visitor: no hook family for entity_type — skipping handler install",
+        );
+        return;
+    };
+
     // Capability gating at the synthetic-handler boundary. praxis-policy-core's
     // executor calls `filter_extensions(&ext, &caps)` before every
     // handler invoke — including this one. If the synthetic handler
@@ -1030,10 +1045,7 @@ fn install_handler(
         plugin_config.clone(),
         route,
         phase,
-        // The family decides which payload the handler accepts, and it is
-        // read off the same entity type that chose the hook name above, so
-        // the two cannot disagree.
-        HookFamily::for_entity(entity_type),
+        family,
         Arc::clone(plugin_registry),
         Arc::clone(dispatch_cache),
         Arc::clone(session_store),
@@ -1352,8 +1364,8 @@ mod tests {
     use super::{
         AplConfigVisitor, ConfigVisitor as _, DispatchCache, ENTITY_HTTP, ENTITY_NAME_GLOBAL,
         ENTITY_TOOL, HOOK_CMF_TOOL_PRE_INVOKE, HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, PluginConfig,
-        PluginRouteRef, PolicyEngine, RouteEntry, apl_subblock, declares_pre_phase,
-        displaced_plugin_chain, response_subblock,
+        PluginRouteRef, PolicyEngine, RouteEntry, apl_subblock, declares_post_phase,
+        declares_pre_phase, displaced_plugin_chain, response_subblock,
     };
     use crate::session_store::MemorySessionStore;
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage, TypeCheck};
@@ -1426,6 +1438,38 @@ mod tests {
             !declares_pre_phase(&post_only),
             "post_policy never runs on the Pre-phase-only catch-all, so it must not gate installation"
         );
+    }
+
+    /// Every `Phase` must be claimed by exactly one install predicate, or a
+    /// route declaring only that phase installs no handler and evaluates
+    /// nothing. The match below is exhaustive, so a fifth variant fails to
+    /// compile here instead of silently installing nothing.
+    #[test]
+    fn every_phase_is_claimed_by_exactly_one_install_predicate() {
+        use praxis_policy_apl_core::rules::Phase;
+        for phase in [Phase::Args, Phase::Policy, Phase::Result, Phase::PostPolicy] {
+            let mut route = CompiledRoute::new("r");
+            let is_pre = match phase {
+                Phase::Args => {
+                    route.args.push(field_rule("a"));
+                    true
+                },
+                Phase::Policy => {
+                    route.policy.push(deny_effect());
+                    true
+                },
+                Phase::Result => {
+                    route.result.push(field_rule("r"));
+                    false
+                },
+                Phase::PostPolicy => {
+                    route.post_policy.push(deny_effect());
+                    false
+                },
+            };
+            assert_eq!(declares_pre_phase(&route), is_pre, "pre for {phase:?}");
+            assert_eq!(declares_post_phase(&route), !is_pre, "post for {phase:?}");
+        }
     }
 
     #[test]
