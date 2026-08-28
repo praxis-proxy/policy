@@ -53,7 +53,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `/api/v1` but not `/apikeys`, and a trailing slash is insignificant. An exact
   path outranks every prefix, the longer prefix wins among prefixes, and a
   route narrowed by `method:` outranks the same path left open for the methods
-  it names. None of the three depends on declaration order. An exact path is
+  it names, with the narrower of two narrowings winning a method both name.
+  Declaration order decides nothing among them, and among two selectors naming
+  the same number of methods it is what is left. An exact path is
   compared byte for byte against the path the request arrived on, the way the
   gateway router's own exact arm compares it, so `/admin` and `/admin/` are two
   routes answering for two different requests.
@@ -254,6 +256,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Two routes narrowed by the same method in different case are refused at load.** Method matching ignores ASCII case, but the rendered route identity did not, so `method: GET` and `method: get` on one path passed the duplicate check and both matched every request, with the first declared silently winning. The identity now uppercases the method set before sorting it, so the two spellings are one name and the load fails naming both routes. A config carrying both stops loading, and a lowercase `method:` renders its name uppercase.
 
 - **A route narrowed by `method:` now outranks the same path left open.** The narrowing gated the match without scoring, so two routes on one path resolved by declaration order: a broad `path_prefix: /api` written above `{path_prefix: /api, method: DELETE}` took the `DELETE` request, and swapping the two lines changed which policy ran. A present `method:` now adds to the score, below the per-character prefix weight so it breaks a tie within one path rather than reordering two paths, and below the scope bonus so a scoped route keeps winning its own scope. A configuration that pairs a broad route with a method-narrowed one moves those methods to the narrower policy.
+
+- **A declared `http:` path that is not absolute is refused at load.** Matching reads the request path as given, so a selector whose path does not start with `/` can never match, and seven shapes of it loaded as dead routes with no signal at all. A bare path, a list element, `path:`, and `path_prefix:` are all checked now, and the error names the route and the path it read. A config declaring one stops loading; write the path with its leading slash.
+
+- **A route can no longer claim the reserved catch-all name.** A route declaring `http: "*"` rendered `*` as its name, which is the name the entity-less catch-all policy is annotated under, so the route matched no request while its policy body governed every request that resolved no route, and it displaced the global `response:` block on the way. A route whose rendered names include the reserved name is now refused at load. The check reads the names the route contributes, so it covers every selector shape rather than the one spelling, and it runs whether or not routing is enabled, because the engine consults the annotation table either way.
+
+- **An `http.method:` value that is not a method token is refused at load.** Methods are compared literally and there is no glob dialect, so `method: 'GET*'` matched nothing, and neither did a typo carrying a space or a slash. A value must now be an RFC 9110 token, with `*` excluded because it reads as a glob, and the error names the route and the value. An extension verb such as `PROPFIND` or `M-SEARCH` is unaffected.
+
+- **Two routes narrowed by `method:` on one path no longer tie.** The narrowing scored a flat bonus whatever its method set held, so `{path: /a, method: [GET, POST]}` written above `{path: /a, method: GET}` took the `GET` request and the narrower policy never ran, with the declaration order deciding which one did. It failed in the fail-open direction, since the route that lost was the narrower one. The bonus now scales with how many methods the selector names, so one method outranks two on the same path, which is how the gateway's own router breaks a tie between equal paths: by counting constraints. The whole bonus still sits under the scope bonus, so a scoped broad route keeps winning its own scope, and far under the per-character prefix weight, so prefix length still decides between two different paths. A config pairing a wide narrowing with a narrow one moves the methods they share to the narrower policy.
 
 - **A body-less `http:` route no longer silences the response half.** A route whose effective layers declare only pre-phase steps installed a post handler that ran nothing, and that empty handler short-circuited the response-side plugin chain, so a configuration gained a catch-all `http:` route and lost whatever governed the way out. Each half now installs on the route path only when the route declares steps for it, which is the rule the global catch-all already applies.
 

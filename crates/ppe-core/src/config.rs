@@ -22,7 +22,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::cmf::constants::{ENTITY_HTTP, ENTITY_LLM, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL};
+use crate::cmf::constants::{
+    ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL,
+};
 use crate::error::PluginError;
 use crate::plugin::PluginConfig;
 
@@ -721,16 +723,21 @@ impl HttpSelector {
     /// when it is well formed. The caller prefixes the route it came from.
     fn defect(&self) -> Option<String> {
         match self {
-            Self::Path(path) => path
-                .is_empty()
-                .then(|| "declares an empty `http:` path".to_owned()),
+            Self::Path(path) => {
+                if path.is_empty() {
+                    return Some("declares an empty `http:` path".to_owned());
+                }
+                non_absolute_path_defect("http", path)
+            },
             Self::Paths(paths) => {
                 if paths.is_empty() {
                     Some("declares an empty `http:` list, which matches nothing".to_owned())
                 } else if paths.iter().any(String::is_empty) {
                     Some("declares an empty path in its `http:` list".to_owned())
                 } else {
-                    None
+                    paths
+                        .iter()
+                        .find_map(|path| non_absolute_path_defect("http", path))
                 }
             },
             Self::Match(m) => {
@@ -749,6 +756,22 @@ impl HttpSelector {
                 {
                     return Some("declares an empty method under `http.method:`".to_owned());
                 }
+                // A method is compared literally, so anything but a bare token
+                // matches nothing: `GET*` reads as a glob that no dialect here
+                // expands, and a typo carrying a space or a slash is the same
+                // dead route.
+                if let Some(method) = &m.method
+                    && let Some(bad) = method
+                        .as_names()
+                        .iter()
+                        .find(|name| !is_http_method_token(name))
+                {
+                    return Some(format!(
+                        "declares `http.method:` as '{bad}', which is not an HTTP method token; a \
+                         method is compared literally, so `*` and other non-token characters \
+                         match nothing"
+                    ));
+                }
                 match (&m.path, &m.path_prefix) {
                 (Some(_), Some(_)) => Some(
                     "declares both `path:` and `path_prefix:` under `http:`, which ask for \
@@ -765,11 +788,37 @@ impl HttpSelector {
                 (None, Some(prefix)) if prefix.is_empty() => Some(
                     "declares an empty `http.path_prefix:`; write `/` for the catch-all".to_owned(),
                 ),
-                _ => None,
+                (Some(path), None) => non_absolute_path_defect("http.path", path),
+                (None, Some(prefix)) => non_absolute_path_defect("http.path_prefix", prefix),
                 }
             },
         }
     }
+}
+
+/// What is wrong with a declared path that is not absolute, or `None` when it
+/// is. Matching reads the request line as given and a request path starts with
+/// `/`, so a declared path that does not can never match: the route would load
+/// as a dead one with no signal. `key` names the field it came from.
+fn non_absolute_path_defect(key: &str, path: &str) -> Option<String> {
+    (!path.starts_with('/')).then(|| {
+        format!(
+            "declares `{key}:` as '{path}', which is not an absolute path; a request path starts \
+             with `/`, so this selector matches nothing"
+        )
+    })
+}
+
+/// Whether a declared method is a bare HTTP method token.
+///
+/// RFC 9110 `tchar`, minus `*`: the star is a token character there, but here it
+/// reads as a glob, and methods are compared literally, so `GET*` would match
+/// nothing.
+fn is_http_method_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'+-.^_`|~".contains(&b))
 }
 
 impl<'de> Deserialize<'de> for HttpSelector {
@@ -1153,6 +1202,33 @@ fn validate_declared_hooks(config: &PolicyConfig) -> Result<(), Box<PluginError>
     Ok(())
 }
 
+/// Refuse a route whose rendered names claim [`ENTITY_NAME_GLOBAL`], the name
+/// the entity-less HTTP catch-all policy is annotated under.
+///
+/// A route claiming it takes over the catch-all: its policy body would govern
+/// every request that resolves no route while the route itself matched nothing.
+/// The check reads the names the route contributes, so it holds for every
+/// selector shape rather than for the one spelling that reached it, and it runs
+/// whether or not routing is enabled, because the engine consults the
+/// annotation table either way.
+fn reject_reserved_route_names(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
+    for (i, route) in config.routes.iter().enumerate() {
+        let Some((entity_type, names)) = route_entity_identity(route) else {
+            continue;
+        };
+        if entity_type == ENTITY_HTTP && names.iter().any(|name| name == ENTITY_NAME_GLOBAL) {
+            return Err(Box::new(PluginError::Config {
+                message: format!(
+                    "route {i} resolves to the name '{ENTITY_NAME_GLOBAL}', which is reserved for \
+                     the catch-all policy that governs a request matching no route; a route \
+                     cannot claim it"
+                ),
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a parsed config for structural correctness.
 ///
 /// This checks declared hook names plus the *structural* plugin activation
@@ -1166,6 +1242,7 @@ fn validate_declared_hooks(config: &PolicyConfig) -> Result<(), Box<PluginError>
 /// free of APL semantics is intentional.
 pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
     validate_declared_hooks(config)?;
+    reject_reserved_route_names(config)?;
 
     let mut seen_names = HashSet::new();
     for plugin in &config.plugins {
@@ -1392,12 +1469,19 @@ const SPECIFICITY_WILDCARD: usize = 0;
 const SPECIFICITY_EXACT_PATH: usize = usize::MAX / 2;
 const SPECIFICITY_PATH_PREFIX_STEP: usize = 1000;
 
-/// The bonus a present `method:` adds to whatever the path scored, so a route
-/// narrowed by method outranks the same path left open for the methods it
-/// names. It sits below the per-character prefix weight, so it breaks a tie
-/// within one path without reordering two different paths, and below the scope
-/// bonus, so a scoped route keeps winning its own scope.
+/// The bonus a one-method `method:` narrowing adds to whatever the path scored,
+/// and the ceiling of the whole method bonus. Each further method the selector
+/// names gives one back, so the narrower of two selectors on one path wins.
+///
+/// It sits below the per-character prefix weight, so it breaks a tie within one
+/// path without reordering two different paths, and below
+/// [`SPECIFICITY_SCOPE_MATCH`], so a scoped route keeps winning its own scope.
 const SPECIFICITY_METHOD_NARROWED: usize = 50;
+
+/// The bonus a route scores for declaring the request's scope. Above the whole
+/// method bonus, so a scoped broad route wins its own scope against a
+/// method-narrowed global one on the same path.
+const SPECIFICITY_SCOPE_MATCH: usize = 100;
 
 /// Score a single entity matcher (tool / resource / prompt / llm) against
 /// a request entity name, returning the specificity bucket if it matches
@@ -1479,6 +1563,27 @@ fn http_method_matches(accepted: Option<&StringOrList>, method: Option<&str>) ->
         .any(|name| name.eq_ignore_ascii_case(method))
 }
 
+/// The bonus a `method:` narrowing adds to whatever the path scored, scaled by
+/// how many methods it names so the narrower of two selectors on one path wins.
+/// One method takes the whole [`SPECIFICITY_METHOD_NARROWED`] and each further
+/// method gives one back, with a floor of 1 so any narrowing still outranks
+/// none. The gateway's own router orders routes by
+/// `(is_exact, path_len, constraint_count)`, so counting the constraint rather
+/// than noting its presence is how the router itself breaks this tie.
+///
+/// The floor makes a pathologically long method list score 1 rather than wrap
+/// past an unnarrowed route, and the ceiling keeps the whole range under
+/// [`SPECIFICITY_SCOPE_MATCH`] and far under
+/// [`SPECIFICITY_PATH_PREFIX_STEP`].
+fn method_narrowing_bonus(method: Option<&StringOrList>) -> usize {
+    match normalized_methods(method) {
+        None => 0,
+        Some(methods) => SPECIFICITY_METHOD_NARROWED
+            .saturating_sub(methods.len().saturating_sub(1))
+            .max(1),
+    }
+}
+
 /// Score an `http:` selector against a request path and method, or `None` when
 /// it does not match. The method narrowing both gates the match and adds to the
 /// score, so the narrower of two routes on one path wins whichever order they
@@ -1496,12 +1601,7 @@ fn score_http_match(selector: &HttpSelector, path: &str, method: Option<&str>) -
             .is_some()
             .then_some(SPECIFICITY_EXACT_PATH)
     }?;
-    let method_bonus = if selector.method().is_some() {
-        SPECIFICITY_METHOD_NARROWED
-    } else {
-        0
-    };
-    Some(path_score.saturating_add(method_bonus))
+    Some(path_score.saturating_add(method_narrowing_bonus(selector.method())))
 }
 
 /// The static bundle-membership tags a route declares: its `meta.tags`
@@ -1594,11 +1694,11 @@ fn rendered_exact_name(declared: &str, methods: Option<&str>) -> String {
 }
 
 /// The method set a selector narrows by, or `None` when it accepts any method.
-/// Uppercased, sorted, and deduplicated so the rendering follows the set
-/// matching reads rather than the order or case it was written in, and holds
-/// across reloads. Matching ignores case, so `GET` and `get` are one set and
-/// must render one name.
-fn rendered_methods(method: Option<&StringOrList>) -> Option<String> {
+/// Uppercased, sorted, and deduplicated so the set follows what matching reads
+/// rather than the order or case it was written in, and holds across reloads.
+/// Matching ignores case, so `GET` and `get` are one method, which is what makes
+/// this both the name a route renders and the count that scores its narrowing.
+fn normalized_methods(method: Option<&StringOrList>) -> Option<Vec<String>> {
     let mut methods: Vec<String> = method?
         .as_names()
         .iter()
@@ -1606,7 +1706,12 @@ fn rendered_methods(method: Option<&StringOrList>) -> Option<String> {
         .collect();
     methods.sort_unstable();
     methods.dedup();
-    Some(methods.join(","))
+    Some(methods)
+}
+
+/// The method set as it appears in a rendered route name.
+fn rendered_methods(method: Option<&StringOrList>) -> Option<String> {
+    Some(normalized_methods(method)?.join(","))
 }
 
 /// The name a matching name selector resolves to: the matched element for a
@@ -1932,9 +2037,9 @@ pub fn resolve_route<'a>(
     for route in &config.routes {
         let route_scope = route.meta.as_ref().and_then(|m| m.scope.as_deref());
         let scope_bonus = match (route_scope, query.scope) {
-            (None, _) => 0,                          // route is global
-            (Some(rs), Some(rq)) if rs == rq => 100, // scopes match
-            (Some(_), _) => continue,                // scope mismatch — skip
+            (None, _) => 0,                                              // route is global
+            (Some(rs), Some(rq)) if rs == rq => SPECIFICITY_SCOPE_MATCH, // scopes match
+            (Some(_), _) => continue,                                    // scope mismatch — skip
         };
 
         let Some((base_specificity, name)) = score_route_match(route, query) else {
@@ -4246,6 +4351,144 @@ routes:
         }
     }
 
+    /// The load error for a config declaring one `http:` route, written as just
+    /// the selector, so a case reads as the selector it declares.
+    fn selector_error(selector: &str) -> String {
+        let yaml = format!(
+            "plugin_settings:\n  routing_enabled: true\nplugins: []\nroutes:\n  - http: \
+             {selector}\n"
+        );
+        parse_config(&yaml)
+            .expect_err("a malformed selector must fail the load")
+            .to_string()
+    }
+
+    /// A declared path that is not absolute matches nothing, because matching
+    /// reads the request line as given and a request path starts with `/`. Every
+    /// shape that can carry one refuses it and names it, rather than loading a
+    /// route that can never match.
+    #[test]
+    fn a_declared_path_that_is_not_absolute_is_rejected() {
+        for (selector, named) in [
+            ("healthz", "healthz"),
+            ("[healthz]", "healthz"),
+            ("[/livez, readyz]", "readyz"),
+            ("{ path: healthz }", "healthz"),
+            ("{ path: healthz, method: GET }", "healthz"),
+            ("{ path_prefix: v1 }", "v1"),
+            ("{ path_prefix: v1, method: GET }", "v1"),
+        ] {
+            let err = selector_error(selector);
+            assert!(err.contains("route 0"), "{selector}: {err}");
+            assert!(err.contains("not an absolute path"), "{selector}: {err}");
+            assert!(err.contains(named), "{selector}: {err}");
+        }
+    }
+
+    /// A method is compared literally against the value as written, so anything
+    /// but a bare token is a route that matches nothing: `GET*` reads as a glob
+    /// no dialect here expands, and a typo carrying a space or a slash is the
+    /// same dead route.
+    #[test]
+    fn a_method_that_is_not_a_token_is_rejected() {
+        for (selector, named) in [
+            ("{ path_prefix: /v1, method: 'GET*' }", "GET*"),
+            ("{ path_prefix: /v1, method: '*' }", "*"),
+            ("{ path_prefix: /v1, method: 'GET POST' }", "GET POST"),
+            ("{ path_prefix: /v1, method: 'GET/POST' }", "GET/POST"),
+            ("{ path_prefix: /v1, method: [GET, 'PO ST'] }", "PO ST"),
+            ("{ path: /v1, method: 'GÉT' }", "GÉT"),
+        ] {
+            let err = selector_error(selector);
+            assert!(err.contains("route 0"), "{selector}: {err}");
+            assert!(
+                err.contains("not an HTTP method token"),
+                "{selector}: {err}"
+            );
+            assert!(err.contains(named), "{selector}: {err}");
+        }
+    }
+
+    /// The token check refuses what cannot match, not what is unfamiliar: a
+    /// method is any RFC 9110 token, so an extension verb loads.
+    #[test]
+    fn a_method_written_as_a_bare_token_loads() {
+        let cfg = routed_config("  - http: { path_prefix: /dav, method: [PROPFIND, M-SEARCH] }\n");
+        assert_eq!(cfg.routes.len(), 1);
+        assert!(
+            http_name(&cfg, "/dav/x", Some("PROPFIND")).is_some(),
+            "an extension verb matches the way a standard one does"
+        );
+    }
+
+    /// The catch-all policy that governs a request matching no route is
+    /// annotated under the reserved name, so no route may render it: a route
+    /// that did would govern every unmatched request while matching none itself.
+    /// Written over every `http:` shape, since one refused spelling is not the
+    /// invariant. The shapes that cannot render the reserved name are refused
+    /// for the path instead, and both refusals close the hijack.
+    #[test]
+    fn no_http_selector_shape_can_claim_the_reserved_global_name() {
+        for (selector, reason) in [
+            (format!("\"{ENTITY_NAME_GLOBAL}\""), "reserved"),
+            (format!("[\"{ENTITY_NAME_GLOBAL}\"]"), "reserved"),
+            (format!("[/healthz, \"{ENTITY_NAME_GLOBAL}\"]"), "reserved"),
+            (format!("{{ path: \"{ENTITY_NAME_GLOBAL}\" }}"), "reserved"),
+            (
+                format!("{{ path: \"{ENTITY_NAME_GLOBAL}\", method: GET }}"),
+                "not an absolute path",
+            ),
+            (
+                format!("{{ path_prefix: \"{ENTITY_NAME_GLOBAL}\" }}"),
+                "not an absolute path",
+            ),
+            (
+                format!("{{ path_prefix: \"{ENTITY_NAME_GLOBAL}\", method: GET }}"),
+                "not an absolute path",
+            ),
+        ] {
+            let err = selector_error(&selector);
+            assert!(err.contains("route 0"), "{selector}: {err}");
+            assert!(err.contains(reason), "{selector}: {err}");
+        }
+    }
+
+    /// The engine reads the annotation table whether or not routing is enabled,
+    /// so a route claiming the reserved name is refused either way.
+    #[test]
+    fn a_route_claiming_the_reserved_name_is_refused_with_routing_disabled() {
+        let err = parse_config(&format!(
+            "plugins: []\nroutes:\n  - http: \"{ENTITY_NAME_GLOBAL}\"\n"
+        ))
+        .expect_err("the reserved name is refused with routing off too")
+        .to_string();
+        assert!(err.contains("route 0"), "{err}");
+        assert!(err.contains("reserved"), "{err}");
+    }
+
+    /// The invariant read positively: whatever shape a route that loads
+    /// declares, none of the names it contributes is the reserved one.
+    #[test]
+    fn no_loadable_http_route_renders_the_reserved_global_name() {
+        let cfg = routed_config(
+            "  - http: /healthz\n  - http: [/livez, /readyz]\n  - http: { path: /v1/manifest }\n  \
+             - http: { path: /v1/manifest, method: GET }\n  - http: { path_prefix: /v1 }\n  - \
+             http: { path_prefix: /v1, method: [GET, POST] }\n  - http: { path_prefix: / }\n",
+        );
+        assert_eq!(cfg.routes.len(), 7, "one route per selector shape");
+        for (i, route) in cfg.routes.iter().enumerate() {
+            let (entity_type, names) =
+                route_entity_identity(route).expect("every route declares `http:`");
+            assert_eq!(entity_type, ENTITY_HTTP);
+            for name in names {
+                assert_ne!(
+                    name, ENTITY_NAME_GLOBAL,
+                    "route {i} renders the reserved catch-all name"
+                );
+            }
+        }
+    }
+
     /// A typo inside the map form is a key nothing reads, and the map's own
     /// parse names it rather than reporting the whole selector as malformed.
     #[test]
@@ -5341,9 +5584,9 @@ routes:
     }
 
     /// Three routes on one prefix are equal on length, so the narrowing orders
-    /// them: a narrowed route takes a method it names, and two narrowings that
-    /// both cover that method score alike, so the tie falls to the first
-    /// declaration the way every other tie does.
+    /// them: two narrowings that both name the request's method are ordered by
+    /// how many methods each names, so the answer is the same in either
+    /// declaration order.
     #[test]
     fn equal_length_prefixes_order_by_the_narrowing_not_by_the_file() {
         for routes in [
@@ -5351,19 +5594,10 @@ routes:
             "  - http: { path_prefix: /api, method: GET }\n  - http: { path_prefix: /api, method: [GET, POST] }\n  - http: { path_prefix: /api }\n",
         ] {
             let cfg = routed_config(routes);
-            let first_naming_get = cfg
-                .routes
-                .iter()
-                .filter_map(|route| route.http.as_ref())
-                .filter(|selector| selector.method().is_some())
-                .find(|selector| http_method_matches(selector.method(), Some("GET")))
-                .and_then(|selector| http_selector_names(selector).into_iter().next())
-                .expect("two of the three routes narrow to GET");
-
             assert_eq!(
                 http_name(&cfg, "/api/x", Some("GET")).as_deref(),
-                Some(first_naming_get.as_str()),
-                "a narrowed route takes GET, and the first of the two declared breaks their tie"
+                Some("GET prefix:/api"),
+                "the GET-only route names one method where the other names two, so it wins GET"
             );
             assert_eq!(
                 http_name(&cfg, "/api/x", Some("POST")).as_deref(),
@@ -5376,6 +5610,147 @@ routes:
                 "no narrowing names DELETE, so the open route governs it"
             );
         }
+    }
+
+    /// A method set built directly, so a case can name one no operator would
+    /// write. Distinct tokens, since matching reads the set deduplicated.
+    fn methods(count: usize) -> StringOrList {
+        StringOrList::List((0..count).map(|i| format!("M{i}")).collect())
+    }
+
+    /// An exact-path selector narrowed by a built method set.
+    fn narrowed_exact(path: &str, method: StringOrList) -> HttpSelector {
+        HttpSelector::Match(HttpMatch {
+            path: Some(path.to_owned()),
+            method: Some(method),
+            ..HttpMatch::default()
+        })
+    }
+
+    /// Whatever the method set holds, a narrowing scores something: that is what
+    /// keeps a narrowed route ahead of the same path left open.
+    #[test]
+    fn any_method_narrowing_outranks_no_narrowing() {
+        assert_eq!(
+            method_narrowing_bonus(None),
+            0,
+            "an open path adds nothing to its path score"
+        );
+        for count in [1_usize, 2, 9, 50, 51, 1_000, 100_000] {
+            assert!(
+                method_narrowing_bonus(Some(&methods(count))) > 0,
+                "a selector naming {count} methods must still outrank an open path"
+            );
+        }
+    }
+
+    /// Each further method the selector names gives one of the bonus back, so the
+    /// selector naming fewer methods outranks the one naming more.
+    #[test]
+    fn each_further_method_lowers_the_narrowing_bonus() {
+        let mut previous = method_narrowing_bonus(Some(&methods(1)));
+        for count in 2..=20_usize {
+            let bonus = method_narrowing_bonus(Some(&methods(count)));
+            assert!(
+                bonus < previous,
+                "{count} methods scored {bonus}, not below the {} for {}",
+                previous,
+                count - 1
+            );
+            previous = bonus;
+        }
+    }
+
+    /// The narrower of two selectors on one exact path wins a method both name,
+    /// in either declaration order. This is the ordering that used to fall to
+    /// whichever line came first.
+    #[test]
+    fn a_narrower_method_set_outranks_a_wider_one_on_an_exact_path() {
+        for routes in [
+            "  - http: { path: /a, method: [GET, POST] }\n  - http: { path: /a, method: GET }\n",
+            "  - http: { path: /a, method: GET }\n  - http: { path: /a, method: [GET, POST] }\n",
+        ] {
+            let cfg = routed_config(routes);
+            assert_eq!(
+                http_name(&cfg, "/a", Some("GET")).as_deref(),
+                Some("GET path:/a"),
+                "the GET-only route must win GET, declared first or second"
+            );
+            assert_eq!(
+                http_name(&cfg, "/a", Some("POST")).as_deref(),
+                Some("GET,POST path:/a"),
+                "only the wider route names POST"
+            );
+        }
+    }
+
+    /// The same ordering on the prefix shape, where the two selectors also score
+    /// the same path length.
+    #[test]
+    fn a_narrower_method_set_outranks_a_wider_one_on_a_prefix() {
+        for routes in [
+            "  - http: { path_prefix: /api, method: [GET, POST] }\n  - http: { path_prefix: /api, method: GET }\n",
+            "  - http: { path_prefix: /api, method: GET }\n  - http: { path_prefix: /api, method: [GET, POST] }\n",
+        ] {
+            let cfg = routed_config(routes);
+            assert_eq!(
+                http_name(&cfg, "/api/x", Some("GET")).as_deref(),
+                Some("GET prefix:/api"),
+                "the GET-only route must win GET, declared first or second"
+            );
+            assert_eq!(
+                http_name(&cfg, "/api/x", Some("POST")).as_deref(),
+                Some("GET,POST prefix:/api"),
+                "only the wider route names POST"
+            );
+        }
+    }
+
+    /// The whole method bonus stays under the scope bonus, which is what keeps a
+    /// scoped broad route winning its own scope, and far under the per-character
+    /// prefix weight, which is what keeps prefix length deciding between two
+    /// different paths.
+    #[test]
+    fn the_method_bonus_stays_under_the_scope_and_prefix_weights() {
+        for count in [1_usize, 2, 9, 50, 51, 1_000, 100_000] {
+            let bonus = method_narrowing_bonus(Some(&methods(count)));
+            assert!(
+                bonus < SPECIFICITY_SCOPE_MATCH,
+                "{count} methods scored {bonus}, not below the scope bonus"
+            );
+            assert!(
+                bonus * 10 < SPECIFICITY_PATH_PREFIX_STEP,
+                "{count} methods scored {bonus}, not far below one prefix character"
+            );
+        }
+    }
+
+    /// A method set no configuration would hold must neither wrap the total nor
+    /// invert the ordering: it stays a narrowing, stays behind every smaller set,
+    /// and stays above the exact-path score it is added to.
+    #[test]
+    fn a_pathologically_large_method_set_neither_wraps_nor_inverts() {
+        let huge = method_narrowing_bonus(Some(&methods(1_000_000)));
+        assert!(huge >= 1, "a huge set is still a narrowing: {huge}");
+        assert!(
+            huge <= method_narrowing_bonus(Some(&methods(2))),
+            "a huge set cannot outrank a two-method one: {huge}"
+        );
+
+        let selector = narrowed_exact("/a", methods(1_000_000));
+        let score = score_http_match(&selector, "/a", Some("M0"))
+            .expect("the exact path and one of its methods match");
+        assert!(
+            score > SPECIFICITY_EXACT_PATH,
+            "the bonus must land above the exact-path score, not wrap past it: {score}"
+        );
+        let one_method = narrowed_exact("/a", methods(1));
+        assert!(
+            score_http_match(&one_method, "/a", Some("M0"))
+                .expect("the one-method selector matches too")
+                > score,
+            "the one-method selector must still outrank the huge one"
+        );
     }
 
     /// The bonus sits below the scope bonus, so a scoped route keeps winning its
@@ -5404,10 +5779,12 @@ routes:
 
     /// Matching reads a request line, so anything that is not an absolute path
     /// matches nothing, catch-all included. That is what keeps `OPTIONS *` from
-    /// picking up a route it was never written for.
+    /// picking up a route it was never written for. A route spelled `*` is not
+    /// the other half of this case: it is refused at load, both as a path that
+    /// is not absolute and as the reserved catch-all name.
     #[test]
     fn a_path_that_is_not_absolute_matches_no_route() {
-        let cfg = routed_config("  - http: { path_prefix: / }\n  - http: \"*\"\n");
+        let cfg = routed_config("  - http: { path_prefix: / }\n");
 
         for path in ["*", "", "v1/files", "http://host/v1"] {
             assert!(
