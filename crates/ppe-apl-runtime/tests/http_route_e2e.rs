@@ -499,8 +499,8 @@ routes:
       - route-audit
 "#;
 
-/// Two prefixes that both cover a traversal target, so a path that climbs out
-/// of one lands in the other rather than nowhere.
+/// Two prefixes plus a catch-all, so a path written as a traversal out of one
+/// of them has somewhere else it could plausibly have landed.
 const NESTED_PREFIXES: &str = r#"
 plugin_settings:
   routing_enabled: true
@@ -713,12 +713,13 @@ routes:
     );
 }
 
-/// A route declared with a trailing slash runs its body for every spelling of
-/// its path. The annotation key and the resolved name both come from the one
-/// rendering, so canonicalizing the identity cannot orphan the body; this pins
-/// that end to end.
+/// A route declared with a trailing slash runs its body for the path it
+/// declared and for nothing else. The annotation key and the resolved name are
+/// both the path verbatim, so the body is reachable, and the spellings the
+/// gateway router treats as other paths fall back to the global policy, which
+/// this configuration leaves empty.
 #[tokio::test]
-async fn a_route_declared_with_a_trailing_slash_runs_its_body_for_every_spelling() {
+async fn a_route_declared_with_a_trailing_slash_runs_its_body_for_that_spelling_only() {
     const YAML: &str = r#"
 plugin_settings:
   routing_enabled: true
@@ -734,14 +735,23 @@ routes:
       pre_invocation:
         - "plugin(body-audit)"
 "#;
-    for spelling in ["/admin", "/admin/", "/admin//"] {
+    let (mgr, ledger) = engine_with(YAML).await;
+    assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/admin/")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "the body must run for the path the route declared"
+    );
+
+    for other in ["/admin", "/admin//"] {
         let (mgr, ledger) = engine_with(YAML).await;
 
-        assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", spelling)).await);
-        assert_eq!(
-            fired(&ledger),
-            vec!["body-audit".to_owned()],
-            "the body must run for `{spelling}`, whatever the route declared"
+        assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", other)).await);
+        assert!(
+            fired(&ledger).is_empty(),
+            "`{other}` is another path to the router, so this route's body must \
+             not run for it; saw {:?}",
+            fired(&ledger)
         );
     }
 }
@@ -1252,10 +1262,12 @@ routes:
 // Path handling
 // =====================================================================
 
-/// A traversal does not reach the prefix it climbs out of, written either
-/// plainly or percent-encoded.
+/// A traversal stays under the prefix it was written under, written either
+/// plainly or percent-encoded. The gateway's router resolves no dot segment, so
+/// it forwards these under `/v1/files`; resolving them here would apply the
+/// `/admin` route's policy to traffic the gateway sends to the files cluster.
 #[tokio::test]
-async fn a_traversal_does_not_reach_the_prefix_it_climbs_out_of() {
+async fn a_traversal_stays_under_the_prefix_it_was_written_under() {
     let (mgr, ledger) = engine_with(NESTED_PREFIXES).await;
 
     for path in [
@@ -1267,8 +1279,8 @@ async fn a_traversal_does_not_reach_the_prefix_it_climbs_out_of() {
         assert!(fire(&mgr, HOOK_HTTP_REQUEST, request("GET", path)).await);
         assert_eq!(
             fired(&ledger),
-            vec!["admin-audit".to_owned()],
-            "{path} resolves where it lands, not where it started"
+            vec!["files-audit".to_owned()],
+            "{path} resolves the route the request is actually forwarded to"
         );
     }
 }

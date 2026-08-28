@@ -54,8 +54,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   path outranks every prefix, the longer prefix wins among prefixes, and a
   route narrowed by `method:` outranks the same path left open for the methods
   it names. None of the three depends on declaration order. An exact path is
-  matched with one trailing slash treated as insignificant, so `/admin` covers
-  `/admin/` as well as the `/admin//` and `/admin/.` that normalization rewrites.
+  compared byte for byte against the path the request arrived on, the way the
+  gateway router's own exact arm compares it, so `/admin` and `/admin/` are two
+  routes answering for two different requests.
 
   Two things worth knowing before writing the first one. An `http:` route
   carrying a policy body dispatches that body in place of its structural plugin
@@ -189,20 +190,21 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#40](https://github.com/praxis-proxy/policy/issues/40))
 
 - **A path normalizer and a route-resolution error are public surface.**
-  `praxis_policy_core::http_path::normalize_match_path` produces the path
-  matching runs against: query and fragment removed, semicolon path parameters
-  stripped, duplicate slashes collapsed, and `.` / `..` resolved including
-  their percent-encoded spellings, with nothing ever percent-decoded so an
-  encoded separator stays inside its own segment. The rules are the gateway's,
-  duplicated on purpose because the dependency cannot run the other way, and
-  the module names its source so the two can be compared. What a policy reads
-  is untouched: `http.path` and `meta.entity_name` reach the attribute bag as
-  the host set them, and the normalized form is never written back. A path that
-  breaks those rules matches no `http:` route, and where at least one `http:`
-  route is declared it is denied with the stable code
-  `unreadable_request_path` and a `400`, because the engine and the gateway's
-  router would otherwise be reading two different paths for one request. With
-  no `http:` route declared, nothing about such a request changes.
+  `praxis_policy_core::http_path::normalize_match_path` reads a request path and
+  refuses one it cannot read: query and fragment removed, semicolon path
+  parameters stripped, duplicate slashes collapsed, and `.` / `..` resolved
+  including their percent-encoded spellings, with nothing ever percent-decoded
+  so an encoded separator stays inside its own segment. Those rewriting rules
+  mirror the gateway's `normalize_rewritten_path`, which the gateway applies to
+  paths it produced itself and never to an inbound one, and the module names its
+  source so the two can be compared. Route matching does not read the value it
+  returns, and neither does a policy: `http.path` and `meta.entity_name` reach
+  the attribute bag as the host set them, and the normalized form is written
+  nowhere. What the function does for the engine is the refusal. A path that
+  breaks its rules is denied with the stable code `unreadable_request_path` and
+  a `400` wherever at least one `http:` route is declared, because a path PPE
+  cannot read is one it cannot claim to have matched the router on. With no
+  `http:` route declared, nothing about such a request changes.
   ([#40](https://github.com/praxis-proxy/policy/issues/40))
 
 - **A route key nothing reads fails at load, naming the key and the route.**
@@ -239,7 +241,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- **Normalizing a request path that carries a query allocates nothing.** The query and the fragment are dropped by taking a shorter borrow of the request line, but the check for whether the path needed rewriting ran on the raw path, so the `?` and the `#` it found there forced the owned branch and every request carrying a query string paid for a rewrite with nothing to do. The check now runs on the path the borrow covers, so `/v1/files/q3.pdf?page=2` borrows the way `/v1/files/q3.pdf` already did. A path that still needs its dot segments resolved, its duplicate slashes collapsed, or its path parameters stripped is owned as before. Normalized paths are unchanged, except that a trailing slash sitting in front of a query is now kept the way `/a/` already kept its own; both spellings match the same routes, since one trailing slash is insignificant to the prefix and the exact comparison alike.
+- **Normalizing a request path that carries a query allocates nothing.** The query and the fragment are dropped by taking a shorter borrow of the request line, but the check for whether the path needed rewriting ran on the raw path, so the `?` and the `#` it found there forced the owned branch and every request carrying a query string paid for a rewrite with nothing to do. The check now runs on the path the borrow covers, so `/v1/files/q3.pdf?page=2` borrows the way `/v1/files/q3.pdf` already did. A path that still needs its dot segments resolved, its duplicate slashes collapsed, or its path parameters stripped is owned as before. Normalized paths are unchanged, except that a trailing slash sitting in front of a query is now kept the way `/a/` already kept its own.
 
 - **Resolving an HTTP route's name stops cloning the selector's path list.** The name a request resolves to is what keys the annotation table and the route cache, so it has to be computed before either lookup, and computing it rendered a name for every path the selector declares and kept one. A twenty-path selector cost twenty discarded names per matching route per request, cached requests included, and a prefix selector built a one-element list for an answer that is a single rendered string. The scan now hands back the declared path it matched by borrow and renders only that name. The names themselves are unchanged: the names a route is annotated under and the name a request resolves to render through the same two functions, so neither can drift from the other. No configuration or behavior changes.
 
@@ -247,11 +249,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **A stale `policy:` on a route reports the rename, and a route's bad keys are reported together.** The route-key scan runs before any visitor and did not know the pre-rename names, so a route carrying `policy:` failed with an unknown-key error listing every key a route accepts rather than the message naming `authorization.pre_invocation`. The rename check now runs first, off the same table the APL visitor reads. The scan also collects every unrecognized key on a route and names them in one error, so three typos take one load to find rather than three. A stale key still fails the load, which is what keeps a dropped authorization block from failing open.
 
-- **An exact-path route matches the spellings of its path that normalization treats as equal.** `http: /admin` matched `/admin`, `/admin//`, `/admin/.`, and `/admin/x/..`, and missed `/admin/`, the spelling a browser sends: normalization keeps one trailing slash so PPE reads a request the way the gateway that chose its upstream does, and the exact comparison then compared bytes. One trailing slash is now insignificant on both sides of that comparison, as it already is for a prefix. Normalization is unchanged, so `http.path` reads what it always did. A request on `/admin/` that reached the global policy now reaches the `/admin` route, and every spelling resolves the single name the route declares.
+- **HTTP route matching runs on the request path as given.** It normalized the path first, and compared an exact path with one trailing slash treated as insignificant, so PPE could resolve a different route than the one the request is forwarded to. The gateway's router normalizes nothing: it matches on `ctx.rewritten_path` or `ctx.request.uri.path()`, and its exact arm is a byte compare. So `/v1/files/../healthz` resolved the `/healthz` route here while the gateway sent the request to the `/v1/files` cluster, and whatever `/v1/files` authenticates was dropped for it. Matching now uses the path the host supplied and compares an exact path byte for byte, which is how PPE applies the policy of the route the traffic actually goes to. **An exact route no longer matches a trailing-slash spelling of its path**: `http: /admin` answers for `/admin` and not for `/admin/`, a route declared `"/admin/"` answers for `/admin/` and not for `/admin`, and a deployment needing both declares both. Two routes declaring the two spellings now load rather than being refused as one name, and each is annotated under the path it was written as. Prefix matching is untouched and still agrees with the gateway's own `path_prefix_matches`, so a prefix route keeps matching `/api`, `/api/`, and `/api/v1`. The path normalizer still runs as a fail-closed guard, so an unreadable path is denied exactly as before.
 
 - **Two routes narrowed by the same method in different case are refused at load.** Method matching ignores ASCII case, but the rendered route identity did not, so `method: GET` and `method: get` on one path passed the duplicate check and both matched every request, with the first declared silently winning. The identity now uppercases the method set before sorting it, so the two spellings are one name and the load fails naming both routes. A config carrying both stops loading, and a lowercase `method:` renders its name uppercase.
-
-- **Two routes whose exact paths differ only in a trailing slash are refused at load.** Now that an exact path matches every spelling of itself, `http: /admin` and `http: "/admin/"` match the same requests, while the identity still rendered them as two names, so the second route was silently unreachable. An exact path is now rendered with one trailing slash dropped, the way a prefix already is: two routes declaring the two spellings fail the load naming both, and one route repeating them inside a single `http:` list is reported against that route. The root keeps its slash, so an exact `/` stays distinct from `path_prefix: /`. A route declared `"/admin/"` resolves and is annotated under `/admin`, which is one name for every spelling either side writes.
 
 - **A route narrowed by `method:` now outranks the same path left open.** The narrowing gated the match without scoring, so two routes on one path resolved by declaration order: a broad `path_prefix: /api` written above `{path_prefix: /api, method: DELETE}` took the `DELETE` request, and swapping the two lines changed which policy ran. A present `method:` now adds to the score, below the per-character prefix weight so it breaks a tie within one path rather than reordering two paths, and below the scope bonus so a scoped route keeps winning its own scope. A configuration that pairs a broad route with a method-narrowed one moves those methods to the narrower policy.
 

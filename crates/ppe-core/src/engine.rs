@@ -55,10 +55,12 @@ pub const VIOLATION_UNREADABLE_REQUEST_PATH: &str = "unreadable_request_path";
 /// Why a request could not be resolved against the route table.
 ///
 /// Resolving no route is not an error: the request falls back to the global
-/// policy, as it always has. This is only produced when the request line
-/// cannot be read at all and at least one `http:` route is declared, because
-/// then the engine and the host's router would be matching two different
-/// paths and one of them would apply the wrong route's policy.
+/// policy, as it always has. This is only produced when the request line cannot
+/// be read at all and at least one `http:` route is declared. Matching uses the
+/// path as given, so the engine and the host's router read one string; a string
+/// that breaks the rules of a path is one the engine cannot vouch is the string
+/// the router and the backend will act on, and a smuggled request line is
+/// exactly that case.
 ///
 /// A hook with no registered entry and no annotation returns before
 /// resolution runs, so an unreadable path still allows there. Nothing would
@@ -1796,39 +1798,44 @@ impl PolicyEngine {
         // they need no derivation and keep resolving after the lookups below.
         let http_matched = if entity_type == Some(ENTITY_HTTP) {
             let request_line = extensions.http.as_deref();
-            let normalized = match request_line
+            // Whatever precedes a `?`, which is the router's own input: it
+            // matches on `rewritten_path` when a rewrite filter set one and
+            // strips a query off it, and on a request URI's path otherwise,
+            // which carries no query to begin with. A host that puts one in
+            // the path anyway lands on the same route the router picks.
+            let path = request_line
                 .and_then(|http| http.path.as_deref())
-                .map(http_path::normalize_match_path)
-                .transpose()
-            {
-                Ok(path) => path,
-                Err(cause) => {
-                    // An unreadable path denies rather than falling through to
-                    // the global policy. Falling through would apply one
-                    // path's policy to a request the host's router reads as
-                    // another path, which is the mismatch normalization exists
-                    // to prevent. Without an `http:` route nothing could have
-                    // answered for the path anyway, so nothing is denied.
-                    if routing_config.is_some_and(declares_http_route) {
-                        return Err(cause.into());
-                    }
-                    None
-                },
-            };
+                .map(|path| path.split('?').next().unwrap_or(path));
+            // Matching runs on the path exactly as it arrived, because that is
+            // the path the host's router matches on. Normalizing first would
+            // let PPE resolve a different route than the one the request is
+            // actually forwarded to.
+            //
+            // The normalizer still runs, and its `Ok` value is deliberately
+            // discarded: it is a fail-closed guard here, not the matcher. Do
+            // not wire its output back into the query below.
+            if let Err(cause) = path.map(http_path::normalize_match_path).transpose() {
+                // An unreadable path denies rather than falling through to the
+                // global policy: a path PPE cannot read is one it cannot claim
+                // to have matched the router on. Without an `http:` route
+                // nothing could have answered for the path anyway, so nothing
+                // is denied.
+                if routing_config.is_some_and(declares_http_route) {
+                    return Err(cause.into());
+                }
+            }
             self.warn_once_if_route_authentication_is_unreachable(
                 &snapshot.http_routes_declaring_authentication,
                 hook_name,
-                normalized.as_deref(),
+                path,
             );
-            routing_config
-                .zip(normalized.as_deref())
-                .and_then(|(policy_config, path)| {
-                    let method = request_line.and_then(|http| http.method.as_deref());
-                    config::resolve_route(
-                        policy_config,
-                        config::RouteQuery::http(path, method).with_scope(request_scope),
-                    )
-                })
+            routing_config.zip(path).and_then(|(policy_config, path)| {
+                let method = request_line.and_then(|http| http.method.as_deref());
+                config::resolve_route(
+                    policy_config,
+                    config::RouteQuery::http(path, method).with_scope(request_scope),
+                )
+            })
         } else {
             None
         };
@@ -2048,11 +2055,11 @@ impl PolicyEngine {
         &self,
         unreachable: &[String],
         hook_name: &str,
-        normalized_path: Option<&str>,
+        request_path: Option<&str>,
     ) {
         if hook_name != crate::identity::HOOK_IDENTITY_RESOLVE
             || unreachable.is_empty()
-            || normalized_path.is_some_and(|path| path.starts_with('/'))
+            || request_path.is_some_and(|path| path.starts_with('/'))
             || self
                 .route_authentication_unreachable_warned
                 .load(Ordering::Acquire)
@@ -7862,8 +7869,9 @@ routes:
     async fn an_http_request_resolves_the_route_its_path_matches() {
         let (mgr, ledger) = recording_engine(HTTP_ROUTES_YAML).await;
 
-        // A query string is not part of the path matching reads, but it is part
-        // of what the policy sees.
+        // Matching reads the whole string the host set, query included, the way
+        // the router reads the path it was given. The prefix still matches at
+        // the same segment boundary, and the policy sees the string verbatim.
         let raw = "/v1/files/q3.pdf?download=1";
         let result = dispatch(&mgr, "test_hook", http_request(Some(raw))).await;
         assert!(result.continue_processing);
@@ -7953,7 +7961,9 @@ routes:
     async fn an_unreadable_path_denies_only_when_an_http_route_is_declared() {
         // A carriage return in a request line is a smuggling signal, and
         // guessing which path a route should answer for is exactly what the
-        // deny exists to avoid.
+        // deny exists to avoid. This is the whole of what the path normalizer
+        // affects: matching itself runs on the path as given, and only the
+        // refusal reaches a decision.
         let smuggled = "/v1/files/q3.pdf\r\nX-Injected: 1";
 
         let (with_routes, _) = recording_engine(HTTP_ROUTES_YAML).await;

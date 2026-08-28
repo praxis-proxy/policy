@@ -1,14 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// Turning a host-supplied request path into the string route matching
-// runs against.
+// Reading a host-supplied request path, and refusing one that cannot be
+// read safely.
 //
-// The rules are the gateway's own, reimplemented from
-// `filter/src/builtins/http/transformation/path_sanitize.rs` in the
-// praxis tree. PPE cannot depend on that crate, so the duplication is
-// deliberate and the oracle test at the bottom of this file pins the two
-// together case for case. Name both files when either moves.
+// The rewriting rules mirror `normalize_rewritten_path` in
+// `filter/src/builtins/http/transformation/path_sanitize.rs` of the praxis
+// tree. PPE cannot depend on that crate, so the duplication is deliberate
+// and the oracle test at the bottom of this file pins the two together case
+// for case. Name both files when either moves.
+//
+// # A guard, not the matcher
+//
+// The gateway applies `normalize_rewritten_path` only to paths it produced
+// itself: a URL rewrite, a path rewrite, a redirect `Location`. Its router
+// never sees the output. The router matches an inbound request on
+// `ctx.rewritten_path` or `ctx.request.uri.path()` with no normalization of
+// any kind, and its exact arm is a byte compare
+// (`traffic_management/router/mod.rs`, `router/matching.rs`).
+//
+// So route matching in PPE runs on the request path as given, which is what
+// makes it resolve the route the request is actually forwarded to. What this
+// module contributes is fail-closed instead: a path it cannot read denies
+// when the configuration declares an `http:` route. The value it returns is
+// not the matcher and must not be wired back into matching.
 //
 // Five rules here are this module's own rather than the gateway's: the
 // fragment is stripped, the query is stripped, path parameters are
@@ -17,20 +32,21 @@
 // parameter is refused rather than resolved. Everything else agrees case
 // for case.
 //
-// Nothing is percent-decoded, which is the whole reason this module
-// exists instead of a call into a URL crate. A percent-encoded separator
-// stays inside its segment and is matched as written. Decode it and PPE
-// resolves `/admin/x/..%2f..%2fv1%2fok` to `/v1/ok` and applies whatever
-// policy guards `/v1`, while the host's router still sends the request to
-// the `/admin` cluster. Because nothing is decoded there is no charset
-// rule, no UTF-8 validation, and no question about a non-UTF-8 octet.
+// Nothing is percent-decoded, which is the whole reason this module exists
+// instead of a call into a URL crate. A percent-encoded separator stays
+// inside its own segment. Decode it and this function turns
+// `/admin/x/..%2f..%2fv1%2fok` into `/v1/ok`, a path under a prefix the
+// host's router never sends the request to, which is the wrong answer for
+// any caller reading the result. Because nothing is decoded there is no
+// charset rule, no UTF-8 validation, and no question about a non-UTF-8
+// octet.
 //
-// # The output feeds matching and nothing else
+// # The output is written nowhere
 //
-// The normalized form is never written back to `HttpExtension` or into
-// the attribute bag, so the path a route matched on can differ from the
-// `http.path` a policy reads. That is deliberate: a rule written against
-// `http.path` keeps the meaning it has today.
+// The normalized form is never written back to `HttpExtension` or into the
+// attribute bag, and route matching does not read it either. `http.path`
+// reads what the host set, so a rule written against it keeps the meaning it
+// has today.
 //
 // # Why the input is trustworthy as request identity
 //
@@ -105,12 +121,18 @@ pub enum PathError {
     },
 }
 
-/// The path route matching runs against.
+/// A request path with its query, fragment, path parameters, duplicate
+/// slashes, and dot segments resolved away, or an error when it cannot be
+/// read safely.
+///
+/// Route matching does not use this. PPE matches on the path as given, the
+/// way the host router does; this runs alongside as a guard, and an `Err` is
+/// what denies a request the router and PPE could not agree on.
 ///
 /// Borrows when the path is already normal, which is the common case and
 /// must not allocate. A query or a fragment is not a rewrite: it is
 /// stripped by taking a shorter borrow of the same string. A path that is
-/// not absolute comes back byte for byte as given and matches no route.
+/// not absolute comes back byte for byte as given.
 ///
 /// # Errors
 ///
@@ -613,12 +635,11 @@ mod tests {
 
     #[test]
     fn a_trailing_slash_is_preserved_as_the_gateway_preserves_it() {
-        // Both route matchers treat a trailing slash as insignificant: the
-        // prefix matcher strips it from the prefix, and the exact comparison
-        // strips it from the declared path and the request path alike. So
-        // keeping it here costs no match and keeps the two normalizers
-        // agreeing, which is what makes PPE read a request the way the
-        // gateway that chose its upstream did.
+        // The mirrored gateway function keeps a single trailing slash, so this
+        // one does too. It costs no match either way, since matching runs on
+        // the path as given: `/a/` is `/a/` to the exact comparison, which is
+        // a byte compare, and one trailing slash is insignificant only to the
+        // prefix matcher, which strips it from the declared prefix.
         assert_eq!(normalized("/a/"), "/a/", "a trailing slash survives");
         assert_eq!(
             normalized("/a//"),
@@ -655,15 +676,23 @@ mod tests {
     }
 
     #[test]
-    fn the_gateway_normalizer_agrees_case_for_case() {
-        // The gateway's own corpus, from its rules and its test suite, with
-        // its outputs written out here because this crate cannot depend on
-        // it. A divergence fails this test rather than waiting for review.
-        // Inputs carrying a query, a fragment, path parameters, or no
-        // leading slash are excluded: those three strips, the non-absolute
-        // rule, and the refusal of a parameterized dot segment are this
-        // module's five deliberate departures, pinned by their own tests
-        // above.
+    fn the_mirrored_gateway_rewrite_agrees_case_for_case() {
+        // What this pins: this function still agrees with the gateway's
+        // `normalize_rewritten_path` case for case, so the duplicated rewrite
+        // has not drifted from the one it was copied from. The corpus is that
+        // function's own, from its rules and its test suite, with its outputs
+        // written out here because this crate cannot depend on it.
+        //
+        // What this does not pin: how PPE selects a route. The gateway applies
+        // `normalize_rewritten_path` to paths it produced itself and never to
+        // an inbound one, so agreement here says nothing about route
+        // selection. PPE agrees with the router by matching on the path as
+        // given; the tests for that live in `config.rs`.
+        //
+        // Inputs carrying a query, a fragment, path parameters, or no leading
+        // slash are excluded: those three strips, the non-absolute rule, and
+        // the refusal of a parameterized dot segment are this module's five
+        // deliberate departures, pinned by their own tests above.
         let corpus = [
             ("/a/b/c", "/a/b/c"),
             ("/", "/"),
