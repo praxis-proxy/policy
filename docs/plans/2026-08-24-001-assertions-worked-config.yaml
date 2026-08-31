@@ -27,6 +27,13 @@
 #     family of its own (http.request / http.response), so a contract can
 #     be written per HTTP path. It carries a host obligation: see the
 #     reachability note on the /v1/files route.
+#   - Layering is ADDITIVE, reversing an earlier draft. The four levels
+#     stack the way authentication: does, and replace_inherited opts out.
+#     The earlier draft of this very file is why: under the old
+#     "most specific level wins whole" rule, every one of its four
+#     subordinate contracts re-declared the x-auth-* glob and silently
+#     dropped the x-user-id and x-tenant-id entries beside it, so a client
+#     could send x-tenant-id straight through to those upstreams.
 
 # `policy` is the default as of #55. Written out because a worked example
 # should not depend on a default to be legible, and because `hooks` mode
@@ -120,23 +127,25 @@ global:
   # be inert rather than wrong.
   #
   # `http` is the interesting one and is new with #42. It covers every
-  # generic HTTP request that matched no http: route below, which is the
-  # scope that used to have no expression at all: before #42 such traffic
-  # could only be governed by the global block, alongside every MCP entity.
+  # generic HTTP request, whether or not it also matches an http: route
+  # below, since levels accumulate. Before #42 such traffic could only be
+  # governed by the global block, alongside every MCP entity.
   defaults:
     http:
       assertions:
         request:
-          # Plain HTTP transiting the gateway gets identity and nothing
-          # else. No tenant header, because a non-MCP backend here is not
-          # tenant scoped, and asserting one it does not read is a header
-          # nobody audits.
+          # Nothing to add: global already asserts user id, tenant and
+          # attributes, and every level's strip: accumulates. This level
+          # exists to show that a scope may declare a direction and
+          # contribute only a narrowing of it.
+          #
+          # Note what is NOT here. No strip: repetition, because global's
+          # three entries already apply. Under the earlier selection rule
+          # this block would have had to restate all three or lose them.
           headers:
-            - name: x-auth-user-id
-              from: subject.id
-          strip:
-            - x-auth-*
-        # No response: here, so generic HTTP inherits the global one.
+            - name: x-served-by
+              from: claim.namespace
+        # No response: here. Inherited whole from global either way.
 
 # ---------------------------------------------------------------------
 # Level 3 of 4: groups (policy bundles)
@@ -144,21 +153,25 @@ global:
 #
 # A contract can be named once on a group, for the common case of several
 # routes fronting the same upstream. Resolution runs per direction, so a
-# group may declare one direction and leave the other to the level above.
-# A route joining two groups that both declare the SAME direction fails
-# at config load: two whole contracts, no principled winner.
+# group may declare one direction and leave the other to the levels above.
+#
+# Groups are the one layer with no inherent order among themselves, so a
+# route joining two groups that name the SAME target header in the same
+# direction fails at config load, naming the header and both groups.
+# Naming different headers is fine: they union.
 groups:
   files-backend:
     assertions:
       request:
+        # Global already asserts all three of those headers, so a group
+        # that wants the same contract declares nothing. What it adds is
+        # the one thing its upstream needs beyond the baseline.
         headers:
-          - name: x-auth-user-id
-            from: subject.id
-          - name: x-auth-tenant-id
-            from: claim.tenant
-            on_missing: deny
+          - name: x-auth-scope
+            from: claim.projects
+            encode: csv
         strip:
-          - x-auth-*
+          - x-files-*                     # legacy names this backend once read
       # No response: here, so this group's routes inherit the global one.
 
 # ---------------------------------------------------------------------
@@ -175,30 +188,43 @@ routes:
   - resource: "file://*"
     groups: files-backend
 
-  # Its own request contract. Contracts never merge, so the most specific
-  # level that declares a direction wins whole for that direction:
-  # route, then group, then entity default, then global.
+  # The opt-out. This backend is genuinely not tenant scoped, and global
+  # asserts x-auth-tenant-id with on_missing: deny, so without the flag a
+  # token carrying no tenant claim would be DENIED here by a rule this
+  # route's author did not write. replace_inherited: true is how a level
+  # says it speaks only for itself.
+  #
+  # What the flag can and cannot reach matters. It drops the inherited
+  # headers: and strip: entries, and nothing else: the three headers named
+  # below are still removed from the client's request before injection,
+  # because that removal is unconditional and no flag reaches it. So the
+  # opt-out cannot be used to let a client header through under a name the
+  # gateway asserts.
+  #
+  # Setting it here is silent. A route's own author can see it. Setting it
+  # on the group or the entity default above would be reported at load,
+  # naming every route that lost content it never wrote.
   - tool: analytics.*
     assertions:
       request:
+        replace_inherited: true
         headers:
           - name: x-auth-user-id
             from: subject.id
         strip:
           - x-auth-*
-      # No tenant, no attributes. This backend is not tenant scoped.
+          - x-user-id
+          - x-tenant-id
 
   # A third-party tool server. Same identity going out, much more
-  # aggressive filtering coming back.
+  # aggressive filtering coming back. Its request: is inherited whole from
+  # global, and its response: adds to global's rather than replacing it, so
+  # the four names global already strips are not repeated here.
   - tool: partner.*
     assertions:
       response:
         strip:
-          - x-auth-*
-          - server
-          - x-powered-by
           - x-*-internal                  # anything the partner marks internal
-          - set-cookie
           - www-authenticate              # do not let it challenge our client
 
   # A per-path contract on generic HTTP, which #42 made expressible. The
@@ -223,19 +249,14 @@ routes:
       method: [GET, POST]
     assertions:
       request:
+        # Global's three headers and three strip entries already apply,
+        # and global.defaults.http's x-served-by applies too, since this
+        # is an http request. Both inherited levels stack under this one.
         headers:
-          - name: x-auth-user-id
-            from: subject.id
-            on_missing: deny
-          - name: x-auth-tenant-id
-            from: claim.tenant
-            on_missing: deny
-        strip:
-          - x-auth-*
+          - name: x-auth-path-scope
+            from: claim.namespace
       response:
         strip:
-          - x-auth-*
-          - server
           - x-upstream-*
 
 # ---------------------------------------------------------------------
@@ -274,11 +295,11 @@ routes:
 #   x-auth-attributes: {"roles":["admin"]}
 #   x-auth-projects: prod
 #
-# Which contract applies depends on how the request arrives. As an MCP
-# tool call to files.* it is the files-backend group's. As a generic HTTP
-# request with the request line on the extensions it is the /v1/files
-# route's. Both assert user id and tenant, so the wire looks the same
-# here; the walkthrough below is the group's.
+# Which levels apply depends on how the request arrives, and they stack.
+# As an MCP tool call to files.* it is global plus the files-backend
+# group. As a generic HTTP request with the request line on the
+# extensions it is global plus global.defaults.http plus the /v1/files
+# route. The walkthrough below is the tool call.
 #
 # The upstream receives:
 #
@@ -287,6 +308,7 @@ routes:
 #   x-auth-user-id: alice
 #   x-auth-tenant-id: acme
 #   x-auth-attributes: {"namespaces":["team-ml"],"projects":["team-prod","team-stage"],"roles":["ml-engineer","viewer"],"teams":["platform"]}
+#   x-auth-scope: team-prod,team-stage
 #
 # The upstream replies:
 #
@@ -309,7 +331,11 @@ routes:
 #
 #   1. All three client supplied x-auth-* request headers are gone,
 #      including x-auth-projects, which no entry asserts but the strip
-#      glob covers.
+#      glob covers. The glob comes from global; the group did not have to
+#      restate it, and could not have lost it by omission.
+#   0. Four asserted headers, from two levels: three from global and
+#      x-auth-scope from the group. Neither level had to know about the
+#      other.
 #   2. projects is a JSON array, not text that happens to parse as one.
 #      Subject claims keep their JSON shape as of #9.
 #   3. Arrays are sorted, so one identity yields identical header bytes
@@ -336,12 +362,17 @@ routes:
 #   not strip: exists, and even when the source resolved to nothing, so
 #   absence never leaves a wire value in place.
 #
-# strip:, operator authored, additive:
-#   Removes names no entry targets. Delete the request strip: and the
-#   three asserted headers are still removed, but x-auth-projects,
-#   x-user-id and x-tenant-id reach the upstream. Delete the response
-#   strip: and the banner, the debug header and set-cookie reach the
-#   client.
+# strip:, operator authored, accumulating:
+#   Removes names no entry targets. Every level's entries apply, so a
+#   subordinate level cannot narrow an inherited removal by omitting it.
+#   Delete global's request strip: and the three asserted headers are
+#   still removed, but x-auth-projects, x-user-id and x-tenant-id reach
+#   the upstream from every route that inherited it.
+#
+#   Only replace_inherited: true drops an inherited strip:, and only for
+#   the direction it is written in. It still cannot reach the automatic
+#   removal above, so the worst it can do is let through a name no entry
+#   targets.
 
 # ---------------------------------------------------------------------
 # Configs that fail to load
@@ -390,10 +421,13 @@ routes:
 #
 # Two more that fail on structure rather than on sources:
 #
-#   - A route joining two groups that both declare the same direction.
-#     Two whole contracts, no principled winner, so it names both groups.
-#     Two groups declaring DIFFERENT directions is fine: those are
-#     ordered.
+#   - A route joining two groups that name the same target header in the
+#     same direction. Groups have no order among themselves, so it names
+#     the header and both groups. Different headers union and are fine, and
+#     so is the same header in different directions.
+#   - replace_inherted: true, the misspelling that bit authentication:
+#     before its key set was closed. Rejected rather than loading with the
+#     flag false and quietly stacking what the author meant to drop.
 #   - global.defaults.htp: — an entity default key that is not an entity
 #     type. Inert rather than wrong, so it is refused.
 
@@ -401,23 +435,18 @@ routes:
 # Open, not yet settled
 # ---------------------------------------------------------------------
 #
-#   1. Layering default. This file assumes contracts never merge and the
-#      most specific level wins whole. Review argues additive with an
-#      opt-out is right instead, matching authentication:, since a union
-#      of allowlists can only weaken the global floor. Unresolved, and
-#      wider since #55: authentication: now stacks four layers and honors
-#      replace_inherited at each, so this is the one block that does not.
-#      Note the argument holds for headers: and not for strip:, where a
-#      union widens removal rather than narrowing it.
-#   2. The reserved `all` group applies to every request unconditionally
-#      and resolves as a group, so it outranks an entity default. Whether
-#      that is the right precedence for a contract is unexamined.
-#   3. Who wins when a contract entry and the delegated token writer
+#   1. Who wins when a contract entry and the delegated token writer
 #      target the same header name. Undefined today, and both now share
 #      a fold point.
-#   4. Whether on_missing should cover more than absence. A source that
+#   2. Whether on_missing should cover more than absence. A source that
 #      errored, or a value rejected for containing CR or LF, currently
 #      falls to omit with no way to say otherwise.
-#   5. HttpExtension is a HashMap<String, String>, so duplicate wire
+#   3. HttpExtension is a HashMap<String, String>, so duplicate wire
 #      headers collapse and repeated names cannot be emitted. Probably
 #      fine, needs stating.
+#   4. Accumulated headers from four levels could outgrow an upstream's
+#      header budget. Not bounded today.
+#
+# Settled since the first draft: layering is additive with an opt-out,
+# not most-specific-wins-whole. See the note at the top of this file for
+# what this file itself demonstrated about the alternative.

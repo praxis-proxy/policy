@@ -99,8 +99,11 @@ That last one changes the shape of the problem rather than only enabling it. A r
 
 **Layering**
 
-- R25. A direction's contract is whole, and contracts never merge. Each of the four levels may declare one, and the most specific present is the one in force: the route, else a bundle the route joins, else the entity type's default, else global. Resolution is per direction, so a route may state its own `response:` while inheriting the global `request:`. A route joining two bundles that both declare the same direction has no principled winner and fails at config load.
-- R26. R6, R9, R18 and R32 hold at every level, whichever contract is in force.
+- R25. A direction's contract accumulates across the four levels, in the order global, the entity type's default, each bundle the route joins, then the route. `headers:` unions across target header names, and the most specific level wins for a name it repeats. `strip:` unions. A level may drop everything accumulated before it with `replace_inherited: true`. Resolution is per direction, so a route may replace its `response:` while still inheriting the global `request:`.
+- R33. Accumulation is per header entry, never inside one. A level repeating a target header name replaces that entry whole, members and `on_missing` included, so a rendered JSON object always has exactly one author.
+- R34. Two bundles a route joins that name the same target header in the same direction have no principled order and fail at config load, naming the route, the direction, the header, and both bundles. Bundles naming different headers are legal and union.
+- R35. A level above the route that drops inherited content with `replace_inherited: true` is reported once per affected route at config load, naming the level and what the route no longer asserts or strips. A route's own flag is not reported: that drop is written in the route being affected, where its author can see it.
+- R26. R6, R9, R18 and R32 hold at every level, and `replace_inherited` cannot reach any of them. The flag drops operator-authored content only, so no spelling of it removes the unconditional removal of an entry target, extends or weakens the fixed source exclusions, or opens the response protocol floor.
 
 **Reaching the contract at all**
 
@@ -125,11 +128,11 @@ That last one changes the shape of the problem rather than only enabling it. A r
 - AE7. **Covers R15, R16.** Given a token missing the mapped tenant claim, the tenant header is absent by default; given the same entry set to deny, the request is denied under the claim map's existing code.
 - AE8. **Covers R17, R18.** Given a request carrying a client-supplied value under a target header name, and an engine that resolved no identity, the upstream sees no such header.
 - AE9. **Covers R20.** Given a request carrying client-supplied values under every target name, no ordering of the pipeline exposes those values to the upstream.
-- AE10. **Covers R25.** Given a global contract and a route that states its own, the route's upstream receives exactly the route's headers and none of the global ones.
+- AE10. **Covers R25.** Given a global contract and a route that adds one header, the route's upstream receives both the global headers and the route's.
 - AE11. **Covers R3, R5.** Given an entry naming a source that exists as a capability but addresses no slot, config load fails naming the path.
 - AE12. **Covers R27.** Given any config, the rendered artifact names every header that can cross in either direction, every source exclusion, the response floor, and the dispatch paths no contract covers.
-- AE13. **Covers R25.** Given two routes joining one bundle that declares a contract, both upstreams receive that bundle's headers; given a route that joins the bundle and also states its own, it receives only its own.
-- AE14. **Covers R25.** Given a route joining two bundles that each declare the same direction, config load fails and names both bundles.
+- AE13. **Covers R25.** Given two routes joining one bundle that declares a contract, both upstreams receive the global headers and the bundle's; given a route that joins the bundle and adds its own, it receives all three levels'.
+- AE14. **Covers R34.** Given a route joining two bundles that name the same target header in the same direction, config load fails and names the header and both bundles; given two bundles naming different headers, the route receives both.
 - AE15. **Covers R14.** Given a claim whose value contains a line feed, no header is emitted for that entry rather than two headers.
 - AE16. **Covers R21.** Given a request carrying a target header name in mixed case, the upstream receives only the engine's value under that name.
 - AE17. **Covers R23.** Given a request carrying a client-supplied value under a target name, a policy rule reading that header observes the client's value, and the upstream still receives only the engine's.
@@ -138,7 +141,13 @@ That last one changes the shape of the problem rather than only enabling it. A r
 - AE20. **Covers R9.** Given a response `strip:` entry whose glob would match a floor header, config load fails and names the floor header it would have removed.
 - AE21. **Covers R18 in the response direction.** Given an upstream that echoes an asserted header back, the client receives the engine's value or none, never the upstream's.
 - AE22. **Covers R22.** Given a host that registers its own hook with pre-phase metadata, the request contract fires on it with no config change; given the same hook registered unphased, neither contract fires.
-- AE23. **Covers R25 at four levels.** Given a contract on the entity type's default and a bundle the route joins, the route receives the bundle's; given only the entity default, it receives that one and not the global one.
+- AE23. **Covers R25 at four levels.** Given a contract at all four levels, a route receives the union of all four, and for a header name that two levels declare it receives the more specific level's entry.
+- AE29. **Covers R25, R35.** Given a global `on_missing: deny` entry and a route that adds a header without a flag, a token missing the global entry's source is denied, so a route cannot escape a floor another author wrote by declaring a contract of its own.
+- AE30. **Covers R25, R35.** Given the same pair with `replace_inherited: true` on the route, the global entry does not apply and the route is not reported, since its own author wrote the drop.
+- AE31. **Covers R35.** Given a bundle declaring `replace_inherited: true` and a route joining it that declares nothing, config load reports the route, the bundle, and the global headers the route no longer asserts.
+- AE32. **Covers R33.** Given a global members entry keyed `{roles, teams}` and a route entry on the same header keyed `{projects}`, the header holds exactly `{projects}`, not a three-key object composed from two levels.
+- AE33. **Covers R25, R26.** Given a route with `replace_inherited: true` and no `strip:` at all, a client-supplied value under a target header name still does not reach the upstream, because the flag cannot reach unconditional removal.
+- AE34. **Covers R25.** Given a global `strip:` glob and a route adding one more name, the upstream sees neither, so a subordinate level cannot narrow an inherited removal by omission.
 - AE24. **Covers R29.** Given an `http:` route declaring a contract and a request whose HTTP extension carries no path, the global contract applies and the engine reports the route once, naming it.
 - AE25. **Covers R30.** Given an `http:` route declaring both directions, a request invocation carrying the request line and a response invocation carrying none, the route's `request:` applies on the way in and the global `response:` on the way out, and the report names the route.
 - AE26. **Covers R31.** Given a pre-resolved entry list dispatched without a hook name, neither contract fires, and the artifact names that path as uncovered.
@@ -164,6 +173,7 @@ Issue #28 states criteria for the request direction only. The response direction
 | Tests that no credential reaches upstream | R6, R28, AE2, AE4 |
 | *(from review, no issue AC)* response direction | R8, R9, R18, R22, AE19-AE22 |
 | *(from #42, no issue AC)* reachability of a route's contract | R29, R30, R31, AE24-AE26 |
+| *(from review, no issue AC)* additive layering | R25, R26, R33, R34, R35, AE29-AE34 |
 
 ---
 
@@ -177,6 +187,7 @@ Issue #28 states criteria for the request direction only. The response direction
 - A projected claim reaches its destination with the shape the IdP minted, and a consumer can tell an array from text that looks like one.
 - The same identity produces the same header bytes, so audit hashes and golden files are stable.
 - An operator who writes a contract on an `http:` route learns from a report, not from a missing header, when the host has made it unreachable.
+- A subordinate level cannot narrow an inherited removal or escape an inherited denial by omission. Weakening a floor takes an explicit flag that is reported.
 - Planning does not need to invent the surface: naming, direction split, source vocabulary, exclusion model, response floor, layering, absent-value behavior, removal semantics, and reachability reporting are decided here.
 
 ---
@@ -215,7 +226,15 @@ Issue #28 states criteria for the request direction only. The response direction
 
 - **Wire headers join the excluded set in both directions; the request line is merely out of grammar.** The issue lists neither. A uniform source vocabulary makes an inbound header addressable, and rendering a client-supplied header into a trusted upstream header is the exact laundering this design exists to prevent. The response direction has the mirror hazard: an upstream that controls a response header must not be able to aim it at what the client trusts. The request line is a different case, and R32 keeps the two distinct: `path` and `method` are host-populated, and `host` the host is required to take from a validated authority, so they are not credentials being laundered. They are just not sources yet, and an entry naming one should read as an unknown path rather than as a refusal, because admitting them later is a grammar addition and not a policy reversal.
 
-- **Four levels, still one winner.** #55 put an entity-type default between global and the bundles, so the ladder is global, entity default, bundle, route. That changes how many rungs R25 resolves over and nothing about how it resolves: a header set is a contract with one counterparty, and splicing one level's mapping into another's produces a set nobody designed. Resolving per direction means a route can state its own `response:` without restating the inherited `request:`. Bundles carry it because several routes fronting one upstream is the ordinary case, and entity defaults carry it because "every tool route" is the next most common scope after "everything". This is deliberately unlike `authentication:`, which stacks its four layers and honors a `replace_inherited` flag at each; review argues additive is the right default here too, on the grounds that a union of allowlists can only weaken the global floor. That challenge is open and is recorded in the plan rather than settled here.
+- **Contracts accumulate across four levels, and review was right.** An earlier draft made a contract whole and let the most specific level win, on the grounds that a header set is a statement to one counterparty and splicing two levels together produces a set nobody designed. Review argued for additive with an opt-out, matching `authentication:`. Review wins, and the counterparty argument does not survive contact with a worked example.
+
+  Selection is fail-open twice. A level that replaces a direction drops the `strip:` list with it, so an inherited glob and the legacy header names beside it silently stop being removed; in the first worked config written against this design, four of four subordinate contracts dropped two global `strip:` entries, each time keeping the glob that felt load-bearing and forgetting the enumerated names. And a route that declares any `request:` block silently escapes a global `on_missing: deny`, which is how a deliberate tenant-isolation floor stops applying to the one route whose author was thinking about something else.
+
+  Additive cannot fail the same way, and that is structural rather than lucky. The excluded source set is fixed in code, so no level can union in a credential. Only entries a level *names* propagate, so a union adds no unnamed slot. And the engine originates every asserted value, so there is no wire input anywhere in the union. The worst a union of `headers:` can do is send an upstream a header it does not read, which costs bytes and an auditor's second look. Dropping a floor another author wrote is the failure class this surface exists to prevent.
+
+  What replaces the counterparty argument: `headers:` is a floor that accumulates, and a level that genuinely needs to speak for its own counterparty says so with `replace_inherited: true`, which is loud, reportable under R35, and cannot reach the guarantees R26 lists. The cost is that answering "what does this route assert" now means reading four levels, which is why R27's artifact renders provenance per header rather than only the effective set.
+
+  One rule for the whole block is the secondary win. Four levels, one stacking order, one flag, the same shape as `authentication:`, so an operator learns it once.
 
 - **Writing the header map over emitting a new typed slot.** Merging the http slot replaces both header maps wholesale, which is what makes R20 atomic in either direction, and praxis applies that result today. This ships without a coordinated praxis change. The cost is that rendering happens inside PPE and the result is not distinguishable from another header write at the wire; R27's artifact covers the audit need instead.
 
