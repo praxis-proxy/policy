@@ -96,8 +96,10 @@ pub struct DeclassifierToken {
 }
 
 impl DeclassifierToken {
-    /// Only callable by the framework/security subsystem.
-    #[allow(dead_code)]
+    /// Only callable by the framework/security subsystem. Production does
+    /// not declassify today; tests mint the token to exercise
+    /// [`MonotonicSet::remove_with_declassifier`].
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self { _private: () }
     }

@@ -19,6 +19,10 @@
     clippy::unwrap_used,
     reason = "test and example code"
 )]
+#![allow(
+    dead_code,
+    reason = "shared across integration binaries; each suite uses a subset of the helpers"
+)]
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};

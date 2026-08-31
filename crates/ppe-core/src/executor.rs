@@ -1169,7 +1169,10 @@ mod tests {
     use crate::hooks::PluginResult;
 
     #[derive(Debug, Clone)]
-    #[allow(dead_code)] // test fixture — typed shape is the point, not field reads
+    #[allow(
+        dead_code,
+        reason = "test fixture — typed shape is the point, not field reads"
+    )]
     struct TestPayload {
         value: String,
     }

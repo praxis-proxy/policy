@@ -398,6 +398,7 @@ route:
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].plugin_name, "workday-oauth");
     assert_eq!(calls[0].target_name, "workday-api");
+    assert_eq!(calls[0].target_audience, None);
     assert_eq!(calls[0].required_permissions, vec!["read_compensation"]);
 
     // Extensions now carry the minted token under raw_credentials.

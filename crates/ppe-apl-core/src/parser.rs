@@ -149,12 +149,6 @@ impl<'a> Lexer<'a> {
         self.bytes.get(self.pos).copied()
     }
 
-    fn bump(&mut self) -> Option<u8> {
-        let b = self.peek()?;
-        self.pos += 1;
-        Some(b)
-    }
-
     fn skip_ws(&mut self) {
         while let Some(b) = self.peek() {
             if b.is_ascii_whitespace() {
@@ -250,11 +244,7 @@ impl<'a> Lexer<'a> {
                 b'.' => return Err(self.err(EMPTY_SEGMENT)),
                 b if is_ident_start(b) => self.lex_ident_or_keyword()?,
                 _ => {
-                    let ch = self
-                        .src
-                        .get(self.pos..)
-                        .and_then(|rest| rest.chars().next())
-                        .unwrap_or(char::REPLACEMENT_CHARACTER);
+                    let ch = self.char_at_cursor();
                     return Err(self.err(&format!("unexpected character `{ch}`")));
                 },
             };
@@ -387,6 +377,17 @@ impl<'a> Lexer<'a> {
         })
     }
 
+    /// The character at the cursor, decoded rather than cast.
+    ///
+    /// A byte at or above 128 is one of several in a UTF-8 sequence, so casting it
+    /// names a character that is not in the input. Diagnostics only.
+    fn char_at_cursor(&self) -> char {
+        self.src
+            .get(self.pos..)
+            .and_then(|rest| rest.chars().next())
+            .unwrap_or(char::REPLACEMENT_CHARACTER)
+    }
+
     /// Consume one `[...]` interpolation group, whose content is a nested
     /// attribute path the evaluator resolves per request.
     ///
@@ -405,8 +406,8 @@ impl<'a> Lexer<'a> {
                     return Err(self.err("nested `[` in an attribute path subscript"));
                 },
                 Some(b) if is_segment_char(b) || b == b'.' => self.pos += 1,
-                Some(b) => {
-                    let ch = char::from(b);
+                Some(_) => {
+                    let ch = self.char_at_cursor();
                     return Err(self.err(&format!(
                         "`{ch}` in an attribute path subscript; a subscript holds a nested path, \
                          so it takes names and dots and nothing else"
@@ -824,30 +825,8 @@ pub fn parse_rule(line: &str, source: &str) -> Result<Rule, ParseError> {
         )
     };
 
-    // A field operation is not a rule. `result.x | redact` used to compile as a
-    // disjunction of two truthy attributes and take the default deny, so a
-    // pipeline written one position too high enforced something its author never
-    // asked for. Reported before the predicate parse, so the message names the
-    // position rather than a predicate that happened to lex.
-    if let Some(field) = field_operation_in_rule_position(predicate_str) {
-        return Err(ParseError::Rule {
-            rule: trimmed.to_owned(),
-            msg: format!(
-                "`{field}` is a field operation, and this is effect position: a rule here is a \
-                 predicate with an optional `allow`/`deny`. Move the chain under `args:` or \
-                 `result:`, keyed by the field it names"
-            ),
-        });
-    }
-
-    if is_require_form(predicate_str) && effects.iter().any(|e| matches!(e, Effect::Allow)) {
-        return Err(ParseError::Rule {
-            rule: trimmed.to_owned(),
-            msg: "`require(...)` states what must hold and denies when it does not, so its \
-                  action can only be `deny`; write the predicate without `require` to allow on it"
-                .to_owned(),
-        });
-    }
+    reject_field_operation_in_rule_position(predicate_str, trimmed)?;
+    reject_require_with_allow(predicate_str, &effects, trimmed)?;
 
     let condition = parse_predicate(predicate_str).map_err(|e| ParseError::Rule {
         rule: trimmed.to_owned(),
@@ -859,6 +838,54 @@ pub fn parse_rule(line: &str, source: &str) -> Result<Rule, ParseError> {
         effects,
         source: source.to_owned(),
     })
+}
+
+// The two guards below are shared by all three rule spellings: the string form,
+// `when:` / `do:`, and the multi-effect shorthand. Only the string form goes
+// through `parse_rule`, so a guard written there alone held for one spelling out
+// of three. That is how `when: "require(a)"` with `do: allow` compiled to an
+// allow on `!a`. `rule` is the text to quote back, which differs per spelling.
+
+/// A field operation is not a rule. `result.x | redact` used to compile as a
+/// disjunction of two truthy attributes and take the default deny, so a chain one
+/// position too high enforced something its author never asked for.
+///
+/// Call before the predicate parse, so the message names the position rather than
+/// a predicate that happened to lex.
+fn reject_field_operation_in_rule_position(predicate: &str, rule: &str) -> Result<(), ParseError> {
+    if let Some(field) = field_operation_in_rule_position(predicate) {
+        return Err(ParseError::Rule {
+            rule: rule.to_owned(),
+            msg: format!(
+                "`{field}` is a field operation, and this is effect position: a rule here is a \
+                 predicate with an optional `allow`/`deny`. Move the chain under `args:` or \
+                 `result:`, keyed by the field it names"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `require(...)` denies when its condition does not hold, so a rule whose
+/// predicate *is* a `require` call cannot carry `allow`.
+///
+/// Needs the effects, so it runs after they parse. In two spellings that is also
+/// after the predicate parse, which costs nothing: a `require` whose inner
+/// predicate does not lex is better reported as the lex error.
+fn reject_require_with_allow(
+    predicate: &str,
+    effects: &[Effect],
+    rule: &str,
+) -> Result<(), ParseError> {
+    if is_require_form(predicate) && effects.iter().any(|e| matches!(e, Effect::Allow)) {
+        return Err(ParseError::Rule {
+            rule: rule.to_owned(),
+            msg: "`require(...)` states what must hold and denies when it does not, so its \
+                  action can only be `deny`; write the predicate without `require` to allow on it"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// The negation of `e`, pushed down to the leaves.
@@ -1726,7 +1753,7 @@ fn parse_step_map(m: &serde_yaml::Mapping, source: &str) -> Result<Step, ParseEr
     }
 
     // Everything left is a PDP call, and the key set is closed. This used to
-    // split at `(` and hand the prefix to `PdpDialect::from_key`, which made
+    // split at `(` and resolve the prefix through an open mapping, which made
     // every unhandled key a custom dialect: `whens:` compiled to a PDP lookup
     // instead of failing, and `pdp(workload):` resolved `pdp` rather than
     // `workload`, so the resolver registered for `workload` could never be
@@ -1890,8 +1917,11 @@ fn parse_when_do_rule(m: &serde_yaml::Mapping, source: &str) -> Result<Step, Par
         rule: format!("{when_val:?}"),
         msg: "`when:` must be a predicate string".into(),
     })?;
+    // `when:` is rule position, so it passes the same guards the string form does.
+    let quoted = format!("when: {predicate}");
+    reject_field_operation_in_rule_position(predicate, &quoted)?;
     let condition = parse_predicate(predicate).map_err(|e| ParseError::Rule {
-        rule: format!("when: {predicate}"),
+        rule: quoted.clone(),
         msg: format!("{e}"),
     })?;
 
@@ -1908,6 +1938,7 @@ fn parse_when_do_rule(m: &serde_yaml::Mapping, source: &str) -> Result<Step, Par
             msg: "`do:` produced no effects".into(),
         });
     }
+    reject_require_with_allow(predicate, &effects, &quoted)?;
 
     Ok(Step::Rule(Rule {
         condition,
@@ -1924,6 +1955,9 @@ fn parse_shorthand_multi_effect(
     effect_list: &[serde_yaml::Value],
     source: &str,
 ) -> Result<Step, ParseError> {
+    // The map key is rule position, so it passes the same guards the string form
+    // does.
+    reject_field_operation_in_rule_position(predicate, predicate)?;
     let condition = parse_predicate(predicate).map_err(|e| ParseError::Rule {
         rule: predicate.to_owned(),
         msg: format!("{e}"),
@@ -1939,6 +1973,7 @@ fn parse_shorthand_multi_effect(
             msg: "shorthand multi-effect map produced no effects".into(),
         });
     }
+    reject_require_with_allow(predicate, &effects, predicate)?;
     Ok(Step::Rule(Rule {
         condition,
         effects,

@@ -36,7 +36,6 @@ use async_trait::async_trait;
 
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
-use praxis_policy_core::error::PluginError;
 use praxis_policy_core::extensions::{SubjectExtension, WorkloadIdentity};
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
@@ -748,8 +747,3 @@ async fn cap_gating_post_apply_through_cmf_dispatch() {
         "InboundBlind without credential caps must NOT see raw_credentials",
     );
 }
-
-// PluginError import only exists to keep the dev-dep on praxis-policy-core
-// honest if a future test needs it; unused for now.
-#[allow(dead_code)]
-fn _force_plugin_error_link(_e: PluginError) {}

@@ -37,7 +37,7 @@ cargo test -p praxis-policy-core --lib -- test_name
 
 ## Architecture
 
-14-crate workspace implementing a policy engine for
+16-crate workspace implementing a policy engine for
 AI agent traffic. The engine decides who may call
 which tool, what data comes back, and where that
 data goes next.
@@ -54,6 +54,7 @@ crates/
   ppe-apl-cmf   canonical message format transforms
   ppe-apl-runtime  host runtime, plugin invokers,
                    route handler, session management
+  ppe-pdp-diff  differential tests across cedar/cel/opa
 
 builtins/
   plugins/      identity-jwt, delegator-oauth,
@@ -88,9 +89,9 @@ These are settled decisions, not a backlog:
 - **No `panic = "abort"`**: this is a library; abort
   would take the host process down on a recoverable
   policy panic
-- **`dead_code`, `elided_lifetimes_in_paths`,
-  `single_use_lifetimes` at `allow`**: style and
-  cleanup items that do not affect runtime behavior
+- **`elided_lifetimes_in_paths`,
+  `single_use_lifetimes` at `allow`**: style
+  items that do not affect runtime behavior
 - **`mod.rs` module style**: three module directories
   use `mod.rs`; not switching to file-adjacent style
 
@@ -112,6 +113,10 @@ No author lines, no path lines.
   `reason`
 - `[workspace.lints]` in `Cargo.toml` is the
   authority
+- `dead_code` is denied. Keep an unused public item
+  only with a reason that names the host or other
+  out-of-tree caller. Do not silence it for future
+  work; delete the item.
 
 ### Tests
 

@@ -55,7 +55,7 @@ The entries that are not enforced, by group:
 |---|---:|
 | style | 10 |
 | perf | 9 |
-| hygiene | 7 |
+| hygiene | 6 |
 | api | 5 |
 | complexity | 5 |
 | attributes | 2 |
@@ -63,8 +63,15 @@ The entries that are not enforced, by group:
 | concurrency | 1 |
 | test-hygiene | 1 |
 
-Thirty-eight of the 41 are rules Praxis enforces more strictly. The other three
+Thirty-seven of the 40 are rules Praxis enforces more strictly. The other three
 are lints Praxis also does not enforce, or does not configure.
+
+`dead_code` is not in that table. It is denied: unused items fail the build.
+Public host-facing API with no in-tree caller is kept with a reason on the item
+naming who calls it from outside the workspace. A reason that only defers work
+(`future`, `TODO`, `might`) is not enough; delete the item. Test fixtures may
+suppress with a test-scoped reason. Do not add a text-scan CI gate for these
+attributes: a scan cannot tell production from a scope-allowed test module.
 
 ## Documentation lints
 

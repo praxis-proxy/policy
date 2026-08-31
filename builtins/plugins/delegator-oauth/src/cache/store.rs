@@ -368,8 +368,9 @@ impl DelegatedTokenCache {
     ///
     /// The only lever an operator has against an `IdP`-side revocation
     /// besides waiting out `ttl_ceiling_seconds`. Not wired to anything
-    /// yet; it exists so that when it is, it is not a change to this
-    /// module.
+    /// yet; tests exercise it so the invalidate path stays covered until
+    /// a host-facing flush exists.
+    #[cfg(test)]
     pub(crate) async fn flush(&self) {
         self.inner.invalidate_all();
         self.inner.run_pending_tasks().await;

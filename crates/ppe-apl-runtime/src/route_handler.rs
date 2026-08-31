@@ -179,8 +179,7 @@ pub struct AplRouteHandler {
     /// touch this. Default is an empty [`PdpRouter`] — any `pdp(...)`
     /// step against an unregistered dialect returns
     /// `PdpError::NoResolver`. Hosts that need Cedar, OPA, `NeMo`, etc.
-    /// install resolvers via [`Self::with_pdp`] or
-    /// [`Self::with_pdp_router`].
+    /// install resolvers via [`Self::with_pdp`].
     pdp: Arc<dyn PdpResolver>,
     /// Static `data.*` attribute tree, flattened into every request's
     /// bag. Shared `Arc` (the visitor hands the same tree to every
@@ -237,22 +236,6 @@ impl AplRouteHandler {
     /// `PdpError::NoResolver` at evaluation time.
     pub fn with_pdp(mut self, pdp: Arc<dyn PdpResolver>) -> Self {
         self.pdp = pdp;
-        self
-    }
-
-    /// Sugar for the common "register many resolvers" path. Builds a
-    /// [`PdpRouter`], registers each resolver into it, then installs the
-    /// router. Equivalent to constructing a `PdpRouter` by hand and
-    /// passing it to [`Self::with_pdp`].
-    pub fn with_pdp_router(
-        mut self,
-        resolvers: impl IntoIterator<Item = Arc<dyn PdpResolver>>,
-    ) -> Self {
-        let mut router = PdpRouter::new();
-        for r in resolvers {
-            router.register(r);
-        }
-        self.pdp = Arc::new(router);
         self
     }
 }

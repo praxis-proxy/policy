@@ -115,7 +115,7 @@ ones that are not sit at the end of each section, grouped by why, with a comment
 per group. That list is a settled decision rather than a backlog: every lint that
 could silently change an enforcement decision is already denied.
 
-Two rules for contributors:
+Three rules for contributors:
 
 - **Do not add new violations of a non-enforced lint.** It is not enforced
   because the existing violations were judged not worth the churn, which is not
@@ -123,6 +123,12 @@ Two rules for contributors:
 - **Do not suppress a lint at a wider scope than the code that needs it.** A
   module-level allow that covers lints the module does not violate hides the next
   real one, so prefer the narrowest scope, with a `reason`.
+- **`dead_code` reasons must name the out-of-tree caller.** The lint is denied.
+  A public host-facing item with no in-tree caller may keep
+  `#[allow(dead_code, reason = "...")]` only when the reason says who calls it
+  from outside this workspace. Reasons that only defer work (`future`, `TODO`,
+  `might`) are not enough; delete the item. Test fixtures may use a test-scoped
+  reason.
 
 Enforcing one of the allowed groups is welcome as a focused change, one lint at a
 time, separate from feature work. `docs/lints.md` is worth reading first: it

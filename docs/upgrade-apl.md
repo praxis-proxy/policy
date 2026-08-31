@@ -231,7 +231,7 @@ These parsed and did nothing. They are gone rather than warned about.
 | Key | Scope | What to write instead |
 |---|---|---|
 | `when:` | a route | a `when:` / `do:` step inside `authorization:` |
-| `plugin_dirs` | `engine_settings:` | nothing; it was never read |
+| `plugin_dirs` | top level | nothing; it was never read |
 | `parallel_execution_within_band` | `engine_settings:` | nothing; a plugin's `mode:` decides |
 | `fail_on_plugin_error` | `engine_settings:` | a plugin's own `on_error:` |
 | `on_error:` | an `authentication:` step | the `on_error:` of the plugin's own `plugins:` declaration |
@@ -450,11 +450,24 @@ visitor after its own route walk. An existing implementor needs no change.
 
 ## Checking your work
 
-```console
-# The load reports every fault it can find, so read all of it rather than
-# fixing the first line and re-running.
-cargo run --example plugin_demo -- path/to/policy.yaml
-```
+Load the rewritten config through your own host binary, the one that registers
+your plugin factories and the APL visitor. The load names every fault it can
+find, so read all of it rather than fixing the first line and re-running.
+
+`PolicyEngine::load_config_yaml` is the entry point that checks what this guide
+changed. It is the only one that walks the registered visitors, and the visitor
+walk is where APL bodies compile, where a policy key with no visitor to claim it
+is rejected, and where the reachability report comes from. The typed
+`parse_config` / `load_config` pair checks the document's shape but runs no
+visitor, so it accepts a policy body this release does not.
+
+No separate tool can stand in for your host: plugin kinds resolve against the
+factories it registered, so only the process that has them can check a config
+naming your plugins.
+
+`cargo run --example plugin_demo` is not that check. It loads its own bundled
+`plugin_demo.yaml`, takes no path argument, and registers only its four demo
+factories. Read it as a shape reference, not a validator.
 
 A configuration that loads clean under this release has no inert keys in it. If
 the load warns rather than fails, the warning is about coverage you may have

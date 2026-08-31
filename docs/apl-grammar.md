@@ -194,11 +194,12 @@ A rule whose predicate *is* a `require(...)` call can only carry `deny`. It
 states what must hold and refuses when it does not, so `require(a): allow` is a
 contradiction and is rejected as one.
 
-The restriction is on that rule shape, not on the operator. Nested inside a
-larger predicate, `require` is the negation it desugars to and nothing more, so
-`a & require(b): allow` is legal and allows on `a & !b`. Write it that way only
-where the negation is what you mean; `a & !b: allow` says the same thing without
-borrowing a word that reads like a requirement.
+The restriction is on that rule shape, not on the operator, and it holds however
+the shape is written: string form, `when:` / `do:`, or the multi-effect shorthand.
+Nested inside a larger predicate, `require` is the negation it desugars to and
+nothing more, so `a & require(b): allow` is legal and allows on `a & !b`. Write it
+that way only where the negation is what you mean; `a & !b: allow` says the same
+thing without borrowing a word that reads like a requirement.
 
 ---
 
@@ -286,6 +287,7 @@ A step may be a YAML map instead of a string, for the forms that carry a body:
 | `when:` / `do:` | conditional step |
 | `sequential:` / `parallel:` | ordered and unordered groups |
 | `delegate:` | the map form of `delegate(...)` |
+| `restrict:` | the backend-candidate constraint |
 | `pdp(name):` | a custom PDP dialect |
 | a dialect name | `cedar:`, `cel:`, `opa:`, `authzen:`, `nemo:` |
 

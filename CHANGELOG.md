@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   behavior. Its resolution rule changed in this release too, which the Changed
   section covers.
 
+- **Differential tests across Cedar, CEL, and OPA.** The three PDP resolvers each had their own suite; nothing checked that they agree on the same `AttributeBag`. `ppe-pdp-diff` feeds one bag and an equivalent policy intent to all three and compares verdicts and cause kinds. The shared semantic subset (bool, int, string, non-empty string set) must agree. Known splits — float claims, whole-number floats, Cedar resource floats, empty sets, missing collections, missing `subject.id` — live on an allowlist with a reason. An unlisted disagreement fails `make test`. Adding a fourth builtin PDP without a harness driver fails a facade test. ([#25](https://github.com/praxis-proxy/policy/issues/25))
+
 - **Delegated tokens can be reused until they expire.** The OAuth delegator runs one RFC 8693 exchange per `delegate` step; a `cache:` block lets it serve a token it already minted instead. Off unless enabled, and then only for `subject: this_workload` and `client`, whose number of cache entries is bounded by configuration rather than by the caller population. `user` and `caller_workload` are opt-in through `cache.subjects`. Concurrent requests for one uncached key produce one exchange rather than one each, and a failed exchange is not stored. A cached token stays usable after an `IdP`-side revocation until its entry retires, which `cache.ttl_ceiling_seconds` bounds. ([#30](https://github.com/praxis-proxy/policy/issues/30))
 
 - **A route that delegates an unvalidated credential is reported at config load.** A `delegate` step whose subject exchanges the caller's own token relies on identity resolution having checked it, but `identity:` is per-route and optional, so a route can reach the delegator with a token this process has not validated. Loading the config now warns under `alarm = "delegation_without_identity_resolution"`, naming the route and the delegate plugins on it. `subject: this_workload` is excluded, since it carries no inbound credential. ([#30](https://github.com/praxis-proxy/policy/issues/30))
@@ -171,7 +173,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   mixing them now loads and decides something**, so read one before upgrading. And
   a `require(...)` rule's action can only be `deny`: the construct states what must
   hold and refuses when it does not, so `require(a): allow` is a contradiction and
-  fails the load naming the inversion.
+  fails the load naming the inversion. The restriction is on the rule shape, so it
+  holds in all three spellings: the string form, `when:` / `do:`, and the
+  multi-effect shorthand. Nested inside a larger predicate, `require` is only the
+  negation it desugars to, so `a & require(b): allow` stays legal.
+
+- **A field operation in rule position is rejected.** `result.ssn | redact` where a
+  rule belongs used to compile as a disjunction of two truthy attributes and take
+  the default deny, so a chain one position too high enforced something its author
+  never asked for. It now fails the load, naming the position and pointing at
+  `args:` and `result:`. This is a property of the rule shape too, so it holds in
+  all three spellings. A legal disjunction of two attribute paths
+  (`result.x | result.y`) is untouched: what marks a field operation is a field
+  head with a stage beside it, not a `|`.
 
 - **`run(name)` is the only form that invokes a plugin.** `plugin(name)` was a
   second spelling for it in both step and stage position, so a reader had to know
@@ -601,6 +615,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **A workload's trust domain is no longer mappable.** It is the authority of the SPIFFE ID, so it is derived from the identity rather than read from a claim. ([#31](https://github.com/praxis-proxy/policy/pull/31))
 
+- **Unused items fail the build.** `dead_code` is denied workspace-wide, so a function with no caller is a compile error rather than something coverage work has to find by hand. Public host-facing API with no in-tree caller stays, marked with a reason naming who calls it from outside. ([#13](https://github.com/praxis-proxy/policy/issues/13))
+
 ### Removed
 
 - **`compile_config`, and the second `routes:` shape it defined.** Along with it
@@ -793,6 +809,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `global.apl.attribute_files` becomes `global.attribute_files`.
 
 - **The `hooks::types::hook_names` and `hooks::types::cmf_hook_names` modules.** Sixteen `pub const`s that no dispatch site read. Six of `hook_names` shadowed CMF hooks under names nothing fires; two spelled identity and delegation `identity_resolve` / `token_delegate`, which no handler answers to. `cmf_hook_names` duplicated `cmf::constants` and got the prompt pair wrong, teaching `cmf.prompt_pre_fetch` where the dispatched name is `cmf.prompt_pre_invoke`. Because nothing consumed them they drifted unnoticed for months. **Breaking**, with no replacement needed: `praxis_policy_core::cmf::constants` holds the CMF names and is the supported import path, alongside `identity::HOOK_IDENTITY_RESOLVE`, `delegation::HOOK_TOKEN_DELEGATE`, and `elicitation::HOOK_ELICIT`. Those constants keep their paths and their values. The values are operator-facing, since a `hooks:` list in YAML names them as strings, so they are fixed as public API rather than free to rename.
+
+- **`AplRouteHandler::with_pdp_router` is gone.** Install a `PdpRouter` through `with_pdp`, which is what the visitor already does. ([#13](https://github.com/praxis-proxy/policy/issues/13))
 
 ### Fixed
 

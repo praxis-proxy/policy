@@ -173,6 +173,25 @@ fn an_allow_action_is_rejected_and_names_the_inversion() {
     }
 }
 
+/// The same refusal through every spelling. This one failed open: as
+/// `when: "require(a)"` with `do: allow` it compiled to an allow on `IsFalse(a)`,
+/// so a policy meant to admit only those satisfying `a` admitted everyone else.
+#[test]
+fn an_allow_action_is_rejected_in_all_three_spellings() {
+    crate::spellings::rejected_in_all_three_spellings(
+        "require(a)",
+        "allow",
+        ["require", "deny"].as_slice(),
+    );
+}
+
+/// The restriction is on the rule shape, not the operator, in every spelling: a
+/// nested `require` is just its negation and may allow.
+#[test]
+fn a_nested_require_may_allow_in_all_three_spellings() {
+    crate::spellings::accepted_in_all_three_spellings("a & require(b)", "allow");
+}
+
 /// A bare `require(...)` line takes the deny action implicitly, which is the form
 /// every in-repo fixture uses.
 #[test]

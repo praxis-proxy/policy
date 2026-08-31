@@ -46,7 +46,6 @@ use praxis_policy_core::delegation::{
     TokenDelegateHook,
 };
 use praxis_policy_core::engine::PolicyEngine;
-use praxis_policy_core::error::PluginError;
 use praxis_policy_core::extensions::raw_credentials::{
     DelegationKey, DelegationMode, RawDelegatedToken,
 };
@@ -708,8 +707,3 @@ async fn cap_gating_post_apply_through_cmf_dispatch() {
         "DelegatedTokenBlind without credential caps must NOT see raw_credentials",
     );
 }
-
-// PluginError kept imported so a future test wanting to assert on a
-// specific error variant can use it without an extra `use` line.
-#[allow(dead_code)]
-fn _force_plugin_error_link(_e: PluginError) {}

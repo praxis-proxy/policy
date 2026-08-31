@@ -341,17 +341,6 @@ impl PdpDialect {
             _ => None,
         }
     }
-
-    /// Parse a YAML key prefix like `cedar`, `opa`, `authzen`, `nemo`
-    /// into the matching `PdpDialect`. Unknown dialects become `Custom`.
-    ///
-    /// Open by design, for a host naming a dialect it registered. The parser
-    /// does not read step-map keys through this: an open mapping there turned
-    /// every misspelling into a custom dialect. Use [`Self::from_builtin_key`]
-    /// where the key set is closed.
-    pub fn from_key(key: &str) -> Self {
-        Self::from_builtin_key(key).unwrap_or_else(|| Self::Custom(key.to_owned()))
-    }
 }
 
 /// External policy-decision dispatch. Implemented by Cedar, OPA HTTP
@@ -943,18 +932,6 @@ pub enum PluginError {
     Dispatch(String),
 }
 
-impl Step {
-    /// Wrap a `Rule` as a `Step`. Saves typing in tests and parser code.
-    pub(crate) fn rule(r: Rule) -> Self {
-        Step::Rule(r)
-    }
-
-    /// Returns true if this step is a plain rule (no async dispatch needed).
-    pub(crate) fn is_rule(&self) -> bool {
-        matches!(self, Step::Rule(_))
-    }
-}
-
 /// Bag keys the delegation step writes after a successful dispatch.
 /// Centralized here so the evaluator (writer) and policy authors
 /// (readers, via `require(delegation.granted.*)`) agree on the
@@ -1034,20 +1011,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_key_maps_known_dialects() {
-        assert_eq!(PdpDialect::from_key("cedar"), PdpDialect::Cedar);
-        assert_eq!(PdpDialect::from_key("opa"), PdpDialect::Opa);
-        assert_eq!(PdpDialect::from_key("authzen"), PdpDialect::AuthZen);
-        assert_eq!(PdpDialect::from_key("nemo"), PdpDialect::NeMo);
-        assert_eq!(PdpDialect::from_key("cel"), PdpDialect::Cel);
+    fn from_builtin_key_maps_known_dialects() {
+        assert_eq!(
+            PdpDialect::from_builtin_key("cedar"),
+            Some(PdpDialect::Cedar)
+        );
+        assert_eq!(PdpDialect::from_builtin_key("opa"), Some(PdpDialect::Opa));
+        assert_eq!(
+            PdpDialect::from_builtin_key("authzen"),
+            Some(PdpDialect::AuthZen)
+        );
+        assert_eq!(PdpDialect::from_builtin_key("nemo"), Some(PdpDialect::NeMo));
+        assert_eq!(PdpDialect::from_builtin_key("cel"), Some(PdpDialect::Cel));
     }
 
+    // An unknown key is `None`, so a caller has to decide rather than be handed a
+    // `Custom` no resolver answers for. `pdp(name)` is the only route to a custom
+    // dialect.
     #[test]
-    fn from_key_unknown_is_custom() {
-        assert_eq!(
-            PdpDialect::from_key("rego-remote"),
-            PdpDialect::Custom("rego-remote".to_owned())
-        );
+    fn from_builtin_key_unknown_is_none() {
+        assert_eq!(PdpDialect::from_builtin_key("rego-remote"), None);
     }
 
     #[tokio::test]

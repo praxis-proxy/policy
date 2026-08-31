@@ -7,10 +7,10 @@
 // declarations, and per-entity routes into a single YAML document.
 //
 // Supports two dispatch modes, selected by `engine_settings.dispatch`:
-//   - `hooks` (default): each plugin declares the hooks it fires at
-//     and its own `conditions:` for when it fires.
-//   - `policy`: a policy step names the plugin it invokes, with
-//     `routes:`, `groups:`, and `global:` scoping the policy.
+//   - `policy` (default): a policy step names the plugin it invokes,
+//     with `routes:`, `groups:`, and `global:` scoping the policy.
+//   - `hooks`: each plugin declares the hooks it fires at and its own
+//     `conditions:` for when it fires.
 //
 // The two modes are mutually exclusive and each rejects the other's
 // keys by name. Hook mode rejects `routes:`, `groups:`, `global:`, and
@@ -3659,11 +3659,6 @@ fn score_route_match(route: &RouteEntry, query: RouteQuery<'_>) -> Option<(usize
 )]
 mod tests {
     use super::*;
-
-    // Helper: empty tags for tests that don't need them
-    fn no_tags() -> HashSet<String> {
-        HashSet::new()
-    }
 
     /// The name the route table resolves for a request, or `None` when nothing
     /// matched. Route matching outlived the activation lists it used to feed.

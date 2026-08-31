@@ -17,6 +17,7 @@ members = [
     "crates/ppe-apl-core",
     "crates/ppe-apl-cmf",
     "crates/ppe-apl-runtime",
+    "crates/ppe-pdp-diff",
     "builtins/plugins/identity-jwt",
     "builtins/plugins/delegator-oauth",
     "builtins/plugins/elicitation-ciba",
@@ -42,6 +43,7 @@ default-members = [
     "crates/ppe-apl-core",
     "crates/ppe-apl-cmf",
     "crates/ppe-apl-runtime",
+    "crates/ppe-pdp-diff",
     "builtins/plugins/identity-jwt",
     "builtins/plugins/delegator-oauth",
     "builtins/plugins/elicitation-ciba",
@@ -211,6 +213,9 @@ redundant_imports = "deny"
 unit_bindings = "deny"
 # Bound clarity
 explicit_outlives_requirements = "deny"
+# Unused items fail the build. Public host-facing API with no in-tree
+# caller is kept with a reason on the item; everything else is deleted.
+dead_code = "deny"
 
 # --- Not enforced: a settled list, see the header ---
 #
@@ -218,9 +223,8 @@ explicit_outlives_requirements = "deny"
 elided_lifetimes_in_paths = "allow"
 single_use_lifetimes = "allow"
 #
-# hygiene: Dead and unused code, and redundant qualification. Closing these is
+# hygiene: Unused qualifications and drop-of-underscore. Closing these is
 # cleanup; none of them can change what live code does.
-dead_code = "allow"
 let_underscore_drop = "allow"
 unused_qualifications = "allow"
 #
@@ -433,8 +437,8 @@ needless_pass_by_value = "allow"
 rc_buffer = "allow"
 trivially_copy_pass_by_ref = "allow"
 #
-# hygiene: Dead and unused code, and redundant qualification. Closing these is
-# cleanup; none of them can change what live code does.
+# hygiene: Unused qualifications, unused async/self, and drop-of-underscore.
+# Closing these is cleanup; none of them can change what live code does.
 let_underscore_must_use = "allow"
 multiple_inherent_impl = "allow"
 unused_async = "allow"
