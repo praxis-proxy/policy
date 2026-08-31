@@ -1,0 +1,455 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# Example config for the assertions feature (issue #28).
+#
+# Requirements: docs/brainstorms/2026-08-23-upstream-header-projection-requirements.md
+# Plan:         docs/plans/2026-08-24-001-feat-upstream-assertions-plan.md
+#
+# Motivating deployment: praxis fronting a resource API, Keycloak as
+# the IdP. The upstream trusts gateway-injected headers and does no
+# token validation of its own.
+#
+# The block holds two contracts. request: renders engine derived state
+# onto the upstream request and removes the client supplied headers that
+# would collide with it. response: removes what the upstream should not
+# be telling the client and adds what it should.
+#
+# The two directions are deliberately NOT symmetric. See the note near
+# the bottom of this file before writing a response block.
+#
+# Revised 2026-08-30 for #38, #42 and #55. What changed:
+#   - plugin_settings.routing_enabled is gone. engine_settings.dispatch
+#     replaces it, and `policy` is now the default.
+#   - Four inheritance levels, not three. global.defaults.<entity> sits
+#     between global and the groups.
+#   - Generic HTTP has a route selector of its own (http:) and a hook
+#     family of its own (http.request / http.response), so a contract can
+#     be written per HTTP path. It carries a host obligation: see the
+#     reachability note on the /v1/files route.
+#   - Layering is ADDITIVE, reversing an earlier draft. The four levels
+#     stack the way authentication: does, and replace_inherited opts out.
+#     The earlier draft of this very file is why: under the old
+#     "most specific level wins whole" rule, every one of its four
+#     subordinate contracts re-declared the x-auth-* glob and silently
+#     dropped the x-user-id and x-tenant-id entries beside it, so a client
+#     could send x-tenant-id straight through to those upstreams.
+
+# `policy` is the default as of #55. Written out because a worked example
+# should not depend on a default to be legible, and because `hooks` mode
+# rejects global:, groups: and routes: outright.
+engine_settings:
+  dispatch: policy
+
+plugins:
+  - name: corp-jwt
+    kind: identity/jwt
+    capabilities: [read_headers, read_inbound_credentials]
+    config:
+      claim_mapper: keycloak
+      claims:
+        # Claims must be included here to be projectable below.
+        include: [tenant, teams, projects, namespace]
+      trusted_issuers:
+        - issuer: https://sso.corp.example.com/realms/platform
+          audiences: [praxis]
+
+# ---------------------------------------------------------------------
+# Level 1 of 4: global
+# ---------------------------------------------------------------------
+global:
+  # Inbound: establish identity. Existing surface, unchanged.
+  authentication:
+    - corp-jwt
+
+  # Outbound, both directions. These are unsigned statements. Whoever
+  # receives them believes them because they believe the network path,
+  # not because they can verify anything.
+  assertions:
+
+    # ---- request: protects the upstream from the client ----
+    # Allowlist. Only what an entry names reaches upstream.
+    request:
+
+      # Each entry names a target header and one source, or a set of
+      # named members. Sources are slot paths, addressed the way the
+      # rest of the config addresses extension state.
+      headers:
+        - name: x-auth-user-id
+          from: subject.id
+          on_missing: deny
+
+        - name: x-auth-tenant-id
+          from: claim.tenant
+          # Default on_missing is omit. Deny here because tenant
+          # isolation is load bearing: a missing tenant header would
+          # leave the upstream to decide, and its default is not our call.
+          on_missing: deny
+
+        # members renders one JSON object. Keys are operator chosen,
+        # values keep the JSON shape of their sources.
+        - name: x-auth-attributes
+          members:
+            roles:      subject.roles     # keycloak preset maps realm_access.roles
+            teams:      claim.teams       # preset leaves teams unmapped, so read the claim
+            projects:   claim.projects
+            namespaces: claim.namespace
+
+      # Additional inbound header names to remove. See the note on the
+      # two removal mechanisms below.
+      strip:
+        - x-auth-*                        # whole namespace, beyond the projected names
+        - x-user-id                       # legacy spellings from before the namespace
+        - x-tenant-id
+
+    # ---- response: protects the client and the agent from the upstream ----
+    # Denylist. A response header nothing names here passes through.
+    response:
+      strip:
+        - x-auth-*                        # the upstream must not echo what we assert
+        - server                          # backend banner
+        - x-powered-by
+        - x-debug-*                       # upstream debug and trace headers
+        - set-cookie                      # not the upstream's to set on our domain
+
+      # Optional, and usually short. Asserting back to the client is
+      # mostly useful for telling it which context served the request.
+      headers:
+        - name: x-served-tenant
+          from: claim.tenant
+
+  # -------------------------------------------------------------------
+  # Level 2 of 4: global.defaults.<entity>
+  # -------------------------------------------------------------------
+  #
+  # Per entity type. Keys are tool, resource, prompt, llm and http;
+  # anything else is a load error, since a misspelled entity type would
+  # be inert rather than wrong.
+  #
+  # `http` is the interesting one and is new with #42. It covers every
+  # generic HTTP request, whether or not it also matches an http: route
+  # below, since levels accumulate. Before #42 such traffic could only be
+  # governed by the global block, alongside every MCP entity.
+  defaults:
+    http:
+      assertions:
+        request:
+          # Nothing to add: global already asserts user id, tenant and
+          # attributes, and every level's strip: accumulates. This level
+          # exists to show that a scope may declare a direction and
+          # contribute only a narrowing of it.
+          #
+          # Note what is NOT here. No strip: repetition, because global's
+          # three entries already apply. Under the earlier selection rule
+          # this block would have had to restate all three or lose them.
+          headers:
+            - name: x-served-by
+              from: claim.namespace
+        # No response: here. Inherited whole from global either way.
+
+# ---------------------------------------------------------------------
+# Level 3 of 4: groups (policy bundles)
+# ---------------------------------------------------------------------
+#
+# A contract can be named once on a group, for the common case of several
+# routes fronting the same upstream. Resolution runs per direction, so a
+# group may declare one direction and leave the other to the levels above.
+#
+# Groups are the one layer with no inherent order among themselves, so a
+# route joining two groups that name the SAME target header in the same
+# direction fails at config load, naming the header and both groups.
+# Naming different headers is fine: they union.
+groups:
+  files-backend:
+    assertions:
+      request:
+        # Global already asserts all three of those headers, so a group
+        # that wants the same contract declares nothing. What it adds is
+        # the one thing its upstream needs beyond the baseline.
+        headers:
+          - name: x-auth-scope
+            from: claim.projects
+            encode: csv
+        strip:
+          - x-files-*                     # legacy names this backend once read
+      # No response: here, so this group's routes inherit the global one.
+
+# ---------------------------------------------------------------------
+# Level 4 of 4: routes
+# ---------------------------------------------------------------------
+routes:
+  # No block of its own, joins no group, and `tool` has no entity default
+  # here: inherits both global contracts.
+  - tool: search.*
+
+  # Both take the group's request contract and the global response contract.
+  - tool: files.*
+    groups: files-backend
+  - resource: "file://*"
+    groups: files-backend
+
+  # The opt-out. This backend is genuinely not tenant scoped, and global
+  # asserts x-auth-tenant-id with on_missing: deny, so without the flag a
+  # token carrying no tenant claim would be DENIED here by a rule this
+  # route's author did not write. replace_inherited: true is how a level
+  # says it speaks only for itself.
+  #
+  # What the flag can and cannot reach matters. It drops the inherited
+  # headers: and strip: entries, and nothing else: the three headers named
+  # below are still removed from the client's request before injection,
+  # because that removal is unconditional and no flag reaches it. So the
+  # opt-out cannot be used to let a client header through under a name the
+  # gateway asserts.
+  #
+  # Setting it here is silent. A route's own author can see it. Setting it
+  # on the group or the entity default above would be reported at load,
+  # naming every route that lost content it never wrote.
+  - tool: analytics.*
+    assertions:
+      request:
+        replace_inherited: true
+        headers:
+          - name: x-auth-user-id
+            from: subject.id
+        strip:
+          - x-auth-*
+          - x-user-id
+          - x-tenant-id
+
+  # A third-party tool server. Same identity going out, much more
+  # aggressive filtering coming back. Its request: is inherited whole from
+  # global, and its response: adds to global's rather than replacing it, so
+  # the four names global already strips are not repeated here.
+  - tool: partner.*
+    assertions:
+      response:
+        strip:
+          - x-*-internal                  # anything the partner marks internal
+          - www-authenticate              # do not let it challenge our client
+
+  # A per-path contract on generic HTTP, which #42 made expressible. The
+  # three http: shapes are an exact path, a list of exact paths, and this
+  # map form: a segment-boundary prefix or exact path, optionally narrowed
+  # by method. Paths match by equality or prefix, never by glob.
+  #
+  # READ THIS BEFORE RELYING ON IT. A contract here is in force only when
+  # the host puts the request line (method and path) on the HTTP extension
+  # at that invocation, because that is what the route matches on. Absent
+  # it, no http: route matches and the level above governs instead:
+  # global.defaults.http, then global. Nothing errors.
+  #
+  # The request and the response are separate invocations, so a host can
+  # supply the request line on one and not the other. Then this route's
+  # request: applies on the way in and the global response: on the way
+  # out, which is a contract nobody wrote. The engine reports both cases
+  # once rather than leaving them to be inferred from a header that did
+  # not appear.
+  - http:
+      path_prefix: /v1/files
+      method: [GET, POST]
+    assertions:
+      request:
+        # Global's three headers and three strip entries already apply,
+        # and global.defaults.http's x-served-by applies too, since this
+        # is an http request. Both inherited levels stack under this one.
+        headers:
+          - name: x-auth-path-scope
+            from: claim.namespace
+      response:
+        strip:
+          - x-upstream-*
+
+# ---------------------------------------------------------------------
+# Why the two directions are not symmetric
+# ---------------------------------------------------------------------
+#
+# request: is an allowlist because the engine originates every value it
+# asserts. The legitimate set is finite and known, so anything unnamed
+# can be withheld safely.
+#
+# response: cannot be. A response is a passthrough of the upstream's own
+# output. The engine originates none of it and cannot enumerate what is
+# legitimate, so default deny would remove content-type,
+# content-length, etag, cache-control, retry-after, the CORS set, and
+# every rate-limit and tracing header a client depends on. The client
+# breaks. So response: removes what it names and passes the rest.
+#
+# A protocol floor fixed in code backs that up. The floor holds the
+# headers a client needs in order to interpret the response at all, and
+# a strip: entry cannot remove one. A glob that would hit a floor header
+# fails at config load, naming the header it would have removed, rather
+# than silently breaking clients in production.
+#
+# set-cookie, server and x-powered-by are deliberately NOT in the floor.
+# Removing those is a stated use case.
+
+# ---------------------------------------------------------------------
+# On the wire
+# ---------------------------------------------------------------------
+#
+# Client sends a valid token plus some hopeful headers:
+#
+#   POST /v1/files
+#   Authorization: Bearer eyJhbGciOiJSUzI1NiJ9...
+#   x-auth-user-id: root
+#   x-auth-attributes: {"roles":["admin"]}
+#   x-auth-projects: prod
+#
+# Which levels apply depends on how the request arrives, and they stack.
+# As an MCP tool call to files.* it is global plus the files-backend
+# group. As a generic HTTP request with the request line on the
+# extensions it is global plus global.defaults.http plus the /v1/files
+# route. The walkthrough below is the tool call.
+#
+# The upstream receives:
+#
+#   POST /v1/files
+#   Authorization: Bearer eyJhbGciOiJSUzI1NiJ9...
+#   x-auth-user-id: alice
+#   x-auth-tenant-id: acme
+#   x-auth-attributes: {"namespaces":["team-ml"],"projects":["team-prod","team-stage"],"roles":["ml-engineer","viewer"],"teams":["platform"]}
+#   x-auth-scope: team-prod,team-stage
+#
+# The upstream replies:
+#
+#   200 OK
+#   content-type: application/json
+#   etag: "abc123"
+#   server: gunicorn/21.2.0
+#   x-debug-query-time: 41ms
+#   x-auth-attributes: {"roles":["admin"]}
+#   set-cookie: backend_session=...
+#
+# The client receives:
+#
+#   200 OK
+#   content-type: application/json
+#   etag: "abc123"
+#   x-served-tenant: acme
+#
+# Six things to read off that:
+#
+#   1. All three client supplied x-auth-* request headers are gone,
+#      including x-auth-projects, which no entry asserts but the strip
+#      glob covers. The glob comes from global; the group did not have to
+#      restate it, and could not have lost it by omission.
+#   0. Four asserted headers, from two levels: three from global and
+#      x-auth-scope from the group. Neither level had to know about the
+#      other.
+#   2. projects is a JSON array, not text that happens to parse as one.
+#      Subject claims keep their JSON shape as of #9.
+#   3. Arrays are sorted, so one identity yields identical header bytes
+#      across requests. Audit hashes and golden files stay stable.
+#   4. The upstream tried to echo x-auth-attributes back. It did not
+#      reach the client, so the client never learns what we assert on
+#      its behalf.
+#   5. content-type and etag survived. They are in the protocol floor and
+#      no strip: entry can remove them.
+#   6. Authorization is untouched in the request direction. This feature
+#      neither forwards nor removes it. Whether the upstream should
+#      receive it at all is a separate question, and the assessment
+#      argues it should not.
+
+# ---------------------------------------------------------------------
+# Two removal mechanisms, easy to conflate
+# ---------------------------------------------------------------------
+#
+# Automatic, not configurable:
+#   Every header an entry targets is removed from the corresponding wire
+#   map before injection. In the request direction that is the client's
+#   request; in the response direction it is the upstream's response,
+#   which is what stops the echo in point 4 above. It happens whether or
+#   not strip: exists, and even when the source resolved to nothing, so
+#   absence never leaves a wire value in place.
+#
+# strip:, operator authored, accumulating:
+#   Removes names no entry targets. Every level's entries apply, so a
+#   subordinate level cannot narrow an inherited removal by omitting it.
+#   Delete global's request strip: and the three asserted headers are
+#   still removed, but x-auth-projects, x-user-id and x-tenant-id reach
+#   the upstream from every route that inherited it.
+#
+#   Only replace_inherited: true drops an inherited strip:, and only for
+#   the direction it is written in. It still cannot reach the automatic
+#   removal above, so the worst it can do is let through a name no entry
+#   targets.
+
+# ---------------------------------------------------------------------
+# Configs that fail to load
+# ---------------------------------------------------------------------
+#
+# The failure modes are half the design. None of these load:
+#
+#   request:
+#     headers:
+#       - name: x-auth-token
+#         from: raw_credentials.inbound        # fixed exclusion, never a source
+#
+#       - name: x-auth-claims
+#         from: claim                          # names no claim, would render the IdP blob
+#
+#       - name: x-auth-roles
+#         from: subject.roles                  # collection into a single value header
+#
+#       - name: x-auth-fwd
+#         from: http.request_headers.x-user    # laundering an inbound header
+#
+#       - name: x-auth-path
+#         from: http.path                      # not a source; see below
+#
+#   response:
+#     headers:
+#       - name: x-echo
+#         from: http.response_headers.server   # laundering an upstream header
+#     strip:
+#       - content-*                            # would remove content-type, a floor header
+#
+# Two different refusals there, and the messages say which is which.
+#
+# raw_credentials.* and both header maps are the fixed exclusion set: never
+# usable as a source, in either direction, with no config surface to extend
+# or weaken. Rendering a client supplied header into a trusted upstream one
+# is the exact laundering this feature exists to prevent, and an upstream
+# that controls a response header must not be able to aim it at what the
+# client trusts.
+#
+# http.path is a different case. The request line and the response status
+# are host populated rather than credential bearing, so they are not a
+# refusal, just not addressable yet. They fail as an unknown path, because
+# admitting them later should be a grammar addition and not the reversal of
+# a security decision.
+#
+# Two more that fail on structure rather than on sources:
+#
+#   - A route joining two groups that name the same target header in the
+#     same direction. Groups have no order among themselves, so it names
+#     the header and both groups. Different headers union and are fine, and
+#     so is the same header in different directions.
+#   - replace_inherted: true, the misspelling that bit authentication:
+#     before its key set was closed. Rejected rather than loading with the
+#     flag false and quietly stacking what the author meant to drop.
+#   - global.defaults.htp: — an entity default key that is not an entity
+#     type. Inert rather than wrong, so it is refused.
+
+# ---------------------------------------------------------------------
+# Open, not yet settled
+# ---------------------------------------------------------------------
+#
+#   1. A delegated token's outbound_header is only a declaration: the
+#      forwarding component attaches it, not PPE, so nothing here and
+#      nothing in praxis-policy shares a fold point with this surface. A
+#      collision needs an operator to point default_outbound_header away
+#      from Authorization AND target that same name with an entry below.
+#      Visible at config load, so checkable; unchecked today.
+#   2. Whether on_missing should cover more than absence. A source that
+#      errored, or a value rejected for containing CR or LF, currently
+#      falls to omit with no way to say otherwise.
+#   3. HttpExtension is a HashMap<String, String>, so duplicate wire
+#      headers collapse and repeated names cannot be emitted. Probably
+#      fine, needs stating.
+#   4. Accumulated headers from four levels could outgrow an upstream's
+#      header budget. Not bounded today.
+#
+# Settled since the first draft: layering is additive with an opt-out,
+# not most-specific-wins-whole. See the note at the top of this file for
+# what this file itself demonstrated about the alternative.

@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use tracing::warn;
 
 use crate::cmf::constants::{
     ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL,
@@ -225,6 +226,12 @@ pub struct GlobalConfig {
     /// `RouteEntry.authentication` for the accepted forms.
     #[serde(default, deserialize_with = "deserialize_route_identity")]
     pub authentication: Option<crate::identity::RouteIdentityConfig>,
+
+    /// What the engine asserts on the wire (YAML key `assertions:`), the
+    /// first of the four levels a contract accumulates over. Every level
+    /// stacks the way `authentication:` does, per direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<crate::assertions::AssertionsConfig>,
 }
 
 /// A named policy group — plugins to activate and optional metadata.
@@ -256,6 +263,13 @@ pub struct PolicyGroup {
     /// YAML shape as the route-level `authentication:` block.
     #[serde(default, deserialize_with = "deserialize_route_identity")]
     pub authentication: Option<crate::identity::RouteIdentityConfig>,
+
+    /// What the engine asserts on the wire (YAML key `assertions:`), for
+    /// every route this section covers. One field serves two of the four
+    /// levels, since `groups.<name>:` and `global.defaults.<entity>:` both
+    /// deserialize here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<crate::assertions::AssertionsConfig>,
 }
 
 /// A reference in a `plugins:` activation list, the shape no scope accepts any
@@ -425,6 +439,13 @@ pub struct RouteEntry {
     /// ```
     #[serde(default, deserialize_with = "deserialize_route_identity")]
     pub authentication: Option<crate::identity::RouteIdentityConfig>,
+
+    /// What the engine asserts on the wire for this route (YAML key
+    /// `assertions:`), the most specific of the four levels. It stacks on
+    /// what the route inherits unless the direction sets
+    /// `replace_inherited: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertions: Option<crate::assertions::AssertionsConfig>,
 }
 
 /// Deserialize the `authentication:` block in a `RouteEntry`. Accepts either a YAML
@@ -1206,6 +1227,7 @@ const DOCUMENT_KEYS: &[ConfigKey] = &[
 const GLOBAL_STRUCTURAL_KEYS: &[ConfigKey] = &[
     structural_key("defaults", KeyOwner::Core),
     structural_key("authentication", KeyOwner::Core),
+    structural_key("assertions", KeyOwner::Core),
     structural_key("response", KeyOwner::Apl),
 ];
 
@@ -1220,6 +1242,7 @@ const BUNDLE_STRUCTURAL_KEYS: &[ConfigKey] = &[
     structural_key("metadata", KeyOwner::Core),
     shape_conditional_key("plugins"),
     structural_key("authentication", KeyOwner::Core),
+    structural_key("assertions", KeyOwner::Core),
     structural_key("response", KeyOwner::Apl),
 ];
 
@@ -1240,6 +1263,7 @@ const ROUTE_STRUCTURAL_KEYS: &[ConfigKey] = &[
     structural_key("groups", KeyOwner::Core),
     shape_conditional_key("plugins"),
     structural_key("authentication", KeyOwner::Core),
+    structural_key("assertions", KeyOwner::Core),
     structural_key("response", KeyOwner::Apl),
 ];
 
@@ -1276,6 +1300,40 @@ const AUTHENTICATION_KEYS: &[ConfigKey] = &[
     structural_key("replace_inherited", KeyOwner::Core),
 ];
 
+/// The keys an `assertions:` block carries: one per direction.
+///
+/// Direction is the first level so nothing below it moves when either half
+/// grows, and so a level can declare one direction and leave the other to the
+/// levels above it.
+const ASSERTIONS_KEYS: &[ConfigKey] = &[
+    structural_key("request", KeyOwner::Core),
+    structural_key("response", KeyOwner::Core),
+];
+
+/// The keys one direction of an `assertions:` block carries.
+///
+/// `replace_inherited` is spelled and defaulted the way `authentication:`'s is,
+/// and is read per direction, so a route can replace what it inherits one way
+/// while still stacking the other.
+const ASSERTIONS_DIRECTION_KEYS: &[ConfigKey] = &[
+    structural_key("headers", KeyOwner::Core),
+    structural_key("strip", KeyOwner::Core),
+    structural_key("replace_inherited", KeyOwner::Core),
+];
+
+/// The keys one asserted-header entry carries.
+///
+/// `from` and `members` are alternatives rather than both; the entry parser
+/// refuses an entry carrying the two, since the table can only say which keys
+/// exist.
+const ASSERTION_HEADER_KEYS: &[ConfigKey] = &[
+    structural_key("name", KeyOwner::Core),
+    structural_key("from", KeyOwner::Core),
+    structural_key("members", KeyOwner::Core),
+    structural_key("on_missing", KeyOwner::Core),
+    structural_key("encode", KeyOwner::Core),
+];
+
 /// A config scope: one mapping shape the loader reads, with one key table each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigScope {
@@ -1302,11 +1360,20 @@ pub enum ConfigScope {
 
     /// One map-form step of an `authentication:` block, at any scope.
     AuthenticationStep,
+
+    /// An `assertions:` block, at any scope.
+    Assertions,
+
+    /// One direction of an `assertions:` block, at any scope.
+    AssertionsDirection,
+
+    /// One `headers:` entry of an `assertions:` direction, at any scope.
+    AssertionHeader,
 }
 
 impl ConfigScope {
     /// Every scope, for a walk over the whole key model.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::Document,
         Self::Global,
         Self::EntityDefault,
@@ -1315,6 +1382,9 @@ impl ConfigScope {
         Self::EngineSettings,
         Self::Authentication,
         Self::AuthenticationStep,
+        Self::Assertions,
+        Self::AssertionsDirection,
+        Self::AssertionHeader,
     ];
 
     /// The scope's YAML path, for a diagnostic.
@@ -1329,6 +1399,9 @@ impl ConfigScope {
             Self::EngineSettings => "engine_settings",
             Self::Authentication => "an authentication block",
             Self::AuthenticationStep => "an authentication step",
+            Self::Assertions => "an assertions block",
+            Self::AssertionsDirection => "an assertions request or response block",
+            Self::AssertionHeader => "an assertions header entry",
         }
     }
 
@@ -1362,6 +1435,9 @@ impl ConfigScope {
             Self::EngineSettings => (ENGINE_SETTINGS_KEYS, &[], &[], &[]),
             Self::Authentication => (AUTHENTICATION_KEYS, &[], &[], &[]),
             Self::AuthenticationStep => (AUTHENTICATION_STEP_KEYS, &[], &[], &[]),
+            Self::Assertions => (ASSERTIONS_KEYS, &[], &[], &[]),
+            Self::AssertionsDirection => (ASSERTIONS_DIRECTION_KEYS, &[], &[], &[]),
+            Self::AssertionHeader => (ASSERTION_HEADER_KEYS, &[], &[], &[]),
         };
         structural.iter().chain(terms).chain(fields).chain(wiring)
     }
@@ -1394,7 +1470,7 @@ pub fn global_wiring_keys() -> impl Iterator<Item = &'static ConfigKey> {
 /// A non-string key is left to the typed parse to report; every scope here
 /// deserializes to a struct, so a non-string key fails there with a better
 /// message than this check could give.
-fn unknown_keys_in<'a>(
+pub(crate) fn unknown_keys_in<'a>(
     scope: ConfigScope,
     map: &'a serde_yaml::Mapping,
     extra: &[&str],
@@ -1412,7 +1488,7 @@ fn unknown_keys_in<'a>(
 /// replacement clauses are what a removed key gets over a misspelled one: the
 /// closed key set makes both loud, and [`REPLACED_KEYS`] is what still says
 /// where the removed one's contents belong.
-fn unknown_keys_message(scope: ConfigScope, unknown: &[&str]) -> String {
+pub(crate) fn unknown_keys_message(scope: ConfigScope, unknown: &[&str]) -> String {
     let label = if unknown.len() == 1 { "key" } else { "keys" };
     let mut message = format!(
         "unknown {label} `{}`; {} accepts {}",
@@ -2171,6 +2247,7 @@ fn reject_reserved_route_names(config: &PolicyConfig) -> Result<(), Box<PluginEr
 pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
     validate_declared_hooks(config)?;
     reject_reserved_route_names(config)?;
+    validate_assertions(config)?;
 
     let mut seen_names = HashSet::new();
     for plugin in &config.plugins {
@@ -2351,6 +2428,40 @@ pub(crate) fn http_routing_gaps(config: &PolicyConfig) -> Vec<String> {
          instead; a route selecting `http: {{path_prefix: /}}` is what governs the rest",
         selectors.len(),
     )]
+}
+
+/// What a contract on an `http:` route depends on the host for, one message per
+/// such route, empty when there is nothing to report.
+///
+/// A route selecting on `http:` is matched from the request line the host puts
+/// on the HTTP extension, so a contract written there is in force only at an
+/// invocation that carries one. Absent it the route matches nothing and the
+/// levels above govern instead, and nothing errors, which makes it a security
+/// control an operator cannot tell is working. Reported rather than refused:
+/// whether the host populates the request line is not visible at load, and
+/// failing a load over what a host might do is not this layer's call.
+///
+/// Kept separate from emission so a test reads the findings rather than a log
+/// line, the way [`http_routing_gaps`] is.
+pub(crate) fn assertions_reachability_gaps(config: &PolicyConfig) -> Vec<String> {
+    config
+        .routes
+        .iter()
+        .filter(|route| route.http.is_some() && route.assertions.is_some())
+        .enumerate()
+        .map(|(i, route)| {
+            format!(
+                "route {} declares `assertions:` on an `http:` selector, which is in force only \
+                 when the host puts the request line (method and path) on the HTTP extension at \
+                 that invocation. Without it no `http:` route matches and the levels above govern \
+                 instead: `global.defaults.http`, then `global`. The request and the response are \
+                 separate invocations, so a host supplying the request line on one and not the \
+                 other applies this route's `request:` on the way in and the global `response:` on \
+                 the way out, which is a contract nobody wrote",
+                route_display_name(route, i),
+            )
+        })
+        .collect()
 }
 
 /// Whether a selector matches every request, which is what makes a route the
@@ -2808,17 +2919,20 @@ pub fn resolve_plugins_for_entity(config: &PolicyConfig) -> Vec<ResolvedPlugin> 
 ///
 /// The resolver and the load-time drop report both fold this sequence, so
 /// what an operator is told matches what dispatch does by construction.
-struct AuthenticationLayer<'a> {
+struct SectionLayer<'a, T> {
     /// The layer's source, for a report that has to name it.
-    source: AuthenticationSource<'a>,
+    source: SectionSource<'a>,
     /// The block the layer contributes, flag included.
-    config: &'a crate::identity::RouteIdentityConfig,
+    config: &'a T,
 }
 
-/// Where an `authentication:` layer is declared.
+/// Which of the four config levels a layer is declared at.
+///
+/// Shared by every chain that accumulates over the levels, so two chains cannot
+/// name the same level differently or stack it in a different place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuthenticationSource<'a> {
-    /// The `global.authentication:` block, inherited by every route.
+enum SectionSource<'a> {
+    /// The top-level `global:` block, inherited by every route.
     Global,
     /// A `global.defaults.<entity>:` block, named by the entity type it
     /// covers.
@@ -2829,9 +2943,8 @@ enum AuthenticationSource<'a> {
     Route,
 }
 
-impl AuthenticationSource<'_> {
-    /// How a report names the layer. `Global` and `Route` never appear in one,
-    /// so they are named for completeness rather than for a caller.
+impl SectionSource<'_> {
+    /// How a report names the layer.
     fn label(self) -> String {
         match self {
             Self::Global => "global".to_owned(),
@@ -2840,6 +2953,89 @@ impl AuthenticationSource<'_> {
             Self::Route => "the route".to_owned(),
         }
     }
+
+    /// The level, without the name that identifies which section it is.
+    fn level(self) -> crate::assertions::AssertionLevel {
+        use crate::assertions::AssertionLevel;
+        match self {
+            Self::Global => AssertionLevel::Global,
+            Self::EntityDefault(_) => AssertionLevel::EntityDefault,
+            Self::Bundle(_) => AssertionLevel::Bundle,
+            Self::Route => AssertionLevel::Route,
+        }
+    }
+}
+
+/// The layers of one inherited block that apply to a route, in the order they
+/// stack: global, the entity type's default, each bundle the route joins, then
+/// the route.
+///
+/// One walk for every chain that layers this way, so `authentication:` and
+/// `assertions:` cannot drift apart about which sections contribute or in what
+/// order. Each caller supplies only how to read its own block out of a section.
+///
+/// Bundle order is `meta.tags` in declaration order followed by `groups:`, which
+/// is [`route_bundle_names`] order, deduplicated first-seen-wins. A name written
+/// in both spellings is one membership: stacking its layer twice would apply the
+/// bundle's contribution twice.
+///
+/// `request_entity_type` is what lets an entity default apply to a request that
+/// matched no route: the level covers an entity type rather than a route, and a
+/// generic-HTTP request that selected none of the `http:` routes is still a
+/// generic-HTTP request. A matched route's own entity type wins when there is
+/// one, since that is the type the level is keyed on. A caller with nothing to
+/// say passes `None` and the entity default applies only through a route.
+fn section_layers<'a, T>(
+    config: &'a PolicyConfig,
+    route: Option<&'a RouteEntry>,
+    request_entity_type: Option<&'a str>,
+    from_global: impl Fn(&'a GlobalConfig) -> Option<&'a T>,
+    from_section: impl Fn(&'a PolicyGroup) -> Option<&'a T>,
+    from_route: impl Fn(&'a RouteEntry) -> Option<&'a T>,
+) -> Vec<SectionLayer<'a, T>> {
+    let mut layers: Vec<SectionLayer<'a, T>> = Vec::new();
+    if let Some(block) = from_global(&config.global) {
+        layers.push(SectionLayer {
+            source: SectionSource::Global,
+            config: block,
+        });
+    }
+    let entity_type = route
+        .and_then(route_entity_identity)
+        .map(|(entity_type, _)| entity_type)
+        .or(request_entity_type);
+    if let Some(entity_type) = entity_type
+        && let Some(default) = config.global.defaults.get(entity_type)
+        && let Some(block) = from_section(default)
+    {
+        layers.push(SectionLayer {
+            source: SectionSource::EntityDefault(entity_type),
+            config: block,
+        });
+    }
+    let Some(route) = route else { return layers };
+    let mut joined: Vec<&str> = Vec::new();
+    for tag in route_static_tags(route) {
+        if joined.contains(&tag) {
+            continue;
+        }
+        joined.push(tag);
+        if let Some(bundle) = config.global.bundles.get(tag)
+            && let Some(block) = from_section(bundle)
+        {
+            layers.push(SectionLayer {
+                source: SectionSource::Bundle(tag),
+                config: block,
+            });
+        }
+    }
+    if let Some(block) = from_route(route) {
+        layers.push(SectionLayer {
+            source: SectionSource::Route,
+            config: block,
+        });
+    }
+    layers
 }
 
 /// The `authentication:` layers that apply to a route, in the order they
@@ -2864,42 +3060,37 @@ impl AuthenticationSource<'_> {
 fn authentication_layers<'a>(
     config: &'a PolicyConfig,
     route: Option<&'a RouteEntry>,
-) -> Vec<AuthenticationLayer<'a>> {
-    let mut layers: Vec<AuthenticationLayer<'a>> = Vec::new();
-    if let Some(global_identity) = config.global.authentication.as_ref() {
-        layers.push(AuthenticationLayer {
-            source: AuthenticationSource::Global,
-            config: global_identity,
-        });
-    }
-    if let Some(route) = route {
-        if let Some((entity_type, _)) = route_entity_identity(route)
-            && let Some(default) = config.global.defaults.get(entity_type)
-            && let Some(default_identity) = default.authentication.as_ref()
-        {
-            layers.push(AuthenticationLayer {
-                source: AuthenticationSource::EntityDefault(entity_type),
-                config: default_identity,
-            });
-        }
-        for tag in route_static_tags(route) {
-            if let Some(bundle) = config.global.bundles.get(tag)
-                && let Some(bundle_identity) = bundle.authentication.as_ref()
-            {
-                layers.push(AuthenticationLayer {
-                    source: AuthenticationSource::Bundle(tag),
-                    config: bundle_identity,
-                });
-            }
-        }
-        if let Some(route_identity) = route.authentication.as_ref() {
-            layers.push(AuthenticationLayer {
-                source: AuthenticationSource::Route,
-                config: route_identity,
-            });
-        }
-    }
-    layers
+) -> Vec<SectionLayer<'a, crate::identity::RouteIdentityConfig>> {
+    // `None`: identity layers reach a request through its route, and threading a
+    // request's entity type into that chain is a change to which plugins fire.
+    section_layers(
+        config,
+        route,
+        None,
+        |global| global.authentication.as_ref(),
+        |section| section.authentication.as_ref(),
+        |route| route.authentication.as_ref(),
+    )
+}
+
+/// The `assertions:` layers that apply to a route, in the order they stack.
+///
+/// The same four levels `authentication:` stacks over, walked by the same
+/// function, which is what keeps a route's two chains from disagreeing about
+/// which sections reach it.
+fn assertions_layers<'a>(
+    config: &'a PolicyConfig,
+    route: Option<&'a RouteEntry>,
+    request_entity_type: Option<&'a str>,
+) -> Vec<SectionLayer<'a, crate::assertions::AssertionsConfig>> {
+    section_layers(
+        config,
+        route,
+        request_entity_type,
+        |global| global.assertions.as_ref(),
+        |section| section.assertions.as_ref(),
+        |route| route.assertions.as_ref(),
+    )
 }
 
 /// Resolve the identity-resolve dispatch list for a specific
@@ -2981,7 +3172,7 @@ pub(crate) struct DroppedAuthentication {
     /// The affected route, named by the entity it selects.
     pub route: String,
     /// The section whose `replace_inherited: true` did the dropping, as
-    /// [`AuthenticationSource::label`] names it.
+    /// [`SectionSource::label`] names it.
     pub declared_in: String,
     /// The step names the route no longer runs, in the order they stacked.
     pub dropped: Vec<String>,
@@ -3019,7 +3210,7 @@ pub(crate) fn dropped_inherited_authentication(
             // own choice, handled above. What is left is the sections between.
             let declared_away_from_the_route = matches!(
                 layer.source,
-                AuthenticationSource::EntityDefault(_) | AuthenticationSource::Bundle(_)
+                SectionSource::EntityDefault(_) | SectionSource::Bundle(_)
             );
             if declared_away_from_the_route && layer.config.replace_inherited && !steps.is_empty() {
                 findings.push(DroppedAuthentication {
@@ -3038,9 +3229,350 @@ pub(crate) fn dropped_inherited_authentication(
     findings
 }
 
+/// The `assertions:` contract in force for a request, in one direction.
+///
+/// Accumulates over the four levels in the order they stack: global, the
+/// entity type's default, each bundle the route joins, then the route. A level
+/// setting `replace_inherited: true` for this direction drops what accumulated
+/// before it and then contributes, and the flag reaches operator-authored
+/// content only: the unconditional removal of an entry's target, the fixed
+/// source exclusions, and the response protocol floor are all outside it.
+///
+/// `headers:` unions by target header name, compared case-insensitively, and a
+/// repeated name takes the more specific level's entry **whole**, members and
+/// `on_missing` included. Never merged inside an entry: a members object
+/// composed from two levels would have no author and no single level could be
+/// pointed at for what it renders. `strip:` unions and deduplicates, so a
+/// subordinate level cannot narrow an inherited removal by omitting it.
+///
+/// `matched: None` with a `request_entity_type` accumulates global plus that
+/// entity type's default: the default covers an entity type rather than a route,
+/// so a generic-HTTP request that selected none of the `http:` routes is still
+/// governed by `global.defaults.http`. With neither, only global applies.
+///
+/// Returns `None` when no level declared this direction at all, which is
+/// distinct from a contract that accumulated to empty because a
+/// `replace_inherited` cleared it and added nothing.
+#[must_use]
+pub fn resolve_assertions_for_route(
+    config: &PolicyConfig,
+    matched: Option<&MatchedRoute<'_>>,
+    request_entity_type: Option<&str>,
+    direction: crate::assertions::Direction,
+) -> Option<crate::assertions::ResolvedContract> {
+    use crate::assertions::{AssertionLevel, ResolvedContract, ResolvedHeader};
+
+    let mut contract = ResolvedContract::default();
+    let mut declared = false;
+    for layer in assertions_layers(config, matched.map(|m| m.route), request_entity_type) {
+        let Some(block) = direction.block_of(layer.config) else {
+            continue;
+        };
+        declared = true;
+        if block.replace_inherited {
+            contract.headers.clear();
+            contract.strip.clear();
+        }
+        let level = layer.source.level();
+        let declared_in = layer.source.label();
+        for entry in &block.headers {
+            let lowercase = entry.name.to_lowercase();
+            let resolved = ResolvedHeader {
+                name: entry.name.clone(),
+                lowercase: lowercase.clone(),
+                source: resolve_entry_source(entry),
+                on_missing: entry.on_missing,
+                encode: entry.encode,
+                declared_in: declared_in.clone(),
+                level,
+                overrode: None,
+            };
+            match contract
+                .headers
+                .iter()
+                .position(|held| held.lowercase == lowercase)
+            {
+                // The later level wins, in the position the earlier one held,
+                // so iteration order stays the order the levels contributed in.
+                Some(at) => {
+                    let previous = contract
+                        .headers
+                        .get(at)
+                        .map(|held| held.declared_in.clone());
+                    // Bundles have no order among themselves, so two of them
+                    // naming one header would make this a coin toss. Config
+                    // load refuses that, and this is where the refusal is
+                    // relied on rather than assumed.
+                    debug_assert!(
+                        !(level == AssertionLevel::Bundle
+                            && contract
+                                .headers
+                                .get(at)
+                                .is_some_and(|held| held.level == AssertionLevel::Bundle)),
+                        "two bundles both assert `{}`, which config load rejects",
+                        entry.name
+                    );
+                    if let Some(slot) = contract.headers.get_mut(at) {
+                        *slot = ResolvedHeader {
+                            overrode: previous,
+                            ..resolved
+                        };
+                    }
+                },
+                None => contract.headers.push(resolved),
+            }
+        }
+        for pattern in &block.strip {
+            if !contract
+                .strip
+                .iter()
+                .any(|held| held.as_str() == pattern.as_str())
+            {
+                contract.strip.push(pattern.clone());
+            }
+        }
+    }
+    declared.then_some(contract)
+}
+
+/// Parse an entry's authored source paths.
+///
+/// Every path parsed at config load, so a failure here cannot happen. It is
+/// reported and the entry kept rather than dropped, because dropping it would
+/// take its target out of the removal set and leave a client-supplied value
+/// standing under an asserted name.
+fn resolve_entry_source(
+    entry: &crate::assertions::HeaderEntry,
+) -> crate::assertions::ResolvedSource {
+    use crate::assertions::{AuthoredSource, ResolvedSource, SourcePath};
+
+    match &entry.source {
+        AuthoredSource::From(path) => match SourcePath::parse(path) {
+            Ok(parsed) => ResolvedSource::From(parsed),
+            Err(cause) => {
+                warn!(
+                    header = %entry.name,
+                    error = %cause,
+                    "an assertions source did not parse after config load accepted it",
+                );
+                ResolvedSource::Unresolvable
+            },
+        },
+        AuthoredSource::Members(members) => {
+            let mut parsed = Vec::with_capacity(members.len());
+            for (member, path) in members {
+                match SourcePath::parse(path) {
+                    Ok(source) => parsed.push((member.clone(), source)),
+                    Err(cause) => {
+                        warn!(
+                            header = %entry.name,
+                            member = %member,
+                            error = %cause,
+                            "an assertions member source did not parse after config load accepted \
+                             it",
+                        );
+                        return ResolvedSource::Unresolvable;
+                    },
+                }
+            }
+            ResolvedSource::Members(parsed)
+        },
+    }
+}
+
+/// A route whose inherited `assertions:` content a section above it dropped.
+///
+/// Kept separate from emission so a test reads the finding rather than a log
+/// line, the way [`http_routing_gaps`] is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DroppedAssertions {
+    /// The affected route, named by the entity it selects.
+    pub route: String,
+    /// Which direction lost content, as [`crate::assertions::Direction::label`]
+    /// spells it.
+    pub direction: &'static str,
+    /// The section whose `replace_inherited: true` did the dropping.
+    pub declared_in: String,
+    /// The header names the route no longer asserts.
+    pub dropped_headers: Vec<String>,
+    /// The `strip:` patterns the route no longer applies.
+    pub dropped_strip: Vec<String>,
+}
+
+/// Every route whose inherited `assertions:` content a section above it drops
+/// with `replace_inherited: true`, one finding per route and direction.
+///
+/// A route's own flag is not reported: that drop is written in the route being
+/// affected, so its author can see it. A section's is written somewhere else
+/// entirely, and it is the route's author who ends up asserting less, or
+/// removing less, than the document in front of them says. Global cannot drop
+/// anything, since nothing has accumulated by the time its flag is read.
+pub(crate) fn dropped_inherited_assertions(config: &PolicyConfig) -> Vec<DroppedAssertions> {
+    config
+        .routes
+        .iter()
+        .enumerate()
+        .flat_map(|(i, route)| {
+            dropped_inherited_assertions_for(config, route, &route_display_name(route, i))
+        })
+        .collect()
+}
+
+/// What one route loses to a `replace_inherited: true` above it, per direction.
+///
+/// Split out so the effective-policy artifact and the load-time report tell one
+/// story about one route rather than two that can drift.
+pub(crate) fn dropped_inherited_assertions_for(
+    config: &PolicyConfig,
+    route: &RouteEntry,
+    route_label: &str,
+) -> Vec<DroppedAssertions> {
+    let mut findings: Vec<DroppedAssertions> = Vec::new();
+    for direction in [
+        crate::assertions::Direction::Request,
+        crate::assertions::Direction::Response,
+    ] {
+        let route_replaces = route
+            .assertions
+            .as_ref()
+            .and_then(|a| direction.block_of(a))
+            .is_some_and(|block| block.replace_inherited);
+        if route_replaces {
+            continue;
+        }
+        let mut headers: Vec<String> = Vec::new();
+        let mut strip: Vec<String> = Vec::new();
+        for layer in assertions_layers(config, Some(route), None) {
+            let Some(block) = direction.block_of(layer.config) else {
+                continue;
+            };
+            let above_the_route = matches!(
+                layer.source,
+                SectionSource::EntityDefault(_) | SectionSource::Bundle(_)
+            );
+            if above_the_route
+                && block.replace_inherited
+                && !(headers.is_empty() && strip.is_empty())
+            {
+                findings.push(DroppedAssertions {
+                    route: route_label.to_owned(),
+                    direction: direction.label(),
+                    declared_in: layer.source.label(),
+                    dropped_headers: headers.clone(),
+                    dropped_strip: strip.clone(),
+                });
+                break;
+            }
+            if block.replace_inherited {
+                headers.clear();
+                strip.clear();
+            }
+            headers.extend(block.headers.iter().map(|entry| entry.name.clone()));
+            strip.extend(block.strip.iter().map(|p| p.as_str().to_owned()));
+        }
+    }
+    findings
+}
+
+/// Check every declared `assertions:` block, naming the level it sits at.
+///
+/// Runs from [`validate_config`], so every load path reaches it: an unaddressable
+/// source, a credential source, a collection with no declared encoding, or a
+/// glob that would remove a floor header all refuse the load rather than
+/// surfacing as a header that did not appear.
+fn validate_assertions(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
+    let fail = |message: String| Box::new(PluginError::Config { message });
+
+    if let Some(assertions) = config.global.assertions.as_ref() {
+        assertions.validate("global").map_err(fail)?;
+    }
+    for (entity_type, default) in &config.global.defaults {
+        if let Some(assertions) = default.assertions.as_ref() {
+            assertions
+                .validate(&format!("global.defaults.{entity_type}"))
+                .map_err(fail)?;
+        }
+    }
+    for (name, bundle) in &config.global.bundles {
+        if let Some(assertions) = bundle.assertions.as_ref() {
+            assertions
+                .validate(&format!("groups.{name}"))
+                .map_err(fail)?;
+        }
+    }
+    for (i, route) in config.routes.iter().enumerate() {
+        if let Some(assertions) = route.assertions.as_ref() {
+            assertions
+                .validate(&route_display_name(route, i))
+                .map_err(fail)?;
+        }
+    }
+    reject_bundle_assertion_conflicts(config)
+}
+
+/// Refuse a route joining two bundles that assert the same header in the same
+/// direction.
+///
+/// Bundles are the one layer with no order among themselves, so which of the two
+/// wins would depend on nothing an operator wrote. Every other pair of levels is
+/// ordered, which makes a repeated header there a per-name override rather than
+/// an ambiguity. Two bundles naming *different* headers union and are legal, so
+/// the check is per header rather than per direction.
+///
+/// Detectable at load because bundle membership is static: a tag the host injects
+/// at runtime contributes no bundle, so there is no request-time ambiguity this
+/// check could miss.
+fn reject_bundle_assertion_conflicts(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
+    for (i, route) in config.routes.iter().enumerate() {
+        for direction in [
+            crate::assertions::Direction::Request,
+            crate::assertions::Direction::Response,
+        ] {
+            // Deduplicated membership, so a bundle named in both `meta.tags`
+            // and `groups:` is one membership rather than a conflict with
+            // itself.
+            let mut claimed: HashMap<String, String> = HashMap::new();
+            for bundle_name in route_bundle_names(route) {
+                let Some(block) = config
+                    .global
+                    .bundles
+                    .get(&bundle_name)
+                    .and_then(|bundle| bundle.assertions.as_ref())
+                    .and_then(|assertions| direction.block_of(assertions))
+                else {
+                    continue;
+                };
+                for entry in &block.headers {
+                    match claimed.entry(entry.name.to_lowercase()) {
+                        Entry::Occupied(first) => {
+                            return Err(Box::new(PluginError::Config {
+                                message: format!(
+                                    "route {} joins `groups.{}` and `groups.{bundle_name}`, which \
+                                     both assert `{}` under `{}`; bundles have no order among \
+                                     themselves, so which value reaches the wire would depend on \
+                                     nothing the config says. Move the header to one bundle, or \
+                                     onto the route",
+                                    route_display_name(route, i),
+                                    first.get(),
+                                    entry.name,
+                                    direction.label(),
+                                ),
+                            }));
+                        },
+                        Entry::Vacant(slot) => {
+                            slot.insert(bundle_name.clone());
+                        },
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// How a report names a route: the entity type and the names it selects on, or
 /// its position when it selects nothing.
-fn route_display_name(route: &RouteEntry, index: usize) -> String {
+pub(crate) fn route_display_name(route: &RouteEntry, index: usize) -> String {
     match route_entity_identity(route) {
         Some((entity_type, names)) => format!("{entity_type}:{}", names.join(",")),
         None => format!("routes[{index}]"),
@@ -7736,5 +8268,772 @@ routes:
                 matched.name
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
+mod assertions_tests {
+    use super::*;
+    use crate::assertions::{AssertionLevel, Direction, ResolvedSource};
+
+    fn load(yaml: &str) -> PolicyConfig {
+        parse_config(yaml).expect("the config loads")
+    }
+
+    fn refuse(yaml: &str) -> String {
+        parse_config(yaml)
+            .expect_err("the config must not load")
+            .to_string()
+    }
+
+    fn resolve(
+        config: &PolicyConfig,
+        entity_type: &str,
+        name: &str,
+        direction: Direction,
+    ) -> Option<crate::assertions::ResolvedContract> {
+        let matched = resolve_route(config, RouteQuery::named(entity_type, name));
+        resolve_assertions_for_route(config, matched.as_ref(), Some(entity_type), direction)
+    }
+
+    fn header_names(contract: &crate::assertions::ResolvedContract) -> Vec<&str> {
+        contract
+            .headers
+            .iter()
+            .map(|header| header.name.as_str())
+            .collect()
+    }
+
+    fn strip_patterns(contract: &crate::assertions::ResolvedContract) -> Vec<&str> {
+        contract
+            .strip
+            .iter()
+            .map(super::super::assertions::config::StripPattern::as_str)
+            .collect()
+    }
+
+    /// Four levels, each contributing one header and one `strip:` entry.
+    const FOUR_LEVELS: &str = "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-global
+          from: subject.id
+        - name: x-shared
+          from: subject.id
+          on_missing: deny
+      strip: [x-legacy-global]
+    response:
+      strip: [server]
+  defaults:
+    tool:
+      assertions:
+        request:
+          headers:
+            - name: x-default
+              from: claim.tenant
+          strip: [x-legacy-default]
+groups:
+  hr:
+    assertions:
+      request:
+        headers:
+          - name: x-bundle
+            from: claim.team
+        strip: [x-legacy-bundle]
+routes:
+  - tool: get_weather
+    groups: hr
+    assertions:
+      request:
+        headers:
+          - name: x-route
+            from: claim.region
+          - name: X-Shared
+            from: claim.tenant
+        strip: [x-legacy-route]
+  - tool: sibling
+    groups: hr
+  - resource: 'file://*'
+";
+
+    #[test]
+    fn a_route_with_no_block_of_its_own_resolves_the_global_contract() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-global
+          from: subject.id
+      strip: [x-legacy]
+    response:
+      strip: [server]
+routes:
+  - tool: get_weather
+",
+        );
+        let request = resolve(&config, "tool", "get_weather", Direction::Request)
+            .expect("the global level declared it");
+        assert_eq!(header_names(&request), vec!["x-global"]);
+        assert_eq!(strip_patterns(&request), vec!["x-legacy"]);
+        let response = resolve(&config, "tool", "get_weather", Direction::Response)
+            .expect("the global level declared it");
+        assert!(response.headers.is_empty());
+        assert_eq!(strip_patterns(&response), vec!["server"]);
+    }
+
+    #[test]
+    fn all_four_levels_accumulate_in_order() {
+        let config = load(FOUR_LEVELS);
+        let request = resolve(&config, "tool", "get_weather", Direction::Request)
+            .expect("four levels declared it");
+        assert_eq!(
+            header_names(&request),
+            vec!["x-global", "X-Shared", "x-default", "x-bundle", "x-route"],
+            "every level contributes, and an overridden name keeps its position"
+        );
+        assert_eq!(
+            strip_patterns(&request),
+            vec![
+                "x-legacy-global",
+                "x-legacy-default",
+                "x-legacy-bundle",
+                "x-legacy-route",
+            ],
+            "a subordinate level that omits an inherited glob does not remove it"
+        );
+    }
+
+    /// A repeated name takes the more specific level's entry whole, its
+    /// `on_missing` included.
+    #[test]
+    fn a_repeated_header_resolves_to_the_more_specific_level() {
+        let config = load(FOUR_LEVELS);
+        let request =
+            resolve(&config, "tool", "get_weather", Direction::Request).expect("a contract");
+        let shared = request
+            .headers
+            .iter()
+            .find(|header| header.lowercase == "x-shared")
+            .expect("the shared header");
+        assert_eq!(shared.name, "X-Shared", "the winning level's spelling");
+        assert_eq!(shared.level, AssertionLevel::Route);
+        assert_eq!(shared.declared_in, "the route");
+        assert_eq!(shared.overrode.as_deref(), Some("global"));
+        assert_eq!(
+            shared.on_missing,
+            crate::assertions::OnMissing::Omit,
+            "the route's entry replaced global's `on_missing: deny` whole"
+        );
+    }
+
+    /// One entry per header name whatever case each level wrote, so a global
+    /// `X-Auth-User-Id` and a route `x-auth-user-id` are not two headers.
+    #[test]
+    fn header_names_key_case_insensitively() {
+        let config = load(FOUR_LEVELS);
+        let request =
+            resolve(&config, "tool", "get_weather", Direction::Request).expect("a contract");
+        assert_eq!(
+            request
+                .headers
+                .iter()
+                .filter(|header| header.lowercase == "x-shared")
+                .count(),
+            1
+        );
+    }
+
+    /// A route declaring one direction still inherits the other, since
+    /// resolution runs per direction.
+    #[test]
+    fn a_route_declaring_one_direction_inherits_the_other() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-global
+          from: subject.id
+    response:
+      strip: [server]
+routes:
+  - tool: get_weather
+    assertions:
+      response:
+        strip: [x-upstream-*]
+",
+        );
+        let request = resolve(&config, "tool", "get_weather", Direction::Request)
+            .expect("global declared it");
+        assert_eq!(header_names(&request), vec!["x-global"]);
+        let response = resolve(&config, "tool", "get_weather", Direction::Response)
+            .expect("both levels declared it");
+        assert_eq!(strip_patterns(&response), vec!["server", "x-upstream-*"]);
+    }
+
+    /// Granularity is the entry: a members object composed from two levels
+    /// would have no author.
+    #[test]
+    fn a_repeated_members_entry_is_replaced_whole_rather_than_merged() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-auth-attributes
+          members:
+            roles: subject.roles
+            teams: subject.teams
+routes:
+  - tool: get_weather
+    assertions:
+      request:
+        headers:
+          - name: x-auth-attributes
+            members:
+              region: claim.region
+",
+        );
+        let request =
+            resolve(&config, "tool", "get_weather", Direction::Request).expect("a contract");
+        let ResolvedSource::Members(members) = &request.headers[0].source else {
+            panic!("the entry is a members entry");
+        };
+        assert_eq!(
+            members
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["region"],
+            "the route's members alone, not a union of keys"
+        );
+    }
+
+    #[test]
+    fn replace_inherited_on_the_route_drops_the_levels_above_for_that_direction_only() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-global
+          from: subject.id
+          on_missing: deny
+      strip: [x-legacy]
+    response:
+      strip: [server]
+  defaults:
+    tool:
+      assertions:
+        request:
+          headers:
+            - name: x-default
+              from: claim.tenant
+groups:
+  hr:
+    assertions:
+      request:
+        strip: [x-bundle-legacy]
+routes:
+  - tool: get_weather
+    groups: hr
+    assertions:
+      request:
+        replace_inherited: true
+        headers:
+          - name: x-route
+            from: subject.id
+        strip: [x-route-legacy]
+",
+        );
+        let request =
+            resolve(&config, "tool", "get_weather", Direction::Request).expect("a contract");
+        assert_eq!(header_names(&request), vec!["x-route"]);
+        assert_eq!(strip_patterns(&request), vec!["x-route-legacy"]);
+        let response = resolve(&config, "tool", "get_weather", Direction::Response)
+            .expect("global declared it");
+        assert_eq!(
+            strip_patterns(&response),
+            vec!["server"],
+            "the flag reaches the direction it is written in and no other"
+        );
+    }
+
+    #[test]
+    fn replace_inherited_on_a_bundle_drops_what_is_above_it_and_the_route_still_stacks() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-global
+          from: subject.id
+  defaults:
+    tool:
+      assertions:
+        request:
+          headers:
+            - name: x-default
+              from: claim.tenant
+groups:
+  hr:
+    assertions:
+      request:
+        replace_inherited: true
+        headers:
+          - name: x-bundle
+            from: claim.team
+routes:
+  - tool: get_weather
+    groups: hr
+    assertions:
+      request:
+        headers:
+          - name: x-route
+            from: claim.region
+",
+        );
+        let request =
+            resolve(&config, "tool", "get_weather", Direction::Request).expect("a contract");
+        assert_eq!(header_names(&request), vec!["x-bundle", "x-route"]);
+    }
+
+    #[test]
+    fn several_routes_joining_one_bundle_all_resolve_its_content() {
+        let config = load(FOUR_LEVELS);
+        let sibling = resolve(&config, "tool", "sibling", Direction::Request).expect("a contract");
+        assert_eq!(
+            header_names(&sibling),
+            vec!["x-global", "x-shared", "x-default", "x-bundle"],
+            "the bundle reaches every route that joins it"
+        );
+    }
+
+    /// An entity default reaches every route of its type and no other.
+    #[test]
+    fn an_entity_default_reaches_its_own_entity_type_only() {
+        let config = load(FOUR_LEVELS);
+        let resource = resolve(&config, "resource", "file://a", Direction::Request)
+            .expect("global declared it");
+        assert_eq!(header_names(&resource), vec!["x-global", "x-shared"]);
+    }
+
+    /// #42 made a per-path contract expressible. The route's content stacks on
+    /// the generic-HTTP entity default and on global.
+    #[test]
+    fn an_http_route_stacks_on_the_levels_above_it() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-global
+          from: subject.id
+      strip: [x-auth-*]
+  defaults:
+    http:
+      assertions:
+        request:
+          headers:
+            - name: x-served-by
+              from: claim.namespace
+routes:
+  - http:
+      path_prefix: /v1/files
+      method: [GET, POST]
+    assertions:
+      request:
+        headers:
+          - name: x-auth-path-scope
+            from: claim.namespace
+",
+        );
+        let matched = resolve_route(&config, RouteQuery::http("/v1/files/a", Some("GET")));
+        let request = resolve_assertions_for_route(
+            &config,
+            matched.as_ref(),
+            Some("http"),
+            Direction::Request,
+        )
+        .expect("three levels declared it");
+        assert_eq!(
+            header_names(&request),
+            vec!["x-global", "x-served-by", "x-auth-path-scope"]
+        );
+        assert_eq!(strip_patterns(&request), vec!["x-auth-*"]);
+
+        // A generic-HTTP request matching no route still gets the entity
+        // default, because that level covers an entity type rather than a route.
+        let unmatched = resolve_route(&config, RouteQuery::http("/other", Some("GET")));
+        assert!(unmatched.is_none(), "no route selects /other");
+        let unrouted =
+            resolve_assertions_for_route(&config, None, Some("http"), Direction::Request)
+                .expect("a contract");
+        assert_eq!(
+            header_names(&unrouted),
+            vec!["x-global", "x-served-by"],
+            "global plus global.defaults.http, and not the route's own header"
+        );
+        // And a request of another entity type gets neither.
+        let other_type =
+            resolve_assertions_for_route(&config, None, Some("tool"), Direction::Request)
+                .expect("global declared it");
+        assert_eq!(header_names(&other_type), vec!["x-global"]);
+    }
+
+    /// What the pipeline's pre-matching return sites pass, so the answer is
+    /// pinned rather than incidental.
+    #[test]
+    fn no_matched_route_and_no_entity_type_resolves_the_global_layer_alone() {
+        let config = load(FOUR_LEVELS);
+        let request = resolve_assertions_for_route(&config, None, None, Direction::Request)
+            .expect("global declared it");
+        assert_eq!(header_names(&request), vec!["x-global", "x-shared"]);
+        assert_eq!(strip_patterns(&request), vec!["x-legacy-global"]);
+    }
+
+    #[test]
+    fn no_block_at_any_level_resolves_to_nothing() {
+        let config = load("engine_settings:\n  dispatch: policy\nroutes:\n  - tool: get_weather\n");
+        for direction in [Direction::Request, Direction::Response] {
+            assert!(resolve(&config, "tool", "get_weather", direction).is_none());
+            assert!(resolve_assertions_for_route(&config, None, None, direction).is_none());
+        }
+    }
+
+    /// A level that clears what it inherited and adds nothing is a declared
+    /// contract that asserts nothing, which is not the same as no contract: it
+    /// is the spelling for opting out of an inherited floor.
+    #[test]
+    fn a_contract_cleared_to_empty_is_not_the_same_as_no_contract() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-global
+          from: subject.id
+          on_missing: deny
+routes:
+  - tool: analytics
+    assertions:
+      request:
+        replace_inherited: true
+",
+        );
+        let request = resolve(&config, "tool", "analytics", Direction::Request)
+            .expect("the route declared the direction");
+        assert!(request.is_empty(), "cleared, and nothing added");
+    }
+
+    /// A bundle written in both spellings is one membership, so its layer
+    /// stacks once.
+    #[test]
+    fn a_bundle_named_in_both_spellings_contributes_one_layer() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+groups:
+  hr:
+    assertions:
+      request:
+        strip: [x-hr]
+routes:
+  - tool: get_weather
+    groups: hr
+    meta:
+      tags: [hr]
+",
+        );
+        let request = resolve(&config, "tool", "get_weather", Direction::Request)
+            .expect("the bundle declared it");
+        assert_eq!(strip_patterns(&request), vec!["x-hr"]);
+    }
+
+    /// Bundles have no order among themselves, so two of them asserting one
+    /// header would be decided by nothing the config says.
+    #[test]
+    fn two_bundles_asserting_one_header_are_refused_naming_both() {
+        let err = refuse(
+            "
+engine_settings:
+  dispatch: policy
+groups:
+  a:
+    assertions:
+      request:
+        headers:
+          - name: x-auth-user-id
+            from: subject.id
+  b:
+    assertions:
+      request:
+        headers:
+          - name: X-Auth-User-Id
+            from: claim.tenant
+routes:
+  - tool: get_weather
+    groups: [a, b]
+",
+        );
+        assert!(err.contains("groups.a"), "{err}");
+        assert!(err.contains("groups.b"), "{err}");
+        assert!(err.contains("X-Auth-User-Id"), "{err}");
+        assert!(err.contains("assertions.request"), "{err}");
+        assert!(err.contains("tool:get_weather"), "{err}");
+    }
+
+    #[test]
+    fn two_bundles_asserting_different_headers_union() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+groups:
+  a:
+    assertions:
+      request:
+        headers:
+          - name: x-a
+            from: subject.id
+  b:
+    assertions:
+      request:
+        headers:
+          - name: x-b
+            from: claim.tenant
+routes:
+  - tool: get_weather
+    groups: [a, b]
+",
+        );
+        let request = resolve(&config, "tool", "get_weather", Direction::Request)
+            .expect("both bundles declared it");
+        assert_eq!(header_names(&request), vec!["x-a", "x-b"]);
+    }
+
+    /// The same header in different directions is not a conflict: they are two
+    /// contracts.
+    #[test]
+    fn two_bundles_naming_one_header_in_different_directions_load() {
+        load(
+            "
+engine_settings:
+  dispatch: policy
+groups:
+  a:
+    assertions:
+      request:
+        headers:
+          - name: x-served
+            from: subject.id
+  b:
+    assertions:
+      response:
+        headers:
+          - name: x-served
+            from: claim.tenant
+routes:
+  - tool: get_weather
+    groups: [a, b]
+",
+        );
+    }
+
+    /// Every level but bundles is ordered, so a repeated header there is a
+    /// per-name override rather than an ambiguity.
+    #[test]
+    fn an_entity_default_and_a_bundle_naming_one_header_is_an_override() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  defaults:
+    tool:
+      assertions:
+        request:
+          headers:
+            - name: x-shared
+              from: subject.id
+groups:
+  hr:
+    assertions:
+      request:
+        headers:
+          - name: x-shared
+            from: claim.tenant
+routes:
+  - tool: get_weather
+    groups: hr
+",
+        );
+        let request =
+            resolve(&config, "tool", "get_weather", Direction::Request).expect("a contract");
+        assert_eq!(header_names(&request), vec!["x-shared"]);
+        assert_eq!(request.headers[0].level, AssertionLevel::Bundle);
+        assert_eq!(
+            request.headers[0].overrode.as_deref(),
+            Some("global.defaults.tool")
+        );
+    }
+
+    /// A flag above the route removes content the route's own author cannot
+    /// see, so every affected route is reported once per direction.
+    #[test]
+    fn a_flag_above_the_route_is_reported_per_affected_route() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-global
+          from: subject.id
+      strip: [x-legacy]
+groups:
+  hr:
+    assertions:
+      request:
+        replace_inherited: true
+        headers:
+          - name: x-bundle
+            from: claim.team
+routes:
+  - tool: one
+    groups: hr
+  - tool: two
+    groups: hr
+  - tool: three
+",
+        );
+        let findings = dropped_inherited_assertions(&config);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert_eq!(findings[0].route, "tool:one");
+        assert_eq!(findings[0].declared_in, "groups.hr");
+        assert_eq!(findings[0].direction, "assertions.request");
+        assert_eq!(findings[0].dropped_headers, vec!["x-global".to_owned()]);
+        assert_eq!(findings[0].dropped_strip, vec!["x-legacy".to_owned()]);
+        assert_eq!(findings[1].route, "tool:two");
+    }
+
+    /// A route's own flag is written where its author can see it, and global's
+    /// drops nothing because nothing has accumulated before it.
+    #[test]
+    fn a_routes_own_flag_and_a_global_one_are_not_reported() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      replace_inherited: true
+      headers:
+        - name: x-global
+          from: subject.id
+routes:
+  - tool: one
+    assertions:
+      request:
+        replace_inherited: true
+        headers:
+          - name: x-route
+            from: subject.id
+",
+        );
+        assert!(dropped_inherited_assertions(&config).is_empty());
+    }
+
+    /// A contract on an `http:` route is in force only when the host supplies
+    /// the request line, so every such route is named at load.
+    #[test]
+    fn an_http_route_declaring_a_contract_is_reported_once() {
+        let config = load(
+            "
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /v1/files
+    assertions:
+      request:
+        headers:
+          - name: x-a
+            from: subject.id
+  - http: /healthz
+  - tool: get_weather
+    assertions:
+      request:
+        headers:
+          - name: x-b
+            from: subject.id
+",
+        );
+        let gaps = assertions_reachability_gaps(&config);
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert!(gaps[0].contains("prefix:/v1/files"), "{}", gaps[0]);
+        assert!(gaps[0].contains("request line"), "{}", gaps[0]);
+        assert!(
+            gaps[0].contains("global.defaults.http"),
+            "the finding names what governs instead: {}",
+            gaps[0]
+        );
+    }
+
+    #[test]
+    fn a_config_with_no_http_route_contract_is_not_reported() {
+        for yaml in [
+            "engine_settings:\n  dispatch: policy\nroutes:\n  - http: /healthz\n",
+            "engine_settings:\n  dispatch: policy\nroutes:\n  - tool: t\n",
+            "engine_settings:\n  dispatch: policy\n",
+        ] {
+            assert!(
+                assertions_reachability_gaps(&load(yaml)).is_empty(),
+                "{yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_with_no_flag_above_a_route_reports_nothing() {
+        let config = load(FOUR_LEVELS);
+        assert!(dropped_inherited_assertions(&config).is_empty());
     }
 }

@@ -21,6 +21,7 @@ go next.
 - **Authorization:** Authorizes tool calls using a policy language with pluggable decision points, including relationship-based authorization.
 - **Delegation:** Exchanges credentials through RFC 8693, giving each upstream service a token scoped to that service.
 - **Data control:** Redacts data in transit at the field level, with session taint that propagates across tool calls and requests.
+- **Header assertions:** Renders the identity it derived onto the upstream request as headers, removes the client-supplied headers that would collide with it, and filters what an upstream is allowed to tell a client back. See [docs/assertions.md](docs/assertions.md).
 - **Human approval:** Supports out-of-band human approval when a decision cannot be automated.
 - **Audit:** Emits an audit event for every decision.
 

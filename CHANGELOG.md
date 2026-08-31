@@ -15,16 +15,37 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-> **Upgrading a 0.1.0 configuration?** `docs/upgrade-apl.md` lists every key and
-> form that must be rewritten, with a before and an after for each. This release
-> removes ten configuration keys, changes the default dispatch mode, and tightens
-> the policy language's lexical rules, so a 0.1.0 document does not load unchanged.
+> **Upgrading from 0.1.0?** Configurations require changes: this release removes
+> ten keys, changes the default dispatch mode, and tightens APL lexical rules.
+> `docs/upgrade-apl.md` lists the required rewrites with before-and-after examples.
 >
-> For what the language accepts now, rather than what changed,
-> `docs/apl-grammar.md` is normative. It replaces a grammar that existed only as
-> comments inside the parser.
+> `docs/apl-grammar.md` is the normative APL grammar, replacing the parser's
+> inline grammar comments.
 
 ### Added
+
+- **`assertions:` controls the headers PPE writes at trust boundaries.** Available
+  alongside `authentication:` at global, default, bundle, and route scope, its
+  `request:` contract maps engine-derived values such as `subject.id` and
+  `claim.<name>` onto upstream request headers. Target headers are removed before
+  rendering, so a missing value cannot leave a client-supplied value under a
+  trusted name. Its `response:` contract strips or replaces upstream response
+  headers; unnamed response headers pass through unchanged.
+
+  Contracts inherit by scope: more-specific `headers:` entries replace matching
+  targets, `strip:` entries accumulate, and `replace_inherited: true` resets
+  inherited operator-authored rules. Raw or delegated tokens and peer-supplied
+  headers cannot be used as sources, and protected response headers cannot be
+  stripped. Invalid sources, targets, encodings, or conflicting entries fail
+  configuration loading with their location. Assertions run after the applicable
+  policy phase, and response assertions are returned through the existing
+  `PipelineResult`, requiring no host change.
+
+  Configuration loading also reports `http:` routes whose assertions depend on
+  host-supplied request metadata and routes affected by an inherited
+  `replace_inherited: true`. Assertions are unsigned, so recipients must trust the
+  network path. `docs/assertions.md` is the reference.
+  ([#28](https://github.com/praxis-proxy/policy/issues/28))
 
 - **`docs/apl-grammar.md`, the grammar as a document.** APL's grammar lived in
   comments beside the parser, and those comments were wrong on four counts: they
@@ -774,6 +795,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **The `hooks::types::hook_names` and `hooks::types::cmf_hook_names` modules.** Sixteen `pub const`s that no dispatch site read. Six of `hook_names` shadowed CMF hooks under names nothing fires; two spelled identity and delegation `identity_resolve` / `token_delegate`, which no handler answers to. `cmf_hook_names` duplicated `cmf::constants` and got the prompt pair wrong, teaching `cmf.prompt_pre_fetch` where the dispatched name is `cmf.prompt_pre_invoke`. Because nothing consumed them they drifted unnoticed for months. **Breaking**, with no replacement needed: `praxis_policy_core::cmf::constants` holds the CMF names and is the supported import path, alongside `identity::HOOK_IDENTITY_RESOLVE`, `delegation::HOOK_TOKEN_DELEGATE`, and `elicitation::HOOK_ELICIT`. Those constants keep their paths and their values. The values are operator-facing, since a `hooks:` list in YAML names them as strings, so they are fixed as public API rather than free to rename.
 
 ### Fixed
+
+- **A bundle joined through both `meta.tags` and `groups:` no longer runs its
+  `authentication:` steps twice.** Bundle membership is now deduplicated before
+  authentication and assertion layers are resolved, keeping their inheritance
+  order consistent.
 
 - **A `delegate(...)` or elicitation step above route scope no longer fails the
   load.** The reachability check that makes `dispatch: policy` survivable asks

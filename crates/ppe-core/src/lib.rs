@@ -32,6 +32,8 @@
 //! named hooks and the executor dispatches them in five phases, reading every
 //! scheduling decision from trusted config rather than from the plugin.
 
+/// What the engine asserts on a request and a response, as headers.
+pub mod assertions;
 /// The common message format: messages, content parts, and read-only views.
 pub mod cmf;
 /// YAML configuration parsing for plugins, routes, and policies.

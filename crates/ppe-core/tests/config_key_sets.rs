@@ -71,6 +71,7 @@ fn the_route_table_is_the_accept_set() {
             "groups",
             "plugins",
             "authentication",
+            "assertions",
             "response",
             "authorization",
             "args",
@@ -332,6 +333,7 @@ fn the_route_table_records_who_reads_each_key() {
             "meta",
             "groups",
             "authentication",
+            "assertions",
         ],
         "the route keys praxis-policy-core reads are its typed fields"
     );
@@ -745,4 +747,157 @@ fn an_authentication_step_with_a_name_and_a_config_loads() {
         steps[0].config_override.is_some(),
         "the step must carry its config override"
     );
+}
+
+/// `assertions:` sits beside `authentication:` at all four levels, so a
+/// contract can be written at whichever scope owns it. Absent from one table
+/// and the key would be rejected at that scope alone, which is the failure the
+/// closed tables make loud.
+#[test]
+fn every_section_scope_accepts_the_assertions_block() {
+    for scope in [
+        ConfigScope::Global,
+        ConfigScope::EntityDefault,
+        ConfigScope::Group,
+        ConfigScope::Route,
+    ] {
+        assert!(
+            names(scope).contains(&"assertions"),
+            "`assertions` is missing from the `{}` table",
+            scope.label()
+        );
+    }
+    for scope in [ConfigScope::Document, ConfigScope::EngineSettings] {
+        assert!(
+            !names(scope).contains(&"assertions"),
+            "`assertions` must not be accepted at `{}`",
+            scope.label()
+        );
+    }
+}
+
+/// The three nested `assertions:` scopes, in full. Each is only reachable
+/// through the block's own deserializer, which is where its table is enforced.
+#[test]
+fn the_assertions_tables_are_the_accept_sets() {
+    assert_eq!(
+        names(ConfigScope::Assertions),
+        vec!["request", "response"],
+        "an assertions block's accept set changed"
+    );
+    assert_eq!(
+        names(ConfigScope::AssertionsDirection),
+        vec!["headers", "strip", "replace_inherited"],
+        "an assertions direction's accept set changed"
+    );
+    assert_eq!(
+        names(ConfigScope::AssertionHeader),
+        vec!["name", "from", "members", "on_missing", "encode"],
+        "an assertions header entry's accept set changed"
+    );
+}
+
+/// praxis-policy-core reads every key of the block, so none of it travels into
+/// a section's synthetic policy block.
+#[test]
+fn the_assertions_keys_belong_to_core() {
+    for scope in [
+        ConfigScope::Assertions,
+        ConfigScope::AssertionsDirection,
+        ConfigScope::AssertionHeader,
+    ] {
+        for key in scope.keys() {
+            assert_eq!(
+                key.owner,
+                KeyOwner::Core,
+                "`{}` at `{}` is praxis-policy-core's to read",
+                key.name,
+                scope.label()
+            );
+            assert_eq!(
+                key.role,
+                KeyRole::Structural,
+                "`{}` is a typed field",
+                key.name
+            );
+        }
+    }
+    assert!(
+        !section_apl_block_keys().any(|key| key.name == "assertions"),
+        "`assertions:` must not reach the policy compiler"
+    );
+}
+
+/// A misspelled key at each of the three nested scopes. `replace_inherted` is
+/// the one that motivated closing these sets: it would otherwise load with the
+/// flag false and quietly stack the contract its author meant to drop.
+#[test]
+fn a_misspelled_assertions_key_is_rejected_at_every_nested_scope() {
+    for (scope, yaml, misspelled) in [
+        (
+            "assertions",
+            "global:\n  assertions:\n    requst:\n      headers: []\n",
+            "requst",
+        ),
+        (
+            "a direction",
+            "global:\n  assertions:\n    request:\n      replace_inherted: true\n",
+            "replace_inherted",
+        ),
+        (
+            "a direction",
+            "global:\n  assertions:\n    request:\n      strp: [x-a]\n",
+            "strp",
+        ),
+        (
+            "a header entry",
+            "global:\n  assertions:\n    request:\n      headers:\n        - name: x-a\n          \
+             form: subject.id\n",
+            "form",
+        ),
+        (
+            "a header entry",
+            "global:\n  assertions:\n    request:\n      headers:\n        - name: x-a\n          \
+             from: subject.id\n          on_mising: deny\n",
+            "on_mising",
+        ),
+    ] {
+        let err = praxis_policy_core::config::parse_config(yaml)
+            .expect_err("a misspelled key must fail the load")
+            .to_string();
+        assert!(
+            err.contains(misspelled),
+            "the error at {scope} must name `{misspelled}`: {err}"
+        );
+    }
+}
+
+/// The block's own spelling, misspelled at each of the four levels. The typed
+/// structs drop an unknown field, so without the tables a document declaring
+/// `assertion:` would load having asserted nothing.
+#[test]
+fn a_misspelled_assertions_block_is_rejected_at_every_level() {
+    for (path, yaml) in [
+        ("global", "global:\n  assertion:\n    request: {}\n"),
+        (
+            "global.defaults.tool",
+            "global:\n  defaults:\n    tool:\n      assertion:\n        request: {}\n",
+        ),
+        (
+            "groups.hr",
+            "groups:\n  hr:\n    assertion:\n      request: {}\n",
+        ),
+        (
+            "routes[]",
+            "routes:\n  - tool: get_weather\n    assertion:\n      request: {}\n",
+        ),
+    ] {
+        let err = praxis_policy_core::config::parse_config(yaml)
+            .expect_err("a misspelled block name must fail the load")
+            .to_string();
+        assert!(
+            err.contains("assertion"),
+            "the `{path}` error must name the key: {err}"
+        );
+    }
 }

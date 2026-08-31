@@ -16,6 +16,9 @@ dispath = "dispath"
 gobal = "gobal"
 inherted = "inherted"
 invocaton = "invocaton"
+mising = "mising"
+requst = "requst"
+strp = "strp"
 
 # Alternate spellings that are correct English. typos-cli prefers the other form;
 # this project uses these and is consistent about them.

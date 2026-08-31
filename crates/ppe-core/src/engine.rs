@@ -24,7 +24,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use hashbrown::HashMap;
@@ -51,6 +51,13 @@ pub const DEFAULT_ROUTE_CACHE_MAX_ENTRIES: usize = 10_000;
 /// Violation code for a request whose path the engine could not read.
 /// Stable, so a host can map it without matching on the reason text.
 pub const VIOLATION_UNREADABLE_REQUEST_PATH: &str = "unreadable_request_path";
+
+/// Violation code for a request an `assertions:` entry refused to forward
+/// because the state it asserts resolved to nothing. Stable, so a host can map
+/// it without matching on the reason text, and in the `auth.*` family beside
+/// the claim map's own denial, since it is the same kind of refusal: identity
+/// the configuration requires and the token did not carry.
+pub const VIOLATION_ASSERTION_MISSING: &str = "auth.assertion_missing";
 
 /// Violation code for a request carrying no protocol metadata, reaching a
 /// configuration whose policy is written against it. Stable, so a host can map
@@ -130,6 +137,174 @@ fn declares_a_policy(config: &PolicyConfig, snapshot: &RuntimeSnapshot) -> bool 
         || !config.global.defaults.is_empty()
         || config.global.authentication.is_some()
         || !snapshot.route_annotations.is_empty()
+}
+
+/// Whether any level declares an `assertions:` block.
+///
+/// The whole feature hangs off this. It is what keeps a deployment that does
+/// not use it off the route table on a cache hit, since resolving the contract
+/// needs the matched route and the route cache holds entry lists rather than
+/// matches.
+fn declares_assertions(config: &PolicyConfig) -> bool {
+    config.global.assertions.is_some()
+        || config
+            .global
+            .defaults
+            .values()
+            .any(|default| default.assertions.is_some())
+        || config
+            .global
+            .bundles
+            .values()
+            .any(|bundle| bundle.assertions.is_some())
+        || config.routes.iter().any(|route| route.assertions.is_some())
+}
+
+/// Turn a refused assertion into a denial, keeping what the pipeline recorded.
+///
+/// `PipelineResult::denied` constructs with no errors and no metadata, so a bare
+/// call would discard every `on_error: ignore` plugin error the pipeline just
+/// collected, which is what an operator needs in order to debug the denial.
+fn deny_missing_assertion(
+    missing: crate::assertions::MissingSource,
+    direction: crate::assertions::Direction,
+    mut result: PipelineResult,
+) -> PipelineResult {
+    let mut details = std::collections::HashMap::new();
+    details.insert(
+        "header".to_owned(),
+        serde_json::Value::String(missing.header.clone()),
+    );
+    details.insert(
+        "source".to_owned(),
+        serde_json::Value::String(missing.source.clone()),
+    );
+    details.insert(
+        "direction".to_owned(),
+        serde_json::Value::String(direction.label().to_owned()),
+    );
+    let violation = crate::error::PluginViolation::new(
+        VIOLATION_ASSERTION_MISSING,
+        format!(
+            "`{}` asserts header `{}` from `{}`, which resolved to nothing, and the entry declares \
+             `on_missing: deny`",
+            direction.label(),
+            missing.header,
+            missing.source,
+        ),
+    )
+    .with_details(details)
+    .with_proto_error_code(403);
+
+    let extensions = result.modified_extensions.take().unwrap_or_default();
+    let context_table = std::mem::take(&mut result.context_table);
+    let mut denied = PipelineResult::denied(violation, extensions, context_table);
+    denied.errors = std::mem::take(&mut result.errors);
+    denied.metadata = result.metadata.take();
+    denied
+}
+
+/// The span of one executor invocation, counted so a nested dispatch can tell
+/// it is nested. Decrements on drop, so an early return or a panic inside the
+/// executor still closes the span.
+struct ExecutorBoundary<'a> {
+    depth: &'a AtomicUsize,
+}
+
+impl Drop for ExecutorBoundary<'_> {
+    fn drop(&mut self) {
+        self.depth.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// The path route matching reads off an HTTP request: whatever precedes a `?`,
+/// exactly as it arrived.
+///
+/// The host's own router matches on this string, so normalizing first would let
+/// PPE resolve a different route than the one the request is forwarded to.
+fn match_path(extensions: &Extensions) -> Option<&str> {
+    extensions
+        .http
+        .as_deref()
+        .and_then(|http| http.path.as_deref())
+        .map(|path| path.split('?').next().unwrap_or(path))
+}
+
+/// The route an `assertions:` contract resolves from, for a caller that has not
+/// resolved one.
+///
+/// The entry points return before route filtering on their first path, and a
+/// contract written on a route has to hold there too: whether a plugin happens
+/// to be registered on a hook is not what decides which headers reach an
+/// upstream. `None` when nothing declares a contract, so a deployment that does
+/// not use the feature never walks the route table for it.
+fn resolve_contract_route<'a>(
+    snapshot: &'a RuntimeSnapshot,
+    extensions: &Extensions,
+) -> Option<config::MatchedRoute<'a>> {
+    if !snapshot.declares_assertions {
+        return None;
+    }
+    let policy_config = snapshot
+        .policy_config
+        .as_ref()
+        .filter(|config| config.dispatch_mode().is_policy())?;
+    let meta = extensions.meta.as_deref()?;
+    let entity_type = meta.entity_type.as_deref()?;
+    let request_scope = meta.scope.as_deref();
+    if entity_type == ENTITY_HTTP {
+        let path = match_path(extensions)?;
+        let method = extensions
+            .http
+            .as_deref()
+            .and_then(|http| http.method.as_deref());
+        return config::resolve_route(
+            policy_config,
+            config::RouteQuery::http(path, method).with_scope(request_scope),
+        );
+    }
+    let entity_name = meta.entity_name.as_deref()?;
+    config::resolve_route(
+        policy_config,
+        config::RouteQuery::named(entity_type, entity_name).with_scope(request_scope),
+    )
+}
+
+/// The route an `assertions:` contract resolves from, owned so it can outlive
+/// the borrow of the two matches.
+///
+/// `None` when nothing declares a contract, which is what keeps the clone off
+/// every request of a deployment that does not use the feature. The contract
+/// resolver reads `None` as the global layer alone, which is also the right
+/// answer where no route matched.
+fn contract_route<'a>(
+    snapshot: &RuntimeSnapshot,
+    http_matched: Option<&config::MatchedRoute<'a>>,
+    name_matched: Option<&config::MatchedRoute<'a>>,
+) -> Option<config::MatchedRoute<'a>> {
+    if !snapshot.declares_assertions {
+        return None;
+    }
+    http_matched.or(name_matched).cloned()
+}
+
+/// The names of the `http:` routes that declare `assertions:`. Those contracts
+/// are the ones that cannot apply when a generic-HTTP request arrives with no
+/// readable path, because that path is what the route matches on.
+///
+/// Computed once when a config lands on a snapshot, so the hot path reads an
+/// answer rather than walking the route table.
+fn http_routes_declaring_assertions(config: &PolicyConfig) -> Arc<[String]> {
+    if !config.dispatch_mode().is_policy() {
+        return Arc::from(Vec::new());
+    }
+    config
+        .routes
+        .iter()
+        .filter(|route| route.http.is_some() && route.assertions.is_some())
+        .filter_map(config::route_entity_identity)
+        .flat_map(|(_, names)| names)
+        .collect()
 }
 
 /// The names of the `http:` routes that declare `authentication:`. Those lists
@@ -308,6 +483,16 @@ struct RuntimeSnapshot {
     /// that has nothing to report, which is the ordinary one. A config
     /// replacement builds a new snapshot, so the answer cannot go stale.
     http_routes_declaring_authentication: Arc<[String]>,
+
+    /// Whether any level declares an `assertions:` block. False for every
+    /// config that does not use the feature, which is what keeps the extra
+    /// route resolution the contract needs out of those deployments.
+    declares_assertions: bool,
+
+    /// The `http:` routes that declare `assertions:`, by the name each resolves
+    /// under. Read on the generic-HTTP path when a request carries no readable
+    /// path, for the same reason its authentication counterpart is.
+    http_routes_declaring_assertions: Arc<[String]>,
 }
 
 /// Composite key for route annotations. Includes the hook name so a single
@@ -356,6 +541,25 @@ pub struct PolicyEngine {
     /// silent, so it warns once rather than on every request. Reset by
     /// `clear_routing_cache()`.
     route_authentication_unreachable_warned: AtomicBool,
+
+    /// Whether the request-direction contract on an `http:` route has already
+    /// been reported unreachable. Per direction, because a host can supply the
+    /// request line on the request invocation and not the response one, and the
+    /// response half is the actionable half when it does.
+    route_request_assertions_unreachable_warned: AtomicBool,
+
+    /// The same gate for the response direction.
+    route_response_assertions_unreachable_warned: AtomicBool,
+
+    /// Whether an outermost `invoke_entries` has already been reported. That
+    /// call applies no contract by design, so a host integrating that way is
+    /// told once rather than per request.
+    nested_dispatch_boundary_warned: AtomicBool,
+
+    /// How many executor invocations are in flight. Read only to tell a nested
+    /// dispatch from an outermost one, which is what decides whether a call to
+    /// the nested primitive has a boundary above it to apply the contract.
+    executor_depth: AtomicUsize,
 
     /// Whether `initialize()` has been called. Atomic so lifecycle methods
     /// can be `&self` and the engine itself can sit behind `Arc`.
@@ -462,6 +666,38 @@ fn warn_on_inactive_settings(cfg: &PolicyConfig) {
     // the visitor load path, so an operator reads each gap once per load.
     for gap in crate::config::http_routing_gaps(cfg) {
         warn!("{gap}");
+    }
+}
+
+/// Report what a contract on an `http:` route depends on the host for, and every
+/// route whose inherited `assertions:` content a section above it drops. Called
+/// once per `load_config` / `from_config`, after normalization.
+///
+/// After, not before, for the same reason the authentication report is: folding
+/// top-level `groups:` is what fills the bundle store the layers are read from.
+fn warn_on_assertions_findings(cfg: &PolicyConfig) {
+    // The whole boundary, once per load, so an operator and a reviewer can read
+    // what crosses it without reading Rust.
+    if declares_assertions(cfg) {
+        info!("{}", crate::assertions::effective_policy(cfg));
+    }
+    for gap in crate::config::assertions_reachability_gaps(cfg) {
+        warn!(alarm = "assertions_route_needs_the_request_line", "{gap}");
+    }
+    for finding in crate::config::dropped_inherited_assertions(cfg) {
+        warn!(
+            alarm = "assertions_replaced_above_the_route",
+            route = %finding.route,
+            direction = %finding.direction,
+            declared_in = %finding.declared_in,
+            dropped_headers = ?finding.dropped_headers,
+            dropped_strip = ?finding.dropped_strip,
+            "a section above this route sets `replace_inherited: true` for this direction, so the \
+             route no longer asserts the headers it inherited, nor removes the names the inherited \
+             `strip:` covered. The route's own block does not show the drop, and the section is \
+             shared, so every route under it loses the same content. Move the flag onto the route \
+             if only that route meant to opt out, or remove it if the section meant to add",
+        );
     }
 }
 
@@ -590,6 +826,8 @@ fn snapshot_from_config(registry: PluginRegistry, policy_config: PolicyConfig) -
     });
     let route_cache_max_entries = policy_config.engine_settings.route_cache_max_entries;
     let http_routes_declaring_authentication = http_routes_declaring_authentication(&policy_config);
+    let declares_assertions = declares_assertions(&policy_config);
+    let http_routes_declaring_assertions = http_routes_declaring_assertions(&policy_config);
     RuntimeSnapshot {
         registry,
         executor,
@@ -597,6 +835,8 @@ fn snapshot_from_config(registry: PluginRegistry, policy_config: PolicyConfig) -
         route_cache_max_entries,
         route_annotations: HashMap::new(),
         http_routes_declaring_authentication,
+        declares_assertions,
+        http_routes_declaring_assertions,
     }
 }
 
@@ -611,6 +851,8 @@ impl PolicyEngine {
             route_cache_max_entries: config.route_cache_max_entries,
             route_annotations: HashMap::new(),
             http_routes_declaring_authentication: Arc::from(Vec::new()),
+            declares_assertions: false,
+            http_routes_declaring_assertions: Arc::from(Vec::new()),
         };
         Self {
             runtime: arc_swap::ArcSwap::from_pointee(snapshot),
@@ -619,6 +861,10 @@ impl PolicyEngine {
             cache_hasher,
             route_cache_full_warned: AtomicBool::new(false),
             route_authentication_unreachable_warned: AtomicBool::new(false),
+            route_request_assertions_unreachable_warned: AtomicBool::new(false),
+            route_response_assertions_unreachable_warned: AtomicBool::new(false),
+            nested_dispatch_boundary_warned: AtomicBool::new(false),
+            executor_depth: AtomicUsize::new(0),
             initialized: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             runtime_write: Mutex::new(()),
@@ -815,6 +1061,7 @@ impl PolicyEngine {
             .is_empty();
         let policy_config = normalize_and_validate(policy_config, has_visitor)?;
         warn_on_dropped_inherited_authentication(&policy_config);
+        warn_on_assertions_findings(&policy_config);
 
         // Resolve under the factories read lock, then drop it and
         // instantiate holding nothing, per `create_plugin_instances`. A
@@ -1108,6 +1355,7 @@ impl PolicyEngine {
         warn_on_inactive_settings(&policy_config);
         let policy_config = normalize_and_validate(policy_config, false)?;
         warn_on_dropped_inherited_authentication(&policy_config);
+        warn_on_assertions_findings(&policy_config);
 
         let engine = Self::new(PolicyEngineConfig {
             executor: ExecutorConfig::default(),
@@ -1448,27 +1696,41 @@ impl PolicyEngine {
         // hook directly, so we can only short-circuit when both the
         // registry and the annotation map are empty.
         if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
+            // Route filtering has not run, so the route is resolved here: a
+            // contract written on a route holds whether or not this hook has a
+            // plugin on it.
+            let matched = resolve_contract_route(&snapshot, &extensions);
             return (
-                PipelineResult::allowed_with(
-                    payload,
-                    extensions,
-                    context_table.unwrap_or_default(),
+                self.apply_assertions(
+                    &snapshot,
+                    Some(hook_name),
+                    matched.as_ref(),
+                    PipelineResult::allowed_with(
+                        payload,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
                 ),
                 BackgroundTasks::empty(),
             );
         }
 
-        let entries = match self
+        let (entries, matched) = match self
             .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
             .await
         {
-            Ok(entries) => entries,
+            Ok(resolved) => resolved,
             Err(cause) => {
                 return (
-                    PipelineResult::denied(
-                        cause.violation(),
-                        extensions,
-                        context_table.unwrap_or_default(),
+                    self.apply_assertions(
+                        &snapshot,
+                        Some(hook_name),
+                        None,
+                        PipelineResult::denied(
+                            cause.violation(),
+                            extensions,
+                            context_table.unwrap_or_default(),
+                        ),
                     ),
                     BackgroundTasks::empty(),
                 );
@@ -1477,27 +1739,39 @@ impl PolicyEngine {
 
         if entries.is_empty() {
             return (
-                PipelineResult::allowed_with(
-                    payload,
-                    extensions,
-                    context_table.unwrap_or_default(),
+                self.apply_assertions(
+                    &snapshot,
+                    Some(hook_name),
+                    matched.as_ref(),
+                    PipelineResult::allowed_with(
+                        payload,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
                 ),
                 BackgroundTasks::empty(),
             );
         }
 
-        snapshot
-            .executor
-            .execute(
-                &entries,
-                payload,
-                // Make the host's transport reachable; `filter_extensions`
-                // applies the `perform_http` gate per plugin.
-                self.with_host_services(extensions),
-                context_table,
-                &self.task_tracker,
-            )
-            .await
+        let (result, tasks) = {
+            let _boundary = self.enter_executor();
+            snapshot
+                .executor
+                .execute(
+                    &entries,
+                    payload,
+                    // Make the host's transport reachable; `filter_extensions`
+                    // applies the `perform_http` gate per plugin.
+                    self.with_host_services(extensions),
+                    context_table,
+                    &self.task_tracker,
+                )
+                .await
+        };
+        (
+            self.apply_assertions(&snapshot, Some(hook_name), matched.as_ref(), result),
+            tasks,
+        )
     }
 
     /// Invoke a typed hook.
@@ -1540,23 +1814,38 @@ impl PolicyEngine {
         // without a directly-registered plugin.
         if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
+            let matched = resolve_contract_route(&snapshot, &extensions);
             return (
-                PipelineResult::allowed_with(boxed, extensions, context_table.unwrap_or_default()),
+                self.apply_assertions(
+                    &snapshot,
+                    Some(H::NAME),
+                    matched.as_ref(),
+                    PipelineResult::allowed_with(
+                        boxed,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                ),
                 BackgroundTasks::empty(),
             );
         }
 
-        let entries = match self
+        let (entries, matched) = match self
             .filter_entries_by_route(&snapshot, all_entries, &extensions, H::NAME)
             .await
         {
-            Ok(entries) => entries,
+            Ok(resolved) => resolved,
             Err(cause) => {
                 return (
-                    PipelineResult::denied(
-                        cause.violation(),
-                        extensions,
-                        context_table.unwrap_or_default(),
+                    self.apply_assertions(
+                        &snapshot,
+                        Some(H::NAME),
+                        None,
+                        PipelineResult::denied(
+                            cause.violation(),
+                            extensions,
+                            context_table.unwrap_or_default(),
+                        ),
                     ),
                     BackgroundTasks::empty(),
                 );
@@ -1566,24 +1855,40 @@ impl PolicyEngine {
         if entries.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             return (
-                PipelineResult::allowed_with(boxed, extensions, context_table.unwrap_or_default()),
+                self.apply_assertions(
+                    &snapshot,
+                    Some(H::NAME),
+                    matched.as_ref(),
+                    PipelineResult::allowed_with(
+                        boxed,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                ),
                 BackgroundTasks::empty(),
             );
         }
 
         let boxed: Box<dyn PluginPayload> = Box::new(payload);
-        snapshot
-            .executor
-            .execute(
-                &entries,
-                boxed,
-                // Make the host's transport reachable; `filter_extensions`
-                // applies the `perform_http` gate per plugin.
-                self.with_host_services(extensions),
-                context_table,
-                &self.task_tracker,
-            )
-            .await
+        let (result, tasks) = {
+            let _boundary = self.enter_executor();
+            snapshot
+                .executor
+                .execute(
+                    &entries,
+                    boxed,
+                    // Make the host's transport reachable; `filter_extensions`
+                    // applies the `perform_http` gate per plugin.
+                    self.with_host_services(extensions),
+                    context_table,
+                    &self.task_tracker,
+                )
+                .await
+        };
+        (
+            self.apply_assertions(&snapshot, Some(H::NAME), matched.as_ref(), result),
+            tasks,
+        )
     }
 
     /// Invoke a typed hook by explicit name.
@@ -1636,23 +1941,38 @@ impl PolicyEngine {
         // enforced on it either way.
         if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
+            let matched = resolve_contract_route(&snapshot, &extensions);
             return (
-                PipelineResult::allowed_with(boxed, extensions, context_table.unwrap_or_default()),
+                self.apply_assertions(
+                    &snapshot,
+                    Some(hook_name),
+                    matched.as_ref(),
+                    PipelineResult::allowed_with(
+                        boxed,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                ),
                 BackgroundTasks::empty(),
             );
         }
 
-        let entries = match self
+        let (entries, matched) = match self
             .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
             .await
         {
-            Ok(entries) => entries,
+            Ok(resolved) => resolved,
             Err(cause) => {
                 return (
-                    PipelineResult::denied(
-                        cause.violation(),
-                        extensions,
-                        context_table.unwrap_or_default(),
+                    self.apply_assertions(
+                        &snapshot,
+                        Some(hook_name),
+                        None,
+                        PipelineResult::denied(
+                            cause.violation(),
+                            extensions,
+                            context_table.unwrap_or_default(),
+                        ),
                     ),
                     BackgroundTasks::empty(),
                 );
@@ -1662,24 +1982,40 @@ impl PolicyEngine {
         if entries.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             return (
-                PipelineResult::allowed_with(boxed, extensions, context_table.unwrap_or_default()),
+                self.apply_assertions(
+                    &snapshot,
+                    Some(hook_name),
+                    matched.as_ref(),
+                    PipelineResult::allowed_with(
+                        boxed,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                ),
                 BackgroundTasks::empty(),
             );
         }
 
         let boxed: Box<dyn PluginPayload> = Box::new(payload);
-        snapshot
-            .executor
-            .execute(
-                &entries,
-                boxed,
-                // Make the host's transport reachable; `filter_extensions`
-                // applies the `perform_http` gate per plugin.
-                self.with_host_services(extensions),
-                context_table,
-                &self.task_tracker,
-            )
-            .await
+        let (result, tasks) = {
+            let _boundary = self.enter_executor();
+            snapshot
+                .executor
+                .execute(
+                    &entries,
+                    boxed,
+                    // Make the host's transport reachable; `filter_extensions`
+                    // applies the `perform_http` gate per plugin.
+                    self.with_host_services(extensions),
+                    context_table,
+                    &self.task_tracker,
+                )
+                .await
+        };
+        (
+            self.apply_assertions(&snapshot, Some(hook_name), matched.as_ref(), result),
+            tasks,
+        )
     }
 
     /// Find every (`hook_name`, `HookEntry`) pair belonging to the named
@@ -1727,27 +2063,45 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
+        let snapshot = self.load_runtime();
+        self.warn_once_if_dispatch_has_no_boundary(&snapshot);
         if entries.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             return (
-                PipelineResult::allowed_with(boxed, extensions, context_table.unwrap_or_default()),
+                // `None`, so nothing is applied. Not an omission: this is a
+                // nested dispatch primitive rather than a wire boundary, and
+                // the contract belongs after policy evaluation, at the outer
+                // boundary this call runs inside.
+                self.apply_assertions(
+                    &snapshot,
+                    None,
+                    None,
+                    PipelineResult::allowed_with(
+                        boxed,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                ),
                 BackgroundTasks::empty(),
             );
         }
-        let snapshot = self.load_runtime();
         let boxed: Box<dyn PluginPayload> = Box::new(payload);
-        snapshot
-            .executor
-            .execute(
-                entries,
-                boxed,
-                // Make the host's transport reachable; `filter_extensions`
-                // applies the `perform_http` gate per plugin.
-                self.with_host_services(extensions),
-                context_table,
-                &self.task_tracker,
-            )
-            .await
+        let (result, tasks) = {
+            let _boundary = self.enter_executor();
+            snapshot
+                .executor
+                .execute(
+                    entries,
+                    boxed,
+                    // Make the host's transport reachable; `filter_extensions`
+                    // applies the `perform_http` gate per plugin.
+                    self.with_host_services(extensions),
+                    context_table,
+                    &self.task_tracker,
+                )
+                .await
+        };
+        (self.apply_assertions(&snapshot, None, None, result), tasks)
     }
 
     /// Override the resolved plugin list for one `(entity_type, entity_name)`
@@ -1829,6 +2183,159 @@ impl PolicyEngine {
         });
     }
 
+    /// Apply the `assertions:` contract in force to a pipeline result.
+    ///
+    /// Called at **every** return site of every entry point, not only the one
+    /// through the executor. An always-on control that fires on the happy path
+    /// alone is the way this ships broken: a hook with no registered entry
+    /// returns before route filtering, and a client-supplied `x-auth-user-id`
+    /// would reach the upstream from a deployment whose route simply has no
+    /// plugin on that hook.
+    ///
+    /// `hook_name` is what the direction comes from, so `None` applies nothing:
+    /// a nested dispatch primitive is not a wire boundary, and the contract
+    /// belongs after policy evaluation rather than around each step of it.
+    /// `matched` is the route the caller already resolved, or `None` where no
+    /// route matched, which resolves the global layer alone.
+    fn apply_assertions(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        hook_name: Option<&str>,
+        matched: Option<&config::MatchedRoute<'_>>,
+        mut result: PipelineResult,
+    ) -> PipelineResult {
+        use crate::assertions::Direction;
+
+        if !snapshot.declares_assertions {
+            return result;
+        }
+        let (Some(hook_name), Some(policy_config)) = (hook_name, snapshot.policy_config.as_ref())
+        else {
+            return result;
+        };
+        // The hook's registered phase is the authority, so this feature names no
+        // hook: a `Pre` hook asserts toward the upstream, a `Post` hook toward
+        // the client, and a hook that is neither is not a wire boundary.
+        let Some(direction) = crate::hooks::lookup_hook_metadata(hook_name)
+            .and_then(|meta| Direction::from_phase(meta.phase))
+        else {
+            return result;
+        };
+        if let Some(extensions) = result.modified_extensions.as_ref() {
+            self.warn_once_if_route_assertions_are_unreachable(
+                &snapshot.http_routes_declaring_assertions,
+                direction,
+                extensions,
+            );
+        }
+        let denied = result.is_denied();
+        // A denied pipeline forwarded nothing, so there is no upstream response
+        // to filter on the way out.
+        if denied && direction == Direction::Response {
+            return result;
+        }
+        // The entity type comes from the request rather than from the matched
+        // route, so `global.defaults.http` still governs a generic-HTTP request
+        // that selected none of the `http:` routes.
+        let entity_type = result
+            .modified_extensions
+            .as_ref()
+            .and_then(|extensions| extensions.meta.as_deref())
+            .and_then(|meta| meta.entity_type.clone());
+        let Some(contract) = config::resolve_assertions_for_route(
+            policy_config,
+            matched,
+            entity_type.as_deref(),
+            direction,
+        ) else {
+            return result;
+        };
+
+        if denied {
+            // Removal still happens: it costs nothing, is never wrong, and keeps
+            // a client-supplied value out of the extensions the audit path sees.
+            // Injection does not, and `on_missing` is not evaluated, because
+            // replacing one denial with another says nothing useful.
+            if let Some(extensions) = result.modified_extensions.as_mut() {
+                crate::assertions::apply(&contract, &[], extensions, direction);
+            }
+            return result;
+        }
+
+        let rendered = match result.modified_extensions.as_ref() {
+            Some(extensions) => crate::assertions::render(&contract, extensions),
+            None => return result,
+        };
+        match rendered {
+            Ok(rendered) => {
+                if let Some(extensions) = result.modified_extensions.as_mut() {
+                    crate::assertions::apply(&contract, &rendered, extensions, direction);
+                }
+                result
+            },
+            Err(missing) => {
+                // Strip first. The removal is unconditional, and a refused
+                // request must not carry a client value under an asserted name.
+                if let Some(extensions) = result.modified_extensions.as_mut() {
+                    crate::assertions::apply(&contract, &[], extensions, direction);
+                }
+                deny_missing_assertion(missing, direction, result)
+            },
+        }
+    }
+
+    /// Mark the span of one executor invocation, so a nested dispatch can tell
+    /// it is nested.
+    fn enter_executor(&self) -> ExecutorBoundary<'_> {
+        self.executor_depth.fetch_add(1, Ordering::AcqRel);
+        ExecutorBoundary {
+            depth: &self.executor_depth,
+        }
+    }
+
+    /// Warn once when [`invoke_entries`](Self::invoke_entries) is reached from
+    /// outside an executor invocation while a contract is configured.
+    ///
+    /// Every caller in this tree nests inside a policy handler the executor is
+    /// running, so the contract fires at the outer boundary after that handler
+    /// returns. A host adopting this primitive as its *outermost* dispatch has no
+    /// boundary and therefore no contract, and would learn it from a header that
+    /// did not appear.
+    ///
+    /// A warning rather than a debug assertion, on two counts. Driving the
+    /// primitive directly is legitimate for a caller that wants no boundary, and
+    /// a test harness exercising the invokers does exactly that, so a panic would
+    /// punish a caller for something that is not a fault. And the residual risk
+    /// is a *release* build integrated that way losing the contract silently,
+    /// which a debug-only check cannot reach at all.
+    ///
+    /// The depth counter is process-wide rather than per task, so a genuine
+    /// nested call always sees its parent in flight and cannot trip this. An
+    /// unrelated concurrent invocation can mask a real outermost call, which is
+    /// the direction a diagnostic should err in.
+    fn warn_once_if_dispatch_has_no_boundary(&self, snapshot: &RuntimeSnapshot) {
+        // A host with no contract configured loses nothing here, so there is
+        // nothing to tell it. `swap` is last so a nested call does not spend the
+        // gate.
+        if !snapshot.declares_assertions
+            || self.executor_depth.load(Ordering::Acquire) > 0
+            || self
+                .nested_dispatch_boundary_warned
+                .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        warn!(
+            alarm = "assertions_dispatch_without_a_boundary",
+            "invoke_entries was called as an outermost dispatch. It is a nested dispatch \
+             primitive rather than a wire boundary, so no `assertions:` contract is applied \
+             to its result: nothing is asserted onto the request and nothing the contract \
+             names is removed from it. Drive a named entry point (invoke_named, invoke, or \
+             invoke_by_name) as the outermost dispatch so the contract has a boundary to \
+             fire at.",
+        );
+    }
+
     /// Filter hook entries based on route resolution, with caching.
     ///
     /// When routing is enabled and the request identifies an entity, resolves
@@ -1846,17 +2353,28 @@ impl PolicyEngine {
     /// `conditions:`; when the request identifies no entity, every entry is
     /// returned.
     ///
+    /// Returns the route that matched alongside the entries, because the
+    /// `assertions:` contract the caller applies afterwards resolves from it and
+    /// this is where the match is computed. Re-resolving at the call site would
+    /// be a second table walk per request for an answer already in hand.
+    ///
     /// # Errors
     ///
     /// [`RouteResolutionError`] when an HTTP request's path cannot be read and
     /// the configuration declares at least one `http:` route.
-    async fn filter_entries_by_route(
+    async fn filter_entries_by_route<'snapshot>(
         &self,
-        snapshot: &RuntimeSnapshot,
+        snapshot: &'snapshot RuntimeSnapshot,
         entries: &[crate::registry::HookEntry],
         extensions: &Extensions,
         hook_name: &str,
-    ) -> Result<Arc<Vec<crate::registry::HookEntry>>, RouteResolutionError> {
+    ) -> Result<
+        (
+            Arc<Vec<crate::registry::HookEntry>>,
+            Option<config::MatchedRoute<'snapshot>>,
+        ),
+        RouteResolutionError,
+    > {
         // A route only exists when the configuration turns routing on, so the
         // whole selector feature is behind this.
         let routing_config = snapshot
@@ -1880,9 +2398,7 @@ impl PolicyEngine {
             // strips a query off it, and on a request URI's path otherwise,
             // which carries no query to begin with. A host that puts one in
             // the path anyway lands on the same route the router picks.
-            let path = request_line
-                .and_then(|http| http.path.as_deref())
-                .map(|path| path.split('?').next().unwrap_or(path));
+            let path = match_path(extensions);
             // Matching runs on the path exactly as it arrived, because that is
             // the path the host's router matches on. Normalizing first would
             // let PPE resolve a different route than the one the request is
@@ -1932,6 +2448,24 @@ impl PolicyEngine {
             meta.and_then(|m| m.entity_name.as_deref())
         };
 
+        // The route an `assertions:` contract resolves from. A generic-HTTP
+        // request matched above; a named entity matches on the slow path below,
+        // which a cache hit skips, so it is matched here instead when a contract
+        // could need it. Guarded on the config declaring one, because that walk
+        // is exactly what the route cache exists to avoid.
+        let early_named = if entity_type != Some(ENTITY_HTTP)
+            && snapshot.declares_assertions
+            && let (Some(policy_config), Some(entity_type), Some(resolved_name)) =
+                (routing_config, entity_type, resolved_name)
+        {
+            config::resolve_route(
+                policy_config,
+                config::RouteQuery::named(entity_type, resolved_name).with_scope(request_scope),
+            )
+        } else {
+            None
+        };
+
         // Route annotation short-circuit: if the request's
         // (entity_type, resolved_name) has an annotation that handles this
         // hook, return a one-entry list containing the annotated handler.
@@ -1965,7 +2499,10 @@ impl PolicyEngine {
                 })
             });
             if let Some(entry) = candidate {
-                return Ok(Arc::new(vec![entry.clone()]));
+                return Ok((
+                    Arc::new(vec![entry.clone()]),
+                    contract_route(snapshot, http_matched.as_ref(), early_named.as_ref()),
+                ));
             }
         }
 
@@ -1978,7 +2515,10 @@ impl PolicyEngine {
                 .filter(|e| e.plugin_ref.trusted_config().passes_conditions(extensions))
                 .cloned()
                 .collect();
-            return Ok(Arc::new(filtered));
+            return Ok((
+                Arc::new(filtered),
+                contract_route(snapshot, http_matched.as_ref(), early_named.as_ref()),
+            ));
         };
 
         // `meta` is matched but not bound: nothing below reads a field of it
@@ -1998,7 +2538,10 @@ impl PolicyEngine {
             if declares_a_policy(policy_config, snapshot) {
                 return Err(RouteResolutionError::UnidentifiedRequest);
             }
-            return Ok(Arc::new(entries.to_vec()));
+            return Ok((
+                Arc::new(entries.to_vec()),
+                contract_route(snapshot, http_matched.as_ref(), early_named.as_ref()),
+            ));
         };
 
         // Fast path: zero-allocation cache lookup with raw_entry
@@ -2028,7 +2571,10 @@ impl PolicyEngine {
                     && key.hook_name == hook_name
                     && key.scope.as_deref() == request_scope
             }) {
-                return Ok(Arc::clone(cached));
+                return Ok((
+                    Arc::clone(cached),
+                    contract_route(snapshot, http_matched.as_ref(), early_named.as_ref()),
+                ));
             }
         }
 
@@ -2044,6 +2590,10 @@ impl PolicyEngine {
         // than scanning the route table again.
         let name_matched = if entity_type == ENTITY_HTTP {
             None
+        } else if early_named.is_some() {
+            // Already resolved above, for the cache-hit path. Reused rather
+            // than resolved a second time.
+            early_named
         } else {
             config::resolve_route(
                 policy_config,
@@ -2131,7 +2681,10 @@ impl PolicyEngine {
             );
         }
 
-        Ok(cached)
+        Ok((
+            cached,
+            contract_route(snapshot, http_matched.as_ref(), name_matched.as_ref()),
+        ))
     }
 
     /// Warn once when an `http:` route's `authentication:` list cannot apply
@@ -2172,6 +2725,63 @@ impl PolicyEngine {
                  extensions at this hook for a route's list to apply.",
             );
         }
+    }
+
+    /// Warn once per direction when an `http:` route's `assertions:` contract
+    /// cannot apply because the request carried no readable path.
+    ///
+    /// The same failure the authentication warning covers, for a different block,
+    /// so it reads the same way. Falling back to the levels above is defensible
+    /// and stays, but doing it silently hides which contract crossed the
+    /// boundary.
+    ///
+    /// Called from where the contract is applied rather than from route
+    /// filtering, because filtering does not run on every path that applies one.
+    ///
+    /// Per direction because the two halves of one exchange are separate
+    /// invocations, and a host can supply the request line on one and not the
+    /// other. One combined gate would fire on the request half and be spent by
+    /// the time the informative case arrived.
+    fn warn_once_if_route_assertions_are_unreachable(
+        &self,
+        unreachable: &[String],
+        direction: crate::assertions::Direction,
+        extensions: &Extensions,
+    ) {
+        if unreachable.is_empty() {
+            return;
+        }
+        let entity_type = extensions
+            .meta
+            .as_deref()
+            .and_then(|meta| meta.entity_type.as_deref());
+        if entity_type != Some(ENTITY_HTTP) {
+            return;
+        }
+        if match_path(extensions).is_some_and(|path| path.starts_with('/')) {
+            return;
+        }
+        let gate = match direction {
+            crate::assertions::Direction::Request => {
+                &self.route_request_assertions_unreachable_warned
+            },
+            crate::assertions::Direction::Response => {
+                &self.route_response_assertions_unreachable_warned
+            },
+        };
+        if gate.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        warn!(
+            alarm = "assertions_route_unreachable",
+            direction = direction.label(),
+            routes = unreachable.join(", "),
+            "an http: route declares assertions: but the request carries no readable \
+             path at this invocation, so the levels above govern instead: \
+             global.defaults.http, then global. The host must supply the request \
+             line on the extensions at both halves of the exchange for a route's \
+             contract to apply to both.",
+        );
     }
 
     /// Build per-hook `HookEntry`s for a plugin with optional route-
@@ -2497,6 +3107,12 @@ impl PolicyEngine {
         // no reason to hold the cache lock while storing them.
         self.route_cache_full_warned.store(false, Ordering::Release);
         self.route_authentication_unreachable_warned
+            .store(false, Ordering::Release);
+        self.route_request_assertions_unreachable_warned
+            .store(false, Ordering::Release);
+        self.route_response_assertions_unreachable_warned
+            .store(false, Ordering::Release);
+        self.nested_dispatch_boundary_warned
             .store(false, Ordering::Release);
     }
 
@@ -8678,5 +9294,201 @@ routes:
         let events = Events::default();
         SINK.with_borrow_mut(|sink| *sink = Some(events.clone()));
         (events, Sink)
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
+mod assertions_reachability_tests {
+    use super::*;
+    use crate::assertions::Direction;
+    use crate::extensions::{HttpExtension, MetaExtension};
+    use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload};
+
+    /// One `http:` route with a contract, one without, and one named route with
+    /// one. Only the first has anything to lose to a missing request line.
+    const CONFIG: &str = "
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /v1/files
+    assertions:
+      request:
+        headers:
+          - name: x-auth-path-scope
+            from: claim.namespace
+      response:
+        strip: [x-upstream-*]
+  - http: /healthz
+  - tool: get_weather
+    assertions:
+      request:
+        headers:
+          - name: x-auth-user-id
+            from: subject.id
+";
+
+    fn engine_with(yaml: &str) -> Arc<PolicyEngine> {
+        let engine = Arc::new(PolicyEngine::default());
+        let parsed = crate::config::parse_config(yaml).expect("the config loads");
+        engine.load_config(parsed).expect("the config installs");
+        engine
+    }
+
+    fn http_request(path: Option<&str>) -> Extensions {
+        Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_HTTP.to_owned()),
+                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                ..Default::default()
+            })),
+            http: Some(Arc::new(HttpExtension {
+                method: Some("GET".to_owned()),
+                path: path.map(str::to_owned),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn warned(engine: &PolicyEngine, direction: Direction) -> bool {
+        match direction {
+            Direction::Request => &engine.route_request_assertions_unreachable_warned,
+            Direction::Response => &engine.route_response_assertions_unreachable_warned,
+        }
+        .load(Ordering::Acquire)
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_names_only_http_routes_declaring_a_contract() {
+        let engine = engine_with(CONFIG);
+        assert_eq!(
+            engine
+                .load_runtime()
+                .http_routes_declaring_assertions
+                .to_vec(),
+            vec!["prefix:/v1/files".to_owned()],
+            "an http: route with no contract and a tool route with one both have \
+             nothing to lose to a missing request line"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_list_is_empty_when_no_http_route_declares_a_contract() {
+        let engine = engine_with(
+            "engine_settings:\n  dispatch: policy\nroutes:\n  - http: /healthz\n  - tool: t\n",
+        );
+        assert!(
+            engine
+                .load_runtime()
+                .http_routes_declaring_assertions
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invocation_with_no_path_warns_once_and_not_twice() {
+        let engine = engine_with(CONFIG);
+        for _ in 0..2 {
+            let (_result, _bg) = engine
+                .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request(None), None)
+                .await;
+        }
+        assert!(warned(&engine, Direction::Request), "the gate is set");
+        // The gate is one-shot, so the second invocation above found it set. What
+        // this pins is that it is a gate at all: a reset makes it fire again.
+        engine.clear_routing_cache();
+        assert!(!warned(&engine, Direction::Request));
+    }
+
+    #[tokio::test]
+    async fn a_readable_path_does_not_warn() {
+        let engine = engine_with(CONFIG);
+        let (_result, _bg) = engine
+            .invoke_named::<HttpHook>(
+                HOOK_HTTP_REQUEST,
+                HttpPayload,
+                http_request(Some("/v1/files/a")),
+                None,
+            )
+            .await;
+        assert!(!warned(&engine, Direction::Request));
+    }
+
+    /// R30's case: a host that supplies the request line on the way in and not
+    /// on the way out gets a warning naming the response direction, which is the
+    /// actionable half. One combined gate would have been spent already.
+    #[tokio::test]
+    async fn the_request_half_warning_does_not_spend_the_response_half() {
+        let engine = engine_with(CONFIG);
+        let (_result, _bg) = engine
+            .invoke_named::<HttpHook>(
+                HOOK_HTTP_REQUEST,
+                HttpPayload,
+                http_request(Some("/v1/files/a")),
+                None,
+            )
+            .await;
+        assert!(!warned(&engine, Direction::Request));
+        assert!(!warned(&engine, Direction::Response));
+
+        let (_result, _bg) = engine
+            .invoke_named::<HttpHook>(HOOK_HTTP_RESPONSE, HttpPayload, http_request(None), None)
+            .await;
+        assert!(
+            warned(&engine, Direction::Response),
+            "the response half is reported on its own"
+        );
+        assert!(
+            !warned(&engine, Direction::Request),
+            "and the request half, which was reachable, is not"
+        );
+    }
+
+    /// A non-HTTP request carries no path and never could, so it is not a case
+    /// of the host having omitted one.
+    #[tokio::test]
+    async fn a_tool_request_does_not_warn() {
+        let engine = engine_with(CONFIG);
+        let ext = Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some("tool".to_owned()),
+                entity_name: Some("get_weather".to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let (_result, _bg) = engine
+            .invoke_by_name(
+                crate::cmf::constants::HOOK_CMF_TOOL_PRE_INVOKE,
+                Box::new(crate::cmf::MessagePayload {
+                    message: crate::cmf::Message::text(crate::cmf::enums::Role::User, "hi"),
+                }),
+                ext,
+                None,
+            )
+            .await;
+        assert!(!warned(&engine, Direction::Request));
+    }
+
+    /// A config whose `http:` routes declare no contract short-circuits, so the
+    /// check costs an empty-slice test on the ordinary config.
+    #[tokio::test]
+    async fn an_empty_list_short_circuits() {
+        let engine = engine_with(
+            "engine_settings:\n  dispatch: policy\nglobal:\n  assertions:\n    request:\n      \
+             strip: [x-auth-*]\nroutes:\n  - http: /healthz\n",
+        );
+        let (_result, _bg) = engine
+            .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request(None), None)
+            .await;
+        assert!(!warned(&engine, Direction::Request));
     }
 }
