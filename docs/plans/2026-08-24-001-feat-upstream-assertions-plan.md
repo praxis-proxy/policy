@@ -27,8 +27,9 @@ over a protocol floor fixed in code (D7).
 Three things carry most of the risk.
 
 `PolicyEngine` has **four** pipeline entry points with **fourteen** return points between
-them, and an always-on security control must fire on all of them. Two of the four cannot
-name the hook they dispatch, so no direction is derivable there at all (D8, U7).
+them, and an always-on security control must fire on all of them (U7). Three of the four are
+boundaries and carry a hook name; `invoke_entries` is a nested dispatch primitive and
+deliberately applies nothing (D8).
 
 A contract on an `http:` route is reachable only when the host supplies the request line at
 that invocation, and a response invocation is where a host is most likely not to. Silent
@@ -139,7 +140,7 @@ Restated from origin. Cited by unit below.
 - R28. With no `assertions:` block, nothing is asserted and nothing is removed in either direction.
 - R29. A contract on an `http:` route is in force only when the host supplies the request line on the HTTP extension at that invocation. Absent it, the global contract governs, and the engine reports once, naming the routes.
 - R30. Both halves of one HTTP exchange resolve their contract from the request line. A response invocation with no request line falls to the global `response:`, reported under R29.
-- R31. A dispatch path that cannot name the hook applies neither contract, and the artifact names those paths.
+- R31. A nested dispatch primitive is not a boundary and applies neither contract; the artifact names which entry points are boundaries.
 - R32. The request line and response status are not addressable as sources. An entry naming one fails under R5, not R6.
 
 ---
@@ -206,17 +207,36 @@ on the first site, and a client-supplied `x-auth-user-id` reaches the upstream. 
 the single most likely way to ship this feature broken, because every one of those paths is
 an *absence* of code rather than a wrong line.
 
-### Two entry points cannot name a hook
+### Three entry points are boundaries; one is a nested primitive
 
-`invoke_named` and `invoke_by_name` take `hook_name: &str`. `invoke::<H>` keys on `H::NAME`,
-which is the hook *family* (`"cmf"`, `"http"`, `"identity"`), so `lookup("http")` is `None`
-and no phase exists. `invoke_entries::<H>` takes a caller-resolved entry slice and no name at
-all.
+`invoke_named` and `invoke_by_name` take `hook_name: &str` outright.
 
-`invoke_named` is what real hosts use, including for both generic-HTTP names, so the covered
-path is the one that matters. But the two hookless paths are not theoretical: the APL runtime
-dispatches `run(name)` steps through `invoke_entries`. D8 records why applying nothing there
-is the right answer and R31 makes it visible.
+`invoke::<H>` passes `H::NAME`, and for the hook types it is meant to be used with that *is*
+a hook name: a single-name type sets `NAME` to the hook constant (`plugin_demo.rs:75`,
+`ToolPreInvoke::NAME = "demo.tool_pre_invoke"`, a `Pre` row in the table). A multi-name family
+type sets it to the family (`CmfHook` is `"cmf"`), and using `invoke::<CmfHook>` is already a
+no-op dispatch, because the registry is keyed by hook name and nothing is registered under
+`"cmf"`. So `invoke::<H>` needs no special case: pass `Some(H::NAME)` and let `lookup` be the
+discriminator. A family name resolving to no phase is the same failure that makes the
+dispatch find no entries.
+
+`invoke_entries::<H>` is the different one, and the difference is not that it lacks a name.
+It is that it is not a boundary. Its three non-test callers are all inside the APL runtime:
+`cmf_invoker.rs:407` for `run(name)` policy steps, `delegation_invoker.rs:224`
+(`token.delegate`, `Unphased`), `elicitation_invoker.rs:111` (`elicit`, `Unphased`). All three
+run inside `AplRouteHandler`, which is itself an `AnyHookHandler` (`route_handler.rs:268`) and
+therefore executes *inside* the executor, inside an outer `invoke_named`. The contract is
+applied once at that outer boundary, after the handler returns.
+
+That ordering is R23, not a convenience. The APL route handler *is* the policy evaluation, so
+applying the contract around each nested `run(name)` step would inject asserted headers
+mid-evaluation and let a later step read the engine's value where R23 promises it reads the
+client's. Applying nothing at a nested dispatch is the correct behavior, not a gap.
+
+The name is available if it were ever wanted: `pick_entry` (`dispatch_plan.rs:96-109`) walks
+`entries_by_hook: HashMap<String, HookEntry>` and discards the key at `:108`. `HookEntry`
+itself carries no hook name (`registry.rs:200`), so the engine cannot recover one from the
+slice; only the caller can. Recorded because the cheap-looking fix is the wrong one.
 
 ### Four levels participate, by selection rather than stacking
 
@@ -362,23 +382,30 @@ client breaks. So `response.strip:` removes what it names and everything else pa
 floor fixed in code that a greedy glob cannot reach (U11). Cost: two mental models in one
 block, which U10 has to make legible.
 
-**D8. A dispatch path with no hook name applies neither contract, and says so.** `invoke::<H>`
-keys on the hook family and `invoke_entries::<H>` on nothing, so neither yields a phase.
-Three options were considered.
+**D8. The contract applies at boundaries, and `invoke_entries` is not one.** An earlier draft
+of this decision claimed two entry points could not name their hook and accepted a coverage
+hole for both. That was wrong twice over.
 
-Guessing a direction from `H::NAME` fails open on the request half and mangles a response on
-the other, and there is no signal to guess from: `HttpHook` serves both `http.request` and
-`http.response`.
+`invoke::<H>` needs nothing special. `H::NAME` is a hook name for the single-name hook types
+that are the only sound users of it, so it passes `Some(H::NAME)` like the other two named
+entry points. A family type resolves no phase and applies nothing, which is correct, because
+that call dispatches nothing either.
 
-Changing the signatures to carry a hook name reaches across the host boundary, breaks every
-`invoke_entries` caller including the APL runtime's `run(name)` dispatch, and is a larger
-change than this feature.
+`invoke_entries` applies nothing because it is a nested dispatch primitive rather than a wire
+boundary, and R23 puts the contract after policy evaluation. Every current caller sits inside
+`AplRouteHandler`, which the executor runs inside an outer `invoke_named` that does apply the
+contract. Applying it again around each nested `run(name)` would contradict R23 by letting a
+later step read an asserted header where the client's value is promised, and would evaluate
+`on_missing: deny` once per step. So this is a design boundary, not an accepted hole.
 
-Applying nothing, and naming those paths in R27's artifact, is what ships. It is honest about
-coverage and leaves the door open: a later signature change turns two uncovered paths into
-covered ones with no config change, exactly as #42's new hooks were covered by D3. The cost
-is real. A host that dispatches only through `invoke_entries` gets no contract at all, which
-is why the artifact has to say so rather than the operator inferring it from an absent header.
+Plumbing a hook name through `invoke_entries` was considered and rejected on those grounds
+rather than on cost: `pick_entry` already has the name and discards it, so the change is
+small, and it would buy a correctness regression.
+
+What remains is narrower and is Decision 1 in the open questions: a host *could* call
+`invoke_entries` as its outermost dispatch, and would then have no boundary and no contract.
+No current caller does. U8's artifact names which entry points are boundaries so a host
+integrating that way can see it, and U7 adds a debug assertion rather than trusting it.
 
 **D9. Adding a key is a change to the key model.** #55 made every config scope carry a closed
 table (`ConfigScope::keys()`, `config.rs:1339`), and the tables are the accept set. So U2's
@@ -755,12 +782,15 @@ entry point that can name its hook.
 - Call it at **all fourteen** return points, per the table in Context:
   - `invoke_by_name` (`:1432`): `:1451`, `:1467`, `:1479`, tail. Passes `Some(hook_name)`.
   - `invoke_named` (`:1616`): `:1639`, `:1651`, `:1664`, tail. Passes `Some(hook_name)`.
-  - `invoke` (`:1528`): `:1543`, `:1555`, `:1568`, tail. Passes `None` (D8): `H::NAME` is the
-    family, not the hook.
-  - `invoke_entries` (`:1723`): `:1732`, tail. Passes `None` (D8): no hook name exists.
-  Enumerate the sites in the PR description. The two `None` entry points still get the call,
-  so the site list is uniform and a later signature change makes them work by passing a name
-  rather than by finding an un-instrumented return.
+  - `invoke` (`:1528`): `:1543`, `:1555`, `:1568`, tail. Passes `Some(H::NAME)`, which is a
+    hook name for the single-name types that are its sound users, and a family name otherwise;
+    `lookup` is the discriminator (D8).
+  - `invoke_entries` (`:1723`): `:1732`, tail. Passes `None`, because it is a nested dispatch
+    primitive and not a boundary (D8). Add a `debug_assert` that it is reached from within an
+    executor invocation, so a host adopting it as an outermost dispatch trips it in debug
+    rather than silently losing the contract.
+  Enumerate the sites in the PR description. `invoke_entries` still gets the call, so the site
+  list is uniform and the boundary rule is expressed in one place.
 - The pre-matching sites (`:1451`, `:1543`, `:1639`, `:1732`) pass `matched: None`, so U4
   resolves the global contract. The post-filtering sites and the executor tail pass the
   `MatchedRoute` `filter_entries_by_route` (`:1853`) resolved. That requires threading it out
@@ -779,8 +809,10 @@ entry point that can name its hook.
 
 **Test scenarios:**
 - Covers R26, and the early-return hazard. **One test per return site, fourteen in all**, each asserting that a client-supplied entry-target header does not survive where a contract applies, and that nothing changes where D8 says it does not:
-  - per hook-naming entry point (`invoke_by_name`, `invoke_named`): a hook with no registered entries and no route annotations; a hook whose entries all filter out by route; a route resolution failure that denies; a normal pipeline through the executor;
-  - per hookless entry point (`invoke`, `invoke_entries`): the same sites, each asserting the header map comes back byte-identical, so D8 is pinned as behavior rather than left as an omission.
+  - per boundary entry point (`invoke_by_name`, `invoke_named`, `invoke::<H>` with a single-name hook type): a hook with no registered entries and no route annotations; a hook whose entries all filter out by route; a route resolution failure that denies; a normal pipeline through the executor;
+  - `invoke::<H>` with a multi-name family type: the header map comes back byte-identical, since no phase resolves and nothing dispatches;
+  - `invoke_entries`: both sites return a byte-identical header map, so D8's boundary rule is pinned as behavior rather than left as an omission;
+  - nesting: an APL route whose policy names a `run(name)` step receives the contract exactly once, applied at the outer `invoke_named` after the handler returns, and the nested step observes the client's header value and not the engine's (R23).
 - Covers R16. A route whose tenant entry is `on_missing: deny` and whose token carries no tenant claim produces a denied result with the expected code, and the header does not appear.
 - Covers R28. A config with no block leaves the header map byte-identical to the input.
 - Covers R7. A readable slot that no entry names does not appear in the outgoing headers.
@@ -818,9 +850,9 @@ and name the test covering it. If that mapping cannot be stated, the unit is not
   type including generic HTTP, a bundle reaches the routes joining it, global reaches
   whatever matched no route. This is R27's "which traffic" clause and it is what makes the
   four-level ladder legible.
-- Name the dispatch paths that carry no hook and therefore no contract (R31), so an operator
-  whose host dispatches through a pre-resolved entry list learns it here rather than from an
-  absent header.
+- Name which entry points are boundaries and therefore apply a contract, and that a nested
+  dispatch primitive does not (R31), so a host integrating through a pre-resolved entry list
+  learns it here rather than from an absent header.
 - Emitted at startup at `info` when a block is configured, and available as a public
   function so a host can expose it.
 - The excluded set and the floor are printed from the same constants U1 and U11 match on, so
@@ -831,7 +863,7 @@ and name the test covering it. If that mapping cannot be stated, the unit is not
 - The artifact names every configured header and its source.
 - The artifact lists entry-target names as stripped even though they are not in `strip:`.
 - The artifact names all four levels present in a config, with the spellings U3's errors use.
-- Covers R31. The artifact names the hookless dispatch paths as uncovered.
+- Covers R31. The artifact names which entry points are boundaries, and names nested dispatch as applying nothing.
 - Covers the anti-drift property: adding a variant to the excluded set, or a name to the floor, without updating the renderer fails a test.
 - A config with no block renders a statement that nothing is asserted, not an empty string.
 
@@ -1019,7 +1051,7 @@ useful on its own.
 | Risk | Mitigation |
 |---|---|
 | One of fourteen return sites in `engine.rs` is missed and stripping silently does not happen. | U7's per-site tests, and the reviewer check that each site maps to a named test. Highest-severity risk in the work: it fails open. Worse than the previous revision assumed, since the site count grew from nine to fourteen across four entry points rather than three. |
-| A host dispatches only through `invoke_entries` and gets no contract at all. | D8 accepts it; R31 and U8's artifact make it visible. Residual: an operator who never reads the artifact sees a control that is configured and not running. This is the second-highest risk and it is a documentation-and-visibility mitigation, not a technical one. |
+| A host adopts `invoke_entries` as its outermost dispatch, so there is no boundary and no contract. | Not a risk for any current caller: all three sit inside `AplRouteHandler`, which runs inside `invoke_named`. U7 adds a `debug_assert` that the call is nested, U8's artifact names which entry points are boundaries, and U10 documents it. Residual: a release build integrated that way loses the contract silently. |
 | A host does not supply the request line on the response invocation, so a route's `response:` silently becomes the global one. | U12's load-time finding and per-direction runtime warning, modelled on the two precedents the tree already set for this exact failure. Residual: a warning is not enforcement, and the global contract still governs. |
 | A claim value injects CRLF and splits a header. | U5 validates rendered values, under R14. |
 | `HashSet` iteration order leaks into headers. | Sorting happens at resolution in U1, not at each render site, so a new caller cannot forget it. |
@@ -1050,12 +1082,13 @@ useful on its own.
 ### Settled 2026-08-30
 
 - **Which hooks are request-side?** None are named. The phase registry answers it, and #42 is the proof that was the right call: the L7 pair this plan used to name by hand was deleted and replaced, and D3 needed no amendment. D3.
-- **What happens on a dispatch path with no hook name?** Neither contract applies, and the artifact says so. D8, R31. Guessing from the family name is unsound because one family serves both halves.
+- **What happens on a dispatch path with no hook name?** The question was malformed. `invoke::<H>` has one for the hook types that can soundly use it, so it needs no special case. `invoke_entries` applies nothing because it is a nested primitive and R23 puts the contract after policy evaluation, not because a name is missing. D8, R31.
 - **Can a contract be written per HTTP path?** Yes, since #42. The previous revision recorded this as impossible and proposed a startup warning for the resulting over-broad global block. That mitigation is withdrawn; U12 addresses the opposite hazard #42 introduced instead.
 - **How does a new config key get accepted?** Through its scope's key table, not only `deny_unknown_fields`. D9, guideline 4.
 
 ### Still open
 
+- **Is "the outermost dispatch is a named boundary" an invariant or an observation?** Today it is an observation: all three `invoke_entries` callers nest inside `AplRouteHandler`. If it is an invariant PPE guarantees, the `debug_assert` in U7 plus a line in U10 closes it and D8 is finished. If a host may legitimately drive `invoke_entries` as its outermost call, that host needs a boundary of its own, and the options are a public "apply the contract to this result" entry point or a documented requirement that it call a named entry point instead. This is the one live decision `invoke_entries` still carries.
 - **Layering default.** Review argues additive-with-opt-out is right, matching `authentication:`'s default, on the grounds that a union of allowlists can only weaken the global floor and so cannot be used to widen it. R25 says contracts never merge. The counter-argument is that a merged header set is one nobody designed. #55 sharpened this: `authentication:` now stacks *four* layers and honors `replace_inherited` at each, so the divergence is wider than when this was raised. Unresolved; it interacts with the finding that `strip:` is silently dropped when a lower level declares a block.
 - **Delegated-token collision.** Undefined today, and more pressing now that a contract entry and the delegated-token writer share a fold point. Who wins when both target the same header name.
 - **The `all` reserved bundle.** It applies to every request unconditionally and resolves as a bundle, so under R25 it outranks an entity default. Whether that is the intended precedence for a contract is unexamined.
