@@ -540,21 +540,26 @@ levels and registered in the config key model.
 - No `replace_inherited` flag: nothing accumulates, so there is nothing to opt out of.
 
 **Test scenarios:**
-- Happy: the worked config round-trips. Vendor it into the repository first as
+- Happy: the worked config round-trips. Copy it from
+  `docs/plans/2026-08-24-001-assertions-worked-config.yaml` to
   `crates/ppe-core/tests/fixtures/assertions_worked_example.yaml`, beside the existing
   `legacy-policy-document.yaml`, and point this scenario and U9's worked-example scenario at
-  that path. `.sketchpad/` is gitignored (`.gitignore:27`), so a fixture read from there
-  fails on any clean checkout and in CI.
+  that path. It lives next to the plan rather than in `tests/fixtures/` until this unit lands,
+  because a fixture there is read by a test that loads it and `assertions:` is not a known key
+  yet.
 
-  **The draft does not load, and rewriting it is U2's first task.** It opens with
-  `plugin_settings: routing_enabled: true`, which #55 made a load error naming
-  `engine_settings.dispatch: policy` as the replacement (`config.rs:1048`), so vendoring it
-  unchanged fails before any assertion logic is reached. It also declares blocks at only
-  three levels and carries no `http:` route, so it exercises neither `global.defaults.<entity>`
-  nor the selector #42 added. Since U2, U4 and U9 all point at this one file, it should grow
-  both: an entity default with a contract, and an `http:` route with its own, so the fixture
-  covers the four-level ladder and generic HTTP rather than the shape the surface had in
-  August.
+  It was rewritten on 2026-08-30 for the current surface and its skeleton is verified: with the
+  `assertions:` blocks stripped, `config::parse_config` accepts it and reports
+  `dispatch=Policy`, one entity default under `http`, six routes, one of them an `http:` route.
+  So the only thing standing between it and a passing load is this unit. The earlier draft did
+  not load at all: it opened with `plugin_settings: routing_enabled: true`, which #55 made a
+  load error naming `engine_settings.dispatch: policy` as the replacement (`config.rs:1048`),
+  and it named `kind: identity-jwt` where the factory registers `identity/jwt`
+  (`identity-jwt/src/factory.rs:64`).
+
+  One thing that probe pinned, worth knowing before U4: after load, `config.groups` is empty,
+  because `fold_groups_into_bundles` has drained it into `global.bundles`. A resolver reading
+  the document field finds nothing.
 - Happy: `on_missing` absent defaults to omit; present as `deny` parses.
 - Edge: `assertions:` absent leaves `None` at all four levels (R28); present with only `request:` leaves `response:` as `None`, and the reverse.
 - Edge: `headers: []` and `strip: []` parse as empty, distinct from absent.
@@ -1071,7 +1076,7 @@ useful on its own.
 | A greedy `response.strip:` glob removes a header the client needs. | U11's floor plus U3's load-time rejection, which names the floor header the glob would have hit. U11's shared-pattern test keeps the load-time check from being looser than the runtime match. |
 | The floor is incomplete and a client-critical header stays strippable. | The floor is an enumerated list with a reason per entry and a test that every entry has one. Residual: a header nobody thought of is strippable until someone adds it. This is the response direction's analogue of the excluded-source set, and carries the same standing review obligation. |
 | Two mental models in one config block confuse operators into expecting response default-deny. | D7 states the asymmetry, U8's artifact renders both directions labelled, and U10 documents it. Residual: a real cognitive cost, accepted because the alternative breaks clients. |
-| The vendored worked config is carried over unchanged and U2 fails on a removed key before reaching any assertion logic. | U2 names the rewrite as its first task, with the removed key and the two missing levels called out. Cheap to hit and cheap to fix, but it is the first thing an implementer touches. |
+| The worked config drifts out of date again between now and U2, the way it did between August and now. | It is tracked beside the plan rather than left in gitignored scratch, so a breaking config change shows up as a file a reviewer can see. Residual: nothing loads it in CI until U2 copies it to `tests/fixtures/`, so drift is caught by review rather than by a gate. |
 | Re-resolving the route per application costs a second table walk per request. | U7 threads the `MatchedRoute` out of `filter_entries_by_route` rather than calling `resolve_route` again. The route cache caches entry lists, not matches, so there is nothing to lean on. |
 
 ---
@@ -1124,4 +1129,4 @@ useful on its own.
 - **Base branch**: `feat/apl_cleanup`, carrying [policy#55](https://github.com/praxis-proxy/policy/pull/55) (APL grammar and config-model cleanup: four inheritance levels, `ConfigKey` tables, `resolve_route`, `invoke_by_name`, `dispatch: policy` as default, and `871a71f` correcting the five comments that still said otherwise)
 - Upstream framing: praxis-proxy/praxis#954 and its review thread
 - Existing harness for driving both halves of an HTTP exchange: `crates/ppe-apl-runtime/tests/http_route_e2e.rs`
-- Worked config: `.sketchpad/headers_config.yaml` (gitignored; U2 vendors it to `crates/ppe-core/tests/fixtures/assertions_worked_example.yaml`). **Predates all three merges and does not load as written**: see U2 for what has to change.
+- Worked config: `docs/plans/2026-08-24-001-assertions-worked-config.yaml`, tracked beside this plan. Covers all four levels, both directions, an `http:` route, and the configs that fail to load. U2 copies it to `crates/ppe-core/tests/fixtures/assertions_worked_example.yaml`.
