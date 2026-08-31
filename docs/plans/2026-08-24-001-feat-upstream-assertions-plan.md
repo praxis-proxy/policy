@@ -3,7 +3,7 @@ title: "feat: Assertions config for what reaches upstream as request and respons
 type: feat
 status: draft
 date: 2026-08-24
-revised: 2026-08-30
+revised: 2026-08-31
 origin: docs/brainstorms/2026-08-23-upstream-header-projection-requirements.md
 ---
 
@@ -1115,11 +1115,12 @@ inferring it from a header that did not appear.
 ```
 U1  (source paths) ──┬── U2 (config types + keys) ──┬── U3 (validation) ──┐
                      │                              ├── U4 (resolution) ─┤
-                     ├── U5 (rendering) ────────────┴── U6 (apply) ──────┴── U7 (engine) ──┬── U9 (e2e)
-                     └── U8 (artifact)                                                     └── U10 (docs)
+                     └── U5 (rendering) ────────────┴── U6 (apply) ──────┴── U7 (engine) ──┬── U9 (e2e)
+                                                                                           └── U10 (docs)
 
-U11 (response floor) ──> U3 (glob rejection), U8 (artifact renders it)
-U2, U4 ──> U12 (reachability reporting) ──> U9
+U11 (response floor) ──> U3 (glob rejection), U8 (renders the floor)
+U1, U2, U4, U11 ──────> U8 (artifact)
+U2, U4 ───────────────> U12 (reachability reporting) ──> U9
 ```
 
 U1 and U11 have no dependency and can start in parallel. U2 depends on U1, and its key-model
@@ -1192,7 +1193,7 @@ useful on its own.
 ### Still open
 
 - **Is "the outermost dispatch is a named boundary" an invariant or an observation?** Today it is an observation: all three `invoke_entries` callers nest inside `AplRouteHandler`. If it is an invariant PPE guarantees, the `debug_assert` in U7 plus a line in U10 closes it and D8 is finished. If a host may legitimately drive `invoke_entries` as its outermost call, that host needs a boundary of its own, and the options are a public "apply the contract to this result" entry point or a documented requirement that it call a named entry point instead. This is the one live decision `invoke_entries` still carries.
-- **Delegated-token collision.** Undefined today, and more pressing now that a contract entry and the delegated-token writer share a fold point. Who wins when both target the same header name.
+- **Delegated-token collision.** Narrower than earlier revisions of this plan claimed. They do not share a fold point: this surface writes `http.request_headers`, while delegation writes `raw_credentials.delegated_tokens`, whose `outbound_header` (`extensions/raw_credentials.rs:378`) is a *declaration* of the name a forwarding component should attach the token under. Nothing in this tree attaches it, so no ordering exists here to get wrong. The collision lives at whichever component reads `outbound_header`, and only when an operator has both pointed `default_outbound_header` away from its `Authorization` default and written an assertions entry targeting that same name. R18 would then strip what the forwarder attached, or the forwarder would overwrite the assertion, depending on an order PPE cannot see. Both inputs are visible at config load, so this is a candidate load-time check rather than a runtime rule; not in scope here, and no unit is blocked on it.
 - **Response-direction sources.** Whether a response entry may read response-phase state at all, beyond the identity state a request entry reads. `http.status` is the obvious candidate and R32 currently excludes it from the grammar; nothing yet needs it.
 - **Duplicate inbound headers.** `HttpExtension` is `HashMap<String, String>`, so duplicate wire headers collapse and repeated names cannot be emitted. Probably acceptable; needs stating rather than deciding.
 - **Failure modes beyond absence.** `on_missing` covers a source that resolved to nothing. It does not cover a source that errored, or a value rejected by R14. Both currently fall to "omit", which may want to be configurable.

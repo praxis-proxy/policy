@@ -435,9 +435,12 @@ routes:
 # Open, not yet settled
 # ---------------------------------------------------------------------
 #
-#   1. Who wins when a contract entry and the delegated token writer
-#      target the same header name. Undefined today, and both now share
-#      a fold point.
+#   1. A delegated token's outbound_header is only a declaration: the
+#      forwarding component attaches it, not PPE, so nothing here and
+#      nothing in praxis-policy shares a fold point with this surface. A
+#      collision needs an operator to point default_outbound_header away
+#      from Authorization AND target that same name with an entry below.
+#      Visible at config load, so checkable; unchecked today.
 #   2. Whether on_missing should cover more than absence. A source that
 #      errored, or a value rejected for containing CR or LF, currently
 #      falls to omit with no way to say otherwise.
