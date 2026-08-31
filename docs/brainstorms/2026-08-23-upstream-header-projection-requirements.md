@@ -1,5 +1,6 @@
 ---
 date: 2026-08-23
+revised: 2026-08-30
 topic: assertions-header-contract
 ---
 
@@ -13,6 +14,8 @@ The two directions are deliberately not symmetric. The request direction is an a
 
 Addresses [praxis-proxy/policy#28](https://github.com/praxis-proxy/policy/issues/28); the response direction comes from review and exceeds that issue's stated criteria.
 
+**Revised 2026-08-30** against a tree that moved under this document. [#38](https://github.com/praxis-proxy/policy/pull/38) landed the hook phase authority R22 reads. [#42](https://github.com/praxis-proxy/policy/pull/42) gave generic HTTP its own route selector and its own hook family, which turns what was a stated limitation into a working expression and introduces a new dependency on the host supplying the request line (R29, R30). [#55](https://github.com/praxis-proxy/policy/pull/55) reworked the config model: four inheritance levels rather than three, and a closed key table per scope rather than per-struct field rejection. R1, R22, R25 and R26 are revised; R29 to R32 are new.
+
 ---
 
 ## Problem Frame
@@ -25,7 +28,9 @@ The return path has the same shape and the opposite beneficiary. Where the reque
 
 PPE has capability gating, but it answers a different question. `Capability` and the `build_filtered_*` functions govern what a plugin may *read* from the extensions tree. Nothing governs what is *emitted*. The read side already names the sensitive slots, so the vocabulary exists; what is missing is a surface that says which of them render to which header, and which can never render at all.
 
-Two dependencies are now in place. Subject claims keep their JSON shape ([#9](https://github.com/praxis-proxy/policy/pull/9)), so a projected claim has structure to carry. The claim map is configurable ([#31](https://github.com/praxis-proxy/policy/pull/31)), so the typed fields are populated against real IdPs rather than only flat OIDC.
+Four dependencies are now in place, all landed. Subject claims keep their JSON shape ([#9](https://github.com/praxis-proxy/policy/pull/9)), so a projected claim has structure to carry. The claim map is configurable ([#31](https://github.com/praxis-proxy/policy/pull/31)), so the typed fields are populated against real IdPs rather than only flat OIDC. Hook phase is a registered fact rather than a guess ([#38](https://github.com/praxis-proxy/policy/pull/38)), which is what R22 reads. And generic HTTP has a route selector and a hook family of its own ([#42](https://github.com/praxis-proxy/policy/pull/42)), which is what lets a contract be written per HTTP path rather than only globally.
+
+That last one changes the shape of the problem rather than only enabling it. A route matches an HTTP request from the request line the host puts on the HTTP extension, so a contract on an `http:` route is only in force when the host supplies it, on each half of the exchange separately. A contract that silently falls back to the global one is a security control an operator cannot tell is working, which is why R29 and R30 exist.
 
 ---
 
@@ -36,6 +41,7 @@ Two dependencies are now in place. Subject claims keep their JSON shape ([#9](ht
 - A3. Security reviewer: audits what crosses the boundary in either direction, and needs the exclusions visible in what the engine reports rather than inferred from an absence in config.
 - A4. Policy author: writes rules against the same state this renders. Unaffected in what they can read; affected in what leaves.
 - A5. Client and agent: receive the response the gateway returns, and cannot tell which headers originated upstream and which the gateway vouches for.
+- A6. Embedding host: supplies the request line and the extensions PPE decides on. Whether a route's contract is reachable at all is its call, and it needs to be told when it has made one unreachable.
 
 ---
 
@@ -43,7 +49,7 @@ Two dependencies are now in place. Subject claims keep their JSON shape ([#9](ht
 
 **Config surface**
 
-- R1. The block is `assertions:`, sitting beside `authentication:` at global, group, and route level. It holds `request:` and `response:`, each a contract carrying `headers:` and `strip:`.
+- R1. The block is `assertions:`, sitting beside `authentication:` at each of the four levels the config layers: `global:`, `global.defaults.<entity>:`, `groups.<name>:`, and a `routes[]` entry. It holds `request:` and `response:`, each a contract carrying `headers:` and `strip:`.
 - R2. An entry under `headers:` names its target header and takes either one source or a set of named members, never both.
 - R3. Sources are slot paths (`subject.id`, `subject.roles`, `claim.<name>`), addressing extension state as the rest of the config does. The engine maps each path to the capability gating that slot, so the capability model stays the authority on reachability without operators writing capability names.
 - R4. A claim source names one claim. A bare claim root is not a valid source, so a provider's claim map cannot be rendered wholesale.
@@ -52,6 +58,7 @@ Two dependencies are now in place. Subject claims keep their JSON shape ([#9](ht
 **What may be a source**
 
 - R6. A closed set fixed in code is never usable as a source, in either direction: raw inbound tokens, delegated tokens, inbound request headers, and upstream response headers. It has no config surface, and cannot be removed, extended, or overridden. An entry naming one fails at config load, with a message distinguishing it from an unaddressable path.
+- R32. The request line and the response status (`http.method`, `http.path`, `http.host`, `http.scheme`, `http.status`) are not addressable as sources. They are host-populated rather than credential-bearing, so they are not in R6's excluded set; they are simply outside the grammar, and an entry naming one fails under R5. Stated because the HTTP extension now carries them and a uniform source vocabulary would otherwise appear to reach them.
 
 **Request direction**
 
@@ -85,18 +92,24 @@ Two dependencies are now in place. Subject claims keep their JSON shape ([#9](ht
 
 **When each direction runs**
 
-- R22. Direction derives from the hook's registered phase rather than from a list of hook names: a pre-phase hook applies the `request:` contract, a post-phase hook applies the `response:` contract, and an unphased hook applies neither. A host that registers phase metadata for its own hook is covered without a config change.
+- R22. Direction derives from the hook's registered phase rather than from a list of hook names: a pre-phase hook applies the `request:` contract, a post-phase hook applies the `response:` contract, and an unphased hook applies neither. A host that registers phase metadata for its own hook is covered without a config change. Both the MCP entity hooks and the generic-HTTP pair carry a phase, so one contract covers a tool invocation and a plain HTTP request without naming either.
+- R31. A dispatch path that cannot name the hook it is dispatching applies neither contract, and the engine's rendered policy names those paths. A pre-resolved entry list and a family-level typed dispatch carry no hook name, so no phase and no direction can be derived on them; the operator learns that from the artifact rather than from an absent header.
 - R23. Removal and injection happen after that phase's policy evaluation. Policy reads the wire headers unchanged, including a client-supplied value under a target name, so a rule can observe a spoofing attempt and deny it. Removal describes what crosses the boundary, not what policy sees.
 - R24. On a pipeline a plugin already denied, request-direction removal still happens and injection does not, and R16's denial is not evaluated. The response direction does not run at all, because a denied request produces no upstream response.
 
 **Layering**
 
-- R25. A direction's contract is whole, and contracts never merge. Global, group, and route may each declare one, and the most specific present is the one in force, resolved per direction so a route may state its own `response:` while inheriting the global `request:`. A route joining two groups that both declare the same direction has no principled winner and fails at config load.
-- R26. R6, R9, and R18 hold at every level, whichever contract is in force.
+- R25. A direction's contract is whole, and contracts never merge. Each of the four levels may declare one, and the most specific present is the one in force: the route, else a bundle the route joins, else the entity type's default, else global. Resolution is per direction, so a route may state its own `response:` while inheriting the global `request:`. A route joining two bundles that both declare the same direction has no principled winner and fails at config load.
+- R26. R6, R9, R18 and R32 hold at every level, whichever contract is in force.
+
+**Reaching the contract at all**
+
+- R29. A contract on an `http:` route is in force only when the host supplies the request line on the HTTP extension at that invocation, because that is what a route matches on. When it is absent no `http:` route matches and the global contract governs. The engine reports once when a configuration declares a contract on an `http:` route that could not be reached that way, naming the routes, so a deployment can tell the two situations apart.
+- R30. Both halves of one HTTP exchange resolve their contract from the request line, so a route's `request:` and its `response:` are one contract in force. A response invocation carrying no request line resolves no route, so the route's `response:` does not apply and the global one does. That asymmetry is reported under R29 rather than left to be discovered from a header that did not appear.
 
 **Audit and defaults**
 
-- R27. The engine renders the effective policy as one artifact covering both directions: the asserted headers, the code-fixed source exclusions, the response protocol floor, the removal sets, and the phase each direction fires on. A1 and A3 answer what crosses the boundary without reading Rust.
+- R27. The engine renders the effective policy as one artifact covering both directions: the asserted headers, the code-fixed source exclusions, the response protocol floor, the removal sets, the phase each direction fires on, the dispatch paths R31 leaves uncovered, and per level which traffic that level's contract reaches. A1, A3 and A6 answer what crosses the boundary without reading Rust.
 - R28. With no `assertions:` block, nothing is asserted and nothing is removed, in either direction.
 
 ---
@@ -114,9 +127,9 @@ Two dependencies are now in place. Subject claims keep their JSON shape ([#9](ht
 - AE9. **Covers R20.** Given a request carrying client-supplied values under every target name, no ordering of the pipeline exposes those values to the upstream.
 - AE10. **Covers R25.** Given a global contract and a route that states its own, the route's upstream receives exactly the route's headers and none of the global ones.
 - AE11. **Covers R3, R5.** Given an entry naming a source that exists as a capability but addresses no slot, config load fails naming the path.
-- AE12. **Covers R27.** Given any config, the rendered artifact names every header that can cross in either direction, every source exclusion, and the response floor.
-- AE13. **Covers R25.** Given two routes joining one group that declares a contract, both upstreams receive that group's headers; given a route that joins the group and also states its own, it receives only its own.
-- AE14. **Covers R25.** Given a route joining two groups that each declare the same direction, config load fails and names both groups.
+- AE12. **Covers R27.** Given any config, the rendered artifact names every header that can cross in either direction, every source exclusion, the response floor, and the dispatch paths no contract covers.
+- AE13. **Covers R25.** Given two routes joining one bundle that declares a contract, both upstreams receive that bundle's headers; given a route that joins the bundle and also states its own, it receives only its own.
+- AE14. **Covers R25.** Given a route joining two bundles that each declare the same direction, config load fails and names both bundles.
 - AE15. **Covers R14.** Given a claim whose value contains a line feed, no header is emitted for that entry rather than two headers.
 - AE16. **Covers R21.** Given a request carrying a target header name in mixed case, the upstream receives only the engine's value under that name.
 - AE17. **Covers R23.** Given a request carrying a client-supplied value under a target name, a policy rule reading that header observes the client's value, and the upstream still receives only the engine's.
@@ -125,12 +138,18 @@ Two dependencies are now in place. Subject claims keep their JSON shape ([#9](ht
 - AE20. **Covers R9.** Given a response `strip:` entry whose glob would match a floor header, config load fails and names the floor header it would have removed.
 - AE21. **Covers R18 in the response direction.** Given an upstream that echoes an asserted header back, the client receives the engine's value or none, never the upstream's.
 - AE22. **Covers R22.** Given a host that registers its own hook with pre-phase metadata, the request contract fires on it with no config change; given the same hook registered unphased, neither contract fires.
+- AE23. **Covers R25 at four levels.** Given a contract on the entity type's default and a bundle the route joins, the route receives the bundle's; given only the entity default, it receives that one and not the global one.
+- AE24. **Covers R29.** Given an `http:` route declaring a contract and a request whose HTTP extension carries no path, the global contract applies and the engine reports the route once, naming it.
+- AE25. **Covers R30.** Given an `http:` route declaring both directions, a request invocation carrying the request line and a response invocation carrying none, the route's `request:` applies on the way in and the global `response:` on the way out, and the report names the route.
+- AE26. **Covers R31.** Given a pre-resolved entry list dispatched without a hook name, neither contract fires, and the artifact names that path as uncovered.
+- AE27. **Covers R32.** Given an entry naming `http.path`, config load fails under the unaddressable-path message rather than the never-usable one.
+- AE28. **Covers R22 and idempotence.** Given an HTTP-transported tool call that fires both the generic-HTTP request hook and the tool pre-invoke hook, the upstream receives one set of asserted headers, identical to what either hook alone would have produced.
 
 ---
 
 ## Traceability
 
-Issue #28 states criteria for the request direction only. The response direction has no acceptance criterion there and is traced to review instead.
+Issue #28 states criteria for the request direction only. The response direction has no acceptance criterion there and is traced to review instead. R29 to R32 come from the tree moving after the issue was written and are traced to that.
 
 | Issue AC | Requirements |
 |---|---|
@@ -140,10 +159,11 @@ Issue #28 states criteria for the request direction only. The response direction
 | Nothing unprojected propagates | R7, R28, AE4 |
 | Claims carry structure | R10, R11, AE1 |
 | Expressed in the existing vocabulary | R3 |
-| Unknown field fails at config load | R5, R13, AE11 |
+| Unknown field fails at config load | R5, R13, R32, AE11, AE27 |
 | Readable as an audit artifact | R27, AE12 |
 | Tests that no credential reaches upstream | R6, R28, AE2, AE4 |
 | *(from review, no issue AC)* response direction | R8, R9, R18, R22, AE19-AE22 |
+| *(from #42, no issue AC)* reachability of a route's contract | R29, R30, R31, AE24-AE26 |
 
 ---
 
@@ -156,7 +176,8 @@ Issue #28 states criteria for the request direction only. The response direction
 - A response keeps every header a client needs to interpret it, no matter how greedy an operator's `strip:` glob is.
 - A projected claim reaches its destination with the shape the IdP minted, and a consumer can tell an array from text that looks like one.
 - The same identity produces the same header bytes, so audit hashes and golden files are stable.
-- Planning does not need to invent the surface: naming, direction split, source vocabulary, exclusion model, response floor, layering, absent-value behavior, and removal semantics are decided here.
+- An operator who writes a contract on an `http:` route learns from a report, not from a missing header, when the host has made it unreachable.
+- Planning does not need to invent the surface: naming, direction split, source vocabulary, exclusion model, response floor, layering, absent-value behavior, removal semantics, and reachability reporting are decided here.
 
 ---
 
@@ -171,6 +192,8 @@ Issue #28 states criteria for the request direction only. The response direction
 - Per-plugin assertion surfaces.
 - Conditional assertion gated on an evaluated predicate. Most of what looks conditional is whether the source resolved, which R15 already covers.
 - An operator-authored exclusion list. See Key Decisions.
+- Making the request line addressable as a source. R32 states it is out; a path-derived assertion is a separate feature with its own trust question.
+- Giving the hookless dispatch paths a hook name. R31 reports the gap rather than closing it; closing it is a signature change across the host boundary.
 
 ---
 
@@ -178,7 +201,11 @@ Issue #28 states criteria for the request direction only. The response direction
 
 - **The two directions are not symmetric, and the response direction is a denylist.** The request direction can default-deny because the engine originates every value it asserts, so the legitimate set is finite and known. A response is a passthrough of an upstream's own output: the engine does not originate it and cannot enumerate what is legitimate in it. Default-deny there strips `content-type`, `etag`, `retry-after`, rate-limit and tracing headers, and CORS, and the client breaks. So the response direction removes what is named and passes the rest, with a protocol floor fixed in code that a greedy glob cannot reach. Making the two halves mirror each other would be tidier and wrong.
 
-- **Direction derives from the hook's registered phase, not a list of hook names.** Hook types are open, so any fixed list silently fails to fire for a host that declares its own hook, which is a fail-open in a security control. The phase registry already classifies pre, post, and unphased, and already exists for a host to register against. Reading it means a new hook is covered by declaring what it is, rather than by editing this feature.
+- **Direction derives from the hook's registered phase, not a list of hook names.** Hook types are open, so any fixed list silently fails to fire for a host that declares its own hook, which is a fail-open in a security control. The phase registry classifies pre, post, and unphased, and exists for a host to register against. Reading it means a new hook is covered by declaring what it is, rather than by editing this feature. #42 is the case in point: the generic-HTTP pair arrived after this document, carrying `Pre` and `Post` rows, and R22 covers it with no amendment. An earlier draft of this decision named `cmf.http_request` and `cmf.http_response`; those names no longer exist, which is the argument for not naming any.
+
+- **A dispatch path with no hook name is reported, not guessed at.** Two of the engine's four entry points cannot name the hook they dispatch: one takes a caller-resolved entry list, the other keys on the hook family rather than the hook. Deriving a direction there would mean guessing, and a guess in this control fails open in one direction and mangles a response in the other. Applying nothing is the honest answer; R31 makes it visible so an operator is not left inferring it from an absent header. The alternative, changing those signatures, reaches across the host boundary and is out of scope here.
+
+- **Reachability is a first-class requirement, not an implementation note.** #42 made a per-path contract expressible, and in doing so made it conditional on the host putting the request line on the extensions at each invocation. A contract that quietly degrades to the global one is indistinguishable from one that is working, and the response half is the one a host is most likely to leave bare. The tree already set the precedent for making exactly this loud: the identity hook warns once when an `http:` route's `authentication:` list could not apply for the same reason. R29 and R30 follow it rather than inventing a mechanism.
 
 - **Slot paths over capability names as the source vocabulary.** The literal reading of the issue would put capability names in entries, which is unusable and, worse, ill-defined: `build_filtered_subject` includes id and subject type under any subject access while gating the other sub-fields individually, and `has_read_access` makes a sub-capability imply the parent. So the capabilities are not a tree and cannot express nesting. Slot paths nest correctly. The capability model stays the enforcement mechanism behind them, which is the part of the issue's intent that matters: no parallel set of names is invented.
 
@@ -186,10 +213,10 @@ Issue #28 states criteria for the request direction only. The response direction
 
 - **Exclusions fixed in code, with no config surface to extend them.** The failure modes are asymmetric. An operator-maintained list leaks by omission when a new credential slot is added and some deployment's list was not updated. A fixed set requires an affirmative edit to a security-sensitive constant. An additive operator list was drafted and cut: it carries no runtime behavior, since R7 already governs propagation; it blocks a slot path rather than semantics, so excluding `subject.permissions` while asserting `claim.scope` reads as a guarantee it does not provide; and under R25 a route replacing the block would drop a global exclusion silently. R6 and R4 meet the issue's criteria without it.
 
-- **Wire headers join the excluded set in both directions.** The issue lists neither. A uniform source vocabulary makes an inbound header addressable, and rendering a client-supplied header into a trusted upstream header is the exact laundering this design exists to prevent. The response direction has the mirror hazard: an upstream that controls a response header must not be able to aim it at what the client trusts.
+- **Wire headers join the excluded set in both directions; the request line is merely out of grammar.** The issue lists neither. A uniform source vocabulary makes an inbound header addressable, and rendering a client-supplied header into a trusted upstream header is the exact laundering this design exists to prevent. The response direction has the mirror hazard: an upstream that controls a response header must not be able to aim it at what the client trusts. The request line is a different case, and R32 keeps the two distinct: `path` and `method` are host-populated, and `host` the host is required to take from a validated authority, so they are not credentials being laundered. They are just not sources yet, and an entry naming one should read as an unknown path rather than as a refusal, because admitting them later is a grammar addition and not a policy reversal.
 
-- **Writing the header map over emitting a new typed slot.** Merging the http slot already replaces both header maps wholesale, which is what makes R20 atomic in either direction, and praxis applies that result today. This ships without a coordinated praxis change. The cost is that rendering happens inside PPE and the result is not distinguishable from another header write at the wire; R27's artifact covers the audit need instead.
+- **Four levels, still one winner.** #55 put an entity-type default between global and the bundles, so the ladder is global, entity default, bundle, route. That changes how many rungs R25 resolves over and nothing about how it resolves: a header set is a contract with one counterparty, and splicing one level's mapping into another's produces a set nobody designed. Resolving per direction means a route can state its own `response:` without restating the inherited `request:`. Bundles carry it because several routes fronting one upstream is the ordinary case, and entity defaults carry it because "every tool route" is the next most common scope after "everything". This is deliberately unlike `authentication:`, which stacks its four layers and honors a `replace_inherited` flag at each; review argues additive is the right default here too, on the grounds that a union of allowlists can only weaken the global floor. That challenge is open and is recorded in the plan rather than settled here.
+
+- **Writing the header map over emitting a new typed slot.** Merging the http slot replaces both header maps wholesale, which is what makes R20 atomic in either direction, and praxis applies that result today. This ships without a coordinated praxis change. The cost is that rendering happens inside PPE and the result is not distinguishable from another header write at the wire; R27's artifact covers the audit need instead.
 
 - **Removal is a wire operation, not a visibility one.** It happens after the policy phase, so policy reads wire headers exactly as it does today. That keeps existing rules working, and lets an author deny a request that arrived carrying a target header name at all. The cost is a footgun: a value under `http.request_headers.x-auth-user-id` looks authoritative and is not. Stripping before the engine would close that, at the price of making spoof-detection impossible and silently changing what existing policies see.
-
-- **One contract wins whole, at whichever level declares it, resolved per direction.** A header set is a contract with one counterparty; splicing a global mapping into a route's produces a set nobody designed. That rules out stacking, not levels, so global, group, and route each declare a complete contract and the most specific present wins. Resolving per direction means a route can state its own `response:` without restating the global `request:`. Groups carry it because several routes fronting one upstream is the ordinary case. This is deliberately unlike `authentication:`, which concatenates its layers; review argues additive is the right default here too, on the grounds that a union of allowlists can only weaken the global floor. That challenge is open and is recorded in the plan rather than settled here.

@@ -1,12 +1,13 @@
 ---
-title: "feat: Assertions config for what reaches upstream as request headers"
+title: "feat: Assertions config for what reaches upstream as request and response headers"
 type: feat
 status: draft
 date: 2026-08-24
+revised: 2026-08-30
 origin: docs/brainstorms/2026-08-23-upstream-header-projection-requirements.md
 ---
 
-# feat: Assertions config for what reaches upstream as request headers
+# feat: Assertions config for what reaches upstream as request and response headers
 
 ## Summary
 
@@ -23,10 +24,27 @@ coordinated praxis change.
 The two directions do not share semantics. Request is an allowlist; response is a denylist
 over a protocol floor fixed in code (D7).
 
-Two things carry most of the risk. `PolicyEngine::invoke` has early returns that bypass the
-executor entirely, and an always-on security control must fire on those paths too. And the
-call sites cannot currently name the hook they are dispatching, so nothing there can resolve
-a direction at all. U7 exists mostly to close both.
+Three things carry most of the risk.
+
+`PolicyEngine` has **four** pipeline entry points with **fourteen** return points between
+them, and an always-on security control must fire on all of them. Two of the four cannot
+name the hook they dispatch, so no direction is derivable there at all (D8, U7).
+
+A contract on an `http:` route is reachable only when the host supplies the request line at
+that invocation, and a response invocation is where a host is most likely not to. Silent
+degradation to the global contract is the failure mode, and U12 exists to make it loud.
+
+And the config model now has four inheritance levels and a closed key table per scope, so
+adding a block is a change to the key model rather than one struct (D9, U2).
+
+**Revised 2026-08-30.** This plan was written against a tree that has since moved three
+times. Every line reference below is re-verified against the current checkout.
+
+| Landed | What it changed here |
+|---|---|
+| [#38](https://github.com/praxis-proxy/policy/pull/38) | The hook phase authority D3 reads. Merged; no longer a pending dependency. |
+| [#42](https://github.com/praxis-proxy/policy/pull/42) | `http:` route selector and an `http.*` hook family. U4's "L7 resolves only global" limitation is gone; the reachability hazard U12 covers replaces it. `cmf.http_request` / `cmf.http_response` no longer exist. |
+| [#55](https://github.com/praxis-proxy/policy/pull/55) | Four inheritance levels, `ConfigKey` tables per scope, `resolve_route` replacing `find_matching_route`, `invoke_by_name` as a fourth entry point, `dispatch: policy` as the default. |
 
 ---
 
@@ -49,18 +67,27 @@ This is `CONTRIBUTING.md`'s rule.
 
 **2. Keep comments and rustdoc short.** One or two sentences per item. No em dashes; use
 a comma, a colon, or a second sentence. No restating the signature in prose. Rationale
-earns its place where the code looks wrong without it — in this work that is the
-unconditional strip (U6) and the early-return call sites (U7), and little else.
-`missing_docs` and `missing_errors_doc` are denied workspace-wide, so every public item
-needs a doc line; meeting the lint is not a reason to pad it.
+earns its place where the code looks wrong without it: in this work that is the
+unconditional strip (U6), the fourteen return sites (U7), and the two entry points that
+apply nothing (D8). `missing_docs` and `missing_errors_doc` are denied workspace-wide, so
+every public item needs a doc line; meeting the lint is not a reason to pad it.
 
 **3. Commits.** `git commit -s` on every commit. No AI attribution trailers. Conventional
 commit style, imperative subject, body only when the reason is not obvious from the diff.
 
-**4. Reject unknown keys.** Every config struct added here carries
-`#[serde(deny_unknown_fields)]`. PR #31 shipped this as a breaking change after a
-misspelled `audiences` silently disabled audience checking. A misspelled header name here
-silently disables a projection, which is the same class of failure.
+**4. Register every new key in the key model, not only on the struct.** #55 replaced
+per-struct field rejection with a closed table per config scope (`ConfigScope`,
+`config.rs:1279`). A key absent from its scope's table is a load error naming what the scope
+accepts, which is stronger than `deny_unknown_fields` and is where an operator's typo is
+actually caught. So `assertions` needs a `structural_key("assertions", KeyOwner::Core)` row
+in `GLOBAL_STRUCTURAL_KEYS`, `BUNDLE_STRUCTURAL_KEYS` and `ROUTE_STRUCTURAL_KEYS`, and the
+blocks nested under it need `ConfigScope` variants of their own with tables to match.
+`#[serde(deny_unknown_fields)]` still goes on every struct as the second line of defence;
+it is no longer the first. `crates/ppe-core/tests/config_key_sets.rs` is the test that walks
+the whole model and must grow with it.
+
+The reason this matters is the one PR #31 shipped: a misspelled `audiences` silently
+disabled audience checking. A misspelled header name here silently disables a projection.
 
 ---
 
@@ -82,7 +109,7 @@ emitted. See origin for the full framing.
 
 Restated from origin. Cited by unit below.
 
-- R1. The block is `assertions:`, beside `authentication:` at global, group, and route level, holding `request:` and `response:`, each a contract with `headers:` and `strip:`.
+- R1. The block is `assertions:`, beside `authentication:` at all four levels (`global:`, `global.defaults.<entity>:`, `groups.<name>:`, a `routes[]` entry), holding `request:` and `response:`, each a contract with `headers:` and `strip:`.
 - R2. An entry under `headers:` names its target header and takes either one source or a set of named members, never both.
 - R3. Sources are slot paths; the engine maps each to the capability gating that slot.
 - R4. A claim source names one claim; a bare claim root is not a valid source.
@@ -99,85 +126,159 @@ Restated from origin. Cited by unit below.
 - R15. A source resolving to nothing omits its header. Default.
 - R16. An entry may instead deny the request, under the claim map's spelling and denial code family.
 - R17. Omission never leaves a header from the wire in place.
-- R18. Every header an entry targets is removed from the corresponding wire map before injection, unconditionally: the client's request in the request direction, the upstream's response in the response direction.
+- R18. Every header an entry targets is removed from the corresponding wire map before injection, unconditionally.
 - R19. `strip:` accepts further header names and glob prefixes.
 - R20. Removal and injection are one replacement of the corresponding header map.
 - R21. Removal matches header names case-insensitively.
-- R22. Direction derives from the hook's registered phase: pre applies `request:`, post applies `response:`, unphased applies neither.
+- R22. Direction derives from the hook's registered phase: pre applies `request:`, post applies `response:`, unphased applies neither. Covers the MCP entity hooks and the generic-HTTP pair without naming either.
 - R23. Removal and injection happen after that phase's policy evaluation; policy reads wire headers unchanged.
 - R24. On an already-denied pipeline, request removal happens and injection does not; R16 is not evaluated. The response direction does not run at all.
-- R25. A direction's contract is whole; contracts never merge. Global, group, and route may each declare one, resolved per direction, most specific present in force. A route joining two groups declaring the same direction fails at config load.
-- R26. R6, R9, and R18 hold at every level.
-- R27. The engine renders the effective policy as one artifact covering both directions, the source exclusions, the response floor, the removal sets, and the phase each direction fires on.
+- R25. A direction's contract is whole; contracts never merge. Four levels may each declare one, resolved per direction, most specific present in force: route, else bundle, else entity default, else global. A route joining two bundles declaring the same direction fails at config load.
+- R26. R6, R9, R18 and R32 hold at every level.
+- R27. The engine renders the effective policy as one artifact covering both directions, the source exclusions, the response floor, the removal sets, the phase each direction fires on, the dispatch paths R31 leaves uncovered, and per level which traffic that level reaches.
 - R28. With no `assertions:` block, nothing is asserted and nothing is removed in either direction.
+- R29. A contract on an `http:` route is in force only when the host supplies the request line on the HTTP extension at that invocation. Absent it, the global contract governs, and the engine reports once, naming the routes.
+- R30. Both halves of one HTTP exchange resolve their contract from the request line. A response invocation with no request line falls to the global `response:`, reported under R29.
+- R31. A dispatch path that cannot name the hook applies neither contract, and the artifact names those paths.
+- R32. The request line and response status are not addressable as sources. An entry naming one fails under R5, not R6.
 
 ---
 
 ## Context & Research
 
-### The integration points, verified against the tree
+### The integration points, verified against the tree at `75e33fd`
 
 | Concern | Location | Note |
 |---|---|---|
-| Route matching by entity | `crates/ppe-core/src/config.rs:1051` `find_matching_route` | Specificity + scope. Private; U4 reuses it in-module. |
-| Per-hook route config resolution | `crates/ppe-core/src/config.rs:952` `resolve_identity_plugins_for_route` | Structural template for U4, but it stacks its layers where U4 selects one. |
-| Pipeline entry points | `engine.rs:1070` `invoke`, `:1143` `invoke_named`, `:1231` `invoke_entries` | All return `(PipelineResult, BackgroundTasks)`. |
+| Route matching | `config.rs:3064` `resolve_route`, `:3097` `score_route_match` | Replaces the private `find_matching_route`. **Public**, and takes a `RouteQuery`. Matches `ENTITY_HTTP` in its own arm. |
+| Route query / result | `config.rs:2721` `RouteQuery`, `:2733` `named`, `:2745` `http`, `:2757` `with_scope`; `:2763` `MatchedRoute` | `MatchedRoute` carries the route and the selector name it resolved under. |
+| Per-hook route config resolution | `config.rs:2942` `resolve_identity_plugins_for_route` | Now takes `Option<&MatchedRoute>` rather than matching internally. This is U4's signature template, and better than the old one: the caller matches once. It stacks its layers where U4 selects one. |
+| The four inheritance levels | `config.rs:2863` `authentication_layers`, `:2819` `AuthenticationSource` | `Global`, `EntityDefault(entity)`, `Bundle(tag)`, `Route`, in stacking order. `label()` at `:2834` is how a diagnostic names each. |
+| Bundle membership | `config.rs:2546` `route_static_tags` (private), `:2568` `route_bundle_names` (public, deduped) | `meta.tags` then `groups:`, declaration order. Order is load-bearing. |
+| Route identity | `config.rs:2584` `route_entity_identity` | The one mapping from a route to the names it is known by. Precedence tool, resource, prompt, llm, http. |
+| Config scopes and key tables | `config.rs:1279` `ConfigScope`, `:1306` `ALL`, `:1194`-`:1245` the tables | Where guideline 4's rows go. `ConfigScope::keys()` at `:1339` composes structural + APL terms + field stages + wiring. |
+| Config-load validation | `config.rs:2170` `validate_config`, `:2109` `validate_declared_hooks`, `:2137` `reject_reserved_route_names` | U3 hooks in here. `validate_declared_hooks` is the precedent for a name-checking pass. |
+| Load-time findings, reported not fatal | `config.rs:2335` `http_routing_gaps` | Returns `Vec<String>`; the engine emits them once per load. Exactly U12's shape, and its test shape: assert on the finding, not on a log line. |
+| Runtime warn-once precedent | `engine.rs:2148` `warn_once_if_route_authentication_is_unreachable` | Fires when an `http:` route declares `authentication:` and the request carries no readable path. R29 is the same problem for a contract; U12 follows this. |
+| Snapshot-derived route facts | `engine.rs:142` `http_routes_declaring_authentication`, held at `:310` | Computed once at snapshot build so the hot path reads an answer. U12's equivalent list is derived the same way. |
+| Pipeline entry points | `engine.rs:1432` `invoke_by_name`, `:1528` `invoke`, `:1616` `invoke_named`, `:1723` `invoke_entries` | Four, not three. All return `(PipelineResult, BackgroundTasks)`. |
+| Route filtering | `engine.rs:1853` `filter_entries_by_route` | Where the HTTP request line is read and `resolve_route` is called. Runs *after* the first early return in each entry point. |
 | Executor | `executor.rs:298` `execute` | Returns `PipelineResult::allowed_with(...)`. |
-| Result shape | `executor.rs:77` `PipelineResult`, `:134` `allowed_with`, `:160` `denied` | `denied` takes violation + extensions + ctx table. |
-| Wholesale header replace | `extensions/container.rs:313-329` `merge_http` | Assigns `request_headers` and `response_headers` outright. This is why R20 is achievable. |
-| Header helpers | `extensions/http.rs:125,133` | `remove_header_ci`, `get_header_ci` exist but are bare `fn` under `// -- Internal helpers --`; reusing them from `assertions/apply.rs` requires promoting to `pub(crate)`. Note `remove_header_ci` removes exactly one matching key. |
-| Sorted collection rendering | `cmf/view.rs:429-439` | `roles.sort()` / `perms.sort()` / `teams.sort()`. Precedent for R12. |
-| Subject sub-field gating | `extensions/filter.rs:480-508` `build_filtered_subject` | Why capability names cannot be the source vocabulary. |
-| Credential slots | `extensions/raw_credentials.rs:431,438` | `inbound_tokens`, `delegated_tokens`. |
-| Denial code family | `builtins/plugins/identity-jwt/src/resolver.rs:43` | `auth.mapping_failed`. |
-| Hook phase authority | `hooks/metadata.rs:221` `BUILTIN_HOOK_METADATA`, read via `:241` `lookup` | Landed in #38. `lookup` returns `Option<HookMetadata>`; `:125` `permissive()` is the opt-in wildcard. |
-| How the authority is assembled | `hooks/metadata.rs:167` `HOOK_TABLES` → `concat_hook_tables` | Four per-module slices, each emitted by that module's `define_hooks!`, flattened in const context. A module left out of `HOOK_TABLES` makes every hook it owns unregistered at once. |
-| L7 hook pair | `cmf/constants.rs:158` `HOOK_CMF_HTTP_RESPONSE` | Landed in #38 as `ENTITY_HTTP` / `Post`, alongside the request half as `Pre`. |
-| Config-load normalization | `engine.rs:294` `normalize_and_validate`, called at `:530`, `:627`, `:782` | Landed in #38. Every load path now merges groups and validates, which U3 hooks into rather than re-plumbing. |
+| Result shape | `executor.rs:77` `PipelineResult`, `:134` `allowed_with`, `:160` `denied` | `denied` takes violation + extensions + ctx table, and constructs with `errors: Vec::new()` / `metadata: None`. |
+| Wholesale header replace | `extensions/container.rs:346` `merge_http` | Assigns `request_headers` and `response_headers` outright, which is why R20 is achievable. Now takes `Guarded<HttpExtension>` + `Option<&WriteToken>`, and preserves the request line and `status` from canonical. |
+| HTTP slot shape | `extensions/http.rs:22` `HttpExtension` | Gained `status`, `method`, `path`, `host`, `scheme`. R32 is about these. |
+| Header helpers | `extensions/http.rs:133` `get_header_ci`, `:141` `remove_header_ci` | Still bare `fn` under `// -- Internal helpers --`; reuse from `assertions/apply.rs` requires promoting to `pub(crate)`. `remove_header_ci` removes exactly one matching key. |
+| Glob dialect | `config.rs:604` `Pattern` (wildmatch) | What route entity matchers use. `http:` deliberately does *not*, matching by equality or segment prefix instead. U6 uses `Pattern`, since `strip:` matches header names and not paths. |
+| Sorted collection rendering | `cmf/view.rs:441,446,451` | `roles.sort()` / `perms.sort()` / `teams.sort()`. Precedent for R12. |
+| Subject shape | `extensions/security.rs:31` `SubjectExtension`, `:74` `claim_str` | Unchanged. `claim_str` returns `None` for objects and arrays, which is the scalar/structured split U5 needs. |
+| Subject sub-field gating | `extensions/filter.rs:500` `build_filtered_subject` | Why capability names cannot be the source vocabulary. |
+| Capabilities | `extensions/tiers.rs` `Capability` | `ReadSubject`, `ReadRoles`, `ReadTeams`, `ReadClaims`, `ReadPermissions`, `ReadHeaders`, `WriteHeaders`, `ReadInboundCredentials`, `ReadDelegatedTokens`. |
+| Credential slots | `extensions/raw_credentials.rs:431` `inbound_tokens`, `:438` `delegated_tokens` | R6's first two exclusions. |
+| Denial code family | `builtins/plugins/identity-jwt/src/resolver.rs:825` | `auth.mapping_failed`. |
+| Hook phase authority | `hooks/metadata.rs:187` `HOOK_TABLES`, `:241` `BUILTIN_HOOK_METADATA`, read via `:262` `lookup` | Landed in #38. `lookup` returns `Option<HookMetadata>`; `:144` `permissive()` is the opt-in wildcard. Thirteen rows. |
+| How the authority is assembled | `hooks/metadata.rs:187` `HOOK_TABLES` → `:217` `concat_hook_tables` | Five per-module slices now (`CMF`, `HTTP`, `IDENTITY`, `DELEGATION`, `ELICITATION`), flattened in const context. A module left out unregisters every hook it owns at once. |
+| Generic-HTTP hook pair | `http_hook.rs` `HOOK_HTTP_REQUEST` = `"http.request"` (`Pre`), `HOOK_HTTP_RESPONSE` = `"http.response"` (`Post`) | Landed in #42, in a family of their own with `HttpHook` / `HttpPayload`. The `cmf.http_*` names this plan used to cite are gone. |
+| HTTP route selector | `config.rs:373` `RouteEntry.http`, `:710` `HttpSelector`, `:721` `HttpMatch` | Three shapes: exact path, list of exact paths, `{path_prefix|path, method}`. Equality or segment-boundary prefix, never glob. |
+| Config-load normalization | `engine.rs:439` `normalize_and_validate`, called at `:816`, `:974`, `:1109` | Landed in #38. Every load path merges, folds bundles, and validates. U3 and U12 hook in rather than re-plumbing. |
 | Violation shape | `error.rs:215` `PluginViolation` | `code`, `reason`, `details`, `proto_error_code`. |
-| Fold precedent | `ppe-apl-runtime/src/candidate_constraint.rs` | Emitted state folded into a typed extension; called at `route_handler.rs:428`. |
+| Fold precedent | `ppe-apl-runtime/src/candidate_constraint.rs`, called at `route_handler.rs:551` and folded at `:681` | Emitted state folded into a typed extension. |
+| Key-model test | `crates/ppe-core/tests/config_key_sets.rs` | Walks `ConfigScope::ALL`. Guideline 4's gate. |
 
-### The early-return hazard
+### The early-return hazard, restated for four entry points
 
-`PolicyEngine::invoke` returns before the executor runs in two cases: no entries
-registered for the hook and no route annotations (`engine.rs:1082-1090`), and an empty
-entry list after route filtering (`engine.rs:1096-1101`). `invoke_named` and
-`invoke_entries` have their own equivalents.
+Every entry point returns before the executor on at least one path, and every one of those
+paths currently returns the caller's `Extensions` untouched.
 
-Every one of those paths currently returns the caller's `Extensions` untouched. A
-deployment whose route has no plugins on the request hook would therefore skip stripping
-entirely, and a client-supplied `x-auth-user-id` would reach the upstream. This is the
-single most likely way to ship this feature broken, because every one of those paths is
+| Entry point | Return sites |
+|---|---|
+| `invoke_by_name` (`:1432`) | `:1451` no entries and no annotations; `:1467` route resolution failed, denied; `:1479` entry list empty after filtering; tail `executor.execute` |
+| `invoke` (`:1528`) | `:1543`, `:1555`, `:1568`, tail |
+| `invoke_named` (`:1616`) | `:1639`, `:1651`, `:1664`, tail |
+| `invoke_entries` (`:1723`) | `:1732` empty entry list; tail |
+
+Fourteen sites. The plan previously named nine across three methods, so three of the new
+five are `invoke_by_name`'s and two are the denied-on-route-resolution-failure sites, which
+are new in kind: #42 made an unreadable HTTP path a denial rather than a fall-through
+(`engine.rs:1894-1901`), and a denial is a return.
+
+A deployment whose route has no plugins on the request hook still skips stripping entirely
+on the first site, and a client-supplied `x-auth-user-id` reaches the upstream. This remains
+the single most likely way to ship this feature broken, because every one of those paths is
 an *absence* of code rather than a wrong line.
 
-### Groups participate, by selection rather than stacking
+### Two entry points cannot name a hook
 
-`PolicyGroup` already carries `authentication:` (`config.rs:193-203`), stacked between
-global and route by `resolve_identity_plugins_for_route`. Stacking is what R25 forbids;
-levels are not. So `assertions:` resolves global, group, route with the most specific
-present winning whole, and nothing concatenates.
+`invoke_named` and `invoke_by_name` take `hook_name: &str`. `invoke::<H>` keys on `H::NAME`,
+which is the hook *family* (`"cmf"`, `"http"`, `"identity"`), so `lookup("http")` is `None`
+and no phase exists. `invoke_entries::<H>` takes a caller-resolved entry slice and no name at
+all.
 
-Groups matter here because several routes fronting one upstream is the ordinary case, and
-without a group each of them carries a copy of the same contract.
+`invoke_named` is what real hosts use, including for both generic-HTTP names, so the covered
+path is the one that matters. But the two hookless paths are not theoretical: the APL runtime
+dispatches `run(name)` steps through `invoke_entries`. D8 records why applying nothing there
+is the right answer and R31 makes it visible.
 
-The one new failure this introduces: a route joining two groups that both declare a block
+### Four levels participate, by selection rather than stacking
+
+`PolicyGroup` (`config.rs:234`) carries `authentication:` and deserializes for two scopes,
+`groups.<name>:` and `global.defaults.<entity>:`. `authentication_layers` stacks
+global, entity default, each bundle, then route, honoring `replace_inherited` at each.
+Stacking is what R25 forbids; levels are not. So `assertions:` resolves over the same four
+levels with the most specific present winning whole, and nothing concatenates.
+
+Bundles matter because several routes fronting one upstream is the ordinary case. Entity
+defaults matter because "every tool route" is the next scope up, and `global.defaults` now
+accepts `http` as a key too (`config.rs:2188-2199`), so "every generic-HTTP request" is
+expressible without being global.
+
+Top-level `groups:` is folded into `GlobalConfig.bundles` by `fold_groups_into_bundles`
+(`config.rs:1023`) at load, so every resolver reads one map. U4 reads `bundles`, not the
+document field.
+
+The one new failure this introduces: a route joining two bundles that both declare a block
 has two whole contracts and no principled winner. `authentication:` resolves that by
-concatenating; a contract cannot survive concatenation, so it is a config-load error.
-It is detectable at load because `route_static_tags` (`config.rs:835-842`) reads only
-`meta.tags` and the `groups:` sugar, both static — runtime tags do not participate, so
-there is no request-time ambiguity.
+stacking; a contract cannot survive concatenation, so it is a config-load error. It is
+detectable at load because `route_static_tags` reads only `meta.tags` and the `groups:`
+sugar, both static. Runtime tags contribute no bundle, so there is no request-time ambiguity.
 
-One consequence: there is no inheritance flag. `authentication:` needs
-`replace_inherited` because its layers accumulate. Nothing accumulates here, so there is
-nothing to opt out of.
+One consequence: there is no inheritance flag. `authentication:` needs `replace_inherited`
+because its layers accumulate. Nothing accumulates here, so there is nothing to opt out of.
 
-### Idempotence
+### The reachability hazard #42 introduced
 
-Strip-then-inject over the same `Extensions` is idempotent: a second application strips
-the headers the first injected (they are entry targets) and re-injects identical values.
-That makes double-application harmless for correctness. It is not a licence to leave the
-firing rule loose, because `on_missing: deny` would evaluate twice and the work is wasted,
-but it does mean an ordering mistake degrades to wasted cycles rather than a leak.
+This replaces the "L7 resolves only the global block" section, which is obsolete: `RouteEntry`
+has an `http:` selector and `resolve_route` matches it.
+
+An HTTP request resolves a route from `extensions.http.path` and `.method`
+(`engine.rs:1876-1918`). When the host supplies neither, `routing_config.zip(path)` yields
+`None`, `resolved_name` falls to `ENTITY_NAME_GLOBAL`, and the global contract governs.
+Nothing errors.
+
+Two properties make that worse than it sounds. The request and the response are separate
+invocations, so a host can supply the request line on one and not the other, and a route's
+`request:` then pairs with the global `response:` (R30). And `dispatch: policy` is now the
+default (`config.rs:91`), so `http:` routes resolve out of the box rather than behind an
+opt-in, which widens who can hit this.
+
+The tree already treats exactly this as worth reporting rather than accepting: `http_routing_gaps`
+reports at load that declared `http:` routes leave a gap, and
+`warn_once_if_route_authentication_is_unreachable` warns at runtime when an `http:` route's
+`authentication:` list could not apply for want of a path. U12 follows both.
+
+Two stale doc comments in the tree claim `dispatch: policy` "is not the default"
+(`http_hook.rs:31`, `config.rs:706`). They predate #55 flipping it. Not this work's to fix,
+but worth not copying into new prose.
+
+### Idempotence, now load-bearing
+
+Strip-then-inject over the same `Extensions` is idempotent: a second application strips the
+headers the first injected (they are entry targets) and re-injects identical values.
+
+This used to be a nice-to-have. It is now doing real work, because an HTTP-transported MCP
+tool call fires two `Pre` hooks: `http.request` and `cmf.tool_pre_invoke`. Both apply the
+request contract, and the second application is a no-op by construction. It is still not a
+licence to leave the firing rule loose, because `on_missing: deny` would evaluate twice and
+the work is wasted, but an ordering mistake degrades to wasted cycles rather than a leak.
 
 ---
 
@@ -188,34 +289,49 @@ but it does mean an ordering mistake degrades to wasted cycles rather than a lea
 must hold for hosts that never load APL, so it applies in `PolicyEngine` after the
 executor returns. Cost: `ppe-core` grows a rendering module it did not have.
 
-**D2. One shared applier, called at every return point.** Rather than wrapping the three
-`invoke*` methods, add a private `fn apply_assertions(&self, snapshot: &RuntimeSnapshot,
-hook_name: &str, result: PipelineResult) -> PipelineResult` and call it at every point each
-method can return from. The snapshot carries the `PolicyConfig` the block resolves from; the
-hook name is what D3's phase lookup turns into a direction.
-U7 enumerates them and adds a test per site. A wrapper that only covers the happy path is
-the failure mode this decision exists to prevent.
+**D2. One shared applier, called at every return point.** Rather than wrapping the entry
+points, add a private
+`fn apply_assertions(&self, snapshot: &RuntimeSnapshot, hook_name: Option<&str>,
+matched: Option<&MatchedRoute<'_>>, result: PipelineResult) -> PipelineResult`
+and call it at every one of the fourteen sites. The snapshot carries the `PolicyConfig` the
+block resolves from; `hook_name` is what D3's phase lookup turns into a direction, and
+`None` means D8 applies nothing; `matched` is the route the caller already resolved, or
+`None` where it has not resolved one yet.
+
+U7 enumerates the sites and adds a test per site. A wrapper that only covers the happy path
+is the failure mode this decision exists to prevent.
+
+`matched` is threaded rather than re-derived because `filter_entries_by_route` already
+computes it and the route cache (`engine.rs:343`) caches entry lists, not `MatchedRoute`.
+Re-resolving would be a second table walk per request for an answer already in hand. The
+first return site in each entry point runs before matching, so it passes `None` and U4
+resolves the global contract, which is correct: no route matched there either.
 
 **D3. Direction comes from the hook's registered phase, not from a list of hook names.**
-Implemented by [#38](https://github.com/praxis-proxy/policy/pull/38), which this work now depends
-on. `hooks/metadata.rs` holds the authority as `HOOK_TABLES`, flattened at compile time from
-per-module slices that `define_hooks!` emits alongside each hook's constant, so a hook without a
-phase row cannot be declared. `lookup` returns `Option<HookMetadata>`, so an unregistered hook is
-distinguishable from a deliberately unphased one.
+`hooks/metadata.rs` holds the authority as `HOOK_TABLES` (`:187`), flattened at compile time
+from five per-module slices that `define_hooks!` emits alongside each hook's constant, so a
+hook without a phase row cannot be declared. `lookup` (`:262`) returns
+`Option<HookMetadata>`, so an unregistered hook is distinguishable from a deliberately
+unphased one.
 
-Read it: a `Pre` hook applies `request:`, a `Post` hook applies `response:`, `Unphased` applies
-neither, and `None` applies neither. Identity, delegation and elicit are the `Unphased` set;
-mapping them to no contract is correct, since none of them is a wire boundary.
+Read it: a `Pre` hook applies `request:`, a `Post` hook applies `response:`, `Unphased`
+applies neither, and `None` applies neither. Identity, delegation and elicit are the
+`Unphased` set; mapping them to no contract is correct, since none of them is a wire
+boundary.
 
-Two earlier drafts of this decision were wrong. The first hardcoded `cmf.tool_pre_invoke` and
-`tool_pre_invoke`, missing the CMF prompt, resource and llm hooks. The second claimed the phase
-registry already covered everything, when the table was missing `cmf.http_request` and `elicit`
-and the legacy names it appeared to cover were never dispatched at all. Both are closed by #38
-rather than by anything here.
+Three earlier drafts of this decision were wrong, and the third is the argument for the
+current one. The first hardcoded `cmf.tool_pre_invoke` and `tool_pre_invoke`, missing the
+CMF prompt, resource and llm hooks. The second claimed the phase registry already covered
+everything, when the table was missing `cmf.http_request` and `elicit`. The third named
+`cmf.http_request` / `cmf.http_response` as the L7 pair; #42 deleted both names and
+introduced `http.request` / `http.response` in a family of their own. Reading the phase meant
+that landed as a table row and cost this plan nothing, which is precisely the property the
+decision was chosen for.
 
-The residual gap is now small: a host declaring its own hook must register phase metadata for it
-(`register_hook_metadata`), and #38 validates declared hook names at config load, so a hook a
-plugin names without metadata fails loudly rather than silently getting no contract.
+The residual gap is small and is now two gaps. A host declaring its own hook must register
+phase metadata for it (`register_hook_metadata`, `:286`), and #38 validates declared hook
+names at config load, so a hook a plugin names without metadata fails loudly. The second
+gap is D8's, and is not closable by registration.
 
 **D4. Sources are slot paths; capabilities are the enforcement mapping.** `subject.roles`,
 not `read_roles`. `build_filtered_subject` gates sub-fields individually while
@@ -225,7 +341,9 @@ tree and cannot express nesting. See origin's Key Decisions.
 **D5. Render to strings inside PPE.** `HttpExtension.request_headers` is
 `HashMap<String, String>`, so R11's guarantee is about not flattening on the *read* side:
 a claim holding `["a"]` renders as the JSON array `["a"]`, distinguishable from a claim
-holding the string `"[\"a\"]"`, which renders as `"[\"a\"]"`.
+holding the string `"[\"a\"]"`, which renders as `"[\"a\"]"`. `SubjectExtension::claim_str`
+(`extensions/security.rs:74`) already draws the scalar/structured line the renderer needs:
+it returns `None` for objects and arrays rather than handing back JSON text.
 
 **D6. A missing `http` slot is a no-op, not an error.** Non-HTTP transports have no header
 map. The projection skips; `on_missing: deny` does not fire, because the entry was never
@@ -241,6 +359,31 @@ client breaks. So `response.strip:` removes what it names and everything else pa
 floor fixed in code that a greedy glob cannot reach (U11). Cost: two mental models in one
 block, which U10 has to make legible.
 
+**D8. A dispatch path with no hook name applies neither contract, and says so.** `invoke::<H>`
+keys on the hook family and `invoke_entries::<H>` on nothing, so neither yields a phase.
+Three options were considered.
+
+Guessing a direction from `H::NAME` fails open on the request half and mangles a response on
+the other, and there is no signal to guess from: `HttpHook` serves both `http.request` and
+`http.response`.
+
+Changing the signatures to carry a hook name reaches across the host boundary, breaks every
+`invoke_entries` caller including the APL runtime's `run(name)` dispatch, and is a larger
+change than this feature.
+
+Applying nothing, and naming those paths in R27's artifact, is what ships. It is honest about
+coverage and leaves the door open: a later signature change turns two uncovered paths into
+covered ones with no config change, exactly as #42's new hooks were covered by D3. The cost
+is real. A host that dispatches only through `invoke_entries` gets no contract at all, which
+is why the artifact has to say so rather than the operator inferring it from an absent header.
+
+**D9. Adding a key is a change to the key model.** #55 made every config scope carry a closed
+table (`ConfigScope::keys()`, `config.rs:1339`), and the tables are the accept set. So U2's
+work is three table rows plus new `ConfigScope` variants for the nested blocks, and
+`config_key_sets.rs` grows to walk them. The alternative, relying on `deny_unknown_fields`
+alone, gives a worse message and skips the model the rest of the config is validated by.
+Cost: a new key touches four places instead of one. That is the trade #55 made deliberately.
+
 ---
 
 ## Scope Boundaries
@@ -252,11 +395,15 @@ block, which U10 has to make legible.
 - A first-class tenant field on `SubjectExtension`.
 - Conditional assertion gated on an evaluated predicate.
 - An operator-authored exclusion list. Rejected in origin's Key Decisions.
+- Making the request line addressable as a source (R32).
+- Giving `invoke` and `invoke_entries` a hook name (D8).
+- Fixing the two stale `dispatch:` doc comments. Noted above, separate change.
 
 ### Deferred to follow-up
 
 - Sources beyond identity (`agent.*`, `labels`, `delegation.*`). The grammar admits them once U1 maps their paths; no entry ships in this work.
 - A non-header transport under `assertions:`.
+- A contract on the `all` reserved bundle, which applies to every request unconditionally. It resolves as a bundle today; whether it should outrank an entity default is a layering question R25 does not answer.
 
 ---
 
@@ -267,7 +414,7 @@ block, which U10 has to make legible.
 **Goal:** A `SourcePath` that parses an authored string into an addressable slot and
 resolves it against `&Extensions` to an `Option<serde_json::Value>`.
 
-**Requirements:** R3, R4, R5, R6
+**Requirements:** R3, R4, R5, R6, R32
 
 **Dependencies:** None
 
@@ -285,17 +432,24 @@ resolves it against `&Extensions` to an `Option<serde_json::Value>`.
 - The excluded set is a separate match arm returning a distinct error kind:
   `raw_credentials.*`, `http.request_headers.*`, `http.response_headers.*` and any prefix of
   them. Response headers are excluded for the mirror reason inbound ones are: an upstream
-  that controls a response header must not be able to aim it at what the client trusts. The message says the source is never
-  usable, not that it is unknown (R6's "distinguishing it from an unaddressable path").
-- `fn capability(&self) -> Capability` so the capability model stays the authority (R3).
-  Not used for gating in this work — the engine writes canonical state — but it is the
-  mapping D4 promises and the artifact in U8 prints it.
+  that controls a response header must not be able to aim it at what the client trusts. The
+  message says the source is never usable, not that it is unknown (R6's "distinguishing it
+  from an unaddressable path").
+- The request line and status (`http.method`, `http.path`, `http.host`, `http.scheme`,
+  `http.status`) fall through to the *unaddressable* arm, not the never-usable one (R32).
+  They are host-populated rather than credential-bearing, and admitting them later should be
+  a grammar addition rather than a reversal of a security refusal. A test pins which arm each
+  lands in, because the `http.` prefix makes it easy to lump them together by accident.
+- `fn capability(&self) -> Capability` so the capability model stays the authority (R3),
+  mapping to the variants in `extensions/tiers.rs`. Not used for gating in this work, since
+  the engine writes canonical state, but it is the mapping D4 promises and U8 prints it.
 - Resolution returns `Value` so structure survives (R11). Collections resolve to
   `Value::Array` with elements sorted (R12) at resolution, not at render, so every caller
   gets the stable order.
 
-**Patterns to follow:** `extensions/filter.rs:480-508` for which sub-fields exist under
-each slot; `builtins/plugins/identity-jwt/src/config.rs` `build()` for
+**Patterns to follow:** `extensions/filter.rs:500` `build_filtered_subject` for which
+sub-fields exist under each slot; `extensions/security.rs:74` `claim_str` for the
+scalar/structured split; `builtins/plugins/identity-jwt/src/config.rs` `build()` for
 `Result<_, String>` errors a caller wraps.
 
 **Test scenarios:**
@@ -307,16 +461,17 @@ each slot; `builtins/plugins/identity-jwt/src/config.rs` `build()` for
 - Error: Covers R5. `subject.nonexistent`, `nonsense`, `` all rejected naming the path.
 - Error: Covers R4. bare `claim` rejected with the claim-root message, not the unknown-path message.
 - Error: Covers R6. `raw_credentials.inbound`, `raw_credentials.delegated`, `raw_credentials`, `http.request_headers.x-user`, `http.request_headers`, `http.response_headers.x-backend`, `http.response_headers` each rejected with the never-usable message; a test asserts the two error kinds are distinguishable.
+- Error: Covers R32. `http.path`, `http.method`, `http.host`, `http.scheme`, `http.status` and bare `http` each rejected with the *unaddressable* message, and a test asserts they do not share the never-usable kind.
 
-**Verification:** Every arm of the grammar has a test. The floor test enumerates the
-excluded set explicitly so adding a slot without considering it fails.
+**Verification:** Every arm of the grammar has a test. The excluded-set test enumerates the
+set explicitly so adding a slot without considering it fails.
 
 ---
 
-- U2. **Config types**
+- U2. **Config types and key-model rows**
 
-**Goal:** `AssertionsConfig` deserializing the `assertions:` block, wired into
-`GlobalConfig` and `RouteEntry`.
+**Goal:** `AssertionsConfig` deserializing the `assertions:` block, wired into the four
+levels and registered in the config key model.
 
 **Requirements:** R1, R2, R13, R15, R16, R19, R25
 
@@ -324,7 +479,8 @@ excluded set explicitly so adding a slot without considering it fails.
 
 **Files:**
 - Create: `crates/ppe-core/src/assertions/config.rs`
-- Modify: `crates/ppe-core/src/config.rs` (fields on `GlobalConfig`, `RouteEntry`)
+- Modify: `crates/ppe-core/src/config.rs` (fields on `GlobalConfig`, `PolicyGroup`, `RouteEntry`; key tables; `ConfigScope`)
+- Modify: `crates/ppe-core/tests/config_key_sets.rs`
 
 **Approach:**
 - `AssertionsConfig { request: Option<DirectionBlock>, response: Option<DirectionBlock> }`,
@@ -339,21 +495,35 @@ excluded set explicitly so adding a slot without considering it fails.
   `deny_unknown_fields` covers it, but the error message untagged produces is poor, so a
   custom `expecting` is worth the few lines.
 - `OnMissing { Omit, Deny }`, default `Omit` (R15). Spelling matches the claim map.
-- `#[serde(deny_unknown_fields)]` on every struct here.
-- Fields land as `Option<AssertionsConfig>` on `GlobalConfig`, `PolicyGroup`, and
-  `RouteEntry`, named `assertions` in Rust and in YAML, so no `rename` is needed.
+- Fields land as `Option<AssertionsConfig>` named `assertions` on `GlobalConfig`
+  (`config.rs:200`), `PolicyGroup` (`:234`, which covers both `groups.<name>:` and
+  `global.defaults.<entity>:`), and `RouteEntry` (`:351`). One field on `PolicyGroup` gives
+  two of the four levels, which is why the level count costs less than it reads.
+- **Key model (D9, guideline 4).** Add `structural_key("assertions", KeyOwner::Core)` to
+  `GLOBAL_STRUCTURAL_KEYS` (`:1204`), `BUNDLE_STRUCTURAL_KEYS` (`:1217`) and
+  `ROUTE_STRUCTURAL_KEYS` (`:1233`). Add `ConfigScope` variants for the nested blocks with
+  their own tables: the `assertions:` object (`request`, `response`), a direction block
+  (`headers`, `strip`), and a header entry (`name`, `from`, `members`, `on_missing`,
+  `encode`). Extend `ConfigScope::ALL` and each match in `label()` and `keys()`; the array's
+  length is written out, so a missing variant fails to compile rather than silently dropping
+  a scope.
+- `#[serde(deny_unknown_fields)]` on every struct here as the second line of defence.
 - No `replace_inherited` flag: nothing accumulates, so there is nothing to opt out of.
 
 **Test scenarios:**
 - Happy: the worked config round-trips. Vendor it into the repository first as
-  `crates/ppe-core/tests/fixtures/assertions_worked_example.yaml` and point this scenario and
-  U9's worked-example scenario at that path. `.sketchpad/` is gitignored (`.gitignore:24`), so a
-  fixture read from there fails on any clean checkout and in CI.
+  `crates/ppe-core/tests/fixtures/assertions_worked_example.yaml`, beside the existing
+  `legacy-policy-document.yaml`, and point this scenario and U9's worked-example scenario at
+  that path. `.sketchpad/` is gitignored (`.gitignore:27`), so a fixture read from there
+  fails on any clean checkout and in CI.
 - Happy: `on_missing` absent defaults to omit; present as `deny` parses.
-- Edge: `assertions:` absent leaves `None` at all three levels (R28); `assertions:` present with only `request:` leaves `response:` as `None`, and the reverse.
+- Edge: `assertions:` absent leaves `None` at all four levels (R28); present with only `request:` leaves `response:` as `None`, and the reverse.
 - Edge: `headers: []` and `strip: []` parse as empty, distinct from absent.
+- Edge: a block under `global.defaults.http:` parses, since `http` is an accepted entity-default key.
 - Error: an entry with both `from:` and `members:` fails, and the message names the entry's header.
-- Error: a misspelled key (`header:`, `form:`, `stip:`) fails rather than being ignored.
+- Error: a misspelled key (`header:`, `form:`, `strp:`, `assertion:`) fails naming what the scope accepts, via the key table rather than via serde. Each deliberate misspelling a test uses as input needs a row in `typos.toml`, which already carries a block of them for exactly this reason.
+- Error: `assertions:` under `engine_settings:` fails, since that scope's table does not carry it.
+- Key model: `config_key_sets.rs` covers the new scopes, so a variant added without a table fails.
 
 ---
 
@@ -361,48 +531,57 @@ excluded set explicitly so adding a slot without considering it fails.
 
 **Goal:** Every configuration error surfaces at load, naming what is wrong.
 
-**Requirements:** R5, R6, R9, R13, R25
+**Requirements:** R5, R6, R9, R13, R25, R32
 
-**Dependencies:** U1, U2
+**Dependencies:** U1, U2, U11
 
 **Files:**
 - Modify: `crates/ppe-core/src/assertions/config.rs`
-- Modify: `crates/ppe-core/src/engine.rs` (`load_config` / `from_config` call site)
+- Modify: `crates/ppe-core/src/config.rs` (`validate_config`)
 
 **Approach:**
 - `AssertionsConfig::validate(&self) -> Result<(), String>` run over every declared block
-  during config load, at all three levels, before any request is served.
-- Hook into `validate_config` (`config.rs`), which #38 already reaches from every load path via
-  `normalize_and_validate` and which now carries `validate_declared_hooks` as the precedent for
-  a name-checking pass. No new plumbing.
-- Checks: each source parses (U1 surfaces R5 and R6); a collection-valued source with no
-  `encode:` on a single-value entry is rejected (R13); duplicate header names within one
+  during config load, at all four levels, before any request is served.
+- Hook into `validate_config` (`config.rs:2170`), which `normalize_and_validate`
+  (`engine.rs:439`) reaches from every load path, and which carries `validate_declared_hooks`
+  (`:2109`) as the precedent for a name-checking pass. No new plumbing.
+- Checks: each source parses (U1 surfaces R5, R6 and R32); a collection-valued source with
+  no `encode:` on a single-value entry is rejected (R13); duplicate header names within one
   block are rejected; a header name that is not a valid HTTP field name is rejected.
-- Cross-block check: a route whose static tags name two groups that both declare the *same
-  direction* is rejected, naming the route, the direction, and both groups (R25). Two groups
-  declaring different directions is legal. This runs over the whole `PolicyConfig`, so it is
-  a separate function from `validate`.
+- Cross-block check: a route whose static tags name two bundles that both declare the *same
+  direction* is rejected, naming the route, the direction, and both bundles (R25). Read
+  membership through `route_bundle_names` (`:2568`), which is deduped and public, so a name
+  written in both `meta.tags` and `groups:` is one membership rather than a false conflict.
+  Two bundles declaring different directions is legal. This runs over the whole
+  `PolicyConfig`, so it is a separate function from `validate`.
+- An entity default and a bundle both declaring the same direction is *not* an error: they
+  are different rungs and R25 orders them. Only two bundles are unordered.
 - Response-only check: a `response.strip:` entry whose literal name or glob would match any
   member of the protocol floor is rejected, naming the floor header it would have removed
   (R9). Checked against the floor constant from U11, so the two cannot drift.
-- Errors name the block (global, or the route's matcher) and the header entry, since a
-  bare path is not locatable in a large config.
+- Errors name the level (`global`, `global.defaults.<entity>`, `groups.<name>`, or the
+  route's display name) and the header entry, since a bare path is not locatable in a large
+  config. `AuthenticationSource::label()` (`:2834`) is the existing spelling for the first
+  three; `route_display_name` (`:3042`) for the fourth. Reuse both rather than inventing a
+  second vocabulary for the same four levels.
 - Members entries do not need `encode:` — a JSON object holds arrays natively (R10).
 
 **Test scenarios:**
-- Error: Covers R6. A global block naming `raw_credentials.inbound` fails `load_config`, and the error names both the block and the header.
+- Error: Covers R6. A global block naming `raw_credentials.inbound` fails `load_config`, and the error names both the level and the header.
 - Error: Covers R13. `from: subject.roles` on an entry with no `encode:` fails; the same source under `members:` succeeds.
 - Error: two entries targeting `x-auth-user-id` in one block fail.
-- Error: a route block naming an unaddressable source fails, and the message identifies the route.
-- Error: Covers R25. A route joining two groups that each declare a block fails, naming both groups. A route joining two groups where only one declares a block succeeds.
-- Happy: a config declaring a valid block at each of the three levels loads, in both directions.
+- Error: a route block naming an unaddressable source fails, and the message identifies the route by its display name.
+- Error: Covers R25. A route joining two bundles that each declare the same direction fails, naming both. A route joining two bundles where only one declares that direction succeeds. A route joining two bundles that declare *different* directions succeeds.
+- Edge: Covers R25. A bundle named in both `meta.tags` and `groups:` is one membership, so a route joining it and one other bundle is not reported as a conflict.
+- Happy: a config declaring a valid block at each of the four levels loads, in both directions.
 - Error: Covers R9. `response: {strip: ["content-*"]}` fails and names `content-type`; `response: {strip: ["x-backend-*"]}` succeeds.
 
 ---
 
-- U4. **Route resolution**
+- U4. **Contract resolution**
 
-**Goal:** `resolve_assertions_for_route` returning the block in force for a request.
+**Goal:** `resolve_assertions_for_route` returning the contract in force for a request, per
+direction.
 
 **Requirements:** R25, R26
 
@@ -412,48 +591,42 @@ excluded set explicitly so adding a slot without considering it fails.
 - Modify: `crates/ppe-core/src/config.rs`
 
 **Approach:**
-- Signature mirrors `resolve_identity_plugins_for_route(config, entity_type, entity_name,
-  request_scope)` plus a `direction` argument, returning `Option<&DirectionBlock>`.
-  Resolution runs per direction (R25), so a route stating only `response:` still inherits
-  the global `request:`.
-- Selection, not stacking (R25). First match wins, most specific first: the matching
-  route's own block; else a block on a group the route joins, via `route_static_tags`;
-  else the global block; else `None`.
-- The two-groups case cannot arise here because U3 rejects it at load. This function may
-  therefore take the first group it finds without ordering anxiety, but it asserts the
+- `pub fn resolve_assertions_for_route<'a>(config: &'a PolicyConfig,
+  matched: Option<&MatchedRoute<'_>>, direction: Direction) -> Option<&'a DirectionBlock>`.
+  Signature mirrors `resolve_identity_plugins_for_route` (`config.rs:2942`), which since #55
+  takes the already-matched route rather than matching internally. The caller matches once
+  with `resolve_route`, which is what D2 threads.
+- Resolution runs per direction (R25), so a route stating only `response:` still inherits the
+  global `request:`.
+- Selection, not stacking (R25). First match wins, most specific first: the matched route's
+  own block; else a block on a bundle the route joins, via `route_bundle_names`; else the
+  entity type's default, via `route_entity_identity` into `config.global.defaults`; else the
+  global block; else `None`. That is `authentication_layers`' order read backwards, and it
+  should be written to read that way, because the two chains disagreeing about precedence is
+  the drift most likely to go unnoticed.
+- Read bundles from `config.global.bundles`, which `fold_groups_into_bundles`
+  (`config.rs:1023`) has already filled from the document's `groups:`. Reading the document
+  field instead would miss nothing today and would drift the moment folding changes.
+- `matched: None` resolves the global block and nothing else, which is correct for the entry
+  points' first return site: no route matched there either.
+- The two-bundles case cannot arise here because U3 rejects it at load. This function may
+  therefore take the first bundle it finds without ordering anxiety, but it asserts the
   invariant in debug rather than relying on a comment.
-- Reuses `find_matching_route` and `route_static_tags`, both private to the module — this
-  function lives in the same file for that reason.
-- **L7 traffic resolves only the global block, in both directions.** `RouteEntry` has four
-  selectors, `tool` / `resource` / `prompt` / `llm` (`config.rs:296-308`), and no `http:`, so no
-  route can match an L7 request. `find_matching_route` (`:1145-1149`) hits `_ => continue` for
-  `ENTITY_HTTP` and returns `None`; `route_static_tags` needs a `&RouteEntry`, so there is no group
-  layer either. #38 did not change this. Nothing is silently skipped, because the expression is
-  impossible: an operator cannot write a per-HTTP-path contract at all.
-
-  **The consequence runs the other way too, and matters more.** Since L7 falls to global and global
-  also covers any entity whose route declares no contract, one `global:` block serves both. A
-  contract written for MCP tools also applies to non-MCP HTTP traffic transiting the filter, so
-  identity headers are injected and client headers stripped on requests the author was not
-  thinking about. The host's `require_protocol_metadata` gate defaults to fail-closed, which bounds
-  this to deployments that turned it off or run no entity routes, but it does not remove it.
-
-  Mitigation follows the precedent the host already set for the mirror-image problem: praxis warns
-  at startup when a global HTTP policy coexists with entity routes and the gate is off
-  (`filter/src/builtins/http/security/policy/filter.rs:206-230`, "make that specific
-  misconfiguration loud at startup"). So U3 emits a load-time warning when a global block is
-  declared alongside entity routes, naming that L7 traffic will receive the global contract, and
-  R27's artifact states per scope which traffic it reaches. Giving routes an `http:` selector would
-  close it properly and is a larger change reaching beyond assertions.
+- `route_bundle_names` and `route_entity_identity` are public since #55, and `resolve_route`
+  is too, so this function no longer has to live in `config.rs` for visibility. It lives
+  there anyway, beside the resolver it mirrors, so the two are read and changed together.
 
 **Test scenarios:**
-- Happy: no route or group block returns the global block, per direction.
+- Happy: no route, bundle or entity-default block returns the global block, per direction.
 - Happy: a route declaring only `response:` resolves its own response block and the global request block.
-- Happy: a route block returns the route's, and neither the group's nor the global block's headers appear.
-- Happy: Covers R25. Two routes joining one group both resolve that group's block; a third route joining the group but declaring its own resolves its own.
-- Edge: Covers R28. No global and no route block returns `None`.
-- Edge: a route matching no entry falls back to global.
-- Edge: a generic-HTTP request (`ENTITY_HTTP`) resolves the global block even when a route declares its own, and the test says so explicitly so the limitation is pinned rather than discovered.
+- Happy: a route block returns the route's, and none of the bundle's, entity default's or global's headers appear.
+- Happy: Covers R25. Two routes joining one bundle both resolve that bundle's block; a third route joining the bundle but declaring its own resolves its own.
+- Happy: Covers R25 at four levels. A bundle block outranks the entity default's; the entity default's outranks the global; a route's outranks all three.
+- Happy: an `http:` route resolves its own block, which #42 made expressible and which the previous revision of this plan recorded as impossible.
+- Happy: a block under `global.defaults.http:` applies to a generic-HTTP request that matched no route, and not to a tool request.
+- Edge: Covers R28. No block at any level returns `None`.
+- Edge: `matched: None` resolves the global block, and the test says so explicitly, since that is what the pre-matching return sites pass.
+- Edge: a route matching no entry falls back to the entity default, then global.
 - Edge: scope-specific routes resolve the same way `resolve_identity_plugins_for_route` does; one shared test shape.
 
 ---
@@ -471,7 +644,7 @@ a denial.
 - Create: `crates/ppe-core/src/assertions/render.rs`
 
 **Approach:**
-- `fn render(cfg: &AssertionsConfig, ext: &Extensions) -> Result<Vec<(String, String)>, MissingSource>`.
+- `fn render(block: &DirectionBlock, ext: &Extensions) -> Result<Vec<(String, String)>, MissingSource>`.
 - Single-source entry: resolve, then render by `encode:` — scalar renders bare, `json`
   renders `serde_json::to_string`, `csv` joins a resolved array. A `Value::String` renders
   as its contents, never as a quoted JSON string, which is the difference R11 turns on.
@@ -517,23 +690,32 @@ a denial.
   *everything else is retained* (R8). The floor is never removable, but U3 already rejected a
   config that would try, so `apply` does not re-check it at request time.
 - Removal is case-insensitive (R21), which means iterating and comparing lowercased rather
-  than a `HashMap::remove`. `remove_header_ci` in `extensions/http.rs` is the existing
-  helper; use it or match its behavior.
+  than a `HashMap::remove`. `remove_header_ci` (`extensions/http.rs:141`) is the existing
+  helper; use it or match its behavior. Note it removes exactly one matching key, so a map
+  holding two casings of one name needs a loop.
 - Removal of entry targets is unconditional and does not consult `rendered` (R17, R18).
   This is the line most likely to be "optimized" into `if let Some(value)` later, so it
   gets a comment saying why it must not be.
-- `strip:` entries support a trailing `*` glob. Match the globbing used for route entity
-  matchers rather than inventing a second dialect.
+- `strip:` entries support a trailing `*` glob, via `Pattern` (`config.rs:604`, wildmatch),
+  the dialect route entity matchers use. Deliberately *not* `HttpSelector`'s dialect: that
+  one matches paths by equality or segment-boundary prefix because it has to agree with the
+  host router, and a header name is neither.
+- This writes canonical state directly, so `merge_http`'s `WriteToken` gate
+  (`extensions/container.rs:346`) is not in the path. The engine is not a plugin returning an
+  edit. What `merge_http` still gives us is the wholesale assignment of both header maps,
+  which is what makes R20 hold for a plugin's edit as well as ours.
 - `ext.http` is `Option<Arc<HttpExtension>>`: clone the inner, mutate, re-wrap. `None` is
-  a no-op (D6).
+  a no-op (D6). The request line and `status` on the cloned slot are carried through
+  untouched, since nothing here reads or writes them (R32).
 
 **Test scenarios:**
 - Happy: rendered headers appear; unrelated inbound headers survive untouched.
 - Security: Covers R18, R17. A client-supplied value under an entry target is removed when the engine derived no identity at all, so nothing is left behind.
 - Security: Covers R19. A client-supplied `x-auth-projects` is removed by the `x-auth-*` glob though no entry targets it.
-- Security: Covers R21. `X-Auth-User-Id` inbound is removed by a config written `x-auth-user-id`, and by the `x-auth-*` glob.
+- Security: Covers R21. `X-Auth-User-Id` inbound is removed by a config written `x-auth-user-id`, and by the `x-auth-*` glob. A map carrying both `X-Auth-User-Id` and `x-auth-user-id` loses both.
 - Edge: `Authorization` is untouched by a config that does not name it.
 - Edge: Covers D6. `ext.http` of `None` applies nothing and does not panic.
+- Edge: Covers R32. The request line and `status` are unchanged by an application in either direction.
 - Edge: applying twice produces the same header map as applying once.
 - Response: Covers R8. A response header no entry and no `strip:` names survives untouched.
 - Response: Covers R18. An upstream echoing an entry-target name has it replaced by the engine's value, or removed when nothing rendered.
@@ -542,10 +724,10 @@ a denial.
 
 - U7. **Engine integration**
 
-**Goal:** The block is applied on every path that returns a `PipelineResult` for the
-request-side hook, including the ones that never reach the executor.
+**Goal:** The contract is applied on every path that returns a `PipelineResult`, on every
+entry point that can name its hook.
 
-**Requirements:** R7, R8, R16, R22, R23, R24, R26, R28
+**Requirements:** R7, R8, R16, R22, R23, R24, R26, R28, R31
 
 **Dependencies:** U3, U4, U5, U6
 
@@ -553,23 +735,39 @@ request-side hook, including the ones that never reach the executor.
 - Modify: `crates/ppe-core/src/engine.rs`
 
 **Approach:**
-- `fn apply_assertions(&self, snapshot: &RuntimeSnapshot, hook_name: &str, result:
-  PipelineResult) -> PipelineResult`, private. Same signature as D2 states. Resolves the block (U4), renders (U5), applies (U6), and converts a
-  `MissingSource` into `PipelineResult::denied` with a violation coded in the
-  `auth.*` family alongside `auth.mapping_failed`. Proposed code:
-  `auth.assertion_missing`. Build it as
+- `fn apply_assertions(&self, snapshot: &RuntimeSnapshot, hook_name: Option<&str>,
+  matched: Option<&MatchedRoute<'_>>, result: PipelineResult) -> PipelineResult`, private.
+  Same signature as D2 states. Resolves the contract (U4), renders (U5), applies (U6), and
+  converts a `MissingSource` into `PipelineResult::denied` with a violation coded in the
+  `auth.*` family alongside `auth.mapping_failed`. Proposed code: `auth.assertion_missing`.
+  Build it as
   `PipelineResult::denied(violation, extensions, result.context_table).with_errors(result.errors)`
-  and carry `result.metadata` across: `denied` constructs with `errors: Vec::new()` and
-  `metadata: None` (`executor.rs:160-172`), so a bare call discards every `on_error: ignore`
-  plugin error the pipeline just recorded, which is what an operator needs to debug the deny.
-- Call it at **every** return point of `invoke` (`engine.rs:1070`), `invoke_named`
-  (`:1143`), and `invoke_entries` (`:1231`) — the early return when no entries and no
-  annotations exist, the early return after route filtering yields nothing, and the
-  executor's own return. Enumerate the sites in the PR description.
-- Resolve the hook's phase via `hooks::metadata::lookup`, which returns `Option<HookMetadata>`
-  since #38, and map it to a direction (R22, D3): `Pre` applies `request:`, `Post` applies
-  `response:`, `Unphased` and `None` apply neither. Skip when the resolved direction block is
-  `None` (R28).
+  and carry `result.metadata` across: `denied` (`executor.rs:160`) constructs with
+  `errors: Vec::new()` and `metadata: None`, so a bare call discards every
+  `on_error: ignore` plugin error the pipeline just recorded, which is what an operator needs
+  to debug the deny.
+- Resolve the hook's phase via `hooks::metadata::lookup` (`hooks/metadata.rs:262`) and map it
+  to a direction (R22, D3): `Pre` applies `request:`, `Post` applies `response:`, `Unphased`
+  and `None` apply neither. `hook_name: None` applies neither (R31, D8). Skip when the
+  resolved direction block is `None` (R28).
+- Call it at **all fourteen** return points, per the table in Context:
+  - `invoke_by_name` (`:1432`): `:1451`, `:1467`, `:1479`, tail. Passes `Some(hook_name)`.
+  - `invoke_named` (`:1616`): `:1639`, `:1651`, `:1664`, tail. Passes `Some(hook_name)`.
+  - `invoke` (`:1528`): `:1543`, `:1555`, `:1568`, tail. Passes `None` (D8): `H::NAME` is the
+    family, not the hook.
+  - `invoke_entries` (`:1723`): `:1732`, tail. Passes `None` (D8): no hook name exists.
+  Enumerate the sites in the PR description. The two `None` entry points still get the call,
+  so the site list is uniform and a later signature change makes them work by passing a name
+  rather than by finding an un-instrumented return.
+- The pre-matching sites (`:1451`, `:1543`, `:1639`, `:1732`) pass `matched: None`, so U4
+  resolves the global contract. The post-filtering sites and the executor tail pass the
+  `MatchedRoute` `filter_entries_by_route` (`:1853`) resolved. That requires threading it out
+  of the filter, which today returns only the entry list: extend its return to
+  `(Arc<Vec<HookEntry>>, Option<MatchedRoute>)`, or stash it, but do not re-resolve. The
+  route table walk is not free and the answer is already computed.
+- The denied-on-route-resolution-failure sites (`:1467`, `:1555`, `:1664`) are the ones #42
+  added: an unreadable HTTP path denies (`:1894-1901`). Treat them as R24's case, strip and
+  do not inject, and pass `matched: None`, because by construction no route resolved.
 - On a pipeline a plugin already denied (R24): in the request direction strip, do not render,
   do not inject, and do not evaluate `on_missing`. Removal costs nothing and is never wrong,
   so it happens even though the request is not forwarded, which keeps client-supplied values
@@ -578,50 +776,61 @@ request-side hook, including the ones that never reach the executor.
   at all on a denied pipeline: there is no upstream response to filter.
 
 **Test scenarios:**
-- Covers R26, and the early-return hazard. One test per return site, each asserting that a client-supplied entry-target header does not survive:
-  - a hook with no registered entries and no route annotations;
-  - a hook whose entries all filter out by route;
-  - a normal pipeline through the executor;
-  - the same three through `invoke_named` and `invoke_entries`.
+- Covers R26, and the early-return hazard. **One test per return site, fourteen in all**, each asserting that a client-supplied entry-target header does not survive where a contract applies, and that nothing changes where D8 says it does not:
+  - per hook-naming entry point (`invoke_by_name`, `invoke_named`): a hook with no registered entries and no route annotations; a hook whose entries all filter out by route; a route resolution failure that denies; a normal pipeline through the executor;
+  - per hookless entry point (`invoke`, `invoke_entries`): the same sites, each asserting the header map comes back byte-identical, so D8 is pinned as behavior rather than left as an omission.
 - Covers R16. A route whose tenant entry is `on_missing: deny` and whose token carries no tenant claim produces a denied result with the expected code, and the header does not appear.
 - Covers R28. A config with no block leaves the header map byte-identical to the input.
 - Covers R7. A readable slot that no entry names does not appear in the outgoing headers.
-- Covers R22. A pre-phase hook applies `request:` and not `response:`; a post-phase hook applies `response:` and not `request:`; an unphased hook applies neither. A host-registered hook with pre-phase metadata applies `request:` with no config change.
+- Covers R22. A pre-phase hook applies `request:` and not `response:`; a post-phase hook applies `response:` and not `request:`; an unphased hook applies neither. `http.request` applies `request:` and `http.response` applies `response:`, with no name written anywhere in this feature. A host-registered hook with pre-phase metadata applies `request:` with no config change.
+- Covers R22 and idempotence. An exchange firing both `http.request` and `cmf.tool_pre_invoke` produces one set of asserted headers, identical to either hook alone.
 - Covers R23. A policy rule reading a target header name observes the client's value, and the upstream still receives only the engine's.
 - Covers R24. A pipeline denied by a plugin returns extensions with no client value under any target name, and with no asserted header added.
 
-**Verification:** A reviewer can point at each return site in `engine.rs` and name the
-test covering it. If that mapping cannot be stated, the unit is not done.
+**Verification:** A reviewer can point at each of the fourteen return sites in `engine.rs`
+and name the test covering it. If that mapping cannot be stated, the unit is not done.
 
 ---
 
 - U8. **Effective-policy artifact**
 
-**Goal:** The engine can render what reaches upstream, without reading Rust.
+**Goal:** The engine can render what crosses the boundary, without reading Rust.
 
-**Requirements:** R27
+**Requirements:** R27, R31
 
-**Dependencies:** U1, U2, U4
+**Dependencies:** U1, U2, U4, U11
 
 **Files:**
 - Modify: `crates/ppe-core/src/assertions/mod.rs`
 
 **Approach:**
-- `fn effective_policy(config: &PolicyConfig) -> String` rendering, per scope (global, each
-  group, and each route with its own block): every header that can be emitted with its
-  source and capability, the `strip:` set including the implicit entry-target names, the
-  code-fixed excluded set with its rationale, the response protocol floor, and the phase each
-  direction fires on (R27). Both directions render, labelled, so an operator reads one
-  document for the whole boundary.
+- `fn effective_policy(config: &PolicyConfig) -> String` rendering, per level (global, each
+  entity default, each bundle, and each route with its own block): every header that can be
+  emitted with its source and capability, the `strip:` set including the implicit
+  entry-target names, the code-fixed excluded set with its rationale, the response protocol
+  floor, and the phase each direction fires on (R27). Both directions render, labelled, so an
+  operator reads one document for the whole boundary.
+- Name the levels with `AuthenticationSource::label()`'s spellings and `route_display_name`,
+  so the artifact and a validation error name the same level the same way.
+- State per level which traffic it reaches: an entity default reaches every route of that
+  type including generic HTTP, a bundle reaches the routes joining it, global reaches
+  whatever matched no route. This is R27's "which traffic" clause and it is what makes the
+  four-level ladder legible.
+- Name the dispatch paths that carry no hook and therefore no contract (R31), so an operator
+  whose host dispatches through a pre-resolved entry list learns it here rather than from an
+  absent header.
 - Emitted at startup at `info` when a block is configured, and available as a public
   function so a host can expose it.
-- The excluded set is printed from the same constant U1 matches on, so the artifact cannot
-  drift from what the code enforces. A test asserts every excluded variant appears.
+- The excluded set and the floor are printed from the same constants U1 and U11 match on, so
+  the artifact cannot drift from what the code enforces. A test asserts every excluded
+  variant and every floor entry appears.
 
 **Test scenarios:**
 - The artifact names every configured header and its source.
 - The artifact lists entry-target names as stripped even though they are not in `strip:`.
-- Covers the anti-drift property: adding a variant to the excluded set without updating the renderer fails a test.
+- The artifact names all four levels present in a config, with the spellings U3's errors use.
+- Covers R31. The artifact names the hookless dispatch paths as uncovered.
+- Covers the anti-drift property: adding a variant to the excluded set, or a name to the floor, without updating the renderer fails a test.
 - A config with no block renders a statement that nothing is asserted, not an empty string.
 
 ---
@@ -630,42 +839,56 @@ test covering it. If that mapping cannot be stated, the unit is not done.
 
 **Goal:** The properties an operator is promised hold through the real engine.
 
-**Requirements:** R7, R8, R9, R11, R17, R18, R20, R24, R25, R28
+**Requirements:** R7, R8, R9, R11, R17, R18, R20, R24, R25, R28, R29, R30
 
-**Dependencies:** U7
+**Dependencies:** U7, U12
 
 **Files:**
 - Create: `crates/ppe-core/tests/assertions_e2e.rs`
 
 **Approach:** Drive `PolicyEngine` with a loaded config and a populated `Extensions`,
-asserting on the header map in the returned `PipelineResult`.
+asserting on the header map in the returned `PipelineResult`. Dispatch through
+`invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, ...)` and its response half for the HTTP cases,
+and `invoke_named::<CmfHook>("cmf.tool_pre_invoke", ...)` for the MCP ones.
+`crates/ppe-apl-runtime/tests/http_route_e2e.rs` is the existing harness shape for driving
+both halves of an HTTP exchange with a request line on the extensions.
 
 **Test scenarios:**
 - Covers the worked example. A request carrying spoofed `x-auth-user-id`, `x-auth-attributes` and `x-auth-projects` reaches the upstream with the engine's values and none of the client's.
 - Covers R28 and R7. Under a default config, no JWT, no raw credential, and no delegated token appears in any outgoing header. Assert on the whole header map, not on named absences, so a future source cannot leak past the test.
 - Covers R11. A Keycloak-shaped token's nested claim reaches the header as JSON with structure intact.
 - Covers R25. Two routes with different blocks each receive exactly their own headers.
+- Covers R25 at four levels. A generic-HTTP request matching no route receives `global.defaults.http`'s contract; one matching a route receives the route's.
 - Covers R20. No ordering of plugins in the pipeline exposes a client value; a plugin holding `write_headers` that writes an entry-target name is overwritten, not merged.
 - Covers R8, R9. A response carrying a backend banner, `set-cookie`, and `content-type` reaches the client without the first two and with the third intact.
 - Covers R18 in the response direction. An upstream echoing `x-auth-attributes` back does not reach the client with the upstream's value.
 - Covers R24. A denied pipeline produces no response-direction filtering, because no upstream response exists.
+- Covers R29. An `http:` route declaring a contract, driven with no `path` on the HTTP extension, applies the global contract instead, and the engine has reported the route.
+- Covers R30. The same route driven with a request line on the request invocation and none on the response invocation applies the route's `request:` and the global `response:`, and the asymmetry is reported.
 
 ---
 
 - U10. **Documentation and CHANGELOG**
 
-**Requirements:** R27
+**Requirements:** R27, R29
 
-**Dependencies:** U1–U9
+**Dependencies:** U1-U9, U11, U12
 
 **Files:**
 - Modify: `CHANGELOG.md`, `README.md` if the feature list needs a line
-- Create: a config reference section wherever `authentication:` is documented
+- Create: a config reference section for the block
 
-**Approach:** Document the block, the excluded set, and the strip semantics. State plainly
-that what crosses the boundary is unsigned and believed on the strength of the network
-path, because an operator configuring this needs to know the trust model they are opting
-into.
+**Approach:** Document the block, the four levels and how they resolve, the excluded set, the
+strip semantics, and the response floor's contents. State plainly that what crosses the
+boundary is unsigned and believed on the strength of the network path, because an operator
+configuring this needs to know the trust model they are opting into.
+
+Document the host's obligation from R29 explicitly, next to the block rather than in a
+release note: a contract on an `http:` route needs the request line on the HTTP extension at
+both invocations, and without it the global contract governs. `docs/upgrade-apl.md` is the
+precedent for a per-key operator-facing reference in this tree; there is no general config
+reference document yet, so this either starts one or extends that one. Decide which in U10
+rather than assuming a file that does not exist.
 
 ---
 
@@ -692,7 +915,8 @@ its rationale on the page rather than in someone's head.
   so U3 can check globs against it and U8 can print it.
 - Glob checking is the floor's job, not U3's: `fn glob_would_match_floor(pattern: &str) ->
   Option<&'static str>` returns the first floor name a pattern would hit, so U3's error can
-  name it.
+  name it. Use the same `Pattern` dialect U6 matches with, or the two disagree about what a
+  glob covers and a config passes load then strips a floor header.
 - Deliberately *not* included: `set-cookie` (removing it on the gateway domain is a stated
   use case), `server` and `x-powered-by` (banners an operator should be able to strip), and
   anything vendor-specific.
@@ -703,6 +927,7 @@ requirement, opposite polarity.
 **Test scenarios:**
 - Happy: every name in the floor is matched case-insensitively.
 - Happy: a glob matching a floor name returns that name; a glob matching nothing in the floor returns `None`.
+- Happy: the glob check and U6's removal agree on a shared table of patterns, so the load-time check cannot be looser than the runtime match.
 - Edge: `set-cookie`, `server`, `x-powered-by` are NOT in the floor, so an operator can strip them.
 - Covers the anti-drift property: a test asserts every floor entry carries a non-empty reason, so an addition cannot land undocumented.
 
@@ -711,29 +936,78 @@ a visible change with a stated justification, not a silent widening.
 
 ---
 
+- U12. **Reachability reporting**
+
+**Goal:** An operator learns that a contract on an `http:` route is unreachable, rather than
+inferring it from a header that did not appear.
+
+**Requirements:** R29, R30
+
+**Dependencies:** U2, U4
+
+**Files:**
+- Modify: `crates/ppe-core/src/config.rs` (load-time findings)
+- Modify: `crates/ppe-core/src/engine.rs` (snapshot-derived list, runtime warn-once)
+
+**Approach:**
+- Load-time: a function beside `http_routing_gaps` (`config.rs:2335`) returning
+  `Vec<String>`, one finding per `http:` route that declares a contract, stating that the
+  contract applies only when the host supplies the request line. Emitted once per config load
+  by the engine, the way `http_routing_gaps`' findings are. Kept separate from emission so a
+  test reads the finding rather than a log line, which is the shape that function established.
+- Runtime: derive the list of `http:` routes declaring a contract at snapshot build, beside
+  `http_routes_declaring_authentication` (`engine.rs:142`, held at `:310`), so the hot path
+  reads an answer rather than walking the route table. Then warn once, per direction, when a
+  generic-HTTP invocation carries no readable path and that list is non-empty. Model on
+  `warn_once_if_route_authentication_is_unreachable` (`:2148`), including its `AtomicBool`
+  gate: this is the same failure for a different block, and two warnings that read differently
+  for one root cause is worse than one that reads well.
+- Per direction matters because of R30. A host that supplies the request line on the request
+  invocation and not the response one gets a warning naming the response direction, which is
+  the actionable half. One combined warning would fire on the request invocation and be
+  suppressed by the time the informative case arrived.
+- The load-time finding names the routes; the runtime warning names the direction and repeats
+  the host's obligation. Neither denies: the global contract is a defensible fallback and
+  failing a load because a *host* might not populate a field is not this layer's call.
+
+**Test scenarios:**
+- Happy: a config with `http:` routes declaring contracts produces one finding per route, naming each.
+- Happy: a config whose `http:` routes declare no contract produces no findings; nor does one with no `http:` routes.
+- Runtime: a generic-HTTP invocation with no path, against a config with such a route, warns once and not twice.
+- Runtime: the same invocation with a readable path does not warn.
+- Runtime: Covers R30. A request invocation with a path and a response invocation without one warns for the response direction only.
+- Edge: the snapshot-derived list is empty when no route declares a contract, so the runtime check short-circuits.
+
+---
+
 ## Unit Dependency Graph
 
 ```
-U1  (source paths) ──┬── U2 (config types) ──┬── U3 (validation) ──┐
-                     │                       ├── U4 (resolution) ──┤
-                     ├── U5 (rendering) ──────┴── U6 (apply) ──────┴── U7 (engine) ── U9 (e2e)
-                     └── U8 (artifact)                                              └── U10 (docs)
+U1  (source paths) ──┬── U2 (config types + keys) ──┬── U3 (validation) ──┐
+                     │                              ├── U4 (resolution) ─┤
+                     ├── U5 (rendering) ────────────┴── U6 (apply) ──────┴── U7 (engine) ──┬── U9 (e2e)
+                     └── U8 (artifact)                                                     └── U10 (docs)
 
 U11 (response floor) ──> U3 (glob rejection), U8 (artifact renders it)
+U2, U4 ──> U12 (reachability reporting) ──> U9
 ```
 
-U1 and U11 have no dependency and can start in parallel. U2 depends on U1. U7 is the
-integration point and cannot start until U3–U6 land.
+U1 and U11 have no dependency and can start in parallel. U2 depends on U1, and its key-model
+rows are the part most likely to be underestimated. U7 is the integration point and cannot
+start until U3-U6 land. U12 needs only U2 and U4, so it can land before U7 and its warning is
+useful on its own.
 
 ---
 
 ## System-Wide Impact
 
-- **`ppe-core` public API grows**: a new `assertions` module, new fields on `GlobalConfig`, `PolicyGroup`, and `RouteEntry`. All are `Option`, so existing configs are unaffected, but the struct change is a semver event under the project's 0.1.x policy.
+- **`ppe-core` public API grows**: a new `assertions` module, new fields on `GlobalConfig`, `PolicyGroup` and `RouteEntry`, new `ConfigScope` variants, and `resolve_assertions_for_route`. All config fields are `Option`, so existing configs are unaffected, but the struct and enum changes are a semver event under the project's 0.1.x policy. `ConfigScope::ALL` has a written length, so adding variants is a compile-time-checked change for any external matcher.
 - **Config load can now fail** for reasons it could not before. A deployment with a malformed block that previously would have been ignored now refuses to start. That is the intent (R5, R6) and belongs in the CHANGELOG as a behavior change.
-- **No plugin API change.** Capabilities, write tokens, and `merge_http` are untouched.
+- **Config load now reports two more findings** (U12), at `info` and `warn`. A deployment with `http:` routes sees new startup output.
+- **No plugin API change.** Capabilities, write tokens, and `merge_http` are untouched. The engine writes canonical state directly, so it does not pass through the `WriteToken` gate `merge_http` added.
 - **No praxis change.** Header mutations already flow back through `PipelineResult`, and `merge_http` assigns `response_headers` alongside `request_headers`.
 - **The engine now writes `response_headers`.** A deployment that adds a `response:` block changes what its clients receive, which is a client-visible behavior change and belongs in the CHANGELOG with the floor's contents.
+- **`filter_entries_by_route` gains a return value** if the `MatchedRoute` is threaded rather than re-resolved (U7). Private, so no external impact, but it touches the hottest function in the engine.
 - **Coverage gate**: `make coverage` is at 95%. New modules need tests to match or the gate fails.
 
 ---
@@ -742,15 +1016,18 @@ integration point and cannot start until U3–U6 land.
 
 | Risk | Mitigation |
 |---|---|
-| A return site in `engine.rs` is missed and stripping silently does not happen. | U7's per-site tests, and the reviewer check that each site maps to a named test. This is the highest-severity risk in the work: it fails open. |
-| A host declares its own hook without registering phase metadata, so neither contract fires for it. | Largely closed by #38: the host registers metadata via `register_hook_metadata`, and a hook a plugin declares without metadata now fails at config load. Residual: a hook installed in Rust and never named in config still reads as `None`, which maps to no contract. U8's artifact prints the phase per hook so the gap is visible. |
+| One of fourteen return sites in `engine.rs` is missed and stripping silently does not happen. | U7's per-site tests, and the reviewer check that each site maps to a named test. Highest-severity risk in the work: it fails open. Worse than the previous revision assumed, since the site count grew from nine to fourteen across four entry points rather than three. |
+| A host dispatches only through `invoke_entries` and gets no contract at all. | D8 accepts it; R31 and U8's artifact make it visible. Residual: an operator who never reads the artifact sees a control that is configured and not running. This is the second-highest risk and it is a documentation-and-visibility mitigation, not a technical one. |
+| A host does not supply the request line on the response invocation, so a route's `response:` silently becomes the global one. | U12's load-time finding and per-direction runtime warning, modelled on the two precedents the tree already set for this exact failure. Residual: a warning is not enforcement, and the global contract still governs. |
 | A claim value injects CRLF and splits a header. | U5 validates rendered values, under R14. |
 | `HashSet` iteration order leaks into headers. | Sorting happens at resolution in U1, not at each render site, so a new caller cannot forget it. |
-| Route resolution semantics drift from `authentication:`. | U4 mirrors `resolve_identity_plugins_for_route` structurally and shares its test shapes. The one deliberate divergence, selection instead of stacking, is documented in Context so it does not read as an oversight. |
-| A route joins two groups that both declare the same direction, and one silently wins. | U3 rejects it at load; U4 asserts the invariant rather than trusting it. Detectable only because group membership is static. |
-| A greedy `response.strip:` glob removes a header the client needs. | U11's floor plus U3's load-time rejection, which names the floor header the glob would have hit. Fails at load, not in production. |
+| Contract resolution drifts from `authentication:`'s layer order. | U4 reads `authentication_layers`' order backwards and says so; U3 and U8 name levels with the same `label()` spellings. One shared vocabulary for four levels is what keeps the two chains agreeing. |
+| A route joins two bundles that both declare the same direction, and one silently wins. | U3 rejects it at load, reading deduped `route_bundle_names`; U4 asserts the invariant rather than trusting it. Detectable only because bundle membership is static. |
+| The `assertions:` key is added to the structs but not to a scope's key table, so it is rejected at that scope. | Guideline 4, D9, and `config_key_sets.rs`'s walk over `ConfigScope::ALL`. Fails at load with a message naming the scope, which is loud rather than silent. |
+| A greedy `response.strip:` glob removes a header the client needs. | U11's floor plus U3's load-time rejection, which names the floor header the glob would have hit. U11's shared-pattern test keeps the load-time check from being looser than the runtime match. |
 | The floor is incomplete and a client-critical header stays strippable. | The floor is an enumerated list with a reason per entry and a test that every entry has one. Residual: a header nobody thought of is strippable until someone adds it. This is the response direction's analogue of the excluded-source set, and carries the same standing review obligation. |
-| Two mental models in one config block confuse operators into expecting response default-deny. | D7 states the asymmetry, U8's artifact renders both directions labelled, and U10 documents it. Residual: this is a real cognitive cost, accepted because the alternative breaks clients. |
+| Two mental models in one config block confuse operators into expecting response default-deny. | D7 states the asymmetry, U8's artifact renders both directions labelled, and U10 documents it. Residual: a real cognitive cost, accepted because the alternative breaks clients. |
+| Re-resolving the route per application costs a second table walk per request. | U7 threads the `MatchedRoute` out of `filter_entries_by_route` rather than calling `resolve_route` again. The route cache caches entry lists, not matches, so there is nothing to lean on. |
 
 ---
 
@@ -759,36 +1036,46 @@ integration point and cannot start until U3–U6 land.
 ### Resolved during planning
 
 - **Where the projection is applied.** `ppe-core` after the executor, not the APL runtime (D1), because the block is engine config and must hold for hosts without APL.
-- **Whether groups contribute.** Yes, by selection. R25 forbids merging, not levels, so global, group, and route each declare a whole contract and the most specific present wins. A route joining two groups that both declare one is a config-load error, since concatenation is what a contract cannot survive.
-- **Whether double application is harmful.** No. Strip-then-inject is idempotent over the same extensions.
+- **Whether groups contribute.** Yes, by selection, and so do entity defaults. R25 forbids merging, not levels, so all four levels declare a whole contract and the most specific present wins. A route joining two bundles that both declare one is a config-load error, since concatenation is what a contract cannot survive.
+- **Whether double application is harmful.** No. Strip-then-inject is idempotent over the same extensions, which #42 turned from a nicety into load-bearing: two `Pre` hooks fire on one HTTP-transported tool call.
 
 ### Settled 2026-08-24
 
-- **Does policy see inbound headers before removal?** Yes. Removal happens after the policy phase, so existing rules keep working and an author can deny a request that arrived carrying a target header name at all. The accepted cost is that a value under `http.request_headers.x-auth-user-id` looks authoritative and is not. Stripping earlier would close that but make spoof-detection impossible and silently change what existing policies see. R23.
-- **Which hooks are request-side?** `cmf.tool_pre_invoke` and `tool_pre_invoke`. See D3, including the open-hook-types gap it does not close.
+- **Does policy see inbound headers before removal?** Yes. Removal happens after the policy phase, so existing rules keep working and an author can deny a request that arrived carrying a target header name at all. The accepted cost is that a value under `http.request_headers.x-auth-user-id` looks authoritative and is not. R23.
 - **An already-denied pipeline** — strip, do not inject, do not evaluate `on_missing`. R24.
 - **A route block without `replace_inherited: true`** — moot. The flag does not exist, because selection replaced stacking.
 
-### Raised by review 2026-08-24, still open
+### Settled 2026-08-30
 
-- **Layering default.** Review argues additive-with-opt-out is right, matching `authentication:`'s default, on the grounds that a union of allowlists can only weaken the global floor and so cannot be used to widen it. R25 currently says contracts never merge. The counter-argument is that a merged header set is one nobody designed. Unresolved; it interacts with the finding that `strip:` is silently dropped when a lower level declares a block.
+- **Which hooks are request-side?** None are named. The phase registry answers it, and #42 is the proof that was the right call: the L7 pair this plan used to name by hand was deleted and replaced, and D3 needed no amendment. D3.
+- **What happens on a dispatch path with no hook name?** Neither contract applies, and the artifact says so. D8, R31. Guessing from the family name is unsound because one family serves both halves.
+- **Can a contract be written per HTTP path?** Yes, since #42. The previous revision recorded this as impossible and proposed a startup warning for the resulting over-broad global block. That mitigation is withdrawn; U12 addresses the opposite hazard #42 introduced instead.
+- **How does a new config key get accepted?** Through its scope's key table, not only `deny_unknown_fields`. D9, guideline 4.
+
+### Still open
+
+- **Layering default.** Review argues additive-with-opt-out is right, matching `authentication:`'s default, on the grounds that a union of allowlists can only weaken the global floor and so cannot be used to widen it. R25 says contracts never merge. The counter-argument is that a merged header set is one nobody designed. #55 sharpened this: `authentication:` now stacks *four* layers and honors `replace_inherited` at each, so the divergence is wider than when this was raised. Unresolved; it interacts with the finding that `strip:` is silently dropped when a lower level declares a block.
 - **Delegated-token collision.** Undefined today, and more pressing now that a contract entry and the delegated-token writer share a fold point. Who wins when both target the same header name.
-- **Response-direction sources.** Whether a response entry may read response-phase state at all, beyond the identity state a request entry reads. Excluded for now by R6, which forbids `http.response_headers.*`; nothing yet needs more.
+- **The `all` reserved bundle.** It applies to every request unconditionally and resolves as a bundle, so under R25 it outranks an entity default. Whether that is the intended precedence for a contract is unexamined.
+- **Response-direction sources.** Whether a response entry may read response-phase state at all, beyond the identity state a request entry reads. `http.status` is the obvious candidate and R32 currently excludes it from the grammar; nothing yet needs it.
 - **Duplicate inbound headers.** `HttpExtension` is `HashMap<String, String>`, so duplicate wire headers collapse and repeated names cannot be emitted. Probably acceptable; needs stating rather than deciding.
 - **Failure modes beyond absence.** `on_missing` covers a source that resolved to nothing. It does not cover a source that errored, or a value rejected by R14. Both currently fall to "omit", which may want to be configurable.
+- **Whether U12's warning should be a load error under some condition.** It cannot be in general, since whether the host populates the request line is not visible at load. Whether a host could declare its capability, and then a contract on an `http:` route without that declaration could fail loudly, is worth asking of the praxis side.
 
 ### Deferred to implementation
 
 - Whether `csv` is worth shipping, or whether `json` plus members covers every real case. R13 requires *an* encoding declaration, not specifically this set.
 - Whether `effective_policy` should render structured output rather than text.
+- Whether U10 starts a general config reference document or extends `docs/upgrade-apl.md`.
 
 ---
 
 ## Sources & References
 
 - Origin requirements: `docs/brainstorms/2026-08-23-upstream-header-projection-requirements.md`
-- **Depends on** [#38](https://github.com/praxis-proxy/policy/pull/38) (issue [#37](https://github.com/praxis-proxy/policy/issues/37)), which lands the hook phase authority D3 reads, the `cmf.http_response` hook the response direction fires on, and validation on every config-load path. Not yet merged to `main`.
 - Tracking issue: praxis-proxy/policy#28
-- Dependencies already landed: policy#9 (claim JSON shape), policy#31 (configurable claim map)
+- **Landed dependencies**: policy#9 (claim JSON shape), policy#31 (configurable claim map), [policy#38](https://github.com/praxis-proxy/policy/pull/38) (hook phase authority, validation on every load path), [policy#41](https://github.com/praxis-proxy/policy/pull/41) (writers serialized on the runtime snapshot), [policy#42](https://github.com/praxis-proxy/policy/pull/42) (`http:` route selector and the `http.*` hook family)
+- **Base branch**: `feat/apl_cleanup`, carrying [policy#55](https://github.com/praxis-proxy/policy/pull/55) (APL grammar and config-model cleanup: four inheritance levels, `ConfigKey` tables, `resolve_route`, `invoke_by_name`, `dispatch: policy` as default)
 - Upstream framing: praxis-proxy/praxis#954 and its review thread
+- Existing harness for driving both halves of an HTTP exchange: `crates/ppe-apl-runtime/tests/http_route_e2e.rs`
 - Worked config: `.sketchpad/headers_config.yaml` (gitignored; U2 vendors it to `crates/ppe-core/tests/fixtures/assertions_worked_example.yaml` for use as a fixture)
