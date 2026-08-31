@@ -265,9 +265,12 @@ reports at load that declared `http:` routes leave a gap, and
 `warn_once_if_route_authentication_is_unreachable` warns at runtime when an `http:` route's
 `authentication:` list could not apply for want of a path. U12 follows both.
 
-Two stale doc comments in the tree claim `dispatch: policy` "is not the default"
-(`http_hook.rs:31`, `config.rs:706`). They predate #55 flipping it. Not this work's to fix,
-but worth not copying into new prose.
+That the default flipped is worth holding onto, because it is what makes this reachable
+rather than opt-in. Five comments in the tree still claimed `dispatch: policy` was not the
+default; `871a71f` corrected them, and the `RouteEntry::http` rustdoc among them had read the
+worst way round, telling a reader an `http:` route "stays inert until it is set" when such a
+route is live as written. Anyone sizing this hazard from the rustdoc before that commit would
+have sized it as narrow.
 
 ### Idempotence, now load-bearing
 
@@ -397,7 +400,6 @@ Cost: a new key touches four places instead of one. That is the trade #55 made d
 - An operator-authored exclusion list. Rejected in origin's Key Decisions.
 - Making the request line addressable as a source (R32).
 - Giving `invoke` and `invoke_entries` a hook name (D8).
-- Fixing the two stale `dispatch:` doc comments. Noted above, separate change.
 
 ### Deferred to follow-up
 
@@ -1075,7 +1077,7 @@ useful on its own.
 - Origin requirements: `docs/brainstorms/2026-08-23-upstream-header-projection-requirements.md`
 - Tracking issue: praxis-proxy/policy#28
 - **Landed dependencies**: policy#9 (claim JSON shape), policy#31 (configurable claim map), [policy#38](https://github.com/praxis-proxy/policy/pull/38) (hook phase authority, validation on every load path), [policy#41](https://github.com/praxis-proxy/policy/pull/41) (writers serialized on the runtime snapshot), [policy#42](https://github.com/praxis-proxy/policy/pull/42) (`http:` route selector and the `http.*` hook family)
-- **Base branch**: `feat/apl_cleanup`, carrying [policy#55](https://github.com/praxis-proxy/policy/pull/55) (APL grammar and config-model cleanup: four inheritance levels, `ConfigKey` tables, `resolve_route`, `invoke_by_name`, `dispatch: policy` as default)
+- **Base branch**: `feat/apl_cleanup`, carrying [policy#55](https://github.com/praxis-proxy/policy/pull/55) (APL grammar and config-model cleanup: four inheritance levels, `ConfigKey` tables, `resolve_route`, `invoke_by_name`, `dispatch: policy` as default, and `871a71f` correcting the five comments that still said otherwise)
 - Upstream framing: praxis-proxy/praxis#954 and its review thread
 - Existing harness for driving both halves of an HTTP exchange: `crates/ppe-apl-runtime/tests/http_route_e2e.rs`
 - Worked config: `.sketchpad/headers_config.yaml` (gitignored; U2 vendors it to `crates/ppe-core/tests/fixtures/assertions_worked_example.yaml` for use as a fixture)
