@@ -73,7 +73,7 @@ zeroize = { version = "1.9", features = ["zeroize_derive"] }
 # Pinned to 0.12 rather than 0.13 for the same reason: 0.13 pairs with
 # `digest` 0.11 and would pull a second `sha2` alongside the existing one.
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # 32 bytes for the per-process HMAC secret. Already in the tree
 # transitively; named here because the cache needs it directly.
