@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# praxis-policy-pdp-diff — differential testing across the three shipped PDP
+# resolvers (cedar-direct, cel, opa). Not a runtime crate: it never sits on
+# a request path. It exists so a mapping change in one dialect cannot silently
+# disagree with the others.
+#
+# Not published. The suite runs as part of `make test` because this crate is a
+# workspace default-member.
+
+[package]
+name = "praxis-policy-pdp-diff"
+publish = false
+description = "PPE tests — differential evaluation across Cedar, CEL, and OPA."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+praxis-policy-apl-core = { workspace = true }
+praxis-policy-pdp-cedar-direct = { workspace = true }
+praxis-policy-pdp-cel = { workspace = true }
+praxis-policy-pdp-opa = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true
