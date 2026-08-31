@@ -152,7 +152,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   mixing them now loads and decides something**, so read one before upgrading. And
   a `require(...)` rule's action can only be `deny`: the construct states what must
   hold and refuses when it does not, so `require(a): allow` is a contradiction and
-  fails the load naming the inversion.
+  fails the load naming the inversion. The restriction is on the rule shape, so it
+  holds in all three spellings: the string form, `when:` / `do:`, and the
+  multi-effect shorthand. Nested inside a larger predicate, `require` is only the
+  negation it desugars to, so `a & require(b): allow` stays legal.
+
+- **A field operation in rule position is rejected.** `result.ssn | redact` where a
+  rule belongs used to compile as a disjunction of two truthy attributes and take
+  the default deny, so a chain one position too high enforced something its author
+  never asked for. It now fails the load, naming the position and pointing at
+  `args:` and `result:`. This is a property of the rule shape too, so it holds in
+  all three spellings. A legal disjunction of two attribute paths
+  (`result.x | result.y`) is untouched: what marks a field operation is a field
+  head with a stage beside it, not a `|`.
 
 - **`run(name)` is the only form that invokes a plugin.** `plugin(name)` was a
   second spelling for it in both step and stage position, so a reader had to know

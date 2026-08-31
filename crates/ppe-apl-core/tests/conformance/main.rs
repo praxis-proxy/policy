@@ -5,11 +5,15 @@
 //! grammar states.
 //!
 //! `docs/apl-grammar.md` is the normative document and this is what holds it to
-//! account. Every production, every documented wart, and every breaking change in
-//! that document has a case in one of the modules below, and every rejected case
-//! asserts on the *message* rather than only on being an error. A tightening that
-//! fails for the wrong reason passes an `is_err` test and tells an operator
+//! account. Every production, every breaking change, and every documented wart the
+//! *parser* decides has a case in one of the modules below, and every rejected
+//! case asserts on the *message* rather than only on being an error. A tightening
+//! that fails for the wrong reason passes an `is_err` test and tells an operator
 //! nothing, which is the failure mode this work exists to remove.
+//!
+//! Two of the document's warts are out of scope here, settled after the parse
+//! rather than by it: the elicitation `scope:` parsed at request time, and
+//! static-tags-only inheritance. Both belong to a runtime or config suite.
 //!
 //! # Why this file exists at all
 //!
@@ -37,5 +41,7 @@ mod lexical;
 mod positional;
 /// `require(P)` as a predicate, and the desugaring it must preserve.
 mod require;
+/// One rule, written three ways, put through the same assertion.
+mod spellings;
 /// The step-map key set, and the two spellings a PDP call takes.
 mod step_maps;

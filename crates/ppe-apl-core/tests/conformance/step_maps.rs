@@ -4,7 +4,7 @@
 // The step-map key set, which the grammar states is closed.
 //
 // It was open: every key the earlier branches did not claim was split at `(` and
-// its prefix handed to `PdpDialect::from_key`, which maps anything unknown to
+// its prefix resolved through a mapping that turned anything unknown into
 // `Custom`. Two faults came out of that one fallback. A misspelling such as
 // `whens:` compiled to a PDP lookup for a dialect named `whens`, so a typo became
 // a runtime resolver miss rather than a load error. And `pdp(workload):`, the

@@ -135,6 +135,26 @@ fn a_field_operation_in_rule_position_is_rejected() {
     }
 }
 
+/// The same guard through every spelling, not just the entry point that carries
+/// it. Both map forms used to accept what the string form refused.
+#[test]
+fn a_field_operation_in_rule_position_is_rejected_in_all_three_spellings() {
+    for predicate in ["result.ssn | redact", "args.employee_id | mask(4)"] {
+        crate::spellings::rejected_in_all_three_spellings(
+            predicate,
+            "deny",
+            ["effect position", "args:", "result:"].as_slice(),
+        );
+    }
+}
+
+/// The narrowness case, also across the three: a legal disjunction stays legal in
+/// every spelling.
+#[test]
+fn a_disjunction_of_two_field_paths_parses_in_all_three_spellings() {
+    crate::spellings::accepted_in_all_three_spellings("result.x | result.y", "deny");
+}
+
 /// The guard has to stay narrow. This is a legal disjunction of two truthy
 /// attributes: both sides are paths, neither is a stage. Without this case the
 /// guard gets widened to "an `args.`/`result.` head" and starts refusing it.
