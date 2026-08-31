@@ -309,6 +309,21 @@ fn a_position_counts_characters_and_names_the_real_character() {
     );
 }
 
+/// The subscript lexer is a second path to the same diagnostic and had the same
+/// byte cast. Both read the character through `char_at_cursor` now.
+#[test]
+fn a_subscript_names_the_real_character_too() {
+    let message = pred_err("data.t[café] == 'x'");
+    assert!(
+        !message.contains('Ã'),
+        "the subscript message must not render a byte as a character: {message}"
+    );
+    assert!(
+        message.contains('é'),
+        "the subscript message must name the character in the input: {message}"
+    );
+}
+
 // ---- every site reads a literal the same way ---------------------------
 
 /// The PDP paren form used to keep its quotes, so a resolver registered for

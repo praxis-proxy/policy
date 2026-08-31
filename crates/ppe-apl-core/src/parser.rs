@@ -250,11 +250,7 @@ impl<'a> Lexer<'a> {
                 b'.' => return Err(self.err(EMPTY_SEGMENT)),
                 b if is_ident_start(b) => self.lex_ident_or_keyword()?,
                 _ => {
-                    let ch = self
-                        .src
-                        .get(self.pos..)
-                        .and_then(|rest| rest.chars().next())
-                        .unwrap_or(char::REPLACEMENT_CHARACTER);
+                    let ch = self.char_at_cursor();
                     return Err(self.err(&format!("unexpected character `{ch}`")));
                 },
             };
@@ -387,6 +383,17 @@ impl<'a> Lexer<'a> {
         })
     }
 
+    /// The character at the cursor, decoded rather than cast.
+    ///
+    /// A byte at or above 128 is one of several in a UTF-8 sequence, so casting it
+    /// names a character that is not in the input. Diagnostics only.
+    fn char_at_cursor(&self) -> char {
+        self.src
+            .get(self.pos..)
+            .and_then(|rest| rest.chars().next())
+            .unwrap_or(char::REPLACEMENT_CHARACTER)
+    }
+
     /// Consume one `[...]` interpolation group, whose content is a nested
     /// attribute path the evaluator resolves per request.
     ///
@@ -405,8 +412,8 @@ impl<'a> Lexer<'a> {
                     return Err(self.err("nested `[` in an attribute path subscript"));
                 },
                 Some(b) if is_segment_char(b) || b == b'.' => self.pos += 1,
-                Some(b) => {
-                    let ch = char::from(b);
+                Some(_) => {
+                    let ch = self.char_at_cursor();
                     return Err(self.err(&format!(
                         "`{ch}` in an attribute path subscript; a subscript holds a nested path, \
                          so it takes names and dots and nothing else"
