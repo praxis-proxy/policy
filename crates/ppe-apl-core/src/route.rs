@@ -111,46 +111,69 @@ pub async fn evaluate_pre(
     let mut args_modified = false;
 
     for rule in &route.args {
-        let Some(current) = get_dotted(&payload.args, &rule.field).cloned() else {
-            continue; // missing field → no pipeline to run
+        // Fan out over any array on the way to the leaf: `args.rows.ssn`
+        // redacts the `ssn` of every element of `rows` rather than nothing. A
+        // plain object path expands to itself, so non-array fields are
+        // unchanged. An over-large shape fails closed rather than
+        // half-redacting.
+        let Some(paths) = expand_field_paths(&payload.args, &rule.field) else {
+            return RouteDecision {
+                decision: Decision::Deny {
+                    reason: Some(format!(
+                        "args field `{}` expands to too many elements to redact safely",
+                        rule.field
+                    )),
+                    rule_source: rule.source.clone(),
+                },
+                taints,
+                constraints: Vec::new(),
+                args_modified,
+                result_modified: false,
+                pending: None,
+            };
         };
-        let eval = evaluate_pipeline(
-            &rule.pipeline,
-            &current,
-            bag,
-            plugins,
-            &rule.field,
-            DispatchPhase::Pre,
-        )
-        .await;
-        taints.extend(eval.taints);
-        match eval.outcome {
-            FieldOutcome::Pass => {},
-            FieldOutcome::Replace(new_val) => {
-                if set_dotted(&mut payload.args, &rule.field, new_val) {
-                    args_modified = true;
-                }
-            },
-            FieldOutcome::Omit => {
-                if remove_dotted(&mut payload.args, &rule.field) {
-                    args_modified = true;
-                }
-            },
-            FieldOutcome::Deny { reason, .. } => {
-                return RouteDecision {
-                    decision: Decision::Deny {
-                        reason: Some(reason),
-                        rule_source: rule.source.clone(),
-                    },
-                    taints,
-                    // `restrict` only fires in the policy phase (below);
-                    // an args-pipeline deny short-circuits before it.
-                    constraints: Vec::new(),
-                    args_modified,
-                    result_modified: false,
-                    pending: None,
-                };
-            },
+        for path in paths {
+            let Some(current) = get_dotted(&payload.args, &path).cloned() else {
+                continue; // missing field on this element → no pipeline to run
+            };
+            let eval = evaluate_pipeline(
+                &rule.pipeline,
+                &current,
+                bag,
+                plugins,
+                &rule.field,
+                DispatchPhase::Pre,
+            )
+            .await;
+            taints.extend(eval.taints);
+            match eval.outcome {
+                FieldOutcome::Pass => {},
+                FieldOutcome::Replace(new_val) => {
+                    if set_dotted(&mut payload.args, &path, new_val) {
+                        args_modified = true;
+                    }
+                },
+                FieldOutcome::Omit => {
+                    if remove_dotted(&mut payload.args, &path) {
+                        args_modified = true;
+                    }
+                },
+                FieldOutcome::Deny { reason, .. } => {
+                    return RouteDecision {
+                        decision: Decision::Deny {
+                            reason: Some(reason),
+                            rule_source: rule.source.clone(),
+                        },
+                        taints,
+                        // `restrict` only fires in the policy phase (below);
+                        // an args-pipeline deny short-circuits before it.
+                        constraints: Vec::new(),
+                        args_modified,
+                        result_modified: false,
+                        pending: None,
+                    };
+                },
+            }
         }
     }
 
@@ -200,46 +223,67 @@ pub async fn evaluate_post(
 
     if let Some(result) = payload.result.as_mut() {
         for rule in &route.result {
-            let Some(current) = get_dotted(result, &rule.field).cloned() else {
-                continue;
+            // Fan out over any array on the way to the leaf, so
+            // `result.rows.ssn | redact` reaches every row instead of silently
+            // no-opping. See `expand_field_paths`.
+            let Some(paths) = expand_field_paths(result, &rule.field) else {
+                return RouteDecision {
+                    decision: Decision::Deny {
+                        reason: Some(format!(
+                            "result field `{}` expands to too many elements to redact safely",
+                            rule.field
+                        )),
+                        rule_source: rule.source.clone(),
+                    },
+                    taints,
+                    constraints: Vec::new(),
+                    args_modified: false,
+                    result_modified,
+                    pending: None,
+                };
             };
-            let eval = evaluate_pipeline(
-                &rule.pipeline,
-                &current,
-                bag,
-                plugins,
-                &rule.field,
-                DispatchPhase::Post,
-            )
-            .await;
-            taints.extend(eval.taints);
-            match eval.outcome {
-                FieldOutcome::Pass => {},
-                FieldOutcome::Replace(new_val) => {
-                    if set_dotted(result, &rule.field, new_val) {
-                        result_modified = true;
-                    }
-                },
-                FieldOutcome::Omit => {
-                    if remove_dotted(result, &rule.field) {
-                        result_modified = true;
-                    }
-                },
-                FieldOutcome::Deny { reason, .. } => {
-                    return RouteDecision {
-                        decision: Decision::Deny {
-                            reason: Some(reason),
-                            rule_source: rule.source.clone(),
-                        },
-                        taints,
-                        // `restrict` fires in post_invocation (below); a
-                        // result-pipeline deny short-circuits before it.
-                        constraints: Vec::new(),
-                        args_modified: false,
-                        result_modified,
-                        pending: None,
-                    };
-                },
+            for path in paths {
+                let Some(current) = get_dotted(result, &path).cloned() else {
+                    continue;
+                };
+                let eval = evaluate_pipeline(
+                    &rule.pipeline,
+                    &current,
+                    bag,
+                    plugins,
+                    &rule.field,
+                    DispatchPhase::Post,
+                )
+                .await;
+                taints.extend(eval.taints);
+                match eval.outcome {
+                    FieldOutcome::Pass => {},
+                    FieldOutcome::Replace(new_val) => {
+                        if set_dotted(result, &path, new_val) {
+                            result_modified = true;
+                        }
+                    },
+                    FieldOutcome::Omit => {
+                        if remove_dotted(result, &path) {
+                            result_modified = true;
+                        }
+                    },
+                    FieldOutcome::Deny { reason, .. } => {
+                        return RouteDecision {
+                            decision: Decision::Deny {
+                                reason: Some(reason),
+                                rule_source: rule.source.clone(),
+                            },
+                            taints,
+                            // `restrict` fires in post_invocation (below); a
+                            // result-pipeline deny short-circuits before it.
+                            constraints: Vec::new(),
+                            args_modified: false,
+                            result_modified,
+                            pending: None,
+                        };
+                    },
+                }
             }
         }
     }
@@ -312,8 +356,130 @@ pub async fn evaluate_route(
     }
 }
 
+/// Maximum recursion depth [`expand_field_paths`] will descend before failing
+/// closed. The walk increments depth on every hop, so this bounds the sum of a
+/// path's segment count and the array-nesting levels fanned through, not array
+/// nesting alone. 128 is comfortably above any real (path, tool-result) shape
+/// and sits near `serde_json`'s own default parse-recursion limit, so in
+/// practice only a host-constructed payload that bypasses the parser can trip
+/// it; when it does, the caller denies rather than recursing without bound.
+const MAX_FANOUT_DEPTH: usize = 128;
+
+/// Maximum number of concrete leaf paths one field rule may fan out into
+/// before failing closed. High enough for legitimate bulk results, low enough
+/// to bound the work and allocation an adversarial result shape can force.
+const MAX_EXPANDED_PATHS: usize = 100_000;
+
+/// Resolve one path segment against a value. Object segments index by key; a
+/// numeric segment indexes into an array, so a path produced by
+/// [`expand_field_paths`] resolves.
+fn segment_get<'a>(value: &'a serde_json::Value, seg: &str) -> Option<&'a serde_json::Value> {
+    match value {
+        serde_json::Value::Object(_) => value.get(seg),
+        serde_json::Value::Array(items) => seg.parse::<usize>().ok().and_then(|i| items.get(i)),
+        _ => None,
+    }
+}
+
+/// Expand a dotted field path into the concrete paths it names once arrays
+/// along the way are accounted for.
+///
+/// A field pipeline (`result.rows.ssn | redact`) targets a leaf. When an
+/// *intermediate* segment is an array the leaf exists once per element, so the
+/// redaction has to reach every element rather than silently no-op. Each array
+/// encountered before the final segment fans out into one concrete path per
+/// index (`rows.0.ssn`, `rows.1.ssn`, and so on). Paths whose leaf is absent on
+/// a given element are dropped, matching the missing-field skip rule.
+///
+/// A terminal array is left as a single path, so `result.rows | redact` still
+/// replaces the whole array and existing whole-value semantics are preserved.
+///
+/// Returns `None` when the expansion would exceed a fan-out bound, either array
+/// nesting deeper than [`MAX_FANOUT_DEPTH`] or more than [`MAX_EXPANDED_PATHS`]
+/// leaves. Fanning out over attacker-shaped tool output is otherwise unbounded
+/// in stack depth and allocation, so an over-large shape fails closed: the
+/// caller denies rather than recursing without limit or half-redacting and
+/// passing the tail through unredacted.
+pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option<Vec<String>> {
+    fn join(prefix: &str, seg: &str) -> String {
+        if prefix.is_empty() {
+            seg.to_owned()
+        } else {
+            format!("{prefix}.{seg}")
+        }
+    }
+
+    // Returns false once a bound is hit; callers stop and fail closed.
+    fn walk(
+        value: &serde_json::Value,
+        segs: &[&str],
+        prefix: &str,
+        depth: usize,
+        out: &mut Vec<String>,
+    ) -> bool {
+        if depth > MAX_FANOUT_DEPTH || out.len() > MAX_EXPANDED_PATHS {
+            return false;
+        }
+        // All segments consumed, so `prefix` is a concrete path to a leaf.
+        let Some((seg, rest)) = segs.split_first() else {
+            out.push(prefix.to_owned());
+            return true;
+        };
+        if let serde_json::Value::Array(items) = value {
+            if let Ok(idx) = seg.parse::<usize>() {
+                // An explicit numeric segment indexes this array element.
+                if let Some(child) = items.get(idx) {
+                    return walk(child, rest, &join(prefix, seg), depth + 1, out);
+                }
+            } else {
+                // A non-numeric segment against an array means the array is an
+                // intermediate hop the path didn't name: apply the remaining
+                // segments (starting at `seg`) to every element.
+                for (i, item) in items.iter().enumerate() {
+                    if !walk(item, segs, &join(prefix, &i.to_string()), depth + 1, out) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        let Some(child) = segment_get(value, seg) else {
+            return true; // missing segment on this branch, so emit no path
+        };
+        walk(child, rest, &join(prefix, seg), depth + 1, out)
+    }
+
+    let segs: Vec<&str> = path.split('.').collect();
+    let mut out = Vec::new();
+    walk(root, &segs, "", 0, &mut out).then_some(out)
+}
+
+/// Descend to the parent value of a dotted path, following object keys and
+/// numeric array indices. Returns `None` if any parent segment is missing or
+/// crosses a scalar. Shared by `set_dotted` / `remove_dotted` so both write
+/// through arrays the same way `get_dotted` reads through them.
+fn parent_mut<'a>(
+    root: &'a mut serde_json::Value,
+    parents: &[&str],
+) -> Option<&'a mut serde_json::Value> {
+    let mut cur = root;
+    for seg in parents {
+        cur = match cur {
+            serde_json::Value::Object(map) => map.get_mut(*seg)?,
+            serde_json::Value::Array(items) => seg
+                .parse::<usize>()
+                .ok()
+                .and_then(move |i| items.get_mut(i))?,
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
 /// Read `root.a.b.c` from a JSON value via dot-separated path. Returns
-/// `None` if any segment is missing or the path crosses a non-object.
+/// `None` if any segment is missing. Object segments index by key; a numeric
+/// segment indexes into an array, so a path expanded by
+/// [`expand_field_paths`] resolves.
 ///
 /// Public because host bridges read fields back out of their own payload
 /// projections — a plugin dispatched from a pipeline stage reports a new
@@ -322,14 +488,15 @@ pub async fn evaluate_route(
 pub fn get_dotted<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut cur = root;
     for seg in path.split('.') {
-        cur = cur.get(seg)?;
+        cur = segment_get(cur, seg)?;
     }
     Some(cur)
 }
 
 /// Write to `root.a.b.c` via dot-separated path. Returns true on success;
-/// false if the parent path doesn't exist or doesn't resolve to an object.
-/// Does not create missing parent objects — that'd hide schema bugs.
+/// false if the parent path doesn't exist or the leaf's parent is a scalar.
+/// Does not create missing parent objects — that'd hide schema bugs. A numeric
+/// leaf segment overwrites that array element in place.
 pub(crate) fn set_dotted(
     root: &mut serde_json::Value,
     path: &str,
@@ -340,45 +507,49 @@ pub(crate) fn set_dotted(
         Some(x) => x,
         None => return false,
     };
-    let mut cur = root;
-    for seg in parents {
-        let Some(next) = cur.get_mut(*seg) else {
-            return false;
-        };
-        if !next.is_object() {
-            return false;
-        }
-        cur = next;
-    }
-    if let serde_json::Value::Object(map) = cur {
-        map.insert((*leaf).to_owned(), value);
-        true
-    } else {
-        false
+    let Some(cur) = parent_mut(root, parents) else {
+        return false;
+    };
+    match cur {
+        serde_json::Value::Object(map) => {
+            map.insert((*leaf).to_owned(), value);
+            true
+        },
+        serde_json::Value::Array(items) => match leaf.parse::<usize>().ok() {
+            Some(i) => match items.get_mut(i) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                },
+                None => false,
+            },
+            None => false,
+        },
+        _ => false,
     }
 }
 
-/// Remove `root.a.b.c` from a JSON value. Returns true if removal happened.
+/// Remove `root.a.b.c` from a JSON value. Returns true if removal happened. A
+/// numeric leaf segment removes that array element.
 pub(crate) fn remove_dotted(root: &mut serde_json::Value, path: &str) -> bool {
     let parts: Vec<&str> = path.split('.').collect();
     let (leaf, parents) = match parts.split_last() {
         Some(x) => x,
         None => return false,
     };
-    let mut cur = root;
-    for seg in parents {
-        let Some(next) = cur.get_mut(*seg) else {
-            return false;
-        };
-        if !next.is_object() {
-            return false;
-        }
-        cur = next;
-    }
-    if let serde_json::Value::Object(map) = cur {
-        map.remove(*leaf).is_some()
-    } else {
-        false
+    let Some(cur) = parent_mut(root, parents) else {
+        return false;
+    };
+    match cur {
+        serde_json::Value::Object(map) => map.remove(*leaf).is_some(),
+        serde_json::Value::Array(items) => match leaf.parse::<usize>().ok() {
+            Some(i) if i < items.len() => {
+                items.remove(i);
+                true
+            },
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -857,6 +1028,177 @@ mod tests {
         .await;
         assert_eq!(r.decision, Decision::Allow);
         assert!(!r.args_modified);
+    }
+
+    #[test]
+    fn expand_field_paths_fans_out_over_intermediate_arrays() {
+        let v = json!({
+            "rows": [ { "ssn": "a" }, { "ssn": "b" }, { "other": 1 } ]
+        });
+        // The intermediate `rows` array fans out; the element missing `ssn`
+        // is dropped (its path never resolves), matching missing-field skip.
+        let mut paths = expand_field_paths(&v, "rows.ssn").expect("within bounds");
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["rows.0.ssn".to_owned(), "rows.1.ssn".to_owned()]
+        );
+
+        // A terminal array is one path, preserving whole-value semantics.
+        assert_eq!(
+            expand_field_paths(&v, "rows"),
+            Some(vec!["rows".to_owned()])
+        );
+
+        // A plain object path expands to itself.
+        let flat = json!({ "a": { "b": 1 } });
+        assert_eq!(
+            expand_field_paths(&flat, "a.b"),
+            Some(vec!["a.b".to_owned()])
+        );
+
+        // An explicit numeric segment indexes rather than fanning out.
+        assert_eq!(
+            expand_field_paths(&v, "rows.0.ssn"),
+            Some(vec!["rows.0.ssn".to_owned()])
+        );
+    }
+
+    #[test]
+    fn expand_field_paths_fails_closed_on_deep_nesting() {
+        // Pathologically deep array nesting must fail closed rather than
+        // recurse without bound.
+        let mut v = json!({ "leaf": 1 });
+        for _ in 0..(super::MAX_FANOUT_DEPTH + 5) {
+            v = serde_json::Value::Array(vec![v]);
+        }
+        let root = json!({ "rows": v });
+        assert_eq!(
+            expand_field_paths(&root, "rows.leaf"),
+            None,
+            "deep nesting must fail closed"
+        );
+    }
+
+    #[test]
+    fn expand_field_paths_fails_closed_on_wide_array() {
+        // The width bound must fail closed too, not just the depth bound: a
+        // single array past the leaf cap returns None so the caller denies
+        // rather than half-redacting and passing the tail through.
+        let mut rows = Vec::with_capacity(super::MAX_EXPANDED_PATHS + 2);
+        for i in 0..(super::MAX_EXPANDED_PATHS + 2) {
+            rows.push(json!({ "ssn": i }));
+        }
+        let root = json!({ "rows": serde_json::Value::Array(rows) });
+        assert_eq!(
+            expand_field_paths(&root, "rows.ssn"),
+            None,
+            "a wide array past the leaf cap must fail closed"
+        );
+    }
+
+    #[test]
+    fn dotted_helpers_index_into_arrays() {
+        let mut v = json!({ "rows": [ { "ssn": "a" }, { "ssn": "b" } ] });
+        // Read through an array index.
+        assert_eq!(get_dotted(&v, "rows.1.ssn"), Some(&json!("b")));
+        // Write through it.
+        assert!(set_dotted(&mut v, "rows.0.ssn", json!("[REDACTED]")));
+        assert_eq!(v["rows"][0]["ssn"], json!("[REDACTED]"));
+        // Remove a field from an array element.
+        assert!(remove_dotted(&mut v, "rows.1.ssn"));
+        assert!(v["rows"][1].get("ssn").is_none());
+    }
+
+    #[tokio::test]
+    async fn result_pipeline_redacts_every_array_element() {
+        // `result.rows.ssn | redact` must reach every row rather than silently
+        // no-opping because `rows` is an array. Without the fan-out the SSNs
+        // pass through unredacted, which is a PII fail-open.
+        let mut route = CompiledRoute::new("test");
+        route.result.push(field_rule(
+            "rows.ssn",
+            vec![Stage::Redact { condition: None }],
+        ));
+
+        let mut bag = AttributeBag::new();
+        let mut payload = RoutePayload::with_result(
+            json!({}),
+            json!({
+                "rows": [
+                    { "ssn": "111-11-1111", "name": "a" },
+                    { "ssn": "222-22-2222", "name": "b" }
+                ]
+            }),
+        );
+
+        let r = evaluate_route(
+            &route,
+            &mut bag,
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+
+        assert_eq!(r.decision, Decision::Allow);
+        assert!(r.result_modified, "the redaction must register");
+        let result = payload.result.as_ref().unwrap();
+        assert_eq!(result["rows"][0]["ssn"], json!("[REDACTED]"));
+        assert_eq!(result["rows"][1]["ssn"], json!("[REDACTED]"));
+        // Non-targeted fields untouched.
+        assert_eq!(result["rows"][0]["name"], json!("a"));
+    }
+
+    #[tokio::test]
+    async fn route_result_over_large_fanout_denies() {
+        // When a result field path fans out past the bound, evaluate_post must
+        // deny rather than pass the un-redacted tail through. A shape nested
+        // past MAX_FANOUT_DEPTH is the cheap way to trip the bound.
+        let mut route = CompiledRoute::new("ping");
+        route.result.push(field_rule(
+            "rows.leaf",
+            vec![Stage::Redact { condition: None }],
+        ));
+
+        let mut nested = json!({ "leaf": "secret" });
+        for _ in 0..(super::MAX_FANOUT_DEPTH + 5) {
+            nested = serde_json::Value::Array(vec![nested]);
+        }
+        let mut bag = AttributeBag::new();
+        let mut payload = RoutePayload::with_result(json!({}), json!({ "rows": nested }));
+
+        let r = evaluate_route(
+            &route,
+            &mut bag,
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        match r.decision {
+            Decision::Deny {
+                reason,
+                rule_source,
+            } => {
+                let reason = reason.unwrap_or_default();
+                assert!(reason.contains("result field"), "reason: {reason}");
+                assert!(
+                    reason.contains("too many elements to redact safely"),
+                    "reason: {reason}"
+                );
+                assert_eq!(rule_source, "test.rows.leaf");
+            },
+            other => panic!("over-large result fan-out must deny, got {other:?}"),
+        }
+        assert!(
+            !r.result_modified,
+            "nothing may be redacted on a fail-closed deny"
+        );
     }
 
     #[tokio::test]

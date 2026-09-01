@@ -1184,6 +1184,7 @@ async fn dispatch_field_op(
 
     // Pick the right side of the payload based on the path prefix.
     // Out-of-phase ops drop silently (see the doc comment).
+    #[derive(Clone, Copy)]
     enum Side {
         Args,
         Result,
@@ -1210,43 +1211,58 @@ async fn dispatch_field_op(
         });
     };
 
-    let Some(current) = get_dotted(root, subpath).cloned() else {
-        return EffectOutcome::Continue; // missing field → silent no-op
+    // Fan out over arrays on the path so a `do:`-embedded field op like
+    // `result.rows.ssn | redact` reaches every element's leaf instead of
+    // silently no-op'ing on the array. An object-only path expands to itself.
+    // An over-large shape fails closed rather than half-redacting.
+    let Some(paths) = crate::route::expand_field_paths(root, subpath) else {
+        return EffectOutcome::Halt(Decision::Deny {
+            reason: Some(format!(
+                "FieldOp path `{path}` expands to too many elements to redact safely"
+            )),
+            rule_source: fallback_source.to_owned(),
+        });
     };
 
     let pipeline = crate::pipeline::Pipeline {
         stages: stages.to_vec(),
     };
-    // `subpath`, not `path`: the field name a pipeline reports to a
-    // plugin is relative to the args / result root, matching what the
-    // `args:` / `result:` section pipelines pass. The prefixed `path`
-    // stays in use for deny messages, where the reader wants the side
-    // spelled out.
-    let eval = evaluate_pipeline(&pipeline, &current, bag, plugins, subpath, phase).await;
-    taints.extend(eval.taints);
     let mark_modified = |side: Side, args: &mut bool, result: &mut bool| match side {
         Side::Args => *args = true,
         Side::Result => *result = true,
     };
-    match eval.outcome {
-        FieldOutcome::Pass => EffectOutcome::Continue,
-        FieldOutcome::Replace(new_val) => {
-            if set_dotted(root, subpath, new_val) {
-                mark_modified(side, args_modified, result_modified);
-            }
-            EffectOutcome::Continue
-        },
-        FieldOutcome::Omit => {
-            if remove_dotted(root, subpath) {
-                mark_modified(side, args_modified, result_modified);
-            }
-            EffectOutcome::Continue
-        },
-        FieldOutcome::Deny { reason, .. } => EffectOutcome::Halt(Decision::Deny {
-            reason: Some(reason),
-            rule_source: fallback_source.to_owned(),
-        }),
+    for concrete in paths {
+        let Some(current) = get_dotted(root, &concrete).cloned() else {
+            continue; // missing field on this element → silent no-op
+        };
+        // `subpath`, not `path`: the field name a pipeline reports to a
+        // plugin is relative to the args / result root, matching what the
+        // `args:` / `result:` section pipelines pass. The prefixed `path`
+        // stays in use for deny messages, where the reader wants the side
+        // spelled out.
+        let eval = evaluate_pipeline(&pipeline, &current, bag, plugins, subpath, phase).await;
+        taints.extend(eval.taints);
+        match eval.outcome {
+            FieldOutcome::Pass => {},
+            FieldOutcome::Replace(new_val) => {
+                if set_dotted(root, &concrete, new_val) {
+                    mark_modified(side, args_modified, result_modified);
+                }
+            },
+            FieldOutcome::Omit => {
+                if remove_dotted(root, &concrete) {
+                    mark_modified(side, args_modified, result_modified);
+                }
+            },
+            FieldOutcome::Deny { reason, .. } => {
+                return EffectOutcome::Halt(Decision::Deny {
+                    reason: Some(reason),
+                    rule_source: fallback_source.to_owned(),
+                });
+            },
+        }
     }
+    EffectOutcome::Continue
 }
 
 /// Result of running a pipeline against one field's value.
