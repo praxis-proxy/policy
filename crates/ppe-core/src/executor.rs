@@ -491,10 +491,21 @@ impl Executor {
             match result {
                 Ok(Ok(result_box)) => {
                     if let Some(erased) = extract_erased(result_box) {
-                        if !erased.continue_processing
-                            && can_block
-                            && let Some(mut v) = erased.violation
-                        {
+                        if !erased.continue_processing && can_block {
+                            // A blocking plugin that signals "do not continue"
+                            // halts the pipeline whether or not it attached a
+                            // violation. A missing violation is synthesized
+                            // rather than treated as an allow — the concurrent
+                            // phase does the same (`concurrent_deny` below), and
+                            // letting a deny-without-reason fall through to the
+                            // modification path would be a fail-open in the
+                            // phase whose whole job is enforcement.
+                            let mut v = erased.violation.unwrap_or_else(|| {
+                                crate::error::PluginViolation::new(
+                                    "plugin_deny",
+                                    format!("Plugin '{plugin_name}' denied"),
+                                )
+                            });
                             v.plugin_name = Some(plugin_name.to_owned());
                             return Some(v);
                         }
