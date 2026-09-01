@@ -1093,11 +1093,15 @@ fn dispatch_parallel<'a>(
 
         // Aggregate in input order: append every branch's taints; pick
         // the first Halt (by branch index, not wall-clock order) as the
-        // overall result. Aborted / panicked branches contribute no
-        // taints — they didn't run to completion. A panicked branch is
-        // *not* converted into a Halt; we log via `tracing::warn!` and
-        // continue. (A misbehaving plugin shouldn't take down the
-        // parallel block any more than it would the host process.)
+        // overall result. Aborted branches contribute no taints — they
+        // were short-circuit cancelled. A *panicked* branch is converted
+        // into a fail-closed Halt: we cannot know whether the branch it
+        // ran would have denied, and the engine's contract everywhere
+        // else is that an effect which cannot complete denies rather than
+        // permits (a plugin `Err` halts at line 497, and the concurrent
+        // executor phase halts on a panicking branch under `on_error:
+        // fail`). Swallowing the panic here would make a guard branch's
+        // deny vanish — fail-open in the one phase whose job is to block.
         let mut first_halt: Option<Decision> = None;
         for (idx, outcome) in outcomes.into_iter().enumerate() {
             match outcome {
@@ -1124,14 +1128,19 @@ fn dispatch_parallel<'a>(
                     // post-config-extension.
                 },
                 BranchOutcome::Panicked(msg) => {
-                    // A panicking branch is a misbehaving plugin/effect;
-                    // dropping its output (no Halt, no taints) keeps the
-                    // parallel block's other branches intact rather than
-                    // taking the whole block down. praxis-policy-apl-core has no
-                    // tracing dep — host integrations that care can
-                    // surface the panic via praxis-policy-core's plugin error
-                    // path. `idx`/`msg` are eaten here.
-                    let _ = (idx, msg);
+                    // A panicking branch is a misbehaving plugin/effect. It
+                    // fails closed: a panic is a more severe failure than a
+                    // plugin `Err` (which already halts), so it must not be
+                    // treated more leniently. The first panic, in branch
+                    // index order, stands in as the phase's deny if no
+                    // earlier branch already produced a Halt. `msg` carries
+                    // the panic payload into the audit reason.
+                    if first_halt.is_none() {
+                        first_halt = Some(Decision::Deny {
+                            reason: Some(format!("parallel branch {idx} panicked: {msg}")),
+                            rule_source: "parallel.branch_panic".to_owned(),
+                        });
+                    }
                 },
             }
         }
@@ -3120,6 +3129,21 @@ mod tests {
         }
     }
 
+    /// Invoker that panics on any plugin call — models a misbehaving plugin
+    /// unwinding inside a `parallel:` branch.
+    struct PanicPlugins;
+    #[async_trait]
+    impl PluginInvoker for PanicPlugins {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _bag: &AttributeBag,
+            _invocation: PluginInvocation<'_>,
+        ) -> Result<PluginOutcome, PluginError> {
+            panic!("plugin blew up mid-branch");
+        }
+    }
+
     fn pdp_step(decision_diagnostic_label: &str) -> Effect {
         Effect::Pdp {
             call: PdpCall {
@@ -4060,6 +4084,48 @@ mod tests {
                 assert_eq!(reason.as_deref(), Some("branch 1 denied"));
             },
             other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_panicked_branch_fails_closed() {
+        // A branch that panics (misbehaving plugin) must halt the phase, not
+        // be silently dropped — a swallowed panic would let a guard branch's
+        // deny vanish (fail-open). The surviving Allow branch must not rescue
+        // the request.
+        let mut bag = AttributeBag::new();
+        let mut payload = crate::route::RoutePayload::new(json!({}));
+
+        let rule = Rule {
+            condition: Expression::Always,
+            effects: vec![Effect::Parallel(vec![
+                Effect::Plugin {
+                    name: "guard".into(),
+                },
+                Effect::Allow,
+            ])],
+            source: "test.policy[0]".into(),
+        };
+
+        let eval = evaluate_effects(
+            &vec![Effect::from(rule)],
+            &mut bag,
+            &(Arc::new(FakePdp {
+                decision: Decision::Allow,
+            }) as Arc<dyn PdpResolver>),
+            &(Arc::new(PanicPlugins) as Arc<dyn PluginInvoker>),
+            &noop_delegations(),
+            &noop_elicitations(),
+            crate::step::DispatchPhase::Pre,
+            &mut payload,
+        )
+        .await;
+
+        match eval.decision {
+            Decision::Deny { rule_source, .. } => {
+                assert_eq!(rule_source, "parallel.branch_panic");
+            },
+            other => panic!("panicked branch must deny, got {other:?}"),
         }
     }
 
