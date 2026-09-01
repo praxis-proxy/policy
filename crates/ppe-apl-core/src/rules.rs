@@ -334,6 +334,54 @@ impl Effect {
         }
     }
 
+    /// Count the `Elicit` nodes reachable in this effect subtree.
+    ///
+    /// Used by the config-load validator to reject a phase that can reach more
+    /// than one elicitation. `elicitation.id` is a single flat bag key, not a
+    /// per-step one, and `dispatch_elicitation` treats it as present to mean
+    /// "already dispatched, poll it". So within *one* request, with no retry
+    /// involved: the first elicit dispatches and writes the shared key, and the
+    /// second reads it, skips its own dispatch entirely, and adopts the first's
+    /// verdict. A `require_approval` written after a `confirm` never reaches an
+    /// approver, it is rubber-stamped by whoever answered the confirm. The
+    /// resolved bundle (status, outcome, approver, intent id) is shared the same
+    /// way, and which step wins is just evaluation order.
+    ///
+    /// Correct multi-elicit needs a per-step id the current single-id protocol
+    /// cannot carry, so the safe posture is to reject a config that expresses
+    /// two independent gates the engine can only enforce as one.
+    ///
+    /// A PDP's `on_allow` / `on_deny` arms are counted *together* even though
+    /// only one runs per evaluation: the PDP verdict can flip between the
+    /// initial request and the retry (its inputs change), so across the two
+    /// round trips both arms can fire and collide on the shared retry id, which
+    /// is the same hazard. Summing them is the deliberate conservative choice,
+    /// so a policy with an elicit in each PDP arm is rejected rather than
+    /// silently exposed to a verdict flip. `When` arms are likewise summed,
+    /// since the compiler cannot prove two conditions disjoint.
+    pub fn count_elicits(&self) -> usize {
+        match self {
+            Effect::Elicit(_) => 1,
+            Effect::Sequential(effects) | Effect::Parallel(effects) => {
+                effects.iter().map(Effect::count_elicits).sum()
+            },
+            Effect::When { body, .. } => body.iter().map(Effect::count_elicits).sum(),
+            Effect::Pdp {
+                on_allow, on_deny, ..
+            } => {
+                on_allow.iter().map(Effect::count_elicits).sum::<usize>()
+                    + on_deny.iter().map(Effect::count_elicits).sum::<usize>()
+            },
+            Effect::Allow
+            | Effect::Deny { .. }
+            | Effect::Plugin { .. }
+            | Effect::Taint { .. }
+            | Effect::Restrict { .. }
+            | Effect::FieldOp { .. }
+            | Effect::Delegate(_) => 0,
+        }
+    }
+
     /// Walk the effect tree rejecting any `FieldOp` / `Delegate` that
     /// lives directly or transitively under a `Parallel` node. Returns
     /// the path string of the first violation found (or `Ok(())` if
@@ -973,6 +1021,58 @@ mod tests {
                 "tag.hr.policy[0]",
                 "route.policy[0]",
             ]
+        );
+    }
+
+    #[test]
+    fn count_elicits_sums_through_control_flow() {
+        let elicit = |name: &str| {
+            Effect::Elicit(crate::step::ElicitStep {
+                kind: crate::step::ElicitKind::Approval,
+                plugin_name: name.into(),
+                channel: None,
+                from: "user.manager".into(),
+                purpose: None,
+                scope: None,
+                timeout: None,
+                config_override: None,
+                on_error: None,
+                source: "test".into(),
+            })
+        };
+        // No elicit.
+        assert_eq!(Effect::Allow.count_elicits(), 0);
+        // One at top level.
+        assert_eq!(elicit("a").count_elicits(), 1);
+        // Two under a When body count as two: the compiler cannot prove two
+        // conditions disjoint, so they are summed.
+        assert_eq!(
+            Effect::When {
+                condition: Expression::Always,
+                body: vec![elicit("a"), elicit("b")],
+                source: "test".into(),
+            }
+            .count_elicits(),
+            2
+        );
+        // And nested through Sequential.
+        assert_eq!(
+            Effect::Sequential(vec![elicit("a"), Effect::Allow, elicit("b")]).count_elicits(),
+            2
+        );
+        // A PDP's two arms are summed, since a verdict flip between the initial
+        // request and the retry can fire both across the two round trips.
+        assert_eq!(
+            Effect::Pdp {
+                call: crate::step::PdpCall {
+                    dialect: crate::step::PdpDialect::Cedar,
+                    args: serde_yaml::Value::Null,
+                },
+                on_allow: vec![elicit("a")],
+                on_deny: vec![elicit("b")],
+            }
+            .count_elicits(),
+            2
         );
     }
 

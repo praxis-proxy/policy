@@ -3222,6 +3222,35 @@ fn compile_apl_blocks(source: &str, raw: RouteYaml) -> Result<CompiledRoute, Par
         }
     }
     route.plugin_overrides = raw.plugins;
+
+    // Reject a phase that reaches more than one elicitation. `elicitation.id`
+    // is one flat bag key, and a present id means "already dispatched, poll
+    // it", so in a single request the first elicit dispatches and the second
+    // skips its own dispatch and adopts the first's verdict. A
+    // `require_approval` after a `confirm` never reaches an approver. See
+    // `Effect::count_elicits`. This per-block check covers every dispatch path;
+    // cross-layer stacking (a global elicit plus a route one) is caught again
+    // on the fully-stacked route by the APL visitor.
+    for (phase, effects) in [
+        ("pre_invocation", &route.pre_invocation),
+        ("post_invocation", &route.post_invocation),
+    ] {
+        let elicits: usize = effects
+            .iter()
+            .map(crate::rules::Effect::count_elicits)
+            .sum();
+        if elicits > 1 {
+            return Err(ParseError::Rule {
+                rule: format!("{source}.{phase}"),
+                msg: format!(
+                    "{phase} reaches {elicits} elicitation steps; at most one elicitation per \
+                     phase is supported (they would share one retry id and resolve against \
+                     each other)"
+                ),
+            });
+        }
+    }
+
     Ok(route)
 }
 
@@ -4715,6 +4744,40 @@ route:
         let err = compile_test_policy("r", yaml).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("result.x"), "expected result.x in: {msg}");
+    }
+
+    #[test]
+    fn two_elicit_steps_in_one_phase_rejected() {
+        // Two elicitations in one phase share a single retry id, so the second
+        // would resolve against the first's approval. Reject at load.
+        let yaml = r#"
+route:
+  authorization:
+    pre_invocation:
+      - "confirm(approver, from: user.sub)"
+      - "require_approval(approver, from: user.manager)"
+"#;
+        let err = compile_test_policy("payroll", yaml)
+            .expect_err("two elicits in one phase must be rejected");
+        assert!(
+            format!("{err}").contains("at most one elicitation per phase"),
+            "expected a multi-elicit rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn single_elicit_per_phase_compiles() {
+        // One elicit in pre and one in post is fine: separate phases, separate
+        // evaluation walks, so no shared retry id.
+        let yaml = r#"
+route:
+  authorization:
+    pre_invocation:
+      - "require_approval(approver, from: user.manager)"
+    post_invocation:
+      - "confirm(auditor, from: user.sub)"
+"#;
+        compile_test_policy("payroll", yaml).expect("one elicit per phase must compile");
     }
 
     #[test]
