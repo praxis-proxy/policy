@@ -65,19 +65,21 @@ zeroize = { version = "1.9", features = ["zeroize_derive"] }
 #
 # Deliberately not blake3, which is the obvious pick for a keyed hash.
 # `sha2` is already in the tree, and with it `digest`, `crypto-common`,
-# `subtle`, `typenum`, `generic-array` and `block-buffer` — so `hmac`
-# adds one crate and nothing transitive, where blake3 brings a new tree.
+# `block-buffer`, `hybrid-array`, `typenum`, `const-oid` and `ctutils`
+# — so `hmac` adds one crate and nothing transitive, where blake3
+# brings a new tree.
 # Its speed advantage is real and irrelevant at this size: one hash of a
 # couple of kilobytes per delegation, against an IdP round trip.
 #
-# Pinned to 0.12 rather than 0.13 for the same reason: 0.13 pairs with
-# `digest` 0.11 and would pull a second `sha2` alongside the existing one.
-hmac = "0.12"
-sha2 = "0.10"
+# 0.13 pairs with `digest` 0.11, so it moves in lockstep with `sha2`
+# 0.11 here and in the two other crates that hash. Splitting them would
+# put two `sha2` lines in the tree.
+hmac = "0.13"
+sha2 = "0.11"
 
-# 32 bytes for the per-process HMAC secret. Already in the tree
-# transitively; named here because the cache needs it directly.
-getrandom = "0.3"
+# 32 bytes for the per-process HMAC secret. The only runtime user; the
+# 0.3 line in the tree comes from `rand_core` under dev-only deps.
+getrandom = "0.4"
 
 # The bounded, coalescing store behind the delegated-token cache.
 #

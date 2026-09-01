@@ -74,7 +74,7 @@
 // a second preimage under an unknown 256-bit key, with only a
 // chosen-message oracle to work from.
 
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use praxis_policy_core::delegation::{
     AttenuationConfig, AuthEnforcedBy, DelegationPayload, DelegationSubject, TargetType,
 };

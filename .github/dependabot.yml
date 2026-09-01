@@ -10,6 +10,12 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # rsa 0.9 (latest stable) needs rand_core 0.6, which no rand past
+      # 0.8 implements. Revisit when rsa 0.10 ships. See the rand pin in
+      # builtins/plugins/identity-jwt/Cargo.toml.
+      - dependency-name: rand
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule:
