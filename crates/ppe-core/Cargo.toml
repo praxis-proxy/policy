@@ -63,5 +63,8 @@ zeroize = { version = "1.9", features = ["zeroize_derive"] }
 # (and praxis-policy-apl-core's `Effect::Parallel`). Leaf crate, no cycles back here.
 praxis-policy-orchestration = { workspace = true }
 
+[dev-dependencies]
+loom = { workspace = true }
+
 [lints]
 workspace = true
