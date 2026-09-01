@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>מה זה Praxis Policy — הסבר למי שלא מתכנת</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;700;800&amp;family=Frank+Ruhl+Libre:wght@500;700&amp;display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #2a241c;
+      --muted: #5c5348;
+      --paper: #f7f1e6;
+      --card: #fffdf8;
+      --line: #e4d8c4;
+      --wood: #8b5a2b;
+      --wood-dark: #5c3a1e;
+      --stop: #9b2c2c;
+      --go: #2f6b3a;
+      --note: #fff6d6;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Heebo, "Segoe UI", Tahoma, Arial, sans-serif;
+      font-size: 1.08rem;
+      line-height: 1.85;
+    }
+    .wrap {
+      max-width: 50rem;
+      margin: 0 auto;
+      padding: 2.4rem 1.4rem 4.5rem;
+    }
+    header.hero {
+      border-bottom: 3px solid var(--wood);
+      padding-bottom: 1.4rem;
+      margin-bottom: 1.8rem;
+    }
+    .kicker {
+      font-size: 0.82rem;
+      letter-spacing: 0.08em;
+      color: var(--wood);
+      font-weight: 700;
+      margin: 0 0 0.5rem;
+    }
+    h1 {
+      font-family: "Frank Ruhl Libre", Georgia, serif;
+      font-size: 2.15rem;
+      line-height: 1.25;
+      margin: 0 0 0.7rem;
+      font-weight: 700;
+    }
+    .lead {
+      font-size: 1.18rem;
+      color: var(--muted);
+      margin: 0;
+    }
+    nav.toc {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 1rem 1.2rem 1.15rem;
+      margin: 1.6rem 0 2rem;
+    }
+    nav.toc h2 {
+      font-size: 1rem;
+      margin: 0 0 0.5rem;
+      border: none;
+    }
+    nav.toc ol {
+      margin: 0;
+      padding-right: 1.2rem;
+    }
+    nav.toc a {
+      color: var(--wood-dark);
+      text-decoration: none;
+    }
+    nav.toc a:hover { text-decoration: underline; }
+    h2 {
+      font-family: "Frank Ruhl Libre", Georgia, serif;
+      font-size: 1.55rem;
+      margin: 2.4rem 0 0.8rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid var(--line);
+    }
+    h2:first-of-type { border-top: none; }
+    h3 {
+      font-size: 1.12rem;
+      margin: 1.6rem 0 0.45rem;
+      color: var(--wood-dark);
+    }
+    p { margin: 0.75rem 0; }
+    strong { font-weight: 700; }
+    code {
+      font-family: "Fira Code", Consolas, "Courier New", monospace;
+      font-size: 0.9em;
+      background: #f4efe6;
+      padding: 0.05em 0.35em;
+      unicode-bidi: isolate;
+      direction: ltr;
+    }
+    .callout {
+      background: var(--note);
+      border-right: 5px solid var(--wood);
+      padding: 0.85rem 1.05rem;
+      margin: 1.2rem 0;
+    }
+    .story {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 1.1rem 1.2rem;
+      margin: 1.1rem 0 1.4rem;
+    }
+    .steps {
+      list-style: none;
+      padding: 0;
+      margin: 1.2rem 0;
+    }
+    .steps li {
+      display: grid;
+      grid-template-columns: 2.4rem 1fr;
+      gap: 0.75rem;
+      margin: 0 0 0.95rem;
+      align-items: start;
+    }
+    .num {
+      width: 2.2rem;
+      height: 2.2rem;
+      border-radius: 50%;
+      background: var(--wood);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.95rem;
+    }
+    .gate {
+      display: grid;
+      gap: 0.7rem;
+      margin: 1.1rem 0 1.4rem;
+    }
+    .gate div {
+      padding: 0.85rem 1rem;
+      border: 1px solid var(--line);
+      background: var(--card);
+    }
+    .gate .stop { border-right: 5px solid var(--stop); }
+    .gate .go { border-right: 5px solid var(--go); }
+    .word {
+      margin: 1rem 0;
+      padding: 0.7rem 0;
+      border-bottom: 1px dashed var(--line);
+    }
+    .word:last-child { border-bottom: none; }
+    .word dt {
+      font-weight: 700;
+      color: var(--wood-dark);
+    }
+    .word dd { margin: 0.25rem 0 0; }
+    footer {
+      margin-top: 2.8rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    .code-ref, .flow, pre.flow {
+      unicode-bidi: isolate;
+      direction: ltr;
+      text-align: left;
+      font-family: "Fira Code", Consolas, "Courier New", monospace;
+      font-size: 0.86rem;
+      line-height: 1.55;
+    }
+    .code-ref {
+      display: block;
+      background: #f4efe6;
+      border: 1px solid var(--line);
+      padding: 0.65rem 0.85rem;
+      margin: 0.7rem 0 1rem;
+      overflow-x: auto;
+    }
+    .code-ref a {
+      display: block;
+      color: var(--wood-dark);
+      text-decoration: none;
+      border-bottom: 1px dotted var(--wood);
+      margin-top: 0.35rem;
+    }
+    .code-ref a:first-child { margin-top: 0; }
+    .code-ref a:hover { text-decoration: underline; }
+    .code-ref .why {
+      display: block;
+      direction: rtl;
+      text-align: right;
+      font-family: Heebo, "Segoe UI", Tahoma, Arial, sans-serif;
+      font-size: 0.95rem;
+      color: var(--muted);
+      margin-top: 0.35rem;
+      unicode-bidi: isolate;
+    }
+    pre.flow {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      white-space: pre;
+      margin: 1.1rem 0 1.4rem;
+    }
+    @media (max-width: 640px) {
+      h1 { font-size: 1.7rem; }
+      .wrap { padding: 1.4rem 1rem 3rem; }
+    }
+  </style>
+</head>
+<body>
+  <article class="wrap">
+    <header class="hero">
+      <p class="kicker">הסבר בעברית פשוטה</p>
+      <h1>מה זה Praxis Policy, ולמה בכלל צריך אותו</h1>
+      <p class="lead">
+        זה לא מדריך למתכנתים. זה הסבר כמו שמסבירים שכן בבית מלאכה:
+        מה הדבר הזה עושה, למי הוא עוצר את הדרך, ומדוע המילים
+        שמסביב לו מבלבלות.
+      </p>
+    </header>
+
+    <nav class="toc" aria-label="תוכן העניינים">
+      <h2>מה יש בדף הזה</h2>
+      <ol>
+        <li><a href="#one-sentence">במשפט אחד</a></li>
+        <li><a href="#workshop">המשל: בית מלאכה עם דלת</a></li>
+        <li><a href="#two-things">שני שמות שונים, שני תפקידים</a></li>
+        <li><a href="#why-words">למה מילים כמו «שכבה» ו«אכיפה» מטעות</a></li>
+        <li><a href="#problem">איזו בעיה זה פותר</a></li>
+        <li><a href="#story">סיפור של בקשה אחת, מההתחלה עד הסוף</a></li>
+        <li><a href="#jobs">ששת הדברים שהוא באמת עושה</a></li>
+        <li><a href="#flow">הזרימה בקוד, מהדלת עד ההחלטה</a></li>
+        <li><a href="#rules">איך נראים הכללים על הקיר</a></li>
+        <li><a href="#words">מילון קצר: מילה של מתכנת → עברית</a></li>
+      </ol>
+    </nav>
+
+    <section id="one-sentence">
+      <h2>במשפט אחד</h2>
+      <p>
+        <strong>Praxis Policy הוא השומר על הדלת.</strong>
+        בכל פעם שמישהו (או תוכנה שעובדת בשביל מישהו) רוצה להשתמש
+        בכלי מסוכן — לראות משכורת, לשלוח מייל, לגעת במסמך —
+        השומר בודק את הכללים הכתובים ואומר: מותר, אסור,
+        או מותר אבל קודם מוחקים מהדף את מה שאסור לראות.
+      </p>
+      <p>
+        הוא לא בונה את הבית, לא מנסר את העץ, ולא שולח את המייל בעצמו.
+        הוא עומד בפתח ובודק.
+      </p>
+    </section>
+
+    <section id="workshop">
+      <h2>המשל: בית מלאכה עם דלת</h2>
+      <p>
+        תחשוב על נגרייה גדולה. לא נגרייה של אדם אחד, אלא מקום
+        שבו עובדים הרבה אנשים, ויש בו גם מכונות מסוכנות,
+        גם ארון עם תלושי שכר, וגם טלפון ששולח מכתבים החוצה.
+      </p>
+      <p>
+        הלקוח לא נכנס ישר לחדר המשכורות. גם השוליה לא.
+        גם מכונה חכמה שמקבלת הוראות בשפה רגילה לא.
+        כולם עוברים באותו מסדרון, ואצל אותה דלת.
+      </p>
+      <div class="story">
+        <p>
+          על הקיר ליד הדלת תלוי דף כללים. למשל:
+          «רק מישהו ממשאבי אנוש רשאי לפתוח את ארון המשכורות».
+          «מי שנגע במשכורות לא שולח היום מכתבים החוצה».
+          «אם השינוי במשכורת גדול מ־10,000 שקל — מתקשרים למנהל».
+        </p>
+        <p>
+          השומר לא ממציא את הכללים. מישהו כתב אותם מראש.
+          העבודה של השומר היא לקרוא אותם בכל פעם שמישהו
+          רוצה לעבור, ולעצור אותו אם הכלל אומר לעצור.
+        </p>
+      </div>
+      <p>
+        זה Praxis Policy. הדף על הקיר הוא רשימת הכללים.
+        השומר הוא התוכנה שקוראת את הדף ועוצרת או מרשה.
+      </p>
+    </section>
+
+    <section id="two-things">
+      <h2>שני שמות שונים, שני תפקידים</h2>
+      <p>
+        בפרויקט הזה יש שני דברים שנשמעים דומה. הם לא אותו דבר.
+      </p>
+      <h3>Praxis — הבניין והמסדרון</h3>
+      <p>
+        Praxis הוא הפתח שכל עבודה עוברת בו. כמו שער הכניסה
+        לחצר. הוא מקבל פנייה, מעביר אותה הלאה למקום הנכון,
+        ומחזיר תשובה. בלי Praxis אין מסדרון: הבקשות לא יודעות
+        איך להגיע למכונה או לכלי.
+      </p>
+      <p>
+        הוא לא מחליט אם מותר. הוא רק המקום שדרכו עוברים.
+      </p>
+      <h3>Praxis Policy — השומר ודף הכללים</h3>
+      <p>
+        Praxis Policy הוא מי שעומד באותו שער עם הדף ביד.
+        הוא שואל: מי אתה. מה אתה רוצה לעשות. מה אתה עומד
+        לראות. לאן אתה רוצה לקחת את זה אחר כך.
+      </p>
+      <p>
+        אם התשובה לא מתאימה לכלל — הוא לא פותח את הדלת.
+        הכלי שבפנים בכלל לא מתחיל לעבוד.
+      </p>
+    </section>
+
+    <section id="why-words">
+      <h2>למה מילים כמו «שכבה» ו«אכיפה» מטעות</h2>
+      <p>
+        מתכנתים אוהבים מילים של בניין: שכבה, מנוע, תעבורה.
+        לנגרייה זה נשמע כמו קשקוש, ובצדק. הנה מה שהתכוונתי
+        בפעם הקודמת, בלי הקישוט.
+      </p>
+
+      <div class="word">
+        <dl>
+          <dt>«שכבה»</dt>
+          <dd>
+            אין פה קומה בבית. המתכנת מדמיין תוכנות אחת מעל השנייה,
+            כמו דיקט מודבק: למטה הבניין, מעליו מי שבודק כללים.
+            המילה היחידה שחשובה: <strong>זה תפקיד נפרד</strong>.
+            מי שמעביר את העבודה ממקום למקום, ומי שעוצר אותה
+            כשצריך, הם לא אותו אדם.
+          </dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>«אכיפה»</dt>
+          <dd>
+            לא משטרה ברחוב. פשוט: הכלל לא נשאר כתוב על הקיר
+            בתור המלצה. יש מי ש<strong>באמת עוצר</strong> כשהכלל אומר לעצור.
+            בלי זה, דף הכללים הוא קישוט. עם זה, מי שאין לו רשות
+            לא נכנס לחדר.
+          </dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>«מנוע מדיניות»</dt>
+          <dd>
+            «מנוע» כאן לא מנוע של משור. זו דרך של מתכנתים להגיד
+            «החלק שמחשב תשובה שוב ושוב». «מדיניות» זה דף הכללים.
+            ביחד: התוכנה שקוראת את הכללים ועונה מותר או אסור.
+            בעברית רגילה: <strong>השומר</strong>.
+          </dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>«תעבורה»</dt>
+          <dd>
+            לא כביש ולא משאיות. הכוונה לכל הפניות שעוברות
+            במסדרון: «תראה לי משכורת», «שלח מייל», «חפש בקובץ».
+            כמו פתקי עבודה שנכנסים לדלת אחת אחרי השנייה.
+          </dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>«סוכן» / «כלי»</dt>
+          <dd>
+            סוכן הוא תוכנה שמקבלת הוראה בשפה רגילה ומנסה
+            לבצע אותה. כמו שוליה שאתה אומר לו «תביא לי את תלוש
+            השכר של יוסי». כלי הוא פעולה אחת שהשוליה יודע לעשות:
+            לפתוח ארון, לשלוח מכתב, לחפש במגירה. Praxis Policy
+            לא בודק את השוליה פעם אחת בבוקר. הוא בודק
+            <strong>כל פעולה בנפרד</strong>, כי שוליה יכול לבקש
+            דבר מותר ואחר כך דבר אסור.
+          </dd>
+        </dl>
+      </div>
+    </section>
+
+    <section id="problem">
+      <h2>איזו בעיה זה פותר</h2>
+      <p>
+        פעם, אדם ישב מול מחשב ולחץ על כפתורים. היה ברור מי לחץ.
+        היום אפשר להגיד לתוכנה במשפט: «תביא את המשכורת של יוסי
+        ותשלח אותה למייל של הספק». התוכנה תרוץ מהר, תיגע בהרבה
+        חדרים, ואף אחד לא יעמוד לידה.
+      </p>
+      <p>
+        בלי שומר על הדלת קורים שלושה דברים רעים:
+      </p>
+      <div class="gate">
+        <div class="stop">
+          <strong>נכנס מי שלא צריך.</strong>
+          שוליה, או לקוח, או תוכנה של ספק, פותחים ארון שלא להם.
+        </div>
+        <div class="stop">
+          <strong>יוצא מידע שאסור לצאת.</strong>
+          מספר תעודת זהות, משכורת, סוד מקצועי — נשלחים החוצה
+          כי אף אחד לא מחק אותם מהדף בדרך.
+        </div>
+        <div class="stop">
+          <strong>אין זיכרון.</strong>
+          בבוקר נגעו בסוד. בצהריים שולחים מכתב. אף אחד לא זוכר
+          ששתי הפעולות שייכות לאותו אדם באותו יום.
+        </div>
+      </div>
+      <p>
+        Praxis Policy קיים כדי שהכללים האלה לא יהיו תלויים
+        בזה שמישהו «ייזהר». הם נבדקים אוטומטית, בכל פעם,
+        לפני שהדלת נפתחת.
+      </p>
+    </section>
+
+    <section id="story">
+      <h2>סיפור של בקשה אחת, מההתחלה עד הסוף</h2>
+      <p>
+        דוד עובד במשאבי אנוש. הוא אומר לתוכנה:
+        «תראי לי את תלוש השכר של יוסי». אחר כך, בלי לחשוב,
+        הוא אומר: «ועכשיו תשלחי את זה במייל לספק בחוץ».
+      </p>
+      <p>הנה מה שהשומר עושה, לפי הסדר.</p>
+
+      <ol class="steps">
+        <li>
+          <span class="num">1</span>
+          <div>
+            <strong>בודקים מי דופק בדלת.</strong>
+            לא מספיק שהתוכנה אמרה «דוד». השומר בודק תעודה:
+            מי האדם, מי התוכנה שעובדת בשבילו, ומאיזה מחשב
+            זה הגיע. שלושה כרטיסים, לא אחד. כמו לבדוק תעודת
+            זהות, תג עובד, וגם מאיזה שער נכנס הרכב.
+          </div>
+        </li>
+        <li>
+          <span class="num">2</span>
+          <div>
+            <strong>בודקים אם מותר לפתוח את הארון הזה.</strong>
+            על הקיר כתוב: רק למשאבי אנוש מותר לראות משכורת.
+            לדוד יש את התפקיד. הדלת נפתחת. אם זה היה נגר מהמסגריה —
+            הדלת נשארת סגורה, והארון בכלל לא זז.
+          </div>
+        </li>
+        <li>
+          <span class="num">3</span>
+          <div>
+            <strong>נותנים מפתח קטן, לא מפתח אדון.</strong>
+            כדי לקרוא את התלוש צריך לפתוח מערכת חיצונית
+            (נגיד מערכת שכר). השומר לא שולח את המפתח הגדול
+            של כל החברה. הוא חותך מפתח שפותח רק את חדר השכר,
+            ורק לקריאה, ורק להיום. אם מישהו גונב את המפתח הזה
+            בדרך — הוא לא מקבל את כל הבניין.
+          </div>
+        </li>
+        <li>
+          <span class="num">4</span>
+          <div>
+            <strong>מוחקים מהדף מה שאסור לראות.</strong>
+            נניח שבתלוש כתוב גם מספר תעודת זהות, ולדוד אין רשות
+            לראות אותו. השומר לא מונע את כל התלוש. הוא מכסה
+            את המספר, כמו שמכסים מחיר על שרטוט לפני שמראים
+            אותו לקבלן. השאר עובר.
+          </div>
+        </li>
+        <li>
+          <span class="num">5</span>
+          <div>
+            <strong>רושמים במחברת: «נגע בסוד».</strong>
+            דוד ראה משכורת. השומר לא שוכח. הוא שם סימן על
+            כל מה שדוד יעשה היום, כמו נסורת על בגדים אחרי
+            חדר הליטוש: מי שהיה שם, ניכר עליו.
+          </div>
+        </li>
+        <li>
+          <span class="num">6</span>
+          <div>
+            <strong>המייל החוצה נחסם.</strong>
+            דוד מבקש לשלוח. על הקיר כתוב: מי שנגע בסודות
+            לא שולח דואר החוצה. השומר רואה את הסימן מהשלב
+            הקודם, וסוגר. לא כי המייל «נשמע חשוד», אלא כי
+            הכלל זוכר מה היה קודם באותו יום.
+          </div>
+        </li>
+        <li>
+          <span class="num">7</span>
+          <div>
+            <strong>הכול נרשם ביומן.</strong>
+            מי ביקש, מה ביקש, הותר או נאסר, למה. לא בשביל
+            לקשט. בשביל שאפשר יהיה לחזור אחורה כשמשהו משתבש.
+          </div>
+        </li>
+      </ol>
+
+      <div class="callout">
+        שימו לב לסדר. קודם בודקים מי זה. אחר כך אם מותר.
+        אחר כך מוחקים מהדף. אחר כך זוכרים להמשך היום.
+        אם בשלב 2 התשובה היא אסור — הארון לא נפתח בכלל.
+        אין «קודם נראה ואחר כך נחליט».
+      </div>
+    </section>
+
+    <section id="jobs">
+      <h2>ששת הדברים שהוא באמת עושה</h2>
+      <p>
+        אפשר לסכם את העבודה של השומר בשישה תפקידים.
+        לא שישה מסכים. שישה סוגים של בדיקה על אותה דלת.
+      </p>
+
+      <h3 id="job-identity">1. לזהות מי עומד בדלת</h3>
+      <p>
+        אדם, תוכנה שעובדת בשבילו, והמחשב שממנו זה הגיע —
+        שלושה זיהויים נפרדים. למה? כי אפשר לגנוב סיסמה.
+        אפשר להפעיל תוכנה בשם מישהו אחר. השומר לא מאמין
+        לשלט על החולצה. הוא בודק תעודה.
+      </p>
+      <p>
+        בקוד זה קורה <strong>לפני</strong> שבודקים אם מותר לפתוח כלי.
+        הפתח קורא לשרשרת בשם <code>identity.resolve</code>.
+        התוסף המובנה קורא את הטוקן מהכותרת, בודק חתימה ותוקף,
+        וממלא «מי זה» (תפקידים, הרשאות).
+      </p>
+      <div class="code-ref">
+        <a href="../../praxis/filter/src/builtins/http/security/policy/filter.rs">praxis/filter/.../policy/filter.rs</a> · שורות 269–288, 323–355, 513–528
+        <span class="why">הדלת עצמה: Praxis קורא לזיהוי כבר בכניסת הבקשה, לפני שקוראים את גוף ההודעה.</span>
+        <a href="../crates/ppe-core/src/identity/hook.rs">ppe-core/src/identity/hook.rs</a> · שורה 40
+        <span class="why">כאן מוגדר שם הקריאה <code>identity.resolve</code> — זה השלט על הדלת, לא הבדיקה עצמה.</span>
+        <a href="../builtins/plugins/identity-jwt/src/resolver.rs">builtins/plugins/identity-jwt/src/resolver.rs</a> · שורות 664 ואילך
+        <span class="why">כאן בודקים את התעודה בפועל: קוראים JWT, מוודאים מי הנפיק אותו, וממלאים שם ותפקיד.</span>
+      </div>
+
+      <h3 id="job-authz">2. להחליט אם מותר להשתמש בכלי</h3>
+      <p>
+        «מותר לדוד לראות משכורת?» «מותר לשוליה לשלוח מייל?»
+        התשובה כתובה בדף הכללים. לפעמים הכלל פשוט
+        («רק משאבי אנוש»). לפעמים הוא מסובך («מותר לקרוא
+        את הקובץ הזה רק אם אתה חבר בצוות של הקובץ»).
+        השומר יודע לקרוא גם כללים פשוטים וגם כללים
+        שנכתבו בשפות בדיקה מוכנות מראש.
+      </p>
+      <p>
+        אם הכלל אומר אסור — העבודה נעצרת. אין «כמעט».
+        אם משהו חסר בבדיקה (לא ברור מי זה, חסר תפקיד)
+        — גם אז נעצרים. חסר זה לא «כנראה בסדר». חסר זה סגור.
+      </p>
+      <p>
+        בקוד: אחרי הזיהוי, Praxis קורא ל־<code>cmf.tool_pre_invoke</code>
+        (או כלי/משאב/פרומפט אחר). המנוע מוצא את דף הכללים של הכלי הזה
+        ומריץ אותו. הכללים עצמם חיים ב־<code>evaluate_pre</code>:
+        קודם צינורות על שדות הקלט, אחר כך רשימת הצעדים
+        (<code>require</code>, Cedar, CEL, וכו').
+      </p>
+      <div class="code-ref">
+        <a href="../../praxis/filter/src/builtins/http/security/policy/filter.rs">praxis/filter/.../policy/filter.rs</a> · שורות 536–639
+        <span class="why">כאן מזהים איזה כלי ביקשו, בונים את ההודעה, וקוראים למנוע: מותר או אסור.</span>
+        <a href="../crates/ppe-core/src/engine.rs">ppe-core/src/engine.rs</a> · <code>invoke_named</code> שורות 1408–1458
+        <span class="why">הדלפק המרכזי: לפי שם הקריאה מוצאים מי רשום על הכלי הזה, ומריצים אותם לפי הסדר.</span>
+        <a href="../crates/ppe-apl-runtime/src/route_handler.rs">ppe-apl-runtime/src/route_handler.rs</a> · שורות 199–417
+        <span class="why">השומר של הכלי הספציפי: בונה את «תיק הבדיקה» (מי, תפקידים, ארגומנטים) וקורא להערכת הכללים.</span>
+        <a href="../crates/ppe-apl-core/src/route.rs">ppe-apl-core/src/route.rs</a> · <code>evaluate_pre</code> שורות 101–180
+        <span class="why">קודם עוברים על שדות הקלט, אחר כך על הכללים. אסור ראשון עוצר.</span>
+        <a href="../crates/ppe-apl-core/src/evaluator.rs">ppe-apl-core/src/evaluator.rs</a> · <code>evaluate_effects</code> שורות 299 ואילך
+        <span class="why">כאן רצים הכללים אחד־אחד: מותר ממשיך, אסור עוצר, קריאה ל־CEL/Cedar/תוסף לפי מה שכתוב בדף.</span>
+        <a href="../builtins/pdps/cel/src/resolver.rs">builtins/pdps/cel/src/resolver.rs</a> · שורות 402–438
+        <span class="why">אם בדף כתוב ביטוי CEL: מרכיבים אותו פעם אחת, מריצים מול תיק הבדיקה. אמת = מותר, שקר = אסור.</span>
+        <a href="../builtins/pdps/cel/src/activation.rs">builtins/pdps/cel/src/activation.rs</a> · שורות 35–40
+        <span class="why">מתרגם את תיק הבדיקה השטוח (מפתחות כמו <code>role.hr</code>) לצורה ש־CEL יודע לקרוא.</span>
+      </div>
+
+      <h3 id="job-delegate">3. לתת מפתח מוגבל למקום הבא</h3>
+      <p>
+        הרבה פעמים הכלי האמיתי יושב בחדר אחר: מערכת שכר,
+        גיטהאב, תיבת דואר. אי אפשר לשלוח לשם את המפתח
+        הגדול של החברה. השומר מכין מפתח חדש, קטן,
+        שמתאים רק לחדר הזה ורק לפעולה הזו.
+        כמו לתת לקבלן מפתח לשער האחורי ליום אחד,
+        לא את כל צרור המפתחות של הבית.
+      </p>
+      <p>
+        בקוד זה לא קורה אוטומטית לכל בקשה. זה קורה רק אם בדף הכללים
+        כתוב <code>delegate(...)</code>. אז המעריך קורא לגשר,
+        והגשר קורא לתוסף OAuth שמחליף טוקן לפי התקן RFC 8693.
+      </p>
+      <div class="code-ref">
+        <a href="../crates/ppe-core/src/delegation/hook.rs">ppe-core/src/delegation/hook.rs</a> · שורה 26
+        <span class="why">שם הקריאה: <code>token.delegate</code>.</span>
+        <a href="../crates/ppe-apl-core/src/evaluator.rs">ppe-apl-core/src/evaluator.rs</a> · <code>Effect::Delegate</code> שורות 504–543
+        <span class="why">כשכתוב בדף «תן מפתח», כאן קוראים לגשר. אם נכשל — בדרך כלל סוגרים את הדלת.</span>
+        <a href="../crates/ppe-apl-runtime/src/delegation_invoker.rs">ppe-apl-runtime/src/delegation_invoker.rs</a> · שורות 1–36, ואז <code>delegate</code>
+        <span class="why">הגשר: לוקח את הטוקן שנכנס, מוסיף למי זה מיועד, וקורא לתוסף.</span>
+        <a href="../builtins/plugins/delegator-oauth/src/delegator.rs">builtins/plugins/delegator-oauth/src/delegator.rs</a> · שורות 697 ואילך
+        <span class="why">כאן חותכים את המפתח הקטן: מחליפים מול שרת הזהות טוקן שפותח רק את החדר המבוקש.</span>
+      </div>
+
+      <h3 id="job-redact">4. לכסות מידע בדרך</h3>
+      <p>
+        לפעמים מותר לראות את העמוד, אסור לראות שורה.
+        השומר יודע למחוק או להסתיר שדה בודד: מספר זהות,
+        משכורת, כתובת. הוא עושה את זה גם בכניסה
+        (מה שנשלח פנימה) וגם ביציאה (מה שחוזר החוצה).
+      </p>
+      <p>
+        בקוד יש שני רגעים: <code>args:</code> לפני שהכלי רץ,
+        ו־<code>result:</code> אחרי שהוא החזיר תשובה.
+        כל שדה עובר צינור (validate / redact / omit).
+        הסימן «נגע בסוד» נשמר לסשן, כדי שהשלב הבא באותו יום יראה אותו.
+      </p>
+      <div class="code-ref">
+        <a href="../crates/ppe-apl-core/src/pipeline.rs">ppe-apl-core/src/pipeline.rs</a> · שורות 115–125
+        <span class="why">ההגדרה של «מחק / השמט / כסה» — מה מותר לעשות לשדה אחד.</span>
+        <a href="../crates/ppe-apl-core/src/evaluator.rs">ppe-apl-core/src/evaluator.rs</a> · <code>evaluate_pipeline</code> שורה 1296, <code>Stage::Redact</code> שורה 1469
+        <span class="why">כאן באמת מחליפים ערך ב־<code>[REDACTED]</code> אם התנאי מתקיים.</span>
+        <a href="../crates/ppe-apl-core/src/route.rs">ppe-apl-core/src/route.rs</a> · <code>evaluate_pre</code> שורות 113–155, <code>evaluate_post</code> שורות 189–245
+        <span class="why">לפני הכלי: משנים ארגומנטים. אחרי הכלי: משנים את התשובה. אסור בצינור עוצר גם כאן.</span>
+        <a href="../crates/ppe-apl-runtime/src/cmf_invoker.rs">ppe-apl-runtime/src/cmf_invoker.rs</a> · <code>apply_session_taints</code> שורה 239, <code>persist_session</code> שורה 283
+        <span class="why">הנסורת על הבגדים: תווית מהכלל נכתבת לזיכרון הסשן, כדי שהקריאה הבאה תראה אותה.</span>
+      </div>
+
+      <h3 id="job-elicit">5. לעצור ולשאול אדם</h3>
+      <p>
+        יש דברים שהכלל לא רוצה להחליט לבד.
+        «שינוי משכורת מעל 10,000 שקל» — לא נפתח אוטומטית.
+        השומר מתקשר למנהל, מחכה לאישור, ורק אז ממשיך.
+        כמו שבנגרייה יש עבודות שרק בעל המקום חותם עליהן.
+        בינתיים העבודה לא רצה. היא ממתינה.
+      </p>
+      <p>
+        בקוד: כלל <code>require_approval(...)</code> הופך לקריאה ל־<code>elicit</code>.
+        יש שלוש פעולות על אותו שם: לשלוח את השאלה, לבדוק אם כבר ענו,
+        ולאמת שהתשובה אמיתית. עד שיש אישור, מוחזר קוד «נסה שוב אחר כך»
+        והכלי לא רץ.
+      </p>
+      <div class="code-ref">
+        <a href="../crates/ppe-core/src/elicitation/hook.rs">ppe-core/src/elicitation/hook.rs</a> · שורה 25
+        <span class="why">שם הקריאה: <code>elicit</code>. שלוש הפעולות (שלח / בדוק / אמת) נבדלות בתוכן, לא בשם נפרד.</span>
+        <a href="../crates/ppe-apl-core/src/evaluator.rs">ppe-apl-core/src/evaluator.rs</a> · <code>Effect::Elicit</code> שורה 568, <code>dispatch_elicitation</code> שורה 794
+        <span class="why">כאן מחליטים: פעם ראשונה שולחים למנהל; בחזרה בודקים אם חתם; אם חתם — ממשיכים.</span>
+        <a href="../crates/ppe-apl-runtime/src/elicitation_invoker.rs">ppe-apl-runtime/src/elicitation_invoker.rs</a> · שורות 1–32
+        <span class="why">הגשר מהכלל לתוסף שממש מתקשר לאדם (למשל CIBA).</span>
+        <a href="../crates/ppe-apl-runtime/src/route_handler.rs">ppe-apl-runtime/src/route_handler.rs</a> · שורות 63–87
+        <span class="why">הקוד שחוזר לסוכן כשעדיין מחכים לחתימה: «אל תריץ את הכלי, נסה שוב עם אותו מזהה».</span>
+        <a href="../builtins/plugins/elicitation-ciba/src/approver.rs">builtins/plugins/elicitation-ciba/src/approver.rs</a> · שורות 492–510
+        <span class="why">כאן נשלחת הבקשה לאדם, נבדק הסטטוס, ומאומת שהאישור שייך לאותה פעולה.</span>
+      </div>
+
+      <h3 id="job-audit">6. לכתוב ביומן</h3>
+      <p>
+        כל החלטה נרשמת. לא רק הסירובים. גם ההיתרים.
+        בלי יומן אי אפשר לדעת אחר כך מי פתח את הארון ומתי.
+      </p>
+      <p>
+        בקוד היומן הוא תוסף, לא לב המנוע. בדף הכללים כותבים
+        <code>run(audit-log)</code> או רושמים את התוסף על הקריאה.
+        הוא רץ במצב «רק תצפית»: לא עוצר ולא משנה. יש גם דוגמה
+        מוכנה במאגר (לא חלק מהמנוע עצמו).
+      </p>
+      <div class="code-ref">
+        <a href="../crates/ppe-core/src/plugin.rs">ppe-core/src/plugin.rs</a> · <code>PluginMode</code> שורות 497–536
+        <span class="why">מצב Audit = מותר רק להסתכל. אסור לעצור ואסור לשנות. לכן יומן לא יכול «בטעות» לחסום עבודה.</span>
+        <a href="../crates/ppe-core/src/executor.rs">ppe-core/src/executor.rs</a> · <code>execute</code> שורות 280–316
+        <span class="why">כשמריצים כמה תוספים יחד, היומן רץ בפאזה של תצפית, אחרי מי שיכול לעצור או לשנות.</span>
+        <a href="../reference/plugins/audit-logger/src/logger.rs">reference/plugins/audit-logger/src/logger.rs</a> · שורות 16–18, 46 ואילך
+        <span class="why">דוגמה: בונה רשומה (מי, מה, מתי) וכותב אותה. תמיד מחזיר מותר. לא חלק מהמנוע שמפורסם, אלא דוגמה לחיבור.</span>
+      </div>
+    </section>
+
+    <section id="flow">
+      <h2>הזרימה בקוד, מהדלת עד ההחלטה</h2>
+      <p>
+        מכאן זה לקריאה ליד הקבצים. השמות באנגלית כי ככה הקבצים נקראים.
+        הרעיון נשאר אותו דבר: בקשה נכנסת, בודקים מי זה, בודקים אם מותר,
+        אולי מוחקים שדות / נותנים מפתח קטן / שואלים אדם, ואז או פותחים או סוגרים.
+      </p>
+      <p>
+        יש שני רגעים בזמן. <strong>לפני</strong> שהכלי רץ, ו<strong>אחרי</strong>
+        שהוא החזיר תשובה. רוב הבדיקות הן ברגע שלפני.
+        אם שם נסגר — הכלי בכלל לא מתחיל.
+      </p>
+
+      <h3>מה קורה בהפעלה, פעם אחת</h3>
+      <p>
+        כש־Praxis עולה הוא קורא את דף הכללים (קובץ YAML),
+        רושם את התוספים לפי השדה <code>kind:</code>,
+        ומחבר את מפרש הכללים למנוע.
+        אם כתוב בדף <code>kind</code> שאין לו תוסף רשום — זה נכשל כבר כאן,
+        לא באמצע יום עבודה.
+      </p>
+      <div class="code-ref">
+        <a href="../../praxis/filter/src/builtins/http/security/policy/filter.rs">praxis/filter/.../policy/filter.rs</a> · <code>PolicyFilter::new</code> שורות 124–135
+        <span class="why">קורא את קובץ הכללים, מתקין תוספים מובנים, טוען את ה־YAML.</span>
+        <a href="../crates/ppe/src/lib.rs">ppe/src/lib.rs</a> · <code>register_builtin_plugins</code> / <code>install_builtins</code> שורות 136–182
+        <span class="why">כאן נרשמים JWT (תעודה), OAuth (מפתח קטן), CIBA (שאלת אדם), וגם CEL/Cedar/OPA.</span>
+        <a href="../crates/ppe-apl-runtime/src/register.rs">ppe-apl-runtime/src/register.rs</a> · <code>register_apl</code>
+        <span class="why">מחבר את מפרש דף הכללים למנוע, כדי שכל כלי יקבל שומר משלו.</span>
+        <a href="../crates/ppe-apl-runtime/src/visitor.rs">ppe-apl-runtime/src/visitor.rs</a> · שורות 1–47
+        <span class="why">עובר על ה־YAML ובונה לכל כלי שני שומרים: אחד לפני הקריאה, אחד אחרי התשובה.</span>
+      </div>
+
+      <h3>מה קורה בכל בקשה</h3>
+      <pre class="flow">בקשה נכנסת ל-Praxis
+        |
+        |  filter.rs  on_request
+        |  → identity_gate / resolve_identity
+        v
+  1. identity.resolve
+        engine.rs          invoke_named::&lt;IdentityHook&gt;
+        identity-jwt       JwtIdentityResolver::handle
+        תוצאה: מי זה, תפקידים, טוקן גולמי
+        אם אסור → החזרה מיד, בלי לקרוא את גוף ההודעה
+        |
+        |  filter.rs  on_request_body
+        |  מסווגים איזה כלי (mcp.method / mcp.name)
+        |  → invoke_named::&lt;CmfHook&gt;("cmf.tool_pre_invoke")
+        v
+  2. המנוע בוחר את השומר של הכלי הזה
+        engine.rs          filter_entries_by_route
+        executor.rs        execute  (סדר: sequential → transform → audit → …)
+        route_handler.rs   AplRouteHandler::invoke
+        |
+        |  בונים תיק בדיקה (BagBuilder)
+        |  identity + headers + args  →  keys כמו role.hr, args.amount
+        v
+  3. evaluate_pre   (route.rs)
+        א. args:     צינור על כל שדה קלט (redact / omit / validate)
+        ב. policy:   evaluate_effects  — הכללים לפי הסדר
+              require / deny / when
+              cel: / cedar: / opa:     → pdp_router → resolver
+              delegate(...)            → token.delegate → OAuth
+              require_approval(...)    → elicit → CIBA
+              taint(...)               → תווית לסשן
+              plugin(...) / run(...)   → תוסף (למשל יומן)
+        אסור ראשון עוצר. מותר ממשיך לכלל הבא.
+        |
+        |  אם אסור / ממתין לאישור אדם → הכלי לא רץ
+        v
+  4. הכלי רץ במעלה  (רק אם מותר, ואין המתנה)
+        |
+        |  filter.rs  on_response_body
+        |  → cmf.tool_post_invoke
+        v
+  5. evaluate_post  (route.rs)
+        א. result:   צינור על שדות התשובה
+        ב. post_policy:  כללים אחרי הביצוע
+           (למשל: מי שנגע בסוד לא שולח מייל החוצה)
+        |
+        v
+  6. מחזירים ל-Praxis: מותר / אסור / גוף מתוקן / כותרות עם מפתח קטן</pre>
+
+      <h3>איך ששת התפקידים יושבים על הזרימה הזו</h3>
+      <p>
+        הם לא שש תוכנות נפרדות שרצות במקביל. הם שישה סוגים של עבודה
+        שקוראים להם מתוך אותו מסלול, במקומות שונים:
+      </p>
+      <ol>
+        <li><a href="#job-identity">זיהוי</a> — קריאה נפרדת, ראשונה, בשם <code>identity.resolve</code>.</li>
+        <li><a href="#job-authz">היתר לכלי</a> — גוף <code>evaluate_pre</code> / <code>evaluate_effects</code>, כולל CEL אם כתוב בדף.</li>
+        <li><a href="#job-delegate">מפתח קטן</a> — רק אם יש <code>delegate</code> בתוך אותה רשימת כללים.</li>
+        <li><a href="#job-redact">כיסוי שדות</a> — צינורות <code>args:</code> ו־<code>result:</code>, ואז כתיבת תווית לסשן.</li>
+        <li><a href="#job-elicit">שאלת אדם</a> — רק אם יש <code>require_approval</code>; עד תשובה הכלי לא רץ.</li>
+        <li><a href="#job-audit">יומן</a> — תוסף שנקרא מתוך הכללים או רשום על אותה קריאה, במצב תצפית.</li>
+      </ol>
+
+      <h3>שני «מסדרונות» שלא כדאי לערבב</h3>
+      <p>
+        <strong>מסדרון א׳ — סדר הבדיקה של כלי:</strong>
+        קלט → כללים לפני → (הכלי) → תוצאה → כללים אחרי.
+        זה <code>evaluate_pre</code> ואחר כך <code>evaluate_post</code>.
+      </p>
+      <p>
+        <strong>מסדרון ב׳ — סדר הרצת תוספים בתוך קריאה אחת:</strong>
+        מי שיכול לעצור ולשנות רץ קודם, אחר כך מי שרק משנה,
+        אחר כך מי שרק רושם ליומן, אחר כך בדיקות במקביל,
+        ובסוף דברים ברקע שלא מחכים להם.
+        זה <code>Executor::execute</code>.
+      </p>
+      <p>
+        מסדרון ב׳ הוא רק איך מריצים כמה תוספים שנרשמו על אותה קריאה.
+        ההחלטה «מותר לפתוח את ארון המשכורות» חיה במסדרון א׳.
+      </p>
+
+      <div class="callout">
+        אם אתה יושב עכשיו על
+        <a href="../builtins/pdps/cel/src/activation.rs">activation.rs</a>
+        ועל
+        <a href="../builtins/pdps/cel/src/resolver.rs">resolver.rs</a>:
+        אלה לא כל השומר. הם רק המנעול בשפה CEL.
+        הקובץ <code>activation.rs</code> ממלא את המנעול בנתונים מתיק הבדיקה.
+        הקובץ <code>resolver.rs</code> מריץ את הביטוי ואומר מותר או אסור.
+        מי שקורא להם הוא <code>evaluate_effects</code>, דרך <code>PdpRouter</code>,
+        מתוך <code>AplRouteHandler</code>, אחרי ש־Praxis כבר זיהה מי בדלת.
+      </div>
+    </section>
+
+    <section id="rules">
+      <h2>איך נראים הכללים על הקיר</h2>
+      <p>
+        המתכנת כותב את הכללים בקובץ טקסט. בשבילנו זה פשוט
+        רשימה ליד כל כלי. הנה אותו רעיון, בלי הקוד:
+      </p>
+      <div class="story">
+        <p><strong>כלי: הצגת משכורת</strong></p>
+        <p>לפני שפותחים: חייב להיות תפקיד משאבי אנוש.</p>
+        <p>נותנים מפתח רק למערכת השכר, ורק לקריאה.</p>
+        <p>מסמנים את היום הזה כ«נגע בסוד».</p>
+        <p>אם מופיע מספר זהות בדף, ואין רשות לראות אותו — מוחקים.</p>
+        <p><strong>כלי: שליחת מייל</strong></p>
+        <p>לפני ששולחים: חייבת להיות רשות לשלוח מייל.</p>
+        <p>אם על האדם הזה יש סימן «נגע בסוד» — אסור לשלוח החוצה.</p>
+      </div>
+      <p>
+        זה לא קסם. מישהו בחברה מחליט את הכללים האלה,
+        כמו שבעל נגרייה מחליט מי נכנס לחדר הלכה.
+        Praxis Policy רק קורא את מה שנכתב, ועושה אותו.
+      </p>
+      <p>
+        יש גם תוספות שאפשר לחבר לדלת, כמו מנעול מוכן
+        מהמדף: בדיקת כלל לפי נוסחה, בדיקה לפי רשימת יחסים
+        («מי שייך לאיזה צוות»), בדיקה במערכת כללים חיצונית.
+        כולן עונות בסוף אותו דבר: מותר או אסור.
+      </p>
+    </section>
+
+    <section id="words">
+      <h2>מילון קצר: מילה של מתכנת → עברית</h2>
+      <p>
+        אם תשמע את המילים האלה בחדר, זה מה שהן אומרות באמת.
+      </p>
+      <div class="word">
+        <dl>
+          <dt>Policy / מדיניות</dt>
+          <dd>דף הכללים שתלוי על הקיר. לא הרגשה, לא ניחוש — מה שכתוב.</dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>Allow / Deny</dt>
+          <dd>מותר / אסור. אסור עוצר הכול מיד. מותר לא מסיים את הבדיקה — ממשיכים לכלל הבא.</dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>Identity</dt>
+          <dd>בדיקת תעודה: מי האדם, מי התוכנה, מאיפה זה הגיע.</dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>Delegation</dt>
+          <dd>לחתוך מפתח קטן לחדר הבא, במקום לשלוח את צרור המפתחות של הבית.</dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>Redact / Mask</dt>
+          <dd>למחוק או לכסות שורה בדף, בלי לזרוק את כל הדף.</dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>Taint</dt>
+          <dd>הנסורת על הבגדים. סימן שנשאר אחרי שנגעו בדבר רגיש, ומשפיע על מה מותר אחר כך באותו יום.</dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>Audit</dt>
+          <dd>היומן ליד הדלת. כל מעבר נרשם.</dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>Plugin</dt>
+          <dd>עזר מחובר לדלת: סורק שמחפש מספר זהות בדף, רושם ליומן, בודק תעודה. השומר קורא לו כשהכלל אומר «תפעיל את זה».</dd>
+        </dl>
+      </div>
+      <div class="word">
+        <dl>
+          <dt>CEL / Cedar / OPA</dt>
+          <dd>שפות מוכנות לכתוב בהן כללים מסובכים. כמו שלוש דרכים שונות לכתוב את אותו דף על הקיר. השומר יודע לקרוא את כולן. התוצאה תמיד מותר או אסור.</dd>
+        </dl>
+      </div>
+    </section>
+
+    <div class="callout">
+      <strong>אם זוכרים דבר אחד:</strong>
+      Praxis מעביר עבודה במסדרון. Praxis Policy עומד בדלת עם דף כללים,
+      בודק מי אתה ומה אתה רוצה, מוחק מהדף מה שאסור לראות,
+      נותן מפתח קטן לחדר הבא, זוכר מה נגעת בו היום, וכותב הכול ביומן.
+      הוא לא עושה את העבודה עצמה. הוא מחליט אם היא מתחילה.
+    </div>
+
+    <footer>
+      החלק הראשון מסביר מה זה בלי קוד. החלק «הזרימה בקוד» וקופסאות
+      הנתיבים מצביעים לקבצים במאגר, יחסית לדף הזה.
+      לחץ על נתיב כדי לפתוח את הקובץ ליד הדף.
+    </footer>
+  </article>
+</body>
+</html>
