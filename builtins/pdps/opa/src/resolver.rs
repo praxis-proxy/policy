@@ -313,7 +313,19 @@ impl OpaResolver {
         // Reject an inline module that lands in a global module's package — it
         // would merge into (and could override) operator policy. Fail-closed:
         // inline modules may add new packages, never redefine a global one.
-        if self.global_packages.contains(&package) {
+        //
+        // The check is prefix-aware, not exact-match: package paths are dotted
+        // (`data.authz`), and a global rule reads whole subtrees, so an inline
+        // module in a *sub-package* of a global one (`data.authz.exceptions`
+        // under `data.authz`) still feeds `data.authz.*` that a global
+        // `authz` rule can consume — an override by the back door. Reject when
+        // the inline package equals, is nested under, or contains any global
+        // package, so the two never share a `data` subtree.
+        if self
+            .global_packages
+            .iter()
+            .any(|g| packages_share_subtree(&package, g))
+        {
             return Err(EngineError::PackageCollision(package));
         }
 
@@ -383,6 +395,17 @@ impl OpaResolver {
             diagnostics: vec![cause],
         }
     }
+}
+
+/// True when two dotted Rego package paths occupy the same `data` subtree —
+/// they are equal, or one is nested under the other (`data.authz` and
+/// `data.authz.exceptions`). A bare prefix comparison is wrong: `data.authz`
+/// must not be judged to contain `data.authznext`, so the boundary is only a
+/// match when the next character is a path separator.
+fn packages_share_subtree(a: &str, b: &str) -> bool {
+    a == b
+        || a.strip_prefix(b).is_some_and(|rest| rest.starts_with('.'))
+        || b.strip_prefix(a).is_some_and(|rest| rest.starts_with('.'))
 }
 
 /// Internal — failure shapes from preparing a per-step engine. All three
@@ -965,6 +988,30 @@ msg := "not a decision"
         }
     }
 
+    /// An inline module in a *sub-package* of a global package is rejected
+    /// fail-closed. A global `authz` rule reads whole `data.authz.*` subtrees,
+    /// so an inline `package authz.exceptions` still feeds operator policy even
+    /// though it never names `package authz` directly — the back-door override
+    /// the exact-match check used to miss.
+    #[tokio::test]
+    async fn inline_module_cannot_override_global_subpackage() {
+        // Global policy allows only when the caller is listed under
+        // `data.authz.exceptions` — a subtree an inline module must not reach.
+        let global = "package authz\ndefault allow := false\nallow if data.authz.exceptions[input.subject.id]\n";
+        let r = resolver(&[global], OnError::Allow);
+        let inline = "package authz.exceptions\nexceptions := {\"eve\": true}\n";
+        let out = r
+            .evaluate(&call("data.authz.allow", Some(inline)), &bag("eve"))
+            .await
+            .unwrap();
+        match out.decision {
+            Decision::Deny { reason, .. } => {
+                assert!(reason.unwrap_or_default().contains("collides"));
+            },
+            other => panic!("sub-package collision must deny, got {other:?}"),
+        }
+    }
+
     /// An inline module in a fresh package (no global collision) is accepted and
     /// evaluates — inline modules remain a usable feature for additive policy.
     #[tokio::test]
@@ -976,6 +1023,51 @@ msg := "not a decision"
             .await
             .unwrap();
         assert_eq!(out.decision, Decision::Allow);
+    }
+
+    /// The collision check must be prefix-*boundary* aware, not a bare string
+    /// prefix: a global `data.authz` must not be judged to contain
+    /// `data.authznext` just because one string-prefixes the other. A
+    /// sibling-prefix package is a genuinely separate `data` subtree and stays
+    /// allowed; a naive `starts_with` would wrongly reject it (fail-closed, but
+    /// a spurious denial of a legitimate inline module).
+    #[tokio::test]
+    async fn inline_module_in_prefix_sibling_package_is_allowed() {
+        let global = "package authz\nallow if input.subject.id == \"alice\"\n";
+        let r = resolver(&[global], OnError::Deny);
+        // `authznext` shares the `authz` string prefix but is a different subtree.
+        let inline = "package authznext\nallow if input.subject.id == \"alice\"\n";
+        let out = r
+            .evaluate(&call("data.authznext.allow", Some(inline)), &bag("alice"))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.decision,
+            Decision::Allow,
+            "a prefix-sibling package must not collide with a global package"
+        );
+    }
+
+    /// The symmetric case: an inline module whose package is a *parent* of a
+    /// global package (inline `data.authz`, global `data.authz.sub`) still feeds
+    /// a `data` subtree the operator policy reads, so it is rejected fail-closed.
+    /// This exercises the `b.strip_prefix(a)` arm of `packages_share_subtree`,
+    /// which the sub-package test (child-of-global) does not.
+    #[tokio::test]
+    async fn inline_module_that_is_parent_of_global_collides() {
+        let global = "package authz.sub\nallow if input.subject.id == \"alice\"\n";
+        let r = resolver(&[global], OnError::Allow);
+        let inline = "package authz\nallow := true\n";
+        let out = r
+            .evaluate(&call("data.authz.allow", Some(inline)), &bag("alice"))
+            .await
+            .unwrap();
+        match out.decision {
+            Decision::Deny { reason, .. } => {
+                assert!(reason.unwrap_or_default().contains("collides"));
+            },
+            other => panic!("parent-package collision must deny, got {other:?}"),
+        }
     }
 
     #[tokio::test]
