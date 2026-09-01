@@ -2261,6 +2261,35 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     if config.dispatch_mode().is_policy() {
         let plugin_names: HashSet<&str> = config.plugins.iter().map(|p| p.name.as_str()).collect();
 
+        // Validate `authentication:` step names the same way `plugins:` names
+        // are. `RouteIdentityStep` documents that a step name must match a
+        // top-level `plugins:` entry registered under `identity.resolve`, but
+        // nothing enforced it: an unresolvable name finds no entry at dispatch
+        // and is dropped with no error, leaving that authentication step
+        // unrun. Global, group, and route authentication share one shape, so
+        // one check covers all three.
+        let validate_authentication =
+            |authentication: &Option<crate::identity::RouteIdentityConfig>,
+             context: &str|
+             -> Result<(), Box<PluginError>> {
+                let Some(authentication) = authentication else {
+                    return Ok(());
+                };
+                for step in &authentication.steps {
+                    if !plugin_names.contains(step.name.as_str()) {
+                        return Err(Box::new(PluginError::Config {
+                            message: format!(
+                                "{context} authentication references unknown plugin '{}'",
+                                step.name
+                            ),
+                        }));
+                    }
+                }
+                Ok(())
+            };
+
+        validate_authentication(&config.global.authentication, "global")?;
+
         // A `global.defaults` key that names no entity type never applies to
         // anything, so a typo there would be silently inert rather than wrong.
         for entity_type in config.global.defaults.keys() {
@@ -2379,6 +2408,8 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
                     }
                 }
             }
+
+            validate_authentication(&route.authentication, &format!("route {i}"))?;
         }
 
         for (group_name, group) in &config.global.bundles {
@@ -2393,6 +2424,11 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
                     }));
                 }
             }
+
+            validate_authentication(
+                &group.authentication,
+                &format!("policy group '{group_name}'"),
+            )?;
         }
     }
 
@@ -4076,6 +4112,76 @@ routes: []
                 .to_string()
                 .contains("unknown plugin 'nonexistent'")
         );
+    }
+
+    /// A typo'd `authentication:` step name must be rejected at load. At
+    /// dispatch it resolves to no entry and is dropped silently, so the route
+    /// runs with that authentication step missing, which is a fail-open.
+    #[test]
+    fn test_route_unknown_authentication_step_rejected() {
+        let err = parse_config(
+            r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: corp-jwt
+    kind: builtin
+    hooks: [identity.resolve]
+routes:
+  - tool: get_compensation
+    authentication:
+      - corp-jtw
+"#,
+        )
+        .expect_err("a typo'd step name is not a loadable config");
+        assert!(
+            err.to_string()
+                .contains("authentication references unknown plugin 'corp-jtw'"),
+            "got: {err}"
+        );
+    }
+
+    /// The same check on the global block.
+    #[test]
+    fn test_global_unknown_authentication_step_rejected() {
+        let err = parse_config(
+            r#"
+engine_settings:
+  dispatch: policy
+global:
+  authentication:
+    - missing-resolver
+plugins: []
+routes: []
+"#,
+        )
+        .expect_err("a typo'd global step name is not a loadable config");
+        assert!(
+            err.to_string()
+                .contains("authentication references unknown plugin 'missing-resolver'"),
+            "got: {err}"
+        );
+    }
+
+    /// A step naming a declared plugin still loads, so the check does not
+    /// reject legitimate configs.
+    #[test]
+    fn test_known_authentication_step_is_accepted() {
+        parse_config(
+            r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: corp-jwt
+    kind: builtin
+    hooks: [identity.resolve]
+routes:
+  - tool: get_compensation
+    authentication:
+      - corp-jwt
+"#,
+        )
+        .expect("a step naming a declared plugin is legal");
     }
 
     /// The backstop that catches a policy-mode config nothing could dispatch
