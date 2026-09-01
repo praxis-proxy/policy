@@ -450,9 +450,14 @@ impl Extensions {
 
 /// True when `returned` is `canonical` plus zero or more appended hops.
 ///
-/// Hops are compared on the fields that carry authority — subject, audience,
-/// granted scopes, and strategy. A rewrite of any of those on an existing hop is
-/// not an append, so the whole edit is refused.
+/// Every existing hop must be unchanged. The comparison covers all the fields
+/// that carry authority or bound it: subject, audience, granted scopes,
+/// strategy, the RFC 9396 `authorization_details` (documented as "must be
+/// structurally narrowed" — a rewrite widens the grant), the `ttl_seconds`
+/// lifetime (extending it is a privilege escalation), and the `timestamp`
+/// (which drives age/expiry checks). A rewrite of any of these on an existing
+/// hop is not an append, so the whole edit is refused. `from_cache` is merge
+/// bookkeeping, not authority, so it is not compared.
 ///
 /// Public so out-of-process hosts can apply the same validation to a chain
 /// arriving over the wire before it reaches the merge, instead of reimplementing
@@ -473,6 +478,9 @@ pub fn chain_extends(
                 && before.audience == after.audience
                 && before.scopes_granted == after.scopes_granted
                 && before.strategy == after.strategy
+                && before.authorization_details == after.authorization_details
+                && before.ttl_seconds == after.ttl_seconds
+                && before.timestamp == after.timestamp
         })
 }
 
@@ -1287,6 +1295,59 @@ mod tests {
             ext.delegation.as_ref().unwrap().chain[0].scopes_granted,
             vec!["read_hr".to_owned()],
             "an existing hop's granted scopes cannot be widened"
+        );
+    }
+
+    #[test]
+    fn test_delegation_hop_authorization_details_cannot_be_widened() {
+        use crate::extensions::authorization::AuthorizationDetail;
+        use crate::extensions::delegation::DelegationHop;
+
+        let narrow = AuthorizationDetail {
+            detail_type: "payment".into(),
+            actions: Some(vec!["initiate".into()]),
+            ..Default::default()
+        };
+        let mut delegation = DelegationExtension::default();
+        delegation.append_hop(DelegationHop {
+            subject_id: "user-1".into(),
+            scopes_granted: vec!["pay".into()],
+            authorization_details: vec![narrow.clone()],
+            ttl_seconds: Some(60),
+            ..Default::default()
+        });
+        delegation.origin_subject_id = Some("user-1".into());
+
+        let mut ext = Extensions {
+            delegation: Some(Arc::new(delegation)),
+            ..Default::default()
+        };
+        ext.delegation_write_token = Some(WriteToken::new());
+
+        // Rewrite the existing hop's RFC 9396 authorization_details to add
+        // actions (a widening) and extend its ttl — neither is an append.
+        let mut cow = ext.cow_copy();
+        {
+            let hop = &mut cow.delegation.as_mut().unwrap().chain[0];
+            hop.authorization_details = vec![AuthorizationDetail {
+                detail_type: "payment".into(),
+                actions: Some(vec!["initiate".into(), "refund".into(), "admin".into()]),
+                ..Default::default()
+            }];
+            hop.ttl_seconds = Some(999_999);
+        }
+
+        ext.merge_owned(cow);
+        let merged_hop = &ext.delegation.as_ref().unwrap().chain[0];
+        assert_eq!(
+            merged_hop.authorization_details,
+            vec![narrow],
+            "an existing hop's authorization_details cannot be rewritten wider"
+        );
+        assert_eq!(
+            merged_hop.ttl_seconds,
+            Some(60),
+            "an existing hop's ttl cannot be extended"
         );
     }
 
