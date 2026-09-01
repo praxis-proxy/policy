@@ -4718,6 +4718,41 @@ route:
     }
 
     #[test]
+    fn duplicate_field_pipeline_key_is_rejected_not_last_wins() {
+        // A `result:` naming the same field twice must not silently keep one
+        // pipeline: dropping a `redact` in favour of a passthrough leaks the
+        // field. Every route reaches `RouteYaml` through a `serde_yaml::Value`,
+        // and serde_yaml rejects a repeated key in a mapping position, so the
+        // property holds for free today. Pinned because it would not survive a
+        // refactor that deserialized `RouteYaml` straight from a string: a
+        // plain `HashMap` field replays entries into `insert` and is last-wins.
+        let yaml = r#"
+route:
+  result:
+    ssn: "redact"
+    ssn: "hash"
+"#;
+        let err = compile_test_policy("r", yaml).expect_err("a repeated field key is not legal");
+        assert!(
+            format!("{err}").contains("duplicate entry with key"),
+            "expected a duplicate-key error, got {err}"
+        );
+    }
+
+    #[test]
+    fn distinct_field_pipeline_keys_still_load() {
+        // The guard above must reject only repeats, not ordinary multi-field
+        // blocks.
+        let yaml = r#"
+route:
+  result:
+    ssn: "redact"
+    email: "hash"
+"#;
+        compile_test_policy("r", yaml).expect("distinct field keys are legal");
+    }
+
+    #[test]
     fn removed_policy_field_names_are_rejected() {
         // The removed authorization-phase keys must fail loudly, never be
         // silently dropped (which would fail open). `RouteYaml` has no
