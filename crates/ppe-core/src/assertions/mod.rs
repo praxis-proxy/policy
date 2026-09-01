@@ -41,7 +41,9 @@ pub use config::{
     AssertionsConfig, AuthoredSource, DirectionBlock, Encoding, HeaderEntry, OnMissing,
     StripPattern,
 };
-pub use floor::{FloorEntry, RESPONSE_FLOOR, glob_would_match_floor, is_floor};
+pub use floor::{
+    FloorEntry, REQUEST_FLOOR, RESPONSE_FLOOR, floor_for, glob_would_match_floor, is_floor,
+};
 pub use render::{MissingSource, render};
 pub use resolved::{ResolvedContract, ResolvedHeader, ResolvedSource};
 pub use source::{SourceError, SourcePath, SourceRejection};

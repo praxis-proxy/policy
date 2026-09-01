@@ -551,11 +551,6 @@ pub struct PolicyEngine {
     /// The same gate for the response direction.
     route_response_assertions_unreachable_warned: AtomicBool,
 
-    /// Whether an outermost `invoke_entries` has already been reported. That
-    /// call applies no contract by design, so a host integrating that way is
-    /// told once rather than per request.
-    nested_dispatch_boundary_warned: AtomicBool,
-
     /// How many executor invocations are in flight. Read only to tell a nested
     /// dispatch from an outermost one, which is what decides whether a call to
     /// the nested primitive has a boundary above it to apply the contract.
@@ -863,7 +858,6 @@ impl PolicyEngine {
             route_authentication_unreachable_warned: AtomicBool::new(false),
             route_request_assertions_unreachable_warned: AtomicBool::new(false),
             route_response_assertions_unreachable_warned: AtomicBool::new(false),
-            nested_dispatch_boundary_warned: AtomicBool::new(false),
             executor_depth: AtomicUsize::new(0),
             initialized: AtomicBool::new(false),
             generation: AtomicU64::new(0),
@@ -2064,7 +2058,7 @@ impl PolicyEngine {
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
         let snapshot = self.load_runtime();
-        self.warn_once_if_dispatch_has_no_boundary(&snapshot);
+        self.warn_if_dispatch_has_no_boundary(&snapshot);
         if entries.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             return (
@@ -2293,7 +2287,7 @@ impl PolicyEngine {
         }
     }
 
-    /// Warn once when [`invoke_entries`](Self::invoke_entries) is reached from
+    /// Warn when [`invoke_entries`](Self::invoke_entries) is reached from
     /// outside an executor invocation while a contract is configured.
     ///
     /// Every caller in this tree nests inside a policy handler the executor is
@@ -2309,20 +2303,22 @@ impl PolicyEngine {
     /// is a *release* build integrated that way losing the contract silently,
     /// which a debug-only check cannot reach at all.
     ///
+    /// Every occurrence, not once per process. The property at stake is that a
+    /// client cannot set an asserted header, and it lapses on each such call
+    /// rather than only the first; a single line emitted at whatever moment the
+    /// first call happened is gone from a long-running process's logs by the
+    /// time anyone asks. The volume is bounded by the guard below: a host that
+    /// configures no contract loses nothing here and is told nothing, so the
+    /// noise only reaches a deployment where it is reporting a real lapse.
+    ///
     /// The depth counter is process-wide rather than per task, so a genuine
     /// nested call always sees its parent in flight and cannot trip this. An
     /// unrelated concurrent invocation can mask a real outermost call, which is
     /// the direction a diagnostic should err in.
-    fn warn_once_if_dispatch_has_no_boundary(&self, snapshot: &RuntimeSnapshot) {
+    fn warn_if_dispatch_has_no_boundary(&self, snapshot: &RuntimeSnapshot) {
         // A host with no contract configured loses nothing here, so there is
-        // nothing to tell it. `swap` is last so a nested call does not spend the
-        // gate.
-        if !snapshot.declares_assertions
-            || self.executor_depth.load(Ordering::Acquire) > 0
-            || self
-                .nested_dispatch_boundary_warned
-                .swap(true, Ordering::AcqRel)
-        {
+        // nothing to tell it.
+        if !snapshot.declares_assertions || self.executor_depth.load(Ordering::Acquire) > 0 {
             return;
         }
         warn!(
@@ -2330,7 +2326,8 @@ impl PolicyEngine {
             "invoke_entries was called as an outermost dispatch. It is a nested dispatch \
              primitive rather than a wire boundary, so no `assertions:` contract is applied \
              to its result: nothing is asserted onto the request and nothing the contract \
-             names is removed from it. Drive a named entry point (invoke_named, invoke, or \
+             names is removed from it, so a client-supplied header reaches the upstream under \
+             a name the upstream trusts. Drive a named entry point (invoke_named, invoke, or \
              invoke_by_name) as the outermost dispatch so the contract has a boundary to \
              fire at.",
         );
@@ -3111,8 +3108,6 @@ impl PolicyEngine {
         self.route_request_assertions_unreachable_warned
             .store(false, Ordering::Release);
         self.route_response_assertions_unreachable_warned
-            .store(false, Ordering::Release);
-        self.nested_dispatch_boundary_warned
             .store(false, Ordering::Release);
     }
 

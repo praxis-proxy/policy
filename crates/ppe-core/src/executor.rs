@@ -105,8 +105,13 @@ pub struct PipelineResult {
     /// read.
     pub payload_modified: bool,
 
-    /// The final extensions after all modifications.
-    /// `None` if no plugin modified extensions.
+    /// The final extensions the pipeline ran with.
+    ///
+    /// `Some` from both constructors whether or not a plugin changed anything:
+    /// [`Self::allowed_with`] and [`Self::denied`] each carry the extensions
+    /// they were handed, and `payload_modified` is what reports a change. So
+    /// `None` reaches a consumer only from a result a host built itself, and
+    /// means there is no engine state to read rather than that none changed.
     pub modified_extensions: Option<Extensions>,
 
     /// The violation that caused a deny, if any.

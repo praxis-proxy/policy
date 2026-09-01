@@ -15,8 +15,9 @@
 # would collide with it. response: removes what the upstream should not
 # be telling the client and adds what it should.
 #
-# The two directions are deliberately NOT symmetric. See the note near
-# the bottom of this file before writing a response block.
+# What the two directions ASSERT is deliberately NOT symmetric, though
+# strip: is treated the same way in both. See the note near the bottom of
+# this file before writing either block.
 #
 # Revised 2026-08-30 for #38, #42 and #55. What changed:
 #   - plugin_settings.routing_enabled is gone. engine_settings.dispatch
@@ -260,7 +261,7 @@ routes:
           - x-upstream-*
 
 # ---------------------------------------------------------------------
-# Why the two directions are not symmetric
+# What the two directions assert, and why that part is not symmetric
 # ---------------------------------------------------------------------
 #
 # request: is an allowlist because the engine originates every value it
@@ -274,14 +275,39 @@ routes:
 # every rate-limit and tracing header a client depends on. The client
 # breaks. So response: removes what it names and passes the rest.
 #
-# A protocol floor fixed in code backs that up. The floor holds the
-# headers a client needs in order to interpret the response at all, and
-# a strip: entry cannot remove one. A glob that would hit a floor header
-# fails at config load, naming the header it would have removed, rather
-# than silently breaking clients in production.
+# That argument is about what each direction ASSERTS. It does not reach
+# strip:, which removes headers the engine did not originate and cannot
+# enumerate either way round. So strip: is treated the same in both.
 #
-# set-cookie, server and x-powered-by are deliberately NOT in the floor.
-# Removing those is a stated use case.
+# ---------------------------------------------------------------------
+# Both directions have a protocol floor
+# ---------------------------------------------------------------------
+#
+# One floor per direction, fixed in code, holding what that direction's
+# recipient needs in order to read the message at all. A strip: entry
+# cannot remove one, and a headers: entry cannot target one either, since
+# an entry removes its target before injecting. A glob that would hit a
+# floor header fails at config load, naming the header it would have
+# removed, rather than silently breaking traffic in production.
+#
+# request floor:  host, content-type, content-length, transfer-encoding.
+#   Framing and addressing, which is all the engine can assume an
+#   upstream needs.
+#
+#   authorization is deliberately NOT in it: stripping the client's own
+#   bearer before forwarding to an upstream that runs on a delegated
+#   credential is a stated use case. Neither are cookie, accept and
+#   user-agent, which an operator may withhold as a policy choice.
+#
+# response floor: content negotiation and framing, caching and
+#   conditional requests, retry signalling, and the CORS response set.
+#   Longer, because a client's caching, validation and CORS behaviour all
+#   hang off headers the origin chose.
+#
+#   set-cookie, server and x-powered-by are deliberately NOT in it.
+#   Removing those is a stated use case.
+#
+# So strip: ["*"] fails to load in either direction.
 
 # ---------------------------------------------------------------------
 # On the wire
@@ -397,6 +423,13 @@ routes:
 #       - name: x-auth-path
 #         from: http.path                      # not a source; see below
 #
+#       - name: x-auth-attributes
+#         members:
+#           roles: subject.roles
+#         encode: csv                          # members: always renders JSON
+#     strip:
+#       - host                                 # in the request protocol floor
+#
 #   response:
 #     headers:
 #       - name: x-echo
@@ -404,7 +437,7 @@ routes:
 #     strip:
 #       - content-*                            # would remove content-type, a floor header
 #
-# Two different refusals there, and the messages say which is which.
+# Several different refusals there, and the messages say which is which.
 #
 # raw_credentials.* and both header maps are the fixed exclusion set: never
 # usable as a source, in either direction, with no config surface to extend

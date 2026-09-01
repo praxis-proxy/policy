@@ -3236,7 +3236,7 @@ pub(crate) fn dropped_inherited_authentication(
 /// setting `replace_inherited: true` for this direction drops what accumulated
 /// before it and then contributes, and the flag reaches operator-authored
 /// content only: the unconditional removal of an entry's target, the fixed
-/// source exclusions, and the response protocol floor are all outside it.
+/// source exclusions, and the two protocol floors are all outside it.
 ///
 /// `headers:` unions by target header name, compared case-insensitively, and a
 /// repeated name takes the more specific level's entry **whole**, members and
@@ -3323,10 +3323,15 @@ pub fn resolve_assertions_for_route(
             }
         }
         for pattern in &block.strip {
+            // Folded the way the matcher folds, so `X-Auth-*` at one level and
+            // `x-auth-*` at another are one entry rather than two that remove
+            // the same headers. The first level to declare it sets the spelling
+            // the artifact shows.
+            let folded = pattern.as_str().to_lowercase();
             if !contract
                 .strip
                 .iter()
-                .any(|held| held.as_str() == pattern.as_str())
+                .any(|held| held.as_str().to_lowercase() == folded)
             {
                 contract.strip.push(pattern.clone());
             }

@@ -103,7 +103,7 @@ That last one changes the shape of the problem rather than only enabling it. A r
 - R33. Accumulation is per header entry, never inside one. A level repeating a target header name replaces that entry whole, members and `on_missing` included, so a rendered JSON object always has exactly one author.
 - R34. Two bundles a route joins that name the same target header in the same direction have no principled order and fail at config load, naming the route, the direction, the header, and both bundles. Bundles naming different headers are legal and union.
 - R35. A level above the route that drops inherited content with `replace_inherited: true` is reported once per affected route at config load, naming the level and what the route no longer asserts or strips. A route's own flag is not reported: that drop is written in the route being affected, where its author can see it.
-- R26. R6, R9, R18 and R32 hold at every level, and `replace_inherited` cannot reach any of them. The flag drops operator-authored content only, so no spelling of it removes the unconditional removal of an entry target, extends or weakens the fixed source exclusions, or opens the response protocol floor.
+- R26. R6, R9, R18 and R32 hold at every level, and `replace_inherited` cannot reach any of them. The flag drops operator-authored content only, so no spelling of it removes the unconditional removal of an entry target, extends or weakens the fixed source exclusions, or opens either protocol floor.
 
 **Reaching the contract at all**
 
@@ -112,7 +112,7 @@ That last one changes the shape of the problem rather than only enabling it. A r
 
 **Audit and defaults**
 
-- R27. The engine renders the effective policy as one artifact covering both directions: the asserted headers, the code-fixed source exclusions, the response protocol floor, the removal sets, the phase each direction fires on, the dispatch paths R31 leaves uncovered, and per level which traffic that level's contract reaches. A1, A3 and A6 answer what crosses the boundary without reading Rust.
+- R27. The engine renders the effective policy as one artifact covering both directions: the asserted headers, the code-fixed source exclusions, the two protocol floors, the removal sets, the phase each direction fires on, the dispatch paths R31 leaves uncovered, and per level which traffic that level's contract reaches. A1, A3 and A6 answer what crosses the boundary without reading Rust.
 - R28. With no `assertions:` block, nothing is asserted and nothing is removed, in either direction.
 
 ---

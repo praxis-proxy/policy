@@ -35,9 +35,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   Contracts inherit by scope: more-specific `headers:` entries replace matching
   targets, `strip:` entries accumulate, and `replace_inherited: true` resets
   inherited operator-authored rules. Raw or delegated tokens and peer-supplied
-  headers cannot be used as sources, and protected response headers cannot be
-  stripped. Invalid sources, targets, encodings, or conflicting entries fail
-  configuration loading with their location. Assertions run after the applicable
+  headers cannot be used as sources, and a protocol floor fixed in code per
+  direction holds the headers no `strip:` entry can remove: framing and `host` on
+  the way in, and the framing, caching and CORS set a client reads on the way out.
+  `authorization` sits outside the request floor, so forwarding an upstream on a
+  delegated credential can still remove the client's own bearer. Invalid sources,
+  targets, encodings, or conflicting entries fail configuration loading with their
+  location. Assertions run after the applicable
   policy phase, and response assertions are returned through the existing
   `PipelineResult`, requiring no host change.
 

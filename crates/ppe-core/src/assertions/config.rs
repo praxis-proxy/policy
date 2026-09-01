@@ -433,6 +433,11 @@ impl AssertionsConfig {
 /// Check one direction's contract.
 fn validate_block(block: &DirectionBlock, direction: Direction, level: &str) -> Result<(), String> {
     let label = direction.label();
+    // Who is deprived of a floor header, and what they cannot read without it.
+    let (side, deprived) = match direction {
+        Direction::Request => ("request", "the upstream"),
+        Direction::Response => ("response", "the client"),
+    };
     let mut targeted: Vec<String> = Vec::new();
     for entry in &block.headers {
         let lower = entry.name.to_lowercase();
@@ -445,16 +450,15 @@ fn validate_block(block: &DirectionBlock, direction: Direction, level: &str) -> 
         }
         targeted.push(lower.clone());
 
-        // A response entry whose source resolves to nothing still removes its
-        // target, so an entry aimed at a floor header could remove one without
-        // a `strip:` entry naming it.
-        if direction == Direction::Response
-            && let Some(floor_name) = floor::floor_names().iter().find(|f| f.name == lower)
-        {
+        // An entry whose source resolves to nothing still removes its target,
+        // so an entry aimed at a floor header could remove one without a
+        // `strip:` entry naming it. True in either direction, so the check runs
+        // in both against that direction's own floor.
+        if let Some(floor_name) = floor::floor_for(direction).iter().find(|f| f.name == lower) {
             return Err(format!(
-                "{level}: `{label}` asserts header `{}`, which is in the response protocol floor \
+                "{level}: `{label}` asserts header `{}`, which is in the {side} protocol floor \
                  ({}); an entry removes its target before injecting, so a request whose source \
-                 resolved to nothing would leave the client without it",
+                 resolved to nothing would leave {deprived} without it",
                 entry.name, floor_name.reason
             ));
         }
@@ -474,8 +478,19 @@ fn validate_block(block: &DirectionBlock, direction: Direction, level: &str) -> 
                 }
             },
             // A members entry needs no encoding: a JSON object holds a
-            // collection natively, which is what `members:` is for.
+            // collection natively, which is what `members:` is for. Declaring
+            // one anyway is refused rather than ignored, because the renderer
+            // always emits an object here: `encode: csv` would load and then
+            // not happen.
             AuthoredSource::Members(members) => {
+                if entry.encode.is_some() {
+                    return Err(format!(
+                        "{level}: `{label}` header `{}` reads `members:`, which always renders as \
+                         a JSON object, so `encode:` cannot change it; drop `encode:`, or read a \
+                         single collection under `from:` to choose its encoding",
+                        entry.name
+                    ));
+                }
                 for (member, path) in members {
                     SourcePath::parse(path).map_err(|cause| {
                         format!(
@@ -488,16 +503,16 @@ fn validate_block(block: &DirectionBlock, direction: Direction, level: &str) -> 
         }
     }
 
-    if direction == Direction::Response {
-        for pattern in &block.strip {
-            if let Some(floor_name) = floor::glob_would_match_floor(pattern.as_str()) {
-                return Err(format!(
-                    "{level}: `{label}.strip` entry `{}` would remove `{floor_name}`, which is in \
-                     the response protocol floor and cannot be removed: a client needs it in \
-                     order to interpret the response at all",
-                    pattern.as_str()
-                ));
-            }
+    // `strip:` removes headers the engine did not originate and cannot
+    // enumerate, which is the argument for a floor and is true both ways round.
+    for pattern in &block.strip {
+        if let Some(floor_name) = floor::glob_would_match_floor(direction, pattern.as_str()) {
+            return Err(format!(
+                "{level}: `{label}.strip` entry `{}` would remove `{floor_name}`, which is in the \
+                 {side} protocol floor and cannot be removed: {deprived} needs it in order to \
+                 interpret the {side} at all",
+                pattern.as_str()
+            ));
         }
     }
     Ok(())
@@ -774,8 +789,6 @@ global:
 
     /// A collection has to say how it encodes into one header value. Under
     /// `members:` it does not: a JSON object holds a collection natively.
-    /// A collection has to say how it encodes into one header value. Under
-    /// `members:` it does not: a JSON object holds a collection natively.
     #[test]
     fn a_collection_into_a_single_value_header_needs_a_declared_encoding() {
         let err = refuse(&global(
@@ -802,6 +815,37 @@ global:
             roles: subject.roles
 ",
         ));
+    }
+
+    /// `encode:` on a `members:` entry never took effect: the renderer emits a
+    /// JSON object either way. Refused at load rather than ignored, so an
+    /// operator writing `encode: csv` is not told by the absence of CSV.
+    #[test]
+    fn an_encoding_on_a_members_entry_is_refused() {
+        let err = refuse(&global(
+            "    request:
+      headers:
+        - name: x-auth-attributes
+          members:
+            roles: subject.roles
+          encode: csv
+",
+        ));
+        assert!(err.contains("global"), "the level: {err}");
+        assert!(err.contains("x-auth-attributes"), "the header: {err}");
+        assert!(err.contains("encode"), "the refusal: {err}");
+        // Same for `json`, which is what a members entry already renders: the
+        // key is inert either way, so neither spelling loads.
+        let err = refuse(&global(
+            "    response:
+      headers:
+        - name: x-served-attributes
+          members:
+            tenant: claim.tenant
+          encode: json
+",
+        ));
+        assert!(err.contains("x-served-attributes"), "{err}");
     }
 
     #[test]
@@ -875,11 +919,63 @@ routes:
         ));
     }
 
-    /// The request direction has no floor: it is an allowlist over values the
-    /// engine originates, so there is nothing of the client's to protect.
+    /// The request direction has a floor too. `strip:` removes headers the
+    /// engine did not originate and cannot enumerate, which is the argument for
+    /// a floor and does not care which way the traffic is going.
     #[test]
-    fn a_request_strip_may_name_anything() {
-        load(&global("    request:\n      strip: [content-*, \"*\"]\n"));
+    fn a_request_strip_glob_reaching_the_floor_is_refused_naming_the_header() {
+        for (pattern, named) in [
+            ("content-*", "content-type"),
+            ("\"*\"", "host"),
+            ("host", "host"),
+            ("transfer-encoding", "transfer-encoding"),
+        ] {
+            let err = refuse(&global(&format!(
+                "    request:\n      strip: [{pattern}]\n"
+            )));
+            assert!(
+                err.contains(named),
+                "`{pattern}` should name {named}: {err}"
+            );
+            assert!(err.contains("floor"), "`{pattern}`: {err}");
+        }
+    }
+
+    /// `authorization` is outside the request floor on purpose: an upstream
+    /// reached on a delegated credential should not also receive the client's
+    /// own bearer, so removing it stays legal.
+    #[test]
+    fn a_request_strip_may_still_remove_the_clients_own_credential() {
+        load(&global(
+            "    request:\n      strip: [authorization, cookie, x-auth-*, x-user-id]\n",
+        ));
+    }
+
+    /// An entry removes its target before injecting, so one aimed at a request
+    /// floor header would take framing off a request whose source resolved to
+    /// nothing. Same reason as the response side.
+    #[test]
+    fn a_request_entry_targeting_a_floor_header_is_refused() {
+        let err = refuse(&global(
+            "    request:
+      headers:
+        - name: host
+          from: claim.tenant
+",
+        ));
+        assert!(err.contains("host"), "{err}");
+        assert!(err.contains("floor"), "{err}");
+    }
+
+    /// The floors are per direction, not one shared list: `etag` is a response
+    /// concern and says nothing about what a request may strip, and `host` the
+    /// other way round.
+    #[test]
+    fn each_direction_is_bound_by_its_own_floor_only() {
+        load(&global(
+            "    request:\n      strip: [etag, cache-control]\n",
+        ));
+        load(&global("    response:\n      strip: [host]\n"));
     }
 
     #[test]

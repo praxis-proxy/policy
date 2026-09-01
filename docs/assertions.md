@@ -56,6 +56,9 @@ headers:
 ```
 
 `from:` and `members:` are alternatives; an entry carrying both fails to load.
+So does a `members:` entry carrying `encode:`: a members entry always renders as
+a JSON object, so the key could not change anything, and it is refused rather
+than accepted and ignored.
 
 `encode:` says how a value that is not a scalar renders into one header value.
 `json` renders every value as JSON, so a string renders quoted and stays
@@ -124,7 +127,7 @@ Removal and injection are one replacement of the direction's header map, so
 there is no state in between where a client value and an asserted one both
 exist.
 
-## The two directions are not symmetric
+## What each direction asserts is not symmetric
 
 `request:` can withhold anything it does not name, because the engine
 originates every value it asserts and the legitimate set is finite and known.
@@ -136,17 +139,41 @@ default-deny there would remove `content-type`, `content-length`, `etag`,
 header a client depends on. So a response header nothing names reaches the
 client unchanged.
 
-A **protocol floor** fixed in code backs that up. It holds the headers a client
-needs in order to interpret the response at all: content negotiation and
-framing, caching and conditional requests, retry signalling, and the CORS
-response set. A `strip:` entry that would remove one fails at config load,
-naming the header the glob would have hit, rather than breaking clients in
-production. A response `headers:` entry targeting a floor header is refused for
-the same reason: an entry removes its target before injecting, so one whose
-source resolved to nothing would take the floor header with it.
+That asymmetry is about what each direction **asserts**. It says nothing about
+`strip:`, which removes headers the engine did not originate and cannot
+enumerate in either direction. So `strip:` gets the same treatment both ways.
 
-`set-cookie`, `server` and `x-powered-by` are deliberately **not** in the
-floor. Removing those is a stated use case.
+## Both directions have a protocol floor
+
+A **protocol floor** fixed in code holds the headers a `strip:` entry can never
+remove. There is one per direction, holding what that direction's recipient
+needs in order to interpret the message at all. A `strip:` entry that would
+remove one fails at config load, naming the header the glob would have hit,
+rather than breaking traffic in production. A `headers:` entry *targeting* a
+floor header is refused for the same reason: an entry removes its target before
+injecting, so one whose source resolved to nothing would take the floor header
+with it.
+
+The **request floor** is framing and addressing, which is all the engine can
+assume an upstream needs: `host`, `content-type`, `content-length`,
+`transfer-encoding`.
+
+`authorization` is deliberately **not** in it. Stripping the client's own bearer
+before forwarding to an upstream that runs on a delegated credential is a stated
+use case, so it stays removable. Neither are `cookie`, `accept`, `user-agent` and
+the rest of what a client says about itself: withholding those from an upstream
+is a policy choice an operator is entitled to make, not a broken request.
+
+The **response floor** is longer, because a client's caching, validation and
+CORS behaviour all hang off headers the origin chose: content negotiation and
+framing, caching and conditional requests, retry signalling, and the CORS
+response set.
+
+`set-cookie`, `server` and `x-powered-by` are deliberately **not** in it.
+Removing those is a stated use case.
+
+So `strip: ["*"]` fails to load in either direction, and the load error names
+the first floor header the glob reached.
 
 ## Four levels, and they stack
 
@@ -234,9 +261,11 @@ A nested dispatch primitive is not a boundary and applies nothing:
 the contract is applied once at the outer boundary after that handler returns.
 A host driving `invoke_entries` as its outermost dispatch has no boundary, and
 so no contract — nothing is asserted and nothing the contract names is removed.
-The engine reports that once, under
+The engine reports that on every such call, under
 `alarm = "assertions_dispatch_without_a_boundary"`, rather than leaving it to be
-inferred from a header that did not appear.
+inferred from a header that did not appear. Every call is a fresh lapse of the
+property that a client cannot set an asserted header, so it is reported like one;
+a host that configures no contract is not warned at all.
 
 On a pipeline a plugin already denied, the request direction still removes what
 it names — removal costs nothing and keeps a client value out of the extensions

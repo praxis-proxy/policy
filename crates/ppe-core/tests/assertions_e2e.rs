@@ -826,8 +826,8 @@ mod return_sites {
 
     /// The primitive driven directly, with no executor above it. It applies
     /// nothing, the same as when nested, and does not fault: a caller that wants
-    /// no boundary is entitled to one, and the engine says so once rather than
-    /// refusing.
+    /// no boundary is entitled to one, so the engine warns on each such call
+    /// rather than refusing.
     #[tokio::test]
     async fn an_outermost_nested_dispatch_applies_nothing_and_does_not_fault() {
         let engine = engine_with(CONTRACT).await;

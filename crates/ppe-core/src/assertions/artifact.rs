@@ -150,15 +150,23 @@ fn render_exclusions(out: &mut String) {
     );
 }
 
-/// The response headers no `strip:` entry can remove.
+/// The headers no `strip:` entry can remove, one floor per direction.
 fn render_floor(out: &mut String) {
-    out.push_str("Response protocol floor, fixed in code; no strip: entry can remove one\n");
-    for entry in floor::floor_names() {
-        let _ = writeln!(out, "  {:<34} {}", entry.name, entry.reason);
+    out.push_str("Protocol floors, fixed in code; no strip: entry can remove one\n");
+    for (side, entries) in [
+        ("request", floor::REQUEST_FLOOR),
+        ("response", floor::RESPONSE_FLOOR),
+    ] {
+        let _ = writeln!(out, "  {side}");
+        for entry in entries {
+            let _ = writeln!(out, "    {:<32} {}", entry.name, entry.reason);
+        }
     }
     out.push_str(
-        "  set-cookie, server and x-powered-by are deliberately NOT in the floor: removing those
-  is a stated use case.
+        "  authorization is deliberately NOT in the request floor: an upstream reached on a
+  delegated credential should not also get the client's own bearer, so stripping it stays
+  legal. set-cookie, server and x-powered-by are NOT in the response floor: removing
+  those is a stated use case.
 
 ",
     );
@@ -601,7 +609,7 @@ routes:
             assert!(rendered.contains(prefix), "missing {prefix}");
             assert!(rendered.contains(reason), "missing the reason for {prefix}");
         }
-        for entry in floor::floor_names() {
+        for entry in floor::REQUEST_FLOOR.iter().chain(floor::RESPONSE_FLOOR) {
             assert!(rendered.contains(entry.name), "missing {}", entry.name);
             assert!(
                 rendered.contains(entry.reason),
