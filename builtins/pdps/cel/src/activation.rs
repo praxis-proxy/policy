@@ -161,16 +161,12 @@ fn node_to_value(node: Node) -> Value {
 
 /// Convert one `AttributeValue` to a `cel::Value`.
 ///
-/// An `f64` is yielded as `Value::Float`, never silently narrowed to an int.
-/// CEL's `==` / `<=` / `<` and friends already compare an int literal against
-/// a double operand (verified against the pinned `cel` version's ordering
-/// impls and pinned by test), so `delegation.depth <= 2` works with a
-/// double-valued `depth`. Narrowing a whole-valued double to an int used to be
-/// done "to help literal comparison", but it broke float *arithmetic*: a
-/// `confidence` of exactly `1.0` became `int 1`, and `confidence * 100.0` then
-/// errored with "no such overload" (int × double) — so the maximum confidence
-/// was denied while a lower one was allowed, an outcome inversion driven purely
-/// by whether the value happened to be integral.
+/// An `f64` stays `Value::Float`, never narrowed to an int. CEL already
+/// compares an int literal against a double operand (pinned by test), so
+/// `delegation.depth <= 2` works on a double. Narrowing whole-valued doubles
+/// broke arithmetic instead: `1.0` became `int 1`, so `confidence * 100.0`
+/// failed with "no such overload" and denied the maximum-confidence case while
+/// allowing lower ones.
 fn attr_to_value(attr: &AttributeValue) -> Value {
     match attr {
         AttributeValue::Bool(b) => Value::from(*b),
@@ -285,7 +281,7 @@ mod tests {
     }
 
     /// A double-valued bag scalar compares correctly against an integer
-    /// literal without being narrowed to an int — CEL's ordering handles the
+    /// literal without being narrowed to an int: CEL's ordering handles the
     /// mixed comparison. Narrowing is deliberately not done because it breaks
     /// float arithmetic (see `whole_valued_float_keeps_arithmetic`).
     #[test]

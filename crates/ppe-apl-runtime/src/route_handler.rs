@@ -1174,7 +1174,7 @@ mod tests {
     }
 
     /// A route plugin whose only edit is an HTTP header write (via
-    /// `write_headers`) must be detected — otherwise the header rewrite is
+    /// `write_headers`) must be detected, or the header rewrite is
     /// dropped at this boundary and never reaches the upstream request.
     #[test]
     fn an_http_change_alone_is_detected() {

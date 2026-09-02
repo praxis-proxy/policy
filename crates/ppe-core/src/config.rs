@@ -2262,12 +2262,10 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
         let plugin_names: HashSet<&str> = config.plugins.iter().map(|p| p.name.as_str()).collect();
 
         // Validate `authentication:` step names the same way `plugins:` names
-        // are. `RouteIdentityStep` documents that a step name must match a
-        // top-level `plugins:` entry registered under `identity.resolve`, but
-        // nothing enforced it: an unresolvable name finds no entry at dispatch
-        // and is dropped with no error, leaving that authentication step
-        // unrun. Global, group, and route authentication share one shape, so
-        // one check covers all three.
+        // are. `RouteIdentityStep` requires a step to name a top-level
+        // `plugins:` entry, but nothing enforced it: an unresolvable name finds
+        // no entry at dispatch and is dropped silently, leaving that step
+        // unrun. Global, group, and route authentication share one shape.
         let validate_authentication =
             |authentication: &Option<crate::identity::RouteIdentityConfig>,
              context: &str|

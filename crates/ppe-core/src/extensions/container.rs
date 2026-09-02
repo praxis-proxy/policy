@@ -364,21 +364,18 @@ impl Extensions {
     /// Merge the `security` slot — labels only, and only as an append.
     ///
     /// Labels are the Monotonic tier: `append_labels` permits growing the set
-    /// and nothing else. Monotonicity is guaranteed *structurally* here — the
+    /// and nothing else. Monotonicity is guaranteed *structurally* here: the
     /// returned labels are folded into the canonical set, never assigned over
     /// it, so a canonical label the plugin could not see (or deliberately
     /// dropped) is re-added by construction and can never be removed by this
     /// path. Removal requires a `DeclassifierToken` no plugin can construct.
     ///
-    /// This does not itself judge a shrunk returned set to be a laundering
-    /// *attempt* and reject the whole edit: that requires knowing whether the
-    /// plugin was shown the canonical labels (a `read_labels` holder) or an
-    /// empty filtered view (an append-only plugin, whose additions are
-    /// legitimate even though they are not a superset of canonical). That
-    /// capability context lives in the executor, which drops the whole edit
-    /// when a `read_labels` plugin returns a non-superset set (`labels_ok`),
-    /// before this merge is ever reached. Re-checking it here without that
-    /// context silently discarded an append-only plugin's labels.
+    /// It does not also judge a shrunk set to be a laundering *attempt* and
+    /// reject the whole edit. That needs to know whether the plugin saw the
+    /// canonical labels or an empty filtered view, and that capability context
+    /// lives in the executor's `labels_ok`, which runs before this merge.
+    /// Re-checking it here without the context discarded an append-only
+    /// plugin's labels.
     ///
     /// Every other field on the slot is Immutable in the tier model with
     /// `write_cap: None` — `subject`, `auth_method`, `client`, `caller_workload`,
@@ -459,7 +456,7 @@ impl Extensions {
 /// Every existing hop must be unchanged. The comparison covers all the fields
 /// that carry authority or bound it: subject, audience, granted scopes,
 /// strategy, the RFC 9396 `authorization_details` (documented as "must be
-/// structurally narrowed" — a rewrite widens the grant), the `ttl_seconds`
+/// structurally narrowed", since a rewrite widens the grant), the `ttl_seconds`
 /// lifetime (extending it is a privilege escalation), and the `timestamp`
 /// (which drives age/expiry checks). A rewrite of any of these on an existing
 /// hop is not an append, so the whole edit is refused. `from_cache` is merge
@@ -1134,7 +1131,7 @@ mod tests {
         // dropped label survives (monotonicity is structural here). The
         // *drop-whole* punishment for a `read_labels` laundering attempt lives
         // in the executor's `labels_ok`, which has the capability context this
-        // low-level merge does not — see `merge_security`'s doc.
+        // low-level merge does not. See `merge_security`'s doc.
         let mut security = SecurityExtension::default();
         security.add_label("PII");
         security.add_label("HIPAA");
@@ -1166,7 +1163,7 @@ mod tests {
     fn test_append_only_plugin_labels_survive_nonempty_canonical() {
         // Regression: a plugin holding `append_labels` but not `read_labels`
         // sees an empty filtered label set, so its returned set contains only
-        // its additions — not a superset of the canonical set. The old
+        // its additions, not a superset of the canonical set. The old
         // superset gate in `merge_security` dropped those additions whenever
         // canonical was non-empty, silently disabling a write-only tainting /
         // DLP plugin. Folding must now land the addition.
@@ -1373,7 +1370,7 @@ mod tests {
         ext.delegation_write_token = Some(WriteToken::new());
 
         // Rewrite the existing hop's RFC 9396 authorization_details to add
-        // actions (a widening) and extend its ttl — neither is an append.
+        // actions (a widening) and extend its ttl. Neither is an append.
         let mut cow = ext.cow_copy();
         {
             let hop = &mut cow.delegation.as_mut().unwrap().chain[0];

@@ -116,9 +116,9 @@ impl DelegationInvoker for DelegationPluginInvoker {
         // each recognized key is lifted onto the typed DelegationPayload.
         // Recognized keys: `target` (required), `subject`, `actor`,
         // `audience`, `permissions`, `target_type`, `auth_enforced_by`, and
-        // `attenuation`. Any other key is intentionally dropped — the payload
-        // has no untyped input channel, so an unrecognized key does not reach
-        // the plugin (an earlier comment here claimed otherwise; it did not).
+        // `attenuation`. Any other key is intentionally dropped: the payload
+        // has no untyped input channel, so an unrecognized key never reaches
+        // the plugin.
         //
         // There is deliberately no `mode` key: the delegation mode is
         // *derived* from `subject` by the handler rather than declared, so a
@@ -127,7 +127,7 @@ impl DelegationInvoker for DelegationPluginInvoker {
         //
         // `attenuation` is load-bearing: it *narrows* the minted credential's
         // scope, so silently dropping it would mint a broader token than the
-        // author asked for — a fail-open. A malformed `attenuation:` errors
+        // author asked for, which is a fail-open. A malformed `attenuation:` errors
         // (fail closed) rather than being ignored.
         let cfg = step.config_override.as_ref().and_then(|v| v.as_mapping());
 
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn attenuation_typo_key_fails_closed() {
         // A misspelled key must not deserialize into an empty (no-op) config
-        // that silently widens the token — it is a hard error.
+        // that silently widens the token. It is a hard error.
         let err = attenuation_from_cfg(Some(&cfg("attenuation:\n  actionss: [read]")))
             .expect_err("unknown attenuation key must fail closed");
         assert!(matches!(err, DelegationError::InvalidConfig(_)));

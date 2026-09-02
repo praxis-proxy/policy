@@ -130,12 +130,10 @@ pub struct JwtIdentityResolver {
 }
 
 // Manual `Debug` rather than derived: `cfg` retains the raw config JSON and
-// `pending_jwks` holds `DecodingKeySource` values, both of which carry HMAC
-// secrets and inline PEM key material. For HS* those secrets are *signing*
-// keys — token-forgery material — so a `{:?}` of the resolver must never
-// print them. Only the non-secret operational fields are shown; the
-// secret-carrying fields are elided. This mirrors the redacting `Debug` on
-// `KeyStore` / `TrustedIssuer` and the sibling auth plugins.
+// `pending_jwks` holds `DecodingKeySource` values, both carrying HMAC secrets
+// and inline PEM key material. For HS* those secrets are *signing* keys, so a
+// `{:?}` of the resolver must never print them. Only the non-secret fields are
+// shown, mirroring the redacting `Debug` on `KeyStore` / `TrustedIssuer`.
 impl std::fmt::Debug for JwtIdentityResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JwtIdentityResolver")
@@ -1165,7 +1163,7 @@ mod tests {
     fn strip_bearer_prefix_is_case_insensitive() {
         // Canonical casing.
         assert_eq!(strip_bearer_prefix("Bearer abc.def.ghi"), "abc.def.ghi");
-        // Lower / upper / mixed — RFC 9110 scheme is case-insensitive.
+        // Lower / upper / mixed: RFC 9110 scheme is case-insensitive.
         assert_eq!(strip_bearer_prefix("bearer abc.def.ghi"), "abc.def.ghi");
         assert_eq!(strip_bearer_prefix("BEARER abc.def.ghi"), "abc.def.ghi");
         assert_eq!(strip_bearer_prefix("BeArEr abc.def.ghi"), "abc.def.ghi");

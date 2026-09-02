@@ -436,13 +436,11 @@ pub struct RawCredentialsExtension {
     /// (`TokenDelegate` handlers only).
     ///
     /// Serialized as a sequence of `[key, value]` pairs, not a JSON object:
-    /// the key is the `DelegationKey` struct, and JSON object keys must be
-    /// strings, so a plain map serialization errors at runtime the moment a
-    /// token is minted — which would break the documented `extensions` wire
-    /// channel, audit dumps, and hot-reload snapshots (the very paths the
-    /// module's serialization-safety contract promises work). The pair-seq
-    /// form serializes cleanly and round-trips; the token bytes inside each
-    /// value stay `#[serde(skip)]`.
+    /// the key is a `DelegationKey` struct and JSON object keys must be
+    /// strings, so a plain map errors at runtime the moment a token is minted,
+    /// breaking the `extensions` wire channel, audit dumps, and hot-reload
+    /// snapshots. The pair form round-trips, and token bytes inside each value
+    /// stay `#[serde(skip)]`.
     #[serde(default, with = "delegated_tokens_as_pairs")]
     pub delegated_tokens: HashMap<DelegationKey, RawDelegatedToken>,
 }
@@ -451,13 +449,10 @@ pub struct RawCredentialsExtension {
 /// `(DelegationKey, RawDelegatedToken)` pairs so a non-string map key
 /// serializes to JSON. See the field doc for why a plain map cannot.
 ///
-/// Deserialization is tolerant of *both* the pair-sequence form and a plain
-/// map. Before this adapter, only an empty `delegated_tokens` ever serialized,
-/// and it did so as a JSON object (`{}`); a snapshot or wire message written by
-/// that older code must still load, so a map input is accepted too (its entries,
-/// if any, having string-shaped keys from a hand-built or empty document). This
-/// keeps mixed-version rollouts and old persisted snapshots readable in both
-/// directions.
+/// Deserialization accepts both the pair form and a plain map. Before this
+/// adapter only an empty `delegated_tokens` ever serialized, and it did so as
+/// `{}`, so snapshots and wire messages written by that older code must still
+/// load. This keeps mixed-version rollouts readable.
 mod delegated_tokens_as_pairs {
     use super::{DelegationKey, RawDelegatedToken};
     use serde::de::{MapAccess, SeqAccess, Visitor};
@@ -727,7 +722,7 @@ mod tests {
     fn legacy_empty_map_delegated_tokens_still_deserializes() {
         // Before the pair-seq adapter, only an empty delegated_tokens ever
         // serialized, and it did so as a JSON object `{}`. A snapshot written
-        // by that older code must still load — the deserializer accepts a map
+        // by that older code must still load, so the deserializer accepts a map
         // as well as the new sequence form.
         let legacy = r#"{"inbound_tokens":{},"delegated_tokens":{}}"#;
         let restored: RawCredentialsExtension = serde_json::from_str(legacy).unwrap();

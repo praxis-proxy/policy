@@ -318,7 +318,7 @@ impl OpaResolver {
         // (`data.authz`), and a global rule reads whole subtrees, so an inline
         // module in a *sub-package* of a global one (`data.authz.exceptions`
         // under `data.authz`) still feeds `data.authz.*` that a global
-        // `authz` rule can consume — an override by the back door. Reject when
+        // `authz` rule can consume, an override by the back door. Reject when
         // the inline package equals, is nested under, or contains any global
         // package, so the two never share a `data` subtree.
         if self
@@ -397,7 +397,7 @@ impl OpaResolver {
     }
 }
 
-/// True when two dotted Rego package paths occupy the same `data` subtree —
+/// True when two dotted Rego package paths occupy the same `data` subtree:
 /// they are equal, or one is nested under the other (`data.authz` and
 /// `data.authz.exceptions`). A bare prefix comparison is wrong: `data.authz`
 /// must not be judged to contain `data.authznext`, so the boundary is only a
@@ -991,12 +991,12 @@ msg := "not a decision"
     /// An inline module in a *sub-package* of a global package is rejected
     /// fail-closed. A global `authz` rule reads whole `data.authz.*` subtrees,
     /// so an inline `package authz.exceptions` still feeds operator policy even
-    /// though it never names `package authz` directly — the back-door override
-    /// the exact-match check used to miss.
+    /// though it never names `package authz` directly. That is the back-door
+    /// override the exact-match check missed.
     #[tokio::test]
     async fn inline_module_cannot_override_global_subpackage() {
         // Global policy allows only when the caller is listed under
-        // `data.authz.exceptions` — a subtree an inline module must not reach.
+        // `data.authz.exceptions`, a subtree an inline module must not reach.
         let global = "package authz\ndefault allow := false\nallow if data.authz.exceptions[input.subject.id]\n";
         let r = resolver(&[global], OnError::Allow);
         let inline = "package authz.exceptions\nexceptions := {\"eve\": true}\n";

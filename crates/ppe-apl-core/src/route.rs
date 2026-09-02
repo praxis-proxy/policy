@@ -357,12 +357,10 @@ pub async fn evaluate_route(
 }
 
 /// Maximum recursion depth [`expand_field_paths`] will descend before failing
-/// closed. The walk increments depth on every hop, so this bounds the sum of a
-/// path's segment count and the array-nesting levels fanned through, not array
-/// nesting alone. 128 is comfortably above any real (path, tool-result) shape
-/// and sits near `serde_json`'s own default parse-recursion limit, so in
-/// practice only a host-constructed payload that bypasses the parser can trip
-/// it; when it does, the caller denies rather than recursing without bound.
+/// closed. Depth increments on every hop, so this bounds a path's segment count
+/// plus the array-nesting levels fanned through, not nesting alone. 128 sits
+/// above any real shape and near `serde_json`'s own parse-recursion limit, so
+/// in practice only a payload that bypasses the parser trips it.
 const MAX_FANOUT_DEPTH: usize = 128;
 
 /// Maximum number of concrete leaf paths one field rule may fan out into
@@ -479,7 +477,7 @@ fn parent_mut<'a>(
 /// Read `root.a.b.c` from a JSON value via dot-separated path. Returns
 /// `None` if any segment is missing. Object segments index by key; a numeric
 /// segment indexes into an array, so a path expanded by
-/// [`expand_field_paths`] resolves.
+/// `expand_field_paths` resolves.
 ///
 /// Public because host bridges read fields back out of their own payload
 /// projections — a plugin dispatched from a pipeline stage reports a new
@@ -495,7 +493,7 @@ pub fn get_dotted<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a ser
 
 /// Write to `root.a.b.c` via dot-separated path. Returns true on success;
 /// false if the parent path doesn't exist or the leaf's parent is a scalar.
-/// Does not create missing parent objects — that'd hide schema bugs. A numeric
+/// Does not create missing parent objects, which would hide schema bugs. A numeric
 /// leaf segment overwrites that array element in place.
 pub(crate) fn set_dotted(
     root: &mut serde_json::Value,

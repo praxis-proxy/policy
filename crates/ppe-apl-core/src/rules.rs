@@ -336,29 +336,20 @@ impl Effect {
 
     /// Count the `Elicit` nodes reachable in this effect subtree.
     ///
-    /// Used by the config-load validator to reject a phase that can reach more
-    /// than one elicitation. `elicitation.id` is a single flat bag key, not a
-    /// per-step one, and `dispatch_elicitation` treats it as present to mean
-    /// "already dispatched, poll it". So within *one* request, with no retry
-    /// involved: the first elicit dispatches and writes the shared key, and the
-    /// second reads it, skips its own dispatch entirely, and adopts the first's
-    /// verdict. A `require_approval` written after a `confirm` never reaches an
-    /// approver, it is rubber-stamped by whoever answered the confirm. The
-    /// resolved bundle (status, outcome, approver, intent id) is shared the same
-    /// way, and which step wins is just evaluation order.
+    /// Used by the config-load validator to reject a phase reaching more than
+    /// one elicitation. `elicitation.id` is a single flat bag key, and
+    /// `dispatch_elicitation` reads a present id as "already dispatched, poll
+    /// it". So within one request the first elicit dispatches and writes the
+    /// key, and the second skips its own dispatch and adopts the first's
+    /// verdict: a `require_approval` after a `confirm` never reaches an
+    /// approver. Supporting this properly needs a per-step id the current
+    /// protocol cannot carry, so the config is rejected instead.
     ///
-    /// Correct multi-elicit needs a per-step id the current single-id protocol
-    /// cannot carry, so the safe posture is to reject a config that expresses
-    /// two independent gates the engine can only enforce as one.
-    ///
-    /// A PDP's `on_allow` / `on_deny` arms are counted *together* even though
-    /// only one runs per evaluation: the PDP verdict can flip between the
-    /// initial request and the retry (its inputs change), so across the two
-    /// round trips both arms can fire and collide on the shared retry id, which
-    /// is the same hazard. Summing them is the deliberate conservative choice,
-    /// so a policy with an elicit in each PDP arm is rejected rather than
-    /// silently exposed to a verdict flip. `When` arms are likewise summed,
-    /// since the compiler cannot prove two conditions disjoint.
+    /// A PDP's `on_allow` / `on_deny` arms are summed even though only one runs
+    /// per evaluation, because the verdict can flip between the initial request
+    /// and the retry, letting both fire across the two round trips. `When` arms
+    /// are summed for the same reason: the compiler cannot prove two conditions
+    /// disjoint.
     pub fn count_elicits(&self) -> usize {
         match self {
             Effect::Elicit(_) => 1,

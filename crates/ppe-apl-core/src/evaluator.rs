@@ -1093,7 +1093,7 @@ fn dispatch_parallel<'a>(
 
         // Aggregate in input order: append every branch's taints; pick
         // the first Halt (by branch index, not wall-clock order) as the
-        // overall result. Aborted branches contribute no taints — they
+        // overall result. Aborted branches contribute no taints: they
         // were short-circuit cancelled. A *panicked* branch is converted
         // into a fail-closed Halt: we cannot know whether the branch it
         // ran would have denied, and the engine's contract everywhere
@@ -1101,7 +1101,7 @@ fn dispatch_parallel<'a>(
         // permits (a plugin `Err` halts at line 497, and the concurrent
         // executor phase halts on a panicking branch under `on_error:
         // fail`). Swallowing the panic here would make a guard branch's
-        // deny vanish — fail-open in the one phase whose job is to block.
+        // deny vanish, a fail-open in the one phase whose job is to block.
         let mut first_halt: Option<Decision> = None;
         for (idx, outcome) in outcomes.into_iter().enumerate() {
             match outcome {
@@ -3145,7 +3145,7 @@ mod tests {
         }
     }
 
-    /// Invoker that panics on any plugin call — models a misbehaving plugin
+    /// Invoker that panics on any plugin call, modelling a misbehaving plugin
     /// unwinding inside a `parallel:` branch.
     struct PanicPlugins;
     #[async_trait]
@@ -4106,7 +4106,7 @@ mod tests {
     #[tokio::test]
     async fn parallel_panicked_branch_fails_closed() {
         // A branch that panics (misbehaving plugin) must halt the phase, not
-        // be silently dropped — a swallowed panic would let a guard branch's
+        // be silently dropped: a swallowed panic would let a guard branch's
         // deny vanish (fail-open). The surviving Allow branch must not rescue
         // the request.
         let mut bag = AttributeBag::new();
