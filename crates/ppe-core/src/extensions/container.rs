@@ -365,7 +365,8 @@ impl Extensions {
     ///
     /// Labels are the Monotonic tier: `append_labels` permits growing the set
     /// and nothing else. Folding returned labels into the canonical set makes
-    /// removal structurally impossible.
+    /// removal structurally impossible; it requires a `DeclassifierToken` no
+    /// plugin can construct.
     ///
     /// Capability-aware laundering detection happens earlier in `labels_ok`;
     /// this layer cannot distinguish a filtered view from a removal attempt.
@@ -444,8 +445,10 @@ impl Extensions {
 
 /// True when `returned` is `canonical` plus zero or more appended hops.
 ///
-/// Existing hops must match on every authority-bearing or bounding field.
-/// `from_cache` is merge bookkeeping and is not compared.
+/// Existing hops must match on every authority-bearing or bounding field:
+/// subject, audience, granted scopes, strategy, `authorization_details`,
+/// `ttl_seconds`, and `timestamp`. Dropping any of them reopens a widening
+/// path. `from_cache` is merge bookkeeping and is not compared.
 ///
 /// Public so out-of-process hosts can apply the same validation to a chain
 /// arriving over the wire before it reaches the merge, instead of reimplementing
@@ -1111,6 +1114,7 @@ mod tests {
 
     #[test]
     fn test_label_removal_is_refused_by_folding() {
+        // Folding, not a superset gate, is what refuses the removal.
         let mut security = SecurityExtension::default();
         security.add_label("PII");
         security.add_label("HIPAA");
@@ -1140,6 +1144,9 @@ mod tests {
 
     #[test]
     fn test_append_only_plugin_labels_survive_nonempty_canonical() {
+        // Regression: a superset gate here discarded the labels of a plugin
+        // holding `append_labels` but not `read_labels`, which sees an empty
+        // filtered set and so never returns a superset of canonical.
         let mut security = SecurityExtension::default();
         security.add_label("EXISTING");
 
