@@ -645,7 +645,8 @@ fn a_misspelled_authentication_object_key_is_rejected() {
 /// nothing at dispatch and leave the route unauthenticated.
 #[test]
 fn the_authentication_object_shapes_still_load() {
-    const PLUGINS: &str = "plugins:\n  - name: jwt\n    kind: builtin\n    hooks: [identity.resolve]\n";
+    const PLUGINS: &str =
+        "plugins:\n  - name: jwt\n    kind: builtin\n    hooks: [identity.resolve]\n";
     let additive = praxis_policy_core::config::parse_config(&format!(
         "{PLUGINS}routes:\n  - tool: get_weather\n    authentication: [jwt]\n"
     ))
