@@ -1084,14 +1084,8 @@ impl ConfigVisitor for AplConfigVisitor {
                 return Err(err_msg.into());
             }
 
-            // Reject a phase that can reach more than one elicitation. The
-            // elicitation id is one flat bag key, so in a single request the
-            // second elicit skips its own dispatch and adopts the first's
-            // verdict, leaving a `require_approval` rubber-stamped by whoever
-            // answered an earlier `confirm`. See `Effect::count_elicits`.
-            // Checked here on the fully-stacked route so an elicit inherited
-            // from a global or group layer plus one on the route also trips it,
-            // where the parser's per-block check sees only one layer.
+            // Repeat elicitation validation after stacking to catch duplicates
+            // introduced across global, group, and route layers.
             for (phase, effects) in [
                 ("pre_invocation", &effective.pre_invocation),
                 ("post_invocation", &effective.post_invocation),

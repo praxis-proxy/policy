@@ -364,18 +364,11 @@ impl Extensions {
     /// Merge the `security` slot — labels only, and only as an append.
     ///
     /// Labels are the Monotonic tier: `append_labels` permits growing the set
-    /// and nothing else. Monotonicity is guaranteed *structurally* here: the
-    /// returned labels are folded into the canonical set, never assigned over
-    /// it, so a canonical label the plugin could not see (or deliberately
-    /// dropped) is re-added by construction and can never be removed by this
-    /// path. Removal requires a `DeclassifierToken` no plugin can construct.
+    /// and nothing else. Folding returned labels into the canonical set makes
+    /// removal structurally impossible.
     ///
-    /// It does not also judge a shrunk set to be a laundering *attempt* and
-    /// reject the whole edit. That needs to know whether the plugin saw the
-    /// canonical labels or an empty filtered view, and that capability context
-    /// lives in the executor's `labels_ok`, which runs before this merge.
-    /// Re-checking it here without the context discarded an append-only
-    /// plugin's labels.
+    /// Capability-aware laundering detection happens earlier in `labels_ok`;
+    /// this layer cannot distinguish a filtered view from a removal attempt.
     ///
     /// Every other field on the slot is Immutable in the tier model with
     /// `write_cap: None` — `subject`, `auth_method`, `client`, `caller_workload`,
@@ -394,9 +387,7 @@ impl Extensions {
             None => SecurityExtension::default(),
         };
 
-        // Monotonic: fold in the additions, never assign the returned set.
-        // Assignment would drop any canonical label the plugin could not see,
-        // and folding makes a filtered-away label unremovable by construction.
+        // Fold additions into canonical labels; never replace the set.
         for label in owned.labels.iter() {
             merged.labels.add_label(label.clone());
         }
@@ -453,14 +444,8 @@ impl Extensions {
 
 /// True when `returned` is `canonical` plus zero or more appended hops.
 ///
-/// Every existing hop must be unchanged. The comparison covers all the fields
-/// that carry authority or bound it: subject, audience, granted scopes,
-/// strategy, the RFC 9396 `authorization_details` (documented as "must be
-/// structurally narrowed", since a rewrite widens the grant), the `ttl_seconds`
-/// lifetime (extending it is a privilege escalation), and the `timestamp`
-/// (which drives age/expiry checks). A rewrite of any of these on an existing
-/// hop is not an append, so the whole edit is refused. `from_cache` is merge
-/// bookkeeping, not authority, so it is not compared.
+/// Existing hops must match on every authority-bearing or bounding field.
+/// `from_cache` is merge bookkeeping and is not compared.
 ///
 /// Public so out-of-process hosts can apply the same validation to a chain
 /// arriving over the wire before it reaches the merge, instead of reimplementing
@@ -1126,12 +1111,6 @@ mod tests {
 
     #[test]
     fn test_label_removal_is_refused_by_folding() {
-        // A returned set that drops a canonical label cannot remove it: the
-        // merge folds the returned labels into the canonical set, so the
-        // dropped label survives (monotonicity is structural here). The
-        // *drop-whole* punishment for a `read_labels` laundering attempt lives
-        // in the executor's `labels_ok`, which has the capability context this
-        // low-level merge does not. See `merge_security`'s doc.
         let mut security = SecurityExtension::default();
         security.add_label("PII");
         security.add_label("HIPAA");
@@ -1161,12 +1140,6 @@ mod tests {
 
     #[test]
     fn test_append_only_plugin_labels_survive_nonempty_canonical() {
-        // Regression: a plugin holding `append_labels` but not `read_labels`
-        // sees an empty filtered label set, so its returned set contains only
-        // its additions, not a superset of the canonical set. The old
-        // superset gate in `merge_security` dropped those additions whenever
-        // canonical was non-empty, silently disabling a write-only tainting /
-        // DLP plugin. Folding must now land the addition.
         let mut security = SecurityExtension::default();
         security.add_label("EXISTING");
 
@@ -1177,7 +1150,6 @@ mod tests {
         ext.labels_write_token = Some(WriteToken::new());
 
         let mut cow = ext.cow_copy();
-        // Filtered view for a no-read plugin is empty; it appends its label.
         let mut added = std::collections::HashSet::new();
         added.insert("PII".to_owned());
         cow.security.as_mut().unwrap().labels = crate::extensions::MonotonicSet::from_set(added);
@@ -1369,8 +1341,6 @@ mod tests {
         };
         ext.delegation_write_token = Some(WriteToken::new());
 
-        // Rewrite the existing hop's RFC 9396 authorization_details to add
-        // actions (a widening) and extend its ttl. Neither is an append.
         let mut cow = ext.cow_copy();
         {
             let hop = &mut cow.delegation.as_mut().unwrap().chain[0];

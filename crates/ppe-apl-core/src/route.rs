@@ -111,11 +111,7 @@ pub async fn evaluate_pre(
     let mut args_modified = false;
 
     for rule in &route.args {
-        // Fan out over any array on the way to the leaf: `args.rows.ssn`
-        // redacts the `ssn` of every element of `rows` rather than nothing. A
-        // plain object path expands to itself, so non-array fields are
-        // unchanged. An over-large shape fails closed rather than
-        // half-redacting.
+        // Expand intermediate arrays; excessive fan-out fails closed.
         let Some(paths) = expand_field_paths(&payload.args, &rule.field) else {
             return RouteDecision {
                 decision: Decision::Deny {
@@ -223,9 +219,7 @@ pub async fn evaluate_post(
 
     if let Some(result) = payload.result.as_mut() {
         for rule in &route.result {
-            // Fan out over any array on the way to the leaf, so
-            // `result.rows.ssn | redact` reaches every row instead of silently
-            // no-opping. See `expand_field_paths`.
+            // Expand intermediate arrays; excessive fan-out fails closed.
             let Some(paths) = expand_field_paths(result, &rule.field) else {
                 return RouteDecision {
                     decision: Decision::Deny {
@@ -356,16 +350,11 @@ pub async fn evaluate_route(
     }
 }
 
-/// Maximum recursion depth [`expand_field_paths`] will descend before failing
-/// closed. Depth increments on every hop, so this bounds a path's segment count
-/// plus the array-nesting levels fanned through, not nesting alone. 128 sits
-/// above any real shape and near `serde_json`'s own parse-recursion limit, so
-/// in practice only a payload that bypasses the parser trips it.
+/// Maximum traversal depth, counting path segments and implicit array fan-out.
 const MAX_FANOUT_DEPTH: usize = 128;
 
 /// Maximum number of concrete leaf paths one field rule may fan out into
-/// before failing closed. High enough for legitimate bulk results, low enough
-/// to bound the work and allocation an adversarial result shape can force.
+/// before failing closed.
 const MAX_EXPANDED_PATHS: usize = 100_000;
 
 /// Resolve one path segment against a value. Object segments index by key; a
@@ -382,22 +371,10 @@ fn segment_get<'a>(value: &'a serde_json::Value, seg: &str) -> Option<&'a serde_
 /// Expand a dotted field path into the concrete paths it names once arrays
 /// along the way are accounted for.
 ///
-/// A field pipeline (`result.rows.ssn | redact`) targets a leaf. When an
-/// *intermediate* segment is an array the leaf exists once per element, so the
-/// redaction has to reach every element rather than silently no-op. Each array
-/// encountered before the final segment fans out into one concrete path per
-/// index (`rows.0.ssn`, `rows.1.ssn`, and so on). Paths whose leaf is absent on
-/// a given element are dropped, matching the missing-field skip rule.
-///
-/// A terminal array is left as a single path, so `result.rows | redact` still
-/// replaces the whole array and existing whole-value semantics are preserved.
-///
-/// Returns `None` when the expansion would exceed a fan-out bound, either array
-/// nesting deeper than [`MAX_FANOUT_DEPTH`] or more than [`MAX_EXPANDED_PATHS`]
-/// leaves. Fanning out over attacker-shaped tool output is otherwise unbounded
-/// in stack depth and allocation, so an over-large shape fails closed: the
-/// caller denies rather than recursing without limit or half-redacting and
-/// passing the tail through unredacted.
+/// Intermediate arrays fan out into indexed paths; missing leaves are skipped.
+/// A terminal array remains one path so whole-value operations still apply.
+/// Returns `None` when depth or leaf-count bounds are exceeded, allowing callers
+/// to fail closed rather than apply a partial transformation.
 pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option<Vec<String>> {
     fn join(prefix: &str, seg: &str) -> String {
         if prefix.is_empty() {
@@ -407,7 +384,6 @@ pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option
         }
     }
 
-    // Returns false once a bound is hit; callers stop and fail closed.
     fn walk(
         value: &serde_json::Value,
         segs: &[&str],
@@ -418,21 +394,17 @@ pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option
         if depth > MAX_FANOUT_DEPTH || out.len() > MAX_EXPANDED_PATHS {
             return false;
         }
-        // All segments consumed, so `prefix` is a concrete path to a leaf.
         let Some((seg, rest)) = segs.split_first() else {
             out.push(prefix.to_owned());
             return true;
         };
         if let serde_json::Value::Array(items) = value {
             if let Ok(idx) = seg.parse::<usize>() {
-                // An explicit numeric segment indexes this array element.
                 if let Some(child) = items.get(idx) {
                     return walk(child, rest, &join(prefix, seg), depth + 1, out);
                 }
             } else {
-                // A non-numeric segment against an array means the array is an
-                // intermediate hop the path didn't name: apply the remaining
-                // segments (starting at `seg`) to every element.
+                // Apply an unnamed intermediate array to every element.
                 for (i, item) in items.iter().enumerate() {
                     if !walk(item, segs, &join(prefix, &i.to_string()), depth + 1, out) {
                         return false;
@@ -493,8 +465,7 @@ pub fn get_dotted<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a ser
 
 /// Write to `root.a.b.c` via dot-separated path. Returns true on success;
 /// false if the parent path doesn't exist or the leaf's parent is a scalar.
-/// Does not create missing parent objects, which would hide schema bugs. A numeric
-/// leaf segment overwrites that array element in place.
+/// Does not create missing parents. A numeric leaf overwrites an array element.
 pub(crate) fn set_dotted(
     root: &mut serde_json::Value,
     path: &str,
@@ -1033,8 +1004,6 @@ mod tests {
         let v = json!({
             "rows": [ { "ssn": "a" }, { "ssn": "b" }, { "other": 1 } ]
         });
-        // The intermediate `rows` array fans out; the element missing `ssn`
-        // is dropped (its path never resolves), matching missing-field skip.
         let mut paths = expand_field_paths(&v, "rows.ssn").expect("within bounds");
         paths.sort();
         assert_eq!(
@@ -1042,20 +1011,17 @@ mod tests {
             vec!["rows.0.ssn".to_owned(), "rows.1.ssn".to_owned()]
         );
 
-        // A terminal array is one path, preserving whole-value semantics.
         assert_eq!(
             expand_field_paths(&v, "rows"),
             Some(vec!["rows".to_owned()])
         );
 
-        // A plain object path expands to itself.
         let flat = json!({ "a": { "b": 1 } });
         assert_eq!(
             expand_field_paths(&flat, "a.b"),
             Some(vec!["a.b".to_owned()])
         );
 
-        // An explicit numeric segment indexes rather than fanning out.
         assert_eq!(
             expand_field_paths(&v, "rows.0.ssn"),
             Some(vec!["rows.0.ssn".to_owned()])
@@ -1064,8 +1030,6 @@ mod tests {
 
     #[test]
     fn expand_field_paths_fails_closed_on_deep_nesting() {
-        // Pathologically deep array nesting must fail closed rather than
-        // recurse without bound.
         let mut v = json!({ "leaf": 1 });
         for _ in 0..(super::MAX_FANOUT_DEPTH + 5) {
             v = serde_json::Value::Array(vec![v]);
@@ -1080,9 +1044,6 @@ mod tests {
 
     #[test]
     fn expand_field_paths_fails_closed_on_wide_array() {
-        // The width bound must fail closed too, not just the depth bound: a
-        // single array past the leaf cap returns None so the caller denies
-        // rather than half-redacting and passing the tail through.
         let mut rows = Vec::with_capacity(super::MAX_EXPANDED_PATHS + 2);
         for i in 0..(super::MAX_EXPANDED_PATHS + 2) {
             rows.push(json!({ "ssn": i }));
@@ -1098,21 +1059,15 @@ mod tests {
     #[test]
     fn dotted_helpers_index_into_arrays() {
         let mut v = json!({ "rows": [ { "ssn": "a" }, { "ssn": "b" } ] });
-        // Read through an array index.
         assert_eq!(get_dotted(&v, "rows.1.ssn"), Some(&json!("b")));
-        // Write through it.
         assert!(set_dotted(&mut v, "rows.0.ssn", json!("[REDACTED]")));
         assert_eq!(v["rows"][0]["ssn"], json!("[REDACTED]"));
-        // Remove a field from an array element.
         assert!(remove_dotted(&mut v, "rows.1.ssn"));
         assert!(v["rows"][1].get("ssn").is_none());
     }
 
     #[tokio::test]
     async fn result_pipeline_redacts_every_array_element() {
-        // `result.rows.ssn | redact` must reach every row rather than silently
-        // no-opping because `rows` is an array. Without the fan-out the SSNs
-        // pass through unredacted, which is a PII fail-open.
         let mut route = CompiledRoute::new("test");
         route.result.push(field_rule(
             "rows.ssn",
@@ -1146,15 +1101,11 @@ mod tests {
         let result = payload.result.as_ref().unwrap();
         assert_eq!(result["rows"][0]["ssn"], json!("[REDACTED]"));
         assert_eq!(result["rows"][1]["ssn"], json!("[REDACTED]"));
-        // Non-targeted fields untouched.
         assert_eq!(result["rows"][0]["name"], json!("a"));
     }
 
     #[tokio::test]
     async fn route_result_over_large_fanout_denies() {
-        // When a result field path fans out past the bound, evaluate_post must
-        // deny rather than pass the un-redacted tail through. A shape nested
-        // past MAX_FANOUT_DEPTH is the cheap way to trip the bound.
         let mut route = CompiledRoute::new("ping");
         route.result.push(field_rule(
             "rows.leaf",

@@ -224,16 +224,7 @@ fn an_empty_attribute_files_list_loads() {
     loads("global:\n  attribute_files: []\n");
 }
 
-// -----------------------------------------------------------------------------
-// Cross-layer elicitation stacking
-// -----------------------------------------------------------------------------
-
-/// The parser rejects two elicits written in a single route block; the visitor
-/// adds the case the parser cannot see, because it only exists once layers are
-/// stacked: an elicit inherited from the `global` layer plus one on the route,
-/// landing in the same phase. Both would share the one per-request elicitation
-/// id, so the second (a weaker `confirm`) would resolve against the first's
-/// (`require_approval`) approval. Rejected at load, not mis-evaluated.
+/// Cross-layer elicitations in one phase are rejected after route stacking.
 #[test]
 fn a_global_and_route_elicit_in_one_phase_is_rejected() {
     let e = load_err(
@@ -254,10 +245,7 @@ routes:
     );
 }
 
-/// The control: the same two elicits split across the pre and post phases are
-/// separate evaluation walks with separate ids, so the config loads. Without it,
-/// the rejection above could be coming from having two elicits at all rather
-/// than two in one phase.
+/// Elicitations in separate phases remain valid.
 #[test]
 fn a_global_pre_elicit_and_route_post_elicit_load() {
     loads(

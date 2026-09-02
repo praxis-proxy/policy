@@ -129,11 +129,8 @@ pub struct JwtIdentityResolver {
     header: String,
 }
 
-// Manual `Debug` rather than derived: `cfg` retains the raw config JSON and
-// `pending_jwks` holds `DecodingKeySource` values, both carrying HMAC secrets
-// and inline PEM key material. For HS* those secrets are *signing* keys, so a
-// `{:?}` of the resolver must never print them. Only the non-secret fields are
-// shown, mirroring the redacting `Debug` on `KeyStore` / `TrustedIssuer`.
+// Implement `Debug` manually because `cfg` and `pending_jwks` may contain HMAC
+// signing secrets or inline PEM keys.
 impl std::fmt::Debug for JwtIdentityResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JwtIdentityResolver")
@@ -953,14 +950,9 @@ fn peek_issuer(token: &str) -> Option<String> {
 
 /// Strip a leading `Bearer` auth-scheme from a header value, if present.
 ///
-/// The `Bearer` scheme name is case-insensitive per RFC 9110 §11.1 (`bearer`,
-/// `BEARER`, `Bearer` are all the same scheme), and the scheme is followed by
-/// one or more spaces before the token. A value that does not carry the scheme
-/// (a bare token) is returned unchanged, so hosts that pre-strip still work.
+/// The scheme is case-insensitive per RFC 9110 §11.1. Bare tokens are returned
+/// unchanged for hosts that strip the scheme themselves.
 fn strip_bearer_prefix(value: &str) -> &str {
-    // Split on the first space: the scheme is everything before it. Requiring
-    // a space means a bare token (no scheme, e.g. host pre-stripped) and a
-    // token that merely starts with "bearer" both fall through untouched.
     match value.split_once(' ') {
         Some((scheme, after)) if scheme.eq_ignore_ascii_case("bearer") => {
             after.trim_start_matches(' ')
@@ -1161,18 +1153,12 @@ mod tests {
 
     #[test]
     fn strip_bearer_prefix_is_case_insensitive() {
-        // Canonical casing.
         assert_eq!(strip_bearer_prefix("Bearer abc.def.ghi"), "abc.def.ghi");
-        // Lower / upper / mixed: RFC 9110 scheme is case-insensitive.
         assert_eq!(strip_bearer_prefix("bearer abc.def.ghi"), "abc.def.ghi");
         assert_eq!(strip_bearer_prefix("BEARER abc.def.ghi"), "abc.def.ghi");
         assert_eq!(strip_bearer_prefix("BeArEr abc.def.ghi"), "abc.def.ghi");
-        // Multiple spaces between scheme and token collapse away.
         assert_eq!(strip_bearer_prefix("bearer   abc.def.ghi"), "abc.def.ghi");
-        // A bare token (host pre-stripped) passes through untouched.
         assert_eq!(strip_bearer_prefix("abc.def.ghi"), "abc.def.ghi");
-        // A token that merely starts with "bearer" but has no space is not
-        // the scheme and must not be truncated.
         assert_eq!(strip_bearer_prefix("bearerish"), "bearerish");
     }
 

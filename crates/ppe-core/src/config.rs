@@ -2261,11 +2261,7 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     if config.dispatch_mode().is_policy() {
         let plugin_names: HashSet<&str> = config.plugins.iter().map(|p| p.name.as_str()).collect();
 
-        // Validate `authentication:` step names the same way `plugins:` names
-        // are. `RouteIdentityStep` requires a step to name a top-level
-        // `plugins:` entry, but nothing enforced it: an unresolvable name finds
-        // no entry at dispatch and is dropped silently, leaving that step
-        // unrun. Global, group, and route authentication share one shape.
+        // Authentication steps must name a declared plugin.
         let validate_authentication =
             |authentication: &Option<crate::identity::RouteIdentityConfig>,
              context: &str|
@@ -4112,9 +4108,6 @@ routes: []
         );
     }
 
-    /// A typo'd `authentication:` step name must be rejected at load. At
-    /// dispatch it resolves to no entry and is dropped silently, so the route
-    /// runs with that authentication step missing, which is a fail-open.
     #[test]
     fn test_route_unknown_authentication_step_rejected() {
         let err = parse_config(
@@ -4139,7 +4132,6 @@ routes:
         );
     }
 
-    /// The same check on the global block.
     #[test]
     fn test_global_unknown_authentication_step_rejected() {
         let err = parse_config(
@@ -4161,8 +4153,6 @@ routes: []
         );
     }
 
-    /// A step naming a declared plugin still loads, so the check does not
-    /// reject legitimate configs.
     #[test]
     fn test_known_authentication_step_is_accepted() {
         parse_config(

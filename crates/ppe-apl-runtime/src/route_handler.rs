@@ -844,12 +844,7 @@ fn extensions_changed(before: &Extensions, after: &Extensions) -> bool {
         (None, None) => false,
         _ => true,
     };
-    // `http` and `custom` are mutable slots too: a route plugin holding
-    // `write_headers` rewrites request/response headers, and a plugin may
-    // stash data in `custom`. Omitting them here left `modified_extensions`
-    // None when a plugin's *only* edit was a header write, so the executor
-    // never merged it and the upstream call never saw the change. (The
-    // `candidate_constraint` slot is handled by the force-`Some` above.)
+    // `http` and `custom` are mutable slots; `candidate_constraint` is handled above.
     let http_changed = match (before.http.as_ref(), after.http.as_ref()) {
         (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
         (None, None) => false,
@@ -1173,9 +1168,6 @@ mod tests {
         assert!(extensions_changed(&before, &after));
     }
 
-    /// A route plugin whose only edit is an HTTP header write (via
-    /// `write_headers`) must be detected, or the header rewrite is
-    /// dropped at this boundary and never reaches the upstream request.
     #[test]
     fn an_http_change_alone_is_detected() {
         use praxis_policy_core::extensions::HttpExtension;
@@ -1254,11 +1246,7 @@ mod tests {
             "a replaced delegation chain must be detected"
         );
 
-        // The production arm for http/custom is `Some(a) -> Some(b)` with a
-        // replaced Arc (a plugin rewriting an already-present slot). The
-        // slot-appears tests above only hit the `None -> Some` arm; cover the
-        // replaced-Arc arm too so a regression there (e.g. value-equality) is
-        // caught.
+        // Cover replacement of an existing mutable slot, not only `None -> Some`.
         use praxis_policy_core::extensions::HttpExtension;
         let http = Arc::new(HttpExtension::default());
         let with_http = |c: &Arc<HttpExtension>| Extensions {

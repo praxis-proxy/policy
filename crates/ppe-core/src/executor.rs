@@ -492,14 +492,8 @@ impl Executor {
                 Ok(Ok(result_box)) => {
                     if let Some(erased) = extract_erased(result_box) {
                         if !erased.continue_processing && can_block {
-                            // A blocking plugin that signals "do not continue"
-                            // halts the pipeline whether or not it attached a
-                            // violation. A missing one is synthesized rather
-                            // than treated as an allow, as the concurrent phase
-                            // already does (`concurrent_deny` below). Letting a
-                            // reasonless deny fall through to the modification
-                            // path would be a fail-open in the phase whose job
-                            // is enforcement.
+                            // A blocking result always halts; synthesize a violation
+                            // when the plugin did not provide one.
                             let mut v = erased.violation.unwrap_or_else(|| {
                                 crate::error::PluginViolation::new(
                                     "plugin_deny",

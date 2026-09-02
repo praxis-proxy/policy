@@ -161,12 +161,8 @@ fn node_to_value(node: Node) -> Value {
 
 /// Convert one `AttributeValue` to a `cel::Value`.
 ///
-/// An `f64` stays `Value::Float`, never narrowed to an int. CEL already
-/// compares an int literal against a double operand (pinned by test), so
-/// `delegation.depth <= 2` works on a double. Narrowing whole-valued doubles
-/// broke arithmetic instead: `1.0` became `int 1`, so `confidence * 100.0`
-/// failed with "no such overload" and denied the maximum-confidence case while
-/// allowing lower ones.
+/// An `f64` stays `Value::Float`; narrowing whole-valued floats breaks CEL
+/// arithmetic such as `confidence * 100.0`.
 fn attr_to_value(attr: &AttributeValue) -> Value {
     match attr {
         AttributeValue::Bool(b) => Value::from(*b),
@@ -188,11 +184,8 @@ fn attr_to_value(attr: &AttributeValue) -> Value {
     }
 }
 
-/// Convert a `serde_yaml::Value` (author-supplied `cel:` args) to a
-/// `cel::Value`. An integer literal maps to `Int`, a fractional one to
-/// `Float`; a float is never narrowed to an int (same reasoning as
-/// `attr_to_value`). Non-string mapping keys are skipped (CEL map keys here
-/// are always strings for author ergonomics).
+/// Convert an author-supplied `cel:` argument to a `cel::Value`. Integers map
+/// to `Int`, floats to `Float`, and non-string mapping keys are skipped.
 fn yaml_to_value(v: &serde_yaml::Value) -> Value {
     match v {
         serde_yaml::Value::Null => Value::Null,
@@ -280,10 +273,6 @@ mod tests {
         assert!(truthy("session.labels.exists(l, l == 'PII')", &bag));
     }
 
-    /// A double-valued bag scalar compares correctly against an integer
-    /// literal without being narrowed to an int: CEL's ordering handles the
-    /// mixed comparison. Narrowing is deliberately not done because it breaks
-    /// float arithmetic (see `whole_valued_float_keeps_arithmetic`).
     #[test]
     fn double_scalar_compares_against_int_literal() {
         let mut bag = AttributeBag::new();
@@ -295,25 +284,15 @@ mod tests {
         assert!(truthy("intent.confidence > 0.9", &bag));
     }
 
-    /// Regression: a whole-valued double (`1.0`) must stay a double so that
-    /// float arithmetic on it still resolves. Narrowing it to `int 1` made
-    /// `confidence * 100.0` fail with "no such overload" and denied the
-    /// maximum-confidence case while allowing lower ones.
     #[test]
     fn whole_valued_float_keeps_arithmetic() {
         let mut bag = AttributeBag::new();
         bag.set("intent.confidence", 1.0_f64);
         assert!(truthy("intent.confidence * 100.0 >= 90.0", &bag));
-        // And the sub-1.0 case is unchanged.
         bag.set("intent.confidence", 0.92_f64);
         assert!(truthy("intent.confidence * 100.0 >= 90.0", &bag));
     }
 
-    /// The float-stays-float change relies on CEL comparing an int literal
-    /// against a double operand in *either* operand order. The existing tests
-    /// only cover `depth <op> 2`; pin the reversed `2 <op> depth` form too, so a
-    /// one-sided comparison impl can't silently break the half of author
-    /// policies that write the literal on the left.
     #[test]
     fn mixed_int_float_comparison_is_order_independent() {
         let mut bag = AttributeBag::new();
@@ -323,17 +302,11 @@ mod tests {
         assert!(truthy("2 >= delegation.depth", &bag));
         assert!(truthy("3 > delegation.depth", &bag));
         assert!(truthy("1 < delegation.depth", &bag));
-        // A true inequality must resolve to a value, not a "no such overload"
-        // error; asserted via its positive form so an error can't pass as false.
         assert!(truthy("3 != delegation.depth", &bag));
     }
 
     #[test]
     fn whole_valued_float_in_int_list_matches() {
-        // Guard the float-stays-float change against the `in` operator: a
-        // whole-valued double must still be found in an int list (CEL's `in`
-        // uses cross-type equality), so membership doesn't invert on int-vs-
-        // double the way the old narrowing avoided for `==` but broke for `*`.
         let mut bag = AttributeBag::new();
         bag.set("delegation.depth", 2.0_f64);
         assert!(

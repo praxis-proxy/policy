@@ -336,20 +336,9 @@ impl Effect {
 
     /// Count the `Elicit` nodes reachable in this effect subtree.
     ///
-    /// Used by the config-load validator to reject a phase reaching more than
-    /// one elicitation. `elicitation.id` is a single flat bag key, and
-    /// `dispatch_elicitation` reads a present id as "already dispatched, poll
-    /// it". So within one request the first elicit dispatches and writes the
-    /// key, and the second skips its own dispatch and adopts the first's
-    /// verdict: a `require_approval` after a `confirm` never reaches an
-    /// approver. Supporting this properly needs a per-step id the current
-    /// protocol cannot carry, so the config is rejected instead.
-    ///
-    /// A PDP's `on_allow` / `on_deny` arms are summed even though only one runs
-    /// per evaluation, because the verdict can flip between the initial request
-    /// and the retry, letting both fire across the two round trips. `When` arms
-    /// are summed for the same reason: the compiler cannot prove two conditions
-    /// disjoint.
+    /// Validators reject multiple elicitations per phase because the protocol
+    /// has one shared elicitation id. Conditional and PDP arms are summed
+    /// conservatively because different arms may run across retries.
     pub fn count_elicits(&self) -> usize {
         match self {
             Effect::Elicit(_) => 1,
@@ -1031,12 +1020,8 @@ mod tests {
                 source: "test".into(),
             })
         };
-        // No elicit.
         assert_eq!(Effect::Allow.count_elicits(), 0);
-        // One at top level.
         assert_eq!(elicit("a").count_elicits(), 1);
-        // Two under a When body count as two: the compiler cannot prove two
-        // conditions disjoint, so they are summed.
         assert_eq!(
             Effect::When {
                 condition: Expression::Always,
@@ -1046,13 +1031,10 @@ mod tests {
             .count_elicits(),
             2
         );
-        // And nested through Sequential.
         assert_eq!(
             Effect::Sequential(vec![elicit("a"), Effect::Allow, elicit("b")]).count_elicits(),
             2
         );
-        // A PDP's two arms are summed, since a verdict flip between the initial
-        // request and the retry can fire both across the two round trips.
         assert_eq!(
             Effect::Pdp {
                 call: crate::step::PdpCall {

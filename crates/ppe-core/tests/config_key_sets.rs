@@ -639,10 +639,6 @@ fn a_misspelled_authentication_object_key_is_rejected() {
 }
 
 /// Both accepted shapes still load, and the flag still reads through.
-///
-/// Each declares the `jwt` plugin the step names: an `authentication:` step
-/// matching no `plugins:` entry is refused at load, since it would resolve to
-/// nothing at dispatch and leave the route unauthenticated.
 #[test]
 fn the_authentication_object_shapes_still_load() {
     const PLUGINS: &str =

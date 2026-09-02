@@ -3223,14 +3223,8 @@ fn compile_apl_blocks(source: &str, raw: RouteYaml) -> Result<CompiledRoute, Par
     }
     route.plugin_overrides = raw.plugins;
 
-    // Reject a phase that reaches more than one elicitation. `elicitation.id`
-    // is one flat bag key, and a present id means "already dispatched, poll
-    // it", so in a single request the first elicit dispatches and the second
-    // skips its own dispatch and adopts the first's verdict. A
-    // `require_approval` after a `confirm` never reaches an approver. See
-    // `Effect::count_elicits`. This per-block check covers every dispatch path;
-    // cross-layer stacking (a global elicit plus a route one) is caught again
-    // on the fully-stacked route by the APL visitor.
+    // Elicitations within a phase share one id. Cross-layer duplicates are
+    // checked again by the visitor after route stacking.
     for (phase, effects) in [
         ("pre_invocation", &route.pre_invocation),
         ("post_invocation", &route.post_invocation),
@@ -4748,8 +4742,6 @@ route:
 
     #[test]
     fn two_elicit_steps_in_one_phase_rejected() {
-        // Two elicitations in one phase share a single retry id, so the second
-        // would resolve against the first's approval. Reject at load.
         let yaml = r#"
 route:
   authorization:
@@ -4767,8 +4759,6 @@ route:
 
     #[test]
     fn single_elicit_per_phase_compiles() {
-        // One elicit in pre and one in post is fine: separate phases, separate
-        // evaluation walks, so no shared retry id.
         let yaml = r#"
 route:
   authorization:
@@ -4782,13 +4772,7 @@ route:
 
     #[test]
     fn duplicate_field_pipeline_key_is_rejected_not_last_wins() {
-        // A `result:` naming the same field twice must not silently keep one
-        // pipeline: dropping a `redact` in favour of a passthrough leaks the
-        // field. Every route reaches `RouteYaml` through a `serde_yaml::Value`,
-        // and serde_yaml rejects a repeated key in a mapping position, so the
-        // property holds for free today. Pinned because it would not survive a
-        // refactor that deserialized `RouteYaml` straight from a string: a
-        // plain `HashMap` field replays entries into `insert` and is last-wins.
+        // Pin duplicate-key rejection: last-wins parsing could drop a redaction.
         let yaml = r#"
 route:
   result:
@@ -4804,8 +4788,6 @@ route:
 
     #[test]
     fn distinct_field_pipeline_keys_still_load() {
-        // The guard above must reject only repeats, not ordinary multi-field
-        // blocks.
         let yaml = r#"
 route:
   result:

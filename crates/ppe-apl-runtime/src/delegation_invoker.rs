@@ -125,10 +125,7 @@ impl DelegationInvoker for DelegationPluginInvoker {
         // route can't claim on-behalf-of-user while handing over a workload
         // SVID.
         //
-        // `attenuation` is load-bearing: it *narrows* the minted credential's
-        // scope, so silently dropping it would mint a broader token than the
-        // author asked for, which is a fail-open. A malformed `attenuation:` errors
-        // (fail closed) rather than being ignored.
+        // Malformed attenuation fails closed rather than widening the credential.
         let cfg = step.config_override.as_ref().and_then(|v| v.as_mapping());
 
         // Resolve who the exchange is *for*. Defaults to the user
@@ -388,10 +385,7 @@ fn target_type_from_str(s: &str) -> TargetType {
 
 /// Parse the optional `attenuation:` block into a typed `AttenuationConfig`.
 ///
-/// Attenuation *narrows* the minted credential's scope, so a present-but-
-/// malformed block fails closed (returns `InvalidConfig`) rather than being
-/// silently ignored, which would mint a broader token than the author asked
-/// for. An absent block yields `None` (no narrowing requested).
+/// A malformed block returns `InvalidConfig`; an absent block returns `None`.
 fn attenuation_from_cfg(
     cfg: Option<&serde_yaml::Mapping>,
 ) -> Result<Option<AttenuationConfig>, DelegationError> {
@@ -474,8 +468,6 @@ mod tests {
 
     #[test]
     fn malformed_attenuation_fails_closed() {
-        // A present-but-malformed block must error rather than be dropped:
-        // dropping it would mint a broader token than the author asked for.
         let err = attenuation_from_cfg(Some(&cfg("attenuation:\n  ttl_seconds: not-a-number")))
             .expect_err("malformed attenuation must fail closed");
         assert!(matches!(err, DelegationError::InvalidConfig(_)));
@@ -483,8 +475,6 @@ mod tests {
 
     #[test]
     fn attenuation_typo_key_fails_closed() {
-        // A misspelled key must not deserialize into an empty (no-op) config
-        // that silently widens the token. It is a hard error.
         let err = attenuation_from_cfg(Some(&cfg("attenuation:\n  actionss: [read]")))
             .expect_err("unknown attenuation key must fail closed");
         assert!(matches!(err, DelegationError::InvalidConfig(_)));

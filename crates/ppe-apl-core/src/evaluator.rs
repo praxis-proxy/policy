@@ -1091,17 +1091,8 @@ fn dispatch_parallel<'a>(
         })
         .await;
 
-        // Aggregate in input order: append every branch's taints; pick
-        // the first Halt (by branch index, not wall-clock order) as the
-        // overall result. Aborted branches contribute no taints: they
-        // were short-circuit cancelled. A *panicked* branch is converted
-        // into a fail-closed Halt: we cannot know whether the branch it
-        // ran would have denied, and the engine's contract everywhere
-        // else is that an effect which cannot complete denies rather than
-        // permits (a plugin `Err` halts at line 497, and the concurrent
-        // executor phase halts on a panicking branch under `on_error:
-        // fail`). Swallowing the panic here would make a guard branch's
-        // deny vanish, a fail-open in the one phase whose job is to block.
+        // Aggregate in branch order, appending taints and keeping the first Halt.
+        // Cancelled branches contribute nothing; panicked branches fail closed.
         let mut first_halt: Option<Decision> = None;
         for (idx, outcome) in outcomes.into_iter().enumerate() {
             match outcome {
@@ -1128,13 +1119,7 @@ fn dispatch_parallel<'a>(
                     // post-config-extension.
                 },
                 BranchOutcome::Panicked(msg) => {
-                    // A panicking branch is a misbehaving plugin/effect. It
-                    // fails closed: a panic is a more severe failure than a
-                    // plugin `Err` (which already halts), so it must not be
-                    // treated more leniently. The first panic, in branch
-                    // index order, stands in as the phase's deny if no
-                    // earlier branch already produced a Halt. `msg` carries
-                    // the panic payload into the audit reason.
+                    // Use the panic as this branch's synthetic Halt and audit reason.
                     if first_halt.is_none() {
                         first_halt = Some(Decision::Deny {
                             reason: Some(format!("parallel branch {idx} panicked: {msg}")),
@@ -1211,10 +1196,7 @@ async fn dispatch_field_op(
         });
     };
 
-    // Fan out over arrays on the path so a `do:`-embedded field op like
-    // `result.rows.ssn | redact` reaches every element's leaf instead of
-    // silently no-op'ing on the array. An object-only path expands to itself.
-    // An over-large shape fails closed rather than half-redacting.
+    // Expand intermediate arrays; excessive fan-out fails closed.
     let Some(paths) = crate::route::expand_field_paths(root, subpath) else {
         return EffectOutcome::Halt(Decision::Deny {
             reason: Some(format!(
@@ -1235,11 +1217,8 @@ async fn dispatch_field_op(
         let Some(current) = get_dotted(root, &concrete).cloned() else {
             continue; // missing field on this element → silent no-op
         };
-        // `subpath`, not `path`: the field name a pipeline reports to a
-        // plugin is relative to the args / result root, matching what the
-        // `args:` / `result:` section pipelines pass. The prefixed `path`
-        // stays in use for deny messages, where the reader wants the side
-        // spelled out.
+        // Plugins receive a root-relative field name; deny messages use the
+        // prefixed path to identify the args or result side.
         let eval = evaluate_pipeline(&pipeline, &current, bag, plugins, subpath, phase).await;
         taints.extend(eval.taints);
         match eval.outcome {
@@ -3145,8 +3124,7 @@ mod tests {
         }
     }
 
-    /// Invoker that panics on any plugin call, modelling a misbehaving plugin
-    /// unwinding inside a `parallel:` branch.
+    /// Invoker that panics on every plugin call.
     struct PanicPlugins;
     #[async_trait]
     impl PluginInvoker for PanicPlugins {
@@ -4105,10 +4083,6 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_panicked_branch_fails_closed() {
-        // A branch that panics (misbehaving plugin) must halt the phase, not
-        // be silently dropped: a swallowed panic would let a guard branch's
-        // deny vanish (fail-open). The surviving Allow branch must not rescue
-        // the request.
         let mut bag = AttributeBag::new();
         let mut payload = crate::route::RoutePayload::new(json!({}));
 

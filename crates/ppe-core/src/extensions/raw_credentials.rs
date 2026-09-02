@@ -435,24 +435,16 @@ pub struct RawCredentialsExtension {
     /// `read_delegated_tokens`; write with `write_delegated_tokens`
     /// (`TokenDelegate` handlers only).
     ///
-    /// Serialized as a sequence of `[key, value]` pairs, not a JSON object:
-    /// the key is a `DelegationKey` struct and JSON object keys must be
-    /// strings, so a plain map errors at runtime the moment a token is minted,
-    /// breaking the `extensions` wire channel, audit dumps, and hot-reload
-    /// snapshots. The pair form round-trips, and token bytes inside each value
-    /// stay `#[serde(skip)]`.
+    /// Serialized as `[key, value]` pairs because JSON object keys must be
+    /// strings. Token bytes remain excluded by `#[serde(skip)]`.
     #[serde(default, with = "delegated_tokens_as_pairs")]
     pub delegated_tokens: HashMap<DelegationKey, RawDelegatedToken>,
 }
 
-/// serde adapter: represent `delegated_tokens` as a sequence of
-/// `(DelegationKey, RawDelegatedToken)` pairs so a non-string map key
-/// serializes to JSON. See the field doc for why a plain map cannot.
+/// Serialize `delegated_tokens` as pairs so its structured keys work in JSON.
 ///
-/// Deserialization accepts both the pair form and a plain map. Before this
-/// adapter only an empty `delegated_tokens` ever serialized, and it did so as
-/// `{}`, so snapshots and wire messages written by that older code must still
-/// load. This keeps mixed-version rollouts readable.
+/// Deserialization also accepts the legacy map form; older code could emit an
+/// empty map even though non-empty structured-key maps failed to serialize.
 mod delegated_tokens_as_pairs {
     use super::{DelegationKey, RawDelegatedToken};
     use serde::de::{MapAccess, SeqAccess, Visitor};
@@ -485,10 +477,7 @@ mod delegated_tokens_as_pairs {
         }
 
         fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-            // Legacy shape: a JSON object. Only the empty case was ever
-            // emitted (a non-empty struct-keyed map could not serialize), so
-            // this is normally `{}`; still, drain any entries a hand-built
-            // document carries.
+            // Accept legacy JSON objects, normally `{}`.
             let mut map = HashMap::with_capacity(access.size_hint().unwrap_or(0));
             while let Some((k, v)) = access.next_entry::<DelegationKey, RawDelegatedToken>()? {
                 map.insert(k, v);
@@ -679,11 +668,6 @@ mod tests {
 
     #[test]
     fn delegated_tokens_serialize_without_error_and_round_trip() {
-        // Regression: `delegated_tokens` is keyed by the `DelegationKey`
-        // struct, which cannot be a JSON object key. A plain map serialization
-        // errored the moment a token was minted, breaking the documented wire
-        // channel. The pair-seq form must serialize cleanly, drop the token
-        // bytes, and round-trip the key + metadata.
         let mut ext = RawCredentialsExtension::default();
         let key = DelegationKey::new(
             DelegationMode::OnBehalfOfUser,
@@ -702,7 +686,6 @@ mod tests {
             ),
         );
 
-        // The whole point: this used to return Err("key must be a string").
         let json = serde_json::to_string(&ext).expect("delegated_tokens must serialize");
         assert!(
             !json.contains("minted-secret"),
@@ -720,15 +703,10 @@ mod tests {
 
     #[test]
     fn legacy_empty_map_delegated_tokens_still_deserializes() {
-        // Before the pair-seq adapter, only an empty delegated_tokens ever
-        // serialized, and it did so as a JSON object `{}`. A snapshot written
-        // by that older code must still load, so the deserializer accepts a map
-        // as well as the new sequence form.
         let legacy = r#"{"inbound_tokens":{},"delegated_tokens":{}}"#;
         let restored: RawCredentialsExtension = serde_json::from_str(legacy).unwrap();
         assert!(restored.delegated_tokens.is_empty());
 
-        // And the new sequence form loads too.
         let modern = r#"{"inbound_tokens":{},"delegated_tokens":[]}"#;
         let restored: RawCredentialsExtension = serde_json::from_str(modern).unwrap();
         assert!(restored.delegated_tokens.is_empty());

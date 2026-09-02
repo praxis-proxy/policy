@@ -35,10 +35,7 @@ use tracing::{Event, Metadata, Subscriber};
 
 const ALARM: &str = "delegation_without_identity_resolution";
 
-/// A plugin registering no handler. These cases are decided during the config
-/// load, so what it would do on a request is beside the point; it exists so the
-/// `authentication:` step in `WITH_IDENTITY` names a declared plugin whose
-/// `kind:` resolves to a factory.
+/// Declares the identity plugin used by the configuration fixture.
 struct Inert(PluginConfig);
 
 impl Plugin for Inert {
@@ -72,9 +69,7 @@ routes:
 "#;
 
 /// The same route with an `authentication:` block, which is what
-/// identity resolution keys on. The step's plugin is declared because an
-/// `authentication:` name that matches no `plugins:` entry is refused at load:
-/// it would resolve to nothing at dispatch and leave the route unauthenticated.
+/// identity resolution keys on.
 const WITH_IDENTITY: &str = r#"
 engine_settings:
   dispatch: policy
