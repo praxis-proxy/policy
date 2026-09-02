@@ -25,3 +25,6 @@
 
 # Misc
 /.sketchpad
+
+# macOS Finder metadata, created in any directory it browses
+.DS_Store
