@@ -639,15 +639,20 @@ fn a_misspelled_authentication_object_key_is_rejected() {
 }
 
 /// Both accepted shapes still load, and the flag still reads through.
+///
+/// Each declares the `jwt` plugin the step names: an `authentication:` step
+/// matching no `plugins:` entry is refused at load, since it would resolve to
+/// nothing at dispatch and leave the route unauthenticated.
 #[test]
 fn the_authentication_object_shapes_still_load() {
-    let additive = praxis_policy_core::config::parse_config(
-        "routes:\n  - tool: get_weather\n    authentication: [jwt]\n",
-    )
+    const PLUGINS: &str = "plugins:\n  - name: jwt\n    kind: builtin\n    hooks: [identity.resolve]\n";
+    let additive = praxis_policy_core::config::parse_config(&format!(
+        "{PLUGINS}routes:\n  - tool: get_weather\n    authentication: [jwt]\n"
+    ))
     .expect("the list form is additive");
-    let replacing = praxis_policy_core::config::parse_config(
-        "routes:\n  - tool: get_weather\n    authentication:\n      replace_inherited:          true\n      steps: [jwt]\n",
-    )
+    let replacing = praxis_policy_core::config::parse_config(&format!(
+        "{PLUGINS}routes:\n  - tool: get_weather\n    authentication:\n      replace_inherited:          true\n      steps: [jwt]\n"
+    ))
     .expect("the object form loads");
     for (label, cfg, expected) in [("list", additive, false), ("object", replacing, true)] {
         let identity = cfg.routes[0]

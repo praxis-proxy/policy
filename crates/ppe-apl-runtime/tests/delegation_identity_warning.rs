@@ -26,11 +26,37 @@
 use std::sync::{Arc, Mutex};
 
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::error::PluginError;
+use praxis_policy_core::factory::{PluginFactory, PluginInstance};
+use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
 const ALARM: &str = "delegation_without_identity_resolution";
+
+/// A plugin registering no handler. These cases are decided during the config
+/// load, so what it would do on a request is beside the point; it exists so the
+/// `authentication:` step in `WITH_IDENTITY` names a declared plugin whose
+/// `kind:` resolves to a factory.
+struct Inert(PluginConfig);
+
+impl Plugin for Inert {
+    fn config(&self) -> &PluginConfig {
+        &self.0
+    }
+}
+
+struct InertFactory;
+
+impl PluginFactory for InertFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        Ok(PluginInstance {
+            plugin: Arc::new(Inert(config.clone())),
+            handlers: Vec::new(),
+        })
+    }
+}
 
 /// A route delegating the caller's credential, with nothing configured
 /// to validate it.
@@ -46,11 +72,16 @@ routes:
 "#;
 
 /// The same route with an `authentication:` block, which is what
-/// identity resolution keys on.
+/// identity resolution keys on. The step's plugin is declared because an
+/// `authentication:` name that matches no `plugins:` entry is refused at load:
+/// it would resolve to nothing at dispatch and leave the route unauthenticated.
 const WITH_IDENTITY: &str = r#"
 engine_settings:
   dispatch: policy
-plugins: []
+plugins:
+  - name: corp-jwt
+    kind: builtin
+    hooks: [identity.resolve]
 routes:
   - tool: get_compensation
     authentication:
@@ -136,6 +167,7 @@ fn alarms_raised_by_loading(yaml: &str) -> Vec<String> {
     };
 
     let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory("builtin", Box::new(InertFactory));
     praxis_policy_apl_runtime::register_apl(
         &mgr,
         praxis_policy_apl_runtime::AplOptions::in_process(),
