@@ -9,8 +9,9 @@
 //! disagreement fails the build.
 //!
 //! The semantic subset and the known-divergence allowlist are documented in
-//! this crate's `README.md`. That document is the contract; the catalog and
-//! allowlist here are the executable form.
+//! this crate's `README.md`. The CMF absent-value contract those cases
+//! check is `docs/cmf-extensions.md`. The catalog and allowlist here are
+//! the executable form.
 
 /// Factory `kind:` strings this harness drives.
 ///
@@ -45,6 +46,9 @@ mod tests {
     use std::collections::HashMap;
 
     use praxis_policy_apl_core::attributes::AttributeValue;
+
+    use praxis_policy_apl_core::evaluator::{Decision, evaluate_rules};
+    use praxis_policy_apl_core::parser::parse_rule;
 
     use super::HARNESS_PDP_KINDS;
     use super::allowlist::{allowlist, allowlist_by_id};
@@ -142,6 +146,20 @@ mod tests {
     }
 
     #[test]
+    fn absent_value_agreement_cases_check_apl() {
+        for name in ["empty-set", "bridge-empty-teams", "bridge-empty-roles"] {
+            let case = catalog()
+                .into_iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("catalog must include '{name}'"));
+            assert!(
+                case.apl_rule.is_some(),
+                "{name} must run an APL rule so all four decision points are checked"
+            );
+        }
+    }
+
+    #[test]
     fn harness_kinds_match_drivers() {
         let mut from_const: Vec<&str> = HARNESS_PDP_KINDS.to_vec();
         let mut from_enum: Vec<&str> = Dialect::all().iter().map(|d| d.kind()).collect();
@@ -174,6 +192,7 @@ mod tests {
                         case.name
                     );
                 }
+                assert_apl(case, true);
             },
             Expect::AgreeDeny { cedar, cel, opa } => {
                 assert_eq!(
@@ -210,6 +229,7 @@ mod tests {
                         case.name
                     );
                 }
+                assert_apl(case, false);
             },
             Expect::Diverge(id) => {
                 let entry = allowlist_by_id(id)
@@ -243,5 +263,22 @@ mod tests {
                 got.keys().collect::<Vec<_>>()
             )
         })
+    }
+
+    fn assert_apl(case: &Case, want_allow: bool) {
+        let Some(src) = case.apl_rule else {
+            return;
+        };
+        let rule = parse_rule(src, "diff")
+            .unwrap_or_else(|e| panic!("case '{}': APL rule `{src}` must parse: {e}", case.name));
+        match evaluate_rules(&[rule], &case.bag) {
+            Decision::Allow if want_allow => {},
+            Decision::Deny { .. } if !want_allow => {},
+            other => panic!(
+                "case '{}': APL must {}; got {other:?}",
+                case.name,
+                if want_allow { "Allow" } else { "Deny" }
+            ),
+        }
     }
 }

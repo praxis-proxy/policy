@@ -29,7 +29,8 @@ pub(crate) enum Expect {
     Diverge(&'static str),
 }
 
-/// One bag, one intent, three dialect texts.
+/// One bag, one intent, three dialect texts, and optionally an APL rule
+/// with the same polarity so the native evaluator is checked too.
 pub(crate) struct Case {
     pub(crate) name: &'static str,
     pub(crate) bag: AttributeBag,
@@ -38,6 +39,9 @@ pub(crate) struct Case {
     pub(crate) opa_module: String,
     pub(crate) opa_query: String,
     pub(crate) cedar_resource_attrs: Option<serde_yaml::Mapping>,
+    /// APL deny-rule whose verdict must match the agreed PDP verdict.
+    /// `None` on allowlist splits and on cases that have no APL spelling.
+    pub(crate) apl_rule: Option<&'static str>,
     pub(crate) expect: Expect,
 }
 
@@ -58,8 +62,12 @@ pub(crate) fn catalog() -> Vec<Case> {
         float_whole(),
         float_resource(),
         empty_set(),
+        bridge_empty_teams(),
         missing_collection(),
+        bridge_empty_roles(),
         missing_subject_id(),
+        missing_claim_string(),
+        missing_claim_int(),
     ]
 }
 
@@ -106,8 +114,14 @@ fn case(
         opa_module: opa_allow(opa_rule, opa_default),
         opa_query: OPA_QUERY.to_owned(),
         cedar_resource_attrs: None,
+        apl_rule: None,
         expect,
     }
+}
+
+fn with_apl(mut case: Case, rule: &'static str) -> Case {
+    case.apl_rule = Some(rule);
+    case
 }
 
 fn string_id_allow() -> Case {
@@ -293,21 +307,91 @@ fn float_resource() -> Case {
         opa_module: opa_allow("allow if input.resource.score > 1.0", true),
         opa_query: OPA_QUERY.to_owned(),
         cedar_resource_attrs: Some(attrs),
+        apl_rule: None,
         expect: Expect::Diverge("floats-resource"),
     }
 }
 
+fn missing_subject_id() -> Case {
+    Case {
+        name: "missing-subject-id",
+        bag: AttributeBag::new(),
+        cedar_policy: cedar_permit(),
+        cel_expr: r#"subject.id == "alice""#.to_owned(),
+        opa_module: opa_allow(r#"allow if input.subject.id == "alice""#, false),
+        opa_query: OPA_QUERY.to_owned(),
+        cedar_resource_attrs: None,
+        apl_rule: None,
+        expect: Expect::Diverge("missing-subject-id"),
+    }
+}
+
+fn alice_via_bridge() -> AttributeBag {
+    use std::sync::Arc;
+
+    use praxis_policy_apl_cmf::extract_extensions;
+    use praxis_policy_core::extensions::{
+        Extensions, SecurityExtension, SubjectExtension, SubjectType,
+    };
+
+    let ext = Extensions {
+        security: Some(Arc::new(SecurityExtension {
+            subject: Some(SubjectExtension {
+                id: Some("alice".into()),
+                subject_type: Some(SubjectType::User),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let mut bag = AttributeBag::new();
+    extract_extensions(&ext, &mut bag);
+    bag
+}
+
+fn agree_deny() -> Expect {
+    Expect::AgreeDeny {
+        cedar: CauseKind::DefaultDeny,
+        cel: CauseKind::PolicyFalse,
+        opa: CauseKind::PolicyFalse,
+    }
+}
+
 fn empty_set() -> Case {
+    // Hand-built present-empty set: the bag shape the contract names, without
+    // going through the bridge. Cause kinds match the other negative subset
+    // cases; this is not a dialect split.
     let mut bag = alice();
     bag.set("subject.teams", HashSet::<String>::new());
-    case(
-        "empty-set",
-        bag,
-        r#"principal.teams.contains("eng")"#,
-        r#""eng" in subject.teams"#,
-        r#"allow if "eng" in input.subject.teams"#,
-        true,
-        Expect::Diverge("empty-set"),
+    with_apl(
+        case(
+            "empty-set",
+            bag,
+            r#"principal.teams.contains("eng")"#,
+            r#""eng" in subject.teams"#,
+            r#"allow if "eng" in input.subject.teams"#,
+            true,
+            agree_deny(),
+        ),
+        r#"require(subject.teams contains "eng")"#,
+    )
+}
+
+fn bridge_empty_teams() -> Case {
+    // Same intent as empty-set, bag produced by extract_extensions so a
+    // missing member is tested against the contract the PDPs actually see.
+    with_apl(
+        case(
+            "bridge-empty-teams",
+            alice_via_bridge(),
+            r#"principal.teams.contains("eng")"#,
+            r#""eng" in subject.teams"#,
+            r#"allow if "eng" in input.subject.teams"#,
+            true,
+            agree_deny(),
+        ),
+        r#"require(subject.teams contains "eng")"#,
     )
 }
 
@@ -323,15 +407,46 @@ fn missing_collection() -> Case {
     )
 }
 
-fn missing_subject_id() -> Case {
-    Case {
-        name: "missing-subject-id",
-        bag: AttributeBag::new(),
-        cedar_policy: cedar_permit(),
-        cel_expr: r#"subject.id == "alice""#.to_owned(),
-        opa_module: opa_allow(r#"allow if input.subject.id == "alice""#, false),
-        opa_query: OPA_QUERY.to_owned(),
-        cedar_resource_attrs: None,
-        expect: Expect::Diverge("missing-subject-id"),
-    }
+fn bridge_empty_roles() -> Case {
+    // Roles are the split mapping: Cedar rebuilds `principal.roles` from
+    // flattened `role.*=true`, while CEL / OPA / APL read `subject.roles`.
+    // The bridge writes both from the same set, so an empty set Denies on
+    // every engine. `has(role.hr)` is not this case — without a `role`
+    // namespace CEL still errors (see `missing-collection`).
+    with_apl(
+        case(
+            "bridge-empty-roles",
+            alice_via_bridge(),
+            r#"principal.roles.contains("hr")"#,
+            r#""hr" in subject.roles"#,
+            r#"allow if "hr" in input.subject.roles"#,
+            true,
+            agree_deny(),
+        ),
+        r#"require(subject.roles contains "hr")"#,
+    )
+}
+
+fn missing_claim_string() -> Case {
+    case(
+        "missing-claim-string",
+        alice(),
+        r#"principal.claims.tenant == "acme""#,
+        r#"claim.tenant == "acme""#,
+        r#"allow if input.claim.tenant == "acme""#,
+        false,
+        Expect::Diverge("missing-claim-string"),
+    )
+}
+
+fn missing_claim_int() -> Case {
+    case(
+        "missing-claim-int",
+        alice(),
+        "principal.claims.depth <= 2",
+        "claim.depth <= 2",
+        "allow if input.claim.depth <= 2",
+        false,
+        Expect::Diverge("missing-claim-int"),
+    )
 }

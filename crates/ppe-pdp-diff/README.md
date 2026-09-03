@@ -28,8 +28,16 @@ Negative subset cases must all **deny**. Cause kinds may still differ:
 Cedar no-match is `DefaultDeny`; CEL/OPA `false` is `PolicyFalse`. That
 triple is named on the case (`AgreeDeny`), not hidden.
 
-Subset policies use same-type literals (int compared to int). They do not
-probe missing keys.
+Present-empty `StringSet` (`empty-set`, `bridge-empty-teams`,
+`bridge-empty-roles`) is in the subset: membership is false everywhere,
+including APL `require(subject.roles contains "hr")`. Cedar rebuilds
+`principal.roles` from flattened `role.*` trues; CEL and OPA read the
+original `subject.roles` set. The bridge writes both from the same
+`HashSet`, so they agree when empty.
+
+Unguarded probes of **omitted scalars** and of a flattened bool whose
+namespace was never written are not in the subset. See
+[`docs/cmf-extensions.md`](../../docs/cmf-extensions.md).
 
 ## Out of subset (allowlist)
 
@@ -38,9 +46,10 @@ probe missing keys.
 | `floats-claim` | `AttributeValue::Float` on `claim.*` | Cedar has no float type; claims are stringified. CEL/OPA compare numerically. |
 | `floats-whole` | `Float(2.0)` on a claim | CEL/OPA coerce whole floats to int. Cedar still has a string, so `== 2` does not match. |
 | `floats-resource` | float in Cedar `resource.attributes` | Cedar rejects at entity build (`PdpError::Dispatch`). CEL/OPA accept the bag value. |
-| `empty-set` | empty `StringSet` on `subject.teams` | Present-empty: Cedar empty set, CEL/OPA empty list, `in`/`contains` is false. |
-| `missing-collection` | no `role.*` keys | Cedar empty set (clean false). Unguarded CEL `role.hr` is an eval error. OPA without `default` is undefined. |
+| `missing-collection` | no `role.*` keys, unguarded CEL `role.hr` | Cedar empty set (clean false). Unguarded CEL is an eval error. OPA without `default` is undefined. |
 | `missing-subject-id` | no `subject.id` | Cedar cannot build a principal. CEL eval error. OPA undefined. |
+| `missing-claim-string` | omitted `claim.tenant` | Optional strings are omitted. Unguarded equality is a CEL/Cedar eval error and an undefined OPA query. |
+| `missing-claim-int` | omitted `claim.depth` | Same as a missing string; emitting `0` would pass a `<= 2` gate. |
 
 Each allowlist row in `src/allowlist.rs` carries a `reason`. An unused id
 or an empty reason fails the meta tests.

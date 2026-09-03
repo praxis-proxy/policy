@@ -2495,7 +2495,9 @@ dependencies = [
 name = "praxis-policy-pdp-diff"
 version = "0.1.0"
 dependencies = [
+ "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
+ "praxis-policy-core",
  "praxis-policy-pdp-cedar-direct",
  "praxis-policy-pdp-cel",
  "praxis-policy-pdp-opa",

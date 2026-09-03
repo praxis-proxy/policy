@@ -24,6 +24,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`docs/cmf-extensions.md`, the bag contract.** The CMF bridge writes twelve
+  extension slots into a flat `AttributeBag`, and until now the empty-set
+  rule for `StringSet`, the original-vs-flattened role keys, and the
+  `subject.claims` gap lived only as comments beside the extractors. The
+  document is the per-type absent-value contract, which key a policy author
+  should write, why there is no `subject.claims` map in the bag, and a
+  catalog of every key each slot emits. `ppe-pdp-diff` checks that a
+  present-empty set Denies on APL, CEL, cedar-direct, and OPA; unguarded
+  probes of omitted scalars stay on the allowlist. ([#18](https://github.com/praxis-proxy/policy/issues/18))
+
 - **`assertions:` controls the headers PPE writes at trust boundaries.** Available
   alongside `authentication:` at global, default, bundle, and route scope, its
   `request:` contract maps engine-derived values such as `subject.id` and
@@ -72,7 +82,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   behavior. Its resolution rule changed in this release too, which the Changed
   section covers.
 
-- **Differential tests across Cedar, CEL, and OPA.** The three PDP resolvers each had their own suite; nothing checked that they agree on the same `AttributeBag`. `ppe-pdp-diff` feeds one bag and an equivalent policy intent to all three and compares verdicts and cause kinds. The shared semantic subset (bool, int, string, non-empty string set) must agree. Known splits — float claims, whole-number floats, Cedar resource floats, empty sets, missing collections, missing `subject.id` — live on an allowlist with a reason. An unlisted disagreement fails `make test`. Adding a fourth builtin PDP without a harness driver fails a facade test. ([#25](https://github.com/praxis-proxy/policy/issues/25))
+- **Differential tests across Cedar, CEL, and OPA.** The three PDP resolvers each had their own suite; nothing checked that they agree on the same `AttributeBag`. `ppe-pdp-diff` feeds one bag and an equivalent policy intent to all three and compares verdicts and cause kinds. The shared semantic subset (bool, int, string, non-empty string set, present-empty string set) must agree. Known splits — float claims, whole-number floats, Cedar resource floats, missing collections, missing `subject.id`, omitted claim scalars — live on an allowlist with a reason. An unlisted disagreement fails `make test`. Adding a fourth builtin PDP without a harness driver fails a facade test. ([#25](https://github.com/praxis-proxy/policy/issues/25))
 
 - **Delegated tokens can be reused until they expire.** The OAuth delegator runs one RFC 8693 exchange per `delegate` step; a `cache:` block lets it serve a token it already minted instead. Off unless enabled, and then only for `subject: this_workload` and `client`, whose number of cache entries is bounded by configuration rather than by the caller population. `user` and `caller_workload` are opt-in through `cache.subjects`. Concurrent requests for one uncached key produce one exchange rather than one each, and a failed exchange is not stored. A cached token stays usable after an `IdP`-side revocation until its entry retires, which `cache.ttl_ceiling_seconds` bounds. ([#30](https://github.com/praxis-proxy/policy/issues/30))
 

@@ -32,6 +32,8 @@ serde_yaml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+praxis-policy-apl-cmf = { workspace = true }
+praxis-policy-core = { workspace = true }
 
 [lints]
 workspace = true
