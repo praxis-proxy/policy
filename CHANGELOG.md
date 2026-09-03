@@ -834,6 +834,21 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Delegators and elicitation handlers are no longer reported as narrowed when
+  their family-specific hooks are reached.** `delegate(...)` is credited to
+  `token.delegate`, and elicitation verbs to `elicit`. Unreached hooks declared by
+  those plugins are still reported.
+
+- **The bundled hyper transport selects `ring` explicitly.** It no longer depends
+  on rustls's process default, which is ambiguous when a host includes both `ring`
+  and `aws-lc-rs`. It neither reads nor installs that default, and TLS setup errors
+  now return `HttpTransportError::Connect` instead of panicking.
+
+- **Glob routes under `tool:`, `resource:`, `prompt:`, and `llm:` now evaluate
+  their policy bodies.** Annotation lookup now resolves a request name to the
+  configured pattern. Exact selectors still outrank globs, including when the
+  exact route has no policy body.
+
 - **A bundle joined through both `meta.tags` and `groups:` no longer runs its
   `authentication:` steps twice.** Bundle membership is now deduplicated before
   authentication and assertion layers are resolved, keeping their inheritance

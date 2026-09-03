@@ -637,6 +637,29 @@ pub(crate) fn collect_plugin_names_by_half(route: &CompiledRoute) -> (Vec<String
     (pre, post)
 }
 
+/// Return `(plugin, hook)` pairs for effects whose family fixes the hook.
+///
+/// Delegation uses `token.delegate`; elicitation uses `elicit`, independent of
+/// the route's entity.
+pub(crate) fn collect_family_fixed_plugin_hooks(
+    route: &CompiledRoute,
+) -> Vec<(String, &'static str)> {
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    let mut visit = |e: &Effect| {
+        let pair = match e {
+            Effect::Delegate(ds) => (ds.plugin_name.clone(), HOOK_TOKEN_DELEGATE),
+            Effect::Elicit(es) => (es.plugin_name.clone(), HOOK_ELICIT),
+            _ => return,
+        };
+        if !out.contains(&pair) {
+            out.push(pair);
+        }
+    };
+    walk_effects(&route.pre_invocation, &mut visit);
+    walk_effects(&route.post_invocation, &mut visit);
+    out
+}
+
 /// Compute the union of capabilities declared by every plugin a
 /// `CompiledRoute` can dispatch to (with per-route overrides applied).
 ///

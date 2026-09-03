@@ -781,12 +781,9 @@ routes:
     }
 }
 
-/// A glob route under one of the entity selectors installs its annotation under
-/// the pattern as written, and the lookup is exact, so its policy body never
-/// evaluates. With the activation list gone there is no chain behind it either,
-/// so the route reaches nothing.
+/// A glob selector resolves request names to the annotation keyed by its pattern.
 #[tokio::test]
-async fn a_glob_entity_routes_body_never_evaluates_and_nothing_replaces_it() {
+async fn a_glob_entity_route_dispatches_its_body() {
     const YAML: &str = r#"
 engine_settings:
   dispatch: policy
@@ -803,10 +800,165 @@ routes:
     let (mgr, ledger) = engine_with(YAML).await;
 
     assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-get-salary")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "the request name must resolve to the glob annotation"
+    );
+}
+
+/// Every name matched by a glob shares its compiled body.
+#[tokio::test]
+async fn many_names_under_one_glob_share_its_body() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: body-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "hr-*"
+    authorization:
+      pre_invocation:
+        - "run(body-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    for name in ["hr-get-salary", "hr-adjust-comp"] {
+        assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request(name)).await);
+    }
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned(), "body-audit".to_owned()],
+        "every name the pattern covers reaches the one body it wrote"
+    );
+}
+
+/// A bracket expression is a literal, not a character class.
+///
+/// `wildmatch` reads `*` and `?` and nothing else, so `hr-[a-z]` matches the
+/// eight characters `hr-[a-z]` and no other name. That makes it an exact
+/// selector: the annotation key and the request name agree whenever it matches,
+/// which is why the glob detector does not look for `[`.
+#[tokio::test]
+async fn a_bracket_selector_is_matched_literally() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: body-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "hr-[a-z]"
+    authorization:
+      pre_invocation:
+        - "run(body-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    // The name a character class would have covered.
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-x")).await);
+    assert!(fired(&ledger).is_empty(), "`hr-x` matches no route");
+
+    // The literal spelling is what the selector names, and the exact lookup
+    // finds its annotation with no glob resolution.
+    clear(&ledger);
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-[a-z]")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "the literal name reaches the body"
+    );
+}
+
+/// A name outside the glob reaches no body.
+#[tokio::test]
+async fn a_name_outside_the_glob_reaches_no_body() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: body-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "hr-*"
+    authorization:
+      pre_invocation:
+        - "run(body-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("finance-close")).await);
+    assert!(fired(&ledger).is_empty(), "the name matches no route");
+}
+
+/// An exact selector outranks a matching glob.
+#[tokio::test]
+async fn an_exact_entity_route_outranks_a_glob_that_also_matches() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: glob-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+  - name: exact-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "hr-*"
+    authorization:
+      pre_invocation:
+        - "run(glob-audit)"
+  - tool: hr-get-salary
+    authorization:
+      pre_invocation:
+        - "run(exact-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-get-salary")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["exact-audit".to_owned()],
+        "the exact route must win"
+    );
+
+    clear(&ledger);
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-adjust-comp")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["glob-audit".to_owned()],
+        "a name only the pattern covers still reaches the pattern's body"
+    );
+}
+
+/// An exact route without policy still shadows a matching glob.
+#[tokio::test]
+async fn an_exact_route_with_no_body_shadows_a_glob_that_has_one() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: glob-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "hr-*"
+    authorization:
+      pre_invocation:
+        - "run(glob-audit)"
+  - tool: hr-get-salary
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-get-salary")).await);
     assert!(
         fired(&ledger).is_empty(),
-        "the glob's annotation is keyed on the pattern, so an exact lookup for \
-         `hr-get-salary` finds nothing and nothing else activates a plugin"
+        "the glob body must not replace the more specific route's empty body"
     );
 }
 
@@ -1517,9 +1669,12 @@ routes:
             tool_request("get_weather"),
             "tool-audit",
         ),
-        // The glob's annotation is keyed on the pattern as written and the
-        // lookup is exact, so nothing answers for a name the glob covers.
-        ("cmf.tool_pre_invoke", tool_request("hr-get-salary"), ""),
+        // Resolve the request name to the glob pattern used as the annotation key.
+        (
+            "cmf.tool_pre_invoke",
+            tool_request("hr-get-salary"),
+            "glob-audit",
+        ),
         (
             "cmf.resource_pre_fetch",
             entity_request("resource", "file:///data.csv"),

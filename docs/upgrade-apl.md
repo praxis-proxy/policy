@@ -12,6 +12,9 @@ means every key in it does something.
 Work through the sections in order. The first two change the shape of the
 document, and the rest are local rewrites.
 
+Section 10 also covers the `perform_http` capability required by plugins that
+fetch JWKS, exchange tokens, or dispatch CIBA prompts.
+
 ---
 
 ## 1. `engine_settings:`, and the dispatch mode
@@ -428,6 +431,78 @@ For a host embedding the engine rather than only writing configuration.
 | `GlobalConfig.identity`, `PolicyGroup.identity`, `RouteEntry.identity` | `.authentication` |
 | `compile_config`, `ConfigYaml`, `CompiledConfig` | deleted; see below |
 | `ParseError::RenamedField`, `::ConflictingAuthorizationForms` | deleted |
+| `cmf::constants::HOOK_CMF_HTTP_REQUEST` | `http_hook::HOOK_HTTP_REQUEST` |
+| `cmf::constants::HOOK_CMF_HTTP_RESPONSE` | `http_hook::HOOK_HTTP_RESPONSE` |
+| `invoke_named::<CmfHook>` on either HTTP hook | `invoke_named::<HttpHook>`, with `HttpPayload` |
+| `HookHandler<CmfHook>` for an HTTP hook | `HookHandler<HttpHook>` |
+| `HookFamily::for_entity -> HookFamily` | `-> Option<HookFamily>` |
+| `Subject::claims: HashMap<String, String>` | `HashMap<String, Value>` |
+
+### The generic-HTTP hooks moved families
+
+The hook names are now `http.request` and `http.response`; their constants,
+handler type, and empty payload live in `praxis_policy_core::http_hook`:
+
+```rust
+// before
+use praxis_policy_core::cmf::constants::HOOK_CMF_HTTP_REQUEST;
+let payload = MessagePayload { message: Message::text(Role::User, "") };
+mgr.invoke_named::<CmfHook>(HOOK_CMF_HTTP_REQUEST, payload, ext, None).await;
+```
+
+```rust
+// after
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload};
+mgr.invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, ext, None).await;
+```
+
+HTTP handlers no longer receive a fabricated placeholder message. YAML using
+`cmf.http_request` or `cmf.http_response` now fails with the replacement name.
+
+### Subject claims keep their JSON shape
+
+`Subject::claims` changed from `HashMap<String, String>` to
+`HashMap<String, Value>`. To retain flat strings without quoting string values:
+
+```rust
+let flat = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
+```
+
+### A host must install an HTTP transport
+
+This requirement is checked at initialization, not compile time.
+
+`identity-jwt`, `delegator-oauth`, and `elicitation-ciba` use a transport supplied
+by the host. Without one, HTTP-dependent plugins fail at
+`PolicyEngine::initialize()`.
+
+To reuse the host's connection pool, trust store, and egress path:
+
+```rust
+mgr.set_http_transport(Arc::new(MyTransport::new()));
+```
+
+Otherwise, enable `praxis-policy`'s non-default `http-hyper` feature and install
+the bundled transport explicitly:
+
+```rust
+praxis_policy::install_builtins(&mgr);
+praxis_policy::install_default_http_transport(&mgr);
+```
+
+The bundled transport builds its pool on first use. Each plugin using `jwks_url`,
+OAuth delegation, or CIBA must also declare `perform_http`:
+
+```yaml
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    capabilities:
+      - perform_http
+```
+
+`ServiceError::NotInstalled` indicates a missing host transport;
+`ServiceError::NotPermitted` indicates a missing capability.
 
 `Phase` and `CompiledRoute` both derive `Serialize`, so **the serialized keys
 change too**: a phase serializes as `pre_invocation` / `post_invocation`, and a

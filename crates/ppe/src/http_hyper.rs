@@ -217,57 +217,80 @@ impl HyperTransport {
         self
     }
 
-    /// The shared client, built on first call.
-    fn client(&self) -> &HyperClient {
-        self.client.get_or_init(|| {
-            let mut http = HttpConnector::new_with_resolver(EgressResolver {
-                allow_private: self.allow_private_destinations,
-            });
-            // The HTTPS connector wraps this one, so it must accept the
-            // `https` scheme rather than rejecting it as non-HTTP.
-            http.enforce_http(false);
-            http.set_connect_timeout(Some(self.connect_timeout));
-            // hyper-util defaults this to false; reqwest sets it true.
-            // Leaving Nagle on would let a small request body — a token
-            // exchange form is a couple of hundred bytes — sit waiting to
-            // coalesce with data that never comes, adding tens of
-            // milliseconds to a call on the request path.
-            http.set_nodelay(true);
-            http.set_keepalive(self.tcp_keepalive);
+    /// Return the shared client, building it on first use.
+    fn client(&self) -> Result<&HyperClient, HttpTransportError> {
+        if let Some(client) = self.client.get() {
+            return Ok(client);
+        }
+        let built = Self::build_client(self)?;
+        // Another caller may win the race; use whichever equivalent client was stored.
+        let _ = self.client.set(built);
+        self.client
+            .get()
+            .ok_or_else(|| HttpTransportError::Connect("HTTP client init raced".to_owned()))
+    }
 
-            let tls = hyper_rustls::HttpsConnectorBuilder::new()
-                // Webpki roots rather than the system store, matching
-                // what the reqwest path resolved to and keeping the
-                // trust set identical across every deployment.
-                .with_webpki_roots()
-                // `https_or_http`, not `https_only`: `identity-jwt`
-                // supports an explicit `insecure_http: true` for local
-                // development, and it already refuses plaintext by
-                // default one layer up. Enforcing here as well would
-                // make that setting silently ineffective.
-                .https_or_http();
+    /// Build a pooling client.
+    fn build_client(&self) -> Result<HyperClient, HttpTransportError> {
+        let mut http = HttpConnector::new_with_resolver(EgressResolver {
+            allow_private: self.allow_private_destinations,
+        });
+        // The HTTPS connector wraps this one, so it must accept the
+        // `https` scheme rather than rejecting it as non-HTTP.
+        http.enforce_http(false);
+        http.set_connect_timeout(Some(self.connect_timeout));
+        // hyper-util defaults this to false; reqwest sets it true.
+        // Leaving Nagle on would let a small request body — a token
+        // exchange form is a couple of hundred bytes — sit waiting to
+        // coalesce with data that never comes, adding tens of
+        // milliseconds to a call on the request path.
+        http.set_nodelay(true);
+        http.set_keepalive(self.tcp_keepalive);
 
-            // `enable_all_versions` advertises ALPN `h2, http/1.1`;
-            // `enable_http1` advertises none. Either way a peer that
-            // cannot do HTTP/2 gets HTTP/1.1, and plaintext gets it
-            // regardless since there is no ALPN without TLS.
-            let https = if self.http2 {
-                tls.enable_all_versions().wrap_connector(http)
-            } else {
-                tls.enable_http1().wrap_connector(http)
-            };
+        // Select `ring` locally: a host may load both supported providers,
+        // leaving rustls without a process default. Do not install one here.
+        // Keep the webpki roots used by the previous connector configuration.
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls_config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| HttpTransportError::Connect(format!("rustls client configuration: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
 
-            Client::builder(TokioExecutor::new())
-                // Without a timer, `pool_idle_timeout` silently does
-                // nothing and idle connections are never evicted. With
-                // `pool_max_idle_per_host` defaulting to unlimited, that
-                // is unbounded socket growth against a busy `IdP`, which
-                // is a slow leak rather than an error anyone would see.
-                .pool_timer(TokioTimer::new())
-                .pool_idle_timeout(self.pool_idle_timeout)
-                .pool_max_idle_per_host(self.pool_max_idle_per_host)
-                .build(https)
-        })
+        let tls = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(tls_config)
+            // `https_or_http`, not `https_only`: `identity-jwt`
+            // supports an explicit `insecure_http: true` for local
+            // development, and it already refuses plaintext by
+            // default one layer up. Enforcing here as well would
+            // make that setting silently ineffective.
+            .https_or_http();
+
+        // `enable_all_versions` advertises ALPN `h2, http/1.1`;
+        // `enable_http1` advertises none. Either way a peer that
+        // cannot do HTTP/2 gets HTTP/1.1, and plaintext gets it
+        // regardless since there is no ALPN without TLS.
+        let https = if self.http2 {
+            tls.enable_all_versions().wrap_connector(http)
+        } else {
+            tls.enable_http1().wrap_connector(http)
+        };
+
+        let client = Client::builder(TokioExecutor::new())
+            // Without a timer, `pool_idle_timeout` silently does
+            // nothing and idle connections are never evicted. With
+            // `pool_max_idle_per_host` defaulting to unlimited, that
+            // is unbounded socket growth against a busy `IdP`, which
+            // is a slow leak rather than an error anyone would see.
+            .pool_timer(TokioTimer::new())
+            .pool_idle_timeout(self.pool_idle_timeout)
+            .pool_max_idle_per_host(self.pool_max_idle_per_host)
+            .build(https);
+
+        Ok(client)
     }
 }
 
@@ -380,7 +403,7 @@ impl HttpTransport for HyperTransport {
         // Build the pool even when the destination is later refused, so
         // a refused first request still lands the client on the runtime
         // that served it.
-        let client = self.client();
+        let client = self.client()?;
 
         if !self.allow_private_destinations
             && let Some(host) = uri.host()
@@ -674,6 +697,27 @@ mod tests {
         );
         let _ = t.execute(HttpRequest::get("http://127.0.0.1:1/x")).await;
         assert!(t.client.get().is_some(), "first use must build the pool");
+    }
+
+    #[tokio::test]
+    async fn the_pool_builds_with_no_process_default_crypto_provider() {
+        // Building against the named provider must neither require nor install a default.
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_none(),
+            "the guard only means something while nothing has installed a default"
+        );
+        let t = HyperTransport::new();
+        // A closed loopback port builds the client, then fails to connect.
+        let _ = t.execute(HttpRequest::get("https://127.0.0.1:1/x")).await;
+        assert!(
+            t.client.get().is_some(),
+            "the pool must build against the named provider"
+        );
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_none(),
+            "naming a provider must not install one process-wide, which would \
+             race a host installing its own"
+        );
     }
 
     #[test]

@@ -556,6 +556,73 @@ routes:
     );
 }
 
+/// A `delegate(...)` step reaches its plugin on `token.delegate`.
+#[test]
+fn a_delegator_reached_by_a_delegate_step_is_not_reported_as_narrowed() {
+    let alarms = alarms_raised_by_loading(
+        "
+plugins:
+  - name: workday-oauth
+    kind: builtin
+    hooks: [token.delegate]
+routes:
+  - tool: get_compensation
+    authorization:
+      pre_invocation:
+        - \"delegate(workday-oauth, target: workday-api, audience: workday-api)\"
+",
+    );
+    assert!(
+        !alarms.contains(&NARROWED.to_owned()),
+        "`token.delegate` is covered: {alarms:?}"
+    );
+}
+
+/// An elicitation verb reaches its handler on `elicit`.
+#[test]
+fn an_elicitation_handler_reached_by_a_verb_is_not_reported_as_narrowed() {
+    let alarms = alarms_raised_by_loading(
+        "
+plugins:
+  - name: manager-approver
+    kind: builtin
+    hooks: [elicit]
+routes:
+  - tool: adjust_compensation
+    authorization:
+      pre_invocation:
+        - \"require_approval(manager-approver, from: claim.manager, channel: \\\"ciba\\\")\"
+",
+    );
+    assert!(
+        !alarms.contains(&NARROWED.to_owned()),
+        "`elicit` is covered: {alarms:?}"
+    );
+}
+
+/// Family-specific reachability does not hide other uncovered hooks.
+#[test]
+fn a_delegator_declaring_an_unreached_cmf_hook_is_still_reported() {
+    let alarms = alarms_raised_by_loading(
+        "
+plugins:
+  - name: workday-oauth
+    kind: builtin
+    hooks: [token.delegate, cmf.tool_post_invoke]
+routes:
+  - tool: get_compensation
+    authorization:
+      pre_invocation:
+        - \"delegate(workday-oauth, target: workday-api, audience: workday-api)\"
+",
+    );
+    assert!(
+        alarms.contains(&NARROWED.to_owned()),
+        "`cmf.tool_post_invoke` is declared and no step reaches it there: \
+         {alarms:?}"
+    );
+}
+
 // ---- the core-side backstop -------------------------------------------
 
 /// A host that registers no orchestrator gets the flipped default with no
