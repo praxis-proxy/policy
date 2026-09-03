@@ -2358,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2387,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-cmf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "praxis-policy-apl-core",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2432,7 +2432,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2455,7 +2455,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-orchestration"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "tokio",
@@ -2463,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-pdp-cedar-direct"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cedar-policy",
@@ -2480,7 +2480,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-pdp-cel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cel",
@@ -2495,7 +2495,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-pdp-diff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-pdp-cedar-direct",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-pdp-opa"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "praxis-policy-apl-core",
@@ -2523,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-audit-logger"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-delegator-oauth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-elicitation-ciba"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-identity-jwt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2588,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-pii-scanner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "praxis-policy-core",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-session-valkey"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "deadpool-redis",
