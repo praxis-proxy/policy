@@ -1018,11 +1018,55 @@ const REPLACED_ALARM: &str = "authentication_replaced_above_the_route";
 /// `tracing-subscriber`, matching
 /// `praxis-policy-apl-runtime/tests/delegation_identity_warning.rs`: a
 /// handful of fields off one event is not worth a new dependency tree.
-struct AlarmCollector {
-    events: Arc<Mutex<Vec<String>>>,
+struct AlarmCollector;
+
+thread_local! {
+    /// Where this thread's alarms go while a helper is collecting.
+    static ALARM_SINK: std::cell::RefCell<Option<Arc<Mutex<Vec<String>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Collect the alarms raised by `body` on this thread.
+///
+/// One global subscriber for the binary, chosen over `with_default` per call:
+/// a thread-local dispatcher leaves the callsites to be registered by whichever
+/// dispatcher reaches them first, and under `NoSubscriber` that verdict is
+/// `never` and cached for the process.
+fn alarm_events(body: impl FnOnce()) -> Vec<String> {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // Ignore a failure: another harness may own the global default, and the
+        // assertions below report the empty result either way.
+        drop(tracing::subscriber::set_global_default(AlarmCollector));
+    });
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    ALARM_SINK.with(|sink| *sink.borrow_mut() = Some(Arc::clone(&events)));
+    body();
+    ALARM_SINK.with(|sink| *sink.borrow_mut() = None);
+    events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 impl tracing::Subscriber for AlarmCollector {
+    /// Never let a verdict be cached for these callsites.
+    ///
+    /// Callsite interest is global and cached, while `with_default` is
+    /// thread-local. Another test in this binary loading a config without a
+    /// subscriber registered these `warn!` sites under `NoSubscriber`, which
+    /// caches `never`, and every later collector saw nothing. `sometimes`
+    /// forces `enabled` to be asked per event, so the cache holds no verdict to
+    /// poison. Installing this globally rather than per thread is the other
+    /// half; see `alarm_events`.
+    fn register_callsite(
+        &self,
+        _metadata: &tracing::Metadata<'_>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+
     fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
         true
     }
@@ -1039,9 +1083,17 @@ impl tracing::Subscriber for AlarmCollector {
         let mut fields = FieldSink(Vec::new());
         event.record(&mut fields);
         let flattened = fields.0.join(" ");
-        if flattened.contains("alarm=") {
-            self.events.lock().unwrap().push(flattened);
+        if !flattened.contains("alarm=") {
+            return;
         }
+        ALARM_SINK.with(|sink| {
+            if let Some(events) = sink.borrow().as_ref() {
+                events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(flattened);
+            }
+        });
     }
 
     fn enter(&self, _span: &tracing::span::Id) {}
@@ -1063,16 +1115,11 @@ impl tracing::field::Visit for FieldSink {
 
 /// Load `yaml` and return every alarm event the load itself raised.
 fn alarms_raised_by_loading(yaml: &str) -> Vec<String> {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let collector = AlarmCollector {
-        events: Arc::clone(&events),
-    };
     let (mgr, _ledger, _) = manager_with_recording_factory();
     let parsed = praxis_policy_core::config::parse_config(yaml).expect("parse");
-    tracing::subscriber::with_default(collector, || {
+    alarm_events(|| {
         mgr.load_config(parsed).expect("load");
-    });
-    events.lock().unwrap().clone()
+    })
 }
 
 /// One report per affected route, naming the route, the section that set
