@@ -546,17 +546,42 @@ pub enum PluginMode {
 impl PluginMode {
     /// Whether this mode allows the plugin to block the pipeline.
     pub fn can_block(&self) -> bool {
-        matches!(self, Self::Sequential | Self::Concurrent)
+        match self {
+            Self::Sequential | Self::Concurrent => true,
+            Self::Transform | Self::Audit | Self::FireAndForget | Self::Disabled => false,
+        }
     }
 
     /// Whether this mode allows the plugin to modify the payload.
     pub fn can_modify(&self) -> bool {
-        matches!(self, Self::Sequential | Self::Transform)
+        match self {
+            Self::Sequential | Self::Transform => true,
+            Self::Audit | Self::Concurrent | Self::FireAndForget | Self::Disabled => false,
+        }
     }
 
     /// Whether the framework waits for this plugin to complete.
     pub fn is_awaited(&self) -> bool {
-        !matches!(self, Self::FireAndForget | Self::Disabled)
+        match self {
+            Self::FireAndForget | Self::Disabled => false,
+            Self::Sequential | Self::Transform | Self::Audit | Self::Concurrent => true,
+        }
+    }
+
+    /// Whether the executor dispatches this mode as a phase.
+    ///
+    /// `Disabled` is skipped. The match is exhaustive so a new variant is a
+    /// compile error until the catalog in `docs/safety-invariants.md` gains a
+    /// cell for it.
+    pub fn is_dispatch_phase(&self) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::Sequential
+            | Self::Transform
+            | Self::Audit
+            | Self::Concurrent
+            | Self::FireAndForget => true,
+        }
     }
 }
 
@@ -615,6 +640,20 @@ mod tests {
     // pipeline or rewrite the payload. Nothing called them, so a wrong answer
     // would either let an audit-only plugin deny a request or stop a sequential
     // one from enforcing anything.
+
+    #[test]
+    fn disabled_is_the_only_mode_that_is_not_a_dispatch_phase() {
+        assert!(!PluginMode::Disabled.is_dispatch_phase());
+        for mode in [
+            PluginMode::Sequential,
+            PluginMode::Transform,
+            PluginMode::Audit,
+            PluginMode::Concurrent,
+            PluginMode::FireAndForget,
+        ] {
+            assert!(mode.is_dispatch_phase(), "{mode} must be a dispatch phase");
+        }
+    }
 
     #[test]
     fn only_blocking_modes_can_block() {

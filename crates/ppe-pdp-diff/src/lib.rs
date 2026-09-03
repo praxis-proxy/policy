@@ -32,6 +32,8 @@ mod classify;
 mod drivers;
 #[cfg(test)]
 mod outcome;
+#[cfg(test)]
+mod safety;
 
 #[cfg(test)]
 #[allow(

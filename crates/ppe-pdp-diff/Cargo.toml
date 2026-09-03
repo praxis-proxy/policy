@@ -31,7 +31,11 @@ praxis-policy-pdp-opa = { workspace = true }
 serde_yaml = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# `safety` drives `fault_testing`, which is behind `test-util`. Enabling the
+# feature only here keeps it off a normal build of this crate (and of every
+# workspace crate that depends on it).
+praxis-policy-apl-core = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

@@ -16,6 +16,11 @@ make audit
 
 `make ci` runs the same set CI does.
 
+Safety invariants (fail-closed behaviour at every seam) live in
+`docs/safety-invariants.md`. A change that adds a plugin phase or a
+shipped PDP dialect is incomplete until that catalog has a cell for it;
+the tests fail until one is added.
+
 ## File headers
 
 Every source file starts with exactly these two lines, and nothing else:

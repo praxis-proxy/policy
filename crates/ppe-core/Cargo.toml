@@ -19,8 +19,9 @@ categories.workspace = true
 rust-version.workspace = true
 
 [features]
-# Test doubles for the seams a host normally fills — currently
-# `http_testing::FakeTransport`.
+# Test doubles for the seams a host normally fills —
+# `http_testing::FakeTransport` and `fault_testing` (a plugin that panics,
+# errors, or hangs on demand).
 #
 # Off by default and never enabled by a normal build: a `FakeTransport`
 # answers only what it was scripted with, so one reaching production
@@ -29,7 +30,7 @@ rust-version.workspace = true
 # surface, where it would be bound by semver for no one's benefit.
 #
 # Downstream plugin authors testing against the `HttpTransport` seam
-# enable it as a dev-dependency:
+# or injecting plugin faults enable it as a dev-dependency:
 #
 #     [dev-dependencies]
 #     praxis-policy-core = { version = "0.1", features = ["test-util"] }
@@ -62,6 +63,13 @@ zeroize = { version = "1.9", features = ["zeroize_derive"] }
 # Shared concurrency primitive used by `executor::run_concurrent_phase`
 # (and praxis-policy-apl-core's `Effect::Parallel`). Leaf crate, no cycles back here.
 praxis-policy-orchestration = { workspace = true }
+
+[dev-dependencies]
+# Integration tests (`tests/`) compile against the library without
+# `cfg(test)`, so they need the feature to see `fault_testing`.
+praxis-policy-core = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
+tokio-util = { workspace = true }
 
 [lints]
 workspace = true

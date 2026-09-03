@@ -24,6 +24,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Safety invariants, written down and tested as a catalog.** The engine's
+  fail-closed promise lived in comments and per-seam judgment. `docs/safety-invariants.md`
+  lists each claim as something a test can fail, and a fault-injection plugin
+  and PDP resolver drive `{panic, error, timeout}` across every plugin phase and
+  the three shipped PDP dialects. Malformed config and a missing attribute are
+  their own cells. Serial and audit panics are contained the same way concurrent
+  already was: they route through `on_error` instead of unwinding `execute()`.
+  Transform and audit still cannot halt — that difference is written down with
+  the reason. Adding a phase or a shipped dialect without a cell fails the
+  build. ([#24](https://github.com/praxis-proxy/policy/issues/24))
+
 - **`assertions:` controls the headers PPE writes at trust boundaries.** Available
   alongside `authentication:` at global, default, bundle, and route scope, its
   `request:` contract maps engine-derived values such as `subject.id` and

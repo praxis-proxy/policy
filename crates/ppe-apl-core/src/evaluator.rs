@@ -13,6 +13,7 @@
 //   - native fast-path, sync inside async outer
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::attributes::{AttributeBag, AttributeValue};
 use crate::pipeline::{Pipeline, ScanKind, Stage, TaintEvent, TaintScope, TypeCheck};
@@ -438,6 +439,36 @@ enum EffectOutcome {
     Pending(crate::step::PendingElicitation),
 }
 
+/// Per-call budget for a PDP `evaluate`. A hang becomes a deny, not an allow.
+/// Thirty seconds matches the plugin executor's default per-plugin budget.
+pub(crate) const PDP_EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Spawn the resolver call so a panic or hang cannot unwind or stall the
+/// phase. Both map to `PdpError::Dispatch`, which `Effect::Pdp` already
+/// turns into a fail-closed deny.
+async fn evaluate_pdp_contained(
+    pdp: &Arc<dyn PdpResolver>,
+    call: &crate::step::PdpCall,
+    bag: &AttributeBag,
+) -> Result<crate::step::PdpDecision, crate::step::PdpError> {
+    let pdp = Arc::clone(pdp);
+    let call = call.clone();
+    let bag = bag.clone();
+    let join = tokio::spawn(async move { pdp.evaluate(&call, &bag).await });
+    match tokio::time::timeout(PDP_EVALUATE_TIMEOUT, join).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_err)) => {
+            let message = if join_err.is_panic() {
+                format!("PDP task panicked: {join_err}")
+            } else {
+                format!("PDP task cancelled: {join_err}")
+            };
+            Err(crate::step::PdpError::Dispatch(message))
+        },
+        Err(_) => Err(crate::step::PdpError::Dispatch("PDP timed out".into())),
+    }
+}
+
 /// Run a single effect against the evaluator's state. Called by both
 /// `evaluate_effects` (top-level walk of `pre_invocation:` / `post_invocation:`)
 /// and by recursive arms (Sequential, Parallel, When body, Pdp
@@ -720,7 +751,7 @@ async fn dispatch_effect(
         } => {
             // External PDP call — replaces `Step::Pdp`. Reactions run
             // through the same dispatch_effect path (recursively).
-            match pdp.evaluate(call, bag).await {
+            match evaluate_pdp_contained(pdp, call, bag).await {
                 Ok(pdp_result) => match pdp_result.decision {
                     Decision::Allow => {
                         // Walk on_allow; if it ends without a Halt the

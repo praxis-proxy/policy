@@ -35,6 +35,9 @@ async-trait = { workspace = true }
 regex = { workspace = true }
 futures = { workspace = true }
 praxis-policy-orchestration = { workspace = true }
+# `evaluate_pdp_contained` spawns the resolver call so a panic or hang
+# becomes a deny rather than unwinding or stalling the phase.
+tokio = { workspace = true }
 
 [features]
 # Scaffolding for compiling one policy block plus its plugin registry, which is
@@ -44,7 +47,8 @@ praxis-policy-orchestration = { workspace = true }
 # Off by default and never enabled by a normal build. Keeping it behind a feature
 # keeps a test seam out of the published API surface, where semver would bind it
 # for no consumer's benefit. The rationale is praxis-policy-core's `test-util`
-# feature's, verbatim.
+# feature's, verbatim. `fault_testing` (a PDP that panics, errors, or hangs)
+# lives behind the same flag.
 #
 # This crate's own `tests/` need it too, and cargo does not enable a crate's own
 # optional feature for `cargo test`, hence the self dev-dependency below rather
@@ -53,7 +57,7 @@ praxis-policy-orchestration = { workspace = true }
 test-util = []
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 praxis-policy-apl-core = { workspace = true, features = ["test-util"] }
 
 [lints]

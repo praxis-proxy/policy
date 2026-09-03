@@ -2437,6 +2437,7 @@ dependencies = [
  "chrono",
  "hashbrown 0.17.1",
  "http",
+ "praxis-policy-core",
  "praxis-policy-orchestration",
  "serde",
  "serde_json",

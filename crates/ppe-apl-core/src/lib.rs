@@ -33,6 +33,9 @@ pub mod step;
 /// The one reader for a quoted literal, and the one rule for escapes inside one.
 mod lexical;
 
+/// A PDP resolver that panics, errors, or hangs on demand. Behind `test-util`.
+#[cfg(feature = "test-util")]
+pub mod fault_testing;
 /// Test scaffolding, behind the `test-util` feature.
 #[cfg(feature = "test-util")]
 pub mod test_util;

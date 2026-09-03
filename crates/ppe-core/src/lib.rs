@@ -54,6 +54,9 @@ pub mod executor;
 pub mod extensions;
 /// Config-driven plugin construction.
 pub mod factory;
+/// A plugin that panics, errors, or hangs on demand. Requires `test-util`.
+#[cfg(any(test, feature = "test-util"))]
+pub mod fault_testing;
 /// Hook types, payloads, and the handler traits.
 pub mod hooks;
 /// Host-provided services and the carriers that lend them to a plugin.
