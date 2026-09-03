@@ -43,7 +43,7 @@ praxis-policy-core = { workspace = true }
 
 # `base64` to decode the JWT payload segment for the approver claim
 # (claims extraction only — see the validate notes in approver.rs).
-base64 = "0.22"
+base64 = "0.23"
 
 async-trait = { workspace = true }
 serde = { workspace = true }
