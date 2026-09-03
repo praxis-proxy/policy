@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-03
+
 > **Upgrading from 0.1.0?** Configurations require changes: this release removes
 > ten keys, changes the default dispatch mode, and tightens APL lexical rules.
 > `docs/upgrade-apl.md` lists the required rewrites with before-and-after examples.
@@ -985,5 +987,6 @@ public surface now is.
 
 - **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/lints.md`](docs/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/praxis-proxy/policy/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/praxis-proxy/policy/releases/tag/v0.1.0
