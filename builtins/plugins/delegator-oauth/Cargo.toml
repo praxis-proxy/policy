@@ -54,7 +54,7 @@ tracing = { workspace = true }
 # read-only interop check (did the IdP honor the RFC 8693 `actor_token`
 # and emit an `act` claim). We never verify the signature here — the
 # token is already trusted, having just come from our own IdP roundtrip.
-base64 = "0.22"
+base64 = "0.23"
 
 # Secret-clearing wrapper for client credentials in memory.
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
