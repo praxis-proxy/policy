@@ -145,6 +145,11 @@ impl CelResolver {
     ///
     /// Composes: calling `with_functions` more than once stacks the
     /// callbacks. Each runs in registration order on every context.
+    /// Later custom setups can shadow earlier custom setups. They do
+    /// **not** replace a CEL standard-library overload of the same
+    /// name (`size`, `has`, `matches`, `double`, …) as of `cel` 0.14
+    /// — the stdlib wins and the colliding registration is ignored
+    /// for that signature. Pick names that cannot collide.
     ///
     /// # Example
     ///
@@ -668,6 +673,38 @@ mod tests {
             out.decision,
             Decision::Allow,
             "subsequent with_functions calls must compose, not replace",
+        );
+    }
+
+    /// Pins custom-vs-stdlib collision precedence. A host-registered
+    /// `size` that would return 777 must not replace CEL's built-in
+    /// `size` (5 for `"hello"`). As of `cel` 0.14 the stdlib overload
+    /// wins; this test fails if that flips.
+    #[tokio::test]
+    async fn custom_function_does_not_shadow_stdlib_size() {
+        let r = CelResolver::new().with_functions(|ctx| {
+            ctx.add_function("size", |_s: Arc<String>| -> i64 { 777 });
+        });
+        let bag = bag_with(&[("subject.id", "alice")]);
+
+        let stdlib = r
+            .evaluate(&cel_call("size('hello') == 5"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(
+            stdlib.decision,
+            Decision::Allow,
+            "stdlib size('hello') is 5; if this fails, a custom size shadowed the builtin",
+        );
+
+        let custom = r
+            .evaluate(&cel_call("size('hello') == 777"), &bag)
+            .await
+            .unwrap();
+        assert!(
+            matches!(custom.decision, Decision::Deny { .. }),
+            "custom size returning 777 must not run in place of stdlib size; got {:?}",
+            custom.decision,
         );
     }
 

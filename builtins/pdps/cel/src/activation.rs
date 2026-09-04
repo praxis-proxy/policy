@@ -381,4 +381,51 @@ mod tests {
         bag.set("delegation.depth", 3_i64);
         assert!(truthy("delegation.depth == 3", &bag));
     }
+
+    /// The sibling of `namespace_wins_on_leaf_collision`: a scalar
+    /// arrives *after* the namespace already exists. `insert` keeps the
+    /// branch and drops the scalar (the warning at the terminal-segment
+    /// arm). Driven through `insert` directly because `AttributeBag` is
+    /// a `HashMap` — `set` order is not `iter` order, so a bag cannot
+    /// pin this arm.
+    #[test]
+    fn namespace_wins_when_scalar_arrives_after_branch() {
+        let mut root = BTreeMap::new();
+        insert(
+            &mut root,
+            "delegation.depth",
+            &["delegation", "depth"],
+            Value::from(3_i64),
+        );
+        insert(
+            &mut root,
+            "delegation",
+            &["delegation"],
+            Value::from("scalar-value".to_owned()),
+        );
+
+        let depth_kept = match root.get("delegation") {
+            Some(Node::Branch(children)) => {
+                matches!(children.get("depth"), Some(Node::Leaf(_)))
+            },
+            _ => false,
+        };
+        assert!(
+            depth_kept,
+            "namespace must win when a scalar arrives after the branch exists; \
+             the scalar must be dropped so delegation.depth still lives under the map",
+        );
+
+        let mut ctx = Context::default();
+        for (name, node) in root {
+            ctx.add_variable_from_value(name, node_to_value(node));
+        }
+        assert!(
+            matches!(
+                run_cel("delegation.depth == 3", &ctx),
+                Ok(Value::Bool(true))
+            ),
+            "CEL must still resolve delegation.depth after the colliding scalar is dropped",
+        );
+    }
 }
