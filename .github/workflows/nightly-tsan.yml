@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+name: Nightly ThreadSanitizer
+
+# The engine is shared across threads behind `Arc` and mutated while
+# requests are in flight. PR CI runs the seeded stress test on a
+# multi-threaded runtime; this job rebuilds it under ThreadSanitizer so
+# a data race is a red build rather than a wrong plugin count.
+#
+# Nightly only: TSan needs a nightly compiler, and the rebuild is too
+# slow for every pull request. `workflow_dispatch` is here so a race
+# report can be reproduced without waiting for the cron.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -Zsanitizer=thread
+  TSAN_OPTIONS: halt_on_error=1
+
+jobs:
+  tsan-engine-stress:
+    name: engine concurrency under TSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-tsan-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-tsan-
+      - run: rustup toolchain install nightly --component rust-src --profile minimal
+      - run: rustup target add x86_64-unknown-linux-gnu --toolchain nightly
+      - run: make test-tsan

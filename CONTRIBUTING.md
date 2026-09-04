@@ -134,3 +134,30 @@ Enforcing one of the allowed groups is welcome as a focused change, one lint at 
 time, separate from feature work. `docs/lints.md` is worth reading first: it
 records which lints clippy reports as machine-fixable but cannot actually fix, and
 where a lint's suggested rewrite is worse than the code it replaces.
+
+## Multi-threaded Tokio tests
+
+`#[tokio::test]` defaults to `current_thread`. Tasks yield at `.await` but never
+run on two OS threads at the same time, so a load and a store that have no await
+between them cannot overlap.
+
+Tests that exercise registration, unregister, hot reload (`load_config` /
+`from_config`), or route-cache fill and invalidation use
+`#[tokio::test(flavor = "multi_thread")]`, including when the body is a single
+task. Those are the surfaces a host shares behind `Arc`; copying the default
+runtime from an unrelated sequential test is the wrong starting point. Overlap
+itself is asserted in `crates/ppe-core/tests/engine_concurrency.rs` and in
+`test_manager_arc_shareable_with_concurrent_dispatch_and_registration`.
+
+```rust
+#[tokio::test(flavor = "multi_thread")]
+async fn register_while_other_tasks_invoke() { /* ... */ }
+```
+
+Sequential tests that do not touch those surfaces stay on `current_thread`.
+
+A seeded stress test lives in `crates/ppe-core/tests/engine_concurrency.rs`.
+Replay a failure with `PPE_STRESS_SEED`. Nightly CI runs that test under
+ThreadSanitizer (`make test-tsan`). The `Release` / `Acquire` pairing between
+the snapshot and `config_generation` is checked by the loom model in
+`crates/ppe-core/tests/loom_generation_snapshot.rs`.

@@ -3653,7 +3653,7 @@ mod tests {
         assert_eq!(result.violation.as_ref().unwrap().code, "denied");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_has_hooks_for() {
         let mgr = PolicyEngine::default();
         assert!(!mgr.has_hooks_for("test_hook"));
@@ -3849,7 +3849,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_unregister() {
         let mgr = PolicyEngine::default();
         let config = make_config("removable", 10, PluginMode::Sequential);
@@ -3869,7 +3869,7 @@ mod tests {
     /// that runtime registration is safe alongside invocations — the whole
     /// point of the `ArcSwap`-based snapshot redesign. Before this fix,
     /// `register_*` was `&mut self`, so this pattern wouldn't even compile.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_manager_arc_shareable_with_concurrent_dispatch_and_registration() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -5632,7 +5632,7 @@ plugins:
     /// segment-boundary rows mirror the host router's own suite: a prefix that
     /// matches a path only where a `/` follows it, and a trailing slash on the
     /// declared prefix that changes nothing.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_works_for_all_entity_types() {
         register_fixture_hooks();
         use std::sync::Arc as StdArc;
@@ -6198,7 +6198,7 @@ routes:
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_creates_manager() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6225,7 +6225,7 @@ engine_settings:
         assert!(mgr.has_hooks_for("test_hook"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_invokes_correctly() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6259,7 +6259,7 @@ plugins:
         assert_eq!(result.violation.as_ref().unwrap().code, "denied");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_unknown_kind_rejected() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6280,7 +6280,7 @@ plugins:
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_multiple_plugins() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6324,7 +6324,7 @@ plugins:
 
     // -- Routing cache tests --
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_populated_on_first_invoke() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6526,7 +6526,7 @@ routes:
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_different_entities_separate() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6577,7 +6577,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_cleared() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6615,7 +6615,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_unregister_invalidates_routing_cache() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6684,7 +6684,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_rejects_inserts_at_capacity() {
         register_fixture_hooks();
         // Cap of 2 — verifies bound holds AND uncached requests still resolve correctly.
@@ -6758,7 +6758,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_register_handler_invalidates_routing_cache() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6802,7 +6802,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_scope_creates_separate_entries() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6855,7 +6855,7 @@ routes:
 
     // -- Override instance tests --
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_route_override_creates_new_instance() {
         register_fixture_hooks();
         let yaml = r#"
@@ -7092,7 +7092,7 @@ routes:
     /// open DB connections / file handles / network clients on init don't
     /// run with default state. Uses a tracking factory whose plugin
     /// increments a counter inside its `initialize()`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_route_override_initializes_new_instance() {
         register_fixture_hooks();
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7411,7 +7411,7 @@ routes:
     /// config) must not silently disable the plugin for every other route
     /// using the base config — config is part of the failure surface, and
     /// per-route blast radius is the point of having overrides.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_route_override_circuit_breaker_isolated_from_base() {
         register_fixture_hooks();
         struct ErrorOnInvokeFactory;
@@ -7482,7 +7482,7 @@ routes:
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_register_factory_then_load_config() {
         register_fixture_hooks();
         let yaml = r#"
@@ -7540,7 +7540,7 @@ engine_settings:
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_disabled_fires_all_plugins() {
         register_fixture_hooks();
         // Same plugins under hook dispatch: all fire regardless of entity
@@ -7581,7 +7581,7 @@ plugins:
         assert!(!result.continue_processing); // denier fires (all plugins active)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_no_meta_fires_all_plugins() {
         register_fixture_hooks();
         // Routing enabled but no meta on extensions → fallback to all
@@ -7852,7 +7852,7 @@ routes:
 
     /// Verifies that a handler that genuinely `.await`s gets driven
     /// to completion before its result is observed.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_handler_registers_and_invokes() {
         let mgr = PolicyEngine::default();
         let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -7888,7 +7888,7 @@ routes:
     /// genuinely awaits (`AsyncCounterPlugin`) co-register on the same
     /// hook via the same `register_handler` call. Both run in priority
     /// order.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_mixed_sync_and_async_handlers_in_same_hook() {
         let mgr = PolicyEngine::default();
         let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -8457,7 +8457,7 @@ routes:
         (entity_type, names.remove(0))
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn many_http_paths_matching_one_route_share_one_cache_entry() {
         let (mgr, ledger) = recording_engine(HTTP_ROUTES_YAML).await;
 
@@ -8996,7 +8996,7 @@ routes:
     /// A config replacement rebuilds the snapshot, so the answer follows the
     /// config it was derived from. A stale answer would warn about routes that
     /// are gone, or stay silent about ones that arrived.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_reload_recomputes_which_routes_declare_authentication() {
         // A load merges its plugins into the registry, so each generation names
         // its own rather than colliding with the one before it.
