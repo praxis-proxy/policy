@@ -24,6 +24,7 @@ Effects in a `pre_invocation:` block run top to bottom. The first `deny` halts
 the phase and skips every later phase, so order is a tool: put cheap gates first
 and expensive effects last.
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:
@@ -44,6 +45,7 @@ were going to reject.
 
 A PDP call can carry reaction blocks that run depending on the decision:
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:
@@ -52,10 +54,10 @@ authorization:
         resource:
           type: Document
           id: ${args.doc_id}
-      on_allow:
-        - "taint(cedar_approved, session)"
-      on_deny:
-        - "deny('not permitted by Cedar policy', 'cedar_denied')"
+        on_allow:
+          - "taint(cedar_approved, session)"
+        on_deny:
+          - "deny('not permitted by Cedar policy', 'cedar_denied')"
 ```
 
 `on_allow` runs its effects when the PDP permits; `on_deny` runs when it denies.
@@ -63,23 +65,31 @@ Without an `on_deny`, a PDP denial halts the phase on its own.
 
 ## Composition: sequential and parallel
 
-Effects can be grouped. `sequential` runs its members in order and halts on the
-first deny. `parallel` runs independent gates concurrently; any deny fails the
-group, and accumulating effects from the branches (taints, backend restrictions)
-all take hold.
+Effects can be grouped. `sequential` runs its members in order and halts
+on the first deny. `parallel` runs independent members concurrently; any
+deny fails the group, and accumulating effects from the members (taints,
+backend restrictions) all take hold.
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:
+    - "require(perm.read_pii)"
     - parallel:
-        - "require(perm.read_pii)"
-        - cel: { expr: "subject.department == 'compliance'" }
+        - "run(pii-scan)"
+        - "run(audit-log)"
 ```
 
-`parallel` is for independent decisions only. It rejects field operations and
-delegation, because a discarded branch would silently lose those effects. Use
-`sequential` (the default for a `pre_invocation:` list) whenever one effect
-depends on another.
+**Both groups take effects, not gates.** A member is something the phase
+*does*, so `run(...)`, `taint(...)`, `deny`, and the other effects above
+are members; a predicate rule such as `require(...)`, or a PDP call, is
+not, and nesting one is a load error. Gate first and group second, as
+above, rather than trying to run the gates concurrently.
+
+`parallel` also rejects field operations and delegation, because a
+discarded branch would silently lose those effects. Use `sequential`
+(the default for a `pre_invocation:` list) whenever one effect depends
+on another.
 
 ## Phases recap
 

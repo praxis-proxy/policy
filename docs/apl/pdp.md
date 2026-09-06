@@ -19,6 +19,7 @@ the coarse gate and let the engine make the fine-grained call.
 A PDP call is an effect in the `authorization.pre_invocation` phase. It names a
 dialect and passes the request; `on_allow` and `on_deny` react to the decision:
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:
@@ -30,8 +31,8 @@ authorization:
           id: ${args.repo_name}
           attributes:
             visibility: ${args.visibility}
-      on_deny:
-        - "deny('not permitted by repo policy', 'cedar_denied')"
+        on_deny:
+          - "deny('not permitted by repo policy', 'cedar_denied')"
 ```
 
 The cheap APL gate runs first. Only if it passes does PPE evaluate the Cedar
@@ -76,6 +77,7 @@ work unchanged.
 
 CEL is the lightest option for inline boolean policy:
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:

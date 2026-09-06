@@ -48,8 +48,9 @@ the agent claims:
 ```yaml
 routes:
   - tool: get_compensation
-    pre_invocation:
-      - "require(role.hr)"
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
 ```
 
 Bob and Eve pass (HR role in their tokens). Alice is denied with a JSON-RPC
@@ -71,9 +72,10 @@ from the Overview, now running in a real gateway. Bob and Eve send the
 byte-for-byte same request; the field pipeline rewrites Eve's response body
 inside the proxy, after the tool returns and before the agent sees it:
 
+<!-- validate: route-body -->
 ```yaml
-    result:
-      ssn: "str | redact(!perm.view_ssn)"
+result:
+  ssn: "str | redact(!perm.view_ssn)"
 ```
 
 The tool does not implement this, cannot get it wrong, and cannot be talked out
@@ -90,6 +92,7 @@ The backend should never hold or even see the user's IdP credential. Before
 forwarding, the route exchanges Bob's token for a fresh one scoped to exactly
 this backend (RFC 8693, via Keycloak):
 
+<!-- validate: phase-list -->
 ```yaml
       - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation])"
 ```
@@ -99,6 +102,7 @@ and only `read_compensation`. A leak at the backend leaks that, not Bob's
 session. The `search_repos` route goes one step further and verifies the grant
 before trusting it:
 
+<!-- validate: phase-list -->
 ```yaml
       - "!(delegation.granted.permissions contains 'repo:read:internal'): deny"
 ```
@@ -115,6 +119,7 @@ The classic exfiltration path: read something sensitive, then send it somewhere.
 Content filters miss it when the outbound message is clean. PPE instead taints
 the session at the read and gates the send on the label:
 
+<!-- validate: phase-list -->
 ```yaml
   # get_compensation
   - "taint(secret, session)"
@@ -140,6 +145,7 @@ Session taint is state-based; this control is content-based, and they complement
 each other. A validator plugin scans tool arguments for sensitive patterns and
 denies before dispatch:
 
+<!-- validate: fragment -->
 ```yaml
   - name: pii-scan
     kind: validator/pii-scan
@@ -167,6 +173,7 @@ Some actions should not happen on the caller's authority alone.
 `adjust_compensation` changes a salary, so anything over $10,000 requires the
 requester's manager to sign off, out-of-band, before the tool runs:
 
+<!-- validate: fragment -->
 ```yaml
   - tool: adjust_compensation
     pre_invocation:
@@ -200,6 +207,7 @@ Attribute gates answer "does the caller have this role?". Relationship questions
 ("may this principal read this resource?") go to a PDP, and the demo ships the
 same decision in two dialects. Cedar, as a versioned policy set:
 
+<!-- validate: phase-list -->
 ```yaml
       - cedar:
           action: 'Action::"read"'
@@ -224,6 +232,7 @@ permit(
 
 CEL, as an inline predicate on the route:
 
+<!-- validate: phase-list -->
 ```yaml
       - cel:
           expr: |

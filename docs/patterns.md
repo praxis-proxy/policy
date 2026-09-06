@@ -9,6 +9,7 @@ condensed reference for authoring and rollout.
 Order effects cheapest-gate-first so expensive work only runs for requests that
 survive the early checks. Attribute gates, then a PDP call, then delegation:
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:
@@ -80,6 +81,7 @@ to the minimum. A scanner that reads content does not get identity; a downstream
 token gets only the scope the operation requires, verified after the exchange
 (deny if the grant is missing):
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:

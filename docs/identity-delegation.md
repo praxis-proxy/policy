@@ -95,6 +95,17 @@ So a `delegate(...)` is *not* route-only. To pick its breadth, put it (or a
 ### The stack in one config
 
 ```yaml
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+  - name: jwt-manager
+    kind: identity/jwt
+    hooks: [identity.resolve]
+  - name: workday-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+
 global:
   authentication: [jwt-user]            # every request gets user identity
 
@@ -120,11 +131,16 @@ host-injected runtime tags join groups the same way.
 **The override.** A route that must stand alone drops the inherited layers:
 
 ```yaml
+plugins:
+  - name: jwt-workload
+    kind: identity/jwt
+    hooks: [identity.resolve]
+
 routes:
   - tool: get_directory
     authentication:
-      replace_inherited: true           # ignore global + group layers…
-      steps: [jwt-workload]             # …authenticate by the SVID alone
+      replace_inherited: true           # ignore global + group layers
+      steps: [jwt-workload]             # authenticate by the SVID alone
 ```
 
 That is what [Recipe 2](#recipe-2-agent-acting-as-itself-by-its-spiffe-svid)
@@ -339,9 +355,19 @@ It composes two inbound resolvers: `jwt-user` ([Recipe
 `X-Workload-Token`. Both must resolve; both credentials arrive on every call.
 
 ```yaml
+plugins:
+  - name: jwt-user            # Recipe 1
+    kind: identity/jwt
+    hooks: [identity.resolve]
+  - name: jwt-workload        # Recipe 2
+    kind: identity/jwt
+    hooks: [identity.resolve]
+  - name: workday-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+
 global:
-  # define jwt-user (Recipe 1) and jwt-workload (Recipe 2); run both
-  authentication: [jwt-user, jwt-workload]
+  authentication: [jwt-user, jwt-workload]   # run both
 
 routes:
   - tool: get_compensation
@@ -371,6 +397,7 @@ authenticated*. An agent that presented a SPIFFE SVID is a `caller_workload`
 (above); one that authenticated as a registered OAuth client (an `Authorization`
 bearer token, resolved with `role: client`) is `actor: client`:
 
+<!-- validate: phase-list -->
 ```yaml
 - "delegate(workday-oauth, target: workday-api, audience: workday-api,
             permissions: [read_compensation], subject: user, actor: client)"

@@ -85,6 +85,7 @@ context (see [Identity](identity.md) for where attributes come from). The forms:
 - **Logical composition**: `&` (and), `|` (or), `!` (not). Precedence is `()` >
   `!` > `&` > `|`.
 
+<!-- validate: phase-list -->
 ```yaml
 - "(role.hr | role.security) & !delegated"
 ```
@@ -95,6 +96,7 @@ A `pre_invocation:` (or `post_invocation:`) entry is a rule. Two forms:
 
 **`require(...)`** denies unless the predicate holds:
 
+<!-- validate: phase-list -->
 ```yaml
 - "require(authenticated)"
 - "require(role.hr)"
@@ -106,6 +108,7 @@ denies only if both are false.
 
 **`predicate: effect`** runs the effect when the predicate holds:
 
+<!-- validate: phase-list -->
 ```yaml
 - "delegation.depth > 2: deny"
 - "security.labels contains \"secret\": deny('session touched secret data', 'session_tainted')"
@@ -117,11 +120,12 @@ denies only if both are false.
 For richer conditionals, use the `when` / `do` form, where `do` is a single
 effect or a list:
 
+<!-- validate: phase-list -->
 ```yaml
 - when: "role.hr & !perm.view_ssn"
   do:
     - "taint(restricted, session)"
-    - "plugin(audit-log)"
+    - "run(audit-log)"
 ```
 
 ## Custom denial response
@@ -180,6 +184,7 @@ caller.
 `args:` and `result:` map a field to a pipeline of stages separated by `|`.
 Stages run left to right; a failed validator denies the phase.
 
+<!-- validate: route-body -->
 ```yaml
 result:
   ssn: "str | redact(!perm.view_ssn)"

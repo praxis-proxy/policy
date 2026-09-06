@@ -13,6 +13,7 @@ a client.
 
 The block sits beside `authentication:` and holds two contracts:
 
+<!-- validate: fragment -->
 ```yaml
 global:
   assertions:
@@ -39,6 +40,7 @@ standing under a name the upstream reads as the gateway's.
 
 ## An entry
 
+<!-- validate: fragment -->
 ```yaml
 headers:
   - name: x-auth-user-id     # the target header

@@ -22,6 +22,7 @@ fetch JWKS, exchange tokens, or dispatch CIBA prompts.
 `plugin_settings:` is `engine_settings:`, and the boolean `routing_enabled` is a
 named mode.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 plugin_settings:
@@ -89,6 +90,7 @@ unaffected either way, since it names its entity type.
 
 APL terms sit on the section that carries them.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 routes:
@@ -125,6 +127,7 @@ key.
 It was read only as `global.apl.attribute_files`, so it does not simply lose a
 wrapper, it relocates:
 
+<!-- validate: fragment -->
 ```yaml
 # before
 global:
@@ -156,6 +159,7 @@ process-global, so all three engine blocks agree on their own scope.
 
 The flat spellings are gone.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 routes:
@@ -257,6 +261,7 @@ that could write one: a route, a bundle under `groups:`, a
 `global.defaults.<entity>:` entry, and the reserved `all` bundle. A policy names
 the plugin it runs.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 routes:
@@ -296,6 +301,7 @@ expresses the same intent as a predicate on a step.
 
 `plugin(name)` is gone from both step and stage position.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 authorization:
@@ -303,6 +309,7 @@ authorization:
     - "plugin(audit-log)"
 ```
 
+<!-- validate: route-body -->
 ```yaml
 # after
 authorization:
@@ -325,12 +332,14 @@ naming the escape.
 backslash used to pass through a literal untouched, so a regex character class
 worked by accident. It must be doubled now:
 
+<!-- validate: fragment -->
 ```yaml
 # before
 result:
   employee_id: 'regex("\d+")'
 ```
 
+<!-- validate: route-body -->
 ```yaml
 # after
 result:
@@ -351,12 +360,14 @@ An empty stage in a pipe chain is a load error. A leading, trailing or doubled
 `|` left a position with no stage in it, and those were skipped, so a chain
 compiled shorter than it was written:
 
+<!-- validate: fragment -->
 ```yaml
 # before: compiled to one stage, silently
 result:
   ssn: "redact(!perm.view_ssn) |"
 ```
 
+<!-- validate: route-body -->
 ```yaml
 # after
 result:
@@ -388,6 +399,7 @@ integer 7, deliberately: changing it would alter a value silently.
 `require(...)` means `!P` and composes like any other predicate, so forms that
 used to be rejected now parse:
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:

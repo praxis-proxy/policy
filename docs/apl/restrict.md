@@ -43,19 +43,21 @@ attributes](attributes.md):
 routes:
   # Reading data for an EU-resident tenant marks the session.
   - tool: fetch_customer
-    post_invocation:
-      - when: "data.tenants[subject.tenant].data_region == 'eu'"
-        do:
-          - "taint(eu_resident, session)"
+    authorization:
+      post_invocation:
+        - when: "data.tenants[subject.tenant].data_region == 'eu'"
+          do:
+            - "taint(eu_resident, session)"
 
   # Later inference is pinned to EU backends while that label is set.
   - llm: "*"
-    pre_invocation:
-      - when: "security.labels contains 'eu_resident'"
-        do:
-          - restrict:
-              allow_regions: [eu]
-              on_empty: deny          # fail closed — never leave the region
+    authorization:
+      pre_invocation:
+        - when: "security.labels contains 'eu_resident'"
+          do:
+            - restrict:
+                allow_regions: [eu]
+                on_empty: deny        # fail closed, never leave the region
 ```
 
 `data.tenants[subject.tenant].data_region` indexes the tenant→region map by
@@ -90,6 +92,7 @@ The set-valued fields (`allow_models`, `deny_models`, `allow_regions`,
 [static attribute tree](attributes.md) — resolved per request. This lets one
 rule serve every caller instead of hard-coding a block per agent or tenant:
 
+<!-- validate: attributes -->
 ```yaml
 # attributes/agents.yaml
 data:
@@ -101,10 +104,11 @@ data:
 ```yaml
 routes:
   - llm: "*"
-    pre_invocation:
-      # allow_models is looked up from the tree by the caller's id.
-      - restrict:
-          allow_models: "data.agents[subject.id].allowed_models"
+    authorization:
+      pre_invocation:
+        # allow_models is looked up from the tree by the caller's id.
+        - restrict:
+            allow_models: "data.agents[subject.id].allowed_models"
 ```
 
 `support-bot` is restricted to `vllm/*`, `research-bot` to `anthropic/*` +
@@ -132,6 +136,7 @@ top-level, inside a `when` body, inside `sequential` / `parallel`, and inside a
 PDP's `on_allow` block. That last one is a first-class pattern: let Cedar make
 the fine-grained decision, then pin routing on allow.
 
+<!-- validate: fragment -->
 ```yaml
 pre_invocation:
   - cedar:

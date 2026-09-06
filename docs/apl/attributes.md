@@ -27,6 +27,7 @@ Static attributes are a plain nested document. The operator organizes it however
 they like — by tenant, team, environment — and everything lives under a
 top-level `data:` mapping:
 
+<!-- validate: attributes -->
 ```yaml
 # attributes/tenants.yaml
 data:
@@ -48,11 +49,10 @@ into one `data.*` tree:
 
 ```yaml
 global:
-  apl:
-    attribute_files:
-      - attributes/org.yaml
-      - attributes/tenants.yaml
-      - attributes/agents.yaml
+  attribute_files:
+    - attributes/org.yaml
+    - attributes/tenants.yaml
+    - attributes/agents.yaml
 ```
 
 Different subtrees combine freely — `org.yaml` sets `data.org.*`, `tenants.yaml`
@@ -72,6 +72,7 @@ Two ways, depending on whether the path is fixed or keyed by the request.
 
 **Dot-path** — a fixed lookup:
 
+<!-- validate: phase-list -->
 ```yaml
 - "data.org.default_region == 'eu': deny('org is EU-only')"
 ```
@@ -81,10 +82,11 @@ Two ways, depending on whether the path is fixed or keyed by the request.
 ```yaml
 routes:
   - llm: "*"
-    pre_invocation:
-      - when: "data.tenants[subject.tenant].data_region == 'eu'"
-        do:
-          - restrict: { allow_regions: [eu], on_empty: deny }
+    authorization:
+      pre_invocation:
+        - when: "data.tenants[subject.tenant].data_region == 'eu'"
+          do:
+            - restrict: { allow_regions: [eu], on_empty: deny }
 ```
 
 `[subject.tenant]` is resolved at evaluation time: the caller's `subject.tenant`

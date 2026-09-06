@@ -272,6 +272,7 @@ runtime.
 The parens hold the dialect name, so there is no room left for a call signature.
 A custom resolver reads its arguments from the body map, the way `cedar:` does:
 
+<!-- validate: phase-list -->
 ```yaml
 - pdp(workload):
     path: hr/deny
@@ -313,6 +314,7 @@ stage      = type_check | transform | validator | "run" "(" name ")" ;
 
 A chain appears as a value under `args:` or `result:`, keyed by field:
 
+<!-- validate: route-body -->
 ```yaml
 result:
   ssn: "str | redact(!perm.view_ssn)"
@@ -341,6 +343,7 @@ silent hole. The message names `regex(...)` and `run(...)`.
 
 ## The YAML shape
 
+<!-- validate: fragment -->
 ```yaml
 engine_settings:
   dispatch: policy            # or `hooks`; `policy` is the default

@@ -19,6 +19,7 @@ and only after authorization has passed.
 `delegate` is an effect in the `authorization.pre_invocation` phase. It names a
 delegator plugin and the target it mints for:
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:
@@ -88,6 +89,7 @@ Exchange (v2) implements impersonation only and silently ignores `actor_token`,
 so no `act` appears there — capture the actor at the PPE boundary (audit /
 downstream header) if your token service doesn't support delegation.
 
+<!-- validate: fragment -->
 ```yaml
 pre_invocation:
   - "delegate(workday-oauth, target: workday-api, subject: user, actor: caller_workload,
@@ -98,6 +100,7 @@ pre_invocation:
 
 A scheduled or background agent with no user in the loop exchanges its own SVID:
 
+<!-- validate: fragment -->
 ```yaml
 pre_invocation:
   - "delegate(workday-oauth, target: workday-api, subject: caller_workload,
@@ -114,6 +117,7 @@ A common deployment (an MCP gateway is one shape): agents authenticate to PPE,
 but *this instance* is the one holding access to the backend tools. The agent
 never possesses a credential the backend would accept.
 
+<!-- validate: fragment -->
 ```yaml
 pre_invocation:
   - "require(role.hr)"
