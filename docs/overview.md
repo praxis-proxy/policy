@@ -4,7 +4,7 @@
 
 One agent serves several people. It answers questions by calling tools
 (an HR records service, a code repository, an email sender), invoking other
-agents over A2A, running inference, and fetching prompts and resources. The
+agents, running inference, and fetching prompts and resources. The
 backends are shared. The callers are not: an HR analyst, an engineer, and a
 support rep each drive the same agent with different identities and different
 entitlements.

@@ -1,7 +1,7 @@
 # A Reference Monitor for Agents
 
 An agent backed by an LLM acts across trust domains. It calls tools, invokes
-other agents over A2A (agent-to-agent), runs inference, and fetches prompts and
+other agents, runs inference, and fetches prompts and
 resources. The model deciding which operation to run is untrusted: it can be
 steered by injected content, confused by tool output, or simply wrong.
 Authorization, delegation, and information-flow control cannot live inside that
@@ -61,11 +61,11 @@ Enforcement is three concerns, separated cleanly:
 | Common Message Format (CMF) | What APL evaluates: a protocol-agnostic envelope carrying identity, labels, delegation, and content. |
 | Pipeline (hooks, plugins, execution) | How effects run. The mechanism that executes a policy's effects at the boundary. |
 
-APL leads. CMF gives policy a uniform thing to evaluate across tools, A2A,
-inference, prompts, and resources. The pipeline is the supporting execution
-layer: it is what lets a policy effect call a PDP, mint a token, scan for PII,
-or write an audit record. You reach for it when you extend the set of effects
-available to policy, not when you write policy.
+APL leads. CMF gives policy a uniform thing to evaluate across tools, A2A
+methods, inference, prompts, and resources. The pipeline is the supporting
+execution layer: it is what lets a policy effect call a PDP, mint a token, scan
+for PII, or write an audit record. You reach for it when you extend the set of
+effects available to policy, not when you write policy.
 
 ## The policy spectrum
 
@@ -73,7 +73,7 @@ Different controls belong at different points. PPE runs the same way at each of
 them, so you place a policy where its enforcement point is, not where the
 framework forces it.
 
-![The policy spectrum: soft prompt-level controls (style, tone, refusals), enforcement-tier tool and A2A authorization (redaction, delegation), and hard infrastructure-boundary controls (identity, info-flow, audit), on an axis from advisory to enforced at the boundary](images/vision_policy_spectrum.svg)
+![The policy spectrum: soft prompt-level controls (style, tone, refusals), enforcement-tier agentic API authorization (redaction, delegation), and hard infrastructure-boundary controls (identity, info-flow, audit), on an axis from advisory to enforced at the boundary](images/vision_policy_spectrum.svg)
 
 A style guardrail at the prompt level and a hard information-flow control at an
 infrastructure boundary are the same kind of object: an APL policy evaluated by

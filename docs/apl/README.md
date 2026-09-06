@@ -1,9 +1,9 @@
 # APL: configuring enforcement pipelines
 
 APL (Authorization Policy Layer) defines PPE enforcement pipelines. Each
-capability an agent may invoke—a tool, resource, prompt, or A2A method—defines a
-route that sequences its boundary controls. APL keeps predicates and effects
-out of application code.
+capability an agent may invoke (e.g., a tool, resource, prompt, or A2A method)
+defines a route that sequences its boundary controls. APL keeps predicates and
+effects out of application code.
 
 ![An APL config: plugins and global settings, then per-entity routes with a pre-invocation flow (require, PDP, delegate, run) and post-invocation result handling (taint, redact), plus Session Taint across entities](../images/apl_overview.svg)
 
@@ -29,7 +29,7 @@ pipelines:
 ## Routes and phases
 
 Policy is organized by route: an operation PPE mediates, identified by the
-tool, A2A method, or other interface it governs. Each route runs through four
+tool or other interface it governs. Each route runs through four
 phases, in order:
 
 ![The four route phases in order: args validates and transforms input, authorization.pre_invocation authorizes, result redacts and masks output, and authorization.post_invocation runs audit and final checks; the first deny in any phase halts that phase and every later one](../images/apl_phases.svg)
@@ -156,7 +156,7 @@ is not inherited by entity routes.
 
 ## Authorizing HTTP requests without an entity
 
-Routes key on an MCP / A2A entity — a tool, prompt, resource, or LLM. A generic
+Routes key on tool, prompt, resource, or LLM. A generic
 HTTP request that carries no such entity is authorized by the `global`
 policy instead, or by an `http:` route that selects on the request line
 (see [HTTP Routing](../http-routing.md)). When `global` declares an

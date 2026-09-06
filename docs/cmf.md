@@ -2,7 +2,7 @@
 
 APL evaluates policy against a request in the Common Message Format (CMF). This
 protocol-agnostic envelope represents every mediated operation in one structure.
-One policy therefore applies across tool calls, A2A methods, inference, prompts,
+One policy therefore applies across tool calls, inference, prompts,
 and resources without depending on the transport protocol.
 
 ## Why a common format
