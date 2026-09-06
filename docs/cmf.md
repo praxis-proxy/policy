@@ -1,6 +1,6 @@
-# Common Message Format
+# Canonical Message Format
 
-APL evaluates policy against a request. The Common Message Format (CMF) is the
+APL evaluates policy against a request. The canonical message format (CMF) is the
 shape of that request: a protocol-agnostic envelope that represents any mediated
 operation in one structure, so a single policy can apply across tool calls, A2A
 methods, inference, prompts, and resources without caring which protocol carried

@@ -63,8 +63,9 @@ change the code safely. Some things that feel worth writing down are not:
 // modules. Dropping either hides tests without failing.
 ```
 
-Some documentation is generated from source comments. `make lint` regenerates and
-compares it, so run the full gate rather than `cargo clippy` alone.
+`make doc` builds the rustdoc with warnings denied, and `make lint-docs`
+checks the markdown under `docs/`. Neither runs as part of `make lint`,
+so run them when you touch documentation.
 
 ## Durable text carries no planning identifiers
 

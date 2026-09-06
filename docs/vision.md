@@ -58,7 +58,7 @@ Enforcement is three concerns, separated cleanly:
 | Layer | Role |
 |-------|------|
 | **APL** | How you define policy: declarative configuration that sequences the controls in an operation's enforcement pipeline. |
-| **CMF** (Common Message Format) | What you evaluate. A protocol-agnostic envelope carrying identity, labels, delegation, and content. |
+| **CMF** (canonical message format) | What you evaluate. A protocol-agnostic envelope carrying identity, labels, delegation, and content. |
 | **Pipeline** (hooks, plugins, execution) | How effects run. The mechanism that executes a policy's effects at the boundary. |
 
 APL leads. CMF gives policy a uniform thing to evaluate across tools, A2A,

@@ -49,6 +49,8 @@ help:
 	@echo ""
 	@echo "Docs:"
 	@echo "  doc               cargo doc with warnings denied"
+	@echo "  docs-links        Check every link under docs/ (lychee)"
+	@echo "  docs-lint         Markdown style check (markdownlint, needs npx)"
 	@echo ""
 	@echo "Setup:"
 	@echo "  setup-hooks       Install git pre-commit hook"
@@ -215,6 +217,30 @@ semver:
 .PHONY: doc
 doc:
 	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps
+
+# Link and style checks for the markdown under docs/. Advisory, like
+# lint-extra: neither is part of `make ci`, because both reach for a tool the
+# gate does not otherwise need, and docs-links reaches the network.
+#
+# The examples in those pages are checked by a test, not from here:
+# `crates/ppe/tests/docs_examples` loads every fenced yaml block through the
+# real config parser and compiles its policy, so it runs with `make test`.
+.PHONY: docs-links
+docs-links:
+	@command -v lychee >/dev/null 2>&1 || $(CARGO) install lychee --locked
+	@lychee --config lychee.toml docs/ ./*.md
+	@echo "docs-links passed"
+
+# markdownlint is a Node tool and this is a Rust workspace, so it is used
+# through npx when npx is present and skipped, loudly, when it is not.
+.PHONY: docs-lint
+docs-lint:
+	@if command -v npx >/dev/null 2>&1; then \
+		npx --yes markdownlint-cli2 "docs/**/*.md" "*.md"; \
+		echo "docs-lint passed"; \
+	else \
+		echo "docs-lint skipped: npx not found"; \
+	fi
 
 # =============================================================================
 # CI

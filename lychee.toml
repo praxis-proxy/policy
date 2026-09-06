@@ -9,4 +9,8 @@ exclude = [
   # Local and placeholder hosts
   "^https?://localhost",
   "^https?://127\\.0\\.0\\.1",
+  # This repository's own tree and blob links. A link to a path added on the
+  # current branch does not resolve until the branch merges, so checking them
+  # fails exactly on the changes most worth checking.
+  "^https?://github\\.com/praxis-proxy/policy/(tree|blob)/",
 ]

@@ -31,11 +31,16 @@ them. The enforcement point moves; the route above runs unchanged in all three.
 
 ## Route forms
 
-Routes are a list of `- tool:` entries (or `resource:` / `prompt:` / `llm:`),
-with the `authorization`, `args`, and `result` blocks under each. This is the
-form the runtime loads at every placement; the enforcement point changes, the
-config shape does not. See [Configuration](configuration.md) for the full
-structure.
+Routes are a list of `- tool:` entries (or `resource:`, `prompt:`,
+`llm:`), with the `authorization:`, `args:`, and `result:` blocks under
+each. This is the form the runtime loads at every placement: the
+enforcement point changes, the config shape does not. See
+[Configuration](configuration.md) for the full structure.
+
+A placement that also carries plain HTTP traffic can select on the
+request line with an `http:` route, so one document covers both the
+agent's tool calls and the ordinary HTTP around them. See
+[HTTP Routing](http-routing.md).
 
 ## Placement guidance
 
@@ -60,7 +65,10 @@ the enforced path for the operations you actually want mediated.
 
 ## What to read next
 
-- [Configuration](configuration.md): the full config structure for a deployment.
+- [Configuration](configuration.md): the full config structure for a
+  deployment.
+- [Header Assertions](assertions.md): what PPE renders onto the upstream
+  request at whichever boundary it holds.
 - [Patterns](patterns.md): production patterns for rollout and layered
   enforcement.
 - [Identity](apl/identity.md) and [Delegation](apl/delegation.md): wiring IdP

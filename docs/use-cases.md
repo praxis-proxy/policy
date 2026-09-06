@@ -242,10 +242,18 @@ CEL, as an inline predicate on the route:
             - "deny('engineering may read internal repos only; security may read any', 'cel.policy_denied')"
 ```
 
-Same route, same outcome, different authoring model: Cedar suits versioned or
-signed policy sets with an entity model; CEL suits a self-contained predicate
-with no external policy store. Both backends compile into one binary; the config
-selects which runs.
+Same route, same outcome, different authoring model. Cedar suits
+versioned or signed policy sets with an entity model, CEL a
+self-contained predicate with no external policy store, and Rego a team
+that already writes it: the `opa` decision point embeds the evaluator,
+so there is no sidecar to run. All three compile into one binary and
+the config selects which runs.
+
+They are held to each other by a differential test suite. Given the same
+attributes and equivalent policy intent, the three must agree across
+their shared boolean, integer, string, and string-set subset; a new
+disagreement fails the build, and documented semantic differences are
+allowlisted rather than discovered in production.
 
 Run it:
 [`scenarios/04-alice-internal-allow.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/04-alice-internal-allow.sh),

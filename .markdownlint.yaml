@@ -1,5 +1,5 @@
-# Enforces the markdown rules documented in docs/conventions.md:
-# 80-column prose; code blocks follow the 120-char code limit.
+# Markdown rules for this repository: 80-column prose, with code blocks
+# following the 120-char code limit. Run with `make lint-docs`.
 
 # MD013: 80-column prose; code blocks follow the 120-char code limit
 MD013:
