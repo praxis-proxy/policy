@@ -1,34 +1,67 @@
 # Crate Reference
 
-PPE is a Cargo workspace of focused crates. Most hosts depend on `praxis-policy`
-(the facade); plugin authors depend on `cpex-sdk`.
+PPE is a Cargo workspace. Most hosts depend on `praxis-policy`, the
+facade, and nothing else: it re-exports the runtime and, behind
+features, the bundled extensions.
+
+## The engine
 
 | Crate | Role |
-|-------|------|
-| [`praxis-policy`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe) | Host facade. Re-exports the runtime and, with a feature, the builtins. Start here. |
-| [`praxis-policy-core`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-core) | The runtime: `PluginManager`, executor, hooks, config, extensions. |
-| [`cpex-sdk`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-sdk) | Plugin author SDK: the `Plugin` and `HookHandler` traits, payloads, results. Depend on this to write a plugin or PDP resolver. |
-| [`praxis-policy-orchestration`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-orchestration) | Async concurrency primitives shared by the runtime. |
-| [`cpex-builtins`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-builtins) | Feature-gated bundle of builtin plugins, PDP resolvers, and the session store (see [Builtins](builtins.md)). |
-| [`cpex-ffi`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-ffi) | C FFI (`cdylib` / `staticlib`) for Go, Python, and WASM host bindings. |
+|---|---|
+| [`praxis-policy`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe) | Host facade. Re-exports the runtime and registers the builtins. Start here. |
+| [`praxis-policy-core`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-core) | The runtime: engine, phased executor, hook registry, config, extensions, the HTTP seam. |
 | [`praxis-policy-apl-core`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-apl-core) | APL compiler and evaluator: rules, effects, field pipelines, routes. |
-| [`praxis-policy-apl-cmf`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-apl-cmf) | Bridges typed extensions into the flat attribute bag APL reads. |
-| [`praxis-policy-apl-runtime`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-apl-runtime) | Runtime adapter: wires APL routes to hooks, dispatches plugins and PDPs. |
+| [`praxis-policy-apl-cmf`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-apl-cmf) | Bridges typed extensions into the flat attribute bag a policy reads. |
+| [`praxis-policy-apl-runtime`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-apl-runtime) | Host runtime: wires APL routes to hooks, dispatches plugins and decision points. |
+| [`praxis-policy-orchestration`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-orchestration) | Async branch-concurrency primitives shared by the runtime. |
 
-Generated API docs are on [docs.rs/praxis-policy](https://docs.rs/praxis-policy).
+They depend on each other in one direction:
 
-## Language bindings
+```text
+praxis-policy (facade)
+ -> praxis-policy-apl-runtime -> praxis-policy-apl-cmf -> praxis-policy-apl-core
+ -> praxis-policy-orchestration
+ -> praxis-policy-core
+```
 
-The Rust core is exposed to other languages through `cpex-ffi`. Go bindings live
-in [`go/cpex`](https://github.com/praxis-proxy/policy/tree/main/go/cpex). Python
-(PyO3) and WASM bindings are planned over the same core.
+## Bundled extensions
 
-## Supply-chain integrity
+Each is its own published crate, reached through a feature on the
+facade rather than named directly. See [Builtins](builtins.md).
 
-The C FFI is distributed as **signed prebuilt artifacts**. A host that links the
-FFI rather than building from source verifies the signature on the artifact
-before use, so the binary boundary between the Rust core and a non-Rust host is
-not an unverified trust gap. The signing and verification process is documented
-in
-[`crates/cpex-ffi/RELEASE.md`](https://github.com/praxis-proxy/policy/blob/main/crates/ppe-ffi/RELEASE.md).
+| Crate | Kind |
+|---|---|
+| `praxis-policy-plugin-identity-jwt` | `identity/jwt` |
+| `praxis-policy-plugin-delegator-oauth` | `delegator/oauth` |
+| `praxis-policy-plugin-elicitation-ciba` | `elicitation/ciba` |
+| `praxis-policy-pdp-cedar-direct` | `cedar-direct` |
+| `praxis-policy-pdp-cel` | `cel` |
+| `praxis-policy-pdp-opa` | `opa` |
+| `praxis-policy-session-valkey` | `valkey` |
 
+## Not published
+
+| Crate | Why |
+|---|---|
+| `praxis-policy-pdp-diff` | Differential tests across the three decision points. A test harness, not an API. |
+| `reference/plugins/pii-scanner` | A worked example of a host plugin. |
+| `reference/plugins/audit-logger` | The same, for an audit sink. |
+
+## Writing a plugin
+
+There is no separate SDK crate. The plugin-author surface is
+`praxis_policy_core::prelude`, which carries the `Plugin` and
+`HookHandler` traits, payloads, results, and the CMF types. Implement
+`PluginFactory` against it and register it with
+`PolicyEngine::register_factory` under the `kind:` your policy names.
+
+An unrecognized `kind` fails policy loading, so a missing registration
+is caught at startup rather than at the first request that needed it.
+
+## Generated API docs
+
+[docs.rs/praxis-policy](https://docs.rs/praxis-policy), built with all
+features so the feature-gated re-exports are visible.
+
+The crates are versioned and released together, so one `0.2`
+requirement covers the set.

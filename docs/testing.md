@@ -1,102 +1,100 @@
 # Testing Policy
 
-Policy is code, and it deserves tests. The behaviors worth covering are the ones
-the scenario demonstrates: a route allows the right callers, denies the wrong
-ones, redacts the right fields, and carries taint across a session. Because APL
-is declarative and evaluated by the runtime, you can test a route by loading a
-policy and driving operations through it, asserting the outcome, without
-standing up a live backend.
+Policy is code, and it deserves tests. Because APL is declarative and
+evaluated by the runtime, a route can be tested by loading a policy and
+driving operations through it, asserting the outcome, without standing
+up a live backend.
 
 ## What to test
 
 For each route, cover the outcomes its policy produces:
 
-- **Allow**: a caller with the required attributes passes and the operation
-  forwards.
-- **Deny**: a caller missing a required attribute is rejected, with the expected
-  reason code.
-- **Redaction**: a field is present for an entitled caller and redacted for an
-  unentitled one (the "same request, different data" outcomes).
-- **Information flow**: a session that acquired a taint label is blocked on a
-  later operation that gates on it.
-- **Delegation**: a passing caller mints a token with the requested scope, and a
-  post-check denies when the granted scope is short.
+- **Allow**: a caller with the required attributes passes and the
+  operation forwards.
+- **Deny**: a caller missing a required attribute is rejected, with the
+  expected reason code.
+- **Redaction**: a field is present for an entitled caller and redacted
+  for an unentitled one.
+- **Information flow**: a session that acquired a taint label is blocked
+  on a later operation that gates on it.
+- **Delegation**: a passing caller mints a token with the requested
+  scope, and a post-check denies when the granted scope is short.
 
-## A table-driven policy test
+## Testing the policy alone
 
-Load a policy into a manager, drive routes through it with a fake backend, and
-assert the outcome. The tutorial ships this as a working template you can copy:
-[`examples/tutorial/tests/policy_tests.rs`](https://github.com/praxis-proxy/policy/tree/main/examples/tutorial/tests/policy_tests.rs).
-The setup is a small helper:
+To assert on what a policy block compiles to, without an engine, use the
+`test-util` feature of `praxis-policy-apl-core`:
 
-```rust
-async fn manager_with(policy: &str) -> Arc<PluginManager> {
-    let mgr = Arc::new(PluginManager::default());
-    praxis_policy::install_builtins(&mgr);
-    mgr.load_config_yaml(policy).expect("policy should load");
-    mgr.initialize().await.expect("initialize");
-    mgr
+```toml
+[dev-dependencies]
+praxis-policy-apl-core = { version = "0.2", features = ["test-util"] }
+```
+
+`compile_test_policy(source, yaml)` compiles a document with a `route:`
+block and any `plugins:` declarations; `compile_test_route` returns just
+the compiled route. A block declaring no APL term compiles to an empty
+route rather than vanishing, so a test that a section carries no policy
+asserts `route.declared_phases().is_empty()` rather than an absence.
+
+This replaces the removed `compile_config`, which accepted a route shape
+that production never used.
+
+## Testing through the engine
+
+For behavior rather than compilation, load the policy into an engine and
+drive operations through it:
+
+```rust,ignore
+async fn engine_with(policy: &str) -> Arc<PolicyEngine> {
+    let engine = Arc::new(PolicyEngine::default());
+    praxis_policy::install_builtins(&engine);
+    engine.load_config_yaml(policy).expect("policy should load");
+    engine.initialize().await.expect("initialize");
+    engine
 }
 ```
 
-Then a table keeps the allow/deny matrix readable, one row per case:
+A table keeps the allow and deny matrix readable, one row per case.
+Anonymous callers are enough to exercise structural rules
+(authentication gates, argument guards, `result` pipelines) with no IdP.
+Identity-dependent rules need a token, which means either a real IdP or
+a scripted transport.
 
-```rust
-#[tokio::test]
-async fn external_email_denied_with_custom_code() {
-    let mgr = manager_with(POLICY).await;
-    let outcome = mediate(
-        &mgr,
-        &Caller::anonymous(),
-        "send_email",
-        json!({ "to": "x@evil.example", "external": true }),
-        |args| backends::dispatch("send_email", args),
-    )
-    .await;
-    assert!(matches!(
-        outcome,
-        Outcome::Denied { code, .. } if code == "email.external_blocked"
-    ));
-}
-```
+## Testing what reaches outside the process
 
-`mediate()` here is the tutorial's harness wrapper around the host dispatch
-loop, not a PPE API; in your own host you would drive the same route through
-your own loop and assert on the result. Anonymous callers are enough to exercise
-structural rules (authentication gates, argument guards, `result` pipelines)
-with no IdP. For identity-dependent rules, mint a token the way the tutorial's
-`idp` helper does.
+Plugins that fetch JWKS, exchange tokens, or dispatch approvals go
+through the host's `HttpTransport`, which makes their failure paths
+testable without a server. `praxis_policy_core::http_testing` provides
+`FakeTransport`, a scripted transport that makes the cases a mock server
+cannot reach assertable without sleeping: a timeout, a connect failure,
+a key rotation between two fetches.
 
-A stateful taint test follows the same shape but shares one session id across
-two calls: read a sensitive route, then assert a later `send_email` on the same
-session is denied on the taint label. [Session Tainting](apl/tainting.md)
-covers what the label means and how long it survives.
-
-## Scenario checks
-
-Beyond unit tests, each tutorial module binary supports a `--check` flag that
-runs its scripted scenario and exits non-zero if the outcome drifts. `make
-tutorial-check` boots the tutorial IdP, runs every module's check, and tears it
-down. This is a lightweight way to pin end-to-end behavior (including the
-identity- and delegation-backed paths) in CI.
+Those are the branches worth covering. A token exchange that returns a
+short scope, a decision point that denies, an IdP that is unreachable:
+policy exists to handle them, so a test that only covers the happy path
+proves the least interesting half.
 
 ## Integration coverage
 
-Unit-evaluating a route proves the policy logic. It does not prove the plugins
-it dispatches behave correctly end to end. For effects that call out (a PDP
-resolver, a delegator, a PII scanner), add an integration test that exercises
-the real plugin through the manager, so the interaction is covered and not just
-the policy's intent. Test the failure paths too: a PDP that denies, a token
-exchange that returns a short scope, a scanner that flags content. Those are the
-branches policy exists to handle.
+Unit-evaluating a route proves the policy logic. It does not prove the
+plugins it dispatches behave correctly end to end. For effects that call
+out, add an integration test that exercises the real plugin through the
+engine, so the interaction is covered and not just the policy's intent.
+
+The Valkey session store's tests are the standing example of the limit
+here: they are `#[ignore]`-gated and need `VALKEY_TEST_URL` pointing at a
+real server, because a session store is not meaningfully covered by a
+fake. That component is what makes session taint survive a reload or
+span a replica, so it is worth running them for real.
 
 ## Running
 
-```bash
-cargo test -p cpex-tutorial     # the policy tests above
-cargo test --workspace          # everything, including the runtime and APL suites
+```console
+cargo nextest run --workspace          # everything
+cargo nextest run -p praxis-policy-apl-core --lib
+make test                              # both feature passes, as CI runs them
 ```
 
-Copy
-[`examples/tutorial/tests/policy_tests.rs`](https://github.com/praxis-proxy/policy/tree/main/examples/tutorial/tests/policy_tests.rs)
-as the starting point for tests against your own policy.
+Tests run twice, once with default features and once with
+`--all-features`. The facade's `default` is empty, so its tests are
+feature-gated and a single pass would hide them.

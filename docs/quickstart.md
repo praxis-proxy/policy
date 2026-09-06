@@ -1,45 +1,76 @@
 # Quick Start
 
-This walks through standing up PPE as an enforcement point and running the
-[scenario](overview.md): the `get_employee` route that authorizes by role and
-redacts a field by permission.
+Standing up PPE as an enforcement point, then running the
+[scenario](overview.md): a `get_employee` route that authorizes by role
+and redacts a field by permission.
 
-You need Rust 1.96 or newer ([install with rustup](https://rustup.rs)). Section
-4 runs the tutorial's first module, which lives in the repo, so clone it first:
-`git clone https://github.com/praxis-proxy/policy.git && cd policy`, and run
-`cargo` commands from that root.
+You need Rust 1.96 or newer ([install with rustup](https://rustup.rs)).
+The toolchain is pinned in the repository, so `cargo build` picks the
+right one.
 
 ## 1. Add PPE
 
-```bash
-cargo add cpex --features builtins
+```toml
+praxis-policy = { version = "0.2", features = ["builtins"] }
 ```
 
-The `builtins` feature compiles in the bundled plugins and PDPs (JWT identity,
-OAuth delegation, PII scanner, audit logger, Cedar, CEL). For a smaller build,
-opt into a granular subset: `jwt`, `cedar`, `pii`, and so on (see
-[Builtins](builtins.md)).
+`builtins` compiles in every bundled extension: JWT identity, OAuth
+delegation, CIBA elicitation, the Cedar, CEL and OPA decision points,
+and the Valkey session store. For a smaller build, name a subset
+instead: `features = ["jwt", "cedar"]`. See [Builtins](builtins.md).
+
+The default build is the engine alone.
 
 ## 2. Register the runtime
 
-Create a `PluginManager`, register the enabled builtin factories, and install
-the APL config visitor in one call:
+Create the engine, register the enabled builtin factories, and install
+the APL config visitor:
 
-```rust
+```rust,ignore
 use std::sync::Arc;
-use praxis_policy::PluginManager;
+use praxis_policy::PolicyEngine;
 
-let mgr = Arc::new(PluginManager::default());
-praxis_policy::install_builtins(&mgr);
+let engine = Arc::new(PolicyEngine::default());
+
+// Registers every enabled builtin factory and installs the APL visitor.
+praxis_policy::install_builtins(&engine);
 ```
 
-After this, the manager knows every builtin `kind` your features enabled, and
-APL routes can reference them.
+Without the `builtins` feature, register your own factories and install
+the visitor yourself:
+
+```rust,ignore
+use std::sync::Arc;
+use praxis_policy::{PolicyEngine, register_apl, AplOptions};
+
+let engine = Arc::new(PolicyEngine::default());
+engine.register_factory(MyIdentityFactory);
+register_apl(&engine, AplOptions::default());
+```
+
+**Give it an HTTP transport if anything reaches outside the process.**
+PPE performs no outbound HTTP of its own, so a plugin that fetches
+JWKS, exchanges a token, or dispatches a CIBA prompt has nowhere to
+send its request until a host supplies one. A host with its own client
+injects it; a host without one uses the bundled implementation, behind
+the non-default `http-hyper` feature:
+
+```rust,ignore
+// A host with its own client, one pool and one trust store for the process.
+engine.set_http_transport(my_transport);
+
+// Or the bundled hyper implementation.
+praxis_policy::install_default_http_transport(&engine);
+```
+
+Plugins that reach outward must also declare the `perform_http`
+capability, or the engine refuses to start and names what is missing.
 
 ## 3. Write the policy
 
 `routes:` is a list, one entry per operation. This route matches the
-`get_employee` tool, authorizes by role, and redacts on the wire by permission:
+`get_employee` tool, authorizes by role, and redacts on the wire by
+permission:
 
 ```yaml
 routes:
@@ -56,57 +87,53 @@ routes:
       employee_id: "str | mask(4)"
 ```
 
-The `require(authenticated)` and `require(role.hr)` predicates read attributes
-resolved from the caller's verified token. How those attributes get populated is
-covered in [Identity](apl/identity.md); for now, an identity plugin (for example
-`identity/jwt`) resolves the subject and roles before policy runs.
+`require(authenticated)` and `require(role.hr)` read attributes resolved
+from the caller's verified token. [Identity](apl/identity.md) covers how
+those attributes get there; for now, an identity plugin such as
+`identity/jwt` resolves the subject and roles before policy runs.
 
-## 4. Run it
+## 4. Load and run
 
-The fastest way to see PPE actually run is the tutorial's first module, a
-complete program you can execute now:
-
-```bash
-cargo run -p cpex-tutorial --example m01_hello
+```rust,ignore
+engine.load_config_yaml(policy)?;
+engine.initialize().await?;
 ```
 
-It builds a `PluginManager`, installs the builtins, loads a policy, and
-dispatches two operations. The setup is the four lines a host writes:
+Loading is where mistakes surface. An unknown key fails and names its
+replacement, an unrecognized plugin `kind` fails because no factory
+registered it, and under the default `dispatch: policy` a declared
+plugin that no policy reaches fails by name. A configuration that loads
+is one where every key does something.
 
-```rust
-let mgr = Arc::new(PluginManager::default());
-praxis_policy::install_builtins(&mgr);
-mgr.load_config_yaml(policy).unwrap();
-mgr.initialize().await.unwrap();
+The repository carries two runnable programs under
+[`crates/ppe-core/examples/`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-core/examples):
+
+```console
+cargo run -p praxis-policy-core --example plugin_demo
+cargo run -p praxis-policy-core --example cmf_capabilities_demo
 ```
 
-Expected output:
+Both run in `dispatch: hooks` mode and show the plugin and hook
+machinery rather than APL policy. Their README explains what each one
+demonstrates.
 
-```
-▸ anonymous → get_compensation (route requires authentication)
-  ✗ DENIED   [routes.tool:get_compensation.apl.pre_invocation[0]] access denied
-
-▸ anonymous → search_repos (route has no rule)
-  ✓ ALLOWED  {"visibility":"public","repositories":[{"name":"brand-site","visibility":"public"}]}
-```
-
-The `get_employee` policy above follows the same model. Once a caller has an
-identity, its `result` pipeline produces the redaction outcomes:
+## What the policy produces
 
 - An HR caller with `view_ssn` receives the full record.
-- An HR caller without `view_ssn` receives the record with `ssn` redacted before
-  it leaves PPE.
-- A non-HR caller is denied at `require(role.hr)`; the call never reaches the
-  backend.
+- An HR caller without `view_ssn` receives the record with `ssn`
+  redacted before it leaves PPE.
+- A non-HR caller is denied at `require(role.hr)`, and the call never
+  reaches the backend.
 
 ## Next
 
-- [Use Cases](use-cases.md): the full set of controls running end-to-end behind
-  a real gateway.
-- [APL](apl/README.md): the full language: predicates, effects, field pipelines,
-  phases.
-- [Identity](apl/identity.md): resolving callers into the attributes policy
-  reads.
-- [PDP Integration](apl/pdp.md): delegating decisions to Cedar, CEL, or an
-  external engine.
-- [Delegation](apl/delegation.md): minting scoped downstream credentials.
+- [Use Cases](use-cases.md): the full set of controls running end to end
+  behind a real gateway.
+- [APL](apl/README.md): the language, and its
+  [normative grammar](apl-grammar.md).
+- [Configuration](configuration.md): the document, its keys, and both
+  dispatch modes.
+- [Identity](apl/identity.md): resolving callers into the attributes
+  policy reads.
+- [Delegation](apl/delegation.md): minting scoped downstream
+  credentials.

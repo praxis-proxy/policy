@@ -11,25 +11,48 @@ exactly how and when effects run.
 A **hook** is a named interception point. The host invokes a hook at an
 operation boundary (before a tool call, after an LLM completion, around a prompt
 or resource fetch), and the plugin manager runs the plugins registered there.
-Hooks are where APL routes attach: a route's `policy` phase runs at the
-pre-invocation hook, its `result` phase at the post-invocation hook.
+Hooks are where routes attach: a route's `authorization.pre_invocation`
+phase runs at the pre-invocation hook, its `result` phase at the
+post-invocation hook.
 
-When an effect says `plugin(pii-scan)` or `delegate(workday-oauth)`, it is
-naming a plugin registered on the relevant hook. The effect is the policy-level
-intent; the plugin is the code that runs.
+When an effect says `run(pii-scan)` or `delegate(workday-oauth)`, it is
+naming a plugin registered on the relevant hook. The effect is the
+policy-level intent; the plugin is the code that runs.
+
+The hook names a plugin declares in `hooks:` come from a fixed table:
+
+| Family | Hooks |
+|---|---|
+| CMF | `cmf.tool_pre_invoke`, `cmf.tool_post_invoke`, `cmf.llm_input`, `cmf.llm_output`, `cmf.prompt_pre_invoke`, `cmf.prompt_post_invoke`, `cmf.resource_pre_fetch`, `cmf.resource_post_fetch` |
+| HTTP | `http.request`, `http.response` |
+| Identity | `identity.resolve` |
+| Delegation | `token.delegate` |
+| Elicitation | `elicit` |
+
+`http.response` is the return half of the generic HTTP path, installed
+when a global `result:` or `post_invocation:` block exists. Response
+bodies are not modeled; the hook covers response headers and extensions,
+and the host fires it explicitly. Before doing so, review global post
+steps: previously inert HTTP steps become active, and `result.*` is
+absent for a request carrying no entity.
+
+A host may declare hooks of its own with the `define_hooks!` macro,
+which emits a hook's name and its routing metadata together so a name
+without a metadata row cannot be written. See
+`crates/ppe-core/examples/plugin_demo.rs`.
 
 ## The plugin manager
 
-The `PluginManager` owns registration, ordering, capability filtering, timeouts,
-and error isolation. A plugin can:
+`PolicyEngine` owns registration, ordering, capability filtering,
+timeouts, and error isolation. A plugin can:
 
 - **allow** the operation to continue,
 - **block** it with a violation (surfaced as a deny), or
 - **modify** the payload, using copy-on-write isolation so one plugin's changes
   are visible to the next without mutating shared state.
 
-This is the substrate APL effects compile down to. A `deny` is a block; a
-`redact` is a modify; a `plugin(...)` call is a dispatch.
+This is the substrate APL effects compile down to. A `deny` is a block, a
+`redact` is a modify, and a `run(...)` step is a dispatch.
 
 ## Execution modes
 
@@ -49,6 +72,10 @@ sequential -> transform -> audit -> concurrent -> fire_and_forget
 | `fire_and_forget` | background, after all phases | no | no | telemetry, async audit |
 | `disabled` | not loaded | — | — | plugin off |
 
+Modes and their ordering apply under `dispatch: hooks`. Under the default
+`dispatch: policy` a step names the one plugin to run, so nothing orders
+a hook's entries and a per-plugin `priority:` is a load error.
+
 Error handling is set separately with `on_error` (`fail`, `ignore`, or
 `disable`), independent of mode. A `sequential` policy plugin with `on_error:
 fail` denies the operation if it errors; an `audit` plugin with `on_error:
@@ -58,12 +85,14 @@ ignore` never blocks the request even if logging fails.
 
 Write a plugin when policy needs an effect the builtins do not provide: a custom
 validator, a bespoke PDP resolver, an integration with an internal service.
-Depend on the lean
-[`cpex-sdk`](https://github.com/praxis-proxy/policy/tree/main/crates/ppe-sdk)
-crate for the `Plugin` and `HookHandler` traits rather than the full runtime.
+Write it against
+[`praxis_policy_core::prelude`](https://docs.rs/praxis-policy-core/latest/praxis_policy_core/prelude/index.html),
+which carries the `Plugin` and `HookHandler` traits, payloads, results,
+and the CMF types. There is no separate SDK crate.
 Declare the plugin's capabilities so it receives only the context it needs (see
 [Extensions & Capability-Gating](extensions.md)), register it on a hook, and
 reference it from APL by its `kind` or name.
 
-The bundled plugins (identity, delegation, PII, audit, PDPs) are catalogued in
-[Builtins](builtins.md); their wiring is in [Configuration](configuration.md).
+The bundled plugins and decision points are catalogued in
+[Builtins](builtins.md); their wiring is in
+[Configuration](configuration.md).

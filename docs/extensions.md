@@ -105,6 +105,39 @@ predicate can read.
 
 ### Write capabilities
 
+| Capability | Grants |
+|---|---|
+| `append_labels` | attach taint or classification labels |
+| `append_delegation` | extend the delegation chain |
+| `write_headers` | set or remove request and response headers |
+| `write_candidate_constraint` | narrow the backends the router may select |
+
+Reading a candidate constraint is ungated: the host consumes it after
+the pipeline rather than through a filtered plugin view. If a second
+writer is ever introduced, composition should be monotonic, allow-sets
+intersecting and deny-sets unioning, so no writer can weaken another's
+constraint.
+
+### Gating an action rather than a slot
+
+`perform_http` is the odd one out. Every capability above gates a *slot*
+of contextual state, widening or narrowing what a plugin can see and
+set. `perform_http` gates an **action**: reaching outside the process at
+all.
+
+It is the one capability where withholding it stops the call rather than
+degrading it. A plugin denied `read_claims` sees fewer attributes and
+carries on; a plugin denied its IdP call and carrying on regardless
+would be deciding without the answer it was supposed to fetch, which
+fails open. So the engine refuses to start instead, naming the plugin
+and the capability to add.
+
+Any plugin that fetches JWKS, exchanges a token, or dispatches a CIBA
+prompt must declare it. See [Builtins](builtins.md) for how the bundled
+ones do.
+
+### Write capabilities
+
 Three capabilities grant write tokens rather than read access:
 
 | Capability | Grants |
