@@ -2,14 +2,14 @@
 
 ## A running scenario
 
-Picture one agent serving several people. It answers questions by calling tools
+One agent serves several people. It answers questions by calling tools
 (an HR records service, a code repository, an email sender), invoking other
 agents over A2A, running inference, and fetching prompts and resources. The
 backends are shared. The callers are not: an HR analyst, an engineer, and a
 support rep each drive the same agent with different identities and different
 entitlements.
 
-The **R1–R6** labels in the diagram are the six requirements this scenario
+The R1–R6 labels in the diagram are the six requirements this scenario
 places on the enforcement point. Each is a control PPE applies, and each maps to
 a later page:
 
@@ -19,7 +19,7 @@ a later page:
 | R2 | Same request, different data (redact per identity) | [Effects](apl/effects.md) |
 | R3 | Enforce on inputs and results (validate args, shape output) | [APL](apl/README.md) |
 | R4 | Delegate downstream with a narrower credential | [Delegation](apl/delegation.md) |
-| R5 | Remember the session (carry state across calls) | [Session Tainting](apl/tainting.md) |
+| R5 | Remember the session (carry state across calls) | [Session Taint](apl/tainting.md) |
 | R6 | Out-of-band elicitations (human approval) | [Elicitation](apl/elicitation.md) |
 
 The agent's LLM decides which operation to run. It is untrusted. PPE sits
@@ -74,7 +74,7 @@ routes:
 An email with no sensitive content in its body is still blocked if the session
 previously read secret data. This is a write-down control, and the LLM cannot
 route around it because the taint lives in PPE, not in the conversation. See
-[Session Tainting](apl/tainting.md) for how labels propagate and persist.
+[Session Taint](apl/tainting.md) defines label propagation and persistence.
 
 ## Where the boundary sits
 
@@ -86,7 +86,7 @@ agent controls its outbound calls. An in-framework integration controls
 operations as the runtime issues them. The same APL policy enforces in all
 three. [Deployment](deployment.md) walks through each.
 
-## What to read next
+## Related documentation
 
 - [APL](apl/README.md): the enforcement-pipeline configuration.
 - [Identity](apl/identity.md): how callers are resolved into the attributes

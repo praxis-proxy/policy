@@ -1,23 +1,21 @@
 # Testing Policy
 
-Policy is code, and it deserves tests. Because APL is declarative and
-evaluated by the runtime, a route can be tested by loading a policy and
-driving operations through it, asserting the outcome, without standing
-up a live backend.
+Test APL by loading a policy, driving operations through the runtime, and
+asserting each outcome. Most route tests need no live backend.
 
 ## What to test
 
 For each route, cover the outcomes its policy produces:
 
-- **Allow**: a caller with the required attributes passes and the
+- Allow: a caller with the required attributes passes and the
   operation forwards.
-- **Deny**: a caller missing a required attribute is rejected, with the
+- Deny: a caller missing a required attribute is rejected, with the
   expected reason code.
-- **Redaction**: a field is present for an entitled caller and redacted
+- Redaction: a field is present for an entitled caller and redacted
   for an unentitled one.
-- **Information flow**: a session that acquired a taint label is blocked
+- Information flow: a session that acquired a taint label is blocked
   on a later operation that gates on it.
-- **Delegation**: a passing caller mints a token with the requested
+- Delegation: a passing caller mints a token with the requested
   scope, and a post-check denies when the granted scope is short.
 
 ## Testing the policy alone
@@ -84,7 +82,7 @@ engine, so the interaction is covered and not just the policy's intent.
 The Valkey session store's tests are the standing example of the limit
 here: they are `#[ignore]`-gated and need `VALKEY_TEST_URL` pointing at a
 real server, because a session store is not meaningfully covered by a
-fake. That component is what makes session taint survive a reload or
+fake. That component makes Session Taint survive a reload or
 span a replica, so it is worth running them for real.
 
 ## Running

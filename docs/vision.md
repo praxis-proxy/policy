@@ -7,7 +7,7 @@ steered by injected content, confused by tool output, or simply wrong.
 Authorization, delegation, and information-flow control cannot live inside that
 model.
 
-PPE puts them at the boundary. It is a deterministic reference monitor between
+PPE puts them at the boundary. It is a deterministic Reference Monitor between
 the untrusted LLM and the capabilities it invokes. Every operation passes
 through PPE, which decides what happens using state the model cannot see or
 forge.
@@ -17,22 +17,22 @@ forge.
 A policy decision is only as trustworthy as the state it reads. PPE evaluates
 each operation against state it owns, not state the LLM supplies:
 
-- **Identity**: who the caller is, resolved from verified tokens (subject,
+- Identity: who the caller is, resolved from verified tokens (subject,
   roles, permissions, claims, workload identity).
-- **Delegation chains**: which credentials were minted on whose behalf, and with
+- Delegation chains: which credentials were minted on whose behalf, and with
   what scope.
-- **Taint labels**: what sensitive data this session has already touched.
-- **Audit log**: an append-only record of every decision.
+- Session Taint: labels recording the sensitive data this session has
+  touched.
+- Audit log: an append-only record of every decision.
 
 The LLM never sees these and cannot rewrite them. That is what makes PPE a
-reference monitor rather than a suggestion.
+Reference Monitor rather than an advisory control.
 
 ## Policy is configuration
 
-You do not write enforcement logic in application code. You write **APL**
-(Authorization Policy Language): the declarative configuration that defines each
-operation's enforcement pipeline, attaching its conditions and effects to the
-operation they govern.
+Write enforcement logic in APL (Authorization Policy Layer), not application
+code. APL configuration defines each operation's pipeline and binds predicates
+and effects to the operation they govern.
 
 ```yaml
 routes:
@@ -57,9 +57,9 @@ Enforcement is three concerns, separated cleanly:
 
 | Layer | Role |
 |-------|------|
-| **APL** | How you define policy: declarative configuration that sequences the controls in an operation's enforcement pipeline. |
-| **CMF** (canonical message format) | What you evaluate. A protocol-agnostic envelope carrying identity, labels, delegation, and content. |
-| **Pipeline** (hooks, plugins, execution) | How effects run. The mechanism that executes a policy's effects at the boundary. |
+| APL | How you define policy: declarative configuration that sequences the controls in an operation's enforcement pipeline. |
+| Common Message Format (CMF) | What APL evaluates: a protocol-agnostic envelope carrying identity, labels, delegation, and content. |
+| Pipeline (hooks, plugins, execution) | How effects run. The mechanism that executes a policy's effects at the boundary. |
 
 APL leads. CMF gives policy a uniform thing to evaluate across tools, A2A,
 inference, prompts, and resources. The pipeline is the supporting execution
@@ -77,7 +77,7 @@ framework forces it.
 
 A style guardrail at the prompt level and a hard information-flow control at an
 infrastructure boundary are the same kind of object: an APL policy evaluated by
-a PPE reference monitor. Only the placement changes.
+a PPE Reference Monitor. Only the placement changes.
 
 ## Where PPE runs
 

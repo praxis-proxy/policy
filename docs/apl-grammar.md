@@ -1,10 +1,10 @@
-# APL: the grammar
+# APL Grammar
 
-APL is the language a policy is written in. This document is normative: where it
-and the parser disagree, one of them is a bug, and
-`crates/ppe-apl-core/tests/conformance/` is what decides which. Every production
-below has an accepted and a rejected case there, and every wart this document
-admits to has a case pinning it so nobody quietly "fixes" it.
+The normative grammar for APL (Authorization Policy Layer) follows. Any
+disagreement with the parser is a defect;
+`crates/ppe-apl-core/tests/conformance/` determines the accepted behavior. Each
+production below has accepted and rejected conformance cases. Tests also pin
+each retained compatibility behavior.
 
 It replaces a grammar that existed only as comments inside a 5,600-line parser,
 and those comments were wrong about quoting, escapes, attribute paths and numbers.
@@ -32,9 +32,9 @@ from expecting one position to accept another's forms.
 
 | Position | YAML | Accepts |
 |---|---|---|
-| **Rule** | an entry in `authorization.pre_invocation:` / `.post_invocation:` | a rule: a predicate, optionally `:` and an action |
-| **Step** | the same list | a step: `run(...)`, `taint(...)`, `delegate(...)`, an elicitation verb, a PDP call, `sequential:` / `parallel:`, or a `when:` / `do:` map |
-| **Stage** | a value in `args:` / `result:` | a pipe chain of stages |
+| Rule | an entry in `authorization.pre_invocation:` / `.post_invocation:` | a rule: a predicate, optionally `:` and an action |
+| Step | the same list | a step: `run(...)`, `taint(...)`, `delegate(...)`, an elicitation verb, a PDP call, `sequential:` / `parallel:`, or a `when:` / `do:` map |
+| Stage | a value in `args:` / `result:` | a pipe chain of stages |
 
 A rule list and a step list are the same YAML list; an entry is read as a step
 when it opens with a step verb and as a rule otherwise.
@@ -54,12 +54,12 @@ escape     = "\\" | "\'" | '\"' ;
 Both quote styles are accepted. The closing quote must be the same character, so
 `"it's"` and `'say "hi"'` each carry the other quote as content.
 
-**The escape set is exactly `\\`, `\'` and `\"`.** It is the minimum that closes
+The escape set is exactly `\\`, `\'` and `\"`. It is the minimum that closes
 the rule: without it there is no way to write a quote inside a literal delimited
 by
 that quote. An unrecognized escape is an error naming the character.
 
-`\n` and `\t` are deliberately **not** escapes. A deny reason rides in a violation
+`\n` and `\t` are deliberately not escapes. A deny reason rides in a violation
 field a host renders, so a multi-line reason there is a display problem rather than
 a missing capability.
 
@@ -107,7 +107,7 @@ was already refused while `-.5` parsed as a float, and that asymmetry is gone.
 `1e5` is refused by name rather than producing a trailing-token error that never
 mentioned it.
 
-**`007` is the integer 7.** A leading zero does not change a value. Reading it as
+`007` is the integer 7. A leading zero does not change a value. Reading it as
 octal would alter one silently, which is the failure mode this work exists to
 remove.
 
@@ -123,7 +123,7 @@ names `!`, and a path beginning `not.` is refused.
 
 There is no comment syntax inside policy text. Use YAML comments around it.
 
-Positions in diagnostics are **character** offsets. They were byte offsets, and the
+Positions in diagnostics are character offsets. They were byte offsets, and the
 offending character was rendered by casting a single byte, so a message could name
 a character that was not in the input.
 
@@ -162,7 +162,7 @@ Precedence, loosest to tightest:
 A bare path is true when the attribute is truthy. `exists(path)` is true when the
 key is present whatever its value, which is a different question.
 
-**A comparison names its attribute first.** `'x' == a` is rejected naming the
+A comparison names its attribute first. `'x' == a` is rejected naming the
 accepted order rather than rewritten, because rewriting would accept text whose
 meaning the author only guessed at.
 
@@ -242,7 +242,7 @@ elicit_verb = "require_approval" | "confirm" | "require_step_up"
             | "require_attestation" | "request_info" | "require_review" ;
 ```
 
-**`run(name)` is the only form that invokes a plugin**, in a step list and in a
+`run(name)` is the only form that invokes a plugin, in a step list and in a
 pipe chain alike. `plugin(name)` was a second spelling and is refused naming this
 one. The word survives as a noun: `plugin:` is a keyword argument inside
 `delegate(...)`.
@@ -254,10 +254,9 @@ Six elicitation verbs share one argument parser, so they take the same keyword
 arguments (`from:`, `channel:`, `purpose:`, `scope:`, `timeout:`, `on_error:`) and
 differ only in the kind they record.
 
-> A `scope:` string is re-parsed as a predicate **at request time**, not at load.
-> A lexically invalid scope therefore surfaces as a runtime deny rather than a load
-> error. That asymmetry is known and is the one place a policy fault is not found
-> at load.
+A `scope:` string is re-parsed as a predicate at request time, not at load. A
+lexically invalid scope therefore produces a runtime deny rather than a load
+error. This is the only policy syntax fault not reported at load.
 
 ### PDP calls
 
@@ -296,7 +295,7 @@ A step may be a YAML map instead of a string, for the forms that carry a body:
 The key set is closed. A misspelling such as `whens:` is an error naming the key,
 and the message points at `pdp(whens):` in case a custom dialect was meant.
 
-The closure is on **map-bodied** keys. A key with a sequence body is the
+The closure is on map-bodied keys. A key with a sequence body is the
 multi-effect shorthand (`- "predicate": [effects]`), so `whens: [deny]` stays a
 rule on an attribute named `whens`, and `whens: { on_deny: [...] }` is the error.
 
@@ -393,7 +392,7 @@ one phase.
 `attribute_files:`, `pdp:` and `session_store:` are `global:` keys and nowhere
 else: all three are process-global.
 
-`plugins:` on a route is a **map** of per-plugin overrides. A `plugins:` *list* was
+`plugins:` on a route is a map of per-plugin overrides. A `plugins:` *list* was
 an activation list and is a load error in policy mode; a policy names the plugin
 it
 runs.
@@ -428,27 +427,27 @@ per-plugin `conditions:`, which policy mode expresses as a predicate on a step.
 Each of these is a deliberate decision, and each has a case in the corpus so it
 cannot be removed by accident.
 
-**A bare stage argument needs no quotes.** `enum(low, medium, high)` and
+A bare stage argument needs no quotes. `enum(low, medium, high)` and
 `regex(^[A-Z]+$)` are legal. Requiring quotes would rewrite working field stages
 for no gain in meaning. What a stage argument does not get is the right to open a
 literal and not close it.
 
-**`007` is 7.** See [Numbers](#numbers).
+`007` is 7. See [Numbers](#numbers).
 
-**`parse_pipeline("")` is an empty pipeline, while an empty stage inside a chain
+`parse_pipeline("")` is an empty pipeline, while an empty stage inside a chain
 is
-an error.** Two positions, two answers: one takes a possibly-absent field value,
+an error. Two positions, two answers: one takes a possibly-absent field value,
 the other is a chain whose author named a stage.
 
-**A custom PDP dialect is unverifiable at load.** `pdp(workload):` is accepted
+A custom PDP dialect is unverifiable at load. `pdp(workload):` is accepted
 whether or not a resolver for `workload` will ever register, because resolvers
 register at runtime and the load cannot know.
 
-**Static tags only, for `authentication:` inheritance.** Identity resolution walks
+Static tags only, for `authentication:` inheritance. Identity resolution walks
 a route's static tags while the plugin resolver merges the request's too. The
 asymmetry is intended for now and tracked separately.
 
-**An elicitation `scope:` is parsed at request time.** See [Steps](#steps).
+An elicitation `scope:` is parsed at request time. See [Steps](#steps).
 
 ---
 

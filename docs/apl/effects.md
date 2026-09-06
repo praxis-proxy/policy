@@ -1,6 +1,6 @@
 # Effects and Sequencing
 
-An APL rule does something. That something is an **effect**. Effects are the
+An APL rule does something. That something is an effect. Effects are the
 building blocks of policy: a `pre_invocation:` block is an ordered list of them,
 and they run in sequence until one denies.
 
@@ -13,7 +13,7 @@ and they run in sequence until one denies.
 | `plugin(name)` (alias `run(name)`) | Invoke a registered plugin (PII scan, audit log, custom check). |
 | `delegate(name, ...)` | Mint a downstream credential via a delegator plugin. See [Delegation](delegation.md). |
 | `require_approval(name, ...)` / `confirm(...)` / `require_step_up(...)` / `require_attestation(...)` / `request_info(...)` / `require_review(...)` | Ask a human and suspend the operation until they respond. See [Elicitation](elicitation.md). |
-| `taint(label[, scope])` | Attach a label to the session or message. See [Session Tainting](tainting.md). |
+| `taint(label[, scope])` | Attach a label to the session or message. See [Session Taint](tainting.md). |
 | `restrict: { ... }` | Narrow the set of backends the router may select from. See [Backend Restriction](restrict.md). |
 | field pipelines | Validate or transform `args`/`result` fields. See [APL](README.md). |
 | PDP call (`cedar:`, `cel:`, `opa(...)`) | Delegate the decision to a policy engine. See [PDP Integration](pdp.md). |
@@ -38,8 +38,7 @@ authorization:
 ```
 
 If `require(role.hr)` denies, the Cedar call and the token exchange never run.
-This is both faster and safer: you do not mint a credential for a caller you
-were going to reject.
+This ordering avoids a PDP call and credential mint for a rejected caller.
 
 ## Reactions: on_allow and on_deny
 
@@ -80,8 +79,8 @@ authorization:
         - "run(audit-log)"
 ```
 
-**Both groups take effects, not gates.** A member is something the phase
-*does*, so `run(...)`, `taint(...)`, `deny`, and the other effects above
+Both groups take effects, not gates. A member is something the phase
+does, so `run(...)`, `taint(...)`, `deny`, and the other effects above
 are members; a predicate rule such as `require(...)`, or a PDP call, is
 not, and nesting one is a load error. Gate first and group second, as
 above, rather than trying to run the gates concurrently.

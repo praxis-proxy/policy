@@ -1,14 +1,11 @@
 # Plugins and the Execution Pipeline
 
-APL is the policy surface. The pipeline is what runs underneath it: the
-mechanism that executes a policy's effects. Most of the time you write APL and
-never touch the pipeline directly. You reach for it when you extend the set of
-effects available to policy, by adding a plugin, or when you need to understand
-exactly how and when effects run.
+APL defines policy. The execution pipeline runs its effects. Write pipeline code
+only to add an effect through a plugin or inspect effect ordering and execution.
 
 ## Hooks
 
-A **hook** is a named interception point. The host invokes a hook at an
+A hook is a named interception point. The host invokes a hook at an
 operation boundary (before a tool call, after an LLM completion, around a prompt
 or resource fetch), and the plugin manager runs the plugins registered there.
 Hooks are where routes attach: a route's `authorization.pre_invocation`
@@ -46,9 +43,9 @@ without a metadata row cannot be written. See
 `PolicyEngine` owns registration, ordering, capability filtering,
 timeouts, and error isolation. A plugin can:
 
-- **allow** the operation to continue,
-- **block** it with a violation (surfaced as a deny), or
-- **modify** the payload, using copy-on-write isolation so one plugin's changes
+- allow the operation to continue,
+- block it with a violation (surfaced as a deny), or
+- modify the payload, using copy-on-write isolation so one plugin's changes
   are visible to the next without mutating shared state.
 
 This is the substrate APL effects compile down to. A `deny` is a block, a
@@ -56,7 +53,7 @@ This is the substrate APL effects compile down to. A `deny` is a block, a
 
 ## Execution modes
 
-A plugin runs in a **mode** that fixes whether it can block, whether it can
+A plugin runs in a mode that fixes whether it can block, whether it can
 modify, and how it runs relative to others. Modes run in a fixed phase order:
 
 ```text
@@ -83,12 +80,12 @@ ignore` never blocks the request even if logging fails.
 
 ## When to write a plugin
 
-Write a plugin when policy needs an effect the builtins do not provide: a custom
-validator, a bespoke PDP resolver, an integration with an internal service.
-Write it against
+Write a Plugin Factory when APL needs an effect the builtins do not provide: a
+custom validator, a PDP resolver, or an internal-service integration. Implement
+`PluginFactory` against
 [`praxis_policy_core::prelude`](https://docs.rs/praxis-policy-core/latest/praxis_policy_core/prelude/index.html),
-which carries the `Plugin` and `HookHandler` traits, payloads, results,
-and the CMF types. There is no separate SDK crate.
+which carries the `Plugin`, `PluginFactory`, and `HookHandler` traits, payloads,
+results, and CMF types. There is no separate SDK crate.
 Declare the plugin's capabilities so it receives only the context it needs (see
 [Extensions & Capability-Gating](extensions.md)), register it on a hook, and
 reference it from APL by its `kind` or name.

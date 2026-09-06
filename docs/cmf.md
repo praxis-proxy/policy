@@ -1,33 +1,29 @@
 # Canonical Message Format
 
-APL evaluates policy against a request. The canonical message format (CMF) is the
-shape of that request: a protocol-agnostic envelope that represents any mediated
-operation in one structure, so a single policy can apply across tool calls, A2A
-methods, inference, prompts, and resources without caring which protocol carried
-them.
+APL evaluates policy against a request in the Common Message Format (CMF). This
+protocol-agnostic envelope represents every mediated operation in one structure.
+One policy therefore applies across tool calls, A2A methods, inference, prompts,
+and resources without depending on the transport protocol.
 
 ## Why a common format
 
-Without CMF, a redaction policy for tool results and a redaction policy for LLM
-output are different code against different payload types, even though they do
-the same thing. CMF gives every interception point the same representation, so
-cross-cutting policy is written once and evaluated everywhere. This is what lets
-the same APL field pipeline redact a field whether it arrived in a tool result
-or a model completion.
+Without CMF, tool-result redaction and LLM-output redaction require separate code
+for separate payload types. CMF gives every interception point the same
+representation. The same APL field pipeline can redact a field from either a
+tool result or a model completion.
 
 ## Message structure
 
 A CMF `Message` carries:
 
-- **role**: `system`, `developer`, `user`, `assistant`, or `tool`.
-- **content**: a list of typed parts: text, thinking, tool call, tool result,
+- role: `system`, `developer`, `user`, `assistant`, or `tool`.
+- content: a list of typed parts: text, thinking, tool call, tool result,
   resource, prompt request, image, video, audio, document.
-- **channel**: optional routing such as `analysis`, `commentary`, or `final`.
+- channel: optional routing such as `analysis`, `commentary`, or `final`.
 
-Because content is a list of typed parts rather than a flat string, policy can
-target precisely: scan only `tool_call` arguments, redact a field inside a
-`tool_result`, or check a `text` part for injection, without disturbing the
-rest.
+Typed content parts let policy target only `tool_call` arguments, redact a
+field inside a `tool_result`, or check a `text` part for injection without
+disturbing the rest.
 
 ## Views
 
@@ -54,7 +50,7 @@ An APL route's `policy` phase runs at the relevant `*_pre_*` hook and its
 means it covers every operation type that maps to it, rather than one protocol's
 payload.
 
-## How it connects to policy
+## APL integration
 
 CMF is the "what you evaluate" layer (see [Vision](vision.md)). Identity,
 security labels, and delegation context ride alongside the message as typed

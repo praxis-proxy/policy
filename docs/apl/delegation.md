@@ -6,7 +6,7 @@ agent, not the backend, and it carries more privilege than the operation needs.
 Delegation mints a fresh, narrowly scoped credential for the specific downstream
 call.
 
-## The requirement
+## Delegation requirement
 
 The scenario's `get_compensation` reads from a backend HR system that expects
 its own audience-scoped token with only the `read_compensation` scope. The
@@ -60,7 +60,7 @@ populates delegation attributes that later rules read.
 
 ## Choosing who the exchange is for
 
-By default a `delegate` step exchanges the **user's** token: the minted
+By default a `delegate` step exchanges the user's token: the minted
 credential speaks for the user, on-behalf-of style. Two step keys change that:
 
 | Key | Meaning | Accepts | Default |
@@ -127,18 +127,18 @@ pre_invocation:
 
 `subject: this_workload` has no inbound credential to exchange, so the delegator
 switches from RFC 8693 token exchange to an RFC 6749 §4.4
-**`client_credentials`** grant: no `subject_token` is sent, and this instance's
+`client_credentials` grant: no `subject_token` is sent, and this instance's
 identity is the OAuth client identity it already authenticates with. Nothing
 extra to configure — the delegator's existing `client_id` / `client_secret` *is*
 this instance's identity.
 
-Two consequences worth understanding before choosing this shape:
+This shape has two consequences:
 
-- **This instance is the only enforcement point.** The backend sees a token that
+- This instance is the only enforcement point. The backend sees a token that
   says "this instance" and has no idea which agent triggered the call. Whatever
   the `require` gates allow is what happens; there is no second opinion
   downstream. Gate accordingly.
-- **The minted token cannot name the calling agent.** `actor_token` is a
+- The minted token cannot name the calling agent. `actor_token` is a
   token-exchange parameter with no meaning under `client_credentials`, so it is
   not sent even if the step asks for one. Attribution to the calling agent lives
   in your audit log, not in the credential. Carrying the agent inside the token
@@ -148,7 +148,7 @@ Two consequences worth understanding before choosing this shape:
 ### Who the minted token speaks for
 
 Each exchange is attributed to exactly one principal, and the attribution is
-**derived from `subject`** rather than declared:
+derived from `subject` rather than declared:
 
 | `subject` | Attribution | Speaks for |
 |-----------|-------------|-----------|
@@ -157,7 +157,7 @@ Each exchange is attributed to exactly one principal, and the attribution is
 | `caller_workload` | `as_caller_workload` | The calling agent |
 | `this_workload` | `as_this_workload` | This instance itself |
 
-There is deliberately **no `mode` key**. If routes could declare the attribution
+APL has no `mode` key. If routes could declare the attribution
 independently of the credential they hand over, a route could claim to act on
 behalf of a user while exchanging a workload SVID. Deriving it means the
 operator states one thing — which credential — and the consequence follows.
@@ -183,7 +183,7 @@ These let policy reason about the chain itself, for example
 `require(delegation.depth <= 1)` to refuse deeply nested delegation, or the
 post-check above to enforce least privilege on what was actually granted.
 
-## How it connects to the pipeline
+## Pipeline integration
 
 `delegate` dispatches to a plugin implementing the `token.delegate` hook. The
 minted credential is recorded in the request's delegation context and the audit

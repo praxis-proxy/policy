@@ -1,8 +1,7 @@
 # Quick Start
 
-Standing up PPE as an enforcement point, then running the
-[scenario](overview.md): a `get_employee` route that authorizes by role
-and redacts a field by permission.
+Stand up a PPE Reference Monitor and run the [scenario](overview.md): a
+`get_employee` route that authorizes by role and redacts a field by permission.
 
 You need Rust 1.96 or newer ([install with rustup](https://rustup.rs)).
 The toolchain is pinned in the repository, so `cargo build` picks the
@@ -48,8 +47,8 @@ engine.register_factory(MyIdentityFactory);
 register_apl(&engine, AplOptions::default());
 ```
 
-**Give it an HTTP transport if anything reaches outside the process.**
-PPE performs no outbound HTTP of its own, so a plugin that fetches
+Install an HTTP transport if any plugin reaches outside the process. PPE
+performs no outbound HTTP of its own, so a plugin that fetches
 JWKS, exchanges a token, or dispatches a CIBA prompt has nowhere to
 send its request until a host supplies one. A host with its own client
 injects it; a host without one uses the bundled implementation, behind

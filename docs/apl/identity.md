@@ -1,11 +1,11 @@
 # Identity and IdP Integration
 
 Policy reads attributes: `role.hr`, `perm.view_ssn`, `subject.id`. Those
-attributes have to come from somewhere trustworthy. They come from identity
-resolution, which runs before policy and turns a verified credential into the
-attribute bag that predicates read.
+attributes must come from a trusted source. Identity resolution runs before
+policy and turns a verified credential into the attribute bag that predicates
+read.
 
-## The requirement
+## Identity requirement
 
 The scenario authorizes with `require(role.hr)` and redacts with
 `redact(!perm.view_ssn)`. For those to mean anything, PPE must know, for each
@@ -52,7 +52,7 @@ directly:
 | OAuth client | `client.client_id`, `client.authorized_scopes`, `client.role.<r>` |
 | Workload (SPIFFE / mTLS) | `caller_workload.spiffe_id`, `caller_workload.trust_domain` |
 
-So `require(role.hr)` is true when the verified token carried the `hr` role, and
+`require(role.hr)` is true when the verified token carried the `hr` role, and
 `redact(!perm.view_ssn)` redacts unless it carried the `view_ssn` permission.
 
 ## Multiple sources
@@ -73,7 +73,7 @@ client.authorized_scopes contains "tools:invoke"`.
 
 ### Workload identity
 
-A `role: caller_workload` resolver is the ingress for the **calling agent's**
+A `role: caller_workload` resolver is the ingress for the calling agent's
 SPIFFE JWT-SVID:
 
 ```yaml
@@ -95,21 +95,21 @@ plugins:
 The SPIFFE ID is read from the SVID's `sub` claim, and the trust domain is
 derived from it, populating `caller_workload.spiffe_id` and
 `caller_workload.trust_domain`. A token whose `sub` is not SPIFFE-shaped is
-**rejected** rather than filed into the workload slot, so anything policy finds
+rejected rather than filed into the workload slot, so anything policy finds
 there really is an attested workload.
 
-Note the distinction the bag makes between two different machine identities:
+The bag distinguishes two machine identities:
 
-- **`caller_workload`** — the attested workload on the inbound network peer. The
+- `caller_workload` — the attested workload on the inbound network peer. The
   agent calling *us*. Many different agents call through one gateway.
-- **`this_workload`** — this PPE instance's *own* attested identity, used for
+- `this_workload` — this PPE instance's *own* attested identity, used for
   outbound calls. A single principal.
 
 They are not interchangeable, and confusing them is how a token minted for one
 agent ends up presented by another. Delegation depends on the distinction — see
 [Delegation](delegation.md).
 
-## How it connects to the pipeline
+## Pipeline integration
 
 Identity resolution is a hook (`identity.resolve`) that runs ahead of the
 route's policy phase. The resolved subject is filtered by each downstream

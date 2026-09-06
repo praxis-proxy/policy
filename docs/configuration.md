@@ -63,13 +63,13 @@ its scope's set is a load error naming the scope and the set.
 | an `assertions:` direction | `headers`, `strip`, `replace_inherited` |
 | an `assertions:` header entry | `name`, `from`, `members`, `on_missing`, `encode` |
 
-Three of these are worth calling out.
+Three scopes require additional constraints.
 
 `pdp:`, `session_store:` and `attribute_files:` are `global:` only.
 They wire process-global machinery, so there is nowhere else for them
 to mean anything.
 
-`args:` and `result:` are **not** accepted under `global:`. A field
+`args:` and `result:` are not accepted under `global:`. A field
 pipeline names one field of a payload, and `global:` covers every entity
 route at once rather than carrying a payload of its own. Write the
 pipeline on each `global.defaults.<entity>:` block that has a payload,
@@ -134,7 +134,7 @@ global:
 ```
 
 `pdp:` is a sequence, one block per decision point. `session_store:`
-selects where taint labels live; without it, labels stay in an
+selects where Session Taint labels live; without it, labels stay in an
 in-process memory store and do not survive a reload or reach a second
 replica. `attribute_files:` loads the operator-maintained tree policy
 reads under `data.*`, covered in
@@ -212,7 +212,7 @@ For authorizing plain HTTP requests rather than named entities, see
 
 ## Secrets and key material
 
-There is no `${ENV}` substitution of config fields. Secrets are injected
+APL does not substitute `${ENV}` in configuration fields. Inject secrets
 through typed source enums on the plugins that need them, so a secret
 has exactly one shape and the config names where it comes from rather
 than carrying it.
@@ -228,7 +228,7 @@ client_secret_source:
 
 ## Related
 
-- [APL](apl/README.md) for the policy language itself
+- [APL](apl/README.md) for Authorization Policy Layer configuration
 - [Upgrading APL](upgrade-apl.md) for what an older configuration must
   rewrite, with a before and an after for every key
 - [Header Assertions](assertions.md) for the `assertions:` block

@@ -1,21 +1,20 @@
 # Threat Model
 
-> This threat model defines the adversary PPE assumes, the boundary it enforces,
-> and what each deployment placement does and does not cover. See
-> [Vision](vision.md) for the underlying model.
+This threat model defines the assumed adversary, the Reference Monitor boundary,
+and the coverage of each deployment placement.
 
 ## The adversary
 
 PPE assumes the LLM driving an agent is compromised, or close enough that the
 difference does not matter. Three things make it untrusted:
 
-- **Its inputs are attacker-reachable.** Prompt injection can arrive through any
+- Its inputs are attacker-reachable. Prompt injection can arrive through any
   content the model reads: user messages, tool results, fetched resources, other
   agents' replies.
-- **Its outputs are attacker-shaped.** An injected instruction becomes a tool
+- Its outputs are attacker-shaped. An injected instruction becomes a tool
   call, an argument value, an email body. The model is a confused deputy: it
   acts with the agent's authority on whoever's behalf the text says.
-- **It cannot keep secrets or enforce rules.** Anything in the context window
+- It cannot keep secrets or enforce rules. Anything in the context window
   can be exfiltrated through an allowed output channel, and any instruction in
   the prompt can be overridden by a later one.
 
@@ -23,23 +22,23 @@ The assets at stake sit behind the agent: backend data (records, code, mail),
 the credentials the agent holds, tools with side effects (payments, writes,
 messages), and the integrity of the audit trail itself.
 
-The consequence is the reference-monitor rule: authorization, delegation, and
-information-flow decisions cannot live in the model, in the prompt, or in agent
-code the model steers. They live at a boundary the model's output must cross,
-evaluated against state the model cannot see or forge.
+The consequence is the Reference Monitor rule: authorization, Token Exchange /
+Delegation, and information-flow decisions cannot live in the model, in the
+prompt, or in agent code the model steers. They live at a boundary the model's
+output must cross, evaluated against state the model cannot see or forge.
 
 ## The trust boundary
 
 PPE draws that boundary. Every operation the agent attempts crosses it; nothing
 the model emits reaches a capability directly.
 
-![The PPE trust boundary: an untrusted caller and agent on one side, mediated capabilities on the other, with the PPE reference monitor between them evaluating APL policy against identity, delegation, taint, and audit state the model cannot forge, fed by an IdP and a PDP](images/threat_model.svg)
+![The PPE trust boundary: an untrusted caller and agent on one side, mediated capabilities on the other, with the PPE Reference Monitor between them evaluating APL policy against identity, delegation, taint, and audit state the model cannot forge, fed by an IdP and a PDP](images/threat_model.svg)
 
 Everything to the left of the monitor is assumed hostile, and nothing the policy
 reads comes from there: verified tokens come from the IdP (identity provider),
-decisions from the PDP, taint labels from the session store, and the delegation
-and audit state is PPE's own. The model can ask for anything; it can influence
-none of the state the answer depends on.
+decisions from the PDP, Session Taint labels from the session store, and the
+delegation and audit state is PPE's own. The model can ask for anything; it can
+influence none of the state the answer depends on.
 
 ## Threats and controls
 
@@ -47,7 +46,7 @@ none of the state the answer depends on.
 |---|---|---|
 | Prompt-injection-driven tool misuse | injected text becomes an executed tool call | `require(...)` attribute gates and `args` validation run before dispatch; a PDP decides relationship questions ([Effects](apl/effects.md), [PDP](apl/pdp.md)) |
 | Confused deputy / privilege escalation | the agent acts with one blanket identity for all callers | identity resolved per caller from verified tokens; entitlements differ per subject, not per prompt ([Identity](apl/identity.md)) |
-| Cross-request data exfiltration (write-down) | data read in one call leaves through a later, innocent-looking call | `taint(...)` labels the session in PPE-owned state; later operations deny on the label even with clean payloads ([Session Tainting](apl/tainting.md)) |
+| Cross-request data exfiltration (write-down) | data read in one call leaves through a later, innocent-looking call | `taint(...)` labels the session in PPE-owned state; later operations deny on the label even with clean payloads ([Session Taint](apl/tainting.md)) |
 | Credential exposure and over-broad tokens | backends receive the caller's raw IdP credential | `delegate(...)` exchanges it for a fresh audience-scoped token (RFC 8693); the granted scope is verified before use ([Delegation](apl/delegation.md)) |
 | PII disclosure | sensitive values flow into arguments and out in results | PII scanning on `args`, field-level `redact`/`mask` pipelines on `result` ([Builtins](builtins.md)) |
 | Unauthorized high-impact actions | the model triggers irreversible operations on its own authority | `require_approval(...)` suspends the call for out-of-band human sign-off ([Elicitation](apl/elicitation.md)) |
@@ -71,7 +70,7 @@ whichever agent or client sent it.
 
 ![PPE as a gateway: agents and direct clients all pass through the PPE gateway before reaching the tool server](images/threat_model_gateway.svg)
 
-**Covers**
+Covers
 
 - Every caller of the protected backend, including agents you do not operate and
   callers that bypass the "official" agent.
@@ -79,7 +78,7 @@ whichever agent or client sent it.
   sees the caller's raw IdP credential when delegation mints a scoped token.
 - A single audit chokepoint for the resource.
 
-**Does not cover**
+Does not cover
 
 - Anything the agent does that never touches this backend: other tools, other
   APIs, side channels.
@@ -95,7 +94,7 @@ crosses the boundary, whatever it targets.
 
 ![PPE as an egress sidecar: all egress from the agent workload passes through the PPE sidecar on its way to internal tools, third-party APIs, and other agents](images/threat_model_sidecar.svg)
 
-**Covers**
+Covers
 
 - The complete outbound surface of the workload, including third-party APIs you
   do not control and could never gateway.
@@ -105,7 +104,7 @@ crosses the boundary, whatever it targets.
 - Exfiltration control for a specific agent: taint follows the session across
   every backend the agent reaches.
 
-**Does not cover**
+Does not cover
 
 - Other paths to the same backends. The sidecar protects the world from this
   agent, not the backend from other callers.
@@ -121,7 +120,7 @@ issues them.
 
 ![PPE in-process: inside the agent runtime the LLM drives the framework, whose operations pass through in-process PPE before reaching tools and backends](images/threat_model_inframework.svg)
 
-**Covers**
+Covers
 
 - The richest policy context: `agent.*` (session, conversation, turn, lineage)
   and `framework.*` (node and graph ids) attributes let policy reason about
@@ -131,7 +130,7 @@ issues them.
 - Human-in-the-loop and taint decisions at the reasoning step, closest to the
   intent.
 
-**Does not cover**
+Does not cover
 
 - Process-level compromise. PPE shares the agent's process; code execution in
   the runtime can bypass an in-process monitor. This placement hardens the
@@ -149,28 +148,28 @@ every point, so layering placements costs no policy duplication.
 
 ## Out of scope
 
-PPE is a reference monitor, not a model alignment technique. Explicitly outside
+PPE is a Reference Monitor, not a model alignment technique. Explicitly outside
 this threat model:
 
-- **Model-internal behavior.** PPE constrains what the model's decisions can do,
+- Model-internal behavior. PPE constrains what the model's decisions can do,
   not what the model decides. A jailbroken model behind PPE still only reaches
   what policy allows.
-- **Covert channels inside allowed traffic.** If policy permits an output
+- Covert channels inside allowed traffic. If policy permits an output
   channel, a determined model can encode data into it. Taint narrows this (deny
   the channel once secrets are touched); it does not eliminate encoding within
   permitted flows.
-- **Compromise of the PPE host.** The monitor's guarantees hold only as long as
+- Compromise of the PPE host. The monitor's guarantees hold only as long as
   the process and state stores it depends on are intact. Run hard-tier
   enforcement on infrastructure with a smaller attack surface than the agent it
   guards.
-- **Backends themselves.** PPE decides what reaches a tool and what comes back;
+- Backends themselves. PPE decides what reaches a tool and what comes back;
   it does not vouch for what the tool does internally.
 
 Believe you have found a policy-enforcement bypass? That is our critical
 severity class. Report it privately via the process in
 [SECURITY.md](https://github.com/praxis-proxy/policy/blob/main/SECURITY.md).
 
-## What to read next
+## Related documentation
 
 - [Use Cases](use-cases.md): the controls above running end-to-end in a gateway
   deployment.

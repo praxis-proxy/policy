@@ -2,14 +2,14 @@
 
 Some controls are not about *whether* an operation runs, but *where* it runs.
 "EU customer data must be inferred on EU backends." "This tenant may only use
-the cheap model tier." The agent asks for a **class** of backend — "inference" —
+the cheap model tier." The agent asks for a class of backend — "inference" —
 and policy shapes which concrete backends are eligible. That shaping is the
 `restrict` effect.
 
 `restrict` declares a predicate over backend attributes, narrowing the set of
 backends the host's router may select from. It never picks a backend and never
 allows or denies the request — the router still chooses the best survivor by
-health and load. Like `taint`, it is an **accumulating** effect: every
+health and load. Like `taint`, it is an accumulating effect: every
 `restrict` that fires only ever *narrows* the set, and multiple restrictions
 compose by conjunction.
 
@@ -21,20 +21,20 @@ compose by conjunction.
 | Situation | Verb |
 |-----------|------|
 | The agent named a specific target ("model `gpt-4o`", "tool X at site A") | `require` / `deny` |
-| The agent asked for a class ("inference"); policy shapes which backends are eligible | **`restrict`** |
+| The agent asked for a class ("inference"); policy shapes which backends are eligible | `restrict` |
 
-## The requirement
+## Residency requirement
 
 A tenant is EU-resident: its data must stay in-region. When the agent runs
 inference on that tenant's data, only EU inference backends are eligible — and
 if none are reachable, the request must fail rather than silently spill to a US
 backend. The agent never named a backend; it asked for "inference." The control
-has to live in routing, not in the prompt.
+must live in routing, not in the prompt.
 
 ## Declaring a restriction
 
 The session is marked when EU-resident data is read (see [Session
-Tainting](tainting.md)); a later inference route restricts routing to EU
+Taint](tainting.md)); a later inference route restricts routing to EU
 backends when that label is present. Whether the caller's tenant is EU-resident
 is an operator-maintained fact, looked up from the [`data.*` static
 attributes](attributes.md):
@@ -67,7 +67,7 @@ is `eu`. The router load-balances across the healthy EU backends.
 
 ## The constraint fields
 
-A restriction is a small set of **typed fields** plus a `custom` label map. The
+A restriction is a small set of typed fields plus a `custom` label map. The
 shape is deliberately simple — it is a contract the host router evaluates
 against each backend's labels, not a predicate language.
 
@@ -113,12 +113,12 @@ routes:
 
 `support-bot` is restricted to `vllm/*`, `research-bot` to `anthropic/*` +
 `vllm/*` — one rule, values maintained in config. The distinction is by YAML
-shape: a **list** is a literal set; a bare **scalar** is a reference. Quote a
+shape: a list is a literal set; a bare scalar is a reference. Quote a
 reference that contains `[...]` (as above) so YAML doesn't read the brackets as
 an inline list.
 
 If the referenced path doesn't resolve — an agent absent from the tree, a
-missing `subject.id` — the field resolves to the **empty set**: nothing
+missing `subject.id` — the field resolves to the empty set: nothing
 qualifies, so `on_empty` decides (deny by default). An unknown caller is never
 silently unconstrained. (`max_cost_tier` and `custom` are literal-only.)
 
@@ -127,7 +127,7 @@ silently unconstrained. (`max_cost_tier` and `custom` are literal-only.)
 `restrict` has no `when:` field of its own. Whether it fires is handled by APL's
 normal effect-gating — a `when:`/`do:` rule — exactly like every other effect.
 This keeps `restrict` orthogonal: it is *only* a set of backend constraints, and
-*whether* it applies is a normal predicate. So the two layers live apart: the
+*whether* it applies is a normal predicate. The two layers remain separate: the
 `when:` gate is evaluated now, in PPE, against the request; the constraint
 fields are evaluated later, by the host router, against its backends.
 
@@ -148,7 +148,7 @@ pre_invocation:
 
 ## How a restriction reaches the router
 
-Multiple `restrict` effects in one request **fold** into a single constraint:
+Multiple `restrict` effects in one request fold into a single constraint:
 allow-sets intersect, deny-sets and `custom` grow, tier ceilings combine, and
 `on_empty` takes the strictest. The result rides out on the typed
 `candidate_constraint` extension (see [Extensions](../extensions.md)) — the same
@@ -179,17 +179,17 @@ flowchart LR
 the router knows which backends are actually reachable, so the choice rides out
 with the constraint:
 
-- **`deny`** (default) rejects the request. Correct for hard constraints like
+- `deny` (default) rejects the request. Correct for hard constraints like
   data sovereignty — never silently escape the region.
-- **`fallback`** reverts to the unconstrained set. An explicit opt-in for
+- `fallback` reverts to the unconstrained set. An explicit opt-in for
   "prefer, but don't fail."
 
-## How it connects to the pipeline
+## Pipeline integration
 
 `restrict` is an effect like any other: it sequences with `require`, PDP calls,
 and `taint` (see [Effects](effects.md)), and its gate is an ordinary predicate.
-What makes it reliable is the same thing that makes tainting reliable — the
-decision is assembled from PPE-owned state and handed to the router as a typed
+The control uses the same PPE-owned state as Session Taint. The decision is
+assembled inside PPE and handed to the router as a typed
 constraint, so the untrusted model cannot reword its way onto a backend that
 policy excluded. The clean split of ownership is the point: which backends exist
 and their health belong to the host; *which of them this request may use* is

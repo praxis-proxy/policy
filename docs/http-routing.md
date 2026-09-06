@@ -5,8 +5,8 @@ Most routes select an operation by name: a `tool:`, a `resource:`, a
 instead, so plain HTTP traffic that names no entity can still be
 authorized.
 
-This is what lets one enforcement point cover both an agent's tool
-calls and the ordinary HTTP around them, under one policy document.
+One Reference Monitor can therefore cover an agent's tool calls and the
+surrounding HTTP traffic under one APL document.
 
 ## Selector forms
 
@@ -57,10 +57,10 @@ order:
 2. A longer prefix outranks a shorter one.
 3. A narrower method set breaks a remaining tie.
 
-So `/api/v1/status` above wins over the `/api/v1` prefix beside it,
+`/api/v1/status` above wins over the `/api/v1` prefix beside it,
 regardless of declaration order.
 
-**Exact paths compare byte for byte.** `/admin` and `/admin/` are two
+Exact paths compare byte for byte. `/admin` and `/admin/` are two
 different paths, and a route declaring one does not match the other. A
 prefix is normalized instead: one trailing slash is dropped at parse
 time, so `path_prefix: /api/` and `path_prefix: /api` are the same
@@ -84,18 +84,18 @@ routes:
         - "require(authenticated)"
 ```
 
-## What the host has to supply
+## Host obligations
 
-Two obligations, and both fail quietly if missed.
+Missing either obligation changes which policy runs without failing the request.
 
-**The request line, at the identity hook.** A route's own
+The request line at the identity hook. A route's own
 `authentication:` list is only reachable if the engine knows the method
 and path when identity is resolved. A host that puts them on the HTTP
 extension at the identity invocation unlocks per-route authentication;
 a host that does not gets global authentication instead, and the engine
 warns rather than pretending the route's list ran.
 
-**The response hook, explicitly.** A global `result:` or
+The response hook, invoked explicitly. A global `result:` or
 `post_invocation:` block installs a handler on `http.response`, but the
 host fires it. Before turning that on, review your global post steps:
 HTTP steps that were previously inert become active, and `result.*` is

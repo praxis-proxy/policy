@@ -1,8 +1,6 @@
 # Patterns
 
-Production patterns for writing and rolling out PPE policy. Each is expressed in
-APL and builds on the concepts in the earlier pages. This page is the
-condensed reference for authoring and rollout.
+These production patterns cover APL authoring and rollout.
 
 ## Layered enforcement
 
@@ -58,7 +56,7 @@ routes:
 
 Taint a session when it touches sensitive data, then gate later operations on
 the label. The control spans requests and the model cannot route around it (see
-[Session Tainting](apl/tainting.md)):
+[Session Taint](apl/tainting.md)):
 
 ```yaml
 routes:
@@ -91,6 +89,6 @@ authorization:
 
 ## Defense in depth
 
-Combine the patterns: an attribute gate, a PDP relationship check, a PII scan on
-output, a taint, and an audit record, each a separate effect in one policy. No
-single layer is load-bearing alone; the operation has to pass all of them.
+Combine an attribute gate, a PDP relationship check, a PII scan on output,
+Session Taint, and an audit record as separate effects. The operation must pass
+every layer.

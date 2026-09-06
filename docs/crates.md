@@ -47,9 +47,9 @@ facade rather than named directly. See [Builtins](builtins.md).
 | `reference/plugins/pii-scanner` | A worked example of a host plugin. |
 | `reference/plugins/audit-logger` | The same, for an audit sink. |
 
-## Writing a plugin
+## Writing a Plugin Factory
 
-There is no separate SDK crate. The plugin-author surface is
+There is no separate SDK crate. The Plugin Factory surface is
 `praxis_policy_core::prelude`, which carries the `Plugin` and
 `HookHandler` traits, payloads, results, and the CMF types. Implement
 `PluginFactory` against it and register it with

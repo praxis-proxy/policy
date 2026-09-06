@@ -22,10 +22,10 @@ routes:
       ssn: "str | redact(!perm.view_ssn)"
 ```
 
-As a **gateway**, PPE sits in front of the tool server and enforces on inbound
-calls: every request to the backend passes through it. As an **egress sidecar**,
+As a gateway, PPE sits in front of the tool server and enforces on inbound
+calls: every request to the backend passes through it. As an egress sidecar,
 PPE sits beside the agent and enforces on the agent's outbound calls: the
-agent's tool invocations leave through the sidecar's proxy. **In-framework**,
+agent's tool invocations leave through the sidecar's proxy. In-framework,
 PPE runs inside the agent runtime and enforces operations as the runtime issues
 them. The enforcement point moves; the route above runs unchanged in all three.
 
@@ -51,7 +51,8 @@ agent's tool calls and the ordinary HTTP around them. See
 | In-framework | operations as the agent runtime issues them | you control the runtime and want enforcement inline |
 
 The decision is about which boundary you control and trust, not about policy
-capability. Identity resolution, PDP calls, delegation, redaction, and tainting
+capability. Identity resolution, PDP calls, Token Exchange / Delegation,
+redaction, and Session Taint
 all work the same at each. For what each placement does and does not defend
 against, see the [Threat
 Model](threat-model.md#where-the-boundary-sits-and-what-each-placement-covers).
@@ -63,7 +64,7 @@ provider rather than through the policy path, unless you intend to apply policy
 to them. Otherwise model traffic is evaluated as if it were a tool call. Reserve
 the enforced path for the operations you actually want mediated.
 
-## What to read next
+## Related documentation
 
 - [Configuration](configuration.md): the full config structure for a
   deployment.

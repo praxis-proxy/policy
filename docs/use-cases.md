@@ -1,10 +1,10 @@
 # Use Cases
 
-> Each use case below runs end-to-end in the [Praxis
-> demo](https://github.com/praxis-proxy/demos/tree/main/demos/policy-engine):
-> PPE as the policy engine inside a real AI gateway, backed by a real IdP and a
-> mock MCP backend. Every snippet is quoted from the demo's live config, and
-> every scenario is a script you can run.
+Each use case runs end to end in the [Praxis
+demo](https://github.com/praxis-proxy/demos/tree/main/demos/policy-engine). PPE
+runs as the Reference Monitor inside an AI gateway backed by an IdP and a mock
+MCP backend. Each snippet comes from the live configuration, and each scenario
+has an executable script.
 
 The demo realizes the [running scenario](overview.md): one agent, three callers,
 three kinds of backend reached over MCP. Identity decides the outcome.
@@ -20,7 +20,7 @@ around a filter chain. PPE ships as its `policy` filter (the
 `policy-engine` feature), so the gateway parses MCP JSON-RPC, runs the full
 policy pass, and only then forwards a scoped request upstream:
 
-![The Praxis demo topology: a chat agent calls the Praxis gateway over MCP, where the mcp, policy (PPE), and router filters run in sequence before forwarding to the hr-mcp server; the policy filter is configured by policy.yaml and talks to Keycloak for identity, token exchange, and CIBA, and to Valkey for session taint, while Keycloak pushes CIBA approvals to the auth-channel UI](images/use_cases_topology.svg)
+![The Praxis demo topology: a chat agent calls the Praxis gateway over MCP, where the mcp, policy (PPE), and router filters run in sequence before forwarding to the hr-mcp server; the policy filter is configured by policy.yaml and talks to Keycloak for identity, token exchange, and CIBA, and to Valkey for Session Taint, while Keycloak pushes CIBA approvals to the auth-channel UI](images/use_cases_topology.svg)
 
 The wiring is two files:
 [`praxis.yaml`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/praxis.yaml)
@@ -33,7 +33,7 @@ PDP policy. The use cases below are that one config, taken apart.
 
 The recording below shows an interactive session against the gateway, driven by
 an LLM agent, covering an allow with token exchange, on-the-wire redaction,
-session taint, a CEL policy decision, and a human-in-the-loop manager approval,
+Session Taint, a CEL policy decision, and a human-in-the-loop manager approval,
 with the governing policy shown alongside each step.
 
 [Terminal recording of this
@@ -137,7 +137,7 @@ the same id.
 Run it:
 [`scenarios/08-bob-taint-deny.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/08-bob-taint-deny.sh),
 [`scenarios/09-cross-principal-taint-isolation.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/09-cross-principal-taint-isolation.sh).
-More: [Session Tainting](apl/tainting.md).
+More: [Session Taint](apl/tainting.md).
 
 ## 5. PII guardrails on arguments
 
@@ -284,7 +284,7 @@ The same scenario runs with PPE embedded as a Rust crate inside the host
 process rather than behind a gateway. See [Deployment](deployment.md) for
 what changes between the two placements.
 
-## What to read next
+## Related documentation
 
 - [Threat Model](threat-model.md): what these controls defend against, and what
   each placement covers.

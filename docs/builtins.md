@@ -15,7 +15,7 @@ name it by `kind`.
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
-| `valkey` | session store | `valkey` | Persist taint labels across processes. See [Session Tainting](apl/tainting.md). |
+| `valkey` | session store | `valkey` | Persist Session Taint labels across processes. See [Session Taint](apl/tainting.md). |
 
 The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
@@ -29,8 +29,8 @@ disagreement fails the build.
 
 ## Not builtins
 
-Two worked examples live in `reference/plugins/` and are deliberately
-**not** bundled: a PII scanner (`validator/pii-scan`) and an audit
+Two worked examples live in `reference/plugins/` and are not bundled: a PII
+scanner (`validator/pii-scan`) and an audit
 logger (`audit/logger`). They are linted and tested here, and each
 manifest says why it is an example rather than a builtin: the scanner is
 plain regexes with no checksum validation, and the logger's sink is

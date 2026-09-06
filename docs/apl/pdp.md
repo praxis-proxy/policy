@@ -3,10 +3,10 @@
 APL predicates handle attribute checks well: roles, permissions, scopes,
 comparisons. They are a poor fit for relationship questions ("is this user on
 the team that owns this repo?") and for policy you already maintain in a
-dedicated engine. For those, APL hands the decision to a **Policy Decision
-Point**.
+dedicated engine. For those, APL hands the decision to a Policy Decision
+Point.
 
-## The requirement
+## Decision requirement
 
 The scenario's repository search must allow a read when the caller is an
 engineer and the repo is internal, or when the caller is on the security team,
@@ -84,7 +84,7 @@ authorization:
     - cel: { expr: "subject.department == 'compliance' || 'admin' in subject.roles" }
 ```
 
-## How it connects to the pipeline
+## Pipeline integration
 
 A PDP resolver is registered with the manager like any other capability. When
 the evaluator hits a PDP effect, it dispatches to the resolver for that dialect,

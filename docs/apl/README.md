@@ -1,15 +1,14 @@
 # APL: configuring enforcement pipelines
 
-APL is the declarative configuration that defines a PPE enforcement pipeline.
-Each capability an agent can invoke (a tool, resource, prompt, or A2A method)
-defines its own pipeline through a **route** that sequences the controls
-protecting it, evaluated at the boundary. You describe the conditions and the
-effects; you do not write enforcement logic in application code.
+APL (Authorization Policy Layer) defines PPE enforcement pipelines. Each
+capability an agent may invoke—a tool, resource, prompt, or A2A method—defines a
+route that sequences its boundary controls. APL keeps predicates and effects
+out of application code.
 
-![An APL config: plugins and global settings, then per-entity routes with a pre-invocation flow (require, PDP, delegate, run) and post-invocation result handling (taint, redact), plus session tainting across entities](../images/apl_overview.svg)
+![An APL config: plugins and global settings, then per-entity routes with a pre-invocation flow (require, PDP, delegate, run) and post-invocation result handling (taint, redact), plus Session Taint across entities](../images/apl_overview.svg)
 
-This page covers the configuration: routes, phases, predicates, rules, and field
-pipelines. The rest of this section goes deeper on each kind of policy:
+APL configuration comprises routes, phases, predicates, rules, and field
+pipelines:
 
 - [Effects & Sequencing](effects.md): the effects a rule can run, halt-on-deny
   ordering, and composition.
@@ -23,23 +22,23 @@ pipelines. The rest of this section goes deeper on each kind of policy:
   exchange.
 - [Elicitation](elicitation.md): pause an operation for human approval and
   resume on retry.
-- [Session Tainting](tainting.md): information-flow control across requests.
+- [Session Taint](tainting.md): information-flow control across requests.
 - [Backend Restriction](restrict.md): shape which backends the router may select
   for a request.
 
 ## Routes and phases
 
-Policy is organized by **route**: an operation PPE mediates, identified by the
+Policy is organized by route: an operation PPE mediates, identified by the
 tool, A2A method, or other interface it governs. Each route runs through four
 phases, in order:
 
 ![The four route phases in order: args validates and transforms input, authorization.pre_invocation authorizes, result redacts and masks output, and authorization.post_invocation runs audit and final checks; the first deny in any phase halts that phase and every later one](../images/apl_phases.svg)
 
-- **args**: validate and transform request inputs before the operation runs.
-- **authorization.pre_invocation**: authorize the operation. Predicates, PDP
-  calls, delegation, tainting.
-- **result**: transform the response. Redaction and masking on the wire.
-- **authorization.post_invocation**: checks after the result is known. Audit,
+- args: validate and transform request inputs before the operation runs.
+- authorization.pre_invocation: authorize the operation. Predicates, PDP
+  calls, Token Exchange / Delegation, and Session Taint.
+- result: transform the response. Redaction and masking on the wire.
+- authorization.post_invocation: checks after the result is known. Audit,
   post-delegation verification.
 
 The first `deny` in any phase halts that phase and every later phase. Nothing
@@ -73,16 +72,16 @@ route (without the `authorization:` wrapper); both forms are equivalent.
 A predicate reads attributes resolved from the caller's identity and request
 context (see [Identity](identity.md) for where attributes come from). The forms:
 
-- **Truthiness**: a bare attribute is true when present and truthy.
+- Truthiness: a bare attribute is true when present and truthy.
   `authenticated`, `role.hr`, `perm.view_ssn`.
-- **Comparison**: `delegation.depth > 2`, `client.trust_level == 'trusted'`.
+- Comparison: `delegation.depth > 2`, `client.trust_level == 'trusted'`.
   Operators: `==`, `!=`, `>`, `>=`, `<`, `<=`.
-- **Set membership**: `subject.id in authorized_users`, `subject.id not in
+- Set membership: `subject.id in authorized_users`, `subject.id not in
   banned_list`.
-- **Existence**: `exists(delegation.origin_subject_id)` is true when the
+- Existence: `exists(delegation.origin_subject_id)` is true when the
   attribute is present.
-- **Containment**: `security.labels contains "secret"`.
-- **Logical composition**: `&` (and), `|` (or), `!` (not). Precedence is `()` >
+- Containment: `security.labels contains "secret"`.
+- Logical composition: `&` (and), `|` (or), `!` (not). Precedence is `()` >
   `!` > `&` > `|`.
 
 <!-- validate: phase-list -->
@@ -94,7 +93,7 @@ context (see [Identity](identity.md) for where attributes come from). The forms:
 
 A `pre_invocation:` (or `post_invocation:`) entry is a rule. Two forms:
 
-**`require(...)`** denies unless the predicate holds:
+`require(...)` denies unless the predicate holds:
 
 <!-- validate: phase-list -->
 ```yaml
@@ -106,7 +105,7 @@ A `pre_invocation:` (or `post_invocation:`) entry is a rule. Two forms:
 `require(a, b)` denies if either is false (an implicit and). `require(a | b)`
 denies only if both are false.
 
-**`predicate: effect`** runs the effect when the predicate holds:
+`predicate: effect` runs the effect when the predicate holds:
 
 <!-- validate: phase-list -->
 ```yaml

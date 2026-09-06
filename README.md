@@ -8,30 +8,28 @@
 [![docs.rs](https://img.shields.io/docsrs/praxis-policy)](https://docs.rs/praxis-policy)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](rust-toolchain.toml)
 
-Policy engine for [Praxis](https://github.com/praxis-proxy/praxis), covering
-both standard policy use cases as well as AI inference and agents.
-
-A typed, phased plugin runtime and policy evaluator for agent traffic. It
-decides who may call which tool, what data comes back, and where that
-data is allowed to go next.
+A deterministic Reference Monitor for
+[Praxis](https://github.com/praxis-proxy/praxis). It mediates AI inference and
+agent traffic through typed, phased APL pipelines. Each decision controls who
+may call a tool, what data returns, and where that data may go next.
 
 ## What it does
 
-- **Identity:** Resolves and independently validates user, agent, and workload
+- Identity: Resolves and independently validates user, agent, and workload
   identities.
-- **Authorization:** Authorizes tool calls using a policy language with
-  pluggable decision points, including relationship-based authorization.
-- **Delegation:** Exchanges credentials through RFC 8693, giving each upstream
+- Authorization: Evaluates APL predicates and pluggable decision points,
+  including relationship-based authorization.
+- Delegation: Exchanges credentials through RFC 8693, giving each upstream
   service a token scoped to that service.
-- **Data control:** Redacts data in transit at the field level, with session
-  taint that propagates across tool calls and requests.
-- **Header assertions:** Renders the identity it derived onto the upstream
+- Data control: Redacts fields in transit and propagates Session Taint
+  across tool calls and requests.
+- Header assertions: Renders the identity it derived onto the upstream
   request as headers, removes the client-supplied headers that would collide
   with it, and filters what an upstream is allowed to tell a client back. See
   [docs/assertions.md](docs/assertions.md).
-- **Human approval:** Supports out-of-band human approval when a decision cannot
+- Human approval: Supports out-of-band human approval when a decision cannot
   be automated.
-- **Audit:** Emits an audit event for every decision.
+- Audit: Emits an audit event for every decision.
 
 ## Using it
 
@@ -55,8 +53,8 @@ requirement covers the set. Requires Rust 1.96 or newer.
 - [Quick Start](docs/quickstart.md): stand up an enforcement point and run your
   first policy
 - [Overview](docs/overview.md): how it works, followed through one scenario
-- [APL](docs/apl/README.md): the policy language, and its [normative
-  grammar](docs/apl-grammar.md)
+- [APL](docs/apl/README.md): Authorization Policy Layer configuration and its
+  [normative grammar](docs/apl-grammar.md)
 - [Configuration](docs/configuration.md): the config document and both dispatch
   modes
 - [Upgrading APL](docs/upgrade-apl.md): what an existing configuration must
@@ -69,12 +67,12 @@ a breaking change gets a minor bump and is documented in the CHANGELOG.
 
 ## Layout
 
-    crates/             the engine, its policy language, and the host facade
+    crates/             the engine, APL implementation, and host facade
     builtins/           bundled plugins, decision points, and session stores
     reference/          worked examples, not published and not bundled
 
-A host does not have to use a bundled plugin. Implement `PluginFactory` against
-`praxis_policy_core::prelude` and register it with
+A host may replace any bundled plugin. Implement a Plugin Factory through
+`PluginFactory` against `praxis_policy_core::prelude`, then register it with
 `PolicyEngine::register_factory` under the `kind:` your policy names. An
 unrecognized `kind` causes policy loading to fail, so missing registrations are
 detected at startup.

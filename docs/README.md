@@ -1,15 +1,14 @@
 # Praxis Policy Engine Documentation
 
 PPE is a policy enforcement runtime for AI agents: a deterministic
-reference monitor that mediates every operation an agent triggers. It
+Reference Monitor that mediates every operation an agent triggers. It
 decides who may call which tool, what data comes back, and where that
 data is allowed to go next.
 
 Each capability an agent can invoke defines its own enforcement
-pipeline covering authorization, delegation, redaction, information
-flow control, and audit. APL is the configuration that defines that
-pipeline, and it runs in two phases: before the operation and after
-its result.
+pipeline covering authorization, Token Exchange / Delegation, redaction,
+information flow control, and audit. APL (Authorization Policy Layer) defines
+that pipeline in phases before invocation and after its result.
 
 ## Getting started
 
@@ -23,7 +22,7 @@ its result.
 ## Why it exists
 
 - [Vision](vision.md):
-  the reference monitor model and where PPE sits in an agent stack
+  the Reference Monitor model and where PPE sits in an agent stack
 - [Threat Model](threat-model.md):
   the adversary, the trust boundary, and what each placement defends
 
@@ -45,7 +44,7 @@ its result.
   token exchange, delegation subjects, and token caching
 - [Elicitation](apl/elicitation.md):
   human in the loop, and the suspend and resume model
-- [Session Tainting](apl/tainting.md):
+- [Session Taint](apl/tainting.md):
   information flow labels that outlive a single call
 - [Backend Restriction](apl/restrict.md):
   constraining where a call is allowed to land
@@ -96,9 +95,7 @@ its result.
 - [Contributing](../CONTRIBUTING.md) and
   [Changelog](../CHANGELOG.md)
 
-## Notes on the diagrams
+## Diagram sources
 
-The diagrams here are SVG sources, editable as text. Two pages carry
-fewer diagrams than they once did, because the originals existed only
-as rendered images with no source to correct: `overview.md` lost its
-scenario diagram and `deployment.md` lost its placement diagram.
+The diagrams use text-editable SVG sources. `overview.md` and `deployment.md`
+omit earlier diagrams whose rendered images had no source to maintain.
