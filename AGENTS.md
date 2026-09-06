@@ -51,7 +51,7 @@ crates/
                 identity, delegation, elicitation
   ppe-orchestration  async branch concurrency
   ppe-apl-core  policy language parser + evaluator
-  ppe-apl-cmf   canonical message format transforms
+  ppe-apl-cmf   Common Message Format transforms
   ppe-apl-runtime  host runtime, plugin invokers,
                    route handler, session management
   ppe-pdp-diff  differential tests across cedar/cel/opa

@@ -70,7 +70,7 @@ that pipeline in phases before invocation and after its result.
 
 - [Plugins and Pipeline](pipeline.md):
   hooks, the plugin manager, and execution modes
-- [Canonical Message Format](cmf.md):
+- [Common Message Format](cmf.md):
   the protocol-agnostic envelope policy reasons about
 - [Extensions and Capability Gating](extensions.md):
   typed contextual state, and the capabilities that unlock it

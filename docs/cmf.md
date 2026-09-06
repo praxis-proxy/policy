@@ -1,4 +1,4 @@
-# Canonical Message Format
+# Common Message Format
 
 APL evaluates policy against a request in the Common Message Format (CMF). This
 protocol-agnostic envelope represents every mediated operation in one structure.

@@ -17,7 +17,7 @@
 // - [`config`] — Unified YAML configuration parsing
 // - [`factory`] — Plugin factory registry for config-driven instantiation
 // - [`context`] — PluginContext (local_state + global_state)
-// - [`cmf`] — canonical message format (Message, ContentPart, enums)
+// - [`cmf`] — Common Message Format (Message, ContentPart, enums)
 // - [`identity`] — IdentityResolve hook family (subject / client /
 //                   workload resolution from raw credentials)
 // - [`delegation`] — TokenDelegate hook family (outbound credential
@@ -34,7 +34,7 @@
 
 /// What the engine asserts on a request and a response, as headers.
 pub mod assertions;
-/// The canonical message format: messages, content parts, and read-only views.
+/// The Common Message Format: messages, content parts, and read-only views.
 pub mod cmf;
 /// YAML configuration parsing for plugins, routes, and policies.
 pub mod config;
