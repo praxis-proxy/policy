@@ -69,7 +69,8 @@ delegator uses:
 
 PPE resolves the pipeline for each request across one **broad → narrow stack**,
 and
-**both identity and policy (including delegation) ride it**. Narrower layers add to
+**both identity and policy (including delegation) ride it**. Narrower layers add
+to
 (or override) broader ones. Pick the broadest layer that's still correct.
 
 A **group** is a named, reusable bundle of policy (authentication steps +
@@ -213,7 +214,8 @@ Keycloak
 
 ### Recipe 2: Agent acting as itself, by its SPIFFE SVID
 
-**When:** the *agent* is the principal (no human), and you don't trust the agent to
+**When:** the *agent* is the principal (no human), and you don't trust the agent
+to
 hold downstream authority. The agent presents its SVID; PPE brokers a scoped
 downstream token. The agent holds no standing entitlement to the target.
 
@@ -251,7 +253,10 @@ routes:
       steps: [jwt-workload]
     authorization:
       pre_invocation:
-        - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation], subject: caller_workload)"
+        - "delegate(workday-oauth, target: workday-api,
+                    audience: workday-api,
+                    permissions: [read_compensation],
+                    subject: caller_workload)"
         - "!delegation.granted: deny"
 ```
 
@@ -294,7 +299,8 @@ inbound resolver validates the token and the route allows the call.
 
 ### Recipe 5: Scope a token the agent already holds (1-leg)
 
-**When:** the agent authenticated to the IdP *itself* with its SVID and got back a
+**When:** the agent authenticated to the IdP *itself* with its SVID and got back
+a
 normal JWT, and you still want PPE to narrow that token per-tool (least
 privilege at the boundary) without ever handling the SVID.
 
@@ -321,7 +327,10 @@ routes:
   - tool: get_directory
     authorization:
       pre_invocation:
-        - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation], subject: client)"
+        - "delegate(workday-oauth, target: workday-api,
+                    audience: workday-api,
+                    permissions: [read_compensation],
+                    subject: client)"
 ```
 
 This is a **plain RFC 8693 exchange**, the same engine as [Recipe

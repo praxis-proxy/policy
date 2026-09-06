@@ -11,7 +11,7 @@ Every lint that could silently change an enforcement decision is denied.
 
 From the compiler, not from reading the source:
 
-```
+```console
 cargo clippy --workspace --all-targets --all-features -- -W <lint>
 ```
 

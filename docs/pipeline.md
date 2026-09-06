@@ -59,7 +59,7 @@ This is the substrate APL effects compile down to. A `deny` is a block, a
 A plugin runs in a **mode** that fixes whether it can block, whether it can
 modify, and how it runs relative to others. Modes run in a fixed phase order:
 
-```
+```text
 sequential -> transform -> audit -> concurrent -> fire_and_forget
 ```
 

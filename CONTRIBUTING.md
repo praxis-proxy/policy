@@ -8,7 +8,7 @@ pinned stable toolchain, so nothing here needs nightly.
 
 ## Before opening a pull request
 
-```
+```console
 make lint
 make test
 make audit
@@ -77,7 +77,7 @@ Those documents do not ship with the code. An identifier is meaningless to
 someone reading the commit a year from now, and it rots the moment the document
 changes or moves. Describe the behavior or the reason instead:
 
-```
+```text
 # no
 fix: address R24 fail-closed requirement in parser
 

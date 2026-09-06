@@ -577,7 +577,8 @@ each needs, measured rather than estimated:
 | Stale comments claiming the engine accepts both a wrapped and a flat form | 2, in `policy-cel.yaml` and `policy-opa.yaml` |
 
 Nothing else. None of the three uses `apl:`, a removed legacy key, a `plugins:`
-activation list, `plugin(name)`, a `when:` route key, a backslash in policy text, or
+activation list, `plugin(name)`, a `when:` route key, a backslash in policy
+text, or
 a `regex(...)` / `enum(...)` stage, so the rest of this guide does not apply to
 them.
 
@@ -588,5 +589,6 @@ The two stale comments are worth calling out because they are the failure mode t
 release exists to remove, in prose rather than in code. They say APL terms may sit
 either on the section or inside an `apl:` wrapper and point at `policy.yaml` for
 "the wrapped style" — but `policy.yaml` does not use a wrapper either, and no
-document can now, so the note describes a choice that no longer exists and points at
+document can now, so the note describes a choice that no longer exists and
+points at
 an example that never demonstrated it.

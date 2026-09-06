@@ -180,7 +180,11 @@ requester's manager to sign off, out-of-band, before the tool runs:
       - "require(role.hr)"
       - when: "args.amount > 10000"
         do:
-          - "require_approval(manager-approver, from: claim.manager, channel: \"ciba\", scope: \"args.amount <= 25000\", purpose: \"Approve a compensation adjustment\", timeout: 24h)"
+          - "require_approval(manager-approver, from: claim.manager,
+                               channel: \"ciba\",
+                               scope: \"args.amount <= 25000\",
+                               purpose: \"Approve a compensation adjustment\",
+                               timeout: 24h)"
       - "run(audit-log)"
 ```
 

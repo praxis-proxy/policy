@@ -34,7 +34,10 @@ routes:
         - "require(authenticated)"
         - when: "args.amount > 10000"
           do:
-            - "require_approval(manager-approver, from: claim.manager, channel: \"ciba\", scope: \"args.amount <= 25000\", purpose: \"Approve raise\")"
+            - "require_approval(manager-approver, from: claim.manager,
+                                 channel: \"ciba\",
+                                 scope: \"args.amount <= 25000\",
+                                 purpose: \"Approve raise\")"
 ```
 
 - `from` is **who to ask** — an attribute reference resolved against the request

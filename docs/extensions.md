@@ -136,7 +136,7 @@ Any plugin that fetches JWKS, exchanges a token, or dispatches a CIBA
 prompt must declare it. See [Builtins](builtins.md) for how the bundled
 ones do.
 
-### Write capabilities
+### Write capabilities in full
 
 Three capabilities grant write tokens rather than read access:
 
@@ -167,7 +167,8 @@ context and mutations it was explicitly granted.
 ## How it connects to policy
 
 Capability-gating runs at the boundary between the manager and each plugin
-(`filter_extensions` in praxis-policy-core decides which extension slots a plugin sees;
+(`filter_extensions` in praxis-policy-core decides which extension slots a
+plugin sees;
 the CMF extractors then flatten those slots into the bag). The same filtered,
 tier-enforced view feeds the attribute bag APL evaluates, so a policy and the
 plugins it invokes operate on a consistent, least-privilege picture of the

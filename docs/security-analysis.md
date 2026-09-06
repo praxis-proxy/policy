@@ -47,7 +47,9 @@ knob rather than a defect.
 
 ### F1 — parallel panic fail-open
 
-**Closed.** `BranchOutcome::Panicked` and `TimedOut` are now `Decision::Deny` with a reason that says `fail-closed`. `Aborted` stays a no-op: that is a sibling that already denied, and short-circuit cancelled the rest on purpose.
+**Closed.** `BranchOutcome::Panicked` and `TimedOut` are now `Decision::Deny`
+with a reason that says `fail-closed`. `Aborted` stays a no-op: that is a
+sibling that already denied, and short-circuit cancelled the rest on purpose.
 
 Regression: `parallel_panic_is_fail_closed` in
 `crates/ppe-apl-core/src/evaluator.rs`. A `parallel:` of `Allow` plus a

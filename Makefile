@@ -233,10 +233,15 @@ docs-links:
 
 # markdownlint is a Node tool and this is a Rust workspace, so it is used
 # through npx when npx is present and skipped, loudly, when it is not.
+#
+# Plans, brainstorms and proposals are excluded, as they are in the examples
+# test: they are dated records of what was proposed, and reformatting finished
+# history to today's rules would edit the record to no benefit.
 .PHONY: docs-lint
 docs-lint:
 	@if command -v npx >/dev/null 2>&1; then \
-		npx --yes markdownlint-cli2 "docs/**/*.md" "*.md"; \
+		npx --yes markdownlint-cli2 "docs/**/*.md" "*.md" \
+			"!docs/plans/**" "!docs/brainstorms/**" "!docs/proposals/**"; \
 		echo "docs-lint passed"; \
 	else \
 		echo "docs-lint skipped: npx not found"; \

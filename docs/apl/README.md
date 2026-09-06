@@ -160,7 +160,8 @@ is not inherited by entity routes.
 Routes key on an MCP / A2A entity — a tool, prompt, resource, or LLM. A generic
 HTTP request that carries no such entity is authorized by the `global`
 policy instead, or by an `http:` route that selects on the request line
-(see [HTTP Routing](../http-routing.md)): when `global` declares an `authorization:` (or `args:`) block, PPE
+(see [HTTP Routing](../http-routing.md)): when `global` declares an
+`authorization:` (or `args:`) block, PPE
 evaluates it for these requests, reading the request line (`http.method`,
 `http.path`, `http.host`, `http.scheme`) and headers. Pair it with a `global`
 `response:` to return a custom denial.
@@ -230,5 +231,6 @@ not policy terms themselves:
 - `authentication:` names the identity-resolution plugins that run
   before policy. See [Identity](identity.md).
 
-Every fragment on this page is drawn from the `praxis-policy-apl-core` parser tests and the
+Every fragment on this page is drawn from the `praxis-policy-apl-core` parser
+tests and the
 reference deployments, so the forms shown here parse as written.
