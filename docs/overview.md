@@ -73,7 +73,7 @@ routes:
 
 An email with no sensitive content in its body is still blocked if the session
 previously read secret data. This is a write-down control, and the LLM cannot
-route around it because the taint lives in PPE, not in the conversation. See
+route around it because the taint lives in PPE, not in the conversation.
 [Session Taint](apl/tainting.md) defines label propagation and persistence.
 
 ## Where the boundary sits

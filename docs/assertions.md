@@ -67,8 +67,9 @@ refused rather than accepted and ignored.
 distinguishable from a structured value that spells the same text. `csv` joins
 an array with commas. With neither, a scalar renders bare and a structured
 value renders as compact JSON. A source that is *always* a collection
-(`subject.roles` and friends) must declare one, because a set reaching an
-upstream in a shape nobody chose is a shape nobody can rely on.
+(`subject.roles` and other collection-typed sources) must declare one, because
+a set reaching an upstream in a shape nobody chose is a shape nobody can rely
+on.
 
 Collections render sorted, and a members object's keys are sorted, so one
 identity produces identical header bytes across requests. Audit hashes and
@@ -279,11 +280,11 @@ The response direction does not run at all: there is no upstream response.
 
 The engine renders the whole boundary as one document at `info` when a block is
 configured, and `praxis_policy_core::assertions::effective_policy` returns it so
-a host can expose it. It covers every header that can be emitted with its
-source and the capability gating that slot, the removal set including the entry
-targets no `strip:` entry names, the exclusions and the floor with the reason
-each entry is there, which dispatch paths are boundaries, and — per route — the
-accumulated contract with the level each header came from.
+a host can expose it. It covers every header that can be emitted, with its
+source and the capability gating that slot; the removal set, including the
+entry targets no `strip:` entry names; the exclusions and the floor, with the
+reason each entry is there; which dispatch paths are boundaries; and, per
+route, the accumulated contract with the level each header came from.
 
 A contract that spans four levels is harder to read than a one-level one. That
 document is where the cost is paid.

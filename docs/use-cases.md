@@ -197,7 +197,7 @@ change.
 ![The approval sequence: the agent sends adjust_compensation for $25k and the gateway answers -32120 pending with an elicitation id while firing a CIBA backchannel request to Keycloak, which pushes the prompt to the manager's device; after the manager approves, the agent's peek returns -32121 approved, and re-sending with X-Policy-Elicitation-Id applies the change with a 200](images/use_cases_hil_sequence.svg)
 
 The agent needs no approval protocol; it sees "retry later" and, later, a
-result. In the demo's chat client the conversation simply continues until the
+result. In the demo's chat client the conversation continues until the
 approval lands and the result cuts back in.
 
 Run it:
@@ -255,8 +255,8 @@ the config selects which runs.
 
 They are held to each other by a differential test suite. Given the same
 attributes and equivalent policy intent, the three must agree across
-their shared boolean, integer, string, and string-set subset; a new
-disagreement fails the build, and documented semantic differences are
+their shared boolean, integer, string, and string-set subset. A new
+disagreement fails the build; documented semantic differences are
 allowlisted rather than discovered in production.
 
 Run it:

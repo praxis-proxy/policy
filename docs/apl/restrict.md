@@ -125,7 +125,7 @@ silently unconstrained. (`max_cost_tier` and `custom` are literal-only.)
 ## Gating happens at the composition layer
 
 `restrict` has no `when:` field of its own. Whether it fires is handled by APL's
-normal effect-gating — a `when:`/`do:` rule — exactly like every other effect.
+normal effect-gating — a `when:`/`do:` rule — like every other effect.
 This keeps `restrict` orthogonal: it is *only* a set of backend constraints, and
 *whether* it applies is a normal predicate. The two layers remain separate: the
 `when:` gate is evaluated now, in PPE, against the request; the constraint

@@ -17,9 +17,9 @@ back before this repository existed.
 | Files imported | 192 |
 
 The source commit is the anchor for any later comparison between the two trees.
-Recording it is the whole obligation this import carries toward the eventual
-convergence work. How the trees are kept in step, and in which direction, is
-decided by that effort, not this one.
+Recording it is this import's only obligation toward the eventual convergence
+work. How the trees stay in step, and in which direction, is a decision for
+that later effort, not this one.
 
 ## Second import: the Rego decision point
 
@@ -32,11 +32,11 @@ decided by that effort, not this one.
 | Files imported | 8 |
 
 The Rego decision point was excluded from the first import because the
-bundled-extensions crate listed it in its default feature set with an optional
-dependency on a directory that import did not carry, which stopped the workspace
-resolving at all. It is now brought in by a second pass over the same source with
-the same single-pass technique, so its commit and blame survive rather than
-arriving as a copy.
+bundled-extensions crate listed it in its default feature set, with an optional
+dependency on a directory that import did not carry. That stopped the workspace
+from resolving at all. It is now brought in by a second pass over the same
+source with the same single-pass technique, so its commit and blame survive
+rather than arriving as a copy.
 
 Verified the same way as the first import, against the source rather than by
 inspection: 8 files both sides, every blob hash and mode identical, and per-file
@@ -145,8 +145,8 @@ Shipping the gate bare would have made the imported tree impossible to build.
 The bootstrap commit therefore carried a seed allow-list derived by hand from the
 difference between the two configurations. That seed was incomplete: building the
 imported tree surfaced four further lints Praxis denies and the source never
-configured, so had never been compiled against. Those were added from the
-measurement rather than from another reading of the configs.
+configured, so the source had never been compiled against them. Those were
+added from the measurement rather than from another reading of the configs.
 
 The lesson is recorded here because it will recur when the parked entries are
 closed: the delta between two lint configurations is not reliably computed by
@@ -167,6 +167,6 @@ missing coverage does.
 
 Two constraints apply when that work resumes. The six ignored
 session-store integration tests are the largest single block of uncovered
-behavior, and they need a running service rather than more test code. And the
-component they cover is the one Session Taint depends on, so coverage there buys
-more than its line count suggests.
+behavior, and they need a running service rather than more test code. The
+component they cover is the one Session Taint depends on, so coverage there
+buys more than its line count suggests.

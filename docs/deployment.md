@@ -62,7 +62,7 @@ Model](threat-model.md#where-the-boundary-sits-and-what-each-placement-covers).
 When PPE guards an agent's egress, route inference calls directly to the model
 provider rather than through the policy path, unless you intend to apply policy
 to them. Otherwise model traffic is evaluated as if it were a tool call. Reserve
-the enforced path for the operations you actually want mediated.
+the enforced path for the operations you want mediated.
 
 ## Related documentation
 

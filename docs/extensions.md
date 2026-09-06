@@ -126,10 +126,10 @@ all.
 
 It is the one capability where withholding it stops the call rather than
 degrading it. A plugin denied `read_claims` sees fewer attributes and
-carries on; a plugin denied its IdP call and carrying on regardless
-would be deciding without the answer it was supposed to fetch, which
-fails open. The engine therefore refuses to start and names the plugin
-and the capability to add.
+carries on; a plugin denied its IdP call but carrying on regardless
+would decide without the answer it needed, which fails open. The
+engine therefore refuses to start and names the plugin and the
+capability to add.
 
 Any plugin that fetches JWKS, exchanges a token, or dispatches a CIBA
 prompt must declare it. See [Builtins](builtins.md) for how the bundled
@@ -159,7 +159,7 @@ enforces the tier:
   custom namespace.
 
 A plugin cannot clear a Session Taint label or rewrite a verified identity even
-if it holds the corresponding read capability. This keeps the state APL
+if it holds the corresponding read capability. This keeps the state that APL
 depends on trustworthy: the model is untrusted, and so is any plugin beyond the
 context and mutations it was explicitly granted.
 

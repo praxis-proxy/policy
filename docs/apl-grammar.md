@@ -27,8 +27,8 @@ named at that decision rather than left for a reader to notice.
 
 ## Where policy text appears
 
-Three positions, and they accept different things. Most confusion about APL comes
-from expecting one position to accept another's forms.
+Three positions, and they accept different things. Most confusion comes from
+expecting one position to accept another's forms.
 
 | Position | YAML | Accepts |
 |---|---|---|
@@ -55,8 +55,7 @@ Both quote styles are accepted. The closing quote must be the same character, so
 `"it's"` and `'say "hi"'` each carry the other quote as content.
 
 The escape set is exactly `\\`, `\'` and `\"`. It is the minimum that closes
-the rule: without it there is no way to write a quote inside a literal delimited
-by
+the rule: without it there is no way to write a quote inside a literal delimited by
 that quote. An unrecognized escape is an error naming the character.
 
 `\n` and `\t` are deliberately not escapes. A deny reason rides in a violation
@@ -335,10 +334,9 @@ its author wrote.
 `parse_pipeline("")` returns an empty pipeline rather than erroring, because a
 caller hands it a field value that may be absent, and absent is not malformed.
 
-`validate(name)` is refused. It is in the original design and not in this build,
-and the evaluator's stub would let every value through, so accepting it would be
-a
-silent hole. The message names `regex(...)` and `run(...)`.
+`validate(name)` is refused. It exists in the original design, not in this
+build, and the evaluator's stub would let every value through, so accepting it
+would be a silent hole. The message names `regex(...)` and `run(...)`.
 
 ---
 
@@ -393,8 +391,7 @@ one phase.
 else: all three are process-global.
 
 `plugins:` on a route is a map of per-plugin overrides. A `plugins:` *list* was
-an activation list and is a load error in policy mode; a policy names the plugin
-it
+an activation list and is a load error in policy mode; a policy names the plugin it
 runs.
 
 An unrecognized key is an error at every scope, naming the key, and naming its
@@ -434,8 +431,7 @@ literal and not close it.
 
 `007` is 7. See [Numbers](#numbers).
 
-`parse_pipeline("")` is an empty pipeline, while an empty stage inside a chain
-is
+`parse_pipeline("")` is an empty pipeline, while an empty stage inside a chain is
 an error. Two positions, two answers: one takes a possibly-absent field value,
 the other is a chain whose author named a stage.
 

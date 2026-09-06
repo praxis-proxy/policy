@@ -22,7 +22,7 @@ no `kind`, but labels in it do not survive a reload or reach a second
 replica.
 
 The three decision points are held to each other by a differential test
-suite: given the same attributes and equivalent policy intent, they must
+suite. Given the same attributes and equivalent policy intent, they must
 agree across their shared boolean, integer, string, and string-set
 subset. Documented semantic differences are allowlisted; a new
 disagreement fails the build.

@@ -119,7 +119,7 @@ Capability-Gating](../extensions.md)): predicates read it exactly like
 `subject.*` or `session.labels`, and it composes with them freely —
 `data.tenants[subject.tenant].data_region` ties a static fact to a per-request
 identity in one predicate. The tree is loaded once at startup and shared across
-requests, so reading it costs nothing on the hot path. Where
-[Identity](identity.md) supplies the *dynamic* attributes a request carries,
-static provisioning supplies the *stable* ones a deployment maintains — together
-they are the full picture a predicate reasons about.
+requests, so reading it costs nothing on the hot path.
+[Identity](identity.md) supplies the *dynamic* attributes a request carries;
+static provisioning supplies the *stable* ones a deployment maintains. A
+predicate reasons over both.

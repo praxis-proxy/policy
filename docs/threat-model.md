@@ -165,8 +165,8 @@ this threat model:
 - Backends themselves. PPE decides what reaches a tool and what comes back;
   it does not vouch for what the tool does internally.
 
-Believe you have found a policy-enforcement bypass? That is our critical
-severity class. Report it privately via the process in
+A policy-enforcement bypass is our critical severity class. Report it
+privately via the process in
 [SECURITY.md](https://github.com/praxis-proxy/policy/blob/main/SECURITY.md).
 
 ## Related documentation

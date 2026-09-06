@@ -66,10 +66,9 @@ delegator uses:
 ## Scoping: how broadly to apply it
 
 PPE resolves the pipeline for each request across one broad → narrow stack,
-and
-both identity and policy (including delegation) ride it. Narrower layers add
-to
-(or override) broader ones. Pick the broadest layer that's still correct.
+and both identity and policy (including delegation) ride it. Narrower layers
+add to (or override) broader ones. Pick the broadest layer that's still
+correct.
 
 A group is a named, reusable bundle of policy (authentication steps +
 authorization steps + plugins) that routes opt into. The layers, broad to
@@ -82,7 +81,7 @@ narrow:
 | Group | routes that join `<name>` (via `groups:` or a matching tag) | `groups.<name>.authentication` | `groups.<name>.authorization` / `plugins` |
 | Route (entity) | one route (a `tool: "*"` route is the catch-all) | route `authentication:` | route `authorization:` steps / `plugins:` |
 
-`delegate(...)` is not route-only. Place it or a
+`delegate(...)` is not route-only. Place it (or a
 `token.delegate` plugin) at the matching layer:
 
 - every tool → a `delegate()` in a `tool: "*"` route, or the delegator
@@ -158,8 +157,8 @@ uses. (Full group / defaults syntax: [Configuration](configuration.md).)
 
 ## Recipes
 
-Each recipe is a drop-in: the plugins it needs, the route layout, and where it
-has been run. All config is [unified-config](configuration.md) YAML.
+Each recipe is a drop-in: the plugins it needs, the route layout, and where
+it's been tested. All config is [unified-config](configuration.md) YAML.
 
 > One spelling. These recipes write policy under `authorization:`,
 > with `pre_invocation:` and `post_invocation:` inside it. That is now
@@ -207,15 +206,14 @@ routes:
 ```
 
 The minted `workday-api` token is attached to the upstream call. Tested:
-Keycloak
-26.x (Standard Token Exchange v2).
+Keycloak 26.x (Standard Token Exchange v2).
 
 ### Recipe 2: Agent acting as itself, by its SPIFFE SVID
 
 When: the *agent* is the principal (no human), and you don't trust the agent
-to
-hold downstream authority. The agent presents its SVID; PPE brokers a scoped
-downstream token. The agent holds no standing entitlement to the target.
+to hold downstream authority. The agent presents its SVID; PPE brokers a
+scoped downstream token. The agent holds no standing entitlement to the
+target.
 
 > The SVID is a JWT, but not an IdP token. A JWT-SVID is an `ES256` JWT
 > signed by *SPIRE* (validated against SPIRE's JWKS, not your IdP's): a SPIFFE
@@ -298,8 +296,7 @@ inbound resolver validates the token and the route allows the call.
 ### Recipe 5: Scope a token the agent already holds (1-leg)
 
 When: the agent authenticated to the IdP *itself* with its SVID and got back
-a
-normal JWT, and you still want PPE to narrow that token per-tool (least
+a normal JWT, and you still want PPE to narrow that token per-tool (least
 privilege at the boundary) without ever handling the SVID.
 
 > The token is not the SVID. The agent presented its SVID as a
@@ -491,8 +488,8 @@ is unaffected.
 
 ### Gating on which IdP minted a token
 
-Registered claims are dropped from the policy-visible bag by default,
-which left a deployment trusting several issuers unable to gate on
+Registered claims are dropped from the policy-visible bag by default.
+That left a deployment trusting several issuers unable to gate on
 which one signed. `claims:` overrides that, and is a sibling of both
 the preset and the inline map:
 

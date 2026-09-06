@@ -84,7 +84,7 @@ the backend see both parties.
 Whether `act` lands in the minted token is the token service's call: RFC 8693
 distinguishes *impersonation* (subject only, no `act`) from *delegation* (`act`
 records the actor), and only a service implementing the delegation path emits
-it. PPE always sends the delegation request. Notably, Keycloak's Standard Token
+it. PPE always sends the delegation request. Keycloak's Standard Token
 Exchange (v2) implements impersonation only and silently ignores `actor_token`,
 so no `act` appears there — capture the actor at the PPE boundary (audit /
 downstream header) if your token service doesn't support delegation.

@@ -19,7 +19,7 @@ A hit inside a `#[cfg(test)]` region, or in a `tests/`, `examples/`, or `benches
 target, is not a production site. Test code is scope-allowed at the module or
 crate level, so these numbers describe the library's own surface.
 
-Three measurement traps, all of which produced wrong numbers here before:
+Three measurement traps that produced wrong numbers here before:
 
 - A text scan cannot tell production from a scope-allowed test module. The
   first inventory recorded 58 production panic sites by scanning. The real number
@@ -134,7 +134,7 @@ the cost of scoped allows in the affected test modules and no production change
 at all.
 
 The lesson is the measurement order. Each of those fourteen looked like work
-because earlier counts were taken while other lints still failed, and a crate that
+because earlier counts were taken while other lints still failed. A crate that
 fails to compile blocks its dependents from being linted, so every count taken
 before the tree was clean understated some lints and left others looking larger
 than they were. Re-measure after each class closes.
@@ -209,9 +209,9 @@ retires divide-by-zero.
 `significant_drop_tightening` stays allowed at 9 sites, deliberately. The scopes
 where tightening removed a real hazard are closed: the Plugin Factory lookup no
 longer holds the registry read lock across host-supplied `create` code, which
-could re-enter the engine and deadlock, and the CEL compile cache now logs
-outside its guard while keeping the capacity check and the insert under one lock
-so the cap cannot be exceeded by two threads racing. The rest hold a guard across
+could re-enter the engine and deadlock. The CEL compile cache now logs outside
+its guard while keeping the capacity check and the insert under one lock, so
+the cap cannot be exceeded by two threads racing. The rest hold a guard across
 a synchronous call on purpose and document why.
 
 ## Panic sources
