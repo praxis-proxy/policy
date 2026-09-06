@@ -17,7 +17,7 @@ a later page:
 |-------|-------------|-------|
 | R1 | Resolve the real user behind the agent | [Identity](apl/identity.md) |
 | R2 | Same request, different data (redact per identity) | [Effects](apl/effects.md) |
-| R3 | Enforce on inputs and results (validate args, shape output) | [APL](apl/README.md) |
+| R3 | Enforce on inputs and results (validate args, shape output) | [APL](apl/index.md) |
 | R4 | Delegate downstream with a narrower credential | [Delegation](apl/delegation.md) |
 | R5 | Remember the session (carry state across calls) | [Session Taint](apl/tainting.md) |
 | R6 | Out-of-band elicitations (human approval) | [Elicitation](apl/elicitation.md) |
@@ -52,7 +52,7 @@ routes:
 - An engineer is denied at `require(role.hr)`. The call never reaches the
   backend.
 
-![Three identical get_compensation requests pass through PPE APL policy and produce three outcomes by identity: the full record for HR with view_ssn, the record with SSN redacted for HR without view_ssn, and a deny for non-HR callers](images/overview_outcomes.svg)
+![Three identical get_compensation requests pass through PPE APL policy and produce three outcomes by identity: the full record for HR with view_ssn, the record with SSN redacted for HR without view_ssn, and a deny for non-HR callers](../images/overview_outcomes.svg)
 
 No application code changed between the three outcomes. The policy did.
 
@@ -88,7 +88,7 @@ three. [Deployment](deployment.md) walks through each.
 
 ## Related documentation
 
-- [APL](apl/README.md): the enforcement-pipeline configuration.
+- [APL](apl/index.md): the enforcement-pipeline configuration.
 - [Identity](apl/identity.md): how callers are resolved into the attributes
   policy reads.
 - [Quick Start](quickstart.md): stand up PPE and run this scenario.

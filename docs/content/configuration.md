@@ -228,8 +228,8 @@ client_secret_source:
 
 ## Related
 
-- [APL](apl/README.md) for Authorization Policy Layer configuration
-- [Upgrading APL](upgrade-apl.md) for what an older configuration must
+- [APL](apl/index.md) for Authorization Policy Layer configuration
+- [Upgrading APL](../upgrade-apl.md) for what an older configuration must
   rewrite, with a before and an after for every key
 - [Header Assertions](assertions.md) for the `assertions:` block
 - [Builtins](builtins.md) for the `kind:` values that ship here

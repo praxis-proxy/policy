@@ -55,8 +55,9 @@ Both quote styles are accepted. The closing quote must be the same character, so
 `"it's"` and `'say "hi"'` each carry the other quote as content.
 
 The escape set is exactly `\\`, `\'` and `\"`. It is the minimum that closes
-the rule: without it there is no way to write a quote inside a literal delimited by
-that quote. An unrecognized escape is an error naming the character.
+the rule: without it there is no way to write a quote inside a literal
+delimited by that quote. An unrecognized escape is an error naming the
+character.
 
 `\n` and `\t` are deliberately not escapes. A deny reason rides in a violation
 field a host renders, so a multi-line reason there is a display problem rather than
@@ -390,9 +391,9 @@ one phase.
 `attribute_files:`, `pdp:` and `session_store:` are `global:` keys and nowhere
 else: all three are process-global.
 
-`plugins:` on a route is a map of per-plugin overrides. A `plugins:` *list* was
-an activation list and is a load error in policy mode; a policy names the plugin it
-runs.
+`plugins:` on a route is a map of per-plugin overrides. A `plugins:` *list*
+was an activation list and is a load error in policy mode; a policy names the
+plugin it runs.
 
 An unrecognized key is an error at every scope, naming the key, and naming its
 replacement where it had one.

@@ -128,7 +128,7 @@ demonstrates.
 
 - [Use Cases](use-cases.md): the full set of controls running end to end
   behind a real gateway.
-- [APL](apl/README.md): the language, and its
+- [APL](apl/index.md): the language, and its
   [normative grammar](apl-grammar.md).
 - [Configuration](configuration.md): the document, its keys, and both
   dispatch modes.

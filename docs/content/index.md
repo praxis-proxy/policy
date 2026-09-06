@@ -28,7 +28,7 @@ that pipeline in phases before invocation and after its result.
 
 ## Writing policy
 
-- [APL](apl/README.md):
+- [APL](apl/index.md):
   routes, phases, predicates, rules, and field pipelines
 - [Grammar](apl-grammar.md):
   the normative grammar; where it and the parser disagree, one is a bug
@@ -63,7 +63,7 @@ that pipeline in phases before invocation and after its result.
   the same policy at a gateway, a sidecar, or in-framework
 - [Patterns](patterns.md):
   layered enforcement, shadow rollout, guardrails, least privilege
-- [Upgrading APL](upgrade-apl.md):
+- [Upgrading APL](../upgrade-apl.md):
   every key and form an existing configuration must rewrite
 
 ## Architecture
@@ -86,14 +86,14 @@ that pipeline in phases before invocation and after its result.
 
 ## Project
 
-- [Lints](lints.md):
+- [Lints](../lints.md):
   rationale for the workspace lint set
-- [Security Analysis](security-analysis.md):
+- [Security Analysis](../security-analysis.md):
   the point-in-time security review record
-- [Import Provenance](port-provenance.md):
+- [Import Provenance](../port-provenance.md):
   where this tree came from and what was deliberately left behind
-- [Contributing](../CONTRIBUTING.md) and
-  [Changelog](../CHANGELOG.md)
+- [Contributing](../../CONTRIBUTING.md) and
+  [Changelog](../../CHANGELOG.md)
 
 ## Diagram sources
 

@@ -3,8 +3,8 @@
 
 // APL parser: policy text to IR.
 //
-// The grammar this accepts is written down in docs/apl-grammar.md, and that
-// document is normative. This file used to carry the description instead, in a
+// The grammar this accepts is written down in docs/content/apl-grammar.md,
+// and that document is normative. This file used to carry the description instead, in a
 // comment block that had gone wrong on four counts: it claimed steps, pipe chains,
 // `in` / `not in` / `exists()` and `sequential:` / `parallel:` were all rejected,
 // long after each was implemented. A grammar kept in a comment beside its parser

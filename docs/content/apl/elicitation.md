@@ -73,7 +73,7 @@ is one clause: *forward only when the decision is `Allow` and nothing is
 pending.* Expiry, channel error, a genuine denial, or a failed validation all
 fail closed (default `on_error: deny`).
 
-![The elicitation suspend-and-resume flow: an agent request hits require_approval, which opens a Keycloak CIBA backchannel and returns -32120 with an elicitation id; agent retries hit a non-blocking status check that keeps returning pending until the channel resolves; validate then verifies genuineness and scope over the live args, forwarding to the tool when approved and sufficient, and failing closed on denial, expiry, or invalid responses](../images/apl_elicitation_flow.svg)
+![The elicitation suspend-and-resume flow: an agent request hits require_approval, which opens a Keycloak CIBA backchannel and returns -32120 with an elicitation id; agent retries hit a non-blocking status check that keeps returning pending until the channel resolves; validate then verifies genuineness and scope over the live args, forwarding to the tool when approved and sufficient, and failing closed on denial, expiry, or invalid responses](../../images/apl_elicitation_flow.svg)
 
 ## The CIBA channel plugin
 

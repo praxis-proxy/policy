@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Praxis Contributors
 
 # APL core — predicate language, compiler, evaluator.
-# The grammar this crate accepts is normative in docs/apl-grammar.md.
+# The grammar this crate accepts is normative in docs/content/apl-grammar.md.
 
 [package]
 name = "praxis-policy-apl-core"

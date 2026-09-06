@@ -73,7 +73,7 @@ Different controls belong at different points. PPE runs the same way at each of
 them, so you place a policy where its enforcement point is, not where the
 framework forces it.
 
-![The policy spectrum: soft prompt-level controls (style, tone, refusals), enforcement-tier agentic API authorization (redaction, delegation), and hard infrastructure-boundary controls (identity, info-flow, audit), on an axis from advisory to enforced at the boundary](images/vision_policy_spectrum.svg)
+![The policy spectrum: soft prompt-level controls (style, tone, refusals), enforcement-tier agentic API authorization (redaction, delegation), and hard infrastructure-boundary controls (identity, info-flow, audit), on an axis from advisory to enforced at the boundary](../images/vision_policy_spectrum.svg)
 
 A style guardrail at the prompt level and a hard information-flow control at an
 infrastructure boundary are the same kind of object: an APL policy evaluated by

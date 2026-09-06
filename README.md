@@ -26,7 +26,7 @@ may call a tool, what data returns, and where that data may go next.
 - Header assertions: Renders the identity it derived onto the upstream
   request as headers, removes the client-supplied headers that would collide
   with it, and filters what an upstream is allowed to tell a client back. See
-  [docs/assertions.md](docs/assertions.md).
+  [docs/content/assertions.md](docs/content/assertions.md).
 - Human approval: Supports out-of-band human approval when a decision cannot
   be automated.
 - Audit: Emits an audit event for every decision.
@@ -48,15 +48,17 @@ requirement covers the set. Requires Rust 1.96 or newer.
 
 ## Documentation
 
-[docs/README.md](docs/README.md) indexes the full set. The usual entry points:
+[docs/content/index.md](docs/content/index.md) indexes the full set. The usual
+entry points:
 
-- [Quick Start](docs/quickstart.md): stand up an enforcement point and run your
-  first policy
-- [Overview](docs/overview.md): how it works, followed through one scenario
-- [APL](docs/apl/README.md): Authorization Policy Layer configuration and its
-  [normative grammar](docs/apl-grammar.md)
-- [Configuration](docs/configuration.md): the config document and both dispatch
-  modes
+- [Quick Start](docs/content/quickstart.md): stand up an enforcement point and
+  run your first policy
+- [Overview](docs/content/overview.md): how it works, followed through one
+  scenario
+- [APL](docs/content/apl/index.md): Authorization Policy Layer configuration
+  and its [normative grammar](docs/content/apl-grammar.md)
+- [Configuration](docs/content/configuration.md): the config document and
+  both dispatch modes
 - [Upgrading APL](docs/upgrade-apl.md): what an existing configuration must
   rewrite
 

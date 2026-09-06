@@ -32,7 +32,7 @@ output must cross, evaluated against state the model cannot see or forge.
 PPE draws that boundary. Every operation the agent attempts crosses it; nothing
 the model emits reaches a capability directly.
 
-![The PPE trust boundary: an untrusted caller and agent on one side, mediated capabilities on the other, with the PPE Reference Monitor between them evaluating APL policy against identity, delegation, taint, and audit state the model cannot forge, fed by an IdP and a PDP](images/threat_model.svg)
+![The PPE trust boundary: an untrusted caller and agent on one side, mediated capabilities on the other, with the PPE Reference Monitor between them evaluating APL policy against identity, delegation, taint, and audit state the model cannot forge, fed by an IdP and a PDP](../images/threat_model.svg)
 
 Everything to the left of the monitor is assumed hostile, and nothing the policy
 reads comes from there: verified tokens come from the IdP (identity provider),
@@ -68,7 +68,7 @@ it.
 PPE fronts a tool server. Every request to that backend crosses the boundary,
 whichever agent or client sent it.
 
-![PPE as a gateway: agents and direct clients all pass through the PPE gateway before reaching the tool server](images/threat_model_gateway.svg)
+![PPE as a gateway: agents and direct clients all pass through the PPE gateway before reaching the tool server](../images/threat_model_gateway.svg)
 
 Covers
 
@@ -92,7 +92,7 @@ This is the placement in the end-to-end [Praxis demo](use-cases.md).
 PPE sits beside one agent and mediates its egress. Everything that agent emits
 crosses the boundary, whatever it targets.
 
-![PPE as an egress sidecar: all egress from the agent workload passes through the PPE sidecar on its way to internal tools, third-party APIs, and other agents](images/threat_model_sidecar.svg)
+![PPE as an egress sidecar: all egress from the agent workload passes through the PPE sidecar on its way to internal tools, third-party APIs, and other agents](../images/threat_model_sidecar.svg)
 
 Covers
 
@@ -118,7 +118,7 @@ Does not cover
 PPE runs inside the agent runtime and mediates operations as the framework
 issues them.
 
-![PPE in-process: inside the agent runtime the LLM drives the framework, whose operations pass through in-process PPE before reaching tools and backends](images/threat_model_inframework.svg)
+![PPE in-process: inside the agent runtime the LLM drives the framework, whose operations pass through in-process PPE before reaching tools and backends](../images/threat_model_inframework.svg)
 
 Covers
 

@@ -17,7 +17,7 @@ For the conceptual model first, read [Use Cases](use-cases.md) and
 
 Every request crosses two identity boundaries:
 
-![Two identity boundaries. Inbound: identity.resolve validates credentials and fills typed identity slots, additively. Outbound: token.delegate mints the downstream credential, chosen per route by subject.](images/identity_two_boundaries.svg)
+![Two identity boundaries. Inbound: identity.resolve validates credentials and fills typed identity slots, additively. Outbound: token.delegate mints the downstream credential, chosen per route by subject.](../images/identity_two_boundaries.svg)
 
 - Inbound. `identity.resolve` plugins each read one credential (from a
   header) and land a typed identity in a slot. They are additive: one request
@@ -164,7 +164,7 @@ it's been tested. All config is [unified-config](configuration.md) YAML.
 > with `pre_invocation:` and `post_invocation:` inside it. That is now
 > the only spelling. The `apl:` wrapper is gone at every scope, and a
 > phase list written flat on a route is a load error. Both were
-> accepted once; see [Upgrading APL](upgrade-apl.md) for the rewrite.
+> accepted once; see [Upgrading APL](../upgrade-apl.md) for the rewrite.
 
 ### Recipe 1: User acting through an agent (on-behalf-of)
 

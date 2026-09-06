@@ -5,7 +5,7 @@ capability an agent may invoke (e.g., a tool, resource, prompt, or A2A method)
 defines a route that sequences its boundary controls. APL keeps predicates and
 effects out of application code.
 
-![An APL config: plugins and global settings, then per-entity routes with a pre-invocation flow (require, PDP, delegate, run) and post-invocation result handling (taint, redact), plus Session Taint across entities](../images/apl_overview.svg)
+![An APL config: plugins and global settings, then per-entity routes with a pre-invocation flow (require, PDP, delegate, run) and post-invocation result handling (taint, redact), plus Session Taint across entities](../../images/apl_overview.svg)
 
 APL configuration comprises routes, phases, predicates, rules, and field
 pipelines:
@@ -32,7 +32,7 @@ Policy is organized by route: an operation PPE mediates, identified by the
 tool or other interface it governs. Each route runs through four
 phases, in order:
 
-![The four route phases in order: args validates and transforms input, authorization.pre_invocation authorizes, result redacts and masks output, and authorization.post_invocation runs audit and final checks; the first deny in any phase halts that phase and every later one](../images/apl_phases.svg)
+![The four route phases in order: args validates and transforms input, authorization.pre_invocation authorizes, result redacts and masks output, and authorization.post_invocation runs audit and final checks; the first deny in any phase halts that phase and every later one](../../images/apl_phases.svg)
 
 - args: validate and transform request inputs before the operation runs.
 - authorization.pre_invocation: authorize the operation. Predicates, PDP

@@ -117,6 +117,6 @@ plugin's declared capabilities (see [Extensions &
 Capability-Gating](../extensions.md)): a plugin only sees the identity fields it
 is entitled to. APL predicates read the same bag, gated the same way.
 
-Once identity is resolved, policy can authorize ([APL](README.md)), delegate
+Once identity is resolved, policy can authorize ([APL](index.md)), delegate
 downstream ([Delegation](delegation.md)), or hand a relationship decision to a
 PDP ([PDP Integration](pdp.md)).

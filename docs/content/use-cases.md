@@ -20,7 +20,7 @@ around a filter chain. PPE ships as its `policy` filter (the
 `policy-engine` feature), so the gateway parses MCP JSON-RPC, runs the full
 policy pass, and only then forwards a scoped request upstream:
 
-![The Praxis demo topology: a chat agent calls the Praxis gateway over MCP, where the mcp, policy (PPE), and router filters run in sequence before forwarding to the hr-mcp server; the policy filter is configured by policy.yaml and talks to Keycloak for identity, token exchange, and CIBA, and to Valkey for Session Taint, while Keycloak pushes CIBA approvals to the auth-channel UI](images/use_cases_topology.svg)
+![The Praxis demo topology: a chat agent calls the Praxis gateway over MCP, where the mcp, policy (PPE), and router filters run in sequence before forwarding to the hr-mcp server; the policy filter is configured by policy.yaml and talks to Keycloak for identity, token exchange, and CIBA, and to Valkey for Session Taint, while Keycloak pushes CIBA approvals to the auth-channel UI](../images/use_cases_topology.svg)
 
 The wiring is two files:
 [`praxis.yaml`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/praxis.yaml)
@@ -194,7 +194,7 @@ Keycloak, which pushes the prompt to the manager's device. The `scope` binds the
 approval to the live amount, so a sign-off cannot be replayed against a larger
 change.
 
-![The approval sequence: the agent sends adjust_compensation for $25k and the gateway answers -32120 pending with an elicitation id while firing a CIBA backchannel request to Keycloak, which pushes the prompt to the manager's device; after the manager approves, the agent's peek returns -32121 approved, and re-sending with X-Policy-Elicitation-Id applies the change with a 200](images/use_cases_hil_sequence.svg)
+![The approval sequence: the agent sends adjust_compensation for $25k and the gateway answers -32120 pending with an elicitation id while firing a CIBA backchannel request to Keycloak, which pushes the prompt to the manager's device; after the manager approves, the agent's peek returns -32121 approved, and re-sending with X-Policy-Elicitation-Id applies the change with a 200](../images/use_cases_hil_sequence.svg)
 
 The agent needs no approval protocol; it sees "retry later" and, later, a
 result. In the demo's chat client the conversation continues until the

@@ -15,7 +15,7 @@ and they run in sequence until one denies.
 | `require_approval(name, ...)` / `confirm(...)` / `require_step_up(...)` / `require_attestation(...)` / `request_info(...)` / `require_review(...)` | Ask a human and suspend the operation until they respond. See [Elicitation](elicitation.md). |
 | `taint(label[, scope])` | Attach a label to the session or message. See [Session Taint](tainting.md). |
 | `restrict: { ... }` | Narrow the set of backends the router may select from. See [Backend Restriction](restrict.md). |
-| field pipelines | Validate or transform `args`/`result` fields. See [APL](README.md). |
+| field pipelines | Validate or transform `args`/`result` fields. See [APL](index.md). |
 | PDP call (`cedar:`, `cel:`, `opa(...)`) | Delegate the decision to a policy engine. See [PDP Integration](pdp.md). |
 
 ## Sequencing and halt-on-deny
@@ -94,7 +94,7 @@ on another.
 
 Effects run within the four route phases: `args`,
 `authorization.pre_invocation`, `result`, `authorization.post_invocation` (see
-[APL](README.md)). `delegate`, elicitation verbs, and PDP calls belong in
+[APL](index.md)). `delegate`, elicitation verbs, and PDP calls belong in
 `pre_invocation` or `post_invocation`; field pipelines belong in `args` and
 `result`. A deny anywhere halts the rest. An elicitation verb can also *suspend*
 a phase — the operation neither allows nor denies, but pauses for a human and
