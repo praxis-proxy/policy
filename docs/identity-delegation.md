@@ -162,10 +162,11 @@ uses. (Full group / defaults syntax: [Configuration](configuration.md).)
 Each recipe is a drop-in: the plugins it needs, the route layout, and where it
 has been run. All config is [unified-config](configuration.md) YAML.
 
-> **Canonical keys.** These recipes write policy under `authorization:` (with
-> `pre_invocation:` / `post_invocation:` inside), the orchestrator-agnostic
-> spelling. The older `apl:` wrapper is still accepted, and `pre_invocation:`
-> may also be written flat on the route; all three compile identically.
+> **One spelling.** These recipes write policy under `authorization:`,
+> with `pre_invocation:` and `post_invocation:` inside it. That is now
+> the only spelling. The `apl:` wrapper is gone at every scope, and a
+> phase list written flat on a route is a load error. Both were
+> accepted once; see [Upgrading APL](upgrade-apl.md) for the rewrite.
 
 ### Recipe 1: User acting through an agent (on-behalf-of)
 
@@ -432,6 +433,112 @@ actor on the wire exactly as RFC 8693 delegation prescribes (`actor_token` +
 > (audit / downstream header) instead. PPE resolves both principals either way.
 
 ---
+
+## Reading claims the way your IdP writes them
+
+The JWT identity plugin infers a subject from a token's claims. Which
+claims, and where they sit, differs by IdP, so the mapping is
+configuration rather than something to patch a crate for.
+
+Name one of the four shipped presets:
+
+<!-- validate: fragment -->
+```yaml
+claim_mapper: keycloak       # standard | keycloak | auth0 | cognito
+```
+
+Or write the map inline, with candidate paths tried in order:
+
+<!-- validate: fragment -->
+```yaml
+claim_map:
+  subject:
+    roles:
+      paths:
+        - realm_access.roles
+        - resource_access.my-api.roles
+      merge: union             # first_match (default) | union
+    permissions:
+      paths:
+        - { path: permissions, array_only: true }
+        - scope
+      split: whitespace        # break a delimited string into elements
+      on_missing: deny         # ignore (default) | deny
+```
+
+`.` separates path segments and `\` escapes one; every other
+character, `:` and `/` included, is a literal. So `cognito:groups` is
+one segment written plainly, and escaping the colon is rejected rather
+than quietly accepted. A field whose candidates all miss is left empty
+and logged, naming every path tried; `on_missing: deny` makes that a
+refusal instead.
+
+**Each preset records what it omits.** Auth0 and Keycloak put their
+roles claim where no preset can name it, so those need a hand-written
+map. A preset leaves a field empty rather than filling it with the
+wrong concept: Keycloak's `groups` holds realm roles, and Cognito's
+`cognito:roles` holds IAM role ARNs.
+
+Naming no mapper resolves to `standard`, so an existing configuration
+is unaffected.
+
+### Gating on which IdP minted a token
+
+Registered claims are dropped from the policy-visible bag by default,
+which left a deployment trusting several issuers unable to gate on
+which one signed. `claims:` overrides that, and is a sibling of both
+the preset and the inline map:
+
+<!-- validate: fragment -->
+```yaml
+claim_mapper: keycloak
+claims:
+  include: [iss]               # keep one the inference drops
+  exclude: [internal_debug]    # drop an otherwise-visible claim
+```
+
+`claim.iss` is then readable from policy. Both lists take top-level
+claim names, since the bag is keyed by name: a dotted entry is refused
+at load rather than matching nothing, and a claim whose own name holds
+a dot is written with `\.`. A `role: caller_workload` resolver carries
+no claims bag and says so at load rather than ignoring the setting.
+
+## Caching a delegated token
+
+A token exchange is a network call on the request path. The optional
+`cache:` block holds a minted token until it expires:
+
+<!-- validate: fragment -->
+```yaml
+cache:
+  enabled: true
+  subjects: [this_workload, client]
+  max_entries: 10000
+  ttl_ceiling_seconds: 300
+```
+
+The default subjects are `this_workload` and `client`, which have
+bounded cardinality. `user` and `caller_workload` are opt-in through
+`cache.subjects` for exactly that reason: one entry per user is not a
+cache, it is a leak with an eviction policy.
+
+Concurrent misses for one key share a single exchange rather than
+stampeding the IdP, and a failure is never cached.
+`ttl_ceiling_seconds` bounds how long a cached token can outlive a
+revocation at the IdP, which is the real cost of caching here: the IdP
+can revoke, and a cached token does not hear about it until the ceiling
+expires.
+
+### A route that delegates an unvalidated credential
+
+A `delegate` step whose subject exchanges the caller's own token
+relies on identity resolution having checked that token. But
+`authentication:` is per-route and optional, so a route can reach the
+delegator with a credential this process never validated.
+
+Loading reports it, under `alarm = "delegation_without_identity_resolution"`,
+naming the route and the delegate plugins on it. `subject: this_workload`
+is excluded, since it carries no inbound credential.
 
 ## Where to place PPE
 

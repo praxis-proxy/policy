@@ -47,8 +47,8 @@ reaches the backend after a deny in `args` or `authorization.pre_invocation`.
 
 `authorization` names *when* the phase runs, not a pure allow/deny gate:
 alongside the decision, `pre_invocation` (and `post_invocation`) can carry
-obligations and effects — `taint(...)`, `delegate(...)`, and `plugin(...)`
-(which may transform the payload) — that run as part of the phase.
+obligations and effects, `taint(...)`, `delegate(...)`, and `run(...)`
+(which may transform the payload), that run as part of the phase.
 
 ```yaml
 routes:
@@ -158,8 +158,9 @@ is not inherited by entity routes.
 ## Authorizing HTTP requests without an entity
 
 Routes key on an MCP / A2A entity — a tool, prompt, resource, or LLM. A generic
-HTTP request that carries no such entity is authorized by the `global` policy
-instead: when `global` declares an `authorization:` (or `args:`) block, PPE
+HTTP request that carries no such entity is authorized by the `global`
+policy instead, or by an `http:` route that selects on the request line
+(see [HTTP Routing](../http-routing.md)): when `global` declares an `authorization:` (or `args:`) block, PPE
 evaluates it for these requests, reading the request line (`http.method`,
 `http.path`, `http.host`, `http.scheme`) and headers. Pair it with a `global`
 `response:` to return a custom denial.
@@ -200,17 +201,34 @@ The accepted stages:
 | Constraint validators | `enum(a, b, c)`, `regex("...")`, `len(1..100)`, range like `0..100` |
 | Transforms | `mask(N)` (keep last N), `redact`, `redact(!predicate)` (redact unless), `omit`, `hash` |
 | Scans | `pii.redact`, `pii.detect`, `injection.scan` |
-| Dispatch | `plugin(name)` (alias `run(name)`), `taint(label[, scope])` |
+| Dispatch | `run(name)`, `taint(label[, scope])` |
 
-Named-validator dispatch (`validate(name)`) is not implemented in the current
-build. Use `regex("...")` for pattern checks or `plugin(name)` to hand a field
-to a plugin.
+`plugin(name)` is not a spelling here or in step position. `run(name)` is
+the one form that invokes a plugin, in a step list and a pipe chain
+alike, and writing `plugin(name)` is an error naming the replacement.
+
+Named-validator dispatch (`validate(name)`) is refused rather than
+unimplemented. The stub would have let every value through, which is a
+silent hole in a validator. Use `regex("...")` for a pattern check, or
+`run(name)` to hand the field to a plugin.
 
 ## Effects beyond predicates
 
-A `pre_invocation:` rule can also call a PDP, mint a delegated token, or invoke
-a plugin. Those effects and how they sequence are covered in
-[Effects](effects.md).
+A `pre_invocation:` rule can also call a decision point, mint a delegated
+token, or invoke a plugin. Those effects and how they sequence are
+covered in [Effects](effects.md).
+
+## Beside the policy
+
+Two blocks sit alongside `authorization:` on the same sections and are
+not policy terms themselves:
+
+- `assertions:` renders engine-derived identity onto the upstream
+  request as headers and filters what an upstream may tell a client
+  back. It runs after the applicable policy phase. See
+  [Header Assertions](../assertions.md).
+- `authentication:` names the identity-resolution plugins that run
+  before policy. See [Identity](identity.md).
 
 Every fragment on this page is drawn from the `praxis-policy-apl-core` parser tests and the
 reference deployments, so the forms shown here parse as written.
