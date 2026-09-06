@@ -37,6 +37,16 @@ Without `builtins`, you get the engine alone and no extensions compiled in. Decl
 
 The crates are versioned together and released together, so a single `0.2` requirement covers the set. Requires Rust 1.96 or newer.
 
+## Documentation
+
+[docs/README.md](docs/README.md) indexes the full set. The usual entry points:
+
+- [Quick Start](docs/quickstart.md): stand up an enforcement point and run your first policy
+- [Overview](docs/overview.md): how it works, followed through one scenario
+- [APL](docs/apl/README.md): the policy language, and its [normative grammar](docs/apl-grammar.md)
+- [Configuration](docs/configuration.md): the config document and both dispatch modes
+- [Upgrading APL](docs/upgrade-apl.md): what an existing configuration must rewrite
+
 ## Status
 
 0.2.x. The public API will move between minor versions while the shape settles; a breaking change gets a minor bump and is documented in the CHANGELOG.
