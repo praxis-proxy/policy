@@ -16,8 +16,7 @@ may call a tool, what data returns, and where that data may go next.
 ## What it does
 
 - Identity: Resolves and independently validates user, agent, and workload
-  identities, then renders them onto the upstream request as headers,
-  stripping any client-supplied ones that would collide.
+  identities.
 - Authorization: Evaluates APL predicates and pluggable decision points,
   including relationship-based authorization.
 - Delegation: Exchanges credentials through RFC 8693, giving each upstream
