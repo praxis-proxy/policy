@@ -48,19 +48,7 @@ requirement covers the set. Requires Rust 1.96 or newer.
 
 ## Documentation
 
-[docs/content/index.md](docs/content/index.md) indexes the full set. The usual
-entry points:
-
-- [Quick Start](docs/content/quickstart.md): stand up an enforcement point and
-  run your first policy
-- [Overview](docs/content/overview.md): how it works, followed through one
-  scenario
-- [APL](docs/content/apl/index.md): Authorization Policy Layer configuration
-  and its [normative grammar](docs/content/apl-grammar.md)
-- [Configuration](docs/content/configuration.md): the config document and
-  both dispatch modes
-- [Upgrading APL](docs/upgrade-apl.md): what an existing configuration must
-  rewrite
+[docs/content/index.md](docs/content/index.md) indexes the full set.
 
 ## Status
 
