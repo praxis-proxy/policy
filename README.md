@@ -48,7 +48,7 @@ requirement covers the set. Requires Rust 1.96 or newer.
 
 ## Documentation
 
-See the [documentation index](docs/content/index.md) for the full set.
+Full documentation: [docs/content/index.md](docs/content/index.md).
 
 ## Status
 
