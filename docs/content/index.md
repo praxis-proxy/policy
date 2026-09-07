@@ -83,19 +83,3 @@ that pipeline in phases before invocation and after its result.
   bundled plugins, decision points, session stores, and their features
 - [Testing](testing.md):
   testing a policy as code
-
-## Project
-
-- [Lints](../lints.md):
-  rationale for the workspace lint set
-- [Security Analysis](../security-analysis.md):
-  the point-in-time security review record
-- [Import Provenance](../port-provenance.md):
-  where this tree came from and what was deliberately left behind
-- [Contributing](../../CONTRIBUTING.md) and
-  [Changelog](../../CHANGELOG.md)
-
-## Diagram sources
-
-The diagrams use text-editable SVG sources. `overview.md` and `deployment.md`
-omit earlier diagrams whose rendered images had no source to maintain.
