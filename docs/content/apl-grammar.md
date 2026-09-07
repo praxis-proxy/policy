@@ -450,6 +450,9 @@ An elicitation `scope:` is parsed at request time. See [Steps](#steps).
 
 ## See also
 
-- `docs/upgrade-apl.md` — what an existing configuration must rewrite.
-- `crates/ppe-apl-core/tests/conformance/` — the cases this document is held to.
-- `CHANGELOG.md` — when each of these rules arrived, and what it replaced.
+- [`docs/upgrade-apl.md`](../upgrade-apl.md) — what an existing configuration
+  must rewrite.
+- [`crates/ppe-apl-core/tests/conformance/`](../../crates/ppe-apl-core/tests/conformance/)
+  — the cases this document is held to.
+- [`CHANGELOG.md`](../../CHANGELOG.md) — when each of these rules arrived, and
+  what it replaced.

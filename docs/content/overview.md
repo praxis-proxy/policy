@@ -92,3 +92,5 @@ three. [Deployment](deployment.md) walks through each.
 - [Identity](apl/identity.md): how callers are resolved into the attributes
   policy reads.
 - [Quick Start](quickstart.md): stand up PPE and run this scenario.
+- [Use Cases](use-cases.md): the full set of controls running end to end
+  behind a real gateway.
