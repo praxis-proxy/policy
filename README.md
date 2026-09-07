@@ -16,17 +16,15 @@ may call a tool, what data returns, and where that data may go next.
 ## What it does
 
 - Identity: Resolves and independently validates user, agent, and workload
-  identities.
+  identities, then renders them onto the upstream request as headers,
+  stripping any client-supplied ones that would collide.
 - Authorization: Evaluates APL predicates and pluggable decision points,
   including relationship-based authorization.
 - Delegation: Exchanges credentials through RFC 8693, giving each upstream
   service a token scoped to that service.
-- Data control: Redacts fields in transit and propagates Session Taint
-  across tool calls and requests.
-- Header assertions: Renders the identity it derived onto the upstream
-  request as headers, removes the client-supplied headers that would collide
-  with it, and filters what an upstream is allowed to tell a client back. See
-  [docs/content/assertions.md](docs/content/assertions.md).
+- Data control: Redacts fields in transit, propagates Session Taint across
+  tool calls and requests, and filters what an upstream is allowed to tell a
+  client back.
 - Human approval: Supports out-of-band human approval when a decision cannot
   be automated.
 - Audit: Emits an audit event for every decision.
