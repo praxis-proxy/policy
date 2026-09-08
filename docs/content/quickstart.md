@@ -10,7 +10,7 @@ right one.
 ## 1. Add PPE
 
 ```toml
-praxis-policy = { version = "0.2", features = ["builtins"] }
+praxis-policy = { version = "0.2", features = ["builtins", "http-hyper"] }
 ```
 
 `builtins` compiles in every bundled extension: JWT identity, OAuth
@@ -18,7 +18,10 @@ delegation, CIBA elicitation, the Cedar, CEL and OPA decision points,
 and the Valkey session store. For a smaller build, name a subset
 instead: `features = ["jwt", "cedar"]`. See [Builtins](builtins.md).
 
-The default build is the engine alone.
+The default build is the engine alone. `http-hyper` is separate from
+`builtins` because it is the one piece a host commonly already owns: it
+supplies the bundled outbound HTTP transport, and a host with its own
+HTTP client injects that instead (step 2).
 
 ## 2. Register the runtime
 
@@ -35,35 +38,47 @@ let engine = Arc::new(PolicyEngine::default());
 praxis_policy::install_builtins(&engine);
 ```
 
-Without the `builtins` feature, register your own factories and install
-the visitor yourself:
+Without the `builtins` feature there is nothing to register, so install
+the APL visitor yourself:
 
 ```rust,ignore
 use std::sync::Arc;
-use praxis_policy::{PolicyEngine, register_apl, AplOptions};
+use praxis_policy::{
+    AplOptions, DispatchCache, MemorySessionStore, PolicyEngine, register_apl,
+};
 
 let engine = Arc::new(PolicyEngine::default());
-engine.register_factory(MyIdentityFactory);
-register_apl(&engine, AplOptions::default());
+register_apl(
+    &engine,
+    AplOptions {
+        dispatch_cache: Arc::new(DispatchCache::new()),
+        session_store: Arc::new(MemorySessionStore::new()),
+        pdps: Vec::new(),
+        pdp_factories: Vec::new(),
+        session_store_factories: Vec::new(),
+        base_capabilities: None,
+    },
+);
 ```
 
-Install an HTTP transport if any plugin reaches outside the process. PPE
-performs no outbound HTTP of its own, so a plugin that fetches
-JWKS, exchanges a token, or dispatches a CIBA prompt has nowhere to
-send its request until a host supplies one. A host with its own client
-injects it; a host without one uses the bundled implementation, behind
-the non-default `http-hyper` feature:
+A host with plugins of its own registers each one alongside this. See
+[Plugins and the Execution Pipeline](pipeline.md#when-to-write-a-plugin).
+
+Then install the outbound HTTP transport. PPE performs no HTTP of its
+own, so a plugin that fetches JWKS, exchanges a token, or dispatches a
+CIBA prompt has nowhere to send its request until a host supplies one:
 
 ```rust,ignore
-// A host with its own client, one pool and one trust store for the process.
-engine.set_http_transport(my_transport);
-
-// Or the bundled hyper implementation.
+// The bundled transport, from the `http-hyper` feature.
 praxis_policy::install_default_http_transport(&engine);
 ```
 
-Plugins that reach outward must also declare the `perform_http`
-capability, or the engine refuses to start and names what is missing.
+A host that already has an HTTP client calls
+`engine.set_http_transport(my_transport)` instead, so the process keeps
+one connection pool and one TLS trust store. Either call goes before
+`initialize()`, and a plugin that reaches outward must also declare the
+`perform_http` capability. [Builtins](builtins.md#the-http-transport)
+covers both, and the error each mistake produces.
 
 ## 3. Write the policy
 

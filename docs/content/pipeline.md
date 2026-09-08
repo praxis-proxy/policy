@@ -90,6 +90,17 @@ Declare the plugin's capabilities so it receives only the context it needs (see
 [Extensions & Capability-Gating](extensions.md)), register it on a hook, and
 reference it from APL by its `kind` or name.
 
+Registration names the `kind:` a policy will write, and takes the factory
+boxed:
+
+```rust,ignore
+engine.register_factory("validator/my-scan", Box::new(MyScanFactory));
+```
+
+An unrecognized `kind` fails the config load, so a factory you forgot to
+register is caught at startup rather than at the first request that
+needed it.
+
 The bundled plugins and decision points are catalogued in
 [Builtins](builtins.md); their wiring is in
 [Configuration](configuration.md).

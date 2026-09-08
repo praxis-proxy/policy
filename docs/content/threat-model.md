@@ -98,9 +98,9 @@ Covers
 
 - The complete outbound surface of the workload, including third-party APIs you
   do not control and could never gateway.
-- Workload identity: the `workload.*` attributes carry attested identity (SPIFFE
-  / mTLS), so policy can bind decisions to which workload is calling, not just
-  which user.
+- Workload identity: the `caller_workload.*` attributes carry attested
+  identity (SPIFFE / mTLS), so policy can bind decisions to which workload is
+  calling, not just which user.
 - Exfiltration control for a specific agent: taint follows the session across
   every backend the agent reaches.
 

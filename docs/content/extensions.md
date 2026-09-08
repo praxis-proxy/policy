@@ -21,8 +21,8 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 |-----------|---------|---------------|-----------------|
 | Security (subject) | subject id and type, roles, permissions, teams, claims, authentication status | `subject.id`, `subject.type`, `authenticated`, `role.*`, `perm.*`, `subject.teams`, `team.*`, `claim.*` | `read_subject`, `read_roles`, `read_permissions`, `read_teams`, `read_claims` |
 | Security (client) | OAuth application identity: client id, trust level, roles, permissions, scopes, audiences, teams, claims | `client.*` | `read_client` |
-| Security (workload) | attested workload identity (SPIFFE / mTLS) for this host and the inbound caller | `workload.*`, `caller_workload.*` | `read_workload` |
-| Security (labels) | taint / classification labels for information-flow control | read directly from the extension (not materialized into bag keys) | `read_labels`, `append_labels` |
+| Security (workload) | attested workload identity (SPIFFE / mTLS) for the inbound caller and for this instance | `caller_workload.*`, `this_workload.*` | `read_workload` |
+| Security (labels) | taint / classification labels for information-flow control | `security.labels`, `security.classification` | `read_labels`, `append_labels` |
 | Delegation | delegation depth, delegated flag, origin and actor subjects, chain age | `delegation.*`, `delegated` | `read_delegation`, `append_delegation` |
 | Agent | session, conversation, turn, and lineage context | `agent.*` | `read_agent` |
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | `read_meta` |
@@ -79,7 +79,7 @@ plugins:
 | `read_teams` | `subject.teams` (plus baseline; `team.*` mirrors teams) |
 | `read_claims` | `claim.*` (plus baseline) |
 | `read_client` | `client.*` |
-| `read_workload` | `workload.*`, `caller_workload.*` |
+| `read_workload` | `caller_workload.*`, `this_workload.*` |
 | `read_delegation` | `delegation.*`, `delegated` |
 | `read_agent` | `agent.*` |
 | `read_meta` | `meta.*` |
@@ -91,24 +91,27 @@ plugins:
 | `read_provenance` | `provenance.*` |
 | `read_framework` | `framework.*` |
 | `read_custom` | `custom.*` |
-| `read_labels` | no bag keys; the plugin reads labels from the security extension directly |
+| `read_labels` | the labels on the security extension. A plugin reads them from the extension; `security.labels` in the bag is what an APL predicate reads |
 | `read_inbound_credentials` | no bag keys; gates raw inbound tokens in the plugin payload |
 | `read_delegated_tokens` | no bag keys; gates minted tokens in the plugin payload |
 
 `read_roles`, `read_permissions`, `read_teams`, and `read_claims` each imply the
 `read_subject` baseline (`subject.id`, `subject.type`, `authenticated`). The
-last three capabilities gate state that is not materialized into bag keys:
-labels are read from the extension, and credential material flows through plugin
-payloads rather than the bag, so granting them does not widen what an APL
-predicate can read.
+last three capabilities widen no plugin's bag view: labels are read from the
+typed extension, and credential material flows through plugin payloads rather
+than the bag. APL predicates read `security.labels` from the bag directly, which
+is how `security.labels contains "secret"` works (see [Session
+Taint](apl/tainting.md)).
 
 ### Write capabilities
 
+Four capabilities grant write tokens rather than read access:
+
 | Capability | Grants |
 |---|---|
-| `append_labels` | attach taint or classification labels |
-| `append_delegation` | extend the delegation chain |
-| `write_headers` | set or remove request and response headers |
+| `append_labels` | add a taint or classification label (monotonic; cannot remove) |
+| `append_delegation` | extend the delegation chain (monotonic) |
+| `write_headers` | rewrite request and response headers (implies `read_headers`) |
 | `write_candidate_constraint` | narrow the backends the router may select |
 
 Reading a candidate constraint is ungated: the host consumes it after
@@ -134,16 +137,6 @@ capability to add.
 Any plugin that fetches JWKS, exchanges a token, or dispatches a CIBA
 prompt must declare it. See [Builtins](builtins.md) for how the bundled
 ones do.
-
-### Write capabilities in full
-
-Three capabilities grant write tokens rather than read access:
-
-| Capability | Grants |
-|-----------|--------|
-| `append_labels` | add a taint label (monotonic; cannot remove) |
-| `append_delegation` | extend the delegation chain (monotonic) |
-| `write_headers` | rewrite request and response headers (implies `read_headers`) |
 
 ## Mutability tiers
 

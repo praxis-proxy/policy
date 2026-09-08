@@ -64,6 +64,8 @@ praxis-policy = { version = "0.2", features = ["jwt", "cedar"] }
 The default build is the engine alone, so a host that needs only the
 runtime and its own plugins compiles nothing extra.
 
+### The HTTP transport
+
 `http-hyper` is the odd one. PPE performs no outbound HTTP of its own: a
 host installs an `HttpTransport` and the plugins borrow it, so a process
 embedding PPE keeps one connection pool, one TLS trust store, and one
@@ -71,6 +73,25 @@ egress path instead of two. A host with its own client injects it with
 `PolicyEngine::set_http_transport`. A host with none calls
 `install_default_http_transport`, which is what this feature provides.
 It is never wired automatically.
+
+Install it before `initialize()`, since that is when a plugin first asks
+for it. The install is set-once: a second call is ignored and returns
+`false`, so a host that wires twice cannot swap the transport out from
+under plugins already holding it.
+
+Two distinct mistakes fail that same `initialize()`, and the message
+names which one you made:
+
+- No transport installed. The plugin needs the `http` host service
+  "but none is installed; the embedding host must install one before
+  initializing the engine". That is a wiring problem in the embedding
+  program, not something the policy YAML can fix.
+- Transport installed, capability withheld. The plugin does not
+  declare `perform_http`, and the error names the capability to add to
+  its `capabilities:` list.
+
+The engine keeps the two apart on purpose, so the message points at the
+file that needs the edit.
 
 ## Referencing a builtin
 
