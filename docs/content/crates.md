@@ -4,7 +4,7 @@ PPE is a Cargo workspace. Most hosts depend on `praxis-policy`, the
 facade, and nothing else: it re-exports the runtime and, behind
 features, the bundled extensions.
 
-## The engine
+## Core Engine
 
 | Crate | Role |
 |---|---|

@@ -5,7 +5,7 @@ behind a Cargo feature. With a feature enabled,
 `praxis_policy::install_builtins` registers its factory and a policy can
 name it by `kind`.
 
-## The catalog
+## Catalog
 
 | Kind | Type | Feature | Purpose |
 |---|---|---|---|
