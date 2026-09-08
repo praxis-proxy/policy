@@ -21,7 +21,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 > **Upgrading from 0.1.0?** Configurations require changes: this release removes ten keys, changes the default dispatch mode, and tightens APL lexical rules. `docs/upgrade-apl.md` lists the required rewrites with before-and-after examples.
 >
-> `docs/content/apl-grammar.md` is the normative APL grammar, replacing the parser's inline grammar comments.
+> `docs/content/apl/apl-grammar.md` is the normative APL grammar, replacing the parser's inline grammar comments.
 
 ### Added
 
@@ -29,7 +29,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
   More-specific `headers:` entries replace matching targets, `strip:` entries accumulate, and `replace_inherited: true` resets inherited rules. Tokens and peer-supplied headers cannot be sources, while fixed protocol floors protect required request and response headers. Invalid or conflicting entries fail configuration loading with their location. Assertions run after the applicable policy phase and are unsigned, so recipients must trust the network path. See `docs/content/assertions.md`. ([#28](https://github.com/praxis-proxy/policy/issues/28))
 
-- **`docs/content/apl-grammar.md` is now the normative APL grammar.** It documents the EBNF, lexical rules, precedence, valid syntax by position, YAML shape, dispatch-mode keys, and intentional quirks. Conformance tests keep the parser and document aligned with accepted and rejected cases for every production, documented quirk, and breaking change.
+- **`docs/content/apl/apl-grammar.md` is now the normative APL grammar.** It documents the EBNF, lexical rules, precedence, valid syntax by position, steps, field pipelines, and invalid forms. Conformance tests keep the parser and document aligned with accepted and rejected cases.
 
 - **`response:`, the custom denial block, documented at last.** It shipped in 0.1.0 undocumented. A `response:` block on a route, a bundle, a `global.defaults.<entity>:` entry, or `global:` supplies the status and body a denial renders, and the most-specific layer wins on collision. `None` leaves the host's default denial behavior. Its resolution rule changed in this release too, which the Changed section covers.
 

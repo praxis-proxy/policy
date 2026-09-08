@@ -4,7 +4,7 @@
 //! The conformance corpus: one accepted and one rejected case per rule the
 //! grammar states.
 //!
-//! `docs/content/apl-grammar.md` is the normative document and this is what
+//! `docs/content/apl/apl-grammar.md` is the normative document and this is what
 //! holds it to account. Every production, every breaking change, and every documented wart the
 //! *parser* decides has a case in one of the modules below, and every rejected
 //! case asserts on the *message* rather than only on being an error. A tightening

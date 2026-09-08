@@ -1,7 +1,8 @@
 # Praxis Policy Engine Documentation
 
-PPE is a typed policy evaluation and enforcement runtime for AI middleware. It decides who may call which tool, what data comes back, and
-where that data is allowed to go next.
+PPE is a typed policy evaluation and enforcement runtime for AI middleware. It
+decides who may call which tool, what data comes back, and where that data is
+allowed to go next.
 
 Each capability an agent can invoke defines its own enforcement
 pipeline covering authorization, Token Exchange / Delegation, redaction,
@@ -28,7 +29,7 @@ that pipeline in phases before invocation and after its result.
 
 - [APL](apl/index.md):
   routes, phases, predicates, rules, and field pipelines
-- [Grammar](apl-grammar.md):
+- [Grammar](apl/apl-grammar.md):
   the normative grammar; where it and the parser disagree, one is a bug
 - [Effects and Sequencing](apl/effects.md):
   the effect catalog, halt-on-deny, sequential and parallel composition

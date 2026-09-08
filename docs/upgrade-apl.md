@@ -559,7 +559,7 @@ narrowed on purpose, and `dispatch: hooks` is the escape for wanting the previou
 behavior wholesale.
 
 For what the language accepts after all of this, rather than what changed,
-`docs/apl-grammar.md` is normative.
+`docs/content/apl/apl-grammar.md` is normative.
 
 ## Worked example: demo configurations
 
