@@ -286,8 +286,6 @@ what changes between the two placements.
 
 ## Related documentation
 
-- [Threat Model](threat-model.md): what these controls defend against, and what
-  each placement covers.
-- [Quick Start](quickstart.md): stand up your own enforcement point in ten
-  minutes.
-- [Deployment](deployment.md): gateway, sidecar, and in-framework placements.
+- [APL](apl/index.md): define routes, phases, predicates, and field pipelines.
+- [Effects and Sequencing](apl/effects.md): order controls and halt on denial.
+- [PDP Integration](apl/pdp.md): invoke Cedar, CEL, or OPA from APL.

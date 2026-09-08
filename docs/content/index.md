@@ -1,13 +1,28 @@
 # Praxis Policy Engine Documentation
 
-PPE is a typed policy evaluation and enforcement runtime for AI middleware. It
-decides who may call which tool, what data comes back, and where that data is
-allowed to go next.
+PPE is a typed policy runtime for AI middleware. It maps tools, resources,
+prompts, inference calls, and conventional APIs to routes by entity type and
+name. PPE combines global defaults, matching
+groups, and route controls into phases that validate inputs, authorize
+operations, apply effects, and transform results. The pipeline controls which
+operations run, what data returns, and where it may flow.
 
-Each capability an agent can invoke defines its own enforcement
-pipeline covering authorization, Token Exchange / Delegation, redaction,
-information flow control, and audit. APL (Authorization Policy Layer) defines
-that pipeline in phases before invocation and after its result.
+![Agent operations pass through PPE policy, effects, plugins, and enforcement. Policy reads verified identity from an IdP and labels from a session store.](../images/ppe_overview.svg)
+
+Before policy evaluation, PPE verifies the caller with the IdP and maps subject,
+role, and permission claims into attributes. The Policy stage evaluates
+predicates and invokes CEL, Cedar, or OPA where configured. Effects can redact
+data, request approval, apply session taint, or perform token exchange /
+delegation for an audience-scoped upstream credential. The session store carries
+information-flow labels across calls. PPE records the delegation chain and audit
+history.
+
+## Why it exists
+
+- [Vision](vision.md):
+  the Reference Monitor model and where PPE sits in an agent stack
+- [Threat Model](threat-model.md):
+  the adversary, the trust boundary, and what each placement defends
 
 ## Getting started
 
@@ -17,13 +32,6 @@ that pipeline in phases before invocation and after its result.
   how it works, followed through one scenario end to end
 - [Use Cases](use-cases.md):
   the controls running behind a real gateway
-
-## Why it exists
-
-- [Vision](vision.md):
-  the Reference Monitor model and where PPE sits in an agent stack
-- [Threat Model](threat-model.md):
-  the adversary, the trust boundary, and what each placement defends
 
 ## Writing policy
 

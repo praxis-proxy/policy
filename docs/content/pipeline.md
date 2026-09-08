@@ -104,3 +104,10 @@ needed it.
 The bundled plugins and decision points are catalogued in
 [Builtins](builtins.md); their wiring is in
 [Configuration](configuration.md).
+
+## Next
+
+- [Common Message Format](cmf.md): inspect the message envelope passed through
+  hooks and policy.
+- [Extensions and Capability Gating](extensions.md): control which context each
+  plugin may access.

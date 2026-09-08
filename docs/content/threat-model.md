@@ -171,7 +171,6 @@ privately via the process in
 
 ## Related documentation
 
-- [Use Cases](use-cases.md): the controls above running end-to-end in a gateway
-  deployment.
-- [Deployment](deployment.md): choosing and wiring a placement.
-- [Patterns](patterns.md): layering the controls in production policy.
+- [Quick Start](quickstart.md): stand up an enforcement point and load a policy.
+- [Overview](overview.md): follow the enforcement pipeline through one scenario.
+- [Use Cases](use-cases.md): run the controls end to end in a gateway deployment.

@@ -347,10 +347,10 @@ doubled `|`.
 
 ---
 
-## See also
+## Next
 
-- [`docs/upgrade-apl.md`](../../upgrade-apl.md) — migration guidance for existing
-  configurations.
-- [`crates/ppe-apl-core/tests/conformance/`](../../../crates/ppe-apl-core/tests/conformance/)
-  — accepted and rejected conformance cases.
-- [`CHANGELOG.md`](../../../CHANGELOG.md) — release history and compatibility changes.
+- [Effects and Sequencing](effects.md): apply the grammar in ordered policy
+  phases.
+- [Upgrading APL](../../upgrade-apl.md): migrate existing configurations.
+- [`crates/ppe-apl-core/tests/conformance/`](../../../crates/ppe-apl-core/tests/conformance/):
+  accepted and rejected conformance cases.

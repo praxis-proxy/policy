@@ -194,3 +194,9 @@ constraint, so the untrusted model cannot reword its way onto a backend that
 policy excluded. The clean split of ownership is the point: which backends exist
 and their health belong to the host; *which of them this request may use* is
 policy's to shape.
+
+## Next
+
+- [Configuration](../configuration.md): declare plugins, global services,
+  groups, and routes.
+- [HTTP Routing](../http-routing.md): select policy by request path and method.

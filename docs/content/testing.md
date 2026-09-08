@@ -96,3 +96,10 @@ make test                              # both feature passes, as CI runs them
 Tests run twice, once with default features and once with
 `--all-features`. The facade's `default` is empty, so its tests are
 feature-gated and a single pass would hide them.
+
+## Related documentation
+
+- [Crates](crates.md): locate the APIs and test surfaces in the workspace.
+- [Builtins](builtins.md): review the bundled components covered by integration
+  tests.
+- [Documentation index](index.md): return to the documentation map.

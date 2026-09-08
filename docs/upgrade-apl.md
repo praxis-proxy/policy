@@ -589,3 +589,9 @@ either on the section or inside an `apl:` wrapper and point at `policy.yaml` for
 document can now, so the note describes a choice that no longer exists and
 points at
 an example that never demonstrated it.
+
+## Next
+
+- [Plugins and Pipeline](content/pipeline.md): extend APL with host plugins.
+- [Common Message Format](content/cmf.md): inspect the protocol-agnostic message
+  envelope evaluated by APL.

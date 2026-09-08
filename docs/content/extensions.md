@@ -166,3 +166,8 @@ tier-enforced view feeds the attribute bag APL evaluates, so a policy and the
 plugins it invokes operate on a consistent, least-privilege picture of the
 request. See [Identity](apl/identity.md) for how the subject is populated and
 [Session Taint](apl/tainting.md) for the monotonic label tier in action.
+
+## Next
+
+- [Crates](crates.md): map the runtime and extension APIs to workspace crates.
+- [Builtins](builtins.md): review the bundled plugins, PDPs, and session store.

@@ -585,8 +585,6 @@ SVIDs.
 work" means the IdP documents support for the required standards, but the flow
 has no end-to-end result.
 
-## What to add next
-
 <!-- Stubs to flesh out as recipes are validated:
   - Recipe 7: per-tenant / tag-scoped identity (authentication via groups /
     tags).
@@ -595,3 +593,10 @@ has no end-to-end result.
     mock-tested).
   - Per-recipe "verified against <IdP> on <date>" as the support matrix grows.
     -->
+
+## Next
+
+- [Header Assertions](assertions.md): project resolved identity onto upstream
+  requests.
+- [Deployment](deployment.md): place identity and delegation controls at the
+  required boundary.

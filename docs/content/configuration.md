@@ -226,10 +226,11 @@ client_secret_source:
   name: IDP_CLIENT_SECRET
 ```
 
-## Related
+## Next
 
-- [APL](apl/index.md) for Authorization Policy Layer configuration
-- [Upgrading APL](../upgrade-apl.md) for what an older configuration must
-  rewrite, with a before and an after for every key
-- [Header Assertions](assertions.md) for the `assertions:` block
-- [Builtins](builtins.md) for the `kind:` values that ship here
+- [HTTP Routing](http-routing.md): select policy by request path and method.
+- [Identity and Delegation](identity-delegation.md): configure inbound identity
+  and outbound credentials.
+- [Header Assertions](assertions.md): project derived identity onto upstream
+  requests.
+- [Upgrading APL](../upgrade-apl.md): migrate an older configuration.

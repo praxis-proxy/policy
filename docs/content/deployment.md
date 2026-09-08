@@ -66,11 +66,9 @@ the enforced path for the operations you want mediated.
 
 ## Related documentation
 
-- [Configuration](configuration.md): the full config structure for a
-  deployment.
-- [Header Assertions](assertions.md): what PPE renders onto the upstream
-  request at whichever boundary it holds.
 - [Patterns](patterns.md): production patterns for rollout and layered
   enforcement.
+- [Upgrading APL](../upgrade-apl.md): migrate existing policy before deployment.
+- [Configuration](configuration.md): the full configuration structure.
 - [Identity](apl/identity.md) and [Delegation](apl/delegation.md): wiring IdP
   verification and token exchange in a real stack.

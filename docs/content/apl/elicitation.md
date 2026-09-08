@@ -143,3 +143,10 @@ the `elicit` hook, resolved by name off the route's dispatch plan exactly like
 `delegate(...)`. Because elicitation is an explicit, sequenced effect — gated
 behind authentication, checked on every retry, and validated before the forward
 — a pending or unapproved operation never reaches the tool.
+
+## Next
+
+- [Session Taint](tainting.md): enforce information-flow controls across
+  requests.
+- [Backend Restriction](restrict.md): constrain the backends eligible for a
+  request.

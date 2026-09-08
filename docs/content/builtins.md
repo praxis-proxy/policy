@@ -124,4 +124,7 @@ A plugin that fetches JWKS, exchanges a token, or dispatches a CIBA
 prompt must declare `perform_http`, or the engine refuses to start and
 names the plugin and the missing capability.
 
-See [Configuration](configuration.md) for the surrounding document.
+## Next
+
+- [Testing](testing.md): test policy and plugin behavior through the runtime.
+- [Configuration](configuration.md): declare builtins in a policy document.

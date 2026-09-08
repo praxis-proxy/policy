@@ -99,3 +99,8 @@ Effects run within the four route phases: `args`,
 `result`. A deny anywhere halts the rest. An elicitation verb can also *suspend*
 a phase — the operation neither allows nor denies, but pauses for a human and
 resumes on retry (see [Elicitation](elicitation.md)).
+
+## Next
+
+- [PDP Integration](pdp.md): invoke Cedar, CEL, or OPA as an APL effect.
+- [Identity](identity.md): populate the attributes used by predicates and PDPs.

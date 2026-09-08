@@ -191,3 +191,8 @@ log. Because delegation is an explicit effect rather than a side effect of
 forwarding, it is sequenced like any other effect: gated behind authorization,
 followed by verification, and halted on error when configured with `on_error:
 deny`.
+
+## Next
+
+- [Elicitation](elicitation.md): suspend an operation for human approval.
+- [Session Taint](tainting.md): carry information-flow labels across requests.

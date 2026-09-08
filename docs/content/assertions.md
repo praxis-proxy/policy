@@ -295,3 +295,9 @@ document is where the cost is paid.
 configuration covering all four levels, both directions, an `http:` route, and
 the configurations that fail to load. It is loaded by the test suite, so it
 cannot drift from what the engine accepts.
+
+## Next
+
+- [Deployment](deployment.md): place the boundary that emits and filters
+  assertions.
+- [Patterns](patterns.md): combine assertions with layered enforcement.

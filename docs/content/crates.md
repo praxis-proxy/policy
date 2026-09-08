@@ -65,3 +65,9 @@ features so the feature-gated re-exports are visible.
 
 The crates are versioned and released together, so one `0.2`
 requirement covers the set.
+
+## Next
+
+- [Builtins](builtins.md): review the extensions available through facade
+  features.
+- [Testing](testing.md): test APL and plugins through the runtime.

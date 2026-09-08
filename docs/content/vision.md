@@ -83,6 +83,10 @@ a PPE Reference Monitor. Only the placement changes.
 
 PPE is direction-agnostic. It enforces the same policy whether it sits in front
 of a tool server as a gateway, beside an agent as an egress sidecar, or inside
-an agent framework. See [Deployment](deployment.md) for the placements, the
-[Threat Model](threat-model.md) for what each placement covers against an
-untrusted model, and [Overview](overview.md) for the model in motion.
+an agent framework. [Deployment](deployment.md) describes each placement.
+
+## Related documentation
+
+- [Threat Model](threat-model.md): the adversary, trust boundary, and coverage
+  of each placement.
+- [Overview](overview.md): the Reference Monitor applied to one scenario.

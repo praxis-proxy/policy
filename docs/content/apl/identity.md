@@ -120,3 +120,10 @@ is entitled to. APL predicates read the same bag, gated the same way.
 Once identity is resolved, policy can authorize ([APL](index.md)), delegate
 downstream ([Delegation](delegation.md)), or hand a relationship decision to a
 PDP ([PDP Integration](pdp.md)).
+
+## Next
+
+- [Static Attributes](attributes.md): combine verified identity with
+  operator-maintained facts.
+- [Delegation](delegation.md): exchange verified credentials for scoped
+  downstream tokens.

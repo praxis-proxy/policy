@@ -141,8 +141,8 @@ demonstrates.
 
 ## Next
 
-- [Use Cases](use-cases.md): the full set of controls running end to end
-  behind a real gateway.
+- [Overview](overview.md): follow the enforcement pipeline through one scenario.
+- [Use Cases](use-cases.md): run the full control set behind a gateway.
 - [APL](apl/index.md): the language, and its
   [normative grammar](apl/apl-grammar.md).
 - [Configuration](configuration.md): the document, its keys, and both

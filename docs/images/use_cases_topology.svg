@@ -24,8 +24,8 @@
   <text x="375" y="140" font-size="26" fill="#161616">Praxis gateway</text>
   <text x="580" y="140" font-size="21" fill="#5f5f5f" font-family="IBM Plex Mono">:8090</text>
 
-  <!-- cpex.yaml config leader -->
-  <text x="775" y="55" font-size="21" fill="#161616" text-anchor="middle" font-family="IBM Plex Mono" font-weight="600">cpex.yaml</text>
+  <!-- policy.yaml config leader -->
+  <text x="775" y="55" font-size="21" fill="#161616" text-anchor="middle" font-family="IBM Plex Mono" font-weight="600">policy.yaml</text>
   <line x1="775" y1="68" x2="775" y2="165" stroke="#161616" stroke-width="2.5" stroke-dasharray="3 6" marker-end="url(#ah)"/>
 
   <!-- filter chain -->

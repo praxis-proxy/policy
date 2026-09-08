@@ -1,0 +1,57 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 Praxis Contributors -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1810 720" font-family="IBM Plex Sans">
+  <rect width="1810" height="720" fill="#ffffff"/>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8d8d8d"/>
+    </marker>
+  </defs>
+
+  <!-- what calls in -->
+  <rect x="470" y="10" width="870" height="95" rx="8" fill="#f5f5f5"/>
+  <text x="905" y="70" font-size="40" fill="#161616" text-anchor="middle">agent</text>
+  <line x1="905" y1="108" x2="905" y2="178" stroke="#8d8d8d" stroke-width="5" marker-end="url(#ah)"/>
+  <text x="940" y="158" font-size="33" fill="#161616">MCP &#183; a2a &#183; inference</text>
+
+  <!-- the reference monitor -->
+  <rect x="470" y="188" width="870" height="330" rx="14" fill="#161616"/>
+  <text x="905" y="248" font-size="44" fill="#ffffff" text-anchor="middle">PPE</text>
+  <rect x="495" y="272" width="195" height="100" rx="8" fill="#f5f5f5"/>
+  <text x="592" y="312" font-size="30" fill="#161616" text-anchor="middle">Policy</text>
+  <text x="592" y="346" font-size="24" fill="#525252" text-anchor="middle">CEL, Cedar, OPA</text>
+  <rect x="705" y="272" width="430" height="100" rx="8" fill="#f5f5f5"/>
+  <text x="920" y="312" font-size="27" fill="#161616" font-style="italic" text-anchor="middle">allow/deny &#183; redact &#183;</text>
+  <text x="920" y="346" font-size="27" fill="#161616" font-style="italic" text-anchor="middle">delegate &#183; escalate &#183; taint</text>
+  <rect x="1150" y="272" width="165" height="100" rx="8" fill="#f5f5f5"/>
+  <text x="1232" y="330" font-size="28" fill="#161616" text-anchor="middle">Plugins</text>
+  <rect x="495" y="392" width="820" height="100" rx="8" fill="#f5f5f5"/>
+  <text x="905" y="452" font-size="30" fill="#161616" text-anchor="middle">Enforcement</text>
+
+  <!-- the state a decision reads, which the model cannot reach -->
+  <polygon points="260.9,382.5 170.0,435.0 79.1,382.5 79.1,277.5 170.0,225.0 260.9,277.5" fill="none" stroke="#161616" stroke-width="6"/>
+  <text x="170" y="498" font-size="36" fill="#161616" text-anchor="middle">Identity | IdP</text>
+  <g stroke="#161616" stroke-width="7" fill="none" stroke-linecap="round">
+    <circle cx="136" cy="330" r="24"/>
+    <line x1="162" y1="330" x2="216" y2="330"/>
+    <line x1="194" y1="330" x2="194" y2="352"/>
+    <line x1="212" y1="330" x2="212" y2="346"/>
+  </g>
+  <line x1="285" y1="330" x2="412" y2="330" stroke="#8d8d8d" stroke-width="5" stroke-dasharray="3 9" stroke-linecap="round"/>
+  <circle cx="432" cy="330" r="9" fill="#8d8d8d"/>
+  <polygon points="1730.9,382.5 1640.0,435.0 1549.1,382.5 1549.1,277.5 1640.0,225.0 1730.9,277.5" fill="none" stroke="#161616" stroke-width="6"/>
+  <text x="1640" y="498" font-size="36" fill="#161616" text-anchor="middle">Session store</text>
+  <g stroke="#161616" stroke-width="6" fill="none">
+    <ellipse cx="1640" cy="298" rx="44" ry="15"/>
+    <path d="M 1596 298 L 1596 362 A 44 15 0 0 0 1684 362 L 1684 298"/>
+    <path d="M 1596 330 A 44 15 0 0 0 1684 330"/>
+  </g>
+  <line x1="1398" y1="330" x2="1525" y2="330" stroke="#8d8d8d" stroke-width="5" stroke-dasharray="3 9" stroke-linecap="round"/>
+  <circle cx="1378" cy="330" r="9" fill="#8d8d8d"/>
+
+  <!-- what it forwards to -->
+  <line x1="905" y1="521" x2="905" y2="591" stroke="#8d8d8d" stroke-width="5" marker-end="url(#ah)"/>
+  <text x="940" y="571" font-size="33" fill="#161616">forward or block</text>
+  <rect x="470" y="601" width="870" height="95" rx="8" fill="#f5f5f5"/>
+  <text x="905" y="661" font-size="38" fill="#161616" text-anchor="middle">tools &#183; agents &#183; models &#183; resources</text>
+</svg>

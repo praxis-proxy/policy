@@ -92,3 +92,9 @@ passing the attribute bag and the call's arguments, and routes the `Allow` /
 `Deny` decision through `on_allow` / `on_deny`. The decision and its diagnostics
 are recorded in the audit log. See [Effects](effects.md) for how PDP reactions
 sequence with the rest of a policy.
+
+## Next
+
+- [Identity](identity.md): resolve callers into policy attributes.
+- [Static Attributes](attributes.md): load operator-maintained facts under
+  `data.*`.

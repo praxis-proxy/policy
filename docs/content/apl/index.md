@@ -2,8 +2,7 @@
 
 APL (Authorization Policy Layer) defines PPE enforcement pipelines. Each
 capability an agent may invoke (e.g., a tool, resource, prompt, or A2A method)
-defines a route that sequences its boundary controls. APL keeps predicates and
-effects out of application code.
+defines a route that sequences its boundary controls.
 
 ![An APL config: plugins and global settings, then per-entity routes with a pre-invocation flow (require, PDP, delegate, run) and post-invocation result handling (taint, redact), plus Session Taint across entities](../../images/apl_overview.svg)
 
@@ -233,3 +232,9 @@ not policy terms themselves:
 Every fragment on this page is drawn from the `praxis-policy-apl-core` parser
 tests and the
 reference deployments, so the forms shown here parse as written.
+
+## Next
+
+- [APL Grammar](apl-grammar.md): the normative syntax and accepted forms.
+- [Effects and Sequencing](effects.md): effect ordering, composition, and
+  halt-on-deny behavior.

@@ -84,5 +84,9 @@ capability the runtime writes to after a tainting effect and reads from when
 building the attribute bag. Both operations happen inside PPE, so the untrusted
 model cannot forge the Session Taint history used for write-down enforcement.
 
-See [Effects](effects.md) for how `taint` sequences with other effects, and
-[Configuration](../configuration.md) for session-store options.
+## Next
+
+- [Backend Restriction](restrict.md): apply Session Taint labels to backend
+  selection.
+- [Configuration](../configuration.md): configure the session store and other
+  runtime components.

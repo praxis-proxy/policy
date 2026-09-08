@@ -133,9 +133,10 @@ construction.
 A policy body replaces the route's structural plugin chain, so a listed
 plugin runs only where a step names it with `run(name)`.
 
-## Related
+## Next
 
-- [Configuration](configuration.md) for the document around these routes
-- [Header Assertions](assertions.md) for what PPE renders onto the
-  upstream request and strips from the response
-- [Deployment](deployment.md) for where an enforcement point sits
+- [Identity and Delegation](identity-delegation.md): resolve inbound principals
+  and mint outbound credentials.
+- [Header Assertions](assertions.md): control the identity and response headers
+  crossing the boundary.
+- [Deployment](deployment.md): place the HTTP enforcement point.

@@ -92,3 +92,9 @@ authorization:
 Combine an attribute gate, a PDP relationship check, a PII scan on output,
 Session Taint, and an audit record as separate effects. The operation must pass
 every layer.
+
+## Next
+
+- [Upgrading APL](../upgrade-apl.md): migrate existing configurations to the
+  current syntax.
+- [Plugins and Pipeline](pipeline.md): extend APL with host plugins.
