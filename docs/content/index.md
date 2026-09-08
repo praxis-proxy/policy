@@ -1,7 +1,6 @@
 # Praxis Policy Engine Documentation
 
-PPE is a typed, phased plugin runtime and policy evaluator for agent
-traffic. It decides who may call which tool, what data comes back, and
+PPE is a typed policy evaluation and enforcement runtime for AI middleware. It decides who may call which tool, what data comes back, and
 where that data is allowed to go next.
 
 Each capability an agent can invoke defines its own enforcement

@@ -8,25 +8,26 @@
 [![docs.rs](https://img.shields.io/docsrs/praxis-policy)](https://docs.rs/praxis-policy)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](rust-toolchain.toml)
 
-A deterministic Reference Monitor for
-[Praxis](https://github.com/praxis-proxy/praxis). It mediates AI inference and
-agent traffic through typed, phased APL pipelines. Each decision controls who
-may call a tool, what data returns, and where that data may go next.
+Policy engine for [Praxis](https://github.com/praxis-proxy/praxis), covering
+both standard policy use cases as well as AI inference and agents.
+
+A typed, phased plugin runtime and policy evaluator for agent traffic. It decides
+who may call which tool, what data comes back, and where that data is allowed to
+go next.
 
 ## What it does
 
-- Identity: Resolves and independently validates user, agent, and workload
+- **Identity**: Resolves and independently validates user, agent, and workload
   identities.
-- Authorization: Evaluates APL predicates and pluggable decision points,
+- **Authorization**: Evaluates APL predicates and pluggable decision points,
   including relationship-based authorization.
-- Delegation: Exchanges credentials through RFC 8693, giving each upstream
+- **Delegation**: Exchanges credentials through RFC 8693, giving each upstream
   service a token scoped to that service.
-- Data control: Redacts fields in transit, propagates Session Taint across
+- **Data control**: Redacts fields in transit, propagates Session Taint across
   tool calls and requests, and filters what an upstream is allowed to tell a
   client back.
-- Human approval: Supports out-of-band human approval when a decision cannot
-  be automated.
-- Audit: Emits an audit event for every decision.
+- **Out-of-band approval**: Supports out-of-band approval and elicitation.
+- **Audit**: Emits an audit event for every decision.
 
 ## Using it
 
@@ -45,11 +46,11 @@ requirement covers the set. Requires Rust 1.96 or newer.
 
 ## Documentation
 
-Full documentation: [docs/content/index.md](docs/content/index.md).
+Full [documentation](docs/content/index.md).
 
 ## Status
 
-0.2.x. The public API will move between minor versions while the shape settles;
+The public API will move between minor versions while the shape settles;
 a breaking change gets a minor bump and is documented in the CHANGELOG.
 
 ## Layout
