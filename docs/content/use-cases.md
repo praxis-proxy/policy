@@ -1,10 +1,10 @@
 # Use Cases
 
 Each use case runs end to end in the [Praxis
-demo](https://github.com/praxis-proxy/demos/tree/main/demos/policy-engine). PPE
-runs as the Reference Monitor inside an AI gateway backed by an IdP and a mock
-MCP backend. Each snippet comes from the live configuration, and each scenario
-has an executable script.
+demo](https://github.com/praxis-proxy/demos/tree/main/demos/policy-engine).
+PPE runs inside an AI gateway backed by an IdP and a mock MCP backend. Each
+snippet comes from the live configuration, and each scenario has an
+executable script.
 
 The demo realizes the [running scenario](overview.md): one agent, three callers,
 three kinds of backend reached over MCP. Identity decides the outcome.

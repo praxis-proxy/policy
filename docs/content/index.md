@@ -1,9 +1,8 @@
 # Praxis Policy Engine Documentation
 
-PPE is a policy enforcement runtime for AI agents: a deterministic
-Reference Monitor that mediates every operation an agent triggers. It
-decides who may call which tool, what data comes back, and where that
-data is allowed to go next.
+PPE is a typed, phased plugin runtime and policy evaluator for agent
+traffic. It decides who may call which tool, what data comes back, and
+where that data is allowed to go next.
 
 Each capability an agent can invoke defines its own enforcement
 pipeline covering authorization, Token Exchange / Delegation, redaction,

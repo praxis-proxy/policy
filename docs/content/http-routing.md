@@ -5,7 +5,7 @@ Most routes select an operation by name: a `tool:`, a `resource:`, a
 instead, so plain HTTP traffic that names no entity can still be
 authorized.
 
-One Reference Monitor can therefore cover an agent's tool calls and the
+One PPE instance can therefore cover an agent's tool calls and the
 surrounding HTTP traffic under one APL document.
 
 ## Selector forms
