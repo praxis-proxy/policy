@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added PPE documentation ([#82](https://github.com/praxis-proxy/policy/pull/82))
+
 ## [0.2.0] - 2026-09-03
 
 > **Upgrading from 0.1.0?** Configurations require changes: this release removes ten keys, changes the default dispatch mode, and tightens APL lexical rules. `docs/upgrade-apl.md` lists the required rewrites with before-and-after examples.
