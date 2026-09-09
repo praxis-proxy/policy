@@ -36,8 +36,7 @@ an LLM agent, covering an allow with token exchange, on-the-wire redaction,
 Session Taint, a CEL policy decision, and a human-in-the-loop manager approval,
 with the governing policy shown alongside each step.
 
-[Terminal recording of this
-walkthrough](https://asciinema.org/a/NsnafpaR7xzyjm7a.cast)
+[![asciicast](https://asciinema.org/a/NsnafpaR7xzyjm7a.svg)](https://asciinema.org/a/NsnafpaR7xzyjm7a)
 
 ## 1. Identity-aware tool access
 
