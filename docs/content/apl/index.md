@@ -63,8 +63,9 @@ routes:
       employee_id: "str | mask(4)"
 ```
 
-The `pre_invocation:` / `post_invocation:` lists may also be written flat on the
-route (without the `authorization:` wrapper); both forms are equivalent.
+`pre_invocation:` and `post_invocation:` nest under `authorization:`. Each phase
+is an ordered list of rules and effects. An `authorization:` block contains at
+least one phase.
 
 ## Predicates
 

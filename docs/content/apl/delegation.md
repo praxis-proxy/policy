@@ -89,22 +89,20 @@ Exchange (v2) implements impersonation only and silently ignores `actor_token`,
 so no `act` appears there — capture the actor at the PPE boundary (audit /
 downstream header) if your token service doesn't support delegation.
 
-<!-- validate: fragment -->
+<!-- validate: phase-list -->
 ```yaml
-pre_invocation:
-  - "delegate(workday-oauth, target: workday-api, subject: user, actor: caller_workload,
-              audience: workday-api, permissions: [read_compensation])"
+- "delegate(workday-oauth, target: workday-api, subject: user, actor: caller_workload,
+            audience: workday-api, permissions: [read_compensation])"
 ```
 
 ### An agent acting on its own
 
 A scheduled or background agent with no user in the loop exchanges its own SVID:
 
-<!-- validate: fragment -->
+<!-- validate: phase-list -->
 ```yaml
-pre_invocation:
-  - "delegate(workday-oauth, target: workday-api, subject: caller_workload,
-              audience: workday-api, permissions: [read_compensation])"
+- "delegate(workday-oauth, target: workday-api, subject: caller_workload,
+            audience: workday-api, permissions: [read_compensation])"
 ```
 
 This requires a `role: caller_workload` identity resolver to have populated the
@@ -117,12 +115,11 @@ A common deployment (an MCP gateway is one shape): agents authenticate to PPE,
 but *this instance* is the one holding access to the backend tools. The agent
 never possesses a credential the backend would accept.
 
-<!-- validate: fragment -->
+<!-- validate: phase-list -->
 ```yaml
-pre_invocation:
-  - "require(role.hr)"
-  - "delegate(workday-oauth, target: workday-api, subject: this_workload,
-              audience: workday-api, permissions: [read_compensation])"
+- "require(role.hr)"
+- "delegate(workday-oauth, target: workday-api, subject: this_workload,
+            audience: workday-api, permissions: [read_compensation])"
 ```
 
 `subject: this_workload` has no inbound credential to exchange, so the delegator

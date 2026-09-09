@@ -1,5 +1,5 @@
 # Markdown rules for this repository: 80-column prose, with code blocks
-# following the 120-char code limit. Run with `make lint-docs`.
+# following the 120-char code limit. Run with `make docs-lint`.
 
 # MD013: 80-column prose; code blocks follow the 120-char code limit
 MD013:

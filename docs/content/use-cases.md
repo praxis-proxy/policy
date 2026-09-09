@@ -173,19 +173,20 @@ Some actions should not happen on the caller's authority alone.
 `adjust_compensation` changes a salary, so anything over $10,000 requires the
 requester's manager to sign off, out-of-band, before the tool runs:
 
-<!-- validate: fragment -->
 ```yaml
+routes:
   - tool: adjust_compensation
-    pre_invocation:
-      - "require(role.hr)"
-      - when: "args.amount > 10000"
-        do:
-          - "require_approval(manager-approver, from: claim.manager,
-                               channel: \"ciba\",
-                               scope: \"args.amount <= 25000\",
-                               purpose: \"Approve a compensation adjustment\",
-                               timeout: 24h)"
-      - "run(audit-log)"
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
+        - when: "args.amount > 10000"
+          do:
+            - "require_approval(manager-approver, from: claim.manager,
+                                 channel: \"ciba\",
+                                 scope: \"args.amount <= 25000\",
+                                 purpose: \"Approve a compensation adjustment\",
+                                 timeout: 24h)"
+        - "run(audit-log)"
 ```
 
 The gateway never blocks. It suspends the call, answers the agent with JSON-RPC

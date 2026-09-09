@@ -136,12 +136,11 @@ top-level, inside a `when` body, inside `sequential` / `parallel`, and inside a
 PDP's `on_allow` block. That last one is a first-class pattern: let Cedar make
 the fine-grained decision, then pin routing on allow.
 
-<!-- validate: fragment -->
+<!-- validate: phase-list -->
 ```yaml
-pre_invocation:
-  - cedar:
-      action: 'Action::"read"'
-      resource: { type: Dataset, id: eu_data }
+- cedar:
+    action: 'Action::"read"'
+    resource: { type: Dataset, id: eu_data }
     on_allow:
       - restrict: { allow_regions: [eu] }   # authz says yes → now pin routing to EU
 ```

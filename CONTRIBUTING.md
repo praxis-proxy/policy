@@ -63,9 +63,10 @@ change the code safely. Some things that feel worth writing down are not:
 // modules. Dropping either hides tests without failing.
 ```
 
-`make doc` builds the rustdoc with warnings denied, and `make lint-docs`
-checks the markdown under `docs/`. Neither runs as part of `make lint`,
-so run them when you touch documentation.
+`make doc` builds the rustdoc with warnings denied, `make docs-lint` checks
+the markdown under `docs/`, and `make docs-links` checks documentation links.
+None runs as part of `make lint`, so run the relevant checks when you touch
+documentation.
 
 ## Durable text carries no planning identifiers
 

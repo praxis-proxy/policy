@@ -91,7 +91,7 @@ it may see.
 | `name` | instance name, referenced from policy as `run(name)` or `delegate(name, ...)` |
 | `kind` | which implementation, for example `identity/jwt` |
 | `hooks` | the hook points it registers on |
-| `mode` | `sequential` (default) or `concurrent` |
+| `mode` | `sequential` (default), `transform`, `audit`, `concurrent`, `fire_and_forget`, or `disabled`; see [Execution modes](pipeline.md#execution-modes) |
 | `on_error` | `fail` (default), `ignore`, or `disable` |
 | `capabilities` | declared context access, see [Extensions](extensions.md) |
 | `config` | plugin-specific settings |

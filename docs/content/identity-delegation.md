@@ -477,11 +477,12 @@ than quietly accepted. A field whose candidates all miss is left empty
 and logged, naming every path tried; `on_missing: deny` makes that a
 refusal instead.
 
-Each preset records what it omits. Auth0 and Keycloak put their
-roles claim where no preset can name it, so those need a hand-written
-map. A preset leaves a field empty rather than filling it with the
-wrong concept: Keycloak's `groups` holds realm roles, and Cognito's
-`cognito:roles` holds IAM role ARNs.
+Each preset records what it omits. The Keycloak preset maps
+`realm_access.roles`; roles under `resource_access.<client-id>.roles` require a
+custom map because the client ID varies by deployment. Auth0 roles also require
+a custom map because their namespace is deployment-specific. Presets leave
+fields empty rather than assign the wrong concept: Keycloak's `groups` can
+contain realm roles, and Cognito's `cognito:roles` contains IAM role ARNs.
 
 Naming no mapper resolves to `standard`, so an existing configuration
 is unaffected.
