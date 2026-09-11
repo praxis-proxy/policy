@@ -104,7 +104,12 @@ pub enum TokenSource {
 ///
 /// Implements `PluginPayload` so it can flow through the executor's
 /// existing Sequential-phase machinery — no bespoke plumbing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written rather than derived — see the impl below — so
+/// that `tracing::debug!(?payload)` and similar diagnostics never print
+/// `raw_token` or `raw_query_string`, either of which can carry a live
+/// bearer token in plaintext.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IdentityPayload {
     /// Raw credential bytes. Cleared on drop via `Zeroizing`.
     /// `#[serde(skip)]` — never appears in serialized output.
@@ -177,6 +182,30 @@ pub struct IdentityPayload {
     /// field.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub raw_claims: HashMap<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for IdentityPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityPayload")
+            .field("raw_token", &"<redacted>")
+            .field("source", &self.source)
+            .field("source_header", &self.source_header)
+            .field("headers", &self.headers)
+            .field(
+                "raw_query_string",
+                &self.raw_query_string.as_ref().map(|_| "<redacted>"),
+            )
+            .field("client_host", &self.client_host)
+            .field("client_port", &self.client_port)
+            .field("subject", &self.subject)
+            .field("client", &self.client)
+            .field("caller_workload", &self.caller_workload)
+            .field("delegation", &self.delegation)
+            .field("raw_credentials", &self.raw_credentials)
+            .field("resolved_at", &self.resolved_at)
+            .field("raw_claims", &self.raw_claims)
+            .finish()
+    }
 }
 
 impl IdentityPayload {
@@ -469,6 +498,34 @@ mod tests {
             !json.contains("super-secret-value"),
             "raw_query_string leaked into serialized form: {json}"
         );
+    }
+
+    #[test]
+    fn debug_output_redacts_raw_token_and_raw_query_string() {
+        let p = IdentityPayload::new("eyJ.super-secret-bearer-token.sig", TokenSource::Bearer)
+            .with_raw_query_string("access_token=super-secret-query-value");
+        let debug = format!("{p:?}");
+        assert!(
+            !debug.contains("super-secret-bearer-token"),
+            "raw_token leaked into Debug output: {debug}"
+        );
+        assert!(
+            !debug.contains("super-secret-query-value"),
+            "raw_query_string leaked into Debug output: {debug}"
+        );
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn debug_output_shows_whether_raw_query_string_was_present() {
+        // The redaction hides the value but keeps the Some/None shape visible,
+        // so a reader can tell "a query string was supplied but its content is
+        // hidden" apart from "no query string was supplied at all".
+        let with_qs = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=secret");
+        let without_qs = IdentityPayload::new("tok", TokenSource::Bearer);
+        assert!(format!("{with_qs:?}").contains(r#"raw_query_string: Some("<redacted>")"#));
+        assert!(format!("{without_qs:?}").contains("raw_query_string: None"));
     }
 
     #[test]
