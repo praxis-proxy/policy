@@ -314,6 +314,57 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **`AplRouteHandler::with_pdp_router` is gone.** Install a `PdpRouter` through `with_pdp`, which is what the visitor already does. ([#13](https://github.com/praxis-proxy/policy/issues/13))
 
+- **The `identity/jwt` plugin's `header:` config field.** One instance of this
+  plugin could only ever extract its bearer JWT from an HTTP header, which left
+  no way to authenticate a browser session carrying its token in an `HttpOnly`
+  cookie, or a WebSocket/SSE upgrade handshake that cannot set request headers
+  at all. `header:` is replaced by a `credential:` block naming a `kind`
+  (`header`, `cookie`, or `query_param`) and a `name`, and the field is gone with
+  no alias or deprecation period. Cookie and query-string values are parsed by
+  PPE itself (`ppe-core::http_credential`), not by whichever HTTP framework the
+  host runs, so the same request resolves the same credential regardless of
+  which proxy sits in front of it. **Breaking for existing config**:
+
+  ```yaml
+  # Before
+  plugins:
+    - name: user-jwt
+      kind: identity/jwt
+      config:
+        header: "Authorization"
+        trusted_issuers: [...]
+
+  # After
+  plugins:
+    - name: user-jwt
+      kind: identity/jwt
+      config:
+        credential:
+          kind: header
+          name: Authorization
+        trusted_issuers: [...]
+  ```
+
+  Omitting `credential:` entirely still defaults to the `Authorization` header,
+  so a config that never set `header:` needs no change. A config still writing
+  `header:` fails the load as the unrecognized field it now is.
+
+  **Breaking for embedders**: `RawInboundToken.source_header: String` is
+  replaced by `RawInboundToken.source: Credential`, and its constructor becomes
+  `RawInboundToken::new(token, source: Credential, kind)`. `Credential` (in
+  `praxis_policy_core::extensions`) is the new shared type recording where any
+  identity plugin — this one, or a future X.509/mTLS or WIMSE Proof Token
+  resolver — extracted a credential from, so downstream consumers (audit
+  logging, assertion propagation, policy predicates) read one uniform type
+  regardless of which plugin produced it. `RawInboundToken`'s `Debug` is now
+  hand-written rather than derived, and redacts the token in both cases.
+
+  **Security note**: a resolver configured for `credential: { kind: query_param
+  }` logs a one-time notice at construction, because a query-parameter token
+  routinely appears in infrastructure logs (access logs, CDN logs, browser
+  history) outside PPE's control — PPE's own logging never prints the token
+  value, in either the old or the new field.
+
 ### Fixed
 
 - **Delegators and elicitation handlers are no longer reported as narrowed when their family-specific hooks are reached.** `delegate(...)` is credited to `token.delegate`, and elicitation verbs to `elicit`. Unreached hooks declared by those plugins are still reported.

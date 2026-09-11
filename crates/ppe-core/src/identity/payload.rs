@@ -5,8 +5,9 @@
 // IdentityResolve hook chain. Plays two roles in one type:
 //
 //   * **Input** (private fields, read-only after construction) —
-//     `raw_token`, `source`, `source_header`, `headers`, `client_host`,
-//     `client_port`. Populated by the host once at request entry and
+//     `raw_token`, `source`, `source_header`, `headers`,
+//     `raw_query_string`, `client_host`, `client_port`. Populated by
+//     the host once at request entry and
 //     never mutated by handlers. Privacy is enforced at the module
 //     boundary: external code reads through `pub fn raw_token() -> &str`
 //     etc. and has no setters or mutable field access, so even a
@@ -121,6 +122,22 @@ pub struct IdentityPayload {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     headers: HashMap<String, String>,
 
+    /// Raw query string from the request URL, without the leading
+    /// `?`. Set explicitly by the host; `None` otherwise. PPE parses
+    /// this deterministically via `http_credential::parse_query_string`
+    /// — hosts must not pre-parse it.
+    ///
+    /// Must not be derived from `HttpExtension.path`. A credential
+    /// resolver that reads a query-parameter credential needs a
+    /// request target supplied explicitly by the host, independent of
+    /// whether `HttpExtension.path` happens to include a query string.
+    ///
+    /// `#[serde(skip)]` — the query string may contain a bearer token
+    /// (e.g. `access_token=eyJ...`). Like `raw_token`, it must never
+    /// appear in serialized output, logs, or diagnostics.
+    #[serde(skip)]
+    raw_query_string: Option<String>,
+
     /// Client IP, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_host: Option<String>,
@@ -175,6 +192,7 @@ impl IdentityPayload {
             source,
             source_header: None,
             headers: HashMap::new(),
+            raw_query_string: None,
             client_host: None,
             client_port: None,
             subject: None,
@@ -196,6 +214,12 @@ impl IdentityPayload {
     /// Set the inbound headers.
     pub fn with_headers(mut self, h: HashMap<String, String>) -> Self {
         self.headers = h;
+        self
+    }
+
+    /// Set the raw query string (without the leading `?`).
+    pub fn with_raw_query_string(mut self, qs: impl Into<String>) -> Self {
+        self.raw_query_string = Some(qs.into());
         self
     }
 
@@ -231,6 +255,12 @@ impl IdentityPayload {
     /// The inbound headers.
     pub fn headers(&self) -> &HashMap<String, String> {
         &self.headers
+    }
+
+    /// The raw query string (without the leading `?`), when the host
+    /// supplied one.
+    pub fn raw_query_string(&self) -> Option<&str> {
+        self.raw_query_string.as_deref()
     }
 
     /// The client host.
@@ -414,6 +444,30 @@ mod tests {
         assert_eq!(
             p.headers().get("user-agent").map(String::as_str),
             Some("curl/8.0")
+        );
+    }
+
+    #[test]
+    fn raw_query_string_builder_and_getter() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=eyJ.fake.jwt");
+        assert_eq!(p.raw_query_string(), Some("access_token=eyJ.fake.jwt"));
+    }
+
+    #[test]
+    fn raw_query_string_absent_by_default() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer);
+        assert_eq!(p.raw_query_string(), None);
+    }
+
+    #[test]
+    fn raw_query_string_never_serialized() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=super-secret-value");
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("super-secret-value"),
+            "raw_query_string leaked into serialized form: {json}"
         );
     }
 

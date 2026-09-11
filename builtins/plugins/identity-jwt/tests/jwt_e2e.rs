@@ -30,9 +30,13 @@
 
 mod common;
 
-use common::{TEST_AUDIENCE, TEST_ISSUER, invoke, mint_exact as mint_jwt, now_unix, plugin_config};
+use common::{
+    TEST_AUDIENCE, TEST_ISSUER, invoke, invoke_with_payload, mint_exact as mint_jwt, now_unix,
+    plugin_config,
+};
+use std::collections::HashMap;
 
-use praxis_policy_core::extensions::raw_credentials::{TokenKind, TokenRole};
+use praxis_policy_core::extensions::raw_credentials::{Credential, TokenKind, TokenRole};
 use praxis_policy_core::identity::{IdentityPayload, TokenSource};
 use praxis_policy_core::plugin::PluginConfig;
 
@@ -52,12 +56,28 @@ fn resolver_plugin_config_for(role: &str, header: &str) -> PluginConfig {
     plugin_config(json!({
         "claim_mapper": "standard",
         "role": role,
-        "header": header,
+        "credential": { "kind": "header", "name": header },
     }))
 }
 
 async fn invoke_bearer(token: String) -> praxis_policy_core::executor::PipelineResult {
     invoke(resolver_plugin_config(), token, TokenSource::Bearer).await
+}
+
+/// A resolver reading its token from the given cookie name.
+fn resolver_plugin_config_for_cookie(name: &str) -> PluginConfig {
+    plugin_config(json!({
+        "claim_mapper": "standard",
+        "credential": { "kind": "cookie", "name": name },
+    }))
+}
+
+/// A resolver reading its token from the given query parameter name.
+fn resolver_plugin_config_for_query_param(name: &str) -> PluginConfig {
+    plugin_config(json!({
+        "claim_mapper": "standard",
+        "credential": { "kind": "query_param", "name": name },
+    }))
 }
 
 // =====================================================================
@@ -108,6 +128,153 @@ async fn valid_jwt_resolves_subject() {
         .expect("user-role token present");
     assert_eq!(&*user_token.token, &token);
     assert!(matches!(user_token.kind, TokenKind::Jwt));
+}
+
+// ---------------------------------------------------------------------
+// Cookie and query-parameter credential locations
+// ---------------------------------------------------------------------
+
+/// Same happy path as [`valid_jwt_resolves_subject`], but the token arrives
+/// in a `Cookie` header instead of `Authorization`, through the real
+/// pipeline (config → `PolicyEngine` → resolver → merged `IdentityPayload`).
+#[tokio::test]
+async fn valid_jwt_from_cookie_resolves_subject() {
+    let token = mint_jwt(json!({
+        "sub": "alice@corp.com",
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+    }));
+
+    let mut headers = HashMap::new();
+    headers.insert("cookie".to_owned(), format!("__Host-jwt={token}"));
+    let payload = IdentityPayload::new("", TokenSource::Bearer).with_headers(headers);
+
+    let result =
+        invoke_with_payload(resolver_plugin_config_for_cookie("__Host-jwt"), payload).await;
+    assert!(
+        result.continue_processing,
+        "valid cookie-borne token should resolve: violation = {:?}",
+        result.violation,
+    );
+
+    let identity =
+        IdentityPayload::from_pipeline_result(&result).expect("payload should be present");
+    let subject = identity.subject.as_ref().expect("subject populated");
+    assert_eq!(subject.id.as_deref(), Some("alice@corp.com"));
+}
+
+/// Same happy path, with the token arriving in the raw query string instead
+/// of a header or cookie — the WebSocket/SSE case that cannot set headers.
+#[tokio::test]
+async fn valid_jwt_from_query_param_resolves_subject() {
+    let token = mint_jwt(json!({
+        "sub": "alice@corp.com",
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+    }));
+
+    let payload = IdentityPayload::new("", TokenSource::Bearer)
+        .with_raw_query_string(format!("access_token={token}"));
+
+    let result = invoke_with_payload(
+        resolver_plugin_config_for_query_param("access_token"),
+        payload,
+    )
+    .await;
+    assert!(
+        result.continue_processing,
+        "valid query-param-borne token should resolve: violation = {:?}",
+        result.violation,
+    );
+
+    let identity =
+        IdentityPayload::from_pipeline_result(&result).expect("payload should be present");
+    let subject = identity.subject.as_ref().expect("subject populated");
+    assert_eq!(subject.id.as_deref(), Some("alice@corp.com"));
+}
+
+/// The stashed `RawInboundToken` records where the credential actually came
+/// from — a cookie, not the default `Authorization` header — so forwarding
+/// plugins and audit logging see the true origin.
+#[tokio::test]
+async fn raw_inbound_token_records_cookie_origin() {
+    let token = mint_jwt(json!({
+        "sub": "alice@corp.com",
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+    }));
+
+    let mut headers = HashMap::new();
+    headers.insert("cookie".to_owned(), format!("__Host-jwt={token}"));
+    let payload = IdentityPayload::new("", TokenSource::Bearer).with_headers(headers);
+
+    let result =
+        invoke_with_payload(resolver_plugin_config_for_cookie("__Host-jwt"), payload).await;
+    assert!(result.continue_processing, "{:?}", result.violation);
+
+    let identity =
+        IdentityPayload::from_pipeline_result(&result).expect("payload should be present");
+    let raw = identity
+        .raw_credentials
+        .as_ref()
+        .expect("raw_credentials populated");
+    let user_token = raw
+        .inbound_tokens
+        .get(&TokenRole::User)
+        .expect("user-role token present");
+    assert_eq!(&*user_token.token, &token);
+    assert_eq!(
+        user_token.source,
+        Credential::Cookie {
+            name: "__Host-jwt".into()
+        }
+    );
+}
+
+/// Same as above, for the query-parameter location.
+#[tokio::test]
+async fn raw_inbound_token_records_query_param_origin() {
+    let token = mint_jwt(json!({
+        "sub": "alice@corp.com",
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+    }));
+
+    let payload = IdentityPayload::new("", TokenSource::Bearer)
+        .with_raw_query_string(format!("access_token={token}"));
+
+    let result = invoke_with_payload(
+        resolver_plugin_config_for_query_param("access_token"),
+        payload,
+    )
+    .await;
+    assert!(result.continue_processing, "{:?}", result.violation);
+
+    let identity =
+        IdentityPayload::from_pipeline_result(&result).expect("payload should be present");
+    let raw = identity
+        .raw_credentials
+        .as_ref()
+        .expect("raw_credentials populated");
+    let user_token = raw
+        .inbound_tokens
+        .get(&TokenRole::User)
+        .expect("user-role token present");
+    assert_eq!(&*user_token.token, &token);
+    assert_eq!(
+        user_token.source,
+        Credential::QueryParam {
+            name: "access_token".into()
+        }
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -178,7 +345,12 @@ async fn workload_svid_resolves_caller_workload_and_stashes_as_spiffe_jwt() {
         .get(&TokenRole::CallerWorkload)
         .expect("workload-role token present");
     assert_eq!(&*workload_token.token, &svid);
-    assert_eq!(workload_token.source_header, "X-Workload-Token");
+    assert_eq!(
+        workload_token.source,
+        Credential::Header {
+            name: "X-Workload-Token".into()
+        }
+    );
     assert!(
         matches!(workload_token.kind, TokenKind::SpiffeJwt),
         "workload SVID should be tagged SpiffeJwt, got {:?}",

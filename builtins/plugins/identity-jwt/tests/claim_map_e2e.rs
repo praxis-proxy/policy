@@ -24,7 +24,7 @@ use common::{TEST_ISSUER, invoke, mint, plugin_config, sorted};
 
 use praxis_policy_core::error::PluginError;
 use praxis_policy_core::extensions::SubjectExtension;
-use praxis_policy_core::extensions::raw_credentials::{TokenKind, TokenRole};
+use praxis_policy_core::extensions::raw_credentials::{Credential, TokenKind, TokenRole};
 use praxis_policy_core::factory::PluginFactory as _;
 use praxis_policy_core::identity::{IdentityPayload, TokenSource};
 use praxis_policy_plugin_identity_jwt::JwtIdentityFactory;
@@ -376,7 +376,7 @@ async fn a_mistyped_path_is_permissive_by_default_and_fatal_on_request() {
 async fn the_workload_role_requires_a_spiffe_id_on_whichever_candidate_resolves() {
     let map = json!({
         "role": "workload",
-        "header": "X-Workload-Token",
+        "credential": { "kind": "header", "name": "X-Workload-Token" },
         "claim_map": {"workload": {"spiffe_id": ["sub", "spiffe_id"]}},
     });
 
@@ -487,7 +487,12 @@ async fn the_raw_token_and_the_full_claim_set_still_pass_through() {
         .get(&TokenRole::User)
         .expect("the token is stashed under the configured role");
     assert_eq!(*stashed.token, token);
-    assert_eq!(stashed.source_header, "Authorization");
+    assert_eq!(
+        stashed.source,
+        Credential::Header {
+            name: "Authorization".into()
+        }
+    );
     assert!(matches!(stashed.kind, TokenKind::Jwt));
 
     assert_eq!(

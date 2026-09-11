@@ -103,10 +103,52 @@
 // guaranteed.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
+
+/// Where a raw credential was extracted from on the wire. Shared by
+/// every identity plugin — the JWT resolver, a future X.509/mTLS
+/// resolver, a future WIMSE Proof Token resolver — so downstream
+/// consumers (audit logging, assertion propagation, policy
+/// predicates) see one uniform origin type regardless of which
+/// plugin produced it.
+///
+/// `#[non_exhaustive]`: future locations (e.g. a form-encoded body
+/// field) can be added without breaking exhaustive `match`es in
+/// downstream crates.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Credential {
+    /// An HTTP header, e.g. `Authorization: Bearer <jwt>`.
+    Header {
+        /// The header name.
+        name: String,
+    },
+    /// A cookie carried in the `Cookie` request header.
+    Cookie {
+        /// The cookie name.
+        name: String,
+    },
+    /// A URL query parameter.
+    QueryParam {
+        /// The query parameter name.
+        name: String,
+    },
+}
+
+impl fmt::Display for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Header { name } => write!(f, "header '{name}'"),
+            Self::Cookie { name } => write!(f, "cookie '{name}'"),
+            Self::QueryParam { name } => write!(f, "query_param '{name}'"),
+        }
+    }
+}
 
 /// Which principal a raw inbound token represents. Lookups in
 /// `RawCredentialsExtension.inbound_tokens` are by this key.
@@ -229,25 +271,29 @@ pub enum DelegationMode {
 /// — this struct just carries the bytes and a few hints.
 ///
 /// The `token` field is `#[serde(skip)]`. Serializing a struct of
-/// this type yields `{ "source_header": "...", "kind": "..." }` —
-/// the secret material is left out. Deserializing produces a struct
+/// this type yields `{ "source": {...}, "kind": "..." }` — the
+/// secret material is left out. Deserializing produces a struct
 /// whose `token` is `Zeroizing::new(String::new())`.
 ///
 /// A host that needs the plaintext across a process boundary must
 /// read the in-memory field and carry it on a purpose-built channel;
 /// a serialize-then-reparse silently yields an empty token. See the
 /// module docs for the conditions under which that is permitted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written rather than derived — see the impl below
+/// — so that `tracing::debug!(?raw_token)` and similar diagnostics
+/// never print the token value.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RawInboundToken {
     /// The raw credential bytes. Cleared on drop via `Zeroizing`.
     /// **Never serialized** — `#[serde(skip)]` strips this field.
     #[serde(skip)]
     pub token: Zeroizing<String>,
 
-    /// The HTTP header (or other wire-level slot) the token arrived
-    /// in — `"Authorization"`, `"X-User-Token"`, etc. Forwarding
-    /// plugins re-attach under the same name; audit logs cite it.
-    pub source_header: String,
+    /// Where the token was extracted from on the wire — header,
+    /// cookie, or query parameter. Forwarding plugins re-attach
+    /// under the same location; audit logs cite it.
+    pub source: Credential,
 
     /// Wire-format family of the token. Lets handlers route to the
     /// right validator without re-parsing the token contents.
@@ -258,16 +304,22 @@ impl RawInboundToken {
     /// Build a token from raw material + metadata. The most common
     /// constructor; identity-resolver plugins call this once per
     /// recognized credential.
-    pub fn new(
-        token: impl Into<String>,
-        source_header: impl Into<String>,
-        kind: TokenKind,
-    ) -> Self {
+    pub fn new(token: impl Into<String>, source: Credential, kind: TokenKind) -> Self {
         Self {
             token: Zeroizing::new(token.into()),
-            source_header: source_header.into(),
+            source,
             kind,
         }
+    }
+}
+
+impl fmt::Debug for RawInboundToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawInboundToken")
+            .field("source", &self.source)
+            .field("kind", &self.kind)
+            .field("token", &"<redacted>")
+            .finish()
     }
 }
 
@@ -511,7 +563,9 @@ mod tests {
     fn raw_inbound_token_serializes_without_secret() {
         let tok = RawInboundToken::new(
             "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.sig",
-            "Authorization",
+            Credential::Header {
+                name: "Authorization".into(),
+            },
             TokenKind::Jwt,
         );
         let json = serde_json::to_string(&tok).unwrap();
@@ -527,11 +581,78 @@ mod tests {
 
     #[test]
     fn raw_inbound_token_deserializes_with_empty_token() {
-        let json = r#"{"source_header":"Authorization","kind":"jwt"}"#;
+        let json = r#"{"source":{"kind":"header","name":"Authorization"},"kind":"jwt"}"#;
         let tok: RawInboundToken = serde_json::from_str(json).unwrap();
         assert_eq!(&*tok.token, "");
-        assert_eq!(tok.source_header, "Authorization");
+        assert_eq!(
+            tok.source,
+            Credential::Header {
+                name: "Authorization".into()
+            }
+        );
         assert!(matches!(tok.kind, TokenKind::Jwt));
+    }
+
+    #[test]
+    fn credential_display_formats() {
+        assert_eq!(
+            Credential::Header {
+                name: "Authorization".into()
+            }
+            .to_string(),
+            "header 'Authorization'"
+        );
+        assert_eq!(
+            Credential::Cookie {
+                name: "__Host-jwt".into()
+            }
+            .to_string(),
+            "cookie '__Host-jwt'"
+        );
+        assert_eq!(
+            Credential::QueryParam {
+                name: "access_token".into()
+            }
+            .to_string(),
+            "query_param 'access_token'"
+        );
+    }
+
+    #[test]
+    fn credential_serde_round_trips_all_variants() {
+        for cred in [
+            Credential::Header {
+                name: "Authorization".into(),
+            },
+            Credential::Cookie {
+                name: "__Host-jwt".into(),
+            },
+            Credential::QueryParam {
+                name: "access_token".into(),
+            },
+        ] {
+            let json = serde_json::to_string(&cred).unwrap();
+            let back: Credential = serde_json::from_str(&json).unwrap();
+            assert_eq!(cred, back);
+        }
+    }
+
+    #[test]
+    fn raw_inbound_token_debug_does_not_leak_token() {
+        let tok = RawInboundToken::new(
+            "eyJhbGciOiJSUzI1NiJ9.super-secret-payload.sig",
+            Credential::Cookie {
+                name: "__Host-jwt".into(),
+            },
+            TokenKind::Jwt,
+        );
+        let debug = format!("{tok:?}");
+        assert!(
+            !debug.contains("super-secret-payload"),
+            "token leaked into Debug output: {debug}"
+        );
+        assert!(debug.contains("__Host-jwt"));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
@@ -653,7 +774,13 @@ mod tests {
         let mut ext = RawCredentialsExtension::default();
         ext.inbound_tokens.insert(
             TokenRole::User,
-            RawInboundToken::new("user-jwt", "X-User-Token", TokenKind::Jwt),
+            RawInboundToken::new(
+                "user-jwt",
+                Credential::Header {
+                    name: "X-User-Token".into(),
+                },
+                TokenKind::Jwt,
+            ),
         );
 
         let json = serde_json::to_string(&ext).unwrap();
@@ -663,7 +790,12 @@ mod tests {
         // Round-trip preserves the structure but strips secret material.
         let restored_tok = restored.inbound_tokens.get(&TokenRole::User).unwrap();
         assert_eq!(&*restored_tok.token, "");
-        assert_eq!(restored_tok.source_header, "X-User-Token");
+        assert_eq!(
+            restored_tok.source,
+            Credential::Header {
+                name: "X-User-Token".into()
+            }
+        );
     }
 
     #[test]
