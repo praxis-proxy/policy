@@ -40,6 +40,7 @@ help:
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
+	@echo "  bench-pdp-cache   PDP decision-cache hit vs miss (on demand, not CI)"
 	@echo ""
 	@echo "Supply chain & coverage:"
 	@echo "  audit             cargo deny check (advisories, licenses, bans, sources)"
@@ -156,6 +157,12 @@ setup-hooks:
 test:
 	@$(CARGO) test --workspace
 	@$(CARGO) test --workspace --all-features
+
+# Hit vs miss for the PDP decision cache. On demand; not part of `make ci`.
+# Wall-clock numbers are recorded in docs/pdp-decision-cache.md.
+.PHONY: bench-pdp-cache
+bench-pdp-cache:
+	@$(CARGO) bench -p praxis-policy-apl-runtime --bench pdp_decision_cache
 
 # =============================================================================
 # Supply chain & coverage

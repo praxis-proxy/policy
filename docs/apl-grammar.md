@@ -386,7 +386,9 @@ APL terms sit on the section that carries them. There is no `apl:` wrapper.
 one phase.
 
 `attribute_files:`, `pdp:` and `session_store:` are `global:` keys and nowhere
-else: all three are process-global.
+else: all three are process-global. A `pdp:` entry may carry an optional
+`cache:` block with positive `ttl_seconds` and `max_entries`; omission leaves
+PDP evaluation uncached. See `docs/pdp-decision-cache.md`.
 
 `plugins:` on a route is a **map** of per-plugin overrides. A `plugins:` *list* was
 an activation list and is a load error in policy mode; a policy names the plugin it

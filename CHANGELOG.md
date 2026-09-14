@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Optional bounded PDP decision cache.** A `cache:` block on a `global.pdp[]` entry stores Allow and Deny for a positive TTL and a positive entry cap. Omission leaves evaluation unchanged. Keys are a digest of dialect, call arguments, and the full attribute bag, so request data is not retained. Dispatch errors are never stored, expired entries are never returned, FIFO eviction stays inside the cap, and a PPE configuration generation change drops the map. External PDP policy can still go stale until the TTL expires; `docs/pdp-decision-cache.md` states that. ([#67](https://github.com/praxis-proxy/policy/issues/67))
+
 ## [0.2.0] - 2026-09-03
 
 > **Upgrading from 0.1.0?** Configurations require changes: this release removes ten keys, changes the default dispatch mode, and tightens APL lexical rules. `docs/upgrade-apl.md` lists the required rewrites with before-and-after examples.

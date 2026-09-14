@@ -94,6 +94,7 @@ use praxis_policy_apl_core::plugin_decl::{PluginDeclaration, PluginRegistry};
 use praxis_policy_apl_core::rules::{CompiledRoute, DenyResponse};
 use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
+use crate::decision_cache::{CachedPdpResolver, split_cache_block};
 use crate::dispatch_plan::DispatchCache;
 use crate::pdp_router::PdpRouter;
 use crate::route_handler::{AplRouteHandler, HookFamily, Phase};
@@ -390,14 +391,22 @@ impl AplConfigVisitor {
                  host must call register_pdp_factory(...) before load_config_yaml"
             )
         })?;
+        let (backend_entry, cache_config) = split_cache_block(entry)
+            .map_err(|e| format!("global.pdp[{index}] (kind='{kind}') {e}"))?;
         let resolver = factory
-            .build(entry)
+            .build(&backend_entry)
             .map_err(|e| format!("global.pdp[{index}] (kind='{kind}') failed to build: {e}"))?;
+        let resolver = match cache_config {
+            Some(config) => CachedPdpResolver::wrap(resolver, config, self.engine.clone()),
+            None => resolver,
+        };
         let mut state = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.pdp_router.register(resolver);
+        // Replace so a reload cannot keep previous-generation decisions (or a
+        // previous Cedar/OPA policy set) under `register`'s first-wins rule.
+        state.pdp_router.replace(resolver);
         Ok(())
     }
 

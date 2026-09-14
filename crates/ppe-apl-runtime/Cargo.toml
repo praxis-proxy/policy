@@ -49,6 +49,18 @@ serde = { workspace = true }
 # See praxis-policy-apl-cmf's note: the feature unifies into the non-test build,
 # which costs one module and no behavior.
 praxis-policy-apl-core = { workspace = true, features = ["test-util"] }
+praxis-policy-pdp-cel = { workspace = true }
+# `async_tokio` matches PR 35's `ppe-benches` harness (`b.to_async`).
+# Default features stay off so plotters/html_reports do not land in this
+# crate; that crate will own reports once it is on main.
+criterion = { version = "0.7.0", default-features = false, features = [
+    "async_tokio",
+    "cargo_bench_support",
+] }
+
+[[bench]]
+name = "pdp_decision_cache"
+harness = false
 
 [lints]
 workspace = true
