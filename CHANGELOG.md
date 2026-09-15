@@ -19,6 +19,32 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Safety invariants, written down and tested as a catalog.** The engine's
+  fail-closed promise lived in comments and per-seam judgment. `docs/safety-invariants.md`
+  lists each claim as something a test can fail, and a fault-injection plugin
+  and PDP resolver drive `{panic, error, timeout}` across every plugin phase and
+  the three shipped PDP dialects. Malformed config and a missing attribute are
+  their own cells. Serial and audit panics are contained the same way concurrent
+  already was: they route through `on_error` instead of unwinding `execute()`.
+  Transform and audit still cannot halt — that difference is written down with
+  the reason, including that a failed transform continues with the original
+  payload. Adding a phase or a shipped dialect without a cell fails the
+  build. ([#24](https://github.com/praxis-proxy/policy/issues/24))
+
+- **`docs/content/cmf-extensions.md`, the bag contract.** The CMF bridge writes
+  twelve extension slots into a flat `AttributeBag`, and until now the empty-set
+  rule for `StringSet`, the original-vs-flattened role keys, and the
+  `subject.claims` gap lived only as comments beside the extractors. The
+  document is the per-type absent-value contract, which key a policy author
+  should write, why there is no `subject.claims` map in the bag, and a
+  catalog of every key each slot emits. `ppe-pdp-diff` checks that a
+  present-empty set and an omitted claim scalar Deny on APL, CEL,
+  cedar-direct, and OPA for presence, equality, membership, and order; APL
+  `!=` on a missing key Allows while the other engines Deny; APL `not in`
+  Allows with OPA (`not` of undefined is true) while CEL and cedar-direct
+  Deny. A flattened bool with no namespace, and a missing `subject.id`,
+  stay on the allowlist. ([#18](https://github.com/praxis-proxy/policy/issues/18))
+
 - Added PPE documentation ([#82](https://github.com/praxis-proxy/policy/pull/82))
 
 - **Every verdict now reaches an audit sink, denials included.** An observation-only plugin runs as a post-hook, so it only ever saw traffic that was allowed through: a blocked call, an approval rejection, or a delegation failure produced no audit record at all. The executor now builds a `DecisionLog` recording what each plugin did and how the pipeline ruled, and hands it to any registered sink at the verdict itself rather than in a pipeline phase, so allow, deny, and modify all produce exactly one record. A hook resolving to zero plugins emits one allow record too, so a consumer counting records per invocation does not read "nothing configured" as a dropped record.
@@ -35,11 +61,41 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **A copy of `Extensions` no longer carries host services.** `HttpTransportSlot`, `InitExtensions`, and the new `EffectLogSlot` are no longer `Clone`, and `Extensions::clone` drops the HTTP transport the way it already dropped the write tokens. A slot records the verdict reached when the per-plugin view was built, so a copy answered with that verdict for as long as it lived, letting a plugin stash its extensions and keep making requests after an operator revoked `perform_http` on a reload. That is the property the slot's own documentation already claimed. Every dispatch entry point re-seeds host services before the executor runs, so nothing legitimate depended on a copy carrying them.
 
-- **A panic in a sequential or transform plugin is contained.** It is collapsed into a plugin error, so the plugin's `on_error` decides what happens next and the verdict still reaches the audit sinks, instead of unwinding the request. Under `on_error: fail` the resulting violation carries code `plugin_panic` rather than `plugin_error`, so a crash is distinguishable from an ordinary failure. The concurrent phase already behaved this way.
+- **A contained plugin failure is recorded rather than lost.** A panic, a timeout, or a task that ends without a result is recorded in the decision log as that plugin's action and the verdict still reaches the audit sinks, so a crash is visible to a consumer instead of appearing as a gap. Under `on_error: fail` the violation carries `plugin_panic`, `plugin_timeout`, or `executor_invariant`, so a sink can tell them apart by code.
 
   Opt-in and off by default. With no sink registered the executor builds the log but emits nothing, and the cost is a length check.
 
 - **The reference `audit-logger` runs as a decision sink.** Listing no `hooks:` is no longer a configuration error: it selects sink mode, where the logger attaches to the verdict path and records the verdict and the ordered plugin actions alongside the fields it already emitted. Listing hooks keeps the previous per-hook observer, which continues to see only allowed traffic, so one instance never emits two records for one request.
+
+### Fixed
+
+- **`ppe-core` self-dev-dependency is path-only.** Same as `ppe-apl-core`: a
+  versioned workspace self-dep cannot be packaged (`make publish-dry`).
+- **Contained plugin and PDP tasks abort on drop.** Cancelling a request
+  (timeout, disconnect, shutdown) no longer leaves the spawned work running.
+- **Serial/transform panics keep prior `local_state`.** The executor snapshots
+  context into the task so a contained panic does not remove the plugin's
+  existing map.
+- **`read_labels` / `read_workload` bag prefixes.** `capability_namespaces`
+  advertised nothing for `read_labels` and `workload.*` for `read_workload`,
+  neither of which the extractors write. It now returns `security.labels`
+  and `caller_workload.*` / `this_workload.*`.
+
+### Removed
+
+- **`BAG_WORKLOAD_PREFIX`.** The unused public `workload.` constant is gone.
+  Extractors write `caller_workload.*` and `this_workload.*`; nothing
+  emitted `workload.*`.
+
+### Internal
+
+- **Line coverage floor raised to 96%.** `COVERAGE_FLOOR` in the `Makefile` is the gate. Parser error-return sites, `load_config_yaml` visitor refusals (`visit_route` / `visit_complete`), and the Valkey empty-append path are now tested. About 25 unreachable defensive guards still cap the number below 100. ([#14](https://github.com/praxis-proxy/policy/issues/14))
+- **The coverage artifact now measures the gated run.** The coverage job built `lcov.info` from a second, narrower run (default features, ignored tests skipped), so the uploaded report understated the number the floor asserted. `make coverage-lcov` measures once and derives both the floor check and the report from that data. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **Line coverage raised to 96.5%, and a secret leak closed on the way.** `DecodingKeySource`'s derived `Debug` printed inline PEM keys and HMAC secrets verbatim, and `TrustedIssuer`'s hand-written `Debug` forwarded that field while its comment claimed the key was elided, so any host logging its plugin list disclosed the signing secret. It now redacts the material and keeps the locator (path, JWKS URL). Tests cover the redaction on all five hand-written `Debug` impls, the non-blocking and timeout arms of every executor phase, `AplRouteHandler`'s wiring guards, and the Valkey endpoint error paths. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`step_to_effect` no longer carries an unreachable branch.** A rule inside a `do:` list can only be conditional: `parse_predicate` never yields `Always`, and the spellings that build an unconditional rule are consumed upstream. The dead effect-count and no-effect arms are gone, replaced by an explicit refusal. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **A test that no longer tested its premise.** `a_rejected_load_drops_its_plugins_outside_the_writer_lock` was rejected by config validation before any factory ran, so the `Drop`-re-entrancy deadlock it guards was never exercised. It now loads under `dispatch: hooks` and asserts the instantiation count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`make coverage` cleans stale instrumented binaries first.** llvm-cov merges the mappings of every binary it finds, so one left by a run with a different feature set (or a cached `target/` in CI) was counted twice, inflating both the line count and the miss count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`rustls` bumped to 0.23.45** for [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285): TLS 1.3 handshake messages packed after a key-changing message in the same record were accepted at the wrong encryption level. It reaches the shipped graph through `redis` and `deadpool-redis`, so this is a dependency bump rather than an advisory ignore. Lockfile only, one package, still MSRV 1.96. ([#86](https://github.com/praxis-proxy/policy/pull/86))
 
 ## [0.2.0] - 2026-09-03
 

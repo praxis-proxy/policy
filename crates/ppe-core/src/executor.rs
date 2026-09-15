@@ -18,6 +18,17 @@
 //   - Fail: propagate error, halt pipeline
 //   - Ignore: log error, continue pipeline
 //   - Disable: log error, mark plugin disabled, continue
+//
+// A plugin panic is contained in every awaited phase (serial, transform,
+// audit, concurrent): it is caught on the spawned task and routed through
+// on_error, the same way error and timeout already were. Fire-and-forget
+// panics are contained by spawn; they cannot change a verdict already
+// returned.
+//
+// Containment costs a payload clone per plugin per hook. Audit used to
+// take `&payload` and spawn nothing; it is no longer free. The spawn is
+// load-bearing: it carries the timeout and abort-on-drop cancellation
+// as well as the panic containment.
 
 use std::any::Any;
 use std::fmt;
@@ -26,17 +37,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::time::timeout;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, warn};
 
 use crate::audit::AttachedSink;
-use crate::context::PluginContextTable;
+use crate::context::{PluginContext, PluginContextTable};
 use crate::decision::{DecisionLog, PluginAction, Verdict};
 use crate::effect::{DurableEffectLog, EffectLogSlot, EffectSink, EffectStream};
 use crate::error::PluginError;
 use crate::extensions::filter_extensions;
 use crate::hooks::payload::{Extensions, PluginPayload, WriteToken};
 use crate::plugin::OnError;
-use crate::registry::{HookEntry, group_by_mode};
+use crate::registry::{AnyHookHandler, HookEntry, group_by_mode};
 
 /// Configuration for the executor.
 #[derive(Debug, Clone)]
@@ -80,6 +92,61 @@ impl Default for ExecutorConfig {
             audit_stream_namespace: None,
             audit_epoch: None,
         }
+    }
+}
+
+/// Result of invoking a handler inside a spawned task so a panic cannot
+/// unwind [`Executor::execute`].
+enum ContainedOutcome {
+    Success(Box<dyn Any + Send + Sync>, PluginContext),
+    Error(Box<PluginError>, PluginContext),
+    Timeout(PluginContext),
+    Panic(String),
+    /// `JoinHandle` produced no usable outcome. Treated as a deny in
+    /// blocking phases rather than guessed as allow.
+    Lost,
+}
+
+/// Timeout the invoke, and catch a panic, by running it on a task.
+///
+/// Serial and audit used to `.await` the handler inline. A panic then
+/// left `on_error` unconsulted and skipped later audit plugins. Concurrent
+/// already contained panics via `JoinError::is_panic`; this is the same
+/// containment for the other awaited phases.
+///
+/// The payload is cloned into the task because `tokio::spawn` needs
+/// `'static`. Concurrent already cloned; serial, transform, and audit
+/// now match it. Audit used to take `&payload` and spawn nothing.
+///
+/// The join handle aborts on drop. If the request is cancelled (timeout,
+/// disconnect, shutdown) the plugin task is cancelled instead of running
+/// detached until its inner timeout fires.
+async fn invoke_contained(
+    handler: Arc<dyn AnyHookHandler>,
+    payload: Box<dyn PluginPayload>,
+    extensions: Extensions,
+    mut ctx: PluginContext,
+    timeout_dur: Duration,
+) -> ContainedOutcome {
+    let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+        let result = timeout(
+            timeout_dur,
+            handler.invoke(&*payload, &extensions, &mut ctx),
+        )
+        .await;
+        (result, ctx)
+    }));
+    match handle.await {
+        Ok((Ok(Ok(value)), ctx)) => ContainedOutcome::Success(value, ctx),
+        Ok((Ok(Err(err)), ctx)) => ContainedOutcome::Error(err, ctx),
+        Ok((Err(_), ctx)) => ContainedOutcome::Timeout(ctx),
+        Err(join) => {
+            if join.is_panic() {
+                ContainedOutcome::Panic(join.to_string())
+            } else {
+                ContainedOutcome::Lost
+            }
+        },
     }
 }
 
@@ -816,9 +883,11 @@ impl Executor {
     /// Run a serial phase — plugins execute one at a time, each seeing
     /// the (possibly modified) payload from the previous.
     ///
-    /// The framework retains ownership of the payload. Handlers receive
-    /// a borrow and clone only if they modify. Modified payloads in
-    /// the result replace the current payload.
+    /// The framework retains ownership of the payload. The handler runs
+    /// on a spawned task so a panic cannot unwind [`Executor::execute`],
+    /// which means the payload is cloned into the task on every invoke
+    /// (sequential and transform). Modified payloads in the result
+    /// replace the current payload.
     ///
     /// `payload_modified` is set to `true` when a handler's payload is
     /// accepted, and never cleared — this is the only place that fact is
@@ -855,11 +924,12 @@ impl Executor {
             // on the paths that return before the end of the loop body.
             let mut action = PluginAction::Allowed;
 
-            // Take this plugin's context out of the table — pulls its stored
+            // Snapshot this plugin's context — clones its stored
             // local_state and seeds global_state from the canonical store.
-            // Replaces the previous values().last() seed, which was
-            // non-deterministic across HashMap iteration orders.
-            let mut ctx = ctx_table.take_context(plugin_id);
+            // Take-and-commit would drop that local_state if the task
+            // panics (no context comes back). Snapshot leaves the previous
+            // map in the table until a successful store.
+            let ctx = ctx_table.snapshot_context(plugin_id);
 
             // Filter extensions per plugin based on declared capabilities.
             // Produces a filtered view with None for ungated slots.
@@ -895,42 +965,30 @@ impl Executor {
                 EffectLogSlot::unrecorded()
             };
 
-            // Execute with timeout — handler borrows payload, gets filtered
-            // extensions. Panics are contained the way the concurrent phase
-            // contains them. A panic between recording an effect's intent and
-            // recording its outcome would otherwise unwind the whole request
-            // future; collapsing it into a `PluginError` lets `on_error`
-            // decide, keeps the pipeline's bookkeeping intact, and leaves the
-            // orphaned intent for recovery instead of losing the request.
-            use futures::FutureExt as _;
+            // Spawn + timeout so a panic is `ContainedOutcome::Panic`
+            // rather than unwinding `execute`. The payload is cloned into
+            // the task (`'static`); modifications still return through
+            // `ErasedResultFields.modified_payload`.
+            //
+            // A panic between recording an effect's intent and recording its
+            // outcome must not unwind the request future: containment lets
+            // `on_error` decide, keeps the pipeline's bookkeeping intact, and
+            // leaves the orphaned intent for recovery instead of losing the
+            // request.
             let timeout_dur = Duration::from_secs(self.config.timeout_seconds);
-            let result = timeout(
+            let contained = invoke_contained(
+                Arc::clone(&entry.handler),
+                payload.clone_boxed(),
+                filtered,
+                ctx,
                 timeout_dur,
-                std::panic::AssertUnwindSafe(entry.handler.invoke(&**payload, &filtered, &mut ctx))
-                    .catch_unwind(),
             )
-            .await
-            .map(|caught| {
-                caught.unwrap_or_else(|panic| {
-                    let msg = panic
-                        .downcast_ref::<&'static str>()
-                        .map(|s| (*s).to_owned())
-                        .or_else(|| panic.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "unknown panic".to_owned());
-                    error!("{} plugin '{}' panicked: {}", phase_label, plugin_name, msg);
-                    Err(Box::new(crate::error::PluginError::Execution {
-                        plugin_name: plugin_name.to_owned(),
-                        message: format!("task panicked: {msg}"),
-                        source: None,
-                        code: Some("panic".into()),
-                        details: std::collections::HashMap::new(),
-                        proto_error_code: None,
-                    }))
-                })
-            });
+            .await;
 
-            match result {
-                Ok(Ok(result_box)) => {
+            let mut ctx_after: Option<PluginContext> = None;
+            match contained {
+                ContainedOutcome::Success(result_box, ctx) => {
+                    ctx_after = Some(ctx);
                     if let Some(mut erased) = extract_erased(result_box) {
                         if !erased.continue_processing && can_block {
                             // A blocking result always halts; synthesize a violation
@@ -1113,25 +1171,13 @@ impl Executor {
                     }
                     // If no modifications — payload unchanged
                 },
-                Ok(Err(e)) => {
-                    // A contained panic carries code "panic". Surfacing it as
-                    // `plugin_panic` lets a host or a sink tell a crash from an
-                    // ordinary plugin error by code, in either phase.
-                    let is_panic = matches!(
-                        e.as_ref(),
-                        crate::error::PluginError::Execution { code: Some(c), .. }
-                            if c.as_str() == "panic"
-                    );
+                ContainedOutcome::Error(e, ctx) => {
                     error!("{} plugin '{}' failed: {}", phase_label, plugin_name, e);
                     action = PluginAction::Error(e.to_string());
                     match on_error {
                         OnError::Fail if can_block => {
                             let mut v = crate::error::PluginViolation::new(
-                                if is_panic {
-                                    "plugin_panic"
-                                } else {
-                                    "plugin_error"
-                                },
+                                "plugin_error",
                                 format!("Plugin '{plugin_name}' failed: {e}"),
                             );
                             v.plugin_name = Some(plugin_name.to_owned());
@@ -1161,8 +1207,9 @@ impl Executor {
                             entry.plugin_ref.disable();
                         },
                     }
+                    ctx_after = Some(ctx);
                 },
-                Err(_) => {
+                ContainedOutcome::Timeout(ctx) => {
                     error!("{} plugin '{}' timed out", phase_label, plugin_name);
                     let timeout_err = crate::error::PluginError::Timeout {
                         plugin_name: plugin_name.to_owned(),
@@ -1199,6 +1246,85 @@ impl Executor {
                             entry.plugin_ref.disable();
                         },
                     }
+                    ctx_after = Some(ctx);
+                },
+                ContainedOutcome::Panic(s) => {
+                    error!(
+                        "{} plugin '{}' task panicked: {}",
+                        phase_label, plugin_name, s
+                    );
+                    let panic_err = crate::error::PluginError::Execution {
+                        plugin_name: plugin_name.to_owned(),
+                        message: format!("task panicked: {s}"),
+                        source: None,
+                        code: Some("panic".into()),
+                        details: std::collections::HashMap::new(),
+                        proto_error_code: None,
+                    };
+                    action = PluginAction::Error(format!("task panicked: {s}"));
+                    match on_error {
+                        OnError::Fail if can_block => {
+                            let mut v = crate::error::PluginViolation::new(
+                                "plugin_panic",
+                                format!("Plugin '{plugin_name}' task panicked: {s}"),
+                            );
+                            v.plugin_name = Some(plugin_name.to_owned());
+                            decisions.record(plugin_name, phase, action.clone());
+                            return Some(v);
+                        },
+                        OnError::Fail => {
+                            warn!(
+                                "{} plugin '{}' on_error=fail (panic) in non-blocking phase — not halting",
+                                phase_label, plugin_name,
+                            );
+                            errors.push((&panic_err).into());
+                        },
+                        OnError::Ignore => {
+                            errors.push((&panic_err).into());
+                        },
+                        OnError::Disable => {
+                            warn!(
+                                "{} plugin '{}' disabled after panic",
+                                phase_label, plugin_name
+                            );
+                            errors.push((&panic_err).into());
+                            entry.plugin_ref.disable();
+                        },
+                    }
+                },
+                ContainedOutcome::Lost => {
+                    action = PluginAction::Error("task ended without a result".to_owned());
+                    if can_block {
+                        let mut v = crate::error::PluginViolation::new(
+                            "executor_invariant",
+                            format!(
+                                "Plugin '{plugin_name}' task ended without a result; cannot attribute an allow"
+                            ),
+                        );
+                        v.plugin_name = Some(plugin_name.to_owned());
+                        decisions.record(plugin_name, phase, action.clone());
+                        return Some(v);
+                    }
+                    warn!(
+                        "{} plugin '{}' task was lost in a non-blocking phase — not halting",
+                        phase_label, plugin_name,
+                    );
+                    let lost_err = crate::error::PluginError::Execution {
+                        plugin_name: plugin_name.to_owned(),
+                        message: "task ended without a result".into(),
+                        source: None,
+                        code: Some("lost".into()),
+                        details: std::collections::HashMap::new(),
+                        proto_error_code: None,
+                    };
+                    errors.push((&lost_err).into());
+                    if matches!(on_error, OnError::Disable) {
+                        warn!(
+                            "{} plugin '{}' disabled after lost task",
+                            phase_label, plugin_name
+                        );
+                        entry.plugin_ref.disable();
+                    }
                 },
             }
 
@@ -1208,15 +1334,23 @@ impl Executor {
 
             // Commit this plugin's context back to the table — replaces the
             // canonical global_state with its (possibly modified) copy and
-            // stores the local_state for the next hook invocation. The
-            // global_state move is free; only the local_state insert allocates.
-            ctx_table.store_context(plugin_id, ctx);
+            // stores the local_state for the next hook invocation. A panic
+            // or lost task returns no context; the snapshot above left the
+            // previous local_state in the table.
+            if let Some(ctx) = ctx_after {
+                ctx_table.store_context(plugin_id, ctx);
+            }
         }
 
         None // no denial
     }
 
-    /// Run a read-only phase — plugins receive &payload, results discarded.
+    /// Run a read-only phase — plugins receive `&payload` inside the task;
+    /// results are discarded.
+    ///
+    /// The handler still runs on a spawned task, so the payload is cloned
+    /// per plugin. Audit used to take `&payload` and spawn nothing; it
+    /// now pays the same containment cost as serial.
     async fn run_ref_phase(
         &self,
         entries: &[HookEntry],
@@ -1232,7 +1366,7 @@ impl Executor {
             let on_error = entry.plugin_ref.trusted_config().on_error;
             // Read-only phase — snapshot the plugin's local_state and the
             // canonical global_state, no merge-back.
-            let mut ctx = ctx_table.snapshot_context(plugin_id);
+            let ctx = ctx_table.snapshot_context(plugin_id);
             // Filter extensions per plugin — read-only, no write tokens.
             let capabilities: std::collections::HashSet<String> = entry
                 .plugin_ref
@@ -1250,21 +1384,22 @@ impl Executor {
             );
             let timeout_dur = Duration::from_secs(self.config.timeout_seconds);
 
-            let result = timeout(
+            let contained = invoke_contained(
+                Arc::clone(&entry.handler),
+                payload.clone_boxed(),
+                filtered,
+                ctx,
                 timeout_dur,
-                entry.handler.invoke(payload, &filtered, &mut ctx),
             )
             .await;
 
-            // Audit / fire-and-forget cannot block, so OnError::Fail can't
-            // halt the pipeline — but OnError::Disable must still take a
-            // repeatedly-failing plugin out of rotation. The previous code
-            // ignored on_error entirely, so Disable plugins kept failing
-            // forever no matter how many invocations errored. All non-halt
-            // failures also push a record into PipelineResult.errors.
-            match result {
-                Ok(Ok(_)) => {}, // read-only — discard result and ext_clone
-                Ok(Err(e)) => {
+            // Audit cannot block, so OnError::Fail can't halt — but
+            // OnError::Disable must still take a repeatedly-failing plugin
+            // out of rotation. Panic is contained the same way serial and
+            // concurrent contain it.
+            match contained {
+                ContainedOutcome::Success(_, _) => {},
+                ContainedOutcome::Error(e, _) => {
                     warn!(
                         "{} plugin '{}' error (ignored): {}",
                         phase_label, plugin_name, e
@@ -1278,7 +1413,7 @@ impl Executor {
                         entry.plugin_ref.disable();
                     }
                 },
-                Err(_) => {
+                ContainedOutcome::Timeout(_) => {
                     warn!(
                         "{} plugin '{}' timed out (ignored)",
                         phase_label, plugin_name
@@ -1292,6 +1427,50 @@ impl Executor {
                     if matches!(on_error, OnError::Disable) {
                         warn!(
                             "{} plugin '{}' disabled after timeout",
+                            phase_label, plugin_name
+                        );
+                        entry.plugin_ref.disable();
+                    }
+                },
+                ContainedOutcome::Panic(s) => {
+                    warn!(
+                        "{} plugin '{}' panicked (ignored): {}",
+                        phase_label, plugin_name, s
+                    );
+                    let panic_err = crate::error::PluginError::Execution {
+                        plugin_name: plugin_name.clone(),
+                        message: format!("task panicked: {s}"),
+                        source: None,
+                        code: Some("panic".into()),
+                        details: std::collections::HashMap::new(),
+                        proto_error_code: None,
+                    };
+                    errors.push((&panic_err).into());
+                    if matches!(on_error, OnError::Disable) {
+                        warn!(
+                            "{} plugin '{}' disabled after panic",
+                            phase_label, plugin_name
+                        );
+                        entry.plugin_ref.disable();
+                    }
+                },
+                ContainedOutcome::Lost => {
+                    warn!(
+                        "{} plugin '{}' task ended without a result (ignored)",
+                        phase_label, plugin_name
+                    );
+                    let lost_err = crate::error::PluginError::Execution {
+                        plugin_name: plugin_name.clone(),
+                        message: "task ended without a result".into(),
+                        source: None,
+                        code: Some("lost".into()),
+                        details: std::collections::HashMap::new(),
+                        proto_error_code: None,
+                    };
+                    errors.push((&lost_err).into());
+                    if matches!(on_error, OnError::Disable) {
+                        warn!(
+                            "{} plugin '{}' disabled after lost task",
                             phase_label, plugin_name
                         );
                         entry.plugin_ref.disable();
@@ -1882,86 +2061,23 @@ mod tests {
     // reader; `Disable` continues, records, and marks the plugin so it stops
     // being dispatched.
 
-    use crate::context::PluginContext;
-    use crate::plugin::{Plugin, PluginConfig, PluginMode};
-    use crate::registry::{AnyHookHandler, PluginRef};
-    use async_trait::async_trait;
+    use crate::fault_testing::{InjectedFailure, fault_entry};
+    use crate::plugin::PluginMode;
 
-    /// How a mock branch fails.
-    #[derive(Clone, Copy)]
-    enum Failure {
-        Error,
-        Hang,
-        Panic,
-        None,
-        /// Boxed the wrong `Any` type, so [`extract_erased`] returns None.
-        WrongType,
-    }
-
-    struct MockPlugin(PluginConfig);
-
-    #[async_trait]
-    impl Plugin for MockPlugin {
-        fn config(&self) -> &PluginConfig {
-            &self.0
-        }
-    }
-
-    struct MockHandler(Failure);
-
-    #[async_trait]
-    impl AnyHookHandler for MockHandler {
-        async fn invoke(
-            &self,
-            _payload: &dyn PluginPayload,
-            _extensions: &Extensions,
-            _ctx: &mut PluginContext,
-        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
-            match self.0 {
-                Failure::Error => Err(Box::new(PluginError::Execution {
-                    plugin_name: "mock".into(),
-                    message: "simulated failure".into(),
-                    source: None,
-                    code: None,
-                    details: std::collections::HashMap::new(),
-                    proto_error_code: None,
-                })),
-                // Longer than any timeout these tests configure, so the
-                // executor's per-branch timeout is what ends it.
-                Failure::Hang => {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    Ok(erase_result(PluginResult::<TestPayload>::allow()))
-                },
-                Failure::Panic => panic!("simulated panic inside a branch"),
-                Failure::None => Ok(erase_result(PluginResult::<TestPayload>::allow())),
-                Failure::WrongType => Ok(Box::new(0_u8)),
-            }
-        }
-
-        fn hook_type_name(&self) -> &'static str {
-            "test_hook"
-        }
-    }
-
-    fn concurrent_entry(name: &str, on_error: OnError, failure: Failure) -> HookEntry {
-        let cfg = PluginConfig {
-            name: name.into(),
-            mode: PluginMode::Concurrent,
-            on_error,
-            ..Default::default()
-        };
-        HookEntry {
-            plugin_ref: Arc::new(PluginRef::new(
-                Arc::new(MockPlugin(cfg.clone())),
-                cfg.clone(),
-            )),
-            handler: Arc::new(MockHandler(failure)),
-        }
+    fn concurrent_entry(
+        name: &str,
+        on_error: OnError,
+        failure: InjectedFailure,
+    ) -> crate::registry::HookEntry {
+        fault_entry(name, PluginMode::Concurrent, on_error, failure)
     }
 
     /// One concurrent plugin with the given failure and policy. Returns the
     /// pipeline result plus the entry so a test can check `is_disabled`.
-    async fn run_one(failure: Failure, on_error: OnError) -> (PipelineResult, HookEntry) {
+    async fn run_one(
+        failure: InjectedFailure,
+        on_error: OnError,
+    ) -> (PipelineResult, crate::registry::HookEntry) {
         // A short timeout so the Hang case does not stall the suite.
         let executor = Executor::new(ExecutorConfig {
             timeout_seconds: 1,
@@ -1987,7 +2103,7 @@ mod tests {
     /// unrelated to the failure being injected.
     #[tokio::test]
     async fn a_concurrent_plugin_that_succeeds_allows() {
-        let (r, entry) = run_one(Failure::None, OnError::Fail).await;
+        let (r, entry) = run_one(InjectedFailure::None, OnError::Fail).await;
         assert!(r.continue_processing, "no failure, so no halt");
         assert!(r.errors.is_empty(), "and nothing to report");
         assert!(!entry.plugin_ref.is_disabled());
@@ -1999,7 +2115,7 @@ mod tests {
     /// halts.
     #[tokio::test]
     async fn a_concurrent_unreadable_result_under_fail_is_fail_closed() {
-        let (r, _) = run_one(Failure::WrongType, OnError::Fail).await;
+        let (r, _) = run_one(InjectedFailure::WrongType, OnError::Fail).await;
         assert!(!r.continue_processing, "an unreadable result must halt");
         let v = r.violation.expect("a violation is required to halt");
         assert_eq!(v.code, "plugin_error");
@@ -2008,29 +2124,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_unreadable_result_under_ignore_continues() {
-        let (r, entry) = run_one(Failure::WrongType, OnError::Ignore).await;
+        let (r, entry) = run_one(InjectedFailure::WrongType, OnError::Ignore).await;
         assert!(
             r.continue_processing,
             "on_error: ignore is the documented hatch"
         );
         assert_eq!(r.errors.len(), 1);
         assert!(!entry.plugin_ref.is_disabled());
-    }
-
-    fn serial_entry(name: &str, on_error: OnError, failure: Failure) -> HookEntry {
-        let cfg = PluginConfig {
-            name: name.into(),
-            mode: PluginMode::Sequential,
-            on_error,
-            ..Default::default()
-        };
-        HookEntry {
-            plugin_ref: Arc::new(PluginRef::new(
-                Arc::new(MockPlugin(cfg.clone())),
-                cfg.clone(),
-            )),
-            handler: Arc::new(MockHandler(failure)),
-        }
     }
 
     #[tokio::test]
@@ -2040,7 +2140,12 @@ mod tests {
             short_circuit_on_deny: true,
             ..Default::default()
         });
-        let entry = serial_entry("mock", OnError::Fail, Failure::WrongType);
+        let entry = fault_entry(
+            "mock",
+            PluginMode::Sequential,
+            OnError::Fail,
+            InjectedFailure::WrongType,
+        );
         let tracker = tokio_util::task::TaskTracker::new();
         let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
         let (r, _bg) = executor
@@ -2062,7 +2167,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_error_under_fail_halts_and_names_the_plugin() {
-        let (r, _) = run_one(Failure::Error, OnError::Fail).await;
+        let (r, _) = run_one(InjectedFailure::Error, OnError::Fail).await;
         assert!(!r.continue_processing, "on_error: fail must halt");
         let v = r.violation.expect("a violation is required to halt");
         assert_eq!(v.code, "plugin_error");
@@ -2077,7 +2182,7 @@ mod tests {
     /// continues. Logging alone would make the failure invisible to a caller.
     #[tokio::test]
     async fn a_concurrent_error_under_ignore_continues_but_is_recorded() {
-        let (r, entry) = run_one(Failure::Error, OnError::Ignore).await;
+        let (r, entry) = run_one(InjectedFailure::Error, OnError::Ignore).await;
         assert!(r.continue_processing, "on_error: ignore must not halt");
         assert_eq!(r.errors.len(), 1, "and must still report the error");
         assert!(
@@ -2088,7 +2193,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_error_under_disable_continues_and_disables() {
-        let (r, entry) = run_one(Failure::Error, OnError::Disable).await;
+        let (r, entry) = run_one(InjectedFailure::Error, OnError::Disable).await;
         assert!(r.continue_processing, "on_error: disable must not halt");
         assert_eq!(r.errors.len(), 1);
         assert!(
@@ -2101,7 +2206,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_timeout_under_fail_halts_as_a_timeout() {
-        let (r, _) = run_one(Failure::Hang, OnError::Fail).await;
+        let (r, _) = run_one(InjectedFailure::Hang, OnError::Fail).await;
         assert!(!r.continue_processing);
         let v = r.violation.expect("a violation is required to halt");
         assert_eq!(
@@ -2113,7 +2218,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_timeout_under_ignore_continues_but_is_recorded() {
-        let (r, entry) = run_one(Failure::Hang, OnError::Ignore).await;
+        let (r, entry) = run_one(InjectedFailure::Hang, OnError::Ignore).await;
         assert!(r.continue_processing);
         assert_eq!(r.errors.len(), 1);
         assert!(!entry.plugin_ref.is_disabled());
@@ -2121,7 +2226,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_timeout_under_disable_continues_and_disables() {
-        let (r, entry) = run_one(Failure::Hang, OnError::Disable).await;
+        let (r, entry) = run_one(InjectedFailure::Hang, OnError::Disable).await;
         assert!(r.continue_processing);
         assert_eq!(r.errors.len(), 1);
         assert!(entry.plugin_ref.is_disabled());
@@ -2135,7 +2240,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_panic_under_fail_halts_as_a_panic() {
-        let (r, _) = run_one(Failure::Panic, OnError::Fail).await;
+        let (r, _) = run_one(InjectedFailure::Panic, OnError::Fail).await;
         assert!(!r.continue_processing);
         let v = r.violation.expect("a violation is required to halt");
         assert_eq!(
@@ -2147,7 +2252,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_panic_under_ignore_continues_but_is_recorded() {
-        let (r, entry) = run_one(Failure::Panic, OnError::Ignore).await;
+        let (r, entry) = run_one(InjectedFailure::Panic, OnError::Ignore).await;
         assert!(
             r.continue_processing,
             "a panicking plugin under ignore must not halt the pipeline"
@@ -2158,7 +2263,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_concurrent_panic_under_disable_continues_and_disables() {
-        let (r, entry) = run_one(Failure::Panic, OnError::Disable).await;
+        let (r, entry) = run_one(InjectedFailure::Panic, OnError::Disable).await;
         assert!(r.continue_processing);
         assert_eq!(r.errors.len(), 1);
         assert!(entry.plugin_ref.is_disabled());
@@ -2176,8 +2281,8 @@ mod tests {
             ..Default::default()
         });
         let entries = vec![
-            concurrent_entry("lenient", OnError::Ignore, Failure::Error),
-            concurrent_entry("strict", OnError::Fail, Failure::Error),
+            concurrent_entry("lenient", OnError::Ignore, InjectedFailure::Error),
+            concurrent_entry("strict", OnError::Fail, InjectedFailure::Error),
         ];
         let tracker = tokio_util::task::TaskTracker::new();
         let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
@@ -2241,12 +2346,11 @@ mod audit_seam_tests {
 
     use super::*;
     use crate::audit::AuditHandler;
-    use crate::context::PluginContext;
     use crate::decision::DecisionStep;
     use crate::error::PluginViolation;
     use crate::hooks::PluginResult;
     use crate::plugin::{Plugin, PluginConfig, PluginMode};
-    use crate::registry::{AnyHookHandler, PluginRef};
+    use crate::registry::PluginRef;
 
     #[derive(Debug, Clone)]
     #[allow(dead_code, reason = "test payload: the typed shape is the point")]

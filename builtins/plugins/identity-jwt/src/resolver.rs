@@ -1285,6 +1285,36 @@ mod tests {
         cfg_with_config("jwt", config)
     }
 
+    /// The resolver holds the parsed config, which carries HMAC secrets and
+    /// inline PEM keys, and a host that logs its plugin list would print it.
+    /// The manual `Debug` keeps the useful identity and elides the rest.
+    #[test]
+    fn debug_for_the_resolver_does_not_leak_key_material() {
+        let resolver = JwtIdentityResolver::new(cfg_with_mapper(json!({
+            "trusted_issuers": [{
+                "issuer": "https://idp.example.com",
+                "audiences": ["test-aud"],
+                "algorithms": ["HS256"],
+                "decoding_key": { "kind": "secret", "secret": "hunter2-shared-hmac" },
+            }],
+        })))
+        .expect("this config builds");
+
+        let rendered = format!("{resolver:?}");
+        assert!(
+            !rendered.contains("hunter2-shared-hmac"),
+            "resolver Debug leaked the signing secret: {rendered}"
+        );
+        assert!(
+            rendered.contains("jwt"),
+            "should name the instance: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "should say what it withheld: {rendered}"
+        );
+    }
+
     fn build_err(settings: Value) -> String {
         format!(
             "{}",

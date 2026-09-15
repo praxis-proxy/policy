@@ -83,6 +83,8 @@ history.
   the protocol-agnostic envelope policy reasons about
 - [Extensions and Capability Gating](extensions.md):
   typed contextual state, and the capabilities that unlock it
+- [CMF extensions and the attribute bag](cmf-extensions.md):
+  the per-type absent-value contract and every key the bridge emits
 
 ## Reference
 

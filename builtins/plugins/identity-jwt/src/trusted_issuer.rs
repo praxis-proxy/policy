@@ -371,3 +371,128 @@ impl std::fmt::Debug for TrustedIssuer {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    fn issuer_with_secret(secret: &str) -> TrustedIssuer {
+        TrustedIssuer {
+            issuer: "https://idp.example".to_owned(),
+            audiences: vec!["praxis".to_owned()],
+            skip_audience_validation: false,
+            keys: std::sync::Arc::new(std::sync::RwLock::new(KeyStore::single_fallback(
+                DecodingKey::from_secret(secret.as_bytes()),
+            ))),
+            algorithms: vec![Algorithm::HS256],
+            leeway_seconds: 60,
+            source: crate::config::DecodingKeySource::Secret {
+                secret: secret.to_owned(),
+            },
+            refresh: RefreshGate::default(),
+        }
+    }
+
+    /// The manual `Debug` impls on this path exist to keep key material out of
+    /// logs. A derived impl anywhere in the chain undoes that silently, so the
+    /// absence of the secret is asserted rather than assumed.
+    #[test]
+    fn debug_for_a_trusted_issuer_does_not_leak_key_material() {
+        let rendered = format!("{:?}", issuer_with_secret("hunter2-shared-hmac"));
+        assert!(
+            !rendered.contains("hunter2-shared-hmac"),
+            "issuer Debug leaked the signing secret: {rendered}"
+        );
+        assert!(
+            rendered.contains("https://idp.example"),
+            "issuer Debug should still name the issuer: {rendered}"
+        );
+        assert!(
+            rendered.contains("HS256"),
+            "issuer Debug should still name the algorithms: {rendered}"
+        );
+    }
+
+    /// The same guarantee one level down, where the material actually lives.
+    #[test]
+    fn debug_for_a_secret_key_source_is_redacted() {
+        let source = crate::config::DecodingKeySource::Secret {
+            secret: "hunter2-shared-hmac".to_owned(),
+        };
+        let rendered = format!("{source:?}");
+        assert!(
+            !rendered.contains("hunter2-shared-hmac"),
+            "key source Debug leaked the secret: {rendered}"
+        );
+        assert!(rendered.contains("Secret"), "got {rendered}");
+    }
+
+    /// A JWKS URL is a locator, not key material, and a log line about the
+    /// wrong endpoint is only actionable if it names the endpoint.
+    #[test]
+    fn debug_for_a_jwks_source_keeps_the_url() {
+        let source = crate::config::DecodingKeySource::JwksUrl {
+            url: "https://idp.example/jwks".to_owned(),
+            insecure_http: false,
+            refresh_secs: 600,
+            min_refresh_interval_secs: 30,
+        };
+        assert!(
+            format!("{source:?}").contains("https://idp.example/jwks"),
+            "a JWKS URL should survive redaction"
+        );
+    }
+
+    /// `KeyStore` holds `DecodingKey`s, which have no `Debug` of their own
+    /// precisely so a key cannot be printed. The store reports the kid set and
+    /// whether a fallback exists, and nothing else.
+    #[test]
+    fn debug_for_a_key_store_reports_kids_without_keys() {
+        let store = KeyStore::from_jwks_entries([(
+            "kid-1".to_owned(),
+            DecodingKey::from_secret(b"key-bytes"),
+        )]);
+        let rendered = format!("{store:?}");
+        assert!(rendered.contains("kid-1"), "got {rendered}");
+        assert!(rendered.contains("has_fallback"), "got {rendered}");
+        assert!(
+            !rendered.contains("key-bytes"),
+            "leaked key bytes: {rendered}"
+        );
+    }
+
+    /// `len` counts the fallback alongside the kid-indexed keys, so a
+    /// single-key inline source reports one rather than zero.
+    #[test]
+    fn key_store_len_counts_the_fallback() {
+        assert_eq!(KeyStore::empty().len(), 0);
+        assert!(KeyStore::empty().is_empty());
+
+        let fallback = KeyStore::single_fallback(DecodingKey::from_secret(b"k"));
+        assert_eq!(fallback.len(), 1);
+        assert!(!fallback.is_empty());
+    }
+
+    /// A store that has never been fetched successfully is stale by
+    /// definition. That is the failed-boot-fetch case, and it is what makes
+    /// the first request after an `IdP` recovers try again.
+    #[test]
+    fn a_store_that_never_succeeded_is_stale() {
+        let gate = RefreshGate::default();
+        assert!(
+            gate.is_stale(Some(std::time::Duration::from_secs(600))),
+            "no successful fetch has to read as stale"
+        );
+        assert!(
+            !gate.is_stale(None),
+            "a source that cannot refresh is never stale"
+        );
+
+        gate.mark_success();
+        assert!(
+            !gate.is_stale(Some(std::time::Duration::from_secs(600))),
+            "a fresh success is not stale"
+        );
+    }
+}

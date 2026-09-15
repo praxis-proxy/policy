@@ -28,6 +28,18 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    services:
+      valkey:
+        image: valkey/valkey:8.1.10
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      VALKEY_TEST_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,11 +56,10 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-coverage-
       # cargo-llvm-cov installs itself through the Makefile target, the same
       # way it does locally. Cached via ~/.cargo/bin so it is built once.
-      - name: Summary and floor
-        run: make coverage
-      - name: LCOV report
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Floor and LCOV report
+        run: make coverage-lcov
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
         with:
           name: coverage-lcov
           path: lcov.info

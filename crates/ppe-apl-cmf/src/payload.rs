@@ -4,17 +4,17 @@
 // JSON args/result payload → AttributeBag.
 //
 // Leaf scalars at any nesting depth land in the bag under their dotted
-// path, prefixed with `args.` or `result.`. Nested objects recurse;
-// scalar arrays flatten into a StringSet, numbers and bools rendered as
-// strings (empty array → empty set); arrays holding a nested array or
-// object are skipped (no list scalar in the bag).
+// path. Nested objects recurse; scalar arrays flatten into a StringSet,
+// numbers and bools rendered as strings (empty array → empty set); arrays
+// holding a nested array or object are skipped (no list scalar in the bag).
 //
-// Examples:
-//   args = { "include_ssn": true,
-//            "user": { "id": "alice", "roles": ["hr", "manager"] } }
-//   →  args.include_ssn      : Bool(true)
-//      args.user.id          : String("alice")
-//      args.user.roles       : StringSet({"hr", "manager"})
+// The prefix itself is the key when the JSON root is not an object:
+//   `"hello"`           → `args` : String("hello")
+//   `["a", "b"]`        → `args` : StringSet({"a","b"})
+//   `{ "include_ssn": true, "user": { "id": "alice", "roles": ["hr"] } }`
+//                       → `args.include_ssn` : Bool(true)
+//                         `args.user.id`     : String("alice")
+//                         `args.user.roles`  : StringSet({"hr"})
 //
 // Null values are skipped (consistent with bag's missing-key semantics).
 
@@ -24,14 +24,17 @@ use std::collections::HashSet;
 
 use crate::constants::{BAG_ARGS_PREFIX, BAG_RESULT_PREFIX};
 
-/// Flatten an args object into `args.*` keys.
+/// Flatten an args JSON value into bag keys. An object writes
+/// `args.<dotted>` children; a top-level scalar or scalar array writes
+/// the bare key `args`.
 pub fn extract_args(args: &Value, bag: &mut AttributeBag) {
     // `walk` builds dotted paths itself; strip the trailing `.` from
     // the canonical prefix to match its signature.
     walk(args, BAG_ARGS_PREFIX.trim_end_matches('.'), bag);
 }
 
-/// Flatten a result object into `result.*` keys.
+/// Flatten a result JSON value into bag keys. Same shapes as
+/// [`extract_args`], under `result` / `result.<dotted>`.
 pub fn extract_result(result: &Value, bag: &mut AttributeBag) {
     walk(result, BAG_RESULT_PREFIX.trim_end_matches('.'), bag);
 }
@@ -125,6 +128,37 @@ mod tests {
         assert_eq!(bag.get_bool("args.include_ssn"), Some(true));
         assert_eq!(bag.get_int("args.amount"), Some(100));
         assert_eq!(bag.get_string("args.name"), Some("alice"));
+    }
+
+    #[test]
+    fn top_level_scalar_payload_uses_the_bare_prefix() {
+        let mut bag = AttributeBag::new();
+        extract_args(&json!("hello"), &mut bag);
+        assert_eq!(bag.get_string("args"), Some("hello"));
+        assert_eq!(bag.len(), 1);
+
+        let mut bag = AttributeBag::new();
+        extract_args(&json!(true), &mut bag);
+        assert_eq!(bag.get_bool("args"), Some(true));
+        assert_eq!(bag.len(), 1);
+
+        let mut bag = AttributeBag::new();
+        extract_result(&json!(42), &mut bag);
+        assert_eq!(bag.get_int("result"), Some(42));
+        assert_eq!(bag.len(), 1);
+    }
+
+    #[test]
+    fn top_level_scalar_array_payload_uses_the_bare_prefix() {
+        let mut bag = AttributeBag::new();
+        extract_args(&json!(["a", "b"]), &mut bag);
+        assert!(bag.set_contains("args", "a"));
+        assert!(bag.set_contains("args", "b"));
+
+        let mut bag = AttributeBag::new();
+        extract_result(&json!([]), &mut bag);
+        assert!(bag.contains("result"));
+        assert!(!bag.set_contains("result", "anything"));
     }
 
     #[test]

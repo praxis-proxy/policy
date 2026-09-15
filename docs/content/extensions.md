@@ -9,7 +9,9 @@ write each one.
 
 Hosts rarely configure extensions directly. Capability gating restricts the
 state available to plugins that execute APL effects. The namespaces below are
-the exact keys an APL predicate or plugin may read.
+the exact keys an APL predicate or plugin may read. The per-type absent-value
+contract, original vs flattened keys, and the catalog of every key the
+bridge emits are in [CMF extensions and the attribute bag](cmf-extensions.md).
 
 ## The extensions
 
@@ -37,9 +39,10 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Raw credentials | inbound tokens and minted delegated tokens | flow through plugin payloads, not the bag | `read_inbound_credentials`, `read_delegated_tokens` |
 | Candidate constraint | folded backend routing constraint from `restrict` effects | not a bag namespace — read by the host router | written by the policy engine |
 
-The request arguments and response body are also flattened, under `args.*` and
-`result.*`, and the route name is available as `route.key`. APL field pipelines
-(`args:` / `result:`) operate on those. Operator-maintained static attributes
+The request arguments and response body are also flattened. An object
+writes `args.<dotted>` / `result.<dotted>`; a top-level scalar or scalar
+array writes the bare key `args` / `result`. The route name is
+`route.key`. APL field pipelines (`args:` / `result:`) operate on those. Operator-maintained static attributes
 are flattened under `data.*` — these come from config files, not the request,
 and need no capability (see [Static Attributes](apl/attributes.md)).
 

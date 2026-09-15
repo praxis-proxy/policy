@@ -180,7 +180,7 @@ pub struct TrustedIssuerConfig {
 /// Where the JWT signing key material comes from. Serializable
 /// intermediate; the resolver builds a runtime `DecodingKey` from
 /// it at construction time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DecodingKeySource {
     /// Inline PEM-encoded public key (RSA / EC). Useful for tests
@@ -266,6 +266,37 @@ pub enum DecodingKeySource {
         /// The shared secret, for HMAC algorithms.
         secret: String,
     },
+}
+
+// `Debug` is manual because `Pem`, `Jwk`, and `Secret` hold key material and
+// the derived form prints it verbatim. Anything that carries this enum inherits
+// that leak, so it is elided here rather than at each holder. A path or URL is
+// a locator rather than a key, so those stay: they are what makes a log line
+// about the wrong key source actionable.
+impl std::fmt::Debug for DecodingKeySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pem { .. } => f.debug_struct("Pem").field("pem", &"<redacted>").finish(),
+            Self::PemFile { path } => f.debug_struct("PemFile").field("path", path).finish(),
+            Self::Jwk { .. } => f.debug_struct("Jwk").field("jwk", &"<redacted>").finish(),
+            Self::JwksUrl {
+                url,
+                insecure_http,
+                refresh_secs,
+                min_refresh_interval_secs,
+            } => f
+                .debug_struct("JwksUrl")
+                .field("url", url)
+                .field("insecure_http", insecure_http)
+                .field("refresh_secs", refresh_secs)
+                .field("min_refresh_interval_secs", min_refresh_interval_secs)
+                .finish(),
+            Self::Secret { .. } => f
+                .debug_struct("Secret")
+                .field("secret", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl DecodingKeySource {

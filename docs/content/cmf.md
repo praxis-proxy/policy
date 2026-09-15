@@ -55,12 +55,15 @@ covers every operation type mapped to that hook.
 CMF is the "what you evaluate" layer (see [Vision](vision.md)). Identity,
 security labels, and delegation context ride alongside the message as typed
 extensions ([Extensions & Capability-Gating](extensions.md)), and APL reads all
-of it through one attribute bag. The message gives policy the content; the
-extensions give it the context; APL decides.
+of it through one attribute bag
+([CMF extensions and the attribute bag](cmf-extensions.md)). The message
+gives policy the content; the extensions give it the context; APL decides.
 
 ## Next
 
 - [Extensions and Capability Gating](extensions.md): inspect the typed context
   carried alongside each message.
+- [CMF extensions and the attribute bag](cmf-extensions.md): the keys APL
+  reads and what a missing key means in each engine.
 - [Crates](crates.md): locate the CMF and runtime implementations in the
   workspace.

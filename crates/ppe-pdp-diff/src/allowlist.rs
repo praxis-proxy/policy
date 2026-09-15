@@ -15,11 +15,14 @@ pub(crate) struct AllowlistEntry {
     pub(crate) cedar: Outcome,
     pub(crate) cel: Outcome,
     pub(crate) opa: Outcome,
+    /// When `Some`, the catalog case must carry an `apl_rule` whose verdict
+    /// matches this flag. `None` for splits that have no APL spelling.
+    pub(crate) apl_allows: Option<bool>,
 }
 
-/// Seed entries from issue #25 (floats, empty collections) plus the
-/// closely related splits the seed implies (whole floats, resource
-/// floats, missing principal).
+/// Seed entries from issue #25 (floats, missing collections) plus a
+/// missing principal. Present-empty `StringSet` and omitted claim
+/// scalars are not splits: they live in the subset as `AgreeDeny`.
 pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
     vec![
         AllowlistEntry {
@@ -33,6 +36,7 @@ pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
             cedar: Outcome::deny(CauseKind::EvalError),
             cel: Outcome::allow(),
             opa: Outcome::allow(),
+            apl_allows: None,
         },
         AllowlistEntry {
             id: "floats-whole",
@@ -43,6 +47,7 @@ pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
             cedar: Outcome::deny(CauseKind::DefaultDeny),
             cel: Outcome::allow(),
             opa: Outcome::allow(),
+            apl_allows: None,
         },
         AllowlistEntry {
             id: "floats-resource",
@@ -53,29 +58,26 @@ pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
             cedar: Outcome::dispatch_error(),
             cel: Outcome::allow(),
             opa: Outcome::allow(),
-        },
-        AllowlistEntry {
-            id: "empty-set",
-            reason: "An empty `StringSet` is present. Cedar always materializes \
-                     `principal.teams` (possibly empty) because strict mode \
-                     errors on a missing attribute; `contains` is false. CEL \
-                     and OPA see an empty list/array and `in` is false. This \
-                     is not the missing-key case.",
-            cedar: Outcome::deny(CauseKind::DefaultDeny),
-            cel: Outcome::deny(CauseKind::PolicyFalse),
-            opa: Outcome::deny(CauseKind::PolicyFalse),
+            apl_allows: None,
         },
         AllowlistEntry {
             id: "missing-collection",
-            reason: "No `role.*` keys. Cedar still has an empty `roles` set, so \
-                     `contains` is a clean false (default deny). Unguarded CEL \
-                     `role.hr` is an eval error (the `role` namespace is \
-                     absent). OPA with no `default` leaves `allow` undefined — \
-                     a clean deny. Same absent-ish state, three mechanisms; \
-                     only Cedar's empty set is guaranteed by the bridge.",
+            reason: "No `role.*` keys and no `subject.roles` set. Cedar still \
+                     has an empty `roles` set, so `contains` is a clean false \
+                     (default deny). Unguarded CEL `role.hr` is an eval error \
+                     (the `role` namespace is absent). OPA with no `default` \
+                     leaves `allow` undefined — a clean deny. The bridge \
+                     contract in `docs/content/cmf-extensions.md` is: write the \
+                     original set present-empty and keep flattened bools \
+                     presence-only. Authors who need agreement use \
+                     `subject.roles` (see `empty-set` / `bridge-empty-teams` / \
+                     `bridge-empty-roles`). `has(role.hr)` is not a CEL guard \
+                     here: with no `role.*` keys the `role` namespace does not \
+                     exist, and `has(role.hr)` is itself an eval error.",
             cedar: Outcome::deny(CauseKind::DefaultDeny),
             cel: Outcome::deny(CauseKind::EvalError),
             opa: Outcome::deny(CauseKind::DefaultDeny),
+            apl_allows: None,
         },
         AllowlistEntry {
             id: "missing-subject-id",
@@ -88,6 +90,38 @@ pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
             cedar: Outcome::dispatch_error(),
             cel: Outcome::deny(CauseKind::EvalError),
             opa: Outcome::deny(CauseKind::DefaultDeny),
+            apl_allows: None,
+        },
+        AllowlistEntry {
+            id: "missing-claim-not-eq",
+            reason: "APL `!=` on a missing key is true (duality with `!(==)`), \
+                     so `require(claim.tenant != \"acme\")` Allows. CEL and \
+                     Cedar treat the omitted claim as an eval error (Deny). \
+                     OPA without `default` leaves the query undefined \
+                     (DefaultDeny). Authors who need the denylist closed \
+                     write `require(exists(claim.tenant) & claim.tenant != \
+                     \"acme\")`. See `docs/content/cmf-extensions.md`.",
+            cedar: Outcome::deny(CauseKind::EvalError),
+            cel: Outcome::deny(CauseKind::EvalError),
+            opa: Outcome::deny(CauseKind::DefaultDeny),
+            apl_allows: Some(true),
+        },
+        AllowlistEntry {
+            id: "missing-not-in",
+            reason: "APL `not in` on a missing set is true, so \
+                     `require(subject.type not in blocked_types)` Allows. CEL \
+                     `!(subject.type in blocked_types)` is an eval error: \
+                     `blocked_types` is undeclared. Cedar has no free \
+                     `blocked_types` bag key; the catalog uses \
+                     `!(principal.claims.blocked.contains(principal.type))`, \
+                     which is an eval error on the missing claim set. OPA \
+                     `not (x in y)` on an undefined `y` is true, so OPA \
+                     Allows with APL. The split is CEL/Cedar Deny vs \
+                     APL/OPA Allow.",
+            cedar: Outcome::deny(CauseKind::EvalError),
+            cel: Outcome::deny(CauseKind::EvalError),
+            opa: Outcome::allow(),
+            apl_allows: Some(true),
         },
     ]
 }
