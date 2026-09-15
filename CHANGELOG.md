@@ -133,6 +133,52 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Roles and permissions are readable as whole sets.** `subject.roles`, `subject.permissions`, `client.roles`, and `client.permissions` join `subject.teams` as `StringSet` bag keys, so a policy can write `"hr" in subject.roles` rather than enumerating `role.<name>` booleans. The flattened boolean keys are unchanged. ([#7](https://github.com/praxis-proxy/policy/pull/7))
 
+- **Typed credential locations for the `identity/jwt` plugin.** The plugin can
+  now extract bearer JWTs from HTTP headers, cookies, or query parameters — one
+  location per resolver instance. A new `credential:` config block names a
+  `kind` (`header`, `cookie`, or `query_param`) and a `name`. Cookie and
+  query-string values are parsed by PPE itself (`ppe-core::http_credential`),
+  not by whichever HTTP framework the host runs, so the same request resolves
+  the same credential regardless of which proxy sits in front of it.
+  **Breaking for existing config** — `header:` is removed with no alias:
+
+  ```yaml
+  # Before
+  plugins:
+    - name: user-jwt
+      kind: identity/jwt
+      config:
+        header: "Authorization"
+        trusted_issuers: [...]
+
+  # After
+  plugins:
+    - name: user-jwt
+      kind: identity/jwt
+      config:
+        credential:
+          kind: header
+          name: Authorization
+        trusted_issuers: [...]
+  ```
+
+  Omitting `credential:` entirely still defaults to the `Authorization` header,
+  so a config that never set `header:` needs no change.
+
+  Runtime deny codes for credential extraction: `auth.missing_credential` (no
+  `Cookie` header or query string supplied), `auth.empty_credential` (name
+  found but value empty), `auth.ambiguous_credential` (duplicate cookie or
+  query-parameter name), `auth.malformed_credential` (parse failure — oversized
+  input or control characters). Header extraction continues to use
+  `auth.malformed_header`.
+
+  **Security note**: a resolver configured for `credential: { kind: query_param
+  }` logs a one-time notice at construction, because a query-parameter token
+  routinely appears in infrastructure logs (access logs, CDN logs, browser
+  history) outside PPE's control — PPE's own logging never prints the token
+  value, in either the old or the new field.
+  ([#64](https://github.com/praxis-proxy/policy/issues/64))
+
 ### Changed
 
 - **`require(P)` is now a predicate meaning `!P`.** It accepts general predicates, including comparisons, negation, and composition with `&` or `|`. Existing accepted forms retain their semantics: `require(a)`, `require(a, b)`, and `require(a | b)` still normalize to the same trees.
@@ -314,40 +360,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **`AplRouteHandler::with_pdp_router` is gone.** Install a `PdpRouter` through `with_pdp`, which is what the visitor already does. ([#13](https://github.com/praxis-proxy/policy/issues/13))
 
-- **The `identity/jwt` plugin's `header:` config field.** One instance of this
-  plugin could only ever extract its bearer JWT from an HTTP header, which left
-  no way to authenticate a browser session carrying its token in an `HttpOnly`
-  cookie, or a WebSocket/SSE upgrade handshake that cannot set request headers
-  at all. `header:` is replaced by a `credential:` block naming a `kind`
-  (`header`, `cookie`, or `query_param`) and a `name`, and the field is gone with
-  no alias or deprecation period. Cookie and query-string values are parsed by
-  PPE itself (`ppe-core::http_credential`), not by whichever HTTP framework the
-  host runs, so the same request resolves the same credential regardless of
-  which proxy sits in front of it. **Breaking for existing config**:
-
-  ```yaml
-  # Before
-  plugins:
-    - name: user-jwt
-      kind: identity/jwt
-      config:
-        header: "Authorization"
-        trusted_issuers: [...]
-
-  # After
-  plugins:
-    - name: user-jwt
-      kind: identity/jwt
-      config:
-        credential:
-          kind: header
-          name: Authorization
-        trusted_issuers: [...]
-  ```
-
-  Omitting `credential:` entirely still defaults to the `Authorization` header,
-  so a config that never set `header:` needs no change. A config still writing
-  `header:` fails the load as the unrecognized field it now is.
+- **The `identity/jwt` plugin's `header:` config field.** Replaced by the
+  `credential:` block (see Added). A config still writing `header:` fails
+  the load as the unrecognized field it now is.
 
   **Breaking for embedders**: `RawInboundToken.source_header: String` is
   replaced by `RawInboundToken.source: Credential`, and its constructor becomes
@@ -358,12 +373,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   logging, assertion propagation, policy predicates) read one uniform type
   regardless of which plugin produced it. `RawInboundToken`'s `Debug` is now
   hand-written rather than derived, and redacts the token in both cases.
-
-  **Security note**: a resolver configured for `credential: { kind: query_param
-  }` logs a one-time notice at construction, because a query-parameter token
-  routinely appears in infrastructure logs (access logs, CDN logs, browser
-  history) outside PPE's control — PPE's own logging never prints the token
-  value, in either the old or the new field.
 
 ### Fixed
 
