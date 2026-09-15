@@ -534,7 +534,8 @@ mod tests {
         // payload, set the output fields the handler is responsible
         // for, return the updated payload. Input fields survive
         // the clone unchanged.
-        let original = IdentityPayload::new("eyJ.tok", TokenSource::Bearer);
+        let original = IdentityPayload::new("eyJ.tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=eyJ.fake");
         let mut updated = original.clone();
         updated.subject = Some(SubjectExtension {
             id: Some("alice".into()),
@@ -542,11 +543,40 @@ mod tests {
         });
         assert_eq!(updated.raw_token(), "eyJ.tok"); // input preserved
         assert_eq!(
+            updated.raw_query_string(),
+            Some("access_token=eyJ.fake"),
+            "raw_query_string must survive clone"
+        );
+        assert_eq!(
             updated.subject.as_ref().unwrap().id.as_deref(),
             Some("alice")
         );
         // Original unchanged — the clone is a separate value.
         assert!(original.subject.is_none());
+    }
+
+    #[test]
+    fn raw_query_string_empty_string_is_some_not_none() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("");
+        assert_eq!(
+            p.raw_query_string(),
+            Some(""),
+            "empty string must be Some(\"\"), not None"
+        );
+    }
+
+    #[test]
+    fn raw_query_string_absent_after_deserialize_round_trip() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=secret");
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: IdentityPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.raw_query_string(),
+            None,
+            "raw_query_string is serde-skipped and must be None after round-trip"
+        );
     }
 
     #[test]

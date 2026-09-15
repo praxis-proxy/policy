@@ -770,6 +770,33 @@ mod tests {
     }
 
     #[test]
+    fn workload_alias_is_a_back_compat_alias_for_caller_workload() {
+        assert_eq!(
+            serde_json::from_str::<TokenRole>("\"workload\"").unwrap(),
+            TokenRole::CallerWorkload,
+        );
+        assert_eq!(
+            serde_json::from_str::<TokenRole>("\"caller_workload\"").unwrap(),
+            TokenRole::CallerWorkload,
+        );
+    }
+
+    #[test]
+    fn token_role_canonical_variants_round_trip() {
+        for (json_str, expected) in [
+            ("\"user\"", TokenRole::User),
+            ("\"client\"", TokenRole::Client),
+            ("\"caller_workload\"", TokenRole::CallerWorkload),
+        ] {
+            let deserialized: TokenRole = serde_json::from_str(json_str).unwrap();
+            assert_eq!(deserialized, expected, "deserialize {json_str}");
+            let serialized = serde_json::to_string(&expected).unwrap();
+            let round_tripped: TokenRole = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(round_tripped, expected, "round-trip {json_str}");
+        }
+    }
+
+    #[test]
     fn extension_round_trip_drops_tokens() {
         let mut ext = RawCredentialsExtension::default();
         ext.inbound_tokens.insert(

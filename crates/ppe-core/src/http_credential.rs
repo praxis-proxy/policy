@@ -325,4 +325,29 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn query_leading_and_trailing_ampersand_tolerated() {
+        let m = parse_query_string("&a=1&").unwrap();
+        assert_eq!(m.get("a").map(String::as_str), Some("1"));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn cookie_exactly_at_limit_accepted() {
+        let value = "x".repeat(MAX_INPUT_LEN - 2); // "a=" is 2 bytes
+        let raw = format!("a={value}");
+        assert_eq!(raw.len(), MAX_INPUT_LEN);
+        let m = parse_cookie_header(&raw).unwrap();
+        assert_eq!(m.get("a").map(String::as_str), Some(value.as_str()));
+    }
+
+    #[test]
+    fn query_exactly_at_limit_accepted() {
+        let value = "x".repeat(MAX_INPUT_LEN - 2); // "a=" is 2 bytes
+        let raw = format!("a={value}");
+        assert_eq!(raw.len(), MAX_INPUT_LEN);
+        let m = parse_query_string(&raw).unwrap();
+        assert_eq!(m.get("a").map(String::as_str), Some(value.as_str()));
+    }
 }

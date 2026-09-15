@@ -1114,6 +1114,21 @@ mod tests {
         assert_eq!(round_tripped.credential, cfg.credential);
     }
 
+    #[test]
+    fn credential_header_kind_deserializes() {
+        let raw = json!({
+            "trusted_issuers": [minimal_issuer()],
+            "credential": { "kind": "header", "name": "Authorization" },
+        });
+        let cfg: JwtIdentityResolverConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            cfg.credential,
+            Some(Credential::Header {
+                name: "Authorization".into()
+            })
+        );
+    }
+
     // ---- JWKS documents the IdP might actually serve -----------------------
     //
     // The e2e tests all serve a well-formed JWKS with a valid `kid`, so every
