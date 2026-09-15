@@ -133,7 +133,10 @@ global:
     - attributes/tenants.yaml
 ```
 
-`pdp:` is a sequence, one block per decision point. `session_store:`
+`pdp:` is a sequence, one block per decision point. An entry may carry
+an optional `cache:` block with positive `ttl_seconds` and
+`max_entries`; omission leaves evaluation uncached. See
+[PDP decision cache](../pdp-decision-cache.md). `session_store:`
 selects where Session Taint labels live; without it, labels stay in an
 in-process memory store and do not survive a reload or reach a second
 replica. `attribute_files:` loads the operator-maintained tree policy
