@@ -130,18 +130,30 @@ pub struct Extensions {
     /// `filter_extensions` from the plugin's `perform_http` grant, NOT
     /// serialized.
     ///
-    /// Unlike the write tokens above, this *is* carried across `clone()`.
-    /// A write token is a one-shot authorization validated at the merge
-    /// boundary, so propagating it through a clone would widen write
-    /// authority. A transport handle is a borrowed service whose gate was
-    /// already applied when the filtered view was built; dropping it on
-    /// clone would only surprise a plugin that already holds the right.
+    /// Dropped on `clone()`, like the write tokens above. The slot records
+    /// the verdict reached when the filtered view was built, so a copy that
+    /// kept it would answer with that verdict for as long as the copy lived:
+    /// a plugin could stash its extensions and keep making requests after an
+    /// operator revoked `perform_http` on a reload. Every dispatch entry
+    /// point re-seeds the transport through `with_host_services` before the
+    /// executor runs, so nothing legitimate depends on a copy carrying it.
     ///
-    /// Opaque on purpose: the `Arc` inside cannot be taken out, so the
-    /// only way to use the transport is [`HostServices::http_request`],
-    /// which re-checks the capability on every call.
+    /// Opaque on purpose, and not `Clone`: the `Arc` inside cannot be taken
+    /// out, so the only way to use the transport is
+    /// [`HostServices::http_request`] on the extensions a handler was
+    /// actually given.
     #[serde(skip)]
     pub http_transport: HttpTransportSlot,
+
+    /// Whether this plugin may perform an irreversible external effect, and
+    /// where the record goes. Set by the executor per plugin, NOT serialized.
+    ///
+    /// Not carried across `clone()`, unlike the transport handle: the slot
+    /// names the plugin every record is attributed to, so a clone that
+    /// outlived the invocation would let records be written under a name that
+    /// is no longer the one running.
+    #[serde(skip)]
+    pub effect_log: crate::effect::EffectLogSlot,
 }
 
 #[async_trait::async_trait]
@@ -174,7 +186,8 @@ impl Clone for Extensions {
             framework: self.framework.clone(),
             meta: self.meta.clone(),
             custom: self.custom.clone(),
-            http_transport: self.http_transport.clone(),
+            http_transport: HttpTransportSlot::default(),
+            effect_log: crate::effect::EffectLogSlot::default(),
             http_write_token: None,
             labels_write_token: None,
             delegation_write_token: None,

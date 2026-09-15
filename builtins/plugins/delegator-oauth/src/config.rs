@@ -89,6 +89,26 @@ pub struct OAuthDelegatorConfig {
     /// costs as well as what it saves.
     #[serde(default)]
     pub cache: crate::cache::CacheConfig,
+
+    /// Header to carry each mint's effect key to the `IdP`, if the `IdP`
+    /// honours one.
+    ///
+    /// A mint that times out is indeterminate: the token may exist and we do
+    /// not hold it. Resolving that means asking the `IdP` about the attempt,
+    /// and the only handle we have is the effect key. OAuth gives us nowhere
+    /// to put it — neither RFC 6749 nor RFC 8693 defines an idempotency or
+    /// client-reference parameter for the token endpoint — so this is left
+    /// unset and no header is sent.
+    ///
+    /// Name one and the key travels with both legs, which is what a
+    /// vendor-specific idempotency key needs to be useful. It is opt-in
+    /// because the effect is entirely the `IdP`'s: an `IdP` that recognises
+    /// the header makes a retried mint replay-safe, and one that does not
+    /// ignores it. Neither case changes what this plugin records, and neither
+    /// on its own makes an indeterminate mint reconcilable — that still wants
+    /// an `EffectReconciler` that knows how to query this particular `IdP`.
+    #[serde(default)]
+    pub idempotency_header: Option<String>,
 }
 
 /// Where the gateway's OAuth client secret is loaded from. Three

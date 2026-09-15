@@ -52,6 +52,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 hashbrown = { workspace = true }
+# `catch_unwind` on the audit-sink future, so a panicking sink cannot unwind
+# the request whose verdict it is only observing.
+futures = { workspace = true }
+# Content-addressed audit provenance: only the digest of a payload is ever
+# recorded, never the payload.
+sha2 = { workspace = true }
 arc-swap = { workspace = true }
 wildmatch = { workspace = true }
 chrono = { workspace = true }

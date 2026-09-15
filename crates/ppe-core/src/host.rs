@@ -262,7 +262,23 @@ pub(crate) async fn run_request(
 /// process, which is exactly what the operation-shaped API exists to
 /// prevent: the grant is re-evaluated per request, so a retained handle
 /// outlives a capability an operator has since revoked.
-#[derive(Debug, Clone, Default)]
+///
+/// Deliberately not `Clone`. Hiding the `Arc` behind the newtype is not enough
+/// on its own: with the field public, a cloneable slot could be copied out of
+/// the `&Extensions` a plugin is lent, stashed, and later used on a
+/// hand-built `Extensions`. The capability check would then read the verdict
+/// frozen into that copy rather than the plugin's current grant, so a
+/// retained slot would keep egress an operator had since revoked. The crate
+/// rebuilds the slot where it legitimately needs to, through a crate-internal
+/// helper that is not reachable from a plugin.
+///
+/// ```compile_fail
+/// use praxis_policy_core::host::HttpTransportSlot;
+/// use praxis_policy_core::hooks::payload::Extensions;
+/// let ext = Extensions::default();
+/// let _stashed: HttpTransportSlot = ext.http_transport.clone();
+/// ```
+#[derive(Debug, Default)]
 pub struct HttpTransportSlot(ServiceSlot<Arc<dyn HttpTransport>>);
 
 impl HttpTransportSlot {
@@ -289,6 +305,18 @@ impl HttpTransportSlot {
     pub(crate) fn slot(&self) -> &ServiceSlot<Arc<dyn HttpTransport>> {
         &self.0
     }
+
+    /// A second slot carrying the same verdict, for building the per-plugin
+    /// filtered view.
+    ///
+    /// This is what `Clone` would be, minus the public impl a plugin could
+    /// reach. The one caller is `filter_extensions`, which has just decided
+    /// this plugin's grant and is recording it. `Extensions::clone` does not
+    /// use it: a copy carries no transport, so a stashed copy cannot outlive
+    /// the grant it was built under.
+    pub(crate) fn rebuilt(&self) -> Self {
+        Self(self.0.clone())
+    }
 }
 
 /// Host services during `Plugin::initialize_with`, before any request.
@@ -296,7 +324,12 @@ impl HttpTransportSlot {
 /// The engine builds one per plugin, applying that plugin's capability
 /// grants, and drops it when initialization returns. A plugin must not
 /// retain anything from it; see the module note on borrowing per call.
-#[derive(Debug, Clone, Default)]
+///
+/// Not `Clone`, for the same reason [`HttpTransportSlot`] is not: a plugin
+/// handed `&InitExtensions` could otherwise copy it, keep it past
+/// initialization, and call host services against grants decided at startup.
+/// Nothing needs to clone it; every caller takes it by reference.
+#[derive(Debug, Default)]
 pub struct InitExtensions {
     http: HttpTransportSlot,
 }

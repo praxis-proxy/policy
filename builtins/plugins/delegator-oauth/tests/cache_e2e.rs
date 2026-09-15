@@ -374,3 +374,51 @@ async fn this_workload_caches_despite_an_empty_anchor() {
     assert_eq!(token, "gateway-minted");
     assert_eq!(idp.calls(), 1);
 }
+
+/// A cache hit performs no mint, so it must leave no effect record.
+///
+/// The effect log accounts for irreversible acts. A cache hit calls no `IdP`
+/// and issues no credential, so recording one would inflate the count of
+/// mints an operator has to account for and leave a key with nothing at the
+/// participant to reconcile it against. The reuse of a cached token is still
+/// visible, on the decision record, where it belongs.
+#[tokio::test]
+async fn a_cache_hit_records_no_effect() {
+    use praxis_policy_core::effect::{DurableEffectLog, EffectRecord};
+
+    #[derive(Debug, Default)]
+    struct SpyLog(std::sync::Mutex<Vec<EffectRecord>>);
+
+    #[async_trait::async_trait]
+    impl DurableEffectLog for SpyLog {
+        async fn append(
+            &self,
+            effect: &EffectRecord,
+        ) -> Result<(), Box<praxis_policy_core::error::PluginError>> {
+            self.0.lock().unwrap().push(effect.clone());
+            Ok(())
+        }
+    }
+
+    let idp = Arc::new(ScriptedIdp::new());
+    let mgr = build_manager(&idp, Some(cache_on(&["user"]))).await;
+    let log = Arc::new(SpyLog::default());
+    mgr.set_effect_log(log.clone());
+
+    let (_, first_source) = delegate(&mgr, payload_for("alice-token")).await;
+    let after_mint = log.0.lock().unwrap().len();
+    let (_, second_source) = delegate(&mgr, payload_for("alice-token")).await;
+
+    assert_eq!(first_source, "mint");
+    assert_eq!(second_source, "cache");
+    assert_eq!(idp.calls(), 1);
+    assert_eq!(
+        after_mint, 2,
+        "the mint recorded its intent and its outcome"
+    );
+    assert_eq!(
+        log.0.lock().unwrap().len(),
+        after_mint,
+        "the cache hit added no record, because it performed no act"
+    );
+}

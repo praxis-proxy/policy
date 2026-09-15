@@ -66,6 +66,8 @@ history.
   inbound identity slots, outbound delegation subjects, and six recipes
 - [Header Assertions](assertions.md):
   projecting derived identity onto upstream requests
+- [Auditing](auditing.md):
+  decision records, write-ahead effect records, and writing a sink
 - [Deployment](deployment.md):
   the same policy at a gateway, a sidecar, or in-framework
 - [Patterns](patterns.md):

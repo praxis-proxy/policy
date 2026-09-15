@@ -224,7 +224,11 @@ pub struct MessagePayload {
     pub message: Message,
 }
 
-crate::impl_plugin_payload!(MessagePayload);
+// `audit_serialize` opts this payload into content-provenance hashing. It is
+// the payload that carries tool arguments and model output, so it is the one a
+// reader most wants to know went in and came out unchanged. Only the digest is
+// recorded, and only when an operator enables provenance.
+crate::impl_plugin_payload!(MessagePayload, audit_serialize);
 
 crate::define_hook! {
     /// CMF message evaluation hook.

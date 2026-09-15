@@ -47,6 +47,26 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - Added PPE documentation ([#82](https://github.com/praxis-proxy/policy/pull/82))
 
+- **Every verdict now reaches an audit sink, denials included.** An observation-only plugin runs as a post-hook, so it only ever saw traffic that was allowed through: a blocked call, an approval rejection, or a delegation failure produced no audit record at all. The executor now builds a `DecisionLog` recording what each plugin did and how the pipeline ruled, and hands it to any registered sink at the verdict itself rather than in a pipeline phase, so allow, deny, and modify all produce exactly one record. A hook resolving to zero plugins emits one allow record too, so a consumer counting records per invocation does not read "nothing configured" as a dropped record.
+
+  A plugin becomes a sink by overriding `Plugin::as_audit_handler`. Sinks return `()`, so a sink can see a verdict but cannot influence it, and the decision log never reaches `PluginContext`, so an ordinary plugin cannot read what the sink reads. Sink calls are bounded by the plugin timeout with panics contained: a sink that fails is logged and skipped rather than taking down the request whose verdict is already decided.
+
+- **Irreversible effects are recorded write-ahead.** A decision record says what the engine ruled, not what a plugin did to the outside world on the way. A token mint or an approval grant outlives the request and cannot be taken back, so a process that died between deciding to act and acting left no trace either way. A plugin now acts through `Extensions::perform_effect`, which brackets the act between a fail-closed durable append and a best-effort outcome: no durable record, no act. A failed call is recorded `unknown` rather than `rejected`, because it may still have landed at the participant, and `PolicyEngine::initialize` reconciles whatever a previous run left mid-flight.
+
+  Opt-in and off by default. `engine_settings.effect_log_path` selects a durable log and `effect_log_compaction_threshold` tunes it; with neither set, a plugin's effects run exactly as before and nothing is recorded. Auditing is a choice an operator makes, never something a plugin depends on. There is deliberately no `emit_effect` capability: gating the record rather than the act would point the control at the evidence instead of the authority.
+
+  Effects are refused outside `sequential` and `transform`. A concurrent branch is cancelled when another branch denies, `audit` is read-only by contract, and `fire_and_forget` runs after the verdict, so an act in any of them could happen for work the pipeline discarded. The refusal names the fix rather than silently doing nothing. An audit sink observes effects through `AuditHandler::on_effect`, and `audit-logger` renders them as their own event.
+
+### Changed
+
+- **A copy of `Extensions` no longer carries host services.** `HttpTransportSlot`, `InitExtensions`, and the new `EffectLogSlot` are no longer `Clone`, and `Extensions::clone` drops the HTTP transport the way it already dropped the write tokens. A slot records the verdict reached when the per-plugin view was built, so a copy answered with that verdict for as long as it lived, letting a plugin stash its extensions and keep making requests after an operator revoked `perform_http` on a reload. That is the property the slot's own documentation already claimed. Every dispatch entry point re-seeds host services before the executor runs, so nothing legitimate depended on a copy carrying them.
+
+- **A contained plugin failure is recorded rather than lost.** A panic, a timeout, or a task that ends without a result is recorded in the decision log as that plugin's action and the verdict still reaches the audit sinks, so a crash is visible to a consumer instead of appearing as a gap. Under `on_error: fail` the violation carries `plugin_panic`, `plugin_timeout`, or `executor_invariant`, so a sink can tell them apart by code.
+
+  Opt-in and off by default. With no sink registered the executor builds the log but emits nothing, and the cost is a length check.
+
+- **The reference `audit-logger` runs as a decision sink.** Listing no `hooks:` is no longer a configuration error: it selects sink mode, where the logger attaches to the verdict path and records the verdict and the ordered plugin actions alongside the fields it already emitted. Listing hooks keeps the previous per-hook observer, which continues to see only allowed traffic, so one instance never emits two records for one request.
+
 ### Fixed
 
 - **`ppe-core` self-dev-dependency is path-only.** Same as `ppe-apl-core`: a
