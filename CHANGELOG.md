@@ -19,6 +19,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Vault KV v2 secret backend**, behind the `secrets-vault` facade
+  feature. A `kind: vault` provider reads `<mount>/<path>#<field>` through
+  the host `HttpTransport` (no Vault SDK). Auth is Kubernetes or AppRole,
+  with no default. Token renewal is lazy on the next read — nothing
+  spawns a ticker — and a `403` reauthenticates once. Written against
+  the Vault 1.19 KV v2 HTTP API.
+  ([#94](https://github.com/praxis-proxy/policy/issues/94))
+
 - **Safety invariants, written down and tested as a catalog.** The engine's
   fail-closed promise lived in comments and per-seam judgment. `docs/safety-invariants.md`
   lists each claim as something a test can fail, and a fault-injection plugin
@@ -46,6 +54,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   stay on the allowlist. ([#18](https://github.com/praxis-proxy/policy/issues/18))
 
 - Added PPE documentation ([#82](https://github.com/praxis-proxy/policy/pull/82))
+
+### Changed
+
+- `execute_with_retry` is public so a `SecretProvider` that holds a host
+  transport can use the same retry policy as plugins.
 
 ### Fixed
 
@@ -76,6 +89,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **A test that no longer tested its premise.** `a_rejected_load_drops_its_plugins_outside_the_writer_lock` was rejected by config validation before any factory ran, so the `Drop`-re-entrancy deadlock it guards was never exercised. It now loads under `dispatch: hooks` and asserts the instantiation count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
 - **`make coverage` cleans stale instrumented binaries first.** llvm-cov merges the mappings of every binary it finds, so one left by a run with a different feature set (or a cached `target/` in CI) was counted twice, inflating both the line count and the miss count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
 - **`rustls` bumped to 0.23.45** for [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285): TLS 1.3 handshake messages packed after a key-changing message in the same record were accepted at the wrong encryption level. It reaches the shipped graph through `redis` and `deadpool-redis`, so this is a dependency bump rather than an advisory ignore. Lockfile only, one package, still MSRV 1.96. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+
 
 ## [0.2.0] - 2026-09-03
 

@@ -53,6 +53,7 @@ ORDER=(
   praxis-policy-pdp-cel
   praxis-policy-pdp-opa
   praxis-policy-session-valkey
+  praxis-policy-secrets-vault
   praxis-policy
 )
 
