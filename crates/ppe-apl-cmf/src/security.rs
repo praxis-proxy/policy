@@ -75,6 +75,12 @@
 //   sec.auth_method                  → auth_method          : String
 //   sec.labels                       → security.labels      : StringSet (always)
 //   sec.classification               → security.classification : String
+//   sec.objects, sec.data            → not in the bag. Both stay on the
+//                                      typed slot (`filter_extensions`
+//                                      copies them unrestricted). Plugins
+//                                      read ObjectSecurityProfile /
+//                                      DataPolicy directly. Distinct from
+//                                      the static `data:` payload tree.
 
 use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::{
@@ -211,9 +217,9 @@ pub fn extract_workload(prefix: &str, w: &WorkloadIdentity, bag: &mut AttributeB
     if let Some(id) = &w.client_id {
         bag.set(format!("{prefix}.client_id"), id.clone());
     }
-    // `attested_at` intentionally omitted from the bag at v0 — APL
-    // doesn't carry DateTime as a bag value type, and policies that
-    // need it can opt into reading the typed extension directly.
+    // `attested_at` is not in the bag. `request.timestamp` and
+    // `completion.created_at` are carried as plain strings, so the bag
+    // does not refuse timestamps; unifying the three is out of scope.
     let _ = &w.attested_at;
 }
 

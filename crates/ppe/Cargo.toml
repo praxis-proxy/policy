@@ -166,6 +166,10 @@ mockito = "1"
 # Test-only: `every_builtin_pdp_kind_is_in_the_differential_harness` imports
 # `HARNESS_PDP_KINDS` from here so the facade cannot drift from the harness.
 praxis-policy-pdp-diff = { path = "../ppe-pdp-diff" }
+# Test-only: `docs_examples` reads an attribute-file example as YAML before
+# handing it to the merge the runtime uses.
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

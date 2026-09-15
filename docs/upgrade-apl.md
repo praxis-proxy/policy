@@ -1,16 +1,13 @@
-# Upgrading an APL configuration
+# Upgrading an APL Configuration
 
-Every key and form an existing configuration must rewrite, with a before and an
-after. Each entry says what the old form did, what to write instead, and how the
-engine reports the old form if you miss one.
+Rewrite the keys and forms listed below. Each entry states the old behavior, the
+replacement, and the load error produced by a missed migration.
 
-The short version: nothing is silently dropped any more. A key that is not part
-of the language fails the load and names its replacement, and a key the runtime
-never honored is gone rather than warned about. If your configuration loads, it
-means every key in it does something.
+The loader no longer drops unknown keys. A removed key fails the load and names
+its replacement. A successful load means every key has defined behavior.
 
-Work through the sections in order. The first two change the shape of the
-document, and the rest are local rewrites.
+Apply the sections in order. The first two change the document shape; the
+remaining sections make local rewrites.
 
 Section 10 also covers the `perform_http` capability required by plugins that
 fetch JWKS, exchange tokens, or dispatch CIBA prompts.
@@ -22,6 +19,7 @@ fetch JWKS, exchange tokens, or dispatch CIBA prompts.
 `plugin_settings:` is `engine_settings:`, and the boolean `routing_enabled` is a
 named mode.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 plugin_settings:
@@ -36,9 +34,9 @@ engine_settings:
   plugin_timeout: 30
 ```
 
-**The default changed, and this is the widest break in the release.** `dispatch:`
-defaults to `policy`. It used to default to `hooks`, where every declared plugin
-fires at every hook its own `hooks:` list names.
+The default changed; this is the widest compatibility break in the release.
+`dispatch:` defaults to `policy`. It used to default to `hooks`, where every
+declared plugin fires at every hook its own `hooks:` list names.
 
 - A configuration that declares `routes:`, `groups:`, or `global:` was already
   relying on policy dispatch. Write nothing; the default is now what you wanted.
@@ -62,12 +60,12 @@ rather than loading with its contents dropped.
 Under `dispatch: policy` a plugin runs only where a step names it, so the load
 now tells you when nothing does.
 
-- **A declared plugin no policy reaches fails the load, by name.** The reference
+- A declared plugin no policy reaches fails the load, by name. The reference
   set is wider than a `run(name)` step: an `authentication:` list at any scope, a
   `delegate` call, and an elicitation verb's handler all reach a plugin, and a
   step under `global.authorization:` reaches one for every route it stacks onto.
   If a plugin is genuinely meant to be inert, drop the declaration.
-- **A plugin reached on fewer hooks than it declares is warned about**, under
+- A plugin reached on fewer hooks than it declares is warned about, under
   `alarm = "plugin_narrowed_by_policy"`, naming every uncovered hook. Narrowing
   is often intended, so it does not fail the load. Add a step on the uncovered
   hooks, or narrow the plugin's own `hooks:` to match what the policy asks for.
@@ -89,6 +87,7 @@ unaffected either way, since it names its entity type.
 
 APL terms sit on the section that carries them.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 routes:
@@ -125,6 +124,7 @@ key.
 It was read only as `global.apl.attribute_files`, so it does not simply lose a
 wrapper, it relocates:
 
+<!-- validate: fragment -->
 ```yaml
 # before
 global:
@@ -156,6 +156,7 @@ process-global, so all three engine blocks agree on their own scope.
 
 The flat spellings are gone.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 routes:
@@ -184,11 +185,11 @@ an empty list. All three used to load clean and enforce nothing. A phase written
 empty *beside* one that carries steps still loads: only a block with nothing in
 it at all is refused.
 
-**A published compatibility guarantee lapses here.** The 0.1.0 note that the
+A published compatibility guarantee lapses here. The 0.1.0 note that the
 policy document format was unchanged no longer holds for phase spellings. Plugin
 `kind:` strings, hook names, and violation codes are all still guaranteed.
 
-**A capability is removed, not tightened:** `args:` and `result:` under `global:`
+A capability is removed, not tightened: `args:` and `result:` under `global:`
 are load errors. A global field pipeline had no field set to apply to, so write
 field stages on the route, or on `global.defaults.<entity>:` where the entity
 fixes the fields.
@@ -210,8 +211,8 @@ Each fails the load naming its replacement, at every scope.
 A bundle written under top-level `groups:` resolves exactly as one written under
 `global.policies:` did.
 
-`authentication:` now stacks **global to entity default to tag bundles to
-route**, the order the policy layers already stacked in. The
+`authentication:` now stacks global to entity default to tag bundles to
+route, the order the policy layers already stacked in. The
 `global.defaults.<entity>.authentication:` layer is the new one: the key was
 accepted before and read by nothing, so an entity type's default identity steps
 were parsed and dropped. A document already carrying that block gains the
@@ -252,11 +253,12 @@ fails the load rather than being swallowed.
 
 ## 6. `plugins:` as an activation list
 
-Under `dispatch: policy`, a `plugins:` **list** is a load error at every scope
+Under `dispatch: policy`, a `plugins:` list is a load error at every scope
 that could write one: a route, a bundle under `groups:`, a
 `global.defaults.<entity>:` entry, and the reserved `all` bundle. A policy names
 the plugin it runs.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 routes:
@@ -283,7 +285,7 @@ global:
       - "run(audit-log)"
 ```
 
-A `plugins:` **map** is unaffected: that is the per-plugin override block, and it
+A `plugins:` map is unaffected: that is the per-plugin override block, and it
 is still how a route narrows a plugin's `config`, `capabilities`, or `on_error`.
 
 Per-plugin `conditions:` and tag-based group activation are hook-mode features.
@@ -296,6 +298,7 @@ expresses the same intent as a predicate on a step.
 
 `plugin(name)` is gone from both step and stage position.
 
+<!-- validate: fragment -->
 ```yaml
 # before
 authorization:
@@ -303,6 +306,7 @@ authorization:
     - "plugin(audit-log)"
 ```
 
+<!-- validate: route-body -->
 ```yaml
 # after
 authorization:
@@ -321,16 +325,18 @@ A quoted literal now has one rule wherever it appears, and it processes exactly
 three escapes: `\\`, `\'`, and `\"`. Anything else after a backslash is an error
 naming the escape.
 
-**This is the one change that can break policy text which looks fine.** A
+This is the one change that can break policy text which looks fine. A
 backslash used to pass through a literal untouched, so a regex character class
 worked by accident. It must be doubled now:
 
+<!-- validate: fragment -->
 ```yaml
 # before
 result:
   employee_id: 'regex("\d+")'
 ```
 
+<!-- validate: route-body -->
 ```yaml
 # after
 result:
@@ -351,12 +357,14 @@ An empty stage in a pipe chain is a load error. A leading, trailing or doubled
 `|` left a position with no stage in it, and those were skipped, so a chain
 compiled shorter than it was written:
 
+<!-- validate: fragment -->
 ```yaml
 # before: compiled to one stage, silently
 result:
   ssn: "redact(!perm.view_ssn) |"
 ```
 
+<!-- validate: route-body -->
 ```yaml
 # after
 result:
@@ -388,6 +396,7 @@ integer 7, deliberately: changing it would alter a value silently.
 `require(...)` means `!P` and composes like any other predicate, so forms that
 used to be rejected now parse:
 
+<!-- validate: route-body -->
 ```yaml
 authorization:
   pre_invocation:
@@ -406,7 +415,7 @@ A top-level `require(...)` rule accepts only `deny` as its action;
 `require(a): allow` fails the load naming the inversion, since the construct is a
 refusal.
 
-**One thing to read before upgrading, because it goes the other way.** Mixing `,`
+One thing to read before upgrading, because it goes the other way. Mixing `,`
 and `|` inside the parens used to be refused outright, since the old parser tracked
 one separator and had no precedence to appeal to. It means something now: the comma
 binds loosest, so `require(a, b | c)` is `!(a & (b | c))`. A configuration that was
@@ -504,8 +513,8 @@ plugins:
 `ServiceError::NotInstalled` indicates a missing host transport;
 `ServiceError::NotPermitted` indicates a missing capability.
 
-`Phase` and `CompiledRoute` both derive `Serialize`, so **the serialized keys
-change too**: a phase serializes as `pre_invocation` / `post_invocation`, and a
+`Phase` and `CompiledRoute` both derive `Serialize`, so the serialized keys
+change too: a phase serializes as `pre_invocation` / `post_invocation`, and a
 serialized `CompiledRoute` names its two step lists the same way. A consumer
 reading either shape off the wire moves with it. The `authentication` rename is
 Rust-only, since the serde key was already `authentication`.
@@ -523,7 +532,7 @@ visitor after its own route walk. An existing implementor needs no change.
 
 ---
 
-## Checking your work
+## Validate the migration
 
 Load the rewritten config through your own host binary, the one that registers
 your plugin factories and the APL visitor. The load names every fault it can
@@ -536,9 +545,9 @@ is rejected, and where the reachability report comes from. The typed
 `parse_config` / `load_config` pair checks the document's shape but runs no
 visitor, so it accepts a policy body this release does not.
 
-No separate tool can stand in for your host: plugin kinds resolve against the
-factories it registered, so only the process that has them can check a config
-naming your plugins.
+No separate tool can replace the host validation: plugin kinds resolve against
+the factories it registered, so only the process that has them can check a
+configuration naming your plugins.
 
 `cargo run --example plugin_demo` is not that check. It loads its own bundled
 `plugin_demo.yaml`, takes no path argument, and registers only its four demo
@@ -550,9 +559,9 @@ narrowed on purpose, and `dispatch: hooks` is the escape for wanting the previou
 behavior wholesale.
 
 For what the language accepts after all of this, rather than what changed,
-`docs/apl-grammar.md` is normative.
+`docs/content/apl/apl-grammar.md` is normative.
 
-## A worked example: what the demo configs needed
+## Worked example: demo configurations
 
 The three policies in praxis-demos (`demos/policy-engine/policy.yaml`,
 `policy-cel.yaml`, `policy-opa.yaml`) were read against the finished language. What
@@ -565,16 +574,24 @@ each needs, measured rather than estimated:
 | Stale comments claiming the engine accepts both a wrapped and a flat form | 2, in `policy-cel.yaml` and `policy-opa.yaml` |
 
 Nothing else. None of the three uses `apl:`, a removed legacy key, a `plugins:`
-activation list, `plugin(name)`, a `when:` route key, a backslash in policy text, or
+activation list, `plugin(name)`, a `when:` route key, a backslash in policy
+text, or
 a `regex(...)` / `enum(...)` stage, so the rest of this guide does not apply to
 them.
 
 `dispatch:` needs no value written. All three declare `routes:`, so the new default
 is already the mode they were asking for; only the block's name changes.
 
-The two stale comments are worth calling out because they are the failure mode this
-release exists to remove, in prose rather than in code. They say APL terms may sit
+The two stale comments demonstrate the failure mode this release removes. They
+say APL terms may sit
 either on the section or inside an `apl:` wrapper and point at `policy.yaml` for
 "the wrapped style" — but `policy.yaml` does not use a wrapper either, and no
-document can now, so the note describes a choice that no longer exists and points at
+document can now, so the note describes a choice that no longer exists and
+points at
 an example that never demonstrated it.
+
+## Next
+
+- [Plugins and Pipeline](content/pipeline.md): extend APL with host plugins.
+- [Common Message Format](content/cmf.md): inspect the protocol-agnostic message
+  envelope evaluated by APL.

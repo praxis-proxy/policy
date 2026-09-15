@@ -92,6 +92,9 @@ pub fn build_principal(
         })?
         .to_owned();
 
+    // Missing type defaults to PascalCase `User`. The CMF bridge writes
+    // lowercase (`user` / `agent` / `service` / `system`), so a type-scoped
+    // policy can miss a principal whose type was omitted.
     let kind = bag.get_string("subject.type").unwrap_or("User");
     let entity_type = qualify_type(kind, entity_namespace);
 

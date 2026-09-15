@@ -1,0 +1,106 @@
+# PDP Integration
+
+APL predicates handle attribute checks well: roles, permissions, scopes,
+comparisons. They are a poor fit for relationship questions ("is this user on
+the team that owns this repo?") and for policy you already maintain in a
+dedicated engine. For those, APL hands the decision to a Policy Decision
+Point.
+
+## Decision requirement
+
+The scenario's repository search must allow a read when the caller is an
+engineer and the repo is internal, or when the caller is on the security team,
+regardless of repo. That is a relationship-and-attribute decision over entities,
+which is exactly what an engine like Cedar exists to express. APL should make
+the coarse gate and let the engine make the fine-grained call.
+
+## Calling a PDP from policy
+
+A PDP call is an effect in the `authorization.pre_invocation` phase. It names a
+dialect and passes the request; `on_allow` and `on_deny` react to the decision:
+
+<!-- validate: route-body -->
+```yaml
+authorization:
+  pre_invocation:
+    - "require(team.engineering | team.security)"
+    - cedar:
+        action: 'Action::"read"'
+        resource:
+          type: Repo
+          id: ${args.repo_name}
+          attributes:
+            visibility: ${args.visibility}
+        on_deny:
+          - "deny('not permitted by repo policy', 'cedar_denied')"
+```
+
+The cheap APL gate runs first. Only if it passes does PPE evaluate the Cedar
+policy against the request entities. The Cedar policy itself lives in the
+config:
+
+```yaml
+global:
+  pdp:
+    - kind: cedar-direct
+      policy_text: |
+        @id("engineering-internal-repos")
+        permit(principal, action == Action::"read", resource is Repo)
+        when {
+          principal.roles.contains("engineer") &&
+          resource.visibility == "internal"
+        };
+
+        @id("security-team-any-repo")
+        permit(principal, action == Action::"read", resource is Repo)
+        when { principal.roles.contains("security") };
+```
+
+A `pdp:` entry may carry an optional `cache:` block with positive
+`ttl_seconds` and `max_entries`. Omission leaves evaluation uncached.
+The cache stores Allow and Deny only; dispatch errors are never stored.
+External PDP policy can still go stale until the TTL expires. See
+[PDP decision cache](../../pdp-decision-cache.md).
+
+## Supported dialects
+
+APL recognizes a fixed set of PDP dialects. Three ship as builtin resolvers; the
+rest are recognized by APL and dispatched to a resolver you provide on the host.
+
+| Dialect | Status |
+|---------|--------|
+| `cedar` | Ships as the `cedar-direct` builtin resolver. |
+| `cel` | Ships as the `cel` builtin resolver (safe, bounded expressions). |
+| `opa` | Ships as the `opa` builtin resolver (embedded Rego via regorus, no sidecar). |
+| `authzen` | Recognized dialect; wire a host resolver (AuthZEN protocol). |
+| `nemo` | Recognized dialect; wire a host resolver (NeMo Guardrails). |
+
+This is a deliberate pluggable-resolver surface, not a maturity checklist. APL
+speaks the dialect; the resolver is an implementation. Cedar, CEL, and OPA are
+provided so you can start without writing one. For AuthZEN or NeMo, implement
+the resolver trait and register it; the APL `authzen:` / `nemo:` call forms then
+work unchanged.
+
+CEL is the lightest option for inline boolean policy:
+
+<!-- validate: route-body -->
+```yaml
+authorization:
+  pre_invocation:
+    - cel: { expr: "subject.department == 'compliance' || 'admin' in subject.roles" }
+```
+
+## Pipeline integration
+
+A PDP resolver is registered with the manager like any other capability. When
+the evaluator hits a PDP effect, it dispatches to the resolver for that dialect,
+passing the attribute bag and the call's arguments, and routes the `Allow` /
+`Deny` decision through `on_allow` / `on_deny`. The decision and its diagnostics
+are recorded in the audit log. See [Effects](effects.md) for how PDP reactions
+sequence with the rest of a policy.
+
+## Next
+
+- [Identity](identity.md): resolve callers into policy attributes.
+- [Static Attributes](attributes.md): load operator-maintained facts under
+  `data.*`.

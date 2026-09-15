@@ -40,6 +40,7 @@ help:
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
+	@echo "  test-tsan         Engine concurrency stress under ThreadSanitizer (nightly)"
 	@echo "  bench-pdp-cache   PDP decision-cache hit vs miss (on demand, not CI)"
 	@echo ""
 	@echo "Supply chain & coverage:"
@@ -50,6 +51,8 @@ help:
 	@echo ""
 	@echo "Docs:"
 	@echo "  doc               cargo doc with warnings denied"
+	@echo "  docs-links        Check every link under docs/ (lychee)"
+	@echo "  docs-lint         Markdown style check (markdownlint, needs npx)"
 	@echo ""
 	@echo "Setup:"
 	@echo "  setup-hooks       Install git pre-commit hook"
@@ -158,6 +161,19 @@ test:
 	@$(CARGO) test --workspace
 	@$(CARGO) test --workspace --all-features
 
+# ThreadSanitizer on the engine concurrency stress test. Needs nightly, a
+# Linux target, and an instrumented libstd (`-Zbuild-std`). The sanitizer
+# does not run on the pinned stable toolchain or on macOS. `--test-threads=1`
+# keeps TSan's own reports from overlapping.
+.PHONY: test-tsan
+test-tsan:
+	@echo "ThreadSanitizer: praxis-policy-core engine concurrency ..."
+	@RUSTFLAGS="-Zsanitizer=thread" CARGO_INCREMENTAL=0 \
+		$(CARGO) +$(NIGHTLY) test -Zbuild-std=std,panic_abort \
+		-p praxis-policy-core --test engine_concurrency \
+		--target x86_64-unknown-linux-gnu -- --test-threads=1
+	@echo "test-tsan passed"
+
 # Hit vs miss for the PDP decision cache. On demand; not part of `make ci`.
 # Wall-clock numbers are recorded in docs/pdp-decision-cache.md.
 .PHONY: bench-pdp-cache
@@ -188,7 +204,7 @@ audit:
 #
 # The coverage workflow calls this target rather than repeating the threshold, so
 # this is the only copy of the number.
-COVERAGE_FLOOR ?= 95
+COVERAGE_FLOOR ?= 96
 
 # `--all-features` reaches the test targets behind `test-util`, without which the
 # compiler's test scaffolding and everything it covers fall outside the floor.
@@ -197,11 +213,35 @@ COVERAGE_FLOOR ?= 95
 # Valkey at all. `VALKEY_TESTS_OPTIONAL=1` lets them skip instead of fail, because
 # this target measures and `make test` is what asserts. Set `VALKEY_TEST_URL` to
 # measure the paths that do need a server.
+#
+# Both coverage targets share these flags. A report built from a narrower run
+# understates what the floor asserted.
+COVERAGE_ARGS := --workspace --all-features
+COVERAGE_TEST_ARGS := -- --include-ignored
+
+# `clean` first: llvm-cov merges the mappings of every instrumented binary it
+# finds, so a stale one from a run with different features (or a cached target
+# dir in CI) is counted a second time, inflating both the line count and the
+# miss count.
 .PHONY: coverage
 coverage:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --locked
-	@VALKEY_TESTS_OPTIONAL=1 cargo llvm-cov --workspace --all-features --summary-only \
-		--fail-under-lines $(COVERAGE_FLOOR) -- --include-ignored
+	@cargo llvm-cov clean --workspace
+	@VALKEY_TESTS_OPTIONAL=1 cargo llvm-cov $(COVERAGE_ARGS) --summary-only \
+		--fail-under-lines $(COVERAGE_FLOOR) $(COVERAGE_TEST_ARGS)
+
+# The floor plus an LCOV artifact from one test run, for CI. `--no-report`
+# measures once and both `report` calls read that data, so the artifact and the
+# gated number cannot diverge. LCOV comes first so a red gate still leaves a
+# report to diagnose. `report` takes no feature flags; it reads the object files
+# the run above built.
+.PHONY: coverage-lcov
+coverage-lcov:
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --locked
+	@cargo llvm-cov clean --workspace
+	@VALKEY_TESTS_OPTIONAL=1 cargo llvm-cov $(COVERAGE_ARGS) --no-report $(COVERAGE_TEST_ARGS)
+	@cargo llvm-cov report --lcov --output-path lcov.info
+	@cargo llvm-cov report --summary-only --fail-under-lines $(COVERAGE_FLOOR)
 
 # Mutation testing. Advisory, not part of the blocking CI gate.
 .PHONY: mutants
@@ -222,6 +262,35 @@ semver:
 .PHONY: doc
 doc:
 	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps
+
+# Link and style checks for the markdown under docs/. Advisory, like
+# lint-extra: neither is part of `make ci`, because both reach for a tool the
+# gate does not otherwise need, and docs-links reaches the network.
+#
+# The examples in those pages are checked by a test, not from here:
+# `crates/ppe/tests/docs_examples` loads every fenced yaml block through the
+# real config parser and compiles its policy, so it runs with `make test`.
+.PHONY: docs-links
+docs-links:
+	@command -v lychee >/dev/null 2>&1 || $(CARGO) install lychee --locked
+	@lychee --config lychee.toml docs/ ./*.md
+	@echo "docs-links passed"
+
+# markdownlint is a Node tool and this is a Rust workspace, so it is used
+# through npx when npx is present and skipped, loudly, when it is not.
+#
+# Plans, brainstorms and proposals are excluded, as they are in the examples
+# test: they are dated records of what was proposed, and reformatting finished
+# history to today's rules would edit the record to no benefit.
+.PHONY: docs-lint
+docs-lint:
+	@if command -v npx >/dev/null 2>&1; then \
+		npx --yes markdownlint-cli2 "docs/**/*.md" "*.md" \
+			"!docs/plans/**" "!docs/brainstorms/**" "!docs/proposals/**"; \
+		echo "docs-lint passed"; \
+	else \
+		echo "docs-lint skipped: npx not found"; \
+	fi
 
 # =============================================================================
 # CI

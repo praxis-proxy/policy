@@ -1,5 +1,5 @@
-# Enforces the markdown rules documented in docs/conventions.md:
-# 80-column prose; code blocks follow the 120-char code limit.
+# Markdown rules for this repository: 80-column prose, with code blocks
+# following the 120-char code limit. Run with `make docs-lint`.
 
 # MD013: 80-column prose; code blocks follow the 120-char code limit
 MD013:
@@ -29,3 +29,17 @@ MD041: false
 
 # MD033: tables sometimes need inline HTML
 MD033: false
+
+# MD060: table pipes need not align. No file in this repository has ever
+# aligned them, and reformatting every table to satisfy a style nobody
+# writes by hand would be churn with no reader benefit.
+MD060: false
+
+# MD036: bold labels are used deliberately where a heading would be wrong,
+# for the "Covers" / "Does not cover" pairs under a placement in the threat
+# model. They label a paragraph; they are not sections to navigate to.
+MD036: false
+
+# MD046: an indented block is fine where a fence would break the flow, as in
+# the repository layout sketch in the README.
+MD046: false

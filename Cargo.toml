@@ -108,6 +108,9 @@ paste = "1"
 futures = "0.3"
 hashbrown = "0.17"
 arc-swap = "1.9"
+# Exhaustive scheduler for a tiny model of the generation / snapshot
+# pairing. Dev-only, and only compiled when a crate enables `--cfg loom`.
+loom = "0.7"
 wildmatch = "2"
 rmp-serde = "1"
 serde_bytes = "0.11"
@@ -189,7 +192,7 @@ redundant_lifetimes = "deny"
 # A stale feature name in a `cfg` predicate is otherwise only a warning, which
 # is how a rename can silently disable a gated export. Denying it turns that
 # into a build error at the moment the rename happens.
-unexpected_cfgs = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(loom)'] }
 # Closed from the import backlog: measured at zero violations across
 # --workspace --all-targets --all-features, so enforcing costs no code change.
 unused_extern_crates = "deny"

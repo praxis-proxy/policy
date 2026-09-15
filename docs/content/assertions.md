@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 Praxis Contributors
 -->
 
-# `assertions:` — what the engine puts on the wire
+# `assertions:` Wire Contract
 
 PPE validates tokens, maps claims into typed identity, mints delegated
 credentials, and accumulates labels. None of that reaches an upstream on its
@@ -13,6 +13,7 @@ a client.
 
 The block sits beside `authentication:` and holds two contracts:
 
+<!-- validate: fragment -->
 ```yaml
 global:
   assertions:
@@ -24,9 +25,9 @@ global:
       strip: [...]
 ```
 
-## The trust model, first
+## Trust model
 
-**What crosses either boundary is unsigned.** Whoever receives it believes it
+What crosses either boundary is unsigned. Whoever receives it believes it
 because they believe the network path, not because they can verify anything. An
 upstream reading `x-auth-user-id` is trusting that nothing between the gateway
 and itself can set that header. If that is not true of your network, this
@@ -39,6 +40,7 @@ standing under a name the upstream reads as the gateway's.
 
 ## An entry
 
+<!-- validate: fragment -->
 ```yaml
 headers:
   - name: x-auth-user-id     # the target header
@@ -56,17 +58,18 @@ headers:
 ```
 
 `from:` and `members:` are alternatives; an entry carrying both fails to load.
-So does a `members:` entry carrying `encode:`: a members entry always renders as
-a JSON object, so the key could not change anything, and it is refused rather
-than accepted and ignored.
+A `members:` entry carrying `encode:` also fails: a members entry always
+renders as a JSON object, so the key could not change anything, and it is
+refused rather than accepted and ignored.
 
 `encode:` says how a value that is not a scalar renders into one header value.
 `json` renders every value as JSON, so a string renders quoted and stays
 distinguishable from a structured value that spells the same text. `csv` joins
 an array with commas. With neither, a scalar renders bare and a structured
 value renders as compact JSON. A source that is *always* a collection
-(`subject.roles` and friends) must declare one, because a set reaching an
-upstream in a shape nobody chose is a shape nobody can rely on.
+(`subject.roles` and other collection-typed sources) must declare one, because
+a set reaching an upstream in a shape nobody chose is a shape nobody can rely
+on.
 
 Collections render sorted, and a members object's keys are sorted, so one
 identity produces identical header bytes across requests. Audit hashes and
@@ -90,8 +93,8 @@ A claim name is taken whole, so a provider spelling one with dots needs no
 escaping. A bare `claim` names the whole map rather than one claim and is
 refused: a provider's claim set is not something to render wholesale.
 
-**Fixed in code, never usable as a source, in either direction, with no config
-surface to widen:**
+Fixed in code, never usable as a source, in either direction, with no config
+surface to widen:
 
     raw_credentials.*          the inbound bearer tokens, before validation
     http.request_headers.*     the client's own request headers
@@ -109,16 +112,16 @@ The two refusals carry different messages.
 
 ## The two removal mechanisms
 
-They are easy to conflate, and only one is configurable.
+Only one removal mechanism is configurable.
 
-**Automatic.** Every header an entry targets is removed from the corresponding
+Automatic removal. Every header an entry targets is removed from the corresponding
 wire map before injection: the client's request in the request direction, the
 upstream's response in the response direction. It happens whether or not
 `strip:` exists, and whether or not the source resolved, so absence never
 leaves a wire value in place. It is also what stops an upstream echoing an
 asserted header back at the client.
 
-**`strip:`, operator-authored.** Removes names no entry targets. Accepts header
+Operator-authored `strip:`. Removes names no entry targets. Accepts header
 names and trailing-glob patterns, matched case-insensitively. Every level's
 entries apply, so a subordinate level cannot narrow an inherited removal by
 omitting it.
@@ -136,43 +139,44 @@ originates every value it asserts and the legitimate set is finite and known.
 The engine originates none of it and cannot enumerate what is legitimate, so
 default-deny there would remove `content-type`, `content-length`, `etag`,
 `cache-control`, `retry-after`, the CORS set, and every rate-limit and tracing
-header a client depends on. So a response header nothing names reaches the
+header a client depends on. A response header nothing names reaches the
 client unchanged.
 
-That asymmetry is about what each direction **asserts**. It says nothing about
+That asymmetry concerns what each direction asserts. It says nothing about
 `strip:`, which removes headers the engine did not originate and cannot
-enumerate in either direction. So `strip:` gets the same treatment both ways.
+enumerate in either direction. `strip:` therefore receives the same treatment
+both ways.
 
 ## Both directions have a protocol floor
 
-A **protocol floor** fixed in code holds the headers a `strip:` entry can never
+A protocol floor fixed in code holds the headers a `strip:` entry can never
 remove. There is one per direction, holding what that direction's recipient
-needs in order to interpret the message at all. A `strip:` entry that would
+needs to interpret the message. A `strip:` entry that would
 remove one fails at config load, naming the header the glob would have hit,
 rather than breaking traffic in production. A `headers:` entry *targeting* a
 floor header is refused for the same reason: an entry removes its target before
 injecting, so one whose source resolved to nothing would take the floor header
 with it.
 
-The **request floor** is framing and addressing, which is all the engine can
+The request floor is framing and addressing, which is all the engine can
 assume an upstream needs: `host`, `content-type`, `content-length`,
 `transfer-encoding`.
 
-`authorization` is deliberately **not** in it. Stripping the client's own bearer
+`authorization` is deliberately not in it. Stripping the client's own bearer
 before forwarding to an upstream that runs on a delegated credential is a stated
 use case, so it stays removable. Neither are `cookie`, `accept`, `user-agent` and
 the rest of what a client says about itself: withholding those from an upstream
 is a policy choice an operator is entitled to make, not a broken request.
 
-The **response floor** is longer, because a client's caching, validation and
+The response floor is longer, because a client's caching, validation and
 CORS behaviour all hang off headers the origin chose: content negotiation and
 framing, caching and conditional requests, retry signalling, and the CORS
 response set.
 
-`set-cookie`, `server` and `x-powered-by` are deliberately **not** in it.
+`set-cookie`, `server` and `x-powered-by` are deliberately not in it.
 Removing those is a stated use case.
 
-So `strip: ["*"]` fails to load in either direction, and the load error names
+`strip: ["*"]` fails to load in either direction, and the load error names
 the first floor header the glob reached.
 
 ## Four levels, and they stack
@@ -185,7 +189,7 @@ accumulate the way `authentication:` does:
 3. `groups.<name>:` — the bundles a route joins
 4. a `routes[]` entry
 
-Resolution runs **per direction**, so a level may declare one direction and
+Resolution runs per direction, so a level may declare one direction and
 leave the other to the levels above it.
 
 An entity default covers an entity type rather than a route, so it reaches a
@@ -194,7 +198,7 @@ request that selected none of the `http:` routes is still governed by
 `global.defaults.http`.
 
 `headers:` unions by target header name, compared case-insensitively. A
-repeated name takes the more specific level's entry **whole**, `members:` and
+repeated name takes the more specific level's entry whole, `members:` and
 `on_missing:` included: a members object composed from two levels would have no
 author. `strip:` unions and deduplicates.
 
@@ -217,10 +221,10 @@ routes:
 ```
 
 `replace_inherited: true` drops what accumulated before that level, for the
-direction it is written in and no other. It reaches **operator-authored
-`headers:` and `strip:` content, and nothing else**: the unconditional removal
+direction it is written in and no other. It reaches operator-authored
+`headers:` and `strip:` content, and nothing else: the unconditional removal
 of an entry's target, the source exclusions, and the response floor are all
-outside it. So the worst it can do is let through a name no entry targets; it
+outside it. The worst it can do is let through a name no entry targets; it
 cannot be used to let a client header reach an upstream under a name the
 gateway asserts.
 
@@ -231,8 +235,8 @@ every route that lost content it never wrote.
 ## The host's obligation on `http:` routes
 
 A route selecting on `http:` is matched from the request line the host puts on
-the HTTP extension. **A contract written there is in force only at an
-invocation that carries one.** Without it no `http:` route matches and the
+the HTTP extension. A contract written there is in force only at an
+invocation that carries one. Without it no `http:` route matches and the
 levels above govern instead: `global.defaults.http`, then `global`. Nothing
 errors.
 
@@ -252,7 +256,7 @@ names. A pre-phase hook applies `request:`, a post-phase hook applies
 neither. A hook family added later needs no change to this block, and a host
 registering its own hook with a phase gets the contract with no config change.
 
-The contract is applied **after** that phase's policy evaluation, so a policy
+The contract is applied after that phase's policy evaluation, so a policy
 rule reads the client's headers unchanged. The cost is that a value under
 `http.request_headers.x-auth-user-id` looks authoritative to a rule and is not.
 
@@ -276,11 +280,11 @@ The response direction does not run at all: there is no upstream response.
 
 The engine renders the whole boundary as one document at `info` when a block is
 configured, and `praxis_policy_core::assertions::effective_policy` returns it so
-a host can expose it. It covers every header that can be emitted with its
-source and the capability gating that slot, the removal set including the entry
-targets no `strip:` entry names, the exclusions and the floor with the reason
-each entry is there, which dispatch paths are boundaries, and — per route — the
-accumulated contract with the level each header came from.
+a host can expose it. It covers every header that can be emitted, with its
+source and the capability gating that slot; the removal set, including the
+entry targets no `strip:` entry names; the exclusions and the floor, with the
+reason each entry is there; which dispatch paths are boundaries; and, per
+route, the accumulated contract with the level each header came from.
 
 A contract that spans four levels is harder to read than a one-level one. That
 document is where the cost is paid.
@@ -291,3 +295,9 @@ document is where the cost is paid.
 configuration covering all four levels, both directions, an `http:` route, and
 the configurations that fail to load. It is loaded by the test suite, so it
 cannot drift from what the engine accepts.
+
+## Next
+
+- [Deployment](deployment.md): place the boundary that emits and filters
+  assertions.
+- [Patterns](patterns.md): combine assertions with layered enforcement.

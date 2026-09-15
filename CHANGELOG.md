@@ -21,19 +21,77 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Optional bounded PDP decision cache.** A `cache:` block on a `global.pdp[]` entry stores Allow and Deny for a positive TTL and a positive entry cap. Omission leaves evaluation unchanged. Keys are a digest of dialect, call arguments, and the full attribute bag, so request data is not retained. Dispatch errors are never stored, expired entries are never returned, FIFO eviction stays inside the cap, and a PPE configuration generation change drops the map. External PDP policy can still go stale until the TTL expires; `docs/pdp-decision-cache.md` states that. ([#67](https://github.com/praxis-proxy/policy/issues/67))
 
+- **Safety invariants, written down and tested as a catalog.** The engine's
+  fail-closed promise lived in comments and per-seam judgment. `docs/safety-invariants.md`
+  lists each claim as something a test can fail, and a fault-injection plugin
+  and PDP resolver drive `{panic, error, timeout}` across every plugin phase and
+  the three shipped PDP dialects. Malformed config and a missing attribute are
+  their own cells. Serial and audit panics are contained the same way concurrent
+  already was: they route through `on_error` instead of unwinding `execute()`.
+  Transform and audit still cannot halt — that difference is written down with
+  the reason, including that a failed transform continues with the original
+  payload. Adding a phase or a shipped dialect without a cell fails the
+  build. ([#24](https://github.com/praxis-proxy/policy/issues/24))
+
+- **`docs/content/cmf-extensions.md`, the bag contract.** The CMF bridge writes
+  twelve extension slots into a flat `AttributeBag`, and until now the empty-set
+  rule for `StringSet`, the original-vs-flattened role keys, and the
+  `subject.claims` gap lived only as comments beside the extractors. The
+  document is the per-type absent-value contract, which key a policy author
+  should write, why there is no `subject.claims` map in the bag, and a
+  catalog of every key each slot emits. `ppe-pdp-diff` checks that a
+  present-empty set and an omitted claim scalar Deny on APL, CEL,
+  cedar-direct, and OPA for presence, equality, membership, and order; APL
+  `!=` on a missing key Allows while the other engines Deny; APL `not in`
+  Allows with OPA (`not` of undefined is true) while CEL and cedar-direct
+  Deny. A flattened bool with no namespace, and a missing `subject.id`,
+  stay on the allowlist. ([#18](https://github.com/praxis-proxy/policy/issues/18))
+
+- Added PPE documentation ([#82](https://github.com/praxis-proxy/policy/pull/82))
+
+### Fixed
+
+- **`ppe-core` self-dev-dependency is path-only.** Same as `ppe-apl-core`: a
+  versioned workspace self-dep cannot be packaged (`make publish-dry`).
+- **Contained plugin and PDP tasks abort on drop.** Cancelling a request
+  (timeout, disconnect, shutdown) no longer leaves the spawned work running.
+- **Serial/transform panics keep prior `local_state`.** The executor snapshots
+  context into the task so a contained panic does not remove the plugin's
+  existing map.
+- **`read_labels` / `read_workload` bag prefixes.** `capability_namespaces`
+  advertised nothing for `read_labels` and `workload.*` for `read_workload`,
+  neither of which the extractors write. It now returns `security.labels`
+  and `caller_workload.*` / `this_workload.*`.
+
+### Removed
+
+- **`BAG_WORKLOAD_PREFIX`.** The unused public `workload.` constant is gone.
+  Extractors write `caller_workload.*` and `this_workload.*`; nothing
+  emitted `workload.*`.
+
+### Internal
+
+- **Line coverage floor raised to 96%.** `COVERAGE_FLOOR` in the `Makefile` is the gate. Parser error-return sites, `load_config_yaml` visitor refusals (`visit_route` / `visit_complete`), and the Valkey empty-append path are now tested. About 25 unreachable defensive guards still cap the number below 100. ([#14](https://github.com/praxis-proxy/policy/issues/14))
+- **The coverage artifact now measures the gated run.** The coverage job built `lcov.info` from a second, narrower run (default features, ignored tests skipped), so the uploaded report understated the number the floor asserted. `make coverage-lcov` measures once and derives both the floor check and the report from that data. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **Line coverage raised to 96.5%, and a secret leak closed on the way.** `DecodingKeySource`'s derived `Debug` printed inline PEM keys and HMAC secrets verbatim, and `TrustedIssuer`'s hand-written `Debug` forwarded that field while its comment claimed the key was elided, so any host logging its plugin list disclosed the signing secret. It now redacts the material and keeps the locator (path, JWKS URL). Tests cover the redaction on all five hand-written `Debug` impls, the non-blocking and timeout arms of every executor phase, `AplRouteHandler`'s wiring guards, and the Valkey endpoint error paths. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`step_to_effect` no longer carries an unreachable branch.** A rule inside a `do:` list can only be conditional: `parse_predicate` never yields `Always`, and the spellings that build an unconditional rule are consumed upstream. The dead effect-count and no-effect arms are gone, replaced by an explicit refusal. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **A test that no longer tested its premise.** `a_rejected_load_drops_its_plugins_outside_the_writer_lock` was rejected by config validation before any factory ran, so the `Drop`-re-entrancy deadlock it guards was never exercised. It now loads under `dispatch: hooks` and asserts the instantiation count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`make coverage` cleans stale instrumented binaries first.** llvm-cov merges the mappings of every binary it finds, so one left by a run with a different feature set (or a cached `target/` in CI) was counted twice, inflating both the line count and the miss count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`rustls` bumped to 0.23.45** for [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285): TLS 1.3 handshake messages packed after a key-changing message in the same record were accepted at the wrong encryption level. It reaches the shipped graph through `redis` and `deadpool-redis`, so this is a dependency bump rather than an advisory ignore. Lockfile only, one package, still MSRV 1.96. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+
 ## [0.2.0] - 2026-09-03
 
 > **Upgrading from 0.1.0?** Configurations require changes: this release removes ten keys, changes the default dispatch mode, and tightens APL lexical rules. `docs/upgrade-apl.md` lists the required rewrites with before-and-after examples.
 >
-> `docs/apl-grammar.md` is the normative APL grammar, replacing the parser's inline grammar comments.
+> `docs/content/apl/apl-grammar.md` is the normative APL grammar, replacing the parser's inline grammar comments.
 
 ### Added
 
 - **`assertions:` controls headers at trust boundaries.** Available alongside `authentication:` at global, default, bundle, and route scope, request assertions map engine-derived values such as `subject.id` and `claim.<name>` to upstream headers; response assertions strip or replace upstream headers. Target headers are removed before rendering, preventing a missing value from preserving client-supplied data under a trusted name.
 
-  More-specific `headers:` entries replace matching targets, `strip:` entries accumulate, and `replace_inherited: true` resets inherited rules. Tokens and peer-supplied headers cannot be sources, while fixed protocol floors protect required request and response headers. Invalid or conflicting entries fail configuration loading with their location. Assertions run after the applicable policy phase and are unsigned, so recipients must trust the network path. See `docs/assertions.md`. ([#28](https://github.com/praxis-proxy/policy/issues/28))
+  More-specific `headers:` entries replace matching targets, `strip:` entries accumulate, and `replace_inherited: true` resets inherited rules. Tokens and peer-supplied headers cannot be sources, while fixed protocol floors protect required request and response headers. Invalid or conflicting entries fail configuration loading with their location. Assertions run after the applicable policy phase and are unsigned, so recipients must trust the network path. See `docs/content/assertions.md`. ([#28](https://github.com/praxis-proxy/policy/issues/28))
 
-- **`docs/apl-grammar.md` is now the normative APL grammar.** It documents the EBNF, lexical rules, precedence, valid syntax by position, YAML shape, dispatch-mode keys, and intentional quirks. Conformance tests keep the parser and document aligned with accepted and rejected cases for every production, documented quirk, and breaking change.
+- **`docs/content/apl/apl-grammar.md` is now the normative APL grammar.** It documents the EBNF, lexical rules, precedence, valid syntax by position, steps, field pipelines, and invalid forms. Conformance tests keep the parser and document aligned with accepted and rejected cases.
 
 - **`response:`, the custom denial block, documented at last.** It shipped in 0.1.0 undocumented. A `response:` block on a route, a bundle, a `global.defaults.<entity>:` entry, or `global:` supplies the status and body a denial renders, and the most-specific layer wins on collision. `None` leaves the host's default denial behavior. Its resolution rule changed in this release too, which the Changed section covers.
 

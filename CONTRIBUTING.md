@@ -8,13 +8,18 @@ pinned stable toolchain, so nothing here needs nightly.
 
 ## Before opening a pull request
 
-```
+```console
 make lint
 make test
 make audit
 ```
 
 `make ci` runs the same set CI does.
+
+Safety invariants (fail-closed behaviour at every seam) live in
+`docs/safety-invariants.md`. A change that adds a plugin phase or a
+shipped PDP dialect is incomplete until that catalog has a cell for it;
+the tests fail until one is added.
 
 ## File headers
 
@@ -63,8 +68,10 @@ change the code safely. Some things that feel worth writing down are not:
 // modules. Dropping either hides tests without failing.
 ```
 
-Some documentation is generated from source comments. `make lint` regenerates and
-compares it, so run the full gate rather than `cargo clippy` alone.
+`make doc` builds the rustdoc with warnings denied, `make docs-lint` checks
+the markdown under `docs/`, and `make docs-links` checks documentation links.
+None runs as part of `make lint`, so run the relevant checks when you touch
+documentation.
 
 ## Durable text carries no planning identifiers
 
@@ -76,7 +83,7 @@ Those documents do not ship with the code. An identifier is meaningless to
 someone reading the commit a year from now, and it rots the moment the document
 changes or moves. Describe the behavior or the reason instead:
 
-```
+```text
 # no
 fix: address R24 fail-closed requirement in parser
 
@@ -134,3 +141,33 @@ Enforcing one of the allowed groups is welcome as a focused change, one lint at 
 time, separate from feature work. `docs/lints.md` is worth reading first: it
 records which lints clippy reports as machine-fixable but cannot actually fix, and
 where a lint's suggested rewrite is worse than the code it replaces.
+
+## Multi-threaded Tokio tests
+
+`#[tokio::test]` defaults to `current_thread`. Tasks yield at `.await` but never
+run on two OS threads at the same time, so a load and a store that have no await
+between them cannot overlap.
+
+Tests that exercise registration, unregister, hot reload (`load_config` /
+`from_config`), or route-cache fill and invalidation use
+`#[tokio::test(flavor = "multi_thread")]`, including when the body is a single
+task. The flavor is set by the surface under test so a later spawn starts from
+the runtime a host uses. A single-task test of those APIs does not itself
+create overlap.
+
+Overlap is asserted in `crates/ppe-core/tests/engine_concurrency.rs`.
+
+```rust
+#[tokio::test(flavor = "multi_thread")]
+async fn register_while_other_tasks_invoke() { /* ... */ }
+```
+
+Sequential tests that do not touch those surfaces stay on `current_thread`.
+
+A seeded stress test lives in `crates/ppe-core/tests/engine_concurrency.rs`.
+Replay a failure with `PPE_STRESS_SEED`. Nightly CI runs that test under
+ThreadSanitizer (`make test-tsan`; Linux only, the target is hardcoded). The
+`Release` / `Acquire` pairing `mutate_runtime` describes is documented by the
+extracted loom model in `crates/ppe-core/tests/loom_generation_snapshot.rs`.
+That model is not wired to `engine.rs`. Default `cargo test` does not compile
+it; run `RUSTFLAGS='--cfg loom' cargo test -p praxis-policy-core --test loom_generation_snapshot`.

@@ -488,6 +488,17 @@ fn encode_attenuation(enc: &mut KeyEncoder, attenuation: Option<&AttenuationConf
     reason = "tests assert on known-good values"
 )]
 mod tests {
+
+    /// The key is a correlation handle in log lines, so its `Debug` is a
+    /// truncated hex tag: enough to match two lines, and never the whole
+    /// derived tag.
+    #[test]
+    fn debug_for_a_cache_key_is_a_truncated_hex_tag() {
+        let key = CacheKey::from_bytes_for_test([0xab; 32]);
+        let rendered = format!("{key:?}");
+        assert_eq!(rendered, "abababababababab");
+        assert_eq!(rendered.len(), 16, "eight bytes, two hex characters each");
+    }
     use super::*;
 
     fn secret() -> KeySecret {

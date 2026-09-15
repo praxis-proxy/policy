@@ -287,6 +287,8 @@ fn build_principal_uid(
     let id = bag
         .get_string("subject.id")
         .ok_or_else(|| PdpError::Dispatch("bag missing `subject.id`".to_owned()))?;
+    // Same default as `entities::build_principal`: PascalCase `User` when
+    // the key is absent. The CMF bridge writes lowercase (`user`).
     let kind = bag.get_string("subject.type").unwrap_or("User");
     let entity_type = match namespace {
         Some(ns) if !ns.is_empty() => format!("{ns}::{kind}"),

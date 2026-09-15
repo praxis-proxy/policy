@@ -979,6 +979,72 @@ mod tests {
         }
     }
 
+    /// The handler carries the `PluginConfig` the route installed it with, so
+    /// a registry that reads it back sees the route's own name rather than a
+    /// default.
+    #[test]
+    fn a_handler_reports_the_config_it_was_installed_with() {
+        let config = PluginConfig {
+            name: "route.payroll.policy".to_owned(),
+            ..PluginConfig::default()
+        };
+        let handler = AplRouteHandler::new(
+            config,
+            Arc::new(CompiledRoute::new("payroll")),
+            Phase::Pre,
+            HookFamily::for_entity("tool").expect("mapped entity type"),
+            Arc::new(PluginRegistry::default()),
+            Arc::new(DispatchCache::new()),
+            Arc::new(crate::session_store::MemorySessionStore::new()),
+            Weak::new(),
+        );
+        assert_eq!(Plugin::config(&handler).name, "route.payroll.policy");
+    }
+
+    /// The family fixes the payload the hook name carries, so a payload of
+    /// another shape is a wiring bug in the host rather than something to
+    /// evaluate against an empty view. Refuse loudly, naming the route and
+    /// the type that was expected.
+    #[tokio::test]
+    async fn a_payload_of_the_wrong_shape_is_refused() {
+        let handler = handler_for(ENTITY_HTTP);
+        let mut ctx = PluginContext::new();
+        let payload = MessagePayload {
+            message: Message::text(praxis_policy_core::cmf::enums::Role::User, "hi"),
+        };
+        let err = handler
+            .invoke(&payload, &Extensions::default(), &mut ctx)
+            .await
+            .expect_err("an HTTP route cannot evaluate a chat message");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("which is not what this invocation carried"),
+            "got {msg}"
+        );
+        assert!(msg.contains('k'), "the route key names the offender: {msg}");
+    }
+
+    /// The handler holds the engine weakly, because the engine owns the
+    /// registry that owns the handler. If the engine is gone the invocation
+    /// cannot be evaluated at all, and saying so beats treating an absent
+    /// policy as an allow.
+    #[tokio::test]
+    async fn an_invocation_after_the_engine_dropped_is_refused() {
+        let handler = handler_for("tool");
+        let mut ctx = PluginContext::new();
+        let payload = MessagePayload {
+            message: Message::text(praxis_policy_core::cmf::enums::Role::User, "hi"),
+        };
+        let err = handler
+            .invoke(&payload, &Extensions::default(), &mut ctx)
+            .await
+            .expect_err("no engine, no evaluation");
+        assert!(
+            format!("{err}").contains("PolicyEngine dropped before invoke"),
+            "got {err}"
+        );
+    }
+
     fn pending(id: &str) -> praxis_policy_apl_core::step::PendingElicitation {
         praxis_policy_apl_core::step::PendingElicitation {
             id: id.to_owned(),

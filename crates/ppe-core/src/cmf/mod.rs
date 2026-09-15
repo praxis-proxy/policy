@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// ContextForge Message Format (CMF).
+// Common Message Format (CMF).
 //
 // Canonical message representation for interactions between users,
 // agents, tools, and language models.

@@ -126,10 +126,12 @@ pub const BAG_CLIENT_ROLES: &str = "client.roles";
 /// Bag key `client.permissions` — the client's full permission set,
 /// mirroring the flattened `client.perm.<name>` keys as one `StringSet`.
 pub const BAG_CLIENT_PERMISSIONS: &str = "client.permissions";
-/// Key prefix for workload identity, as in `workload.<name>`.
-pub const BAG_WORKLOAD_PREFIX: &str = "workload.";
 /// Key prefix for caller workload, as in `caller_workload.<name>`.
 pub const BAG_CALLER_WORKLOAD_PREFIX: &str = "caller_workload.";
+/// Key prefix for this host's workload, as in `this_workload.<name>`.
+pub const BAG_THIS_WORKLOAD_PREFIX: &str = "this_workload.";
+/// Bag key `security.labels`.
+pub const BAG_SECURITY_LABELS: &str = "security.labels";
 
 /// Key prefix for the delegation chain, as in `delegation.<name>`.
 pub const BAG_DELEGATION_PREFIX: &str = "delegation.";

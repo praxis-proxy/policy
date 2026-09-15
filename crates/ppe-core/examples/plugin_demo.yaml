@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Praxis Contributors
 
-# CPEX Plugin Demo Configuration
+# PPE Plugin Demo Configuration
 #
 # Four plugins under hook dispatch: each declares the hooks it fires
 # at, and the two that must not fire everywhere narrow themselves with

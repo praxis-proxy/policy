@@ -17,13 +17,17 @@ go next.
 
 ## What it does
 
-- **Identity:** Resolves and independently validates user, agent, and workload identities.
-- **Authorization:** Authorizes tool calls using a policy language with pluggable decision points, including relationship-based authorization.
-- **Delegation:** Exchanges credentials through RFC 8693, giving each upstream service a token scoped to that service.
-- **Data control:** Redacts data in transit at the field level, with session taint that propagates across tool calls and requests.
-- **Header assertions:** Renders the identity it derived onto the upstream request as headers, removes the client-supplied headers that would collide with it, and filters what an upstream is allowed to tell a client back. See [docs/assertions.md](docs/assertions.md).
-- **Human approval:** Supports out-of-band human approval when a decision cannot be automated.
-- **Audit:** Emits an audit event for every decision.
+- **Identity**: Resolves and independently validates user, agent, and workload
+  identities.
+- **Authorization**: Evaluates APL predicates and pluggable decision points,
+  including relationship-based authorization.
+- **Delegation**: Exchanges credentials through RFC 8693, giving each upstream
+  service a token scoped to that service.
+- **Data control**: Redacts fields in transit, propagates Session Taint across
+  tool calls and requests, and filters what an upstream is allowed to tell a
+  client back.
+- **Out-of-band approval**: Supports out-of-band approval and elicitation.
+- **Audit**: Emits an audit event for every decision.
 
 ## Using it
 
@@ -33,27 +37,43 @@ Add one dependency to get the engine and all bundled extensions:
 praxis-policy = { version = "0.2", features = ["builtins"] }
 ```
 
-Without `builtins`, you get the engine alone and no extensions compiled in. Declare individual features instead: `jwt`, `oauth`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`.
+Without `builtins`, you get the engine alone and no extensions compiled in.
+Declare individual features instead: `jwt`, `oauth`, `elicitation-ciba`,
+`cedar`, `cel`, `opa`, `valkey`.
 
-The crates are versioned together and released together, so a single `0.2` requirement covers the set. Requires Rust 1.96 or newer.
+The crates are versioned together and released together, so a single `0.2`
+requirement covers the set. Requires Rust 1.96 or newer.
+
+## Documentation
+
+Full [documentation](docs/content/index.md).
 
 ## Status
 
-0.2.x. The public API will move between minor versions while the shape settles; a breaking change gets a minor bump and is documented in the CHANGELOG.
+The public API will move between minor versions while the shape settles;
+a breaking change gets a minor bump and is documented in the CHANGELOG.
 
 ## Layout
 
-    crates/             the engine, its policy language, and the host facade
+    crates/             the engine, APL implementation, and host facade
     builtins/           bundled plugins, decision points, and session stores
     reference/          worked examples, not published and not bundled
 
-A host does not have to use a bundled plugin. Implement `PluginFactory` against `praxis_policy_core::prelude` and register it with `PolicyEngine::register_factory` under the `kind:` your policy names. An unrecognized `kind` causes policy loading to fail, so missing registrations are detected at startup.
+A host may replace any bundled plugin. Implement a Plugin Factory through
+`PluginFactory` against `praxis_policy_core::prelude`, then register it with
+`PolicyEngine::register_factory` under the `kind:` your policy names. An
+unrecognized `kind` causes policy loading to fail, so missing registrations are
+detected at startup.
 
-`reference/plugins/` holds two worked examples: a PII scanner and an audit logger. These are not published, but are linted and tested here, and the reference [demo](https://github.com/praxis-proxy/demos) registers them as host plugins.
+`reference/plugins/` holds two worked examples: a PII scanner and an audit
+logger. These are not published, but are linted and tested here, and the
+reference [demo](https://github.com/praxis-proxy/demos) registers them as host
+plugins.
 
 ## Building
 
-The toolchain is pinned and is also the MSRV, so `cargo build` picks the right one. `make help` lists the available targets.
+The toolchain is pinned and is also the MSRV, so `cargo build` picks the right
+one. `make help` lists the available targets.
 
 ## License
 

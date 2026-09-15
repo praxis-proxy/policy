@@ -7,6 +7,7 @@ definitions and processes.
 ## Project Leads
 
 | Name | GitHub | Affiliation |
+|------|--------|-------------|
 | Shane Utt | [@shaneutt](https://github.com/shaneutt) | Red Hat |
 
 ## Core Reviewers

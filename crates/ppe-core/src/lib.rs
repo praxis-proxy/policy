@@ -17,7 +17,7 @@
 // - [`config`] — Unified YAML configuration parsing
 // - [`factory`] — Plugin factory registry for config-driven instantiation
 // - [`context`] — PluginContext (local_state + global_state)
-// - [`cmf`] — ContextForge Message Format (Message, ContentPart, enums)
+// - [`cmf`] — Common Message Format (Message, ContentPart, enums)
 // - [`identity`] — IdentityResolve hook family (subject / client /
 //                   workload resolution from raw credentials)
 // - [`delegation`] — TokenDelegate hook family (outbound credential
@@ -34,7 +34,7 @@
 
 /// What the engine asserts on a request and a response, as headers.
 pub mod assertions;
-/// The common message format: messages, content parts, and read-only views.
+/// The Common Message Format: messages, content parts, and read-only views.
 pub mod cmf;
 /// YAML configuration parsing for plugins, routes, and policies.
 pub mod config;
@@ -54,6 +54,9 @@ pub mod executor;
 pub mod extensions;
 /// Config-driven plugin construction.
 pub mod factory;
+/// A plugin that panics, errors, or hangs on demand. Requires `test-util`.
+#[cfg(any(test, feature = "test-util"))]
+pub mod fault_testing;
 /// Hook types, payloads, and the handler traits.
 pub mod hooks;
 /// Host-provided services and the carriers that lend them to a plugin.

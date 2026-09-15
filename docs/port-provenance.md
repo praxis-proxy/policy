@@ -1,4 +1,4 @@
-# Import provenance
+# Import Provenance
 
 Most of this tree did not originate here. It was imported from the engine's
 previous home with its commit history intact, so `git log` and `git blame` reach
@@ -17,9 +17,9 @@ back before this repository existed.
 | Files imported | 192 |
 
 The source commit is the anchor for any later comparison between the two trees.
-Recording it is the whole obligation this import carries toward the eventual
-convergence work. How the trees are kept in step, and in which direction, is
-decided by that effort, not this one.
+Recording it is this import's only obligation toward the eventual convergence
+work. How the trees stay in step, and in which direction, is a decision for
+that later effort, not this one.
 
 ## Second import: the Rego decision point
 
@@ -32,17 +32,17 @@ decided by that effort, not this one.
 | Files imported | 8 |
 
 The Rego decision point was excluded from the first import because the
-bundled-extensions crate listed it in its default feature set with an optional
-dependency on a directory that import did not carry, which stopped the workspace
-resolving at all. It is now brought in by a second pass over the same source with
-the same single-pass technique, so its commit and blame survive rather than
-arriving as a copy.
+bundled-extensions crate listed it in its default feature set, with an optional
+dependency on a directory that import did not carry. That stopped the workspace
+from resolving at all. It is now brought in by a second pass over the same
+source with the same single-pass technique, so its commit and blame survive
+rather than arriving as a copy.
 
 Verified the same way as the first import, against the source rather than by
 inspection: 8 files both sides, every blob hash and mode identical, and per-file
 commit counts identical.
 
-Note the source commit differs from the first import's. The source repository
+The source commit differs from the first import's. The source repository
 advanced in between, so the two imports have separate anchors. Only the decision
 point's own paths were selected in the second pass, so nothing else moved with
 it.
@@ -88,19 +88,19 @@ the re-export, the registration site, and the factory-count assertion that
 derived its expected value from that feature were all removed. Without that the
 workspace does not resolve at all.
 
-## Consequences worth knowing
+## Import consequences
 
-**Commits do not correspond one-to-one with the source.** Commits touching both
+Commits do not correspond one-to-one with the source. Commits touching both
 ported and excluded paths were rewritten to their ported portion, and commits
 touching only excluded paths were pruned, which is why 256 became 37. Comparison
 between the trees works by path and content, not by commit identity.
 
-**Imported commit messages reference the source repository's pull requests.**
+Imported commit messages reference the source repository's pull requests.
 GitHub will autolink those numbers to unrelated numbers here. They are preserved
 as written, because rewriting them would cost more traceability than the autolink
 noise costs.
 
-**Package names lag the directory names.** The import moved directories. Renaming
+Package names lag the directory names. The import moved directories. Renaming
 the published packages is a separate change, so for one commit the directory
 names and the package names disagree.
 
@@ -123,19 +123,18 @@ pass.
 Recorded rather than counted as passing, because an ignored test proves nothing.
 They are not one category:
 
-- **19 are documentation examples** marked as non-compiling in doc comments. They
+- 19 are documentation examples marked as non-compiling in doc comments. They
   are illustrative, not skipped coverage.
-- **6 are the session-store integration tests** and are the real gap. They need a
+- 6 are the session-store integration tests and are the real gap. They need a
   running service, so they never execute in a normal run:
   `cross_node_concurrent_append_unions`, `live_dispatch_then_pending`,
   `ttl_set_on_append_and_refreshed_on_load`, `unknown_session_returns_empty_ok`,
   `unreachable_endpoint_fails_closed`, `wrongtype_reply_fails_closed`.
 
-That second group matters more than its size suggests. The session store is what
-makes session taint survive a reload or span more than one replica, so the
-component carrying the weakest automated coverage here is the one the data-flow
-control depends on. Exercising it for real is the acceptance demo's job, not this
-suite's.
+That second group covers the session store. It makes Session Taint survive a
+reload or span more than one replica. The component carrying the weakest
+automated coverage is therefore the one the data-flow control depends on.
+Exercise it against a real service in the acceptance demo.
 
 ## The lint seed
 
@@ -146,8 +145,8 @@ Shipping the gate bare would have made the imported tree impossible to build.
 The bootstrap commit therefore carried a seed allow-list derived by hand from the
 difference between the two configurations. That seed was incomplete: building the
 imported tree surfaced four further lints Praxis denies and the source never
-configured, so had never been compiled against. Those were added from the
-measurement rather than from another reading of the configs.
+configured, so the source had never been compiled against them. Those were
+added from the measurement rather than from another reading of the configs.
 
 The lesson is recorded here because it will recur when the parked entries are
 closed: the delta between two lint configurations is not reliably computed by
@@ -157,7 +156,7 @@ reading them. Compile and measure.
 
 Measured at import: 89.98 percent lines, 90.45 regions, 86.20 functions.
 
-The enforced floor is 89, one point below the measurement. The **target is 95**,
+The enforced floor is 89, one point below the measurement. The target is 95,
 which is a project requirement rather than an inherited number. Closing that gap
 means covering roughly 1,400 more lines out of about 27,900, and it is real work
 rather than a configuration change.
@@ -166,8 +165,8 @@ The gate is not set to the target before the tests exist. A required check that
 nobody can make green is a check people learn to ignore, which costs more than the
 missing coverage does.
 
-Two things worth knowing when that work is picked up. The six ignored
+Two constraints apply when that work resumes. The six ignored
 session-store integration tests are the largest single block of uncovered
-behavior, and they need a running service rather than more test code. And the
-component they cover is the one session taint depends on, so coverage there buys
-more than its line count suggests.
+behavior, and they need a running service rather than more test code. The
+component they cover is the one Session Taint depends on, so coverage there
+buys more than its line count suggests.

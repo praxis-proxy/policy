@@ -1,13 +1,13 @@
-# Security analysis pass
+# Security Analysis Pass
 
 Issue: [#16](https://github.com/praxis-proxy/policy/issues/16).
 Date: 2026-08-26.
 
 The engine decides who may call which tool, what data comes back, and
-where that data may go next. A bypass is an authorization failure. This
-pass ran the workspace through Cursor `/code-review` (security-review
-and Bugbot) and a compound-engineering-style adversarial review of the
-priority surfaces in that issue, then triaged every finding.
+where that data may go next. A bypass is an authorization failure. The review
+used Cursor `/code-review` (security-review and Bugbot) and an
+adversarial review of the priority surfaces in that issue. Every reported
+finding received a disposition.
 
 Prior fixes that set the class of defect to look for:
 
@@ -18,9 +18,8 @@ Prior fixes that set the class of defect to look for:
 - an empty issuer algorithm list read as "any algorithm acceptable"
 - a missing `nbf` check on inbound JWTs
 
-Those four are already closed and tested. This write-up records what
-else the reviews produced, and what was left as a deliberate fail-open
-knob rather than a defect.
+Those four findings are closed and tested. This record covers the remaining
+review results and accepted fail-open controls.
 
 ## Reviews run
 
@@ -36,18 +35,20 @@ knob rather than a defect.
 
 | ID | Severity | Location | Disposition | Why |
 |---|---|---|---|---|
-| F1 | Medium | `crates/ppe-apl-core/src/evaluator.rs` (`dispatch_parallel`, `BranchOutcome::Panicked`) | **Fix** | A panicking parallel branch was discarded. A sibling `Allow` became the block's result, so a `parallel:` of two PDP gates could permit a request if one evaluator panicked. Same class as the dropped-Deny-became-Aborted bug. |
-| F2 | Medium | `crates/ppe/src/http_hyper.rs` | **Fix** | `praxis_policy_core::http_addr` is a table with no caller. The bundled transport dialled loopback, RFC 1918, and link-local (including `169.254.169.254`) when `jwks_url` or a token endpoint pointed there. |
-| F3 | Medium | `builtins/plugins/delegator-oauth/src/delegator.rs` (leg 2) | **Fix** | Leg 1 sanitizes IdP errors to the OAuth `error` code. Leg 2 appended `error_description` and, on non-JSON bodies, the raw body. Leg 2 submits the caller's bearer as `subject_token`; a hostile or buggy IdP that echoes it would put that token on `PluginViolation.reason`. Credential exposure, not an auth bypass. |
-| F4 | Medium | `builtins/plugins/identity-jwt` (`audiences: []`) | **Fix** | Same class as the empty-algorithm bug. An omitted or empty `audiences` list set `validate_aud = false`, so a token minted for another app (valid `iss` + signature) was accepted. Config load now requires a list or `skip_audience_validation: true`. |
-| F5 | Medium | `crates/ppe-apl-core/src/evaluator.rs` (`eval_comparison`, `NotEq`) | **Fix** | Missing attributes returned false for every operator, including `!=`. `subject.role != "admin": deny` did not fire when `role` was absent, so it did not match `!(subject.role == "admin")` and an unauthenticated request fell through to Allow. |
-| F6 | Medium | `crates/ppe-apl-core/src/evaluator.rs` (`numeric_compare`) | **Fix** | String tool-args are coerced with `parse::<f64>()`, which accepts `NaN` / `inf`. IEEE `NaN > 10000` and `-inf > 10000` are false, so a max-amount deny skipped them. Treating non-finite as non-numeric (same as `"lots"`) still returned false, so the deny still skipped, and `"Infinity"` stopped matching too (`inf > 10000` is true). A present value that is not a finite number now Denies the phase; `!(...)` cannot invert that into Allow. |
-| F7 | Medium | `crates/ppe-core/src/executor.rs` (`extract_erased` → Allow) | **Fix** | A handler that boxed the wrong `Any` type was logged and treated as Allow in both serial and concurrent paths. A deny the framework could not decode was dropped. Unreadable results are now execution errors; `on_error: fail` halts. |
-| F8 | Low | `crates/ppe-apl-core/src/evaluator.rs` (`Stage::Scan`) | **Accept with reason** | `injection.scan` / `pii.detect` emit a taint label and continue; they do not inspect the field. Tests assert Pass on arbitrary text. The stage is a taint marker so a later `require` can gate; actual detection lives in `plugin(...)`. Operator-visible: a named scan that cannot fail does not block injection by itself. |
+| F1 | Medium | `crates/ppe-apl-core/src/evaluator.rs` (`dispatch_parallel`, `BranchOutcome::Panicked`) | Fix | A panicking parallel branch was discarded. A sibling `Allow` became the block's result, so a `parallel:` of two PDP gates could permit a request if one evaluator panicked. Same class as the dropped-Deny-became-Aborted bug. |
+| F2 | Medium | `crates/ppe/src/http_hyper.rs` | Fix | `praxis_policy_core::http_addr` is a table with no caller. The bundled transport dialled loopback, RFC 1918, and link-local (including `169.254.169.254`) when `jwks_url` or a token endpoint pointed there. |
+| F3 | Medium | `builtins/plugins/delegator-oauth/src/delegator.rs` (leg 2) | Fix | Leg 1 sanitizes IdP errors to the OAuth `error` code. Leg 2 appended `error_description` and, on non-JSON bodies, the raw body. Leg 2 submits the caller's bearer as `subject_token`; a hostile or buggy IdP that echoes it would put that token on `PluginViolation.reason`. Credential exposure, not an auth bypass. |
+| F4 | Medium | `builtins/plugins/identity-jwt` (`audiences: []`) | Fix | Same class as the empty-algorithm bug. An omitted or empty `audiences` list set `validate_aud = false`, so a token minted for another app (valid `iss` + signature) was accepted. Config load now requires a list or `skip_audience_validation: true`. |
+| F5 | Medium | `crates/ppe-apl-core/src/evaluator.rs` (`eval_comparison`, `NotEq`) | Fix | Missing attributes returned false for every operator, including `!=`. `subject.role != "admin": deny` did not fire when `role` was absent, so it did not match `!(subject.role == "admin")` and an unauthenticated request fell through to Allow. |
+| F6 | Medium | `crates/ppe-apl-core/src/evaluator.rs` (`numeric_compare`) | Fix | String tool-args are coerced with `parse::<f64>()`, which accepts `NaN` / `inf`. IEEE `NaN > 10000` and `-inf > 10000` are false, so a max-amount deny skipped them. Treating non-finite as non-numeric (same as `"lots"`) still returned false, so the deny still skipped, and `"Infinity"` stopped matching too (`inf > 10000` is true). A present value that is not a finite number now Denies the phase; `!(...)` cannot invert that into Allow. |
+| F7 | Medium | `crates/ppe-core/src/executor.rs` (`extract_erased` → Allow) | Fix | A handler that boxed the wrong `Any` type was logged and treated as Allow in both serial and concurrent paths. A deny the framework could not decode was dropped. Unreadable results are now execution errors; `on_error: fail` halts. |
+| F8 | Low | `crates/ppe-apl-core/src/evaluator.rs` (`Stage::Scan`) | Accept with reason | `injection.scan` / `pii.detect` emit a taint label and continue; they do not inspect the field. Tests assert Pass on arbitrary text. The stage is a taint marker so a later `require` can gate; actual detection lives in `plugin(...)`. Operator-visible: a named scan that cannot fail does not block injection by itself. |
 
 ### F1 — parallel panic fail-open
 
-**Closed.** `BranchOutcome::Panicked` and `TimedOut` are now `Decision::Deny` with a reason that says `fail-closed`. `Aborted` stays a no-op: that is a sibling that already denied, and short-circuit cancelled the rest on purpose.
+Closed. `BranchOutcome::Panicked` and `TimedOut` are now `Decision::Deny`
+with a reason that says `fail-closed`. `Aborted` stays a no-op: that is a
+sibling that already denied, and short-circuit cancelled the rest on purpose.
 
 Regression: `parallel_panic_is_fail_closed` in
 `crates/ppe-apl-core/src/evaluator.rs`. A `parallel:` of `Allow` plus a
@@ -59,7 +60,7 @@ injection test. The arm is fail-closed if it ever fires.
 
 ### F2 — bundled transport ignored `http_addr`
 
-**Closed.** IP literals are checked before connect, including IPv6
+Closed. IP literals are checked before connect, including IPv6
 literals whose `Uri::host()` still has brackets (`[::1]`,
 `[::ffff:169.254.169.254]`). Hostnames go through a DNS resolver that
 drops addresses `private_address_reason` would refuse, which is the
@@ -100,7 +101,7 @@ without DNS.
 
 ### F3 — leg-2 IdP errors leaked bearer material
 
-**Closed.** Leg 2 now matches leg 1: OAuth `error` code only, or
+Closed. Leg 2 now matches leg 1: OAuth `error` code only, or
 `token exchange rejected (HTTP {status})` when the body is not error
 JSON. `error_description` and the raw body are not forwarded.
 
@@ -112,7 +113,7 @@ violation. Reverting the sanitization makes those assertions fail.
 
 ### F4 — omitted JWT audiences disabled `aud` checking
 
-**Closed.** `TrustedIssuerConfig::validate` requires at least one
+Closed. `TrustedIssuerConfig::validate` requires at least one
 audience unless `skip_audience_validation: true` is set. Setting both
 is refused. At verify, an emptied `audiences` field without the skip
 flag is `NoAudiences` rather than `validate_aud = false`. A configured
@@ -120,7 +121,7 @@ list also requires the token to carry an `aud` claim
 (`set_required_spec_claims`); jsonwebtoken otherwise skips audience
 checking when the claim is absent.
 
-**Breaking** for a config that listed no audiences. The operator-visible
+Breaking for a config that listed no audiences. The operator-visible
 hatch is `skip_audience_validation: true`, which accepts a token minted
 for any app (or none). Without the hatch, a missing `aud` is refused
 the same as a mismatch (`auth.audience_mismatch`).
@@ -135,7 +136,7 @@ tests build.
 
 ### F5 — `!=` on a missing attribute did not deny
 
-**Closed.** `eval_comparison` returns true for `NotEq` when the key is
+Closed. `eval_comparison` returns true for `NotEq` when the key is
 absent, matching `!(x == y)`. Equality, membership, and order stay
 false on missing, as before.
 
@@ -147,7 +148,7 @@ Regression: `missing_key_not_eq_is_true` and
 
 ### F6 — non-finite string amounts bypassed numeric deny rules
 
-**Closed.** An order comparison on a present value that is not a finite
+Closed. An order comparison on a present value that is not a finite
 number Denies the phase. Returning `false` skipped `args.amount >
 10000: deny`; returning `true` would invert under `!`. The Deny
 reason says `fail-closed` and names the key. Missing amounts stay
@@ -167,7 +168,7 @@ int/float (and on string-encoded integers), same as `NaN`:
 
 ### F7 — unreadable handler result was Allow
 
-**Closed.** Serial and concurrent paths treat `extract_erased` returning
+Closed. Serial and concurrent paths treat `extract_erased` returning
 `None` as `PluginError::Execution`. `on_error: fail` in a blocking phase
 halts; Ignore/Disable remain the documented knobs.
 
@@ -179,7 +180,7 @@ pins that the hatch still works.
 
 ### F8 — `injection.scan` / `pii.detect` are taint markers
 
-**Accepted with reason.** The evaluator comment states the actual
+Accepted with reason. The evaluator comment states the actual
 detection lives in `plugin(...)` variants. Closing this would mean
 rejecting the stage at parse (breaking policies that use it as a taint
 label) or shipping a scanner in-tree. Operator-visible consequence: a
