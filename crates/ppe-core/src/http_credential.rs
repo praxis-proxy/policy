@@ -37,7 +37,7 @@ const MAX_INPUT_LEN: usize = 8 * 1024;
 /// Reason a raw credential string was rejected during parsing.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CredentialParseError {
-    /// The raw input exceeds [`MAX_INPUT_LEN`].
+    /// The raw input exceeds the maximum allowed length.
     #[error("{location} input is {len} bytes, exceeding the {max}-byte limit")]
     TooLong {
         /// Where the input came from (`"cookie"` or `"query_param"`).
