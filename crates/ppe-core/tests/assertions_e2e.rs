@@ -1437,3 +1437,280 @@ mod promises {
         );
     }
 }
+
+// =====================================================================
+// A secret rendered onto the upstream request
+// =====================================================================
+
+/// A target behind a static API key, reached without a token delegator.
+///
+/// The engine renders the header from a value declared in `secrets.values`.
+/// No plugin and no PDP is on this path, and the assertion names the declared
+/// value rather than a provider and a reference, so what the process can reach
+/// stays readable from the document.
+mod secret_source {
+    use praxis_policy_core::secrets::SecretProviderRegistry;
+
+    use super::*;
+
+    /// A directory holding one secret file, and the config that reads it.
+    ///
+    /// The file backend is what makes rotation testable without a network:
+    /// it rereads on refresh, so rewriting the file is a rotation.
+    struct Fixture {
+        dir: std::path::PathBuf,
+    }
+
+    impl Fixture {
+        fn new(contents: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("ppe-assert-secret-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let fixture = Self { dir };
+            fixture.write(contents);
+            fixture
+        }
+
+        fn write(&self, contents: &str) {
+            std::fs::write(self.dir.join("legacy.key"), contents).expect("write");
+        }
+
+        /// A document declaring the secret, plus whatever assertions the test
+        /// wants over it.
+        fn config(&self, assertions: &str) -> String {
+            format!(
+                "
+engine_settings:
+  dispatch: policy
+secrets:
+  providers:
+    local: {{ kind: file, base_dir: {} }}
+  values:
+    legacy_api_key: {{ provider: local, ref: legacy.key }}
+global:
+  assertions:
+{assertions}
+routes:
+  - tool: search
+",
+                self.dir.display()
+            )
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The engine builds the store before it serves, so this is the wiring a
+    /// host does. Without it a document declaring secrets fails to initialize.
+    async fn engine_reading_secrets(yaml: &str) -> Arc<PolicyEngine> {
+        let engine = Arc::new(PolicyEngine::default());
+        let parsed = config::parse_config(yaml).expect("the config loads");
+        engine.load_config(parsed).expect("the config installs");
+        assert!(
+            engine.set_secret_providers(SecretProviderRegistry::with_builtin_backends()),
+            "the factories install once; a second registration would be ignored and the \
+             document's `file` provider would have nothing to build it"
+        );
+        engine.initialize().await.expect("initialize");
+        engine
+    }
+
+    const ASSERTS_THE_KEY: &str = "    request:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_key
+      strip:
+        - x-api-*
+";
+
+    /// What the issue asks for: the header reaches the upstream carrying the
+    /// declared value, and the client's own attempt at the same name is gone.
+    #[tokio::test]
+    async fn a_secret_is_injected_onto_the_upstream_request() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let engine = engine_reading_secrets(&fixture.config(ASSERTS_THE_KEY)).await;
+        let ext = Wire::request(&[("x-api-key", "spoofed"), ("x-api-version", "1")])
+            .onto(tool_meta("search"), alice());
+
+        let (result, _bg) = engine
+            .invoke_by_name(HOOK_CMF_TOOL_PRE_INVOKE, Box::new(message()), ext, None)
+            .await;
+
+        let headers = request_headers(&result);
+        assert_eq!(
+            headers.get("X-API-Key").map(String::as_str),
+            Some("sk-live-abc123"),
+            "the trailing newline is the file backend's to trim: {headers:?}"
+        );
+        assert!(
+            !headers.values().any(|v| v == "spoofed"),
+            "the client's own value is removed before injection: {headers:?}"
+        );
+        assert!(
+            !headers.contains_key("x-api-version"),
+            "and the strip glob still applies: {headers:?}"
+        );
+    }
+
+    /// A consumer that copies the value out at startup would pass every test
+    /// with a static secret and silently never rotate. Driving a real refresh
+    /// and re-invoking is what tells the two apart.
+    #[tokio::test]
+    async fn a_rotated_secret_reaches_the_wire_after_a_refresh() {
+        let fixture = Fixture::new("first-key\n");
+        let engine = engine_reading_secrets(&fixture.config(ASSERTS_THE_KEY)).await;
+
+        let invoke = || {
+            let engine = Arc::clone(&engine);
+            async move {
+                let ext = Wire::request(&[]).onto(tool_meta("search"), alice());
+                let (result, _bg) = engine
+                    .invoke_by_name(HOOK_CMF_TOOL_PRE_INVOKE, Box::new(message()), ext, None)
+                    .await;
+                request_headers(&result)
+                    .get("X-API-Key")
+                    .cloned()
+                    .unwrap_or_default()
+            }
+        };
+
+        assert_eq!(invoke().await, "first-key");
+
+        fixture.write("second-key\n");
+        let report = engine.refresh_secrets().await;
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(report.updated, vec!["legacy_api_key".to_owned()]);
+
+        assert_eq!(
+            invoke().await,
+            "second-key",
+            "the render path reads the store at the point of use, not once at startup"
+        );
+    }
+
+    /// The artifact is what an operator and a security reviewer read to learn
+    /// what crosses the boundary. It has to name the secret and never print it.
+    #[test]
+    fn the_artifact_prints_the_secret_name_and_never_its_value() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let parsed =
+            config::parse_config(&fixture.config(ASSERTS_THE_KEY)).expect("the config loads");
+        let artifact = praxis_policy_core::assertions::effective_policy(&parsed);
+
+        assert!(
+            artifact.contains("secret.legacy_api_key"),
+            "the artifact names the declared secret: {artifact}"
+        );
+        assert!(
+            !artifact.contains("sk-live-abc123"),
+            "and never its value: {artifact}"
+        );
+        // The value is not in the parsed config either, so this holds for
+        // anything else that renders one. Resolution happens at initialize.
+        assert!(
+            !format!("{parsed:?}").contains("sk-live-abc123"),
+            "a parsed document carries the reference, not the bytes"
+        );
+        assert!(
+            artifact.contains("no plugin capability reads this"),
+            "the capability column says no grant reaches it: {artifact}"
+        );
+    }
+
+    /// The value reaches the header it was asserted onto and nothing else: not
+    /// another header, not the extensions the audit path would read, and not
+    /// the payload a plugin is handed.
+    #[tokio::test]
+    async fn the_value_reaches_the_asserted_header_and_nothing_else() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let engine = engine_reading_secrets(&fixture.config(ASSERTS_THE_KEY)).await;
+        let probe = Arc::new(Probe::default());
+        annotate(
+            &engine,
+            "tool",
+            "search",
+            &[HOOK_CMF_TOOL_PRE_INVOKE],
+            &probe,
+        );
+        let ext = Wire::request(&[]).onto(tool_meta("search"), alice());
+
+        let (result, _bg) = engine
+            .invoke_by_name(HOOK_CMF_TOOL_PRE_INVOKE, Box::new(message()), ext, None)
+            .await;
+
+        let seen = probe
+            .seen_request
+            .lock()
+            .expect("not poisoned")
+            .clone()
+            .expect("the probe ran");
+        assert!(
+            !seen.values().any(|v| v.contains("sk-live")),
+            "the plugin phase runs before injection and sees the client's headers: {seen:?}"
+        );
+
+        let extensions = result
+            .modified_extensions
+            .as_ref()
+            .expect("the pipeline carried extensions");
+        let http = extensions.http.as_deref().expect("an http slot");
+        assert_eq!(
+            http.request_headers
+                .iter()
+                .filter(|(_, v)| v.contains("sk-live"))
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            vec!["X-API-Key"],
+            "exactly one header carries it"
+        );
+        assert!(
+            !http
+                .response_headers
+                .values()
+                .any(|v| v.contains("sk-live")),
+            "and nothing put it on the response"
+        );
+    }
+
+    /// An entry naming a secret in the response direction is refused at load,
+    /// so this never becomes a request-time question.
+    #[test]
+    fn a_response_entry_naming_a_secret_does_not_load() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let err = config::parse_config(&fixture.config(
+            "    response:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_key
+",
+        ))
+        .expect_err("the config must not load")
+        .to_string();
+        assert!(err.contains("request-direction"), "{err}");
+    }
+
+    /// An unknown name is a config error rather than a header that renders
+    /// nothing, so a typo fails startup instead of quietly dropping the key.
+    #[test]
+    fn an_undeclared_secret_name_does_not_load() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let err = config::parse_config(&fixture.config(
+            "    request:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_kye
+",
+        ))
+        .expect_err("the config must not load")
+        .to_string();
+        assert!(err.contains("secret.legacy_api_kye"), "{err}");
+        assert!(
+            err.contains("legacy_api_key"),
+            "names what is declared: {err}"
+        );
+    }
+}

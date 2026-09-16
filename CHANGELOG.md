@@ -17,6 +17,26 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added `secret.<name>`, an assertion source for a static upstream credential.
+  A target sitting behind a shared API key had no path short of a token
+  delegator, which is per-request exchange machinery that a static credential
+  does not need. A request entry can now read a value declared under
+  `secrets.values`, and the engine renders the header: no plugin and no PDP
+  holds the bytes, and the value reaches the asserted header and nothing else.
+  The path names a declared secret and never a provider or a raw reference,
+  which is what keeps the addressable set finite and readable from the
+  document instead of being whatever a provider's credentials can reach. An
+  unknown name is a config error naming what is declared, and so is a response
+  entry naming a secret, since a secret is not something an upstream told us.
+  The read is synchronous from the value resolved at startup, so nothing
+  fetches on the request path, and it goes through the store at the point of
+  use, so a rotation reaches the wire on the next request after a refresh. The
+  effective-policy artifact prints the name and never the value, and says that
+  no plugin capability reads the slot rather than naming one.
+  ([#93](https://github.com/praxis-proxy/policy/issues/93))
+
 ## [0.4.1] - 2026-10-05
 
 ### Added

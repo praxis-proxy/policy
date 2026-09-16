@@ -2423,7 +2423,6 @@ fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<Plug
 pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
     validate_declared_hooks(config)?;
     reject_reserved_route_names(config)?;
-    validate_assertions(config)?;
 
     // An empty namespace would compose stream ids like ":decision", which is
     // neither the bare label nor a usable namespace, so refuse it rather than
@@ -2444,11 +2443,18 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     // provider it never declared is wrong whether or not the backend is
     // reachable, and an operator should hear about it without waiting for a
     // network timeout.
+    //
+    // Ahead of the assertion walk, which checks every `secret.<name>` source
+    // against this block. A malformed declaration should be reported against
+    // the `secrets:` block that holds it rather than against whichever route
+    // first named it.
     config.secrets.validate().map_err(|e| {
         Box::new(PluginError::Config {
             message: format!("{e}"),
         })
     })?;
+
+    validate_assertions(config)?;
 
     let mut seen_names = HashSet::new();
     for plugin in &config.plugins {
@@ -3719,27 +3725,31 @@ pub(crate) fn dropped_inherited_assertions_for(
 fn validate_assertions(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
     let fail = |message: String| Box::new(PluginError::Config { message });
 
+    // Every level is checked against the one `secrets:` block, which is
+    // document-wide: a secret is declared once and any level may name it.
+    let secrets = &config.secrets;
+
     if let Some(assertions) = config.global.assertions.as_ref() {
-        assertions.validate("global").map_err(fail)?;
+        assertions.validate("global", secrets).map_err(fail)?;
     }
     for (entity_type, default) in &config.global.defaults {
         if let Some(assertions) = default.assertions.as_ref() {
             assertions
-                .validate(&format!("global.defaults.{entity_type}"))
+                .validate(&format!("global.defaults.{entity_type}"), secrets)
                 .map_err(fail)?;
         }
     }
     for (name, bundle) in &config.global.bundles {
         if let Some(assertions) = bundle.assertions.as_ref() {
             assertions
-                .validate(&format!("groups.{name}"))
+                .validate(&format!("groups.{name}"), secrets)
                 .map_err(fail)?;
         }
     }
     for (i, route) in config.routes.iter().enumerate() {
         if let Some(assertions) = route.assertions.as_ref() {
             assertions
-                .validate(&route_display_name(route, i))
+                .validate(&route_display_name(route, i), secrets)
                 .map_err(fail)?;
         }
     }

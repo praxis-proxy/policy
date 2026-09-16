@@ -88,10 +88,63 @@ Slot paths, addressed the way the rest of the config addresses request state:
     client.client_id  client.client_name  client.trust_level  client.roles
     client.permissions  client.teams  client.authorized_scopes
     client.authorized_audiences  client.claim.<name>
+    secret.<name>
 
 A claim name is taken whole, so a provider spelling one with dots needs no
 escaping. A bare `claim` names the whole map rather than one claim and is
 refused: a provider's claim set is not something to render wholesale.
+
+### `secret.<name>`
+
+The one source that reads nothing from the request. It names a value declared
+under [`secrets.values`](configuration.md#the-secrets-block), which is how a
+target sitting behind a static API key is reached without a token delegator,
+machinery a shared static credential does not need.
+
+```yaml
+secrets:
+  providers:
+    local: { kind: file, base_dir: /etc/ppe }
+  values:
+    legacy_api_key: { provider: local, ref: legacy.key }
+
+global:
+  assertions:
+    request:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_key
+```
+
+The path names a declared secret, never a provider and never a raw reference.
+That is what keeps this module's existing property intact: the engine
+originates every value a request entry asserts, so the legitimate set is finite
+and an operator can read `values:` and know what the process can reach. A raw
+reference in the path would make the addressable set whatever the provider's
+credentials happen to reach, with no list anyone could audit.
+
+Four rules follow from that:
+
+- The name must resolve to a declared `secrets.values` entry at config load. An
+  unknown name is a config error naming the level, the header, and what is
+  declared, not a header that silently renders nothing.
+- **Request direction only.** A response entry naming a secret is a config
+  error: a response passes through what the upstream sent, and a secret is not
+  something an upstream told us.
+- The read is synchronous, from the value resolved at startup. Nothing fetches
+  from a backend on the request path.
+- `on_missing` applies as it does to any other source, and a denial names
+  `secret.<name>` rather than what it held.
+
+The engine renders the header and nothing else touches the value. It does not
+reach a PDP, a plugin payload, a log line, a deny message, or the effective
+policy artifact, which prints the name only. Because a secret is read through
+the store at the point of use rather than copied out once, a
+[rotation](configuration.md#the-secrets-block) reaches the wire on the next
+request after a refresh.
+
+There is no capability that grants a plugin a read of this slot, and the
+artifact says so rather than naming one.
 
 Fixed in code, never usable as a source, in either direction, with no config
 surface to widen:

@@ -2764,8 +2764,13 @@ impl PolicyEngine {
             return (result, None);
         }
 
+        // Resolved at startup, so this is a synchronous load of what is already
+        // in memory. `None` is a host whose document declared no secrets; a
+        // contract reaching one cannot name a secret, because config load
+        // refuses a `secret.<name>` no `secrets.values` entry declares.
+        let secrets = self.secrets.get().map(std::convert::AsRef::as_ref);
         let rendered = match result.modified_extensions.as_ref() {
-            Some(extensions) => crate::assertions::render(&contract, extensions),
+            Some(extensions) => crate::assertions::render(&contract, extensions, secrets),
             None => return (result, None),
         };
         match rendered {

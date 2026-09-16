@@ -15,12 +15,21 @@
 // different reason: they are host-populated rather than credential-bearing,
 // so they are outside the grammar rather than excluded from it, and
 // admitting them later should be a grammar addition.
+//
+// `secret.<name>` is the one source that does not come from the request. It
+// names a value declared under `secrets.values`, never a provider and never a
+// raw reference, which is what keeps the module's existing property intact: the
+// engine originates every value a request entry asserts, so the legitimate set
+// stays finite and enumerable from the document. A raw reference in the path
+// would make the addressable set whatever the provider's credentials can reach,
+// with no list an operator could audit.
 
 use std::collections::HashSet;
 
 use serde_json::Value;
 
 use crate::extensions::{Capability, Extensions};
+use crate::secrets::SecretStore;
 
 /// Why an authored string is not a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +100,7 @@ pub const ADDRESSABLE_SOURCES: &[&str] = &[
     "client.authorized_scopes",
     "client.authorized_audiences",
     "client.claim.<name>",
+    "secret.<name>",
 ];
 
 /// The slot prefixes no entry may ever name, with the reason each is refused.
@@ -150,6 +160,12 @@ pub enum SourcePath {
     ClientAudiences,
     /// `client.claim.<name>`, one claim of the OAuth client.
     ClientClaim(String),
+    /// `secret.<name>`, one value declared under `secrets.values`.
+    ///
+    /// The only source that reads nothing from the request. It holds the
+    /// declared name rather than the value, so a resolved contract carries no
+    /// secret material and neither does anything that clones or prints one.
+    Secret(String),
 }
 
 impl SourcePath {
@@ -184,6 +200,19 @@ impl SourcePath {
         }
         if let Some(name) = path.strip_prefix("claim.") {
             return Ok(Self::Claim(name.to_owned()));
+        }
+        // Taken whole, like a claim name. A declared secret name carries no
+        // `.` (`secrets::config::validate_name` refuses one, for this path),
+        // so `secret.a.b` parses here and is then refused as undeclared,
+        // naming the name it looked for. Bare `secret` falls through to
+        // `Unaddressable` rather than earning a root refusal of its own: the
+        // claim root has one because rendering a whole claim map wholesale is
+        // a hazard worth naming, and there is no "render every secret" shape
+        // to warn about here, only a name left off.
+        if let Some(name) = path.strip_prefix("secret.")
+            && !name.is_empty()
+        {
+            return Ok(Self::Secret(name.to_owned()));
         }
         match path {
             "subject.id" => Ok(Self::SubjectId),
@@ -225,22 +254,32 @@ impl SourcePath {
             Self::ClientScopes => "client.authorized_scopes".to_owned(),
             Self::ClientAudiences => "client.authorized_audiences".to_owned(),
             Self::ClientClaim(name) => format!("client.claim.{name}"),
+            Self::Secret(name) => format!("secret.{name}"),
         }
     }
 
-    /// The capability that gates a plugin's read of this slot.
+    /// The capability that gates a plugin's read of this slot, or `None` for a
+    /// slot no plugin can read at all.
     ///
     /// Nothing is gated here: the engine writes canonical state and is not a
     /// plugin. It is the mapping that keeps the capability model the authority
     /// on what a slot is, and the artifact prints it beside each header.
+    ///
+    /// A secret answers `None`, and that is the honest answer rather than a
+    /// gap: there is no plugin-facing secret read, so no capability grants one.
+    /// Naming a capability here would print one in the artifact and tell an
+    /// operator that a plugin holding it could read the value, which is the
+    /// blanket `read_secrets` grant the secrets work deliberately did not ship.
+    /// A per-secret grant, when there is a consumer to scope it against, is
+    /// what turns this into a `Some`.
     #[must_use]
-    pub fn capability(&self) -> Capability {
+    pub fn capability(&self) -> Option<Capability> {
         match self {
-            Self::SubjectId | Self::SubjectType => Capability::ReadSubject,
-            Self::SubjectRoles => Capability::ReadRoles,
-            Self::SubjectTeams => Capability::ReadTeams,
-            Self::SubjectPermissions => Capability::ReadPermissions,
-            Self::Claim(_) => Capability::ReadClaims,
+            Self::SubjectId | Self::SubjectType => Some(Capability::ReadSubject),
+            Self::SubjectRoles => Some(Capability::ReadRoles),
+            Self::SubjectTeams => Some(Capability::ReadTeams),
+            Self::SubjectPermissions => Some(Capability::ReadPermissions),
+            Self::Claim(_) => Some(Capability::ReadClaims),
             Self::ClientId
             | Self::ClientName
             | Self::ClientTrustLevel
@@ -249,7 +288,8 @@ impl SourcePath {
             | Self::ClientTeams
             | Self::ClientScopes
             | Self::ClientAudiences
-            | Self::ClientClaim(_) => Capability::ReadClient,
+            | Self::ClientClaim(_) => Some(Capability::ReadClient),
+            Self::Secret(_) => None,
         }
     }
 
@@ -283,8 +323,24 @@ impl SourcePath {
     ///
     /// Collections resolve sorted, so one identity yields identical header
     /// bytes across requests whatever order a set iterated in.
+    ///
+    /// `secrets` is the store resolved at startup, and the read from it is a
+    /// synchronous load of a value already in memory: nothing here fetches from
+    /// a backend, because this runs on the request path. `None` for the store,
+    /// or a name the store does not hold, leaves a secret source absent and
+    /// `on_missing` decides what that means, the same as for any other slot.
     #[must_use]
-    pub fn resolve(&self, ext: &Extensions) -> Option<Value> {
+    pub fn resolve(&self, ext: &Extensions, secrets: Option<&SecretStore>) -> Option<Value> {
+        // Ahead of the security slot, which a secret does not live under: a
+        // request that authenticated nobody still renders one.
+        if let Self::Secret(name) = self {
+            // Copied out of the `Zeroizing` wrapper, which is where the value
+            // stops being cleared on drop. Unavoidable at this boundary: the
+            // rendered header is a plain `String` on its way to the wire, so
+            // the bytes exist in an ordinary allocation either way.
+            return secrets
+                .and_then(|store| store.value(name).map(|v| Value::String(v.to_string())));
+        }
         let security = ext.security.as_deref()?;
         match self {
             Self::SubjectId => security.subject.as_ref()?.id.clone().map(Value::String),
@@ -315,6 +371,10 @@ impl SourcePath {
                 Some(sorted_list(&security.client.as_ref()?.authorized_audiences))
             },
             Self::ClientClaim(name) => claim(&security.client.as_ref()?.claims, name),
+            // Answered above, before the security slot was required. Spelled
+            // out rather than folded into a wildcard so a slot added later
+            // still has to say where it reads from.
+            Self::Secret(_) => None,
         }
     }
 }
@@ -402,8 +462,14 @@ mod tests {
             subject_type: Some(SubjectType::User),
             ..Default::default()
         });
-        assert_eq!(parse("subject.id").resolve(&ext), Some(json!("alice")));
-        assert_eq!(parse("subject.type").resolve(&ext), Some(json!("user")));
+        assert_eq!(
+            parse("subject.id").resolve(&ext, None),
+            Some(json!("alice"))
+        );
+        assert_eq!(
+            parse("subject.type").resolve(&ext, None),
+            Some(json!("user"))
+        );
     }
 
     #[test]
@@ -418,15 +484,15 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            parse("subject.roles").resolve(&ext),
+            parse("subject.roles").resolve(&ext, None),
             Some(json!(["admin", "ml-engineer", "viewer"]))
         );
         assert_eq!(
-            parse("subject.teams").resolve(&ext),
+            parse("subject.teams").resolve(&ext, None),
             Some(json!(["platform"]))
         );
         assert_eq!(
-            parse("subject.permissions").resolve(&ext),
+            parse("subject.permissions").resolve(&ext, None),
             Some(json!(["read", "write"]))
         );
     }
@@ -444,8 +510,8 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            parse("subject.roles").resolve(&forwards),
-            parse("subject.roles").resolve(&backwards)
+            parse("subject.roles").resolve(&forwards, None),
+            parse("subject.roles").resolve(&backwards, None)
         );
     }
 
@@ -461,7 +527,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            parse("claim.realm_access").resolve(&ext),
+            parse("claim.realm_access").resolve(&ext, None),
             Some(json!({"roles": ["admin", "viewer"]}))
         );
     }
@@ -479,17 +545,17 @@ mod tests {
             ..Default::default()
         });
         assert_ne!(
-            parse("claim.x").resolve(&structured),
-            parse("claim.x").resolve(&text)
+            parse("claim.x").resolve(&structured, None),
+            parse("claim.x").resolve(&text, None)
         );
     }
 
     #[test]
     fn an_absent_slot_resolves_to_nothing_and_an_empty_collection_does_not() {
         let ext = subject(SubjectExtension::default());
-        assert_eq!(parse("subject.id").resolve(&ext), None);
-        assert_eq!(parse("claim.tenant").resolve(&ext), None);
-        assert_eq!(parse("subject.roles").resolve(&ext), Some(json!([])));
+        assert_eq!(parse("subject.id").resolve(&ext, None), None);
+        assert_eq!(parse("claim.tenant").resolve(&ext, None), None);
+        assert_eq!(parse("subject.roles").resolve(&ext, None), Some(json!([])));
     }
 
     #[test]
@@ -498,7 +564,7 @@ mod tests {
             claims: [("tenant".to_owned(), Value::Null)].into_iter().collect(),
             ..Default::default()
         });
-        assert_eq!(parse("claim.tenant").resolve(&ext), None);
+        assert_eq!(parse("claim.tenant").resolve(&ext, None), None);
     }
 
     #[test]
@@ -510,7 +576,7 @@ mod tests {
             "claim.tenant",
             "client.client_id",
         ] {
-            assert_eq!(parse(path).resolve(&ext), None, "{path}");
+            assert_eq!(parse(path).resolve(&ext, None), None, "{path}");
         }
     }
 
@@ -531,41 +597,91 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            parse("client.client_id").resolve(&ext),
+            parse("client.client_id").resolve(&ext, None),
             Some(json!("agent-app"))
         );
         assert_eq!(
-            parse("client.client_name").resolve(&ext),
+            parse("client.client_name").resolve(&ext, None),
             Some(json!("Agent App"))
         );
         assert_eq!(
-            parse("client.trust_level").resolve(&ext),
+            parse("client.trust_level").resolve(&ext, None),
             Some(json!("first_party"))
         );
         assert_eq!(
-            parse("client.roles").resolve(&ext),
+            parse("client.roles").resolve(&ext, None),
             Some(json!(["admin", "partner"]))
         );
         assert_eq!(
-            parse("client.permissions").resolve(&ext),
+            parse("client.permissions").resolve(&ext, None),
             Some(json!(["read"]))
         );
         assert_eq!(
-            parse("client.teams").resolve(&ext),
+            parse("client.teams").resolve(&ext, None),
             Some(json!(["platform"]))
         );
         assert_eq!(
-            parse("client.authorized_scopes").resolve(&ext),
+            parse("client.authorized_scopes").resolve(&ext, None),
             Some(json!(["a", "b"]))
         );
         assert_eq!(
-            parse("client.authorized_audiences").resolve(&ext),
+            parse("client.authorized_audiences").resolve(&ext, None),
             Some(json!(["praxis"]))
         );
         assert_eq!(
-            parse("client.claim.region").resolve(&ext),
+            parse("client.claim.region").resolve(&ext, None),
             Some(json!("eu"))
         );
+    }
+
+    /// A secret reads the store rather than the request. Every other path
+    /// answers `None` once `security` is absent, and a secret must not be
+    /// caught by that: a request that authenticated nobody still renders one.
+    #[test]
+    fn a_secret_resolves_without_a_security_extension() {
+        let store = crate::secrets::store::fixed("legacy_api_key", "hunter2");
+        assert_eq!(
+            parse("secret.legacy_api_key").resolve(&Extensions::default(), Some(&store)),
+            Some(json!("hunter2"))
+        );
+    }
+
+    /// No store and an undeclared name are both just an absent slot, which is
+    /// what lets `on_missing` decide what either one means.
+    #[test]
+    fn a_secret_with_no_store_or_no_such_name_resolves_to_nothing() {
+        let store = crate::secrets::store::fixed("legacy_api_key", "hunter2");
+        let ext = Extensions::default();
+        assert_eq!(parse("secret.legacy_api_key").resolve(&ext, None), None);
+        assert_eq!(parse("secret.other").resolve(&ext, Some(&store)), None);
+    }
+
+    /// A secret name is taken whole, like a claim name. A declared name carries
+    /// no `.`, so `secret.a.b` parses here and is refused at config load as
+    /// undeclared, which names what it looked for.
+    #[test]
+    fn a_secret_name_is_taken_verbatim() {
+        assert_eq!(
+            parse("secret.a_b-c/d"),
+            SourcePath::Secret("a_b-c/d".to_owned())
+        );
+        assert_eq!(parse("secret.a.b"), SourcePath::Secret("a.b".to_owned()));
+    }
+
+    /// Bare `secret` is unaddressable rather than earning a root refusal of its
+    /// own. The claim root has one because rendering a whole claim map
+    /// wholesale is a hazard worth naming; there is no "render every secret"
+    /// shape here, only a name left off, and the unaddressable message already
+    /// prints the form that fixes it.
+    #[test]
+    fn the_secret_root_is_unaddressable_and_the_message_shows_the_form() {
+        for path in ["secret", "secret."] {
+            assert_eq!(rejection(path), SourceRejection::Unaddressable, "{path}");
+        }
+        let message = SourcePath::parse("secret")
+            .expect_err("bare secret")
+            .to_string();
+        assert!(message.contains("secret.<name>"), "{message}");
     }
 
     /// A claim name is taken whole, so a provider spelling one with dots needs
@@ -682,8 +798,16 @@ mod tests {
             ("client.client_id", Capability::ReadClient),
             ("client.claim.region", Capability::ReadClient),
         ] {
-            assert_eq!(parse(path).capability(), expected, "{path}");
+            assert_eq!(parse(path).capability(), Some(expected), "{path}");
         }
+    }
+
+    /// A secret is the one slot no capability covers, and that has to stay
+    /// true: the moment this answers `Some`, the artifact tells an operator
+    /// that some plugin grant could read the value.
+    #[test]
+    fn a_secret_maps_to_no_capability() {
+        assert_eq!(parse("secret.legacy_api_key").capability(), None);
     }
 
     #[test]
@@ -705,6 +829,8 @@ mod tests {
             "subject.type",
             "claim.teams",
             "client.client_id",
+            // A secret is one opaque string, so it needs no `encode:`.
+            "secret.legacy_api_key",
         ] {
             assert!(!parse(path).is_collection(), "{path}");
         }

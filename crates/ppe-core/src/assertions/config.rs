@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use super::{Direction, floor, source::SourcePath};
 use crate::config::{ConfigScope, Pattern, unknown_keys_in, unknown_keys_message};
+use crate::secrets::SecretsConfig;
 
 /// What a request or response contract asserts and removes.
 ///
@@ -416,22 +417,76 @@ impl AssertionsConfig {
     /// encoding, and a glob that would remove a floor header are all refusals
     /// rather than surprises.
     ///
+    /// `secrets` is the document's own `secrets:` block, which every
+    /// `secret.<name>` source is checked against here. Checking at load is what
+    /// makes an unknown name a config error rather than a header that silently
+    /// never renders, and it is why the render path can treat a name the store
+    /// does not hold as an ordinary absent slot.
+    ///
     /// # Errors
     ///
     /// Returns the first defect, naming the level, the direction, and the
     /// header entry, since a bare path is not locatable in a large config.
-    pub fn validate(&self, level: &str) -> Result<(), String> {
+    pub fn validate(&self, level: &str, secrets: &SecretsConfig) -> Result<(), String> {
         for direction in [Direction::Request, Direction::Response] {
             if let Some(block) = direction.block_of(self) {
-                validate_block(block, direction, level)?;
+                validate_block(block, direction, level, secrets)?;
             }
         }
         Ok(())
     }
 }
 
+/// Check that a parsed source is usable in this direction and, for a secret,
+/// that the document declares it.
+///
+/// Both refusals are about the same property. A request entry asserts something
+/// the engine originates, and a declared secret is exactly that: an operator
+/// put it in the document. A response entry passes through what an upstream
+/// sent, and a secret is not something an upstream told us, so naming one there
+/// describes a projection that could not mean anything.
+fn validate_source(
+    parsed: &SourcePath,
+    direction: Direction,
+    secrets: &SecretsConfig,
+    where_: &str,
+) -> Result<(), String> {
+    let SourcePath::Secret(name) = parsed else {
+        return Ok(());
+    };
+    if direction == Direction::Response {
+        return Err(format!(
+            "{where_}: `secret.{name}` is a request-direction source only; a response entry \
+             passes through what the upstream sent, and a secret is not something an upstream \
+             told us"
+        ));
+    }
+    if !secrets.values.contains_key(name) {
+        let declared = {
+            let mut names: Vec<&str> = secrets.values.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            if names.is_empty() {
+                "the document declares no `secrets.values` entries".to_owned()
+            } else {
+                format!("the declared secrets are {}", names.join(", "))
+            }
+        };
+        return Err(format!(
+            "{where_}: `secret.{name}` names no declared secret; {declared}. A source names a \
+             value under `secrets.values`, never a provider and never a raw reference, so the \
+             set of secrets a route can reach stays readable from the document"
+        ));
+    }
+    Ok(())
+}
+
 /// Check one direction's contract.
-fn validate_block(block: &DirectionBlock, direction: Direction, level: &str) -> Result<(), String> {
+fn validate_block(
+    block: &DirectionBlock,
+    direction: Direction,
+    level: &str,
+    secrets: &SecretsConfig,
+) -> Result<(), String> {
     let label = direction.label();
     // Who is deprived of a floor header, and what they cannot read without it.
     let (side, deprived) = match direction {
@@ -468,6 +523,12 @@ fn validate_block(block: &DirectionBlock, direction: Direction, level: &str) -> 
                 let parsed = SourcePath::parse(path).map_err(|cause| {
                     format!("{level}: `{label}` header `{}`: {cause}", entry.name)
                 })?;
+                validate_source(
+                    &parsed,
+                    direction,
+                    secrets,
+                    &format!("{level}: `{label}` header `{}`", entry.name),
+                )?;
                 if parsed.is_collection() && entry.encode.is_none() {
                     return Err(format!(
                         "{level}: `{label}` header `{}` reads `{path}`, a collection, into a \
@@ -492,12 +553,21 @@ fn validate_block(block: &DirectionBlock, direction: Direction, level: &str) -> 
                     ));
                 }
                 for (member, path) in members {
-                    SourcePath::parse(path).map_err(|cause| {
+                    let parsed = SourcePath::parse(path).map_err(|cause| {
                         format!(
                             "{level}: `{label}` header `{}` member `{member}`: {cause}",
                             entry.name
                         )
                     })?;
+                    validate_source(
+                        &parsed,
+                        direction,
+                        secrets,
+                        &format!(
+                            "{level}: `{label}` header `{}` member `{member}`",
+                            entry.name
+                        ),
+                    )?;
                 }
             },
         }
@@ -547,6 +617,25 @@ mod tests {
 
     fn global(yaml: &str) -> String {
         format!("engine_settings:\n  dispatch: policy\nglobal:\n  assertions:\n{yaml}")
+    }
+
+    /// The same, over a document declaring one secret.
+    ///
+    /// Load checks shape only and reads no backend, so the variable this names
+    /// need not exist for the document to load.
+    fn with_secret(yaml: &str) -> String {
+        format!(
+            "engine_settings:
+  dispatch: policy
+secrets:
+  providers:
+    shell: {{ kind: env }}
+  values:
+    legacy_api_key: {{ provider: shell, ref: LEGACY_API_KEY }}
+global:
+  assertions:
+{yaml}"
+        )
     }
 
     #[test]
@@ -976,6 +1065,157 @@ routes:
             "    request:\n      strip: [etag, cache-control]\n",
         ));
         load(&global("    response:\n      strip: [host]\n"));
+    }
+
+    /// A target behind a static API key needs no token delegator: the engine
+    /// renders the header from a declared value, and nothing else holds it.
+    #[test]
+    fn a_declared_secret_loads_as_a_request_source() {
+        let config = load(&with_secret(
+            "    request:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_key
+",
+        ));
+        let headers = &config
+            .global
+            .assertions
+            .as_ref()
+            .and_then(|a| a.request.as_ref())
+            .expect("a request contract")
+            .headers;
+        assert!(matches!(
+            &headers[0].source,
+            AuthoredSource::From(path) if path == "secret.legacy_api_key"
+        ));
+    }
+
+    /// An unknown name is a config error rather than a header that silently
+    /// never renders, and the message lists what is declared so a typo is
+    /// visible next to the thing it was meant to be.
+    #[test]
+    fn a_secret_no_values_entry_declares_is_refused_naming_it() {
+        let err = refuse(&with_secret(
+            "    request:
+      headers:
+        - name: X-API-Key
+          from: secret.typo_key
+",
+        ));
+        assert!(err.contains("global"), "the level: {err}");
+        assert!(err.contains("X-API-Key"), "the header: {err}");
+        assert!(err.contains("secret.typo_key"), "the name: {err}");
+        assert!(err.contains("legacy_api_key"), "what is declared: {err}");
+    }
+
+    /// A document with no `secrets:` block says so rather than listing an empty
+    /// set, since the fix there is to declare the value, not to correct a name.
+    #[test]
+    fn a_secret_source_against_a_document_declaring_none_says_so() {
+        let err = refuse(&global(
+            "    request:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_key
+",
+        ));
+        assert!(err.contains("no `secrets.values`"), "{err}");
+    }
+
+    /// A secret is not something an upstream told us, so a response entry
+    /// naming one describes a projection that could not mean anything.
+    #[test]
+    fn a_response_entry_naming_a_secret_is_refused() {
+        let err = refuse(&with_secret(
+            "    response:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_key
+",
+        ));
+        assert!(err.contains("request-direction"), "{err}");
+        assert!(err.contains("secret.legacy_api_key"), "{err}");
+    }
+
+    /// Both checks run over a member path too, and name the member, since a
+    /// bad source inside an object is no easier to find than a bad `from:`.
+    #[test]
+    fn a_secret_under_members_is_checked_the_same_way() {
+        load(&with_secret(
+            "    request:
+      headers:
+        - name: x-upstream
+          members:
+            key: secret.legacy_api_key
+",
+        ));
+        let wrong_direction = refuse(&with_secret(
+            "    response:
+      headers:
+        - name: x-upstream
+          members:
+            key: secret.legacy_api_key
+",
+        ));
+        assert!(
+            wrong_direction.contains("key"),
+            "the member: {wrong_direction}"
+        );
+        assert!(
+            wrong_direction.contains("request-direction"),
+            "{wrong_direction}"
+        );
+        let undeclared = refuse(&with_secret(
+            "    request:
+      headers:
+        - name: x-upstream
+          members:
+            key: secret.nope
+",
+        ));
+        assert!(undeclared.contains("secret.nope"), "{undeclared}");
+    }
+
+    /// A secret is one opaque string, so it loads into a single-value header
+    /// with no `encode:`, unlike a collection.
+    #[test]
+    fn a_secret_needs_no_declared_encoding() {
+        load(&with_secret(
+            "    request:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_key
+",
+        ));
+    }
+
+    /// A malformed declaration is reported against the `secrets:` block that
+    /// holds it rather than against whichever route first named it, which is
+    /// why the secrets walk runs ahead of this one.
+    #[test]
+    fn a_malformed_secret_declaration_is_reported_before_the_source_that_names_it() {
+        let err = refuse(
+            "engine_settings:
+  dispatch: policy
+secrets:
+  providers:
+    shell: { kind: env }
+  values:
+    bad.name: { provider: shell, ref: LEGACY_API_KEY }
+global:
+  assertions:
+    request:
+      headers:
+        - name: X-API-Key
+          from: secret.bad.name
+",
+        );
+        assert!(err.contains("bad.name"), "{err}");
+        assert!(
+            !err.contains("X-API-Key"),
+            "the declaration is at fault, not the route that named it: {err}"
+        );
     }
 
     #[test]
