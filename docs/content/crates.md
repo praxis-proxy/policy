@@ -46,6 +46,7 @@ facade rather than named directly. See [Builtins](builtins.md).
 | `praxis-policy-pdp-diff` | Differential tests across the three decision points. A test harness, not an API. |
 | `reference/plugins/pii-scanner` | A worked example of a host plugin. |
 | `reference/plugins/audit-logger` | The same, for an audit sink. |
+| `reference/plugins/transcript-scanner` | The same, for a plugin that reads typed conversation history through `read_agent`. |
 
 ## Writing a Plugin Factory
 

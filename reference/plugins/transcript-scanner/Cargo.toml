@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# praxis-policy-plugin-transcript-scanner — CMF plugin that scans the typed
+# conversation history carried on the agent extension and denies when a prior
+# turn matches a configured pattern.
+
+[package]
+name = "praxis-policy-plugin-transcript-scanner"
+# Reference implementation. Not published, and not in the `builtins` umbrella:
+# it exists to show how a plugin reads `AgentExtension.conversation.history`,
+# which the CMF bridge deliberately keeps off the attribute bag. Its detectors
+# are plain operator-supplied regexes, which is not a data-loss control.
+#
+# Still a workspace member, so it is built, linted and tested here. A host
+# registers it with `PolicyEngine::register_factory`; write your own against
+# `praxis_policy_core::prelude`.
+publish = false
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+description = "PPE CMF plugin — scans typed conversation history for configured patterns."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+praxis-policy-core = { workspace = true }
+
+async-trait = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+regex       = { workspace = true }
+
+[dev-dependencies]
+praxis-policy-apl-runtime = { workspace = true }
+
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

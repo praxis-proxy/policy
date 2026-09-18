@@ -62,6 +62,8 @@ history.
   the config document, its five top-level keys, and both dispatch modes
 - [HTTP Routing](http-routing.md):
   the `http:` route selector, precedence, and the catch-all report
+- [LLM Routes](llm-routes.md):
+  what an `llm:` route can read before and after the call, with a worked config
 - [Identity and Delegation](identity-delegation.md):
   inbound identity slots, outbound delegation subjects, and six recipes
 - [Header Assertions](assertions.md):

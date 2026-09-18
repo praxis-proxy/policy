@@ -21,6 +21,8 @@ rust-version.workspace = true
 praxis-policy-apl-core = { workspace = true }
 praxis-policy-core = { workspace = true }
 serde_json = { workspace = true }
+# `llm.system_prompt_digest`.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

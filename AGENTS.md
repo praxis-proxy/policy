@@ -65,7 +65,8 @@ builtins/
   session/      valkey
 
 reference/
-  plugins/      pii-scanner, audit-logger (examples)
+  plugins/      pii-scanner, audit-logger,
+                transcript-scanner (examples)
 ```
 
 **Dependency flow:**

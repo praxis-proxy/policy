@@ -30,7 +30,7 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | `read_meta` |
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | `read_request` |
 | HTTP | request line (method, path, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
-| LLM | model id, provider, capabilities | `llm.*` | `read_llm` |
+| LLM | model id, provider, capabilities; for the request, the offered tools, tool choice, sampling parameters, and a digest of the system prompt | `llm.*` | `read_llm` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | `read_mcp` |
 | Completion | stop reason, token counts, model, latency | `completion.*` | `read_completion` |
 | Provenance | source, message id, parent id | `provenance.*` | `read_provenance` |
@@ -38,6 +38,26 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Custom | free-form host-defined namespace | `custom.*` | `read_custom` |
 | Raw credentials | inbound tokens and minted delegated tokens | flow through plugin payloads, not the bag | `read_inbound_credentials`, `read_delegated_tokens` |
 | Candidate constraint | folded backend routing constraint from `restrict` effects | not a bag namespace — read by the host router | written by the policy engine |
+
+One field of the agent extension is carried but not flattened: the
+conversation history. `AgentExtension.conversation.history` is a list of CMF
+`Message`s, oldest first, the same type as the current turn's payload. No
+`agent.*` key exposes it, so an APL predicate cannot read it directly. A policy
+that needs to reason over earlier turns runs a plugin that declares
+`read_agent` and walks the typed turns itself;
+`reference/plugins/transcript-scanner` is a worked example.
+
+The LLM extension carries what a request asks of the model when the host can
+see it: `LLMExtension.request`. Its offered tools flatten to `llm.offered_tools`,
+a set of tool names, so `llm.offered_tools contains 'send_email'` is a
+predicate. The scalars flatten to `llm.max_tokens`, `llm.temperature`,
+`llm.top_p`, `llm.stream`, `llm.tool_choice` (`auto`, `none`, `required`, or
+`tool`) and `llm.forced_tool`. The system prompt reaches the bag only as
+`llm.system_prompt_digest`, `sha256:` and the hex digest of its text, which is
+enough to pin a known prompt; a plugin reads the text from the extension. When
+the host reports no request, none of these keys exist, so a rule that must fail
+closed on an unreported request tests `exists(llm.offered_tools)`.
+[LLM Routes](llm-routes.md) lists every key an `llm:` route reads, per phase.
 
 The request arguments and response body are also flattened. An object
 writes `args.<dotted>` / `result.<dotted>`; a top-level scalar or scalar

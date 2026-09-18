@@ -17,6 +17,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`reference/plugins/transcript-scanner`**, a worked example of a plugin that reads typed conversation history through `read_agent` and denies with `transcript.detected` when a prior turn matches a configured pattern. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+- **`llm:` routes can see the request.** `LLMExtension.request` carries the system prompt, the offered tool definitions, tool choice, `max_tokens`, `temperature`, `top_p`, stop sequences, and the streaming flag. The bag gains `llm.offered_tools` (a set of tool names), the scalars, and `llm.system_prompt_digest` (`sha256:<hex>`), so `"llm.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"` and a system-prompt pin are config lines. `LLMExtension` gains a public field, which breaks a host that builds it with an exhaustive struct literal. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+- **`docs/content/llm-routes.md` documents what an `llm:` route can read**, before and after the call: the message text, the `llm.*`, `agent.*` and `completion.*` keys, what stays out of the bag and how to reach it, how a missing key behaves when the host did not report the request, and what the host must supply. Its worked config is run against the engine by `visitor_e2e`, so the page cannot drift from the behaviour it describes. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+
+### Changed
+
+- **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+
 ## [0.3.0] - 2026-09-18
 
 ### Added
