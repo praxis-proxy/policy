@@ -45,7 +45,7 @@ jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 # `base64` for the peek-at-iss helper (split + URL_SAFE_NO_PAD decode
 # of the middle JWT segment). Pinned to 0.22 to match what
 # jsonwebtoken pulls — Cargo dedups to a single version.
-base64 = "0.22"
+base64 = "0.23"
 
 # `chrono` for the `resolved_at` timestamp on IdentityPayload. Comes
 # in transitively via praxis-policy-core already; redeclaring keeps the

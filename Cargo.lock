@@ -2859,7 +2859,7 @@ name = "praxis-policy-plugin-delegator-oauth"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "getrandom 0.4.3",
@@ -2879,7 +2879,7 @@ name = "praxis-policy-plugin-elicitation-ciba"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "praxis-policy-core",
  "serde",
@@ -2893,7 +2893,7 @@ name = "praxis-policy-plugin-identity-jwt"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "futures",
  "jsonwebtoken",
