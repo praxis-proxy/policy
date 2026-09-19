@@ -3279,6 +3279,7 @@ mod tests {
     use crate::error::PluginViolation;
     use crate::hooks::metadata::{HookMetadata, register_hook_metadata};
     use crate::plugin::{OnError, PluginMode};
+    use crate::trace_capture::capturing;
     use async_trait::async_trait;
 
     /// Every mock handler here answers for the same fixture hook. The trait
@@ -9513,109 +9514,6 @@ routes:
             vec!["route".to_owned(), "catch-all".to_owned()],
             "the route answers what it resolves; the reserved name answers the rest"
         );
-    }
-
-    // -- Capturing what the engine emits --
-    //
-    // A subscriber installed once for the whole binary, always interested, so
-    // callsite interest never depends on which test reached it first. The
-    // thread-local sink keeps each test reading only its own events.
-
-    #[derive(Clone, Default)]
-    struct Events(Arc<std::sync::Mutex<Vec<String>>>);
-
-    impl Events {
-        fn matching(&self, needle: &str) -> Vec<String> {
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-                .filter(|event| event.contains(needle))
-                .cloned()
-                .collect()
-        }
-    }
-
-    std::thread_local! {
-        static SINK: std::cell::RefCell<Option<Events>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    struct Capture;
-
-    /// Clears the sink even if the body panics, so a failing test cannot leak
-    /// its events into whichever test the runner puts on this thread next.
-    struct Sink;
-
-    impl Drop for Sink {
-        fn drop(&mut self) {
-            SINK.with_borrow_mut(|sink| *sink = None);
-        }
-    }
-
-    struct Render(String);
-
-    impl tracing::field::Visit for Render {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!(" {}={value:?}", field.name()));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.push_str(&format!(" {}={value}", field.name()));
-        }
-    }
-
-    impl tracing::Subscriber for Capture {
-        fn register_callsite(&self, _: &tracing::Metadata<'_>) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::always()
-        }
-
-        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-            Some(tracing::level_filters::LevelFilter::TRACE)
-        }
-
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            SINK.with_borrow(|sink| {
-                let Some(events) = sink.as_ref() else {
-                    return;
-                };
-                let mut render = Render(format!("[{}]", event.metadata().level()));
-                event.record(&mut render);
-                events
-                    .0
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(render.0);
-            });
-        }
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    /// Capture what the engine emits until the returned guard is dropped.
-    fn capturing() -> (Events, Sink) {
-        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        INSTALLED.get_or_init(|| {
-            tracing::subscriber::set_global_default(Capture)
-                .expect("no other subscriber is installed in this test binary");
-        });
-        let events = Events::default();
-        SINK.with_borrow_mut(|sink| *sink = Some(events.clone()));
-        (events, Sink)
     }
 }
 

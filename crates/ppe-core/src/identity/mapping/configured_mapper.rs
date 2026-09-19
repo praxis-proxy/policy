@@ -13,15 +13,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use praxis_policy_core::extensions::raw_credentials::TokenRole;
-use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
+use crate::extensions::raw_credentials::TokenRole;
+use crate::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
 use serde_json::Value;
 
-use crate::claim_map::{ClaimMap, ClaimMapper, is_spiffe_id, trust_domain_of};
-use crate::claim_map_config::{
+use super::claim_map_config::{
     CompiledCandidate, CompiledClaimMap, CompiledField, CompiledRoleMap, MergeMode, OnMissing,
     SplitMode,
 };
+use super::{ClaimMap, ClaimMapper, is_spiffe_id, trust_domain_of};
 
 /// The registered JWT claims, which the claims bag drops unless a map asks for
 /// one back. They are properties of token validation rather than subject
@@ -488,13 +488,10 @@ impl ClaimMapper for ConfiguredClaimMap {
     reason = "tests"
 )]
 mod tests {
-    use std::cell::RefCell;
-    use std::sync::{Arc, Mutex, OnceLock};
-
     use serde_json::json;
 
     use super::*;
-    use crate::claim_map_config::{ClaimMapConfig, ClaimsOverrides};
+    use crate::identity::mapping::claim_map_config::{ClaimMapConfig, ClaimsOverrides};
 
     fn claims(value: Value) -> ClaimMap {
         value.as_object().unwrap().clone().into_iter().collect()
@@ -529,123 +526,7 @@ mod tests {
         items
     }
 
-    // ---- tracing capture --------------------------------------------------
-    //
-    // A minimal subscriber rather than a dev-dependency: the diagnostics are
-    // asserted on, so they need capturing, and `tracing` alone is enough to do
-    // it.
-    //
-    // One global subscriber with a thread-local sink, not `with_default` per
-    // test. Callsite interest is cached process-wide, so a thread-local
-    // subscriber does not own whether an event fires: installing one rebuilds
-    // the cache, and a test running in parallel can have its callsite recached
-    // as disabled between the `debug!` and the assertion. A subscriber that is
-    // installed once and always interested takes the cache out of the race, and
-    // the sink keeps each test reading only its own events.
-
-    #[derive(Clone, Default)]
-    struct Events(Arc<Mutex<Vec<String>>>);
-
-    impl Events {
-        fn recorded(&self) -> Vec<String> {
-            self.0
-                .lock()
-                .expect("the event log is not poisoned")
-                .clone()
-        }
-
-        fn matching(&self, needle: &str) -> Vec<String> {
-            self.recorded()
-                .into_iter()
-                .filter(|event| event.contains(needle))
-                .collect()
-        }
-    }
-
-    thread_local! {
-        static SINK: RefCell<Option<Events>> = const { RefCell::new(None) };
-    }
-
-    struct Capture;
-
-    /// Clears the sink even if the body panics, so a failing test cannot leak
-    /// its events into whichever test the runner puts on this thread next.
-    struct Sink;
-
-    impl Drop for Sink {
-        fn drop(&mut self) {
-            SINK.with_borrow_mut(|sink| *sink = None);
-        }
-    }
-
-    struct Render(String);
-
-    impl tracing::field::Visit for Render {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!(" {}={value:?}", field.name()));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.push_str(&format!(" {}={value}", field.name()));
-        }
-    }
-
-    impl tracing::Subscriber for Capture {
-        /// Always, so the cached interest never depends on which thread first
-        /// reached the callsite.
-        fn register_callsite(&self, _: &tracing::Metadata<'_>) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::always()
-        }
-
-        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-            Some(tracing::level_filters::LevelFilter::TRACE)
-        }
-
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            SINK.with_borrow(|sink| {
-                let Some(events) = sink.as_ref() else {
-                    return;
-                };
-                let mut render = Render(format!("[{}]", event.metadata().level()));
-                event.record(&mut render);
-                events
-                    .0
-                    .lock()
-                    .expect("the event log is not poisoned")
-                    .push(render.0);
-            });
-        }
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    /// Run `body` with events captured.
-    fn capturing<T>(body: impl FnOnce() -> T) -> (T, Events) {
-        static INSTALLED: OnceLock<()> = OnceLock::new();
-        INSTALLED.get_or_init(|| {
-            tracing::subscriber::set_global_default(Capture)
-                .expect("no other subscriber is installed in this test binary");
-        });
-
-        let events = Events::default();
-        SINK.with_borrow_mut(|sink| *sink = Some(events.clone()));
-        let _guard = Sink;
-        (body(), events)
-    }
+    use crate::trace_capture::capturing_body as capturing;
 
     // ---- candidate resolution and merge -----------------------------------
 

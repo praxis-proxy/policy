@@ -13,7 +13,7 @@
 
 use serde::Deserialize;
 
-use crate::claim_map_config::{ClaimMapConfig, CompiledClaimMap};
+use praxis_policy_core::identity::mapping::{ClaimMapConfig, CompiledClaimMap};
 
 /// Every shipped preset, by the name an operator writes in `claim_mapper`.
 ///
@@ -119,8 +119,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::claim_map::{ClaimMap, ClaimMapper as _};
-    use crate::configured_mapper::ConfiguredClaimMap;
+    use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper as _, ConfiguredClaimMap};
 
     fn claims(value: Value) -> ClaimMap {
         value.as_object().unwrap().clone().into_iter().collect()

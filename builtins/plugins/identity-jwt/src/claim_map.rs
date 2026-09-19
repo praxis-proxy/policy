@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// `ClaimMapper` — converts validated JWT claims into a populated
-// `SubjectExtension`.
+// `StandardClaimMap` — the OIDC-standard claim shape, mapped onto the
+// identity slots.
 //
 // Different IdPs use different claim shapes:
 //
@@ -16,63 +16,14 @@
 //
 // `StandardClaimMap` covers the OIDC-standard shape; deployments
 // with bespoke IdPs implement `ClaimMapper` themselves and inject
-// at resolver construction.
-
-use std::collections::HashMap;
+// at resolver construction. The trait, the path compiler and the
+// configured mapper live in `praxis_policy_core::identity::mapping`,
+// since an API key directory record maps the same way a claim set does.
 
 use serde_json::Value;
 
 use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
-
-/// Convert a validated JWT's claim map into the typed identity slot
-/// for the resolver's configured role.
-///
-/// Implementations supply one method per role they understand:
-///
-///   * [`map_subject`] — `sub` plus subject-shaped fields, for
-///     `TokenRole::User`.
-///   * [`map_client`]  — `client_id` plus client-shaped fields, for
-///     `TokenRole::Client`.
-///   * [`map_workload`] — SPIFFE-style identity, for `TokenRole::CallerWorkload`.
-///
-/// Each defaults to `None` so existing custom mappers stay valid —
-/// they get implicit "this mapper doesn't know how to do that role,"
-/// which the resolver surfaces as `auth.mapping_failed` when an
-/// operator wires a role the mapper can't fill.
-///
-/// `Debug` is a supertrait so structs holding `Arc<dyn ClaimMapper>`
-/// (notably `JwtIdentityResolver`) can themselves derive `Debug`.
-///
-/// [`map_subject`]: ClaimMapper::map_subject
-/// [`map_client`]: ClaimMapper::map_client
-/// [`map_workload`]: ClaimMapper::map_workload
-pub trait ClaimMapper: std::fmt::Debug + Send + Sync {
-    /// Map JWT claims into a `SubjectExtension` (for `role: user`).
-    fn map_subject(&self, claims: &HashMap<String, Value>) -> Option<SubjectExtension> {
-        let _ = claims;
-        None
-    }
-
-    /// Map JWT claims into a `ClientExtension` (for `role: client`).
-    /// Default returns `None` — implementations that handle client
-    /// tokens override this.
-    fn map_client(&self, claims: &HashMap<String, Value>) -> Option<ClientExtension> {
-        let _ = claims;
-        None
-    }
-
-    /// Map JWT claims into a `WorkloadIdentity` (for `role: workload`).
-    /// Default returns `None` — implementations that handle SPIFFE /
-    /// SPIFFE-JWT-SVID tokens override this.
-    fn map_workload(&self, claims: &HashMap<String, Value>) -> Option<WorkloadIdentity> {
-        let _ = claims;
-        None
-    }
-}
-
-/// Type alias matching what `jsonwebtoken::decode::<ClaimMap>(...)`
-/// produces — a JSON object's key/value pairs.
-pub type ClaimMap = HashMap<String, Value>;
+use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper, is_spiffe_id, trust_domain_of};
 
 /// Default `ClaimMapper` covering the OIDC-standard claim shape:
 ///
@@ -285,31 +236,6 @@ impl ClaimMapper for StandardClaimMap {
 
         Some(subject)
     }
-}
-
-/// Every SPIFFE ID starts here, and no configuration can turn the check off.
-const SPIFFE_SCHEME: &str = "spiffe://";
-
-/// Whether a string is usable as a SPIFFE ID.
-///
-/// The scheme alone is not enough: the authority carries the trust domain, and
-/// the SPIFFE standard makes it mandatory. `spiffe:///ns/default/sa/agent` names
-/// no trust boundary, so it is not an identity this plugin can file.
-pub(crate) fn is_spiffe_id(text: &str) -> bool {
-    trust_domain_of(text).is_some()
-}
-
-/// The trust domain is the SPIFFE URI's authority, which the standard makes the
-/// trust boundary. Deriving it from `iss` instead is explicitly discouraged.
-///
-/// `None` when the authority is absent, which is what makes the string unusable
-/// as an identity rather than an identity with no trust domain.
-pub(crate) fn trust_domain_of(spiffe_id: &str) -> Option<String> {
-    spiffe_id
-        .strip_prefix(SPIFFE_SCHEME)
-        .and_then(|rest| rest.split('/').next())
-        .filter(|domain| !domain.is_empty())
-        .map(str::to_owned)
 }
 
 #[cfg(test)]

@@ -59,13 +59,13 @@ use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
-use super::claim_map::{ClaimMap, ClaimMapper};
-use super::claim_map_config::{ClaimsOverrides, CompiledClaimsOverrides};
 use super::config::{
     JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError, TrustedIssuerConfig,
 };
-use super::configured_mapper::ConfiguredClaimMap;
 use super::presets;
+use praxis_policy_core::identity::mapping::ConfiguredClaimMap;
+use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper};
+use praxis_policy_core::identity::mapping::{ClaimsOverrides, CompiledClaimsOverrides};
 
 /// How long a request that needs new keys waits for an in-flight
 /// refresh before giving up and denying.
