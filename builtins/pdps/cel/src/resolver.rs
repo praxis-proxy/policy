@@ -145,6 +145,17 @@ impl CelResolver {
     ///
     /// Composes: calling `with_functions` more than once stacks the
     /// callbacks. Each runs in registration order on every context.
+    /// If two custom setups register the same name, the later one wins.
+    ///
+    /// Prefer names that are not already in the CEL standard library
+    /// (`size`, `matches`, `double`, …). `with_functions` does not
+    /// reject a colliding name. Which body runs is decided by CEL, not
+    /// by this crate: today CEL tries a matching built-in first
+    /// (`size("hello")` stays the standard `size`) and calls the
+    /// custom function only when the built-in has no matching form
+    /// (`size(42)` can run a custom `size` that takes an int). That
+    /// dispatch is not part of this resolver's contract. `has(...)` is
+    /// rewritten by the parser, so a custom `has` never runs.
     ///
     /// # Example
     ///
@@ -668,6 +679,76 @@ mod tests {
             out.decision,
             Decision::Allow,
             "subsequent with_functions calls must compose, not replace",
+        );
+    }
+
+    /// A custom `size(int) -> 777` must not replace stdlib
+    /// `size("hello")` (still 5), but must run for `size(42)` because
+    /// the stdlib has no `size` that takes an int.
+    #[tokio::test]
+    async fn custom_size_stdlib_overload_then_int_fallback() {
+        let r = CelResolver::new().with_functions(|ctx| {
+            ctx.add_function("size", |_n: i64| -> i64 { 777 });
+        });
+        let bag = bag_with(&[("subject.id", "alice")]);
+
+        let stdlib = r
+            .evaluate(&cel_call("size('hello') == 5"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(
+            stdlib.decision,
+            Decision::Allow,
+            "stdlib size('hello') is 5; a matching built-in must win",
+        );
+
+        let fallback = r
+            .evaluate(&cel_call("size(42) == 777"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(
+            fallback.decision,
+            Decision::Allow,
+            "no stdlib size(int); the custom function must run as fallback",
+        );
+    }
+
+    /// Two custom setups that register the same name and signature:
+    /// the later registration's body must win. Pins the doc-comment
+    /// claim on `with_functions` ("If two custom setups register the
+    /// same name, the later one wins") so a silent semantics change
+    /// in the CEL crate breaks loudly here.
+    #[tokio::test]
+    async fn later_custom_function_overwrites_earlier_one() {
+        let r = CelResolver::new()
+            .with_functions(|ctx| {
+                ctx.add_function("magic", |n: i64| -> i64 { n + 100 });
+            })
+            .with_functions(|ctx| {
+                // Same name, same signature, different body.
+                ctx.add_function("magic", |n: i64| -> i64 { n + 999 });
+            });
+        let bag = bag_with(&[("subject.id", "alice")]);
+
+        // The later registration (n + 999) must be the one that runs.
+        let out = r
+            .evaluate(&cel_call("magic(1) == 1000"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.decision,
+            Decision::Allow,
+            "the later custom function body must win; expected magic(1) == 1000",
+        );
+
+        // Confirm the earlier body (n + 100) is NOT the one running.
+        let out = r
+            .evaluate(&cel_call("magic(1) == 101"), &bag)
+            .await
+            .unwrap();
+        assert!(
+            matches!(out.decision, Decision::Deny { .. }),
+            "the earlier custom function body (n + 100) must be shadowed",
         );
     }
 
