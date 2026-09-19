@@ -66,6 +66,10 @@ pub mod http;
 /// Which IP addresses an outbound policy call must not reach. The shared
 /// range table; a transport enforces it where it dials.
 pub mod http_addr;
+/// Deterministic parsing of a raw `Cookie` header value and a raw URL query
+/// string into name-value pairs, independent of which HTTP framework the
+/// host runs.
+pub mod http_credential;
 /// The generic-HTTP hook family: its two names, its payload, and its hook type.
 pub mod http_hook;
 /// The path a route matches on, normalized the way the gateway's own

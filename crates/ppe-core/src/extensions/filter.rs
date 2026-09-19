@@ -976,13 +976,19 @@ mod tests {
 
     fn extensions_with_raw_credentials() -> Extensions {
         use crate::extensions::raw_credentials::{
-            DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken,
+            Credential, DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken,
             RawInboundToken, TokenKind, TokenRole,
         };
         let mut raw = RawCredentialsExtension::default();
         raw.inbound_tokens.insert(
             TokenRole::User,
-            RawInboundToken::new("user-jwt-bytes", "X-User-Token", TokenKind::Jwt),
+            RawInboundToken::new(
+                "user-jwt-bytes",
+                Credential::Header {
+                    name: "X-User-Token".into(),
+                },
+                TokenKind::Jwt,
+            ),
         );
         raw.delegated_tokens.insert(
             DelegationKey {
