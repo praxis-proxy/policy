@@ -26,7 +26,18 @@ use super::{ClaimMap, ClaimMapper, is_spiffe_id, trust_domain_of};
 /// The registered JWT claims, which the claims bag drops unless a map asks for
 /// one back. They are properties of token validation rather than subject
 /// attributes.
-const REGISTERED_CLAIMS: &[&str] = &["aud", "exp", "iat", "iss", "jti", "nbf", "sub"];
+///
+/// The default for [`ConfiguredClaimMap`], since the JWT resolver is what the
+/// map was built for. A resolver reading records that are not JWTs passes its
+/// own list to [`with_reserved_names`]: a directory record naming a field `exp`
+/// or `iss` means its own thing by it, and dropping that silently loses an
+/// attribute a policy may be written against.
+///
+/// [`with_reserved_names`]: ConfiguredClaimMap::with_reserved_names
+pub const REGISTERED_JWT_CLAIMS: &[&str] = &["aud", "exp", "iat", "iss", "jti", "nbf", "sub"];
+
+/// What a workload identity records as its attestor when no resolver names one.
+const DEFAULT_ATTESTOR: &str = "jwt";
 
 /// A `ClaimMapper` driven by a compiled claim map.
 ///
@@ -35,12 +46,36 @@ const REGISTERED_CLAIMS: &[&str] = &["aud", "exp", "iat", "iss", "jti", "nbf", "
 #[derive(Debug, Clone)]
 pub struct ConfiguredClaimMap {
     map: CompiledClaimMap,
+    reserved: &'static [&'static str],
+    attestor: &'static str,
 }
 
 impl ConfiguredClaimMap {
-    /// Wrap a compiled map as a mapper.
+    /// Wrap a compiled map as a mapper, with the JWT defaults.
     pub fn new(map: CompiledClaimMap) -> Self {
-        Self { map }
+        Self {
+            map,
+            reserved: REGISTERED_JWT_CLAIMS,
+            attestor: DEFAULT_ATTESTOR,
+        }
+    }
+
+    /// The names the claims bag drops unless a map asks for one back.
+    ///
+    /// Pass an empty slice for a record whose fields are all subject
+    /// attributes, which is the API key directory case.
+    pub fn with_reserved_names(mut self, reserved: &'static [&'static str]) -> Self {
+        self.reserved = reserved;
+        self
+    }
+
+    /// What a mapped workload identity records as its attestor.
+    ///
+    /// Read by a policy that gates on how an identity was established, so it
+    /// has to name the credential the resolver actually verified.
+    pub fn with_attestor(mut self, attestor: &'static str) -> Self {
+        self.attestor = attestor;
+        self
     }
 
     /// The compiled map this mapper runs.
@@ -57,7 +92,7 @@ impl ConfiguredClaimMap {
     /// `permissions` won. Only a single-segment path consumes its claim, so a
     /// nested path leaves its parent whole.
     fn claims_bag(&self, section: &CompiledRoleMap, claims: &ClaimMap) -> HashMap<String, Value> {
-        let mut excluded: HashSet<&str> = REGISTERED_CLAIMS.iter().copied().collect();
+        let mut excluded: HashSet<&str> = self.reserved.iter().copied().collect();
         for (_, field) in section.fields() {
             for candidate in field.candidates() {
                 if let Some(name) = candidate.path().single_segment() {
@@ -473,7 +508,7 @@ impl ClaimMapper for ConfiguredClaimMap {
             spiffe_id: Some(spiffe_id),
             trust_domain,
             attested_at: None,
-            attestor: Some("jwt".to_owned()),
+            attestor: Some(self.attestor.to_owned()),
             selectors,
             client_id,
         })
@@ -1358,6 +1393,57 @@ mod tests {
     /// An escaped URL-named claim and a colon-prefixed one each populate their
     /// field through the mapper, which is the pair a policy language cannot
     /// address directly.
+    /// A directory record naming a field `exp` or `iss` means its own thing by
+    /// it. A resolver whose records are not JWTs clears the list so the record
+    /// keeps what it carries.
+    #[test]
+    fn cleared_reserved_names_keep_a_record_field_a_jwt_would_drop() {
+        let record = claims(json!({
+            "user": "alice",
+            "exp": "2027-01-01T00:00:00Z",
+            "iss": "maas-api",
+        }));
+        let map = json!({"subject": {"id": "user"}});
+
+        let dropped = mapper(map.clone())
+            .map_subject(&record)
+            .expect("the record maps");
+        assert!(
+            !dropped.claims.contains_key("exp") && !dropped.claims.contains_key("iss"),
+            "the JWT default drops both: {:?}",
+            dropped.claims
+        );
+
+        let kept = mapper(map)
+            .with_reserved_names(&[])
+            .map_subject(&record)
+            .expect("the record maps");
+        assert_eq!(
+            sorted(&kept.claims.keys().cloned().collect()),
+            vec!["exp", "iss"],
+            "a cleared list keeps every field the map did not consume"
+        );
+    }
+
+    /// The attestor names the credential the resolver verified, so a policy
+    /// gating on it cannot be told a key was a JWT.
+    #[test]
+    fn the_attestor_names_the_credential_the_resolver_verified() {
+        let record = claims(json!({"workload_id": "spiffe://corp.example/ns/prod/sa/batch"}));
+        let map = json!({"workload": {"spiffe_id": "workload_id"}});
+
+        let default = mapper(map.clone())
+            .map_workload(&record)
+            .expect("the record maps");
+        assert_eq!(default.attestor.as_deref(), Some("jwt"));
+
+        let named = mapper(map)
+            .with_attestor("api_key")
+            .map_workload(&record)
+            .expect("the record maps");
+        assert_eq!(named.attestor.as_deref(), Some("api_key"));
+    }
+
     #[test]
     fn escaped_and_colon_prefixed_claim_names_populate_their_fields() {
         let subject = mapper(json!({
