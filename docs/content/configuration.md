@@ -237,4 +237,4 @@ client_secret_source:
   and outbound credentials.
 - [Header Assertions](assertions.md): project derived identity onto upstream
   requests.
-- [Upgrading APL](../upgrade-apl.md): migrate an older configuration.
+- [Upgrading APL](upgrade-apl.md): migrate an older configuration.

@@ -351,6 +351,6 @@ doubled `|`.
 
 - [Effects and Sequencing](effects.md): apply the grammar in ordered policy
   phases.
-- [Upgrading APL](../../upgrade-apl.md): migrate existing configurations.
+- [Upgrading APL](../upgrade-apl.md): migrate existing configurations.
 - [`crates/ppe-apl-core/tests/conformance/`](../../../crates/ppe-apl-core/tests/conformance/):
   accepted and rejected conformance cases.

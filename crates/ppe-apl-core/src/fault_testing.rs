@@ -4,7 +4,7 @@
 //! A PDP resolver that panics, returns an error, or hangs, on demand.
 //!
 //! Drive this through [`crate::fault_testing::drive_pdp`] and assert the
-//! decision. `docs/safety-invariants.md` is the catalog.
+//! decision. `docs/dev/safety-invariants.md` is the catalog.
 //!
 //! Behind `test-util`. A `FaultPdp` that reached production would either
 //! deny every request or hang it.

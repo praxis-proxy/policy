@@ -17,7 +17,7 @@ make audit
 `make ci` runs the same set CI does.
 
 Safety invariants (fail-closed behaviour at every seam) live in
-`docs/safety-invariants.md`. A change that adds a plugin phase or a
+`docs/dev/safety-invariants.md`. A change that adds a plugin phase or a
 shipped PDP dialect is incomplete until that catalog has a cell for it;
 the tests fail until one is added.
 
@@ -112,7 +112,7 @@ consequences are worth knowing:
   original repository. Cross-tree comparison works by path and content, not by
   commit identity.
 
-`docs/port-provenance.md` records the exact source commit the import was taken
+`docs/dev/port-provenance.md` records the exact source commit the import was taken
 from.
 
 ## Lints
@@ -138,7 +138,7 @@ Three rules for contributors:
   reason.
 
 Enforcing one of the allowed groups is welcome as a focused change, one lint at a
-time, separate from feature work. `docs/lints.md` is worth reading first: it
+time, separate from feature work. `docs/dev/lints.md` is worth reading first: it
 records which lints clippy reports as machine-fixable but cannot actually fix, and
 where a lint's suggested rewrite is worse than the code it replaces.
 

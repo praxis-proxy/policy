@@ -63,7 +63,7 @@ is caught at startup rather than at the first request that needed it.
 [docs.rs/praxis-policy](https://docs.rs/praxis-policy), built with all
 features so the feature-gated re-exports are visible.
 
-The crates are versioned and released together, so one `0.2`
+The crates are versioned and released together, so one `0.3`
 requirement covers the set.
 
 ## Next

@@ -95,6 +95,6 @@ every layer.
 
 ## Next
 
-- [Upgrading APL](../upgrade-apl.md): migrate existing configurations to the
+- [Upgrading APL](upgrade-apl.md): migrate existing configurations to the
   current syntax.
 - [Plugins and Pipeline](pipeline.md): extend APL with host plugins.
