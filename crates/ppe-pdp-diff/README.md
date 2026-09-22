@@ -28,8 +28,23 @@ Negative subset cases must all **deny**. Cause kinds may still differ:
 Cedar no-match is `DefaultDeny`; CEL/OPA `false` is `PolicyFalse`. That
 triple is named on the case (`AgreeDeny`), not hidden.
 
-Subset policies use same-type literals (int compared to int). They do not
-probe missing keys.
+Present-empty `StringSet` (`empty-set`, `bridge-empty-teams`,
+`bridge-empty-roles`) is in the subset: membership is false everywhere,
+including APL `require(subject.roles contains "hr")`. Cedar rebuilds
+`principal.roles` from flattened `role.*` trues; CEL and OPA read the
+original `subject.roles` set. The bridge writes both from the same
+`HashSet`, so they agree when empty.
+
+Unguarded probes of **omitted scalars** whose namespace was never written
+(`missing-collection`) and a missing `subject.id` are not in the subset.
+Omitted **claim** scalars (`missing-claim-string`, `missing-claim-int`)
+Deny on all four engines and are `AgreeDeny`: CEL and Cedar report a key
+error rather than a policy false. See
+[`docs/content/cmf-extensions.md`](../../docs/content/cmf-extensions.md).
+`!=` and `not in` on an omitted key do **not** agree across all four.
+APL `!=` Allows while CEL, cedar-direct, and OPA Deny
+(`missing-claim-not-eq`). APL `not in` Allows, OPA Allows with it (`not`
+of undefined is true), and CEL/cedar-direct Deny (`missing-not-in`).
 
 ## Out of subset (allowlist)
 
@@ -38,9 +53,10 @@ probe missing keys.
 | `floats-claim` | `AttributeValue::Float` on `claim.*` | Cedar has no float type; claims are stringified. CEL/OPA compare numerically. |
 | `floats-whole` | `Float(2.0)` on a claim | CEL/OPA coerce whole floats to int. Cedar still has a string, so `== 2` does not match. |
 | `floats-resource` | float in Cedar `resource.attributes` | Cedar rejects at entity build (`PdpError::Dispatch`). CEL/OPA accept the bag value. |
-| `empty-set` | empty `StringSet` on `subject.teams` | Present-empty: Cedar empty set, CEL/OPA empty list, `in`/`contains` is false. |
-| `missing-collection` | no `role.*` keys | Cedar empty set (clean false). Unguarded CEL `role.hr` is an eval error. OPA without `default` is undefined. |
+| `missing-collection` | no `role.*` keys, unguarded CEL `role.hr` | Cedar empty set (clean false). Unguarded CEL is an eval error. OPA without `default` is undefined. `has(role.hr)` is not a guard: the `role` namespace is absent. Use `subject.roles`. |
 | `missing-subject-id` | no `subject.id` | Cedar cannot build a principal. CEL eval error. OPA undefined. |
+| `missing-claim-not-eq` | omitted `claim.tenant`, `!=` | APL `!=` is true so `require` Allows. CEL/Cedar eval error. OPA undefined. |
+| `missing-not-in` | omitted denylist set, `not in` | APL Allows. OPA `not (x in y)` on undefined `y` is true (Allow). CEL/Cedar eval error (Deny). |
 
 Each allowlist row in `src/allowlist.rs` carries a `reason`. An unused id
 or an empty reason fails the meta tests.

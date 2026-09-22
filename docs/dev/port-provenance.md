@@ -11,7 +11,7 @@ back before this repository existed.
 | Source repository | `contextforge-org/cpex` |
 | Source commit | `aed0f15cda34a9b46e087e7ce337f78579146e12` |
 | Extraction tool | `git-filter-repo` |
-| Directives | [`tools/port-paths.txt`](../tools/port-paths.txt) |
+| Directives | [`tools/port-paths.txt`](../../tools/port-paths.txt) |
 | Commits before filtering | 256 |
 | Commits after filtering | 37 |
 | Files imported | 192 |

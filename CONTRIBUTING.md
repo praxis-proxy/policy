@@ -16,6 +16,11 @@ make audit
 
 `make ci` runs the same set CI does.
 
+Safety invariants (fail-closed behaviour at every seam) live in
+`docs/dev/safety-invariants.md`. A change that adds a plugin phase or a
+shipped PDP dialect is incomplete until that catalog has a cell for it;
+the tests fail until one is added.
+
 ## File headers
 
 Every source file starts with exactly these two lines, and nothing else:
@@ -107,7 +112,7 @@ consequences are worth knowing:
   original repository. Cross-tree comparison works by path and content, not by
   commit identity.
 
-`docs/port-provenance.md` records the exact source commit the import was taken
+`docs/dev/port-provenance.md` records the exact source commit the import was taken
 from.
 
 ## Lints
@@ -133,6 +138,36 @@ Three rules for contributors:
   reason.
 
 Enforcing one of the allowed groups is welcome as a focused change, one lint at a
-time, separate from feature work. `docs/lints.md` is worth reading first: it
+time, separate from feature work. `docs/dev/lints.md` is worth reading first: it
 records which lints clippy reports as machine-fixable but cannot actually fix, and
 where a lint's suggested rewrite is worse than the code it replaces.
+
+## Multi-threaded Tokio tests
+
+`#[tokio::test]` defaults to `current_thread`. Tasks yield at `.await` but never
+run on two OS threads at the same time, so a load and a store that have no await
+between them cannot overlap.
+
+Tests that exercise registration, unregister, hot reload (`load_config` /
+`from_config`), or route-cache fill and invalidation use
+`#[tokio::test(flavor = "multi_thread")]`, including when the body is a single
+task. The flavor is set by the surface under test so a later spawn starts from
+the runtime a host uses. A single-task test of those APIs does not itself
+create overlap.
+
+Overlap is asserted in `crates/ppe-core/tests/engine_concurrency.rs`.
+
+```rust
+#[tokio::test(flavor = "multi_thread")]
+async fn register_while_other_tasks_invoke() { /* ... */ }
+```
+
+Sequential tests that do not touch those surfaces stay on `current_thread`.
+
+A seeded stress test lives in `crates/ppe-core/tests/engine_concurrency.rs`.
+Replay a failure with `PPE_STRESS_SEED`. Nightly CI runs that test under
+ThreadSanitizer (`make test-tsan`; Linux only, the target is hardcoded). The
+`Release` / `Acquire` pairing `mutate_runtime` describes is documented by the
+extracted loom model in `crates/ppe-core/tests/loom_generation_snapshot.rs`.
+That model is not wired to `engine.rs`. Default `cargo test` does not compile
+it; run `RUSTFLAGS='--cfg loom' cargo test -p praxis-policy-core --test loom_generation_snapshot`.

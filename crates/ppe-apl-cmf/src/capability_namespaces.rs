@@ -98,13 +98,11 @@ const TABLE: &[CapabilityEntry] = &[
         ],
     },
     CapabilityEntry {
-        // Labels are not extracted into discrete bag keys today —
-        // they live on `Extensions.security.labels` and plugins
-        // read them directly. APL's BagBuilder doesn't materialize
-        // a bag-readable label namespace yet; if it does, add the
-        // prefix constant + reference here.
+        // Labels flatten as one present-empty StringSet. The typed
+        // `Extensions.security.labels` slot remains the plugin-facing
+        // form; this prefix is what a policy author writes.
         name: CAP_READ_LABELS,
-        prefixes: &[],
+        prefixes: &[BAG_SECURITY_LABELS],
     },
     CapabilityEntry {
         name: CAP_READ_CLIENT,
@@ -113,7 +111,9 @@ const TABLE: &[CapabilityEntry] = &[
     CapabilityEntry {
         name: CAP_READ_WORKLOAD,
         // Exposes both inbound caller workload AND this-host workload.
-        prefixes: &[BAG_WORKLOAD_PREFIX, BAG_CALLER_WORKLOAD_PREFIX],
+        // The extractors write `caller_workload.*` / `this_workload.*`;
+        // there is no `workload.*` prefix.
+        prefixes: &[BAG_CALLER_WORKLOAD_PREFIX, BAG_THIS_WORKLOAD_PREFIX],
     },
     CapabilityEntry {
         // Gates `Extensions.raw_credentials.inbound_tokens` — those
@@ -306,8 +306,23 @@ mod tests {
         // payloads, not bag attributes.
         assert!(capability_namespaces(CAP_READ_INBOUND_CREDENTIALS).is_empty());
         assert!(capability_namespaces(CAP_READ_DELEGATED_TOKENS).is_empty());
-        // read_labels too — labels aren't materialized into bag keys.
-        assert!(capability_namespaces(CAP_READ_LABELS).is_empty());
+    }
+
+    #[test]
+    fn read_labels_exposes_security_labels() {
+        let prefixes = capability_namespaces(CAP_READ_LABELS);
+        assert_eq!(prefixes, &[BAG_SECURITY_LABELS]);
+    }
+
+    #[test]
+    fn read_workload_exposes_caller_and_this_prefixes() {
+        let prefixes = capability_namespaces(CAP_READ_WORKLOAD);
+        assert!(prefixes.contains(&BAG_CALLER_WORKLOAD_PREFIX));
+        assert!(prefixes.contains(&BAG_THIS_WORKLOAD_PREFIX));
+        assert!(
+            !prefixes.iter().any(|p| p.starts_with("workload.")),
+            "extractors write caller_workload.* / this_workload.*, not workload.*"
+        );
     }
 
     #[test]

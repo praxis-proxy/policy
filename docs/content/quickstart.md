@@ -10,7 +10,7 @@ right one.
 ## 1. Add PPE
 
 ```toml
-praxis-policy = { version = "0.2", features = ["builtins", "http-hyper"] }
+praxis-policy = { version = "0.3", features = ["builtins", "http-hyper"] }
 ```
 
 `builtins` compiles in every bundled extension: JWT identity, OAuth

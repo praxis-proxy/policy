@@ -23,7 +23,8 @@ make test           # all workspace tests (two passes)
 make lint           # fmt --check + clippy -D warnings
 make lint-extra     # typos + taplo fmt --check
 make audit          # cargo deny check
-make coverage       # line coverage gated at 95%
+make coverage       # line coverage gated at 96%
+make coverage-lcov  # same gate, plus an lcov.info artifact
 make doc            # rustdoc with -D warnings
 make ci             # lint + test (what CI runs)
 make setup-hooks    # install pre-commit hook
@@ -37,7 +38,7 @@ cargo test -p praxis-policy-core --lib -- test_name
 
 ## Architecture
 
-16-crate workspace implementing a policy engine for
+17-crate workspace implementing a policy engine for
 AI agent traffic. The engine decides who may call
 which tool, what data comes back, and where that
 data goes next.
@@ -55,6 +56,7 @@ crates/
   ppe-apl-runtime  host runtime, plugin invokers,
                    route handler, session management
   ppe-pdp-diff  differential tests across cedar/cel/opa
+  ppe-benches   criterion benches, not a default member
 
 builtins/
   plugins/      identity-jwt, delegator-oauth,

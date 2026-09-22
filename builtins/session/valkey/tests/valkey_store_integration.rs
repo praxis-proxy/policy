@@ -238,3 +238,20 @@ async fn ttl_set_on_append_and_refreshed_on_load() {
         "load should keep/refresh a positive TTL, got {ttl_after_load}"
     );
 }
+
+/// An empty append is a no-op and must not dial Valkey. The early return
+/// exists so a caller that has nothing to union does not pay a round trip
+/// or fail closed on a dead endpoint.
+#[tokio::test]
+async fn empty_append_is_ok_without_dialing() {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str("kind: valkey\nendpoint: 127.0.0.1:1\ncommand_timeout_ms: 300\n")
+            .unwrap();
+    let cfg = ValkeyConfig::from_value(&value).unwrap();
+    let store = ValkeySessionStore::from_config(&cfg).unwrap();
+
+    store
+        .append_labels("sess-empty", &[])
+        .await
+        .expect("empty append must succeed without a backend");
+}

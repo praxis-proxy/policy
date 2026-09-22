@@ -34,14 +34,14 @@ go next.
 Add one dependency to get the engine and all bundled extensions:
 
 ```toml
-praxis-policy = { version = "0.2", features = ["builtins"] }
+praxis-policy = { version = "0.3", features = ["builtins"] }
 ```
 
 Without `builtins`, you get the engine alone and no extensions compiled in.
 Declare individual features instead: `jwt`, `oauth`, `elicitation-ciba`,
 `cedar`, `cel`, `opa`, `valkey`.
 
-The crates are versioned together and released together, so a single `0.2`
+The crates are versioned together and released together, so a single `0.3`
 requirement covers the set. Requires Rust 1.96 or newer.
 
 ## Documentation
@@ -77,4 +77,4 @@ one. `make help` lists the available targets.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+[Apache-2.0](LICENSE)

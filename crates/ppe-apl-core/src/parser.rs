@@ -2457,35 +2457,31 @@ fn step_to_effect(step: Step, source: &str) -> Result<Effect, ParseError> {
         Step::Delegate(d) => Ok(Effect::Delegate(d)),
         Step::Elicit(e) => Ok(Effect::Elicit(e)),
         Step::Taint { label, scopes } => Ok(Effect::Taint { label, scopes }),
+        // `restrict:` in effect position is consumed by `parse_effect_value`
+        // before `parse_step` runs, so this arm only keeps the match
+        // exhaustive.
         Step::Restrict { spec } => Ok(Effect::Restrict { spec }),
         Step::Rule(rule) => {
-            // Nested when/do inside a do: list isn't supported
-            // — only control effects (allow/deny) flatten cleanly.
-            if !matches!(rule.condition, Expression::Always) {
+            // A rule does not flatten into an effect list. A conditional one
+            // carries a guard the list cannot express, and an unconditional one
+            // never arrives: `parse_predicate` needs at least one atom, so it
+            // never yields `Always`, and the spellings that do build an
+            // `Always` rule (bare `allow`/`deny`, `sequential:`, `parallel:`)
+            // are all consumed upstream. Both are refused rather than guessed.
+            if matches!(rule.condition, Expression::Always) {
                 return Err(ParseError::Rule {
                     rule: source.to_owned(),
-                    msg: "conditional rules nested inside `do:` are not supported \
-                          (use a sibling `when:`/`do:` rule instead)"
+                    msg: "unconditional rule inside `do:` is not supported (use the \
+                          effect on its own)"
                         .into(),
                 });
             }
-            if rule.effects.len() != 1 {
-                return Err(ParseError::Rule {
-                    rule: source.to_owned(),
-                    msg: format!(
-                        "unconditional rule inside `do:` must produce exactly one \
-                         effect, got {}",
-                        rule.effects.len()
-                    ),
-                });
-            }
-            rule.effects
-                .into_iter()
-                .next()
-                .ok_or_else(|| ParseError::Rule {
-                    rule: source.to_owned(),
-                    msg: "unconditional rule inside `do:` produced no effect".into(),
-                })
+            Err(ParseError::Rule {
+                rule: source.to_owned(),
+                msg: "conditional rules nested inside `do:` are not supported \
+                      (use a sibling `when:`/`do:` rule instead)"
+                    .into(),
+            })
         },
         Step::Pdp { .. } => Err(ParseError::Rule {
             rule: source.to_owned(),
@@ -6108,5 +6104,332 @@ route:
         let p = parse_pipeline("str | len(..100) | regex(\"^[A-Z]+$\") | mask(4)")
             .expect("non-validate pipeline parses");
         assert_eq!(p.stages.len(), 4);
+    }
+
+    fn assert_rejected(err: ParseError, needle: &str) {
+        let msg = format!("{err}");
+        assert!(msg.contains(needle), "expected `{needle}` in: {msg}");
+    }
+
+    #[test]
+    fn pipeline_stage_argument_errors_are_named() {
+        let cases = [
+            ("hash(1)", "hash takes no arguments"),
+            ("mask(abc)", "mask(N) expects a non-negative integer"),
+            ("len(nope)", "len(...) expects N..M range"),
+            ("enum()", "enum() requires at least one value"),
+            // `taint()` is an empty first part, not a missing one.
+            // `split_top_level` always yields at least one segment, so the
+            // "requires at least a label" arm is not this input.
+            ("taint()", "taint label must not be empty"),
+            ("taint(, session)", "taint label must not be empty"),
+            ("taint(PII, warehouse)", "unknown taint scope"),
+        ];
+        for (src, needle) in cases {
+            let err = parse_pipeline(src).expect_err(src);
+            assert_rejected(err, needle);
+        }
+    }
+
+    #[test]
+    fn malformed_taint_call_as_a_step_is_rejected() {
+        let err = parse_step(&serde_yaml::Value::String("taint(".into()), "test")
+            .expect_err("unbalanced taint call");
+        assert_rejected(err, "malformed `taint(...)`");
+    }
+
+    #[test]
+    fn step_that_is_neither_string_nor_map_is_rejected() {
+        let err = parse_step(&serde_yaml::Value::Null, "test").expect_err("null is not a step");
+        assert_rejected(err, "step must be a string or a single-key map");
+    }
+
+    #[test]
+    fn when_yaml_boolean_is_not_a_predicate_string() {
+        let err = parse_step_yaml("when: true\ndo: deny").expect_err("YAML true is a boolean");
+        assert_rejected(err, "`when:` must be a predicate string");
+    }
+
+    #[test]
+    fn do_value_that_is_neither_string_list_nor_map_is_rejected() {
+        let err = parse_step_yaml("when: authenticated\ndo: 42").expect_err("numeric do");
+        assert_rejected(
+            err,
+            "`do:` value must be a string, a list of effects, or an effect map",
+        );
+    }
+
+    #[test]
+    fn do_list_entry_that_is_neither_string_nor_map_is_rejected() {
+        let err = parse_step_yaml("when: authenticated\ndo: [1]").expect_err("numeric effect");
+        assert_rejected(err, "effect entry must be a string or a map");
+    }
+
+    #[test]
+    fn sequential_body_must_be_a_list() {
+        let err = parse_step_yaml("when: authenticated\ndo:\n  sequential: deny")
+            .expect_err("scalar sequential");
+        assert_rejected(err, "`sequential:` body must be a list");
+    }
+
+    #[test]
+    fn parallel_body_must_be_a_list() {
+        let err = parse_step_yaml("when: authenticated\ndo:\n  parallel: deny")
+            .expect_err("scalar parallel");
+        assert_rejected(err, "`parallel:` body must be a list");
+    }
+
+    #[test]
+    fn nested_conditional_inside_do_is_rejected() {
+        let yaml = r#"
+when: authenticated
+do:
+  - when: delegated
+    do: deny
+"#;
+        let err = parse_step_yaml(yaml).expect_err("nested when/do");
+        assert_rejected(err, "conditional rules nested inside `do:`");
+    }
+
+    /// `delegate.plugin` names a registered plugin, so a non-string value is
+    /// an author error rather than something to stringify and look up.
+    #[test]
+    fn delegate_plugin_must_be_a_string() {
+        let err = parse_step_yaml("when: authenticated\ndo:\n  delegate:\n    plugin: 42")
+            .expect_err("numeric plugin name");
+        assert_rejected(err, "`delegate.plugin` must be a string");
+    }
+
+    #[test]
+    fn pdp_call_inside_do_is_rejected() {
+        let yaml = r#"
+when: authenticated
+do:
+  cedar:
+    action: read
+    resource: doc
+"#;
+        let err = parse_step_yaml(yaml).expect_err("PDP inside do");
+        assert_rejected(err, "PDP calls inside `do:` are not supported");
+    }
+
+    #[test]
+    fn on_deny_must_be_a_list_of_steps() {
+        let yaml = r#"
+cedar:
+  action: read
+  resource: doc
+  on_deny: deny
+"#;
+        let err = parse_step_yaml(yaml).expect_err("scalar on_deny");
+        assert_rejected(err, "`on_deny:` must be a list of steps");
+    }
+
+    #[test]
+    fn delegate_empty_quoted_plugin_name_is_rejected() {
+        let err = parse_step(&serde_yaml::Value::String(r#"delegate("")"#.into()), "test")
+            .expect_err("empty plugin name");
+        assert_rejected(err, "plugin name cannot be empty");
+    }
+
+    #[test]
+    fn delegate_kwarg_with_empty_key_is_rejected() {
+        let err = parse_step(
+            &serde_yaml::Value::String("delegate(x, : value)".into()),
+            "test",
+        )
+        .expect_err("empty kwarg key");
+        assert_rejected(err, "kwarg has empty key");
+    }
+
+    #[test]
+    fn delegate_on_error_must_be_a_string() {
+        let err = parse_step(
+            &serde_yaml::Value::String("delegate(x, on_error: [a])".into()),
+            "test",
+        )
+        .expect_err("list on_error");
+        assert_rejected(err, "`on_error` must be a string");
+    }
+
+    #[test]
+    fn elicit_from_must_be_a_string() {
+        let err = parse_step(
+            &serde_yaml::Value::String("require_approval(p, from: [mgr])".into()),
+            "test",
+        )
+        .expect_err("list from");
+        assert_rejected(err, "`from` must be a string");
+    }
+
+    #[test]
+    fn elicit_argument_with_empty_key_is_rejected() {
+        let err = parse_step(
+            &serde_yaml::Value::String("require_approval(p, : x, from: u)".into()),
+            "test",
+        )
+        .expect_err("empty elicit key");
+        assert_rejected(err, "argument has empty key");
+    }
+
+    #[test]
+    fn restrict_empty_allow_models_list_is_rejected() {
+        let err = parse_step_yaml("restrict: { allow_models: [] }").expect_err("empty list");
+        assert_rejected(err, "list must not be empty");
+    }
+
+    #[test]
+    fn restrict_empty_allow_models_reference_is_rejected() {
+        let err = parse_step_yaml("restrict: { allow_models: \"\" }").expect_err("empty ref");
+        assert_rejected(err, "reference path must not be empty");
+    }
+
+    #[test]
+    fn restrict_empty_allow_models_entry_is_rejected() {
+        let err = parse_step_yaml("restrict: { allow_models: [\"\"] }").expect_err("empty entry");
+        assert_rejected(err, "list entries must not be empty");
+    }
+
+    #[test]
+    fn restrict_empty_custom_map_is_rejected() {
+        let err = parse_step_yaml("restrict: { custom: {} }").expect_err("empty custom");
+        assert_rejected(err, "`custom` map must not be empty");
+    }
+
+    #[test]
+    fn restrict_empty_cost_tier_is_rejected() {
+        let err = parse_step_yaml("restrict: { max_cost_tier: \"\" }").expect_err("empty tier");
+        assert_rejected(err, "tier must not be empty");
+    }
+
+    #[test]
+    fn restrict_numeric_allow_models_is_rejected() {
+        let err = parse_step_yaml("restrict: { allow_models: 1 }").expect_err("numeric set");
+        assert_rejected(err, "must be a list of strings or a `data.*` reference");
+    }
+
+    #[test]
+    fn restrict_body_must_be_a_map() {
+        let err = parse_step_yaml("restrict: deny").expect_err("scalar restrict");
+        assert_rejected(err, "`restrict:` body must be a map");
+    }
+
+    #[test]
+    fn step_map_with_two_unrelated_keys_is_rejected() {
+        let err = parse_step_yaml("foo: a\nbar: b").expect_err("two keys");
+        assert_rejected(err, "step map must have exactly one key");
+    }
+
+    #[test]
+    fn malformed_call_forms_are_rejected() {
+        let cases = [
+            ("deny(", "malformed `deny(...)`"),
+            ("run(", "malformed `run(...)`"),
+            ("delegate(", "malformed `delegate(...)`"),
+            ("require_approval(", "malformed `require_approval(...)`"),
+        ];
+        for (src, needle) in cases {
+            let err = parse_step(&serde_yaml::Value::String(src.into()), "test").expect_err(src);
+            assert_rejected(err, needle);
+        }
+    }
+
+    #[test]
+    fn field_op_with_unknown_stage_is_rejected() {
+        let err = parse_step_yaml("when: authenticated\ndo: \"result.ssn | nonsense\"")
+            .expect_err("unknown field stage");
+        assert_rejected(err, "unknown stage");
+    }
+
+    #[test]
+    fn predicate_number_and_paren_errors_are_named() {
+        let cases = [
+            ("1.", "there is no exponent form"),
+            ("1e2", "there is no exponent form"),
+            ("(authenticated", "expected `)`"),
+            ("subject[.id]", "empty segment"),
+        ];
+        for (src, needle) in cases {
+            let err = parse_predicate(src).expect_err(src);
+            assert_rejected(err, needle);
+        }
+    }
+
+    #[test]
+    fn when_predicate_parse_error_is_attributed_to_the_rule() {
+        let err = parse_step_yaml("when: \"(\"\ndo: deny").expect_err("bad when predicate");
+        let msg = format!("{err}");
+        assert!(msg.contains("when:"), "must name the `when:` field: {msg}");
+        assert!(
+            msg.contains("expected atom"),
+            "must carry the inner predicate error, not only the field name: {msg}"
+        );
+    }
+
+    #[test]
+    fn delegate_kwarg_value_must_parse() {
+        // An unterminated quote fails in the comma splitter, before the
+        // value reader. An empty value after `:` is the value reader's own
+        // error, and it names the key.
+        let err = parse_step(
+            &serde_yaml::Value::String("delegate(x, target: )".into()),
+            "test",
+        )
+        .expect_err("empty kwarg value");
+        assert_rejected(err, "`target`: empty value");
+    }
+
+    #[test]
+    fn not_as_a_bare_word_is_reserved() {
+        let err = parse_predicate("not authenticated").expect_err("bare not");
+        assert_rejected(err, "`not` is reserved");
+    }
+
+    #[test]
+    fn redact_condition_must_be_a_predicate() {
+        // `redact(())` extracts `()` as the condition. `redact(()` never
+        // closes the call, so it would fail as a missing stage identifier
+        // and still contain the letters `redact`.
+        let err = parse_pipeline("redact(())").expect_err("bad redact condition");
+        assert_rejected(err, "invalid redact() condition");
+    }
+
+    #[test]
+    fn unbalanced_confirm_is_rejected() {
+        let err = parse_step(&serde_yaml::Value::String("confirm(".into()), "test")
+            .expect_err("unbalanced confirm");
+        assert_rejected(err, "malformed `confirm(...)`");
+    }
+
+    #[test]
+    fn taint_list_scope_is_rejected() {
+        let err = parse_pipeline("taint(PII, [warehouse])").expect_err("unknown list scope");
+        assert_rejected(err, "unknown taint scope");
+    }
+
+    #[test]
+    fn empty_sequential_body_is_rejected() {
+        let err = parse_step_yaml("when: authenticated\ndo:\n  sequential: []")
+            .expect_err("empty sequential");
+        assert_rejected(err, "`sequential:` body is empty");
+    }
+
+    #[test]
+    fn empty_parallel_body_is_rejected() {
+        let err = parse_step_yaml("when: authenticated\ndo:\n  parallel: []")
+            .expect_err("empty parallel");
+        assert_rejected(err, "`parallel:` body is empty");
+    }
+
+    #[test]
+    fn negative_len_bound_is_rejected() {
+        let err = parse_pipeline("len(-1..2)").expect_err("negative len bound");
+        assert_rejected(err, "len bound");
+    }
+
+    #[test]
+    fn comparison_must_name_the_attribute_first() {
+        let err = parse_predicate("'acme' == subject.tenant").expect_err("literal-first");
+        assert_rejected(err, "attribute first");
     }
 }

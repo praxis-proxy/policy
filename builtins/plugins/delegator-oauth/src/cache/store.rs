@@ -392,6 +392,21 @@ impl DelegatedTokenCache {
     reason = "tests assert on known-good values"
 )]
 mod tests {
+
+    /// The cache is held by the delegator, which logs itself on config
+    /// errors. Its `Debug` reports size rather than contents: an entry is a
+    /// live delegated access token.
+    #[test]
+    fn debug_for_the_cache_reports_size_not_contents() {
+        let cache = cache();
+        let rendered = format!("{cache:?}");
+        assert!(rendered.contains("DelegatedTokenCache"), "got {rendered}");
+        assert!(rendered.contains("max_entries"), "got {rendered}");
+        assert!(
+            rendered.contains(".."),
+            "non-exhaustive form keeps future fields out of logs: {rendered}"
+        );
+    }
     use std::sync::atomic::AtomicUsize;
 
     use praxis_policy_core::delegation::{DelegationPayload, DelegationSubject};

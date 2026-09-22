@@ -3387,6 +3387,38 @@ mod tests {
     use crate::plugin::{OnError, PluginMode};
     use async_trait::async_trait;
 
+    /// Every mock handler here answers for the same fixture hook. The trait
+    /// requires the method on each impl and the executor resolves handlers by
+    /// the name they were registered under, so nothing calls it on a mock. One
+    /// definition carries the body rather than a copy per mock.
+    /// A mock plugin that only has to exist: it reports the config it was
+    /// built with and has no lifecycle of its own. Four fixtures needed
+    /// exactly this and each wrote the same eleven lines.
+    macro_rules! impl_inert_plugin {
+        ($ty:ty) => {
+            #[async_trait]
+            impl Plugin for $ty {
+                fn config(&self) -> &PluginConfig {
+                    &self.cfg
+                }
+                async fn initialize(&self) -> Result<(), Box<PluginError>> {
+                    Ok(())
+                }
+                async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+                    Ok(())
+                }
+            }
+        };
+    }
+
+    macro_rules! test_hook_name {
+        () => {
+            fn hook_type_name(&self) -> &'static str {
+                "test_hook"
+            }
+        };
+    }
+
     // -- Test payload --
 
     #[derive(Debug, Clone)]
@@ -3412,18 +3444,7 @@ mod tests {
         cfg: PluginConfig,
     }
 
-    #[async_trait]
-    impl Plugin for AllowPlugin {
-        fn config(&self) -> &PluginConfig {
-            &self.cfg
-        }
-        async fn initialize(&self) -> Result<(), Box<PluginError>> {
-            Ok(())
-        }
-        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
-            Ok(())
-        }
-    }
+    impl_inert_plugin!(AllowPlugin);
 
     impl HookHandler<TestHook> for AllowPlugin {
         async fn handle(
@@ -3441,18 +3462,7 @@ mod tests {
         cfg: PluginConfig,
     }
 
-    #[async_trait]
-    impl Plugin for DenyPlugin {
-        fn config(&self) -> &PluginConfig {
-            &self.cfg
-        }
-        async fn initialize(&self) -> Result<(), Box<PluginError>> {
-            Ok(())
-        }
-        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
-            Ok(())
-        }
-    }
+    impl_inert_plugin!(DenyPlugin);
 
     impl HookHandler<TestHook> for DenyPlugin {
         async fn handle(
@@ -3489,6 +3499,44 @@ mod tests {
         }
     }
 
+    /// Never answers within the deadline. Used with `timeout_seconds: 0`, so
+    /// the sleep length only has to outlast the test.
+    struct SleepyHandler;
+
+    #[async_trait]
+    impl AnyHookHandler for SleepyHandler {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let result: PluginResult<TestPayload> = PluginResult::allow();
+            Ok(crate::executor::erase_result(result))
+        }
+
+        test_hook_name!();
+    }
+
+    /// Panics instead of answering, to exercise the join-error path a
+    /// background task reaches when its plugin panics.
+    struct PanickingHandler;
+
+    #[async_trait]
+    impl AnyHookHandler for PanickingHandler {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            panic!("this handler exists to panic");
+        }
+
+        test_hook_name!();
+    }
+
     struct ErrorHandler;
 
     #[async_trait]
@@ -3509,9 +3557,7 @@ mod tests {
             }))
         }
 
-        fn hook_type_name(&self) -> &'static str {
-            "test_hook"
-        }
+        test_hook_name!();
     }
 
     // -- Helpers --
@@ -3759,7 +3805,7 @@ mod tests {
         assert_eq!(result.violation.as_ref().unwrap().code, "denied");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_has_hooks_for() {
         let mgr = PolicyEngine::default();
         assert!(!mgr.has_hooks_for("test_hook"));
@@ -3801,9 +3847,7 @@ mod tests {
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -3905,9 +3949,7 @@ mod tests {
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -3955,7 +3997,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_unregister() {
         let mgr = PolicyEngine::default();
         let config = make_config("removable", 10, PluginMode::Sequential);
@@ -3975,7 +4017,7 @@ mod tests {
     /// that runtime registration is safe alongside invocations — the whole
     /// point of the `ArcSwap`-based snapshot redesign. Before this fix,
     /// `register_*` was `&mut self`, so this pattern wouldn't even compile.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_manager_arc_shareable_with_concurrent_dispatch_and_registration() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3995,9 +4037,7 @@ mod tests {
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = Arc::new(PolicyEngine::default());
@@ -4182,18 +4222,7 @@ plugins:
         engine: std::sync::Weak<PolicyEngine>,
     }
 
-    #[async_trait]
-    impl Plugin for DropReentrantHandler {
-        fn config(&self) -> &PluginConfig {
-            &self.cfg
-        }
-        async fn initialize(&self) -> Result<(), Box<PluginError>> {
-            Ok(())
-        }
-        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
-            Ok(())
-        }
-    }
+    impl_inert_plugin!(DropReentrantHandler);
 
     #[async_trait]
     impl crate::registry::AnyHookHandler for DropReentrantHandler {
@@ -4208,9 +4237,7 @@ plugins:
             }))
         }
 
-        fn hook_type_name(&self) -> &'static str {
-            "test_hook"
-        }
+        test_hook_name!();
     }
 
     impl Drop for DropReentrantHandler {
@@ -4262,6 +4289,9 @@ plugins:
     /// rejected after instantiation has host teardown to run.
     struct DropReentrantFactory {
         engine: std::sync::Weak<PolicyEngine>,
+        /// Instantiations, so the test can prove the load was rejected after
+        /// the plugins were built rather than before.
+        created: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl crate::factory::PluginFactory for DropReentrantFactory {
@@ -4269,6 +4299,7 @@ plugins:
             &self,
             config: &PluginConfig,
         ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            self.created.fetch_add(1, Ordering::SeqCst);
             let plugin = Arc::new(DropReentrantHandler {
                 cfg: config.clone(),
                 engine: self.engine.clone(),
@@ -4295,10 +4326,12 @@ plugins:
     #[test]
     fn a_rejected_load_drops_its_plugins_outside_the_writer_lock() {
         let engine = Arc::new(PolicyEngine::default());
+        let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         engine.register_factory(
             "test/drop_reentrant",
             Box::new(DropReentrantFactory {
                 engine: Arc::downgrade(&engine),
+                created: Arc::clone(&created),
             }),
         );
 
@@ -4308,7 +4341,12 @@ plugins:
             .register_handler::<TestHook, _>(sitting, taken)
             .expect("the conflicting name has to be registered first");
 
+        // `dispatch: hooks` matters: under the default `policy` dispatch this
+        // config is refused by validation, which is before any factory runs,
+        // and the whole teardown path below would go unexercised.
         let yaml = r"
+engine_settings:
+  dispatch: hooks
 plugins:
   - name: taken
     kind: test/drop_reentrant
@@ -4331,6 +4369,12 @@ plugins:
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("a rejected load deadlocked dropping its own plugins");
         assert!(rejected, "a conflicting plugin name must reject the load");
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            2,
+            "the rejection has to land after instantiation, or nothing this \
+             test guards is exercised",
+        );
         assert_eq!(
             engine.plugin_count(),
             1,
@@ -4529,6 +4573,208 @@ plugins:
         assert!(mgr.get_plugin("flaky-plugin").unwrap().is_disabled());
     }
 
+    /// A plugin that fails in a phase that cannot block must not halt the
+    /// pipeline even under `on_error: fail`. The error still has to reach
+    /// `PipelineResult.errors`, or a transform failing silently looks like a
+    /// transform that chose to change nothing.
+    ///
+    /// One case per non-blocking phase: transform (serial, `can_modify`),
+    /// audit (by reference), and concurrent under a policy that does not
+    /// halt. Concurrent with `on_error: fail` is a blocking phase and denies,
+    /// which [`a_concurrent_failure_under_on_error_fail_denies`] covers.
+    #[tokio::test]
+    async fn a_failure_in_a_non_blocking_phase_is_recorded_without_halting() {
+        for (mode, on_error) in [
+            (PluginMode::Transform, OnError::Fail),
+            (PluginMode::Transform, OnError::Ignore),
+            (PluginMode::Audit, OnError::Fail),
+            (PluginMode::Audit, OnError::Ignore),
+            (PluginMode::Concurrent, OnError::Ignore),
+        ] {
+            let mgr = PolicyEngine::default();
+            let config = make_config_with_on_error("flaky-plugin", 10, mode, on_error);
+            let plugin = Arc::new(AllowPlugin {
+                cfg: config.clone(),
+            });
+            let handler: Arc<dyn AnyHookHandler> = Arc::new(ErrorHandler);
+            mgr.register_raw::<TestHook>(plugin, config, handler)
+                .unwrap();
+            mgr.initialize().await.unwrap();
+
+            let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
+            let (result, _) = mgr
+                .invoke_by_name("test_hook", payload, Extensions::default(), None)
+                .await;
+
+            assert!(
+                result.continue_processing,
+                "{mode:?}/{on_error:?} must not halt a non-blocking phase"
+            );
+            assert_eq!(
+                result.errors.len(),
+                1,
+                "{mode:?}/{on_error:?} must still record the failure"
+            );
+            assert!(
+                !mgr.get_plugin("flaky-plugin").unwrap().is_disabled(),
+                "{mode:?}/{on_error:?} must not disable the plugin"
+            );
+        }
+    }
+
+    /// The concurrent phase can block, so a failing branch under
+    /// `on_error: fail` denies the request rather than being recorded and
+    /// waved through. Fail-closed is the point: a policy plugin that errored
+    /// has not allowed anything.
+    #[tokio::test]
+    async fn a_concurrent_failure_under_on_error_fail_denies() {
+        let mgr = PolicyEngine::default();
+        let config =
+            make_config_with_on_error("flaky-plugin", 10, PluginMode::Concurrent, OnError::Fail);
+        let plugin = Arc::new(AllowPlugin {
+            cfg: config.clone(),
+        });
+        let handler: Arc<dyn AnyHookHandler> = Arc::new(ErrorHandler);
+        mgr.register_raw::<TestHook>(plugin, config, handler)
+            .unwrap();
+        mgr.initialize().await.unwrap();
+
+        let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
+        let (result, _) = mgr
+            .invoke_by_name("test_hook", payload, Extensions::default(), None)
+            .await;
+
+        assert!(!result.continue_processing, "a failed branch must deny");
+        let violation = result.violation.as_ref().expect("a denial carries one");
+        assert_eq!(violation.code, "plugin_error");
+        assert_eq!(violation.plugin_name.as_deref(), Some("flaky-plugin"));
+    }
+
+    /// `on_error: disable` trips the breaker from every phase, not just the
+    /// sequential one. A plugin that keeps failing in a transform or audit
+    /// phase is exactly the one worth taking out of the path.
+    #[tokio::test]
+    async fn on_error_disable_trips_the_breaker_from_every_phase() {
+        for mode in [
+            PluginMode::Transform,
+            PluginMode::Audit,
+            PluginMode::Concurrent,
+        ] {
+            let mgr = PolicyEngine::default();
+            let config = make_config_with_on_error("flaky-plugin", 10, mode, OnError::Disable);
+            let plugin = Arc::new(AllowPlugin {
+                cfg: config.clone(),
+            });
+            let handler: Arc<dyn AnyHookHandler> = Arc::new(ErrorHandler);
+            mgr.register_raw::<TestHook>(plugin, config, handler)
+                .unwrap();
+            mgr.initialize().await.unwrap();
+
+            let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
+            let (result, _) = mgr
+                .invoke_by_name("test_hook", payload, Extensions::default(), None)
+                .await;
+
+            assert_eq!(result.errors.len(), 1, "{mode:?} must record the failure");
+            assert!(
+                mgr.get_plugin("flaky-plugin").unwrap().is_disabled(),
+                "{mode:?} must disable the plugin"
+            );
+        }
+    }
+
+    /// A plugin that outruns the per-plugin timeout is handled by the same
+    /// `on_error` policy as one that returns an error: blocking phases deny,
+    /// the rest record and continue, and `disable` trips the breaker either
+    /// way. `timeout_seconds: 0` makes the deadline expire before the handler
+    /// is polled, which is the one timing this can assert deterministically.
+    #[tokio::test]
+    async fn a_timed_out_plugin_follows_its_on_error_policy() {
+        for (mode, on_error, halts, disabled) in [
+            (PluginMode::Sequential, OnError::Fail, true, false),
+            (PluginMode::Transform, OnError::Fail, false, false),
+            (PluginMode::Transform, OnError::Ignore, false, false),
+            (PluginMode::Transform, OnError::Disable, false, true),
+            (PluginMode::Audit, OnError::Ignore, false, false),
+            (PluginMode::Audit, OnError::Disable, false, true),
+            (PluginMode::Concurrent, OnError::Ignore, false, false),
+            (PluginMode::Concurrent, OnError::Disable, false, true),
+        ] {
+            let mgr = PolicyEngine::new(PolicyEngineConfig {
+                executor: crate::executor::ExecutorConfig {
+                    timeout_seconds: 0,
+                    short_circuit_on_deny: true,
+                },
+                route_cache_max_entries: DEFAULT_ROUTE_CACHE_MAX_ENTRIES,
+            });
+            let config = make_config_with_on_error("slow-plugin", 10, mode, on_error);
+            let plugin = Arc::new(AllowPlugin {
+                cfg: config.clone(),
+            });
+            let handler: Arc<dyn AnyHookHandler> = Arc::new(SleepyHandler);
+            mgr.register_raw::<TestHook>(plugin, config, handler)
+                .unwrap();
+            mgr.initialize().await.unwrap();
+
+            let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
+            let (result, _) = mgr
+                .invoke_by_name("test_hook", payload, Extensions::default(), None)
+                .await;
+
+            assert_eq!(
+                !result.continue_processing, halts,
+                "{mode:?}/{on_error:?} halt behavior"
+            );
+            if halts {
+                let violation = result
+                    .violation
+                    .as_ref()
+                    .expect("a halt carries a violation");
+                assert_eq!(violation.code, "plugin_timeout", "{mode:?}/{on_error:?}");
+            } else {
+                assert_eq!(
+                    result.errors.len(),
+                    1,
+                    "{mode:?}/{on_error:?} must record the timeout"
+                );
+            }
+            assert_eq!(
+                mgr.get_plugin("slow-plugin").unwrap().is_disabled(),
+                disabled,
+                "{mode:?}/{on_error:?} breaker state"
+            );
+        }
+    }
+
+    /// A fire-and-forget task that panics must be reported by
+    /// `wait_for_background_tasks` rather than lost with the thread. A host
+    /// that awaits its audit tasks before responding needs to know one died.
+    #[tokio::test]
+    async fn a_panicking_background_task_is_reported() {
+        let mgr = PolicyEngine::default();
+        let config = make_config("panicker", 10, PluginMode::FireAndForget);
+        let plugin = Arc::new(AllowPlugin {
+            cfg: config.clone(),
+        });
+        let handler: Arc<dyn AnyHookHandler> = Arc::new(PanickingHandler);
+        mgr.register_raw::<TestHook>(plugin, config, handler)
+            .unwrap();
+        mgr.initialize().await.unwrap();
+
+        let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
+        let (_result, tasks) = mgr
+            .invoke_by_name("test_hook", payload, Extensions::default(), None)
+            .await;
+
+        let errors = tasks.wait_for_background_tasks().await;
+        assert_eq!(errors.len(), 1, "the panic has to surface");
+        assert!(
+            format!("{}", errors[0]).contains("background task panicked"),
+            "got {}",
+            errors[0]
+        );
+    }
+
     #[tokio::test]
     async fn test_on_error_fail_halts_pipeline() {
         let mgr = PolicyEngine::default();
@@ -4567,18 +4813,7 @@ plugins:
         cfg: PluginConfig,
     }
 
-    #[async_trait]
-    impl Plugin for TransformPlugin {
-        fn config(&self) -> &PluginConfig {
-            &self.cfg
-        }
-        async fn initialize(&self) -> Result<(), Box<PluginError>> {
-            Ok(())
-        }
-        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
-            Ok(())
-        }
-    }
+    impl_inert_plugin!(TransformPlugin);
 
     impl HookHandler<TestHook> for TransformPlugin {
         async fn handle(
@@ -4611,9 +4846,7 @@ plugins:
             Ok(crate::executor::erase_result(result))
         }
 
-        fn hook_type_name(&self) -> &'static str {
-            "test_hook"
-        }
+        test_hook_name!();
     }
 
     // -- Bug-covering tests --
@@ -4766,9 +4999,7 @@ plugins:
                 Ok(crate::executor::erase_result(result))
             }
 
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -4830,9 +5061,7 @@ plugins:
                     PluginResult::deny(PluginViolation::new("denied", "fast deny"));
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         struct SlowSideEffect;
@@ -4851,9 +5080,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -4930,9 +5157,7 @@ plugins:
                     PluginResult::deny(PluginViolation::new("denied", "fast deny"));
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         struct AllowAndCount;
@@ -4948,9 +5173,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let config = PolicyEngineConfig {
@@ -5011,9 +5234,7 @@ plugins:
         ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
             panic!("simulated panic in concurrent plugin task");
         }
-        fn hook_type_name(&self) -> &'static str {
-            "test_hook"
-        }
+        test_hook_name!();
     }
 
     /// A panicking concurrent plugin with `on_error: Fail` must halt the
@@ -5071,9 +5292,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -5187,9 +5406,7 @@ plugins:
                 Ok(crate::executor::erase_result(result))
             }
 
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -5254,9 +5471,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -5307,9 +5522,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         struct ReaderHandler {
@@ -5331,9 +5544,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let saw_writer = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -5393,9 +5604,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -5484,9 +5693,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -5558,9 +5765,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::modify_payload(modified);
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         // Transform — modifies payload, logs "transform".
@@ -5583,9 +5788,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::modify_payload(modified);
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         // Logger that asserts the payload it observes contains both prior
@@ -5613,9 +5816,7 @@ plugins:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let mgr = PolicyEngine::default();
@@ -5738,7 +5939,7 @@ plugins:
     /// segment-boundary rows mirror the host router's own suite: a prefix that
     /// matches a path only where a `/` follows it, and a trailing slash on the
     /// declared prefix that changes nothing.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_works_for_all_entity_types() {
         register_fixture_hooks();
         use std::sync::Arc as StdArc;
@@ -6429,7 +6630,7 @@ routes:
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_creates_manager() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6456,7 +6657,7 @@ engine_settings:
         assert!(mgr.has_hooks_for("test_hook"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_invokes_correctly() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6490,7 +6691,7 @@ plugins:
         assert_eq!(result.violation.as_ref().unwrap().code, "denied");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_unknown_kind_rejected() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6511,7 +6712,7 @@ plugins:
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_multiple_plugins() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6555,7 +6756,7 @@ plugins:
 
     // -- Routing cache tests --
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_populated_on_first_invoke() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6757,7 +6958,7 @@ routes:
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_different_entities_separate() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6808,7 +7009,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_cleared() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6846,7 +7047,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_unregister_invalidates_routing_cache() {
         register_fixture_hooks();
         let yaml = r#"
@@ -6915,7 +7116,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_rejects_inserts_at_capacity() {
         register_fixture_hooks();
         // Cap of 2 — verifies bound holds AND uncached requests still resolve correctly.
@@ -6989,7 +7190,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_register_handler_invalidates_routing_cache() {
         register_fixture_hooks();
         let yaml = r#"
@@ -7033,7 +7234,7 @@ routes:
         assert_eq!(mgr.routing_cache_size(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_cache_scope_creates_separate_entries() {
         register_fixture_hooks();
         let yaml = r#"
@@ -7086,7 +7287,7 @@ routes:
 
     // -- Override instance tests --
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_route_override_creates_new_instance() {
         register_fixture_hooks();
         let yaml = r#"
@@ -7323,7 +7524,7 @@ routes:
     /// open DB connections / file handles / network clients on init don't
     /// run with default state. Uses a tracking factory whose plugin
     /// increments a counter inside its `initialize()`.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_route_override_initializes_new_instance() {
         register_fixture_hooks();
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7642,7 +7843,7 @@ routes:
     /// config) must not silently disable the plugin for every other route
     /// using the base config — config is part of the failure surface, and
     /// per-route blast radius is the point of having overrides.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_route_override_circuit_breaker_isolated_from_base() {
         register_fixture_hooks();
         struct ErrorOnInvokeFactory;
@@ -7713,7 +7914,7 @@ routes:
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_register_factory_then_load_config() {
         register_fixture_hooks();
         let yaml = r#"
@@ -7771,7 +7972,7 @@ engine_settings:
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_disabled_fires_all_plugins() {
         register_fixture_hooks();
         // Same plugins under hook dispatch: all fire regardless of entity
@@ -7812,7 +8013,7 @@ plugins:
         assert!(!result.continue_processing); // denier fires (all plugins active)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_routing_no_meta_fires_all_plugins() {
         register_fixture_hooks();
         // Routing enabled but no meta on extensions → fallback to all
@@ -7879,9 +8080,7 @@ routes:
             result.modified_extensions = Some(ext);
             Ok(crate::executor::erase_result(result))
         }
-        fn hook_type_name(&self) -> &'static str {
-            "test_hook"
-        }
+        test_hook_name!();
     }
 
     /// Handler that tampers with an immutable extension slot.
@@ -7905,9 +8104,7 @@ routes:
             result.modified_extensions = Some(ext);
             Ok(crate::executor::erase_result(result))
         }
-        fn hook_type_name(&self) -> &'static str {
-            "test_hook"
-        }
+        test_hook_name!();
     }
 
     #[tokio::test]
@@ -8005,9 +8202,7 @@ routes:
                 let result: PluginResult<TestPayload> = PluginResult::allow();
                 Ok(crate::executor::erase_result(result))
             }
-            fn hook_type_name(&self) -> &'static str {
-                "test_hook"
-            }
+            test_hook_name!();
         }
 
         let saw_security = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -8083,7 +8278,7 @@ routes:
 
     /// Verifies that a handler that genuinely `.await`s gets driven
     /// to completion before its result is observed.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_handler_registers_and_invokes() {
         let mgr = PolicyEngine::default();
         let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -8119,7 +8314,7 @@ routes:
     /// genuinely awaits (`AsyncCounterPlugin`) co-register on the same
     /// hook via the same `register_handler` call. Both run in priority
     /// order.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_mixed_sync_and_async_handlers_in_same_hook() {
         let mgr = PolicyEngine::default();
         let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -8317,6 +8512,23 @@ groups:
                 }
                 Ok(())
             }
+            fn visit_route(
+                &self,
+                _mgr: &Arc<PolicyEngine>,
+                _yaml: &serde_yaml::Value,
+                _parsed: &crate::config::RouteEntry,
+            ) -> Result<(), VisitorError> {
+                if self.0 == "route" {
+                    return Err("no".into());
+                }
+                Ok(())
+            }
+            fn visit_complete(&self, _mgr: &Arc<PolicyEngine>) -> Result<(), VisitorError> {
+                if self.0 == "complete" {
+                    return Err("no".into());
+                }
+                Ok(())
+            }
         }
 
         let yaml = r#"
@@ -8333,6 +8545,11 @@ groups:
     authorization:
       pre_invocation:
         - "require(authenticated)"
+routes:
+  - tool: some_tool
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
 "#;
         // One section per run, so a failure in an earlier section cannot mask a
         // missing error arm in a later one.
@@ -8341,6 +8558,8 @@ groups:
             ("global", "visit_global"),
             ("default", "visit_default"),
             ("bundle", "visit_policy_bundle"),
+            ("route", "visit_route"),
+            ("complete", "visit_complete"),
         ] {
             let mgr = Arc::new(PolicyEngine::default());
             mgr.register_visitor(Arc::new(Refuser(section)));
@@ -8356,6 +8575,33 @@ groups:
                 "and the section it refused; expected {expect} in: {msg}"
             );
         }
+    }
+
+    /// Garbage YAML must fail as a parse error, not as a visitor or
+    /// deserialize problem. Operators paste documents; a lex failure is the
+    /// first thing they need named.
+    #[test]
+    fn load_config_yaml_rejects_unlexable_yaml() {
+        let mgr = Arc::new(PolicyEngine::default());
+        let err = load_fixture_yaml(&mgr, "{{").expect_err("unlexable YAML must not load");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("YAML parse error"),
+            "the load must name a YAML parse failure: {msg}"
+        );
+    }
+
+    /// A document that is valid YAML but not a policy document must fail as a
+    /// deserialize error, not as a YAML lex failure.
+    #[test]
+    fn load_config_yaml_rejects_a_document_that_is_not_a_policy() {
+        let mgr = Arc::new(PolicyEngine::default());
+        let err = load_fixture_yaml(&mgr, "[]").expect_err("a sequence is not a policy document");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PolicyConfig deserialize error"),
+            "the load must name a deserialize failure: {msg}"
+        );
     }
 
     // =====================================================================
@@ -8688,7 +8934,7 @@ routes:
         (entity_type, names.remove(0))
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn many_http_paths_matching_one_route_share_one_cache_entry() {
         let (mgr, ledger) = recording_engine(HTTP_ROUTES_YAML).await;
 
@@ -9227,7 +9473,7 @@ routes:
     /// A config replacement rebuilds the snapshot, so the answer follows the
     /// config it was derived from. A stale answer would warn about routes that
     /// are gone, or stay silent about ones that arrived.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_reload_recomputes_which_routes_declare_authentication() {
         // A load merges its plugins into the registry, so each generation names
         // its own rather than colliding with the one before it.

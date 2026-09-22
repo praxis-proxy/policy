@@ -40,6 +40,12 @@ help:
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
+	@echo "  test-tsan         Engine concurrency stress under ThreadSanitizer (nightly)"
+	@echo ""
+	@echo "Benchmarks (on demand — not part of make ci; see docs/dev/benchmarks.md):"
+	@echo "  bench             Criterion suite (ppe-benches / issue #19)"
+	@echo "  bench-percentiles p50/p95/p99 from target/criterion samples"
+	@echo "  bench-heap        dhat per-decision + policy-size footprint"
 	@echo ""
 	@echo "Supply chain & coverage:"
 	@echo "  audit             cargo deny check (advisories, licenses, bans, sources)"
@@ -57,6 +63,8 @@ help:
 	@echo ""
 	@echo "CI:"
 	@echo "  ci                What CI runs: lint + test"
+	@echo "                    (ppe-benches compiles via clippy --all-targets"
+	@echo "                     plus a dhat-heap pass; make bench is on-demand)"
 	@echo ""
 	@echo "Release:"
 	@echo "  release-dry       Preview a release (no changes)"
@@ -112,6 +120,7 @@ lint:
 	@echo "fmt --check + clippy -D warnings ..."
 	@$(CARGO) +$(NIGHTLY) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
 	@echo "lint passed"
 
 .PHONY: lint-fix
@@ -159,6 +168,46 @@ test:
 	@$(CARGO) test --workspace
 	@$(CARGO) test --workspace --all-features
 
+# ThreadSanitizer on the engine concurrency stress test. Needs nightly, a
+# Linux target, and an instrumented libstd (`-Zbuild-std`). The sanitizer
+# does not run on the pinned stable toolchain or on macOS. `--test-threads=1`
+# keeps TSan's own reports from overlapping.
+.PHONY: test-tsan
+test-tsan:
+	@echo "ThreadSanitizer: praxis-policy-core engine concurrency ..."
+	@RUSTFLAGS="-Zsanitizer=thread" CARGO_INCREMENTAL=0 \
+		$(CARGO) +$(NIGHTLY) test -Zbuild-std=std,panic_abort \
+		-p praxis-policy-core --test engine_concurrency \
+		--target x86_64-unknown-linux-gnu -- --test-threads=1
+	@echo "test-tsan passed"
+
+# =============================================================================
+# Benchmarks (issue #19) — on demand, never part of `make ci`
+# =============================================================================
+#
+# Wall-clock benches do not gate PRs: CI runners are noisy and a flaky
+# p99 gate would train people to ignore failures. Workspace clippy
+# --all-targets plus a dhat-heap clippy pass compile every [[bench]]
+# (including heap_profile). See docs/dev/benchmarks.md.
+
+.PHONY: bench
+bench:
+	@echo "Criterion suite (ppe-benches) — on demand, not a CI gate ..."
+	@$(CARGO) bench -p ppe-benches
+	@echo "HTML reports under target/criterion/; write-up in docs/dev/benchmarks.md"
+
+.PHONY: bench-percentiles
+bench-percentiles:
+	@command -v python3 >/dev/null 2>&1 || { echo "python3 not found"; exit 1; }
+	@python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" \
+		|| { echo "bench-percentiles requires Python 3.10+"; exit 1; }
+	@python3 tools/bench_percentiles.py
+
+.PHONY: bench-heap
+bench-heap:
+	@echo "dhat heap_profile (per-decision + policy-size) ..."
+	@$(CARGO) bench -p ppe-benches --features dhat-heap --bench heap_profile
+
 # =============================================================================
 # Supply chain & coverage
 # =============================================================================
@@ -183,7 +232,7 @@ audit:
 #
 # The coverage workflow calls this target rather than repeating the threshold, so
 # this is the only copy of the number.
-COVERAGE_FLOOR ?= 95
+COVERAGE_FLOOR ?= 96
 
 # `--all-features` reaches the test targets behind `test-util`, without which the
 # compiler's test scaffolding and everything it covers fall outside the floor.
@@ -192,11 +241,35 @@ COVERAGE_FLOOR ?= 95
 # Valkey at all. `VALKEY_TESTS_OPTIONAL=1` lets them skip instead of fail, because
 # this target measures and `make test` is what asserts. Set `VALKEY_TEST_URL` to
 # measure the paths that do need a server.
+#
+# Both coverage targets share these flags. A report built from a narrower run
+# understates what the floor asserted.
+COVERAGE_ARGS := --workspace --all-features --exclude ppe-benches
+COVERAGE_TEST_ARGS := -- --include-ignored
+
+# `clean` first: llvm-cov merges the mappings of every instrumented binary it
+# finds, so a stale one from a run with different features (or a cached target
+# dir in CI) is counted a second time, inflating both the line count and the
+# miss count.
 .PHONY: coverage
 coverage:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --locked
-	@VALKEY_TESTS_OPTIONAL=1 cargo llvm-cov --workspace --all-features --summary-only \
-		--fail-under-lines $(COVERAGE_FLOOR) -- --include-ignored
+	@cargo llvm-cov clean --workspace
+	@VALKEY_TESTS_OPTIONAL=1 cargo llvm-cov $(COVERAGE_ARGS) --summary-only \
+		--fail-under-lines $(COVERAGE_FLOOR) $(COVERAGE_TEST_ARGS)
+
+# The floor plus an LCOV artifact from one test run, for CI. `--no-report`
+# measures once and both `report` calls read that data, so the artifact and the
+# gated number cannot diverge. LCOV comes first so a red gate still leaves a
+# report to diagnose. `report` takes no feature flags; it reads the object files
+# the run above built.
+.PHONY: coverage-lcov
+coverage-lcov:
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --locked
+	@cargo llvm-cov clean --workspace
+	@VALKEY_TESTS_OPTIONAL=1 cargo llvm-cov $(COVERAGE_ARGS) --no-report $(COVERAGE_TEST_ARGS)
+	@cargo llvm-cov report --lcov --output-path lcov.info
+	@cargo llvm-cov report --summary-only --fail-under-lines $(COVERAGE_FLOOR)
 
 # Mutation testing. Advisory, not part of the blocking CI gate.
 .PHONY: mutants

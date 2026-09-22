@@ -230,6 +230,9 @@ impl ValkeyConfig {
             // that cannot carry userinfo (e.g. cannot-be-a-base URLs).
             url.set_username(self.username.as_deref().unwrap_or(""))
                 .map_err(|()| BuildError::Config("endpoint cannot carry credentials".to_owned()))?;
+            // `set_password` shares `set_username`'s precondition (a URL with a
+            // non-empty host), which the call above has already proved. The
+            // error arm is an unreachable guard, not a live path.
             if let Some(password) = &self.password {
                 url.set_password(Some(password)).map_err(|()| {
                     BuildError::Config("endpoint cannot carry credentials".to_owned())
@@ -429,6 +432,13 @@ mod tests {
         assert_eq!(redact_endpoint("host:6379"), "host:6379");
     }
 
+    /// A misconfigured bare endpoint can still carry userinfo, and that
+    /// spelling reaches the same error messages as the URL form.
+    #[test]
+    fn redact_endpoint_strips_userinfo_from_a_bare_endpoint() {
+        assert_eq!(redact_endpoint("user:secret@host:6379"), "***@host:6379");
+    }
+
     /// Credentials must never leak into the TLS-required error.
     #[test]
     fn tls_required_error_redacts_credentials() {
@@ -440,5 +450,51 @@ mod tests {
             !msg.contains("topsecret"),
             "error leaked credentials: {msg}"
         );
+    }
+
+    /// A TTL shorter than the declared session lifetime is sound config but
+    /// unsound behavior: taint expires while the session lives on, so the
+    /// store warns instead of failing. Keep the warning reachable.
+    #[test]
+    fn a_ttl_shorter_than_the_session_lifetime_is_accepted_with_a_warning() {
+        let cfg = parse(
+            "kind: valkey\nendpoint: localhost:6379\nttl_seconds: 60\n\
+             max_session_lifetime_seconds: 3600\n",
+        )
+        .expect("a short TTL warns, it does not reject");
+        assert_eq!(cfg.ttl_seconds, Some(60));
+        assert_eq!(cfg.max_session_lifetime_seconds, Some(3600));
+    }
+
+    /// An unparseable `rediss://` endpoint fails at load, and the message
+    /// carries the redacted endpoint rather than the raw one.
+    #[test]
+    fn an_unparseable_url_endpoint_is_rejected() {
+        let err = parse("kind: valkey\nendpoint: \"rediss://user:topsecret@[::1\"\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("invalid endpoint"), "got {msg}");
+        assert!(
+            !msg.contains("topsecret"),
+            "error leaked credentials: {msg}"
+        );
+    }
+
+    /// Same for a bare `host:port` that cannot be assembled into a URL. The
+    /// scheme comes from the TLS intent, so this path needs `tls: true`.
+    #[test]
+    fn an_unparseable_bare_endpoint_is_rejected() {
+        let err = parse("kind: valkey\nendpoint: \"[::1\"\ntls: true\n").unwrap_err();
+        assert!(format!("{err}").contains("invalid endpoint"), "got {err:?}");
+    }
+
+    /// An endpoint with no host cannot carry userinfo. `url` refuses the
+    /// credentials rather than dropping them, so the store never connects
+    /// unauthenticated where a password was configured.
+    #[test]
+    fn an_endpoint_without_a_host_cannot_carry_credentials() {
+        let err = parse("kind: valkey\nendpoint: \"\"\ntls: true\npassword: s3cret\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("cannot carry credentials"), "got {msg}");
+        assert!(!msg.contains("s3cret"), "error leaked credentials: {msg}");
     }
 }

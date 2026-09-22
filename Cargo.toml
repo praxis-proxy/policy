@@ -31,6 +31,10 @@ members = [
     # why it is not a builtin.
     "reference/plugins/pii-scanner",
     "reference/plugins/audit-logger",
+    # Criterion suite for issue #19. Unpublished; excluded from default-members
+    # so everyday `cargo build` stays lean. `cargo bench -p ppe-benches` /
+    # `make bench` still pick it up, and `clippy --all-targets` compiles it.
+    "crates/ppe-benches",
 ]
 
 # The session store pulls a redis client and a TLS stack, which slows a default
@@ -59,7 +63,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # MSRV. Keep in sync with rust-toolchain.toml `channel` and clippy.toml `msrv`.
 rust-version = "1.96"
@@ -108,6 +112,9 @@ paste = "1"
 futures = "0.3"
 hashbrown = "0.17"
 arc-swap = "1.9"
+# Exhaustive scheduler for a tiny model of the generation / snapshot
+# pairing. Dev-only, and only compiled when a crate enables `--cfg loom`.
+loom = "0.7"
 wildmatch = "2"
 rmp-serde = "1"
 serde_bytes = "0.11"
@@ -122,18 +129,22 @@ regex = "1"
 # The keys are package names, which still carry the engine's previous naming.
 # Renaming them is a manifest change across every crate and lands separately, so
 # that the import stays a move and the rename stays a rename.
-praxis-policy-core                     = { path = "crates/ppe-core",              version = "0.2.0" }
-praxis-policy-orchestration            = { path = "crates/ppe-orchestration",     version = "0.2.0" }
-praxis-policy-apl-core                      = { path = "crates/ppe-apl-core",          version = "0.2.0" }
-praxis-policy-apl-cmf                       = { path = "crates/ppe-apl-cmf",           version = "0.2.0" }
-praxis-policy-apl-runtime                      = { path = "crates/ppe-apl-runtime",       version = "0.2.0" }
-praxis-policy-plugin-identity-jwt      = { path = "builtins/plugins/identity-jwt",     version = "0.2.0" }
-praxis-policy-plugin-delegator-oauth   = { path = "builtins/plugins/delegator-oauth",  version = "0.2.0" }
-praxis-policy-plugin-elicitation-ciba  = { path = "builtins/plugins/elicitation-ciba", version = "0.2.0" }
-praxis-policy-pdp-cedar-direct         = { path = "builtins/pdps/cedar-direct",        version = "0.2.0" }
-praxis-policy-pdp-cel                  = { path = "builtins/pdps/cel",                 version = "0.2.0" }
-praxis-policy-pdp-opa                  = { path = "builtins/pdps/opa",                 version = "0.2.0" }
-praxis-policy-session-valkey           = { path = "builtins/session/valkey",           version = "0.2.0" }
+praxis-policy-core                     = { path = "crates/ppe-core",              version = "0.3.0" }
+praxis-policy-orchestration            = { path = "crates/ppe-orchestration",     version = "0.3.0" }
+praxis-policy-apl-core                      = { path = "crates/ppe-apl-core",          version = "0.3.0" }
+praxis-policy-apl-cmf                       = { path = "crates/ppe-apl-cmf",           version = "0.3.0" }
+praxis-policy-apl-runtime                      = { path = "crates/ppe-apl-runtime",       version = "0.3.0" }
+praxis-policy-plugin-identity-jwt      = { path = "builtins/plugins/identity-jwt",     version = "0.3.0" }
+praxis-policy-plugin-delegator-oauth   = { path = "builtins/plugins/delegator-oauth",  version = "0.3.0" }
+praxis-policy-plugin-elicitation-ciba  = { path = "builtins/plugins/elicitation-ciba", version = "0.3.0" }
+praxis-policy-pdp-cedar-direct         = { path = "builtins/pdps/cedar-direct",        version = "0.3.0" }
+praxis-policy-pdp-cel                  = { path = "builtins/pdps/cel",                 version = "0.3.0" }
+praxis-policy-pdp-opa                  = { path = "builtins/pdps/opa",                 version = "0.3.0" }
+praxis-policy-session-valkey           = { path = "builtins/session/valkey",           version = "0.3.0" }
+
+# Criterion is only consumed by the unpublished `ppe-benches` crate (issue #19).
+# Kept in the workspace table so version bumps stay one-line.
+criterion = { version = "0.7.0", features = ["html_reports", "async_tokio"] }
 
 # Cross-crate inlining and dead-code elimination, one codegen unit for
 # optimization quality.
@@ -189,7 +200,7 @@ redundant_lifetimes = "deny"
 # A stale feature name in a `cfg` predicate is otherwise only a warning, which
 # is how a rename can silently disable a gated export. Denying it turns that
 # into a build error at the moment the rename happens.
-unexpected_cfgs = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(loom)'] }
 # Closed from the import backlog: measured at zero violations across
 # --workspace --all-targets --all-features, so enforcing costs no code change.
 unused_extern_crates = "deny"

@@ -263,6 +263,34 @@ impl HttpTransport for FakeTransport {
     reason = "tests"
 )]
 mod tests {
+
+    /// `FakeTransport` is held by tests that log it on failure, and its own
+    /// fields are mutexes whose derived `Debug` says nothing useful. The
+    /// manual impl reports the call count, which is what a failing assertion
+    /// is usually about.
+    #[tokio::test]
+    async fn debug_for_the_transport_reports_the_call_count() {
+        let t = FakeTransport::new().json("/jwks", 200, "{}");
+        assert!(format!("{t:?}").contains("calls: 0"), "got {t:?}");
+
+        let _ = t
+            .execute(HttpRequest::get("https://idp.example.com/jwks"))
+            .await;
+        assert!(format!("{t:?}").contains("calls: 1"), "got {t:?}");
+    }
+
+    /// A rule reports how many replies are still queued rather than their
+    /// bodies, so a rotation test that runs out of replies says so.
+    #[test]
+    fn debug_for_a_rule_reports_the_queue_depth() {
+        let rule = Rule {
+            fragment: "/token".to_owned(),
+            replies: VecDeque::from(vec![Err(HttpTransportError::Timeout)]),
+        };
+        let rendered = format!("{rule:?}");
+        assert!(rendered.contains("/token"), "got {rendered}");
+        assert!(rendered.contains("queued: 1"), "got {rendered}");
+    }
     use super::*;
 
     #[tokio::test]
