@@ -2,9 +2,10 @@
 // Copyright (c) 2026 Praxis Contributors
 
 // Hit vs miss cost for the PDP decision cache, harness-aligned with
-// PR 35's `ppe-benches` `pdp_cost` bench (issue #19): same CEL fixture,
-// `to_async`, setup (including CEL compile) outside the timed loop.
-// When that crate is on main, copy these two functions next to
+// PR 35's `ppe-benches` `pdp_cost` bench (issue #19): same CEL fixture
+// (`has(role.reader) && role.reader` plus `reader_bag`), `to_async`,
+// `SamplingMode::Flat`, setup (including CEL compile) outside the timed
+// loop. When that crate is on main, copy these two functions next to
 // `cel_evaluate` as `pdp_cost/cache_hit` and `pdp_cost/cache_miss`.
 
 #![allow(
@@ -22,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, SamplingMode, criterion_group, criterion_main};
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpResolver};
@@ -65,24 +66,27 @@ fn bench_cache(c: &mut Criterion) {
     let rt = Runtime::new().expect("tokio runtime");
     let mut group = c.benchmark_group("pdp_cost");
     group
+        .sampling_mode(SamplingMode::Flat)
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(4))
         .sample_size(100);
 
     let mgr = Arc::new(PolicyEngine::default());
     let inner: Arc<dyn PdpResolver> = Arc::new(CelResolver::new());
-    let call = cel_call("subject.id == 'alice'");
+    let call = cel_call("has(role.reader) && role.reader");
     let bag = reader_bag();
     {
         let d = rt.block_on(inner.evaluate(&call, &bag)).expect("cel setup");
         assert_allow("cel_evaluate", &d);
     }
 
+    // Cap is well above Criterion's iteration count so a miss is hash +
+    // CEL evaluate + insert, not FIFO eviction (see review of #101).
     let miss_cache = CachedPdpResolver::wrap(
         Arc::clone(&inner),
         DecisionCacheConfig {
             ttl: Duration::from_secs(60),
-            max_entries: 65_536,
+            max_entries: 1_000_000,
         },
         Arc::downgrade(&mgr),
     );

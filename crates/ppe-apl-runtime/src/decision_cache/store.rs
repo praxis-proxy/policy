@@ -4,8 +4,16 @@
 // Bounded TTL map for PDP decisions.
 //
 // FIFO eviction is deterministic given the same insert sequence: the
-// oldest live entry leaves first once expired entries have been
-// stripped from the front. Expired entries are never returned.
+// oldest live entry leaves first. Expired entries are never returned.
+// A lookup removes the expired key immediately. An insert that would
+// exceed `max_entries` first drops every expired slot, then FIFO-evicts
+// a live one if the map is still full — so an expired entry in the
+// middle of the deque cannot occupy a slot that a live entry needs.
+//
+// `remove` scans the `VecDeque` (`O(n)` in `max_entries`). That is a
+// known v1 cost: keep the cap in the hundreds to low thousands, not
+// tens of thousands. A follow-up can switch to `IndexMap` for `O(1)`
+// removal.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
@@ -80,12 +88,11 @@ impl Store {
             });
             return Insert::Stored;
         }
+        if self.entries.len() >= self.max_entries {
+            self.drop_all_expired(now);
+        }
         let mut evicted = false;
         while self.entries.len() >= self.max_entries {
-            self.drop_expired_from_front(now);
-            if self.entries.len() < self.max_entries {
-                break;
-            }
             if let Some(old) = self.order.pop_front() {
                 self.entries.remove(&old);
                 evicted = true;
@@ -121,6 +128,21 @@ impl Store {
         }
     }
 
+    /// Drop expired keys anywhere in the deque. Called only when an
+    /// insert would exceed the cap, so a live FIFO victim is not chosen
+    /// while an expired middle slot still counts toward `max_entries`.
+    fn drop_all_expired(&mut self, now: Instant) {
+        self.order.retain(|key| match self.entries.get(key) {
+            Some(slot) if slot.expires_at > now => true,
+            _ => {
+                self.entries.remove(key);
+                false
+            },
+        });
+    }
+
+    /// `O(n)` in `order.len()`: the deque has no index. Operators should
+    /// keep `max_entries` modest; see the module comment.
     fn remove(&mut self, key: &CacheKey) {
         self.entries.remove(key);
         if let Some(index) = self.order.iter().position(|k| k == key) {
@@ -197,6 +219,26 @@ mod tests {
         assert!(matches!(store.lookup(&key(1), now), Lookup::Miss));
         assert!(matches!(store.lookup(&key(2), now), Lookup::Hit(_)));
         assert!(matches!(store.lookup(&key(3), now), Lookup::Hit(_)));
+    }
+
+    #[test]
+    fn expired_middle_entry_does_not_evict_a_live_front() {
+        let mut store = Store::new(3);
+        let t0 = Instant::now();
+        let long = t0 + Duration::from_secs(60);
+        let short = t0 + Duration::from_secs(2);
+        store.insert(key(1), allow(), long, t0);
+        store.insert(key(2), deny(), short, t0);
+        store.insert(key(3), allow(), long, t0);
+        let t5 = t0 + Duration::from_secs(5);
+        assert!(matches!(
+            store.insert(key(4), allow(), long, t5),
+            Insert::Stored
+        ));
+        assert!(matches!(store.lookup(&key(1), t5), Lookup::Hit(_)));
+        assert!(matches!(store.lookup(&key(2), t5), Lookup::Miss));
+        assert!(matches!(store.lookup(&key(3), t5), Lookup::Hit(_)));
+        assert!(matches!(store.lookup(&key(4), t5), Lookup::Hit(_)));
     }
 
     #[test]

@@ -87,14 +87,16 @@ impl CachedPdpResolver {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn current_generation(&self) -> Option<u64> {
+        self.engine.upgrade().map(|mgr| mgr.config_generation())
+    }
+
     /// Drop cached answers when PPE configuration generation moved.
-    /// Must run while `store` is held so a miss cannot insert a
-    /// previous-generation decision after another thread already cleared.
-    fn sync_generation(&self, store: &mut Store) {
-        let Some(mgr) = self.engine.upgrade() else {
-            return;
-        };
-        let current = mgr.config_generation();
+    /// The `Weak` upgrade and generation read happen *before* the store
+    /// lock; the clear itself still runs while `store` is held so a
+    /// miss cannot insert a previous-generation decision after another
+    /// thread already cleared.
+    fn maybe_clear_for_generation(&self, store: &mut Store, current: u64) {
         let previous = self.generation.load(Ordering::Acquire);
         if current == previous {
             return;
@@ -111,8 +113,11 @@ impl CachedPdpResolver {
     }
 
     fn lookup(&self, key: &CacheKey) -> Lookup {
+        let current_gen = self.current_generation();
         let mut store = self.lock_store();
-        self.sync_generation(&mut store);
+        if let Some(generation) = current_gen {
+            self.maybe_clear_for_generation(&mut store, generation);
+        }
         store.lookup(key, Instant::now())
     }
 
@@ -121,8 +126,11 @@ impl CachedPdpResolver {
         let Some(expires_at) = now.checked_add(self.config.ttl) else {
             return;
         };
+        let current_gen = self.current_generation();
         let mut store = self.lock_store();
-        self.sync_generation(&mut store);
+        if let Some(generation) = current_gen {
+            self.maybe_clear_for_generation(&mut store, generation);
+        }
         if self.generation.load(Ordering::Acquire) != expected_gen {
             return;
         }

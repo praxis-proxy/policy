@@ -50,13 +50,10 @@ serde = { workspace = true }
 # which costs one module and no behavior.
 praxis-policy-apl-core = { workspace = true, features = ["test-util"] }
 praxis-policy-pdp-cel = { workspace = true }
-# Version comes from `[workspace.dependencies]`. `async_tokio` matches the
-# `ppe-benches` harness (`b.to_async`). Default features stay off so
-# plotters/`html_reports` stay with that crate, not this one.
-criterion = { workspace = true, default-features = false, features = [
-    "async_tokio",
-    "cargo_bench_support",
-] }
+# Version comes from `[workspace.dependencies]`. Feature list matches
+# the workspace pin (`html_reports`, `async_tokio`); this crate cannot
+# set `default-features = false` against that entry.
+criterion = { workspace = true }
 
 [[bench]]
 name = "pdp_decision_cache"

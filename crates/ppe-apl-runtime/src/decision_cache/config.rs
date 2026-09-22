@@ -90,7 +90,7 @@ fn positive_u64(value: &serde_yaml::Value) -> Option<u64> {
 
 fn positive_usize(value: &serde_yaml::Value) -> Option<usize> {
     let n = positive_u64(value)?;
-    usize::try_from(n).ok().filter(|v| *v > 0)
+    usize::try_from(n).ok()
 }
 
 /// Pull `cache:` off a `global.pdp[]` entry so backend factories never see

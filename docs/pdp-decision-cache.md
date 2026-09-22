@@ -33,6 +33,11 @@ Both fields are required when `cache:` is present, and both must be
 positive integers. Omission of the whole block disables the cache.
 `ttl_seconds: 0` or `max_entries: 0` fails configuration load.
 
+Keep `max_entries` in the hundreds to low thousands. Evicting an
+entry scans the FIFO order (`O(n)` in the cap); a value like 65536
+makes every overflow insert expensive. The example above (1024) is
+the intended scale. A later change can make removal `O(1)`.
+
 The `cache:` key is stripped before the Cedar / CEL / OPA factory sees
 the block, so those backends' unknown-key checks stay exact.
 
@@ -56,9 +61,12 @@ the cache.
 | `Ok(Deny)` | yes |
 | `Err` (dispatch failure, timeout, missing args) | **no** |
 
-Expired entries are dropped on lookup and never returned. At
-`max_entries`, the oldest live entry is evicted (FIFO). Eviction is
-deterministic for a given insert sequence.
+Expired entries are dropped on lookup and never returned. When an
+insert would exceed `max_entries`, every expired slot is dropped
+first; only then does FIFO evict the oldest *live* entry. An expired
+key in the middle of the queue therefore cannot occupy a slot that a
+live entry needs. Eviction is deterministic for a given insert
+sequence.
 
 A PPE configuration generation change (any successful `load_config` /
 `load_config_yaml`) drops the whole map, including wrappers still held
@@ -99,9 +107,11 @@ Tests read [`CachedPdpResolver::stats`](../crates/ppe-apl-runtime/src/decision_c
 
 `make bench-pdp-cache` times a miss (inner CEL evaluate) against a hit
 (digest lookup) for the same call and bag. The harness matches PR 35's
-`pdp_cost` bench: `CelResolver::new()`, `subject.id == 'alice'`, the
-reader bag, `b.to_async`, and Criterion group `pdp_cost` so the function
-names are already `pdp_cost/cache_miss` and `pdp_cost/cache_hit`.
+`pdp_cost` bench: `CelResolver::new()`, `has(role.reader) && role.reader`,
+the reader bag, `SamplingMode::Flat`, `b.to_async`, and Criterion group
+`pdp_cost` so the function names are already `pdp_cost/cache_miss` and
+`pdp_cost/cache_hit`. The miss cap is 1_000_000 so the timed loop does
+not FIFO-evict.
 
 **CI does not gate on wall-clock numbers.** Runner noise would flake
 the gate, which is the same decision [#19](https://github.com/praxis-proxy/policy/issues/19)
@@ -114,14 +124,14 @@ the numbers below into that document against the same hardware.
 
 ### Baseline (this machine)
 
-Run `make bench-pdp-cache` and record Criterion's p50 / p95 / p99
-here before publishing, with the CPU model. Until then the suite
-compiles (`clippy --all-targets`) but does not claim a number.
+`make bench-pdp-cache` on 2026-09-22, `SamplingMode::Flat`, 100
+samples. CPU: 11th Gen Intel Core i7-1185G7 @ 3.00GHz.
 
 | function | p50 | p95 | p99 | hardware |
 |---|---|---|---|---|
-| `pdp_cost/cache_miss` | — | — | — | fill in |
-| `pdp_cost/cache_hit` | — | — | — | fill in |
+| `pdp_cost/cache_miss` | 36 µs | 62 µs | 73 µs | i7-1185G7 @ 3.00GHz |
+| `pdp_cost/cache_hit` | 1.1 µs | 1.7 µs | 2.2 µs | i7-1185G7 @ 3.00GHz |
 
-A hit should be cheaper than a miss by enough to matter on the hot
-path. If it is not, leave `cache:` omitted.
+A hit is about 30× cheaper than a miss at p50. Enabling `cache:` is
+worthwhile for repeated identical PDP calls. If a workload almost
+never repeats a digest, leave `cache:` omitted.
