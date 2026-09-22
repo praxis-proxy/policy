@@ -138,6 +138,10 @@ praxis-policy-pdp-cel                  = { path = "builtins/pdps/cel",          
 praxis-policy-pdp-opa                  = { path = "builtins/pdps/opa",                 version = "0.2.0" }
 praxis-policy-session-valkey           = { path = "builtins/session/valkey",           version = "0.2.0" }
 
+# Criterion is only consumed by the unpublished `ppe-benches` crate (issue #19).
+# Kept in the workspace table so version bumps stay one-line.
+criterion = { version = "0.7.0", features = ["html_reports", "async_tokio"] }
+
 # Cross-crate inlining and dead-code elimination, one codegen unit for
 # optimization quality.
 #
