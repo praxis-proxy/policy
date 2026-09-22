@@ -45,6 +45,7 @@ default = []
 # carries.
 builtins = [
     "jwt",
+    "api-key",
     "oauth",
     "elicitation-ciba",
     "cedar",
@@ -56,6 +57,7 @@ builtins = [
 # One feature per builtin crate. The names are the public API: a host writes
 # these, so they are deliberately shorter than the crate names they pull.
 jwt = ["_builtin", "dep:praxis-policy-plugin-identity-jwt"]
+api-key = ["_builtin", "dep:praxis-policy-plugin-identity-api-key"]
 oauth = ["_builtin", "dep:praxis-policy-plugin-delegator-oauth"]
 elicitation-ciba = ["_builtin", "dep:praxis-policy-plugin-elicitation-ciba"]
 cedar = ["_builtin", "dep:praxis-policy-pdp-cedar-direct"]
@@ -107,6 +109,7 @@ praxis-policy-apl-runtime = { workspace = true }
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
 praxis-policy-plugin-identity-jwt = { workspace = true, optional = true }
+praxis-policy-plugin-identity-api-key = { workspace = true, optional = true }
 praxis-policy-plugin-delegator-oauth = { workspace = true, optional = true }
 praxis-policy-plugin-elicitation-ciba = { workspace = true, optional = true }
 praxis-policy-pdp-cedar-direct = { workspace = true, optional = true }

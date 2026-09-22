@@ -2673,6 +2673,7 @@ dependencies = [
  "praxis-policy-pdp-opa",
  "praxis-policy-plugin-delegator-oauth",
  "praxis-policy-plugin-elicitation-ciba",
+ "praxis-policy-plugin-identity-api-key",
  "praxis-policy-plugin-identity-jwt",
  "praxis-policy-session-valkey",
  "rustls",
@@ -2868,6 +2869,24 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "praxis-policy-plugin-identity-api-key"
+version = "0.3.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "chrono",
+ "praxis-policy-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
  "zeroize",
 ]
 
