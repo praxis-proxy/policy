@@ -4,6 +4,9 @@
 // Shared cache-contract runner used by this crate's tests and by each
 // builtin PDP crate, so Cedar, CEL, and OPA cannot drift off the issue's
 // acceptance list.
+//
+// Behind `test-util` (and `cfg(test)`): it panics on unexpected input
+// and must not compile into a production library build.
 
 #![allow(
     clippy::expect_used,

@@ -2644,6 +2644,7 @@ dependencies = [
  "criterion",
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
+ "praxis-policy-apl-runtime",
  "praxis-policy-core",
  "praxis-policy-pdp-cel",
  "serde",

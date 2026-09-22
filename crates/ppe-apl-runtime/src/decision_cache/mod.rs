@@ -13,11 +13,13 @@
 // documented in `docs/pdp-decision-cache.md`.
 
 mod config;
+#[cfg(any(test, feature = "test-util"))]
 mod contract;
 mod key;
 mod store;
 mod wrapper;
 
 pub use config::{DecisionCacheConfig, DecisionCacheConfigError, split_cache_block};
+#[cfg(any(test, feature = "test-util"))]
 pub use contract::{CacheContractSamples, run_cache_contract};
 pub use wrapper::{CachedPdpResolver, DecisionCacheStats};

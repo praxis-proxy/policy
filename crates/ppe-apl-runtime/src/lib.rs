@@ -74,9 +74,11 @@ pub use attribute_source::{FileAttributeSource, merge_attribute_docs};
 pub use candidate_constraint::{ConstraintConflict, fold_candidate_constraints};
 pub use cmf_invoker::{CmfPluginInvoker, HookPluginInvoker, HttpPluginInvoker};
 pub use decision_cache::{
-    CacheContractSamples, CachedPdpResolver, DecisionCacheConfig, DecisionCacheConfigError,
-    DecisionCacheStats, run_cache_contract, split_cache_block,
+    CachedPdpResolver, DecisionCacheConfig, DecisionCacheConfigError, DecisionCacheStats,
+    split_cache_block,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use decision_cache::{CacheContractSamples, run_cache_contract};
 pub use delegation_invoker::DelegationPluginInvoker;
 pub use dispatch_plan::{DispatchCache, RouteDispatchPlan, RoutePluginEntry};
 pub use elicitation_invoker::ElicitationPluginInvoker;

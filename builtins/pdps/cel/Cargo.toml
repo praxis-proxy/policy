@@ -53,7 +53,7 @@ tracing = { workspace = true }
 # edges only exist for tests — the crate itself stays apl-core-only at
 # compile time so it can be used standalone (e.g. in a custom orchestrator
 # that doesn't go through praxis-policy-apl-runtime at all).
-praxis-policy-apl-runtime = { workspace = true }
+praxis-policy-apl-runtime = { workspace = true, features = ["test-util"] }
 praxis-policy-core = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
