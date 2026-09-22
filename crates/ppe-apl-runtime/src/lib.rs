@@ -43,6 +43,8 @@ pub mod attribute_source;
 pub mod candidate_constraint;
 /// Dispatches plugin steps to one hook family's hooks.
 pub mod cmf_invoker;
+/// Optional bounded cache around PDP Allow/Deny decisions.
+pub mod decision_cache;
 /// Dispatches delegation steps to the delegation hook.
 pub mod delegation_invoker;
 /// The per-request plan of which handlers run in which phase.
@@ -71,6 +73,12 @@ pub mod visitor;
 pub use attribute_source::{FileAttributeSource, merge_attribute_docs};
 pub use candidate_constraint::{ConstraintConflict, fold_candidate_constraints};
 pub use cmf_invoker::{CmfPluginInvoker, HookPluginInvoker, HttpPluginInvoker};
+#[cfg(any(test, feature = "test-util"))]
+pub use decision_cache::{CacheContractSamples, run_cache_contract};
+pub use decision_cache::{
+    CachedPdpResolver, DecisionCacheConfig, DecisionCacheConfigError, DecisionCacheStats,
+    split_cache_block,
+};
 pub use delegation_invoker::DelegationPluginInvoker;
 pub use dispatch_plan::{DispatchCache, RouteDispatchPlan, RoutePluginEntry};
 pub use elicitation_invoker::ElicitationPluginInvoker;

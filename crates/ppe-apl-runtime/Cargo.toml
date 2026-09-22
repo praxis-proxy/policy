@@ -44,11 +44,37 @@ tracing = { workspace = true }
 # algorithmically fixed hash.
 sha2 = "0.11"
 
+[features]
+# Shared PDP decision-cache contract runner used by this crate's tests
+# and by Cedar / CEL / OPA integration tests. Off by default: the
+# module panics on unexpected input and carries clippy allows that
+# must not ship in a production build. Same rationale as
+# praxis-policy-core's `test-util`.
+#
+# This crate's own `tests/` need it too, and cargo does not enable a
+# crate's own optional feature for `cargo test`, hence the self
+# dev-dependency below rather than a `required-features` test target
+# (those are silently skipped).
+test-util = []
+
 [dev-dependencies]
 serde = { workspace = true }
 # See praxis-policy-apl-cmf's note: the feature unifies into the non-test build,
 # which costs one module and no behavior.
 praxis-policy-apl-core = { workspace = true, features = ["test-util"] }
+praxis-policy-pdp-cel = { workspace = true }
+# Path-only rather than `workspace = true`: a versioned workspace
+# self-dep cannot be packaged (`make publish-dry`). Cargo drops a
+# path-only self-dev-dep from the published manifest.
+praxis-policy-apl-runtime = { path = ".", features = ["test-util"] }
+# Version comes from `[workspace.dependencies]`. Feature list matches
+# the workspace pin (`html_reports`, `async_tokio`); this crate cannot
+# set `default-features = false` against that entry.
+criterion = { workspace = true }
+
+[[bench]]
+name = "pdp_decision_cache"
+harness = false
 
 [lints]
 workspace = true

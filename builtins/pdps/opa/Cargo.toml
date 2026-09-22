@@ -82,7 +82,7 @@ tokio = { workspace = true, features = ["rt"] }
 # visitor and exercise it against a real `PolicyEngine`. These dev-dep edges
 # only exist for tests — the crate depends only on praxis-policy-apl-core (plus its engine
 # and runtime deps) at compile time, so it can be used standalone.
-praxis-policy-apl-runtime = { workspace = true }
+praxis-policy-apl-runtime = { workspace = true, features = ["test-util"] }
 praxis-policy-core = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
