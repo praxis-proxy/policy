@@ -39,7 +39,15 @@ fn hash_dialect(hasher: &mut Sha256, dialect: &PdpDialect) {
             hasher.update([5_u8]);
             hash_bytes(hasher, name.as_bytes());
         },
-        _ => hasher.update([255_u8]),
+        // `PdpDialect` is `#[non_exhaustive]` in another crate, so this
+        // match needs a catch-all. Tag 255 alone would collide if two
+        // new variants landed together; `Debug` of a fieldless variant
+        // is the variant name, so each unknown dialect gets its own
+        // digest. `Custom` is already handled above.
+        other => {
+            hasher.update([255_u8]);
+            hash_bytes(hasher, format!("{other:?}").as_bytes());
+        },
     }
 }
 
@@ -241,6 +249,21 @@ mod tests {
             CacheKey::for_call(&cel, &bag),
             CacheKey::for_call(&cel, &other)
         );
+    }
+
+    #[test]
+    fn custom_dialect_names_change_the_digest() {
+        let bag = AttributeBag::new();
+        let args = serde_yaml::Value::Null;
+        let a = PdpCall {
+            dialect: PdpDialect::Custom("workload".into()),
+            args: args.clone(),
+        };
+        let b = PdpCall {
+            dialect: PdpDialect::Custom("guard".into()),
+            args,
+        };
+        assert_ne!(CacheKey::for_call(&a, &bag), CacheKey::for_call(&b, &bag));
     }
 
     #[test]
