@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::credential::{Credential, CredentialLocation};
 use crate::file_directory::FileDirectoryConfig;
+use crate::http_directory::HttpDirectoryConfig;
 
 /// Which backend holds the records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,8 @@ use crate::file_directory::FileDirectoryConfig;
 pub enum DirectoryConfig {
     /// Records in a file, indexed by digest.
     File(FileDirectoryConfig),
+    /// Records held by a service, reached over HTTP.
+    Http(HttpDirectoryConfig),
 }
 
 /// What to do when the directory cannot answer.

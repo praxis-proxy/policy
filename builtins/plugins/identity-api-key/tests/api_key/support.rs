@@ -112,6 +112,27 @@ pub async fn resolve(
     resolve_with_payload(resolver, &payload).await
 }
 
+/// Run the resolver against a request whose `Extensions` carry `transport`,
+/// which is how a backend needing egress reaches the host.
+pub async fn resolve_over_http(
+    resolver: &ApiKeyIdentityResolver,
+    value: &str,
+    transport: std::sync::Arc<praxis_policy_core::http_testing::FakeTransport>,
+) -> PluginResult<IdentityPayload> {
+    let mut headers = HashMap::new();
+    headers.insert("authorization".to_owned(), value.to_owned());
+    let payload = IdentityPayload::new("", TokenSource::ApiKey).with_headers(headers);
+    let ext = Extensions {
+        http_transport: praxis_policy_core::host::HttpTransportSlot::installed(transport),
+        ..Default::default()
+    };
+    let mut ctx = PluginContext::default();
+    <ApiKeyIdentityResolver as HookHandler<IdentityHook>>::handle(
+        resolver, &payload, &ext, &mut ctx,
+    )
+    .await
+}
+
 /// Run the resolver against a payload another handler already contributed to,
 /// which is how the executor threads a chain.
 pub async fn resolve_with_payload(

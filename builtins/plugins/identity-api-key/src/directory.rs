@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use praxis_policy_core::host::HostServices;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -109,7 +110,17 @@ pub trait KeyDirectory: std::fmt::Debug + Send + Sync {
     /// The lookup must not cost more as the record count grows: a directory
     /// that scans is a directory that times out under the key population it was
     /// bought for.
-    async fn lookup(&self, presented: &PresentedKey) -> Result<Option<KeyRecord>, DirectoryError>;
+    ///
+    /// `services` is the host's, carried by whatever the caller had: the
+    /// `Extensions` of the request being resolved, or an `InitExtensions` when
+    /// something calls this outside a request. A backend that needs no egress
+    /// ignores it, and must not be made to declare `perform_http` for a call it
+    /// never makes.
+    async fn lookup(
+        &self,
+        presented: &PresentedKey,
+        services: &dyn HostServices,
+    ) -> Result<Option<KeyRecord>, DirectoryError>;
 
     /// A name for this backend, for diagnostics and the effect log.
     fn kind(&self) -> &'static str;

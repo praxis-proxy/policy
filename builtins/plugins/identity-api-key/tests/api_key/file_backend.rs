@@ -10,6 +10,13 @@ use praxis_policy_plugin_identity_api_key::{
     DirectoryError, FileDirectory, FileDirectoryConfig, KeyDirectory as _, PresentedKey,
 };
 
+/// The file backend reads no host services, so an empty carrier is honest
+/// about what it needs: nothing here should make a deployment declare
+/// `perform_http`.
+fn no_services() -> praxis_policy_core::host::InitExtensions {
+    praxis_policy_core::host::InitExtensions::new()
+}
+
 fn config_for(path: &str) -> FileDirectoryConfig {
     serde_yaml::from_str(&format!("path: {path}")).expect("the backend config parses")
 }
@@ -120,7 +127,7 @@ async fn a_failed_reload_keeps_the_previous_records() {
         "the previous index must still be serving"
     );
     let found = directory
-        .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]))
+        .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]), &no_services())
         .await
         .expect("a lookup against the kept index still answers");
     assert!(
@@ -144,7 +151,7 @@ async fn a_successful_reload_replaces_the_records() {
 
     assert!(directory.is_empty(), "the revoked record must be gone");
     let found = directory
-        .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]))
+        .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]), &no_services())
         .await
         .expect("the lookup answers");
     assert!(found.is_none(), "a revoked credential must stop resolving");
@@ -170,7 +177,7 @@ async fn a_lookup_past_the_interval_reloads_and_a_revoked_record_stops_resolving
 
     assert!(
         directory
-            .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]))
+            .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]), &no_services())
             .await
             .expect("the lookup answers")
             .is_some(),
@@ -181,7 +188,7 @@ async fn a_lookup_past_the_interval_reloads_and_a_revoked_record_stops_resolving
 
     assert!(
         directory
-            .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]))
+            .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]), &no_services())
             .await
             .expect("the lookup answers")
             .is_none(),
@@ -203,7 +210,7 @@ async fn without_an_interval_a_lookup_does_not_reload() {
 
     assert!(
         directory
-            .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]))
+            .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]), &no_services())
             .await
             .expect("the lookup answers")
             .is_some(),
@@ -237,7 +244,7 @@ async fn past_the_staleness_ceiling_a_lookup_reports_a_directory_failure() {
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let error = directory
-        .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]))
+        .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]), &no_services())
         .await
         .expect_err("past the ceiling the backend must not answer");
 
@@ -322,7 +329,7 @@ async fn readers_never_observe_a_partial_index_during_a_reload() {
         tokio::spawn(async move {
             for _ in 0..500 {
                 let found = directory
-                    .lookup(&PresentedKey::new(&b"sk-oai-stable"[..]))
+                    .lookup(&PresentedKey::new(&b"sk-oai-stable"[..]), &no_services())
                     .await
                     .expect("the lookup answers");
                 assert!(
@@ -331,7 +338,10 @@ async fn readers_never_observe_a_partial_index_during_a_reload() {
                 );
 
                 let absent = directory
-                    .lookup(&PresentedKey::new(&b"sk-oai-never-issued"[..]))
+                    .lookup(
+                        &PresentedKey::new(&b"sk-oai-never-issued"[..]),
+                        &no_services(),
+                    )
                     .await
                     .expect("the lookup answers");
                 assert!(
@@ -364,7 +374,7 @@ async fn the_hash_and_expiry_never_reach_the_record_fields() {
     let directory = FileDirectory::new(config_for(file.path())).expect("the file loads");
 
     let record = directory
-        .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]))
+        .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]), &no_services())
         .await
         .expect("the lookup answers")
         .expect("the credential is known");

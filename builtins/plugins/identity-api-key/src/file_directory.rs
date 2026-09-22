@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+use praxis_policy_core::host::HostServices;
+
 use crate::directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 
 /// The `kind:` string an operator writes under `directory:`.
@@ -385,7 +387,14 @@ impl FileDirectory {
 
 #[async_trait::async_trait]
 impl KeyDirectory for FileDirectory {
-    async fn lookup(&self, presented: &PresentedKey) -> Result<Option<KeyRecord>, DirectoryError> {
+    /// The file index needs no egress, so `services` goes unread: a
+    /// deployment on a records file must not be made to declare
+    /// `perform_http` for a call this backend never makes.
+    async fn lookup(
+        &self,
+        presented: &PresentedKey,
+        _services: &dyn HostServices,
+    ) -> Result<Option<KeyRecord>, DirectoryError> {
         if presented.is_empty() {
             return Ok(None);
         }

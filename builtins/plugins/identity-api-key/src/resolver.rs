@@ -24,6 +24,7 @@ use crate::config::{ApiKeyResolverConfig, DirectoryConfig, ExpiryPolicy};
 use crate::credential::{CredentialLocation, Extraction};
 use crate::directory::KeyDirectory;
 use crate::file_directory::FileDirectory;
+use crate::http_directory::HttpDirectory;
 use crate::record_map;
 
 /// Denial codes, which a host maps to a status.
@@ -99,6 +100,11 @@ impl ApiKeyIdentityResolver {
                     message: format!("{}: {e}", config.name),
                 },
             )?),
+            DirectoryConfig::Http(http) => Arc::new(HttpDirectory::new(http.clone()).map_err(
+                |e| PluginError::Config {
+                    message: format!("{}: {e}", config.name),
+                },
+            )?),
         };
 
         let location = settings.location();
@@ -143,7 +149,7 @@ impl HookHandler<IdentityHook> for ApiKeyIdentityResolver {
     async fn handle(
         &self,
         payload: &IdentityPayload,
-        _ext: &Extensions,
+        ext: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<IdentityPayload> {
         let location = &self.location;
@@ -179,7 +185,10 @@ impl HookHandler<IdentityHook> for ApiKeyIdentityResolver {
             Extraction::WrongPrefix => return PluginResult::allow(),
         };
 
-        let record = match self.directory.lookup(&presented).await {
+        // `Extensions` is the request's carrier of host services, already
+        // capability filtered by the executor, so a backend that needs egress
+        // reaches it through the same value every hook receives.
+        let record = match self.directory.lookup(&presented, ext).await {
             Ok(Some(record)) => record,
             Ok(None) => {
                 return PluginResult::deny(PluginViolation::new(

@@ -23,6 +23,7 @@
 mod expiry;
 mod extraction;
 mod file_backend;
+mod http_backend;
 mod populations;
 mod projection;
 

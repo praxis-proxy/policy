@@ -51,6 +51,10 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# The `HttpTransport` test double, so the HTTP backend's cases run in process
+# with no socket. A dev-dependency, so resolver 3 keeps the feature out of a
+# normal build of this crate.
+praxis-policy-core = { workspace = true, features = ["test-util"] }
 sha2 = "0.11"
 
 [lints]

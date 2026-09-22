@@ -48,6 +48,8 @@ pub mod directory;
 pub mod factory;
 /// The hash indexed file backend.
 pub mod file_directory;
+/// The backend for a directory behind an HTTP API.
+pub mod http_directory;
 /// Record fields onto the identity slots.
 pub mod record_map;
 /// The identity hook handler.
@@ -58,4 +60,5 @@ pub use credential::{Credential, CredentialLocation, Extraction};
 pub use directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 pub use factory::{ApiKeyIdentityFactory, KIND};
 pub use file_directory::{FileDirectory, FileDirectoryConfig, FileRecord, IndexKind, RecordFile};
+pub use http_directory::{HttpDirectory, HttpDirectoryConfig};
 pub use resolver::{ApiKeyIdentityResolver, codes};
