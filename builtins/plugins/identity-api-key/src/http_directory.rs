@@ -153,11 +153,6 @@ impl HttpDirectory {
         Ok(Self { config })
     }
 
-    /// The settings this backend runs.
-    pub fn config(&self) -> &HttpDirectoryConfig {
-        &self.config
-    }
-
     /// The request body for a credential.
     ///
     /// Built through `serde_json` rather than by formatting a string, so a

@@ -153,3 +153,62 @@ async fn the_presented_credential_never_reaches_raw_credentials() {
         "the credential must not reach anything this resolver writes: {projected}"
     );
 }
+
+/// `role: client` is a supported setting, so the branch that fills the client
+/// slot needs exercising rather than assuming it mirrors the subject one.
+#[tokio::test]
+async fn a_record_fills_the_client_slot() {
+    let file = RecordFile::write(&format!(
+        "keys:\n  - hash: \"{}\"\n    app: billing-service\n    scopes: [invoices.read]\n",
+        hash("sk-oai-secret")
+    ));
+    let mut config = file_config(file.path(), None);
+    config["role"] = serde_json::Value::String("client".to_owned());
+    config["record_map"] = serde_json::json!({
+        "client": { "client_id": "app", "authorized_scopes": "scopes" }
+    });
+    let resolver = resolver(config).expect("the config builds");
+
+    let result = resolve_with_header(&resolver, "sk-oai-secret").await;
+
+    let client = result
+        .modified_payload
+        .expect("the payload is modified")
+        .client
+        .expect("the client slot is filled");
+    assert_eq!(client.client_id, "billing-service");
+    assert_eq!(client.authorized_scopes, vec!["invoices.read"]);
+}
+
+/// A record the map cannot project fails the same way for every role, and the
+/// message names which slot could not be filled.
+#[tokio::test]
+async fn a_mapping_failure_names_the_slot_for_each_role() {
+    for (role, map) in [
+        (
+            "client",
+            serde_json::json!({ "client": { "client_id": "absent" } }),
+        ),
+        (
+            "caller_workload",
+            serde_json::json!({ "workload": { "spiffe_id": "absent" } }),
+        ),
+    ] {
+        let file = RecordFile::write(&format!(
+            "keys:\n  - hash: \"{}\"\n    user: alice\n",
+            hash("sk-oai-secret")
+        ));
+        let mut config = file_config(file.path(), None);
+        config["role"] = serde_json::Value::String(role.to_owned());
+        config["record_map"] = map;
+        let resolver = resolver(config).expect("the config builds");
+
+        let result = resolve_with_header(&resolver, "sk-oai-secret").await;
+
+        assert_eq!(
+            denial_code(&result).as_deref(),
+            Some("auth.mapping_failed"),
+            "role {role} must deny as a mapping failure"
+        );
+    }
+}

@@ -8,9 +8,10 @@
 // the wrong logs.
 
 use praxis_policy_core::extensions::raw_credentials::TokenRole;
-use praxis_policy_core::identity::mapping::{ClaimMapConfig, ClaimsOverrides};
+use praxis_policy_core::identity::mapping::{ClaimMapConfig, ClaimsOverrides, ConfiguredClaimMap};
 use serde::{Deserialize, Serialize};
 
+use crate::cache::CacheConfig;
 use crate::credential::{Credential, CredentialLocation};
 use crate::file_directory::FileDirectoryConfig;
 use crate::http_directory::HttpDirectoryConfig;
@@ -98,6 +99,14 @@ pub struct ApiKeyResolverConfig {
     /// Who enforces a record's expiry.
     #[serde(default)]
     pub expiry: ExpiryPolicy,
+
+    /// Reuse the directory's answers for a while.
+    ///
+    /// Omitted means every lookup reaches the directory. Meaningful only for a
+    /// backend that goes somewhere: see `validate` for why a file directory
+    /// refuses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheConfig>,
 }
 
 fn default_role() -> TokenRole {
@@ -110,14 +119,21 @@ impl ApiKeyResolverConfig {
         CredentialLocation::new(self.credential.clone(), self.prefix.clone())
     }
 
-    /// Reject what cannot work, before a request depends on it.
+    /// Reject what cannot work, before a request depends on it, and return the
+    /// mapper the checking produced.
+    ///
+    /// Compiling the `record_map` *is* most of the validation, so the compiled
+    /// map comes back rather than being thrown away and rebuilt: two compiles
+    /// is two places that could disagree about what an operator wrote, and the
+    /// second one's failure arm could then never be reached or tested.
     ///
     /// # Errors
     ///
     /// A location no request can satisfy, a `record_map` the shared compiler
-    /// refuses, or a map with no section for the configured role, which would
-    /// decline every credential.
-    pub fn validate(&self) -> Result<(), String> {
+    /// refuses, a map with no section for the configured role, which would
+    /// decline every credential, or a cache over a backend that is already an
+    /// index.
+    pub fn validate(&self) -> Result<ConfiguredClaimMap, String> {
         self.location().validate()?;
         let mapper = crate::record_map::compile(&self.record_map, &self.claims)?;
         // A map that declares no section for the role this resolver fills maps
@@ -129,6 +145,22 @@ impl ApiKeyResolverConfig {
                 self.role
             )
         })?;
-        Ok(())
+        // The cache's own settings are checked by `CachingDirectory::new`,
+        // which is the type that has to hold them. Only the pairing is checked
+        // here, because only this type can see both halves: a file directory is
+        // already an in-memory index, so a cache over it adds no speed and a
+        // second revocation window, with a record removed from the file waiting
+        // out `refresh_secs` and then `cache.ttl_secs`. Refused rather than
+        // quietly honoured, because an operator who wrote it believes they
+        // configured one window.
+        if self.cache.is_some() && matches!(self.directory, DirectoryConfig::File(_)) {
+            return Err(
+                "`cache:` with `directory.kind: file` gives two revocation windows for one \
+                 property: the file backend is already an index, and `refresh_secs` is its \
+                 window. Remove the `cache:` block"
+                    .to_owned(),
+            );
+        }
+        Ok(mapper)
     }
 }

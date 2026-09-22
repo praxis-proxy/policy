@@ -20,12 +20,12 @@ use praxis_policy_core::identity::mapping::{ClaimMapper as _, ConfiguredClaimMap
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
+use crate::cache::CachingDirectory;
 use crate::config::{ApiKeyResolverConfig, DirectoryConfig, ExpiryPolicy};
 use crate::credential::{CredentialLocation, Extraction};
 use crate::directory::KeyDirectory;
 use crate::file_directory::FileDirectory;
 use crate::http_directory::HttpDirectory;
-use crate::record_map;
 
 /// Denial codes, which a host maps to a status.
 ///
@@ -84,14 +84,10 @@ impl ApiKeyIdentityResolver {
             serde_json::from_value(block).map_err(|e| PluginError::Config {
                 message: format!("{}: {e}", config.name),
             })?;
-        settings.validate().map_err(|e| PluginError::Config {
+        // The mapper falls out of validation rather than being compiled a
+        // second time from the same block.
+        let mapper = settings.validate().map_err(|e| PluginError::Config {
             message: format!("{}: {e}", config.name),
-        })?;
-
-        let mapper = record_map::compile(&settings.record_map, &settings.claims).map_err(|e| {
-            PluginError::Config {
-                message: format!("{}: {e}", config.name),
-            }
         })?;
 
         let directory: Arc<dyn KeyDirectory> = match &settings.directory {
@@ -107,6 +103,17 @@ impl ApiKeyIdentityResolver {
             )?),
         };
 
+        // The cache wraps whatever backend was built, so what it holds is
+        // answers rather than anything one directory knows about.
+        let directory: Arc<dyn KeyDirectory> = match &settings.cache {
+            Some(cache) => Arc::new(CachingDirectory::new(directory, cache.clone()).map_err(
+                |e| PluginError::Config {
+                    message: format!("{}: {e}", config.name),
+                },
+            )?),
+            None => directory,
+        };
+
         let location = settings.location();
         Ok(Self {
             config,
@@ -115,26 +122,6 @@ impl ApiKeyIdentityResolver {
             mapper,
             location,
         })
-    }
-
-    /// The backend this resolver queries.
-    pub fn directory(&self) -> &Arc<dyn KeyDirectory> {
-        &self.directory
-    }
-
-    /// The compiled record map.
-    pub fn mapper(&self) -> &ConfiguredClaimMap {
-        &self.mapper
-    }
-
-    /// The settings this resolver runs.
-    pub fn settings(&self) -> &ApiKeyResolverConfig {
-        &self.settings
-    }
-
-    /// The plugin config this resolver was built from.
-    pub fn plugin_config(&self) -> &PluginConfig {
-        &self.config
     }
 }
 

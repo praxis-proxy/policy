@@ -392,3 +392,55 @@ async fn the_hash_and_expiry_never_reach_the_record_fields() {
         "an authored attribute must survive"
     );
 }
+
+/// The index names one algorithm, so a digest computed with another cannot be
+/// matched and is a config fault rather than a credential that never resolves.
+#[test]
+fn a_digest_from_another_algorithm_fails_at_load() {
+    let file = RecordFile::write(&format!(
+        "keys:\n  - hash: \"sha512:{}\"\n    user: alice\n",
+        "a".repeat(64)
+    ));
+
+    let error =
+        resolver(file_config(file.path(), None)).expect_err("a sha512 digest must not load");
+
+    assert!(
+        error.contains("where the index is 'sha256'"),
+        "the error must name both algorithms: {error}"
+    );
+}
+
+/// Before the interval elapses the file is not re-read, so the revocation
+/// window is the interval rather than however often requests arrive.
+#[tokio::test]
+async fn a_lookup_inside_the_interval_does_not_reload() {
+    let file = RecordFile::write(&format!(
+        "keys:\n  - hash: \"{}\"\n    user: alice\n",
+        hash("sk-oai-secret")
+    ));
+    let directory = FileDirectory::new(
+        serde_yaml::from_str(&format!("path: {}\nrefresh_secs: 3600", file.path()))
+            .expect("the backend config parses"),
+    )
+    .expect("the file loads");
+
+    file.rewrite("keys: []\n");
+
+    assert!(
+        directory
+            .lookup(&PresentedKey::new(&b"sk-oai-secret"[..]), &no_services())
+            .await
+            .expect("the lookup answers")
+            .is_some(),
+        "inside the interval the startup records keep serving"
+    );
+}
+
+#[test]
+fn the_backend_names_itself() {
+    let file = RecordFile::write("keys: []\n");
+    let directory = FileDirectory::new(config_for(file.path())).expect("the file loads");
+
+    assert_eq!(directory.kind(), "file");
+}

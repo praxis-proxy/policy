@@ -211,3 +211,28 @@ fn an_empty_prefix_is_refused_at_config_load() {
         "the error must say what is wrong with it: {error}"
     );
 }
+
+/// A location with no name can never be satisfied, so it is a config fault
+/// rather than a request that always denies.
+#[test]
+fn an_empty_header_name_is_refused_at_config_load() {
+    let file = one_record();
+    let mut config = file_config(file.path(), None);
+    config["credential"]["name"] = serde_json::Value::String("   ".to_owned());
+
+    let error = resolver(config).expect_err("an empty name must not build");
+
+    assert!(error.contains("empty name"), "got: {error}");
+}
+
+/// A leading space would be read as an empty auth scheme, and then no value
+/// could match the gate.
+#[test]
+fn a_prefix_starting_with_a_space_is_refused_at_config_load() {
+    let file = one_record();
+
+    let error = resolver(file_config(file.path(), Some(" Bearer ")))
+        .expect_err("a leading space must not build");
+
+    assert!(error.contains("starts with a space"), "got: {error}");
+}

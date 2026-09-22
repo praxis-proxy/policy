@@ -118,11 +118,6 @@ pub struct FileDirectoryConfig {
 }
 
 impl FileDirectoryConfig {
-    /// The revocation window, when one is configured.
-    pub fn refresh(&self) -> Option<Duration> {
-        self.refresh_secs.map(Duration::from_secs)
-    }
-
     /// The staleness ceiling, when one is configured.
     pub fn max_staleness(&self) -> Option<Duration> {
         self.max_staleness_secs.map(Duration::from_secs)
@@ -329,12 +324,6 @@ impl FileDirectory {
     /// Whether the running index holds no records.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// The settings this backend runs, including the refresh interval that is
-    /// its revocation window.
-    pub fn config(&self) -> &FileDirectoryConfig {
-        &self.config
     }
 
     /// Re-read the file, keeping the previous records if it fails.

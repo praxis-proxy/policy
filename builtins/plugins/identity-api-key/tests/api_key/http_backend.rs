@@ -333,3 +333,74 @@ async fn a_directory_failure_denies_differently_from_an_unknown_key() {
         Some("auth.key_unknown")
     );
 }
+
+/// A credential that is not UTF-8 cannot be asked about over a JSON contract.
+/// Refused rather than lossily converted: a replacement character would be a
+/// lookup for a different key, and would answer "unknown" about a credential
+/// nobody ever issued.
+#[tokio::test]
+async fn a_non_utf8_credential_is_refused_without_a_request() {
+    let (services, transport) = serving(200, VALID);
+
+    let error = directory()
+        .lookup(
+            &PresentedKey::new(&b"sk-oai-\xff\xfe_secret"[..]),
+            &services,
+        )
+        .await
+        .expect_err("a credential that cannot be encoded must not be sent");
+
+    assert!(
+        matches!(error, DirectoryError::Malformed(detail) if detail.contains("not UTF-8")),
+        "the refusal must say why"
+    );
+    assert_eq!(transport.call_count(), 0, "nothing should have been sent");
+}
+
+/// `connect_timeout_secs` reaches the request rather than being parsed and
+/// dropped.
+#[tokio::test]
+async fn the_connect_timeout_reaches_the_request() {
+    let (services, transport) = serving(200, VALID);
+    let config: HttpDirectoryConfig = serde_yaml::from_str(&format!(
+        "url: {URL}\ntimeout_secs: 9\nconnect_timeout_secs: 2"
+    ))
+    .expect("the backend config parses");
+
+    let _ = HttpDirectory::new(config)
+        .expect("the config builds")
+        .lookup(&PresentedKey::new(KEY), &services)
+        .await;
+
+    let request = transport.last_request().expect("a request was made");
+    assert_eq!(request.timeout, std::time::Duration::from_secs(9));
+    assert_eq!(
+        request.connect_timeout,
+        Some(std::time::Duration::from_secs(2))
+    );
+}
+
+/// A field name that is empty addresses nothing, so it fails at load rather
+/// than making every answer unreadable.
+#[test]
+fn an_empty_field_name_fails_at_config_load() {
+    for (block, expected) in [
+        (
+            format!("url: {URL}\nkey_field: \"\""),
+            "`key_field` is empty",
+        ),
+        (
+            format!("url: {URL}\nvalid_field: \"  \""),
+            "`valid_field` is empty",
+        ),
+    ] {
+        let config: HttpDirectoryConfig = serde_yaml::from_str(&block).expect("the block parses");
+        let error = HttpDirectory::new(config).expect_err("an empty field name must not build");
+        assert!(error.contains(expected), "got: {error}");
+    }
+}
+
+#[test]
+fn the_backend_names_itself() {
+    assert_eq!(directory().kind(), "http");
+}

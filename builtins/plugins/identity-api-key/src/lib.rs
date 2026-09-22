@@ -38,6 +38,8 @@
 //!
 //! [`record_map`]: crate::config::ApiKeyResolverConfig::record_map
 
+/// A cache in front of a directory.
+pub mod cache;
 /// Plugin configuration and its validation.
 pub mod config;
 /// Where the key is read from, and the prefix gate.
@@ -55,6 +57,7 @@ pub mod record_map;
 /// The identity hook handler.
 pub mod resolver;
 
+pub use cache::{CacheConfig, CachingDirectory};
 pub use config::{ApiKeyResolverConfig, DirectoryConfig, ExpiryPolicy, OnDirectoryError};
 pub use credential::{Credential, CredentialLocation, Extraction};
 pub use directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
