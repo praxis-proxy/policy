@@ -25,7 +25,7 @@ To assert on what a policy block compiles to, without an engine, use the
 
 ```toml
 [dev-dependencies]
-praxis-policy-apl-core = { version = "0.2", features = ["test-util"] }
+praxis-policy-apl-core = { version = "0.3", features = ["test-util"] }
 ```
 
 `compile_test_policy(source, yaml)` compiles a document with a `route:`

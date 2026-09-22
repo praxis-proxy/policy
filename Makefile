@@ -42,6 +42,11 @@ help:
 	@echo "  test              Run all workspace tests"
 	@echo "  test-tsan         Engine concurrency stress under ThreadSanitizer (nightly)"
 	@echo ""
+	@echo "Benchmarks (on demand — not part of make ci; see docs/dev/benchmarks.md):"
+	@echo "  bench             Criterion suite (ppe-benches / issue #19)"
+	@echo "  bench-percentiles p50/p95/p99 from target/criterion samples"
+	@echo "  bench-heap        dhat per-decision + policy-size footprint"
+	@echo ""
 	@echo "Supply chain & coverage:"
 	@echo "  audit             cargo deny check (advisories, licenses, bans, sources)"
 	@echo "  coverage          Coverage summary, gated at COVERAGE_FLOOR percent"
@@ -58,6 +63,8 @@ help:
 	@echo ""
 	@echo "CI:"
 	@echo "  ci                What CI runs: lint + test"
+	@echo "                    (ppe-benches compiles via clippy --all-targets"
+	@echo "                     plus a dhat-heap pass; make bench is on-demand)"
 	@echo ""
 	@echo "Release:"
 	@echo "  release-dry       Preview a release (no changes)"
@@ -113,6 +120,7 @@ lint:
 	@echo "fmt --check + clippy -D warnings ..."
 	@$(CARGO) +$(NIGHTLY) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
 	@echo "lint passed"
 
 .PHONY: lint-fix
@@ -174,6 +182,33 @@ test-tsan:
 	@echo "test-tsan passed"
 
 # =============================================================================
+# Benchmarks (issue #19) — on demand, never part of `make ci`
+# =============================================================================
+#
+# Wall-clock benches do not gate PRs: CI runners are noisy and a flaky
+# p99 gate would train people to ignore failures. Workspace clippy
+# --all-targets plus a dhat-heap clippy pass compile every [[bench]]
+# (including heap_profile). See docs/dev/benchmarks.md.
+
+.PHONY: bench
+bench:
+	@echo "Criterion suite (ppe-benches) — on demand, not a CI gate ..."
+	@$(CARGO) bench -p ppe-benches
+	@echo "HTML reports under target/criterion/; write-up in docs/dev/benchmarks.md"
+
+.PHONY: bench-percentiles
+bench-percentiles:
+	@command -v python3 >/dev/null 2>&1 || { echo "python3 not found"; exit 1; }
+	@python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" \
+		|| { echo "bench-percentiles requires Python 3.10+"; exit 1; }
+	@python3 tools/bench_percentiles.py
+
+.PHONY: bench-heap
+bench-heap:
+	@echo "dhat heap_profile (per-decision + policy-size) ..."
+	@$(CARGO) bench -p ppe-benches --features dhat-heap --bench heap_profile
+
+# =============================================================================
 # Supply chain & coverage
 # =============================================================================
 
@@ -209,7 +244,7 @@ COVERAGE_FLOOR ?= 96
 #
 # Both coverage targets share these flags. A report built from a narrower run
 # understates what the floor asserted.
-COVERAGE_ARGS := --workspace --all-features
+COVERAGE_ARGS := --workspace --all-features --exclude ppe-benches
 COVERAGE_TEST_ARGS := -- --include-ignored
 
 # `clean` first: llvm-cov merges the mappings of every instrumented binary it

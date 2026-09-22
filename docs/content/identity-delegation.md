@@ -164,7 +164,7 @@ it's been tested. All config is [unified-config](configuration.md) YAML.
 > with `pre_invocation:` and `post_invocation:` inside it. That is now
 > the only spelling. The `apl:` wrapper is gone at every scope, and a
 > phase list written flat on a route is a load error. Both were
-> accepted once; see [Upgrading APL](../upgrade-apl.md) for the rewrite.
+> accepted once; see [Upgrading APL](upgrade-apl.md) for the rewrite.
 
 ### Recipe 1: User acting through an agent (on-behalf-of)
 

@@ -6,7 +6,7 @@
 //! The executor's safety invariants are a property of every phase, not of
 //! one mock in one test module. This is the reusable seam: script a failure,
 //! drive [`crate::executor::Executor::execute`], and assert the decision.
-//! `docs/safety-invariants.md` is the catalog.
+//! `docs/dev/safety-invariants.md` is the catalog.
 //!
 //! Behind `test-util` (and `cfg(test)`), so it stays out of the published
 //! surface. A `FaultHandler` that reached production would either halt

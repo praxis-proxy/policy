@@ -571,7 +571,7 @@ impl PluginMode {
     /// Whether the executor dispatches this mode as a phase.
     ///
     /// `Disabled` is skipped. The match is exhaustive so a new variant is a
-    /// compile error until the catalog in `docs/safety-invariants.md` gains a
+    /// compile error until the catalog in `docs/dev/safety-invariants.md` gains a
     /// cell for it.
     pub fn is_dispatch_phase(&self) -> bool {
         match self {

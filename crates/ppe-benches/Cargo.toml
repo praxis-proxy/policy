@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# ppe-benches — Criterion microbenchmarks for the Praxis Policy Engine
+# (https://github.com/praxis-proxy/policy/issues/19).
+#
+# Unpublished on purpose: measurement harness, not a library.
+#
+# Run:
+#   make bench
+#   cargo bench -p ppe-benches --bench full_decision
+#
+# Profiles (on demand, not part of `make ci`):
+#   cargo flamegraph -p ppe-benches --bench full_decision
+#   cargo bench -p ppe-benches --features dhat-heap --bench memory
+
+[package]
+name = "ppe-benches"
+description = "Criterion benchmarks for the Praxis Policy Engine (issue #19)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+praxis-policy-core = { workspace = true }
+praxis-policy-apl-core = { workspace = true }
+praxis-policy-apl-runtime = { workspace = true }
+praxis-policy-pdp-cedar-direct = { workspace = true }
+praxis-policy-pdp-cel = { workspace = true }
+praxis-policy-pdp-opa = { workspace = true }
+async-trait = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+dhat = { version = "0.3.3", optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[features]
+dhat-heap = ["dep:dhat"]
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "hook_overhead"
+harness = false
+
+[[bench]]
+name = "full_decision"
+harness = false
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "pdp_cost"
+harness = false
+
+[[bench]]
+name = "memory"
+harness = false
+
+[[bench]]
+name = "heap_profile"
+harness = false
+required-features = ["dhat-heap"]

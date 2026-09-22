@@ -70,7 +70,7 @@ history.
   the same policy at a gateway, a sidecar, or in-framework
 - [Patterns](patterns.md):
   layered enforcement, shadow rollout, guardrails, least privilege
-- [Upgrading APL](../upgrade-apl.md):
+- [Upgrading APL](upgrade-apl.md):
   every key and form an existing configuration must rewrite
 
 ## Architecture
@@ -92,3 +92,5 @@ history.
   bundled plugins, decision points, session stores, and their features
 - [Testing](testing.md):
   testing a policy as code
+- [Benchmarks](benchmarks.md):
+  measuring the decision hot path, and reading the results
