@@ -63,10 +63,10 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 # MSRV. Keep in sync with rust-toolchain.toml `channel` and clippy.toml `msrv`.
-rust-version = "1.96"
+rust-version = "1.92"
 license = "Apache-2.0"
 authors = ["Teryl Taylor", "Fred Araujo"]
 repository = "https://github.com/praxis-proxy/policy"
@@ -129,18 +129,18 @@ regex = "1"
 # The keys are package names, which still carry the engine's previous naming.
 # Renaming them is a manifest change across every crate and lands separately, so
 # that the import stays a move and the rename stays a rename.
-praxis-policy-core                     = { path = "crates/ppe-core",              version = "0.3.0" }
-praxis-policy-orchestration            = { path = "crates/ppe-orchestration",     version = "0.3.0" }
-praxis-policy-apl-core                      = { path = "crates/ppe-apl-core",          version = "0.3.0" }
-praxis-policy-apl-cmf                       = { path = "crates/ppe-apl-cmf",           version = "0.3.0" }
-praxis-policy-apl-runtime                      = { path = "crates/ppe-apl-runtime",       version = "0.3.0" }
-praxis-policy-plugin-identity-jwt      = { path = "builtins/plugins/identity-jwt",     version = "0.3.0" }
-praxis-policy-plugin-delegator-oauth   = { path = "builtins/plugins/delegator-oauth",  version = "0.3.0" }
-praxis-policy-plugin-elicitation-ciba  = { path = "builtins/plugins/elicitation-ciba", version = "0.3.0" }
-praxis-policy-pdp-cedar-direct         = { path = "builtins/pdps/cedar-direct",        version = "0.3.0" }
-praxis-policy-pdp-cel                  = { path = "builtins/pdps/cel",                 version = "0.3.0" }
-praxis-policy-pdp-opa                  = { path = "builtins/pdps/opa",                 version = "0.3.0" }
-praxis-policy-session-valkey           = { path = "builtins/session/valkey",           version = "0.3.0" }
+praxis-policy-core                     = { path = "crates/ppe-core",              version = "0.3.1" }
+praxis-policy-orchestration            = { path = "crates/ppe-orchestration",     version = "0.3.1" }
+praxis-policy-apl-core                      = { path = "crates/ppe-apl-core",          version = "0.3.1" }
+praxis-policy-apl-cmf                       = { path = "crates/ppe-apl-cmf",           version = "0.3.1" }
+praxis-policy-apl-runtime                      = { path = "crates/ppe-apl-runtime",       version = "0.3.1" }
+praxis-policy-plugin-identity-jwt      = { path = "builtins/plugins/identity-jwt",     version = "0.3.1" }
+praxis-policy-plugin-delegator-oauth   = { path = "builtins/plugins/delegator-oauth",  version = "0.3.1" }
+praxis-policy-plugin-elicitation-ciba  = { path = "builtins/plugins/elicitation-ciba", version = "0.3.1" }
+praxis-policy-pdp-cedar-direct         = { path = "builtins/pdps/cedar-direct",        version = "0.3.1" }
+praxis-policy-pdp-cel                  = { path = "builtins/pdps/cel",                 version = "0.3.1" }
+praxis-policy-pdp-opa                  = { path = "builtins/pdps/opa",                 version = "0.3.1" }
+praxis-policy-session-valkey           = { path = "builtins/session/valkey",           version = "0.3.1" }
 
 # Criterion is only consumed by the unpublished `ppe-benches` crate (issue #19).
 # Kept in the workspace table so version bumps stay one-line.

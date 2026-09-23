@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![crates.io](https://img.shields.io/crates/v/praxis-policy.svg)](https://crates.io/crates/praxis-policy)
 [![docs.rs](https://img.shields.io/docsrs/praxis-policy)](https://docs.rs/praxis-policy)
-[![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](rust-toolchain.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.92-blue.svg)](rust-toolchain.toml)
 
 Policy engine for [Praxis](https://github.com/praxis-proxy/praxis), covering
 both standard policy use cases as well as AI inference and agents.
@@ -42,7 +42,7 @@ Declare individual features instead: `jwt`, `oauth`, `elicitation-ciba`,
 `cedar`, `cel`, `opa`, `valkey`.
 
 The crates are versioned together and released together, so a single `0.3`
-requirement covers the set. Requires Rust 1.96 or newer.
+requirement covers the set. Requires Rust 1.92 or newer.
 
 ## Documentation
 

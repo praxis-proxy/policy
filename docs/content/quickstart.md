@@ -3,7 +3,7 @@
 Stand up PPE and run the [scenario](overview.md): a `get_employee` route
 that authorizes by role and redacts a field by permission.
 
-You need Rust 1.96 or newer ([install with rustup](https://rustup.rs)).
+You need Rust 1.92 or newer ([install with rustup](https://rustup.rs)).
 The toolchain is pinned in the repository, so `cargo build` picks the
 right one.
 
