@@ -123,6 +123,8 @@ PDP ([PDP Integration](pdp.md)).
 
 ## Next
 
+- [Identity Claim Mapping](../identity-claim-mapping.md): add and test a
+  provider-specific JWT claim mapper preset.
 - [Static Attributes](attributes.md): combine verified identity with
   operator-maintained facts.
 - [Delegation](delegation.md): exchange verified credentials for scoped
