@@ -16,11 +16,8 @@
 //   String    → Value::String
 //   StringSet → Value::List(of String)   (so `"x" in session.labels` works)
 //
-// Collision rule: if a key is both a leaf and a namespace prefix
-// (`delegation` AND `delegation.depth`), the namespace (map) wins and the
-// scalar leaf is dropped with a `tracing::warn!`. In practice the cmf
-// BagBuilder never emits both, but the bag is an open namespace so we
-// resolve it deterministically rather than panic.
+// If a key is both a leaf and a namespace prefix, the namespace wins
+// and the scalar is dropped with a warning.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -232,6 +229,11 @@ mod tests {
         matches!(run_cel(expr, &ctx), Ok(Value::Bool(true)))
     }
 
+    fn insert_key(root: &mut BTreeMap<String, Node>, key: &str, leaf: Value) {
+        let segments: Vec<&str> = key.split('.').collect();
+        insert(root, key, &segments, leaf);
+    }
+
     #[test]
     fn dotted_keys_become_nested_maps() {
         let mut bag = AttributeBag::new();
@@ -380,5 +382,51 @@ mod tests {
         bag.set("delegation", "scalar-value");
         bag.set("delegation.depth", 3_i64);
         assert!(truthy("delegation.depth == 3", &bag));
+    }
+
+    #[test]
+    fn namespace_wins_when_scalar_arrives_after_branch() {
+        let mut root = BTreeMap::new();
+        insert_key(&mut root, "delegation.depth", Value::from(3_i64));
+        insert_key(
+            &mut root,
+            "delegation",
+            Value::from("scalar-value".to_owned()),
+        );
+
+        assert!(
+            matches!(
+                root.get("delegation"),
+                Some(Node::Branch(children))
+                    if matches!(
+                        children.get("depth"),
+                        Some(Node::Leaf(Value::Int(3)))
+                    )
+            ),
+            "namespace must retain its child",
+        );
+    }
+
+    #[test]
+    fn namespace_wins_when_branch_arrives_after_scalar() {
+        let mut root = BTreeMap::new();
+        insert_key(
+            &mut root,
+            "delegation",
+            Value::from("scalar-value".to_owned()),
+        );
+        insert_key(&mut root, "delegation.depth", Value::from(3_i64));
+
+        assert!(
+            matches!(
+                root.get("delegation"),
+                Some(Node::Branch(children))
+                    if matches!(
+                        children.get("depth"),
+                        Some(Node::Leaf(Value::Int(3)))
+                    )
+            ),
+            "namespace must replace the scalar",
+        );
     }
 }

@@ -11,7 +11,7 @@ deliberate reversal: keys used to be dropped silently, so a stale
 `plugin_settings:` block could take every engine setting down with it
 and leave the process running in a mode nobody chose.
 
-## The five top-level keys
+## The six top-level keys
 
 ```yaml
 engine_settings:  # dispatch mode and runtime limits
@@ -19,9 +19,10 @@ global:           # cross-cutting wiring, defaults, and policy
 plugins:          # the plugins available, by kind
 groups:           # reusable policy bundles routes opt into
 routes:           # policy, one entry per operation
+secrets:          # secret material: providers, and the values bound to them
 ```
 
-Anything else is a load error. All five are optional.
+Anything else is a load error. All six are optional.
 
 ## Dispatch modes
 
@@ -51,7 +52,7 @@ its scope's set is a load error naming the scope and the set.
 
 | Scope | Keys |
 |---|---|
-| the document | `global`, `plugins`, `groups`, `routes`, `engine_settings` |
+| the document | `global`, `plugins`, `groups`, `routes`, `secrets`, `engine_settings` |
 | `global:` | `defaults`, `authentication`, `assertions`, `response`, `authorization`, `pdp`, `session_store`, `attribute_files` |
 | `global.defaults.<entity>:` | `description`, `metadata`, `plugins`, `authentication`, `assertions`, `response`, `authorization`, `args`, `result` |
 | `groups.<name>:` | the same set as `global.defaults.<entity>:` |
@@ -212,12 +213,71 @@ For authorizing plain HTTP requests rather than named entities, see
 
 ## Secrets and key material
 
-APL does not substitute `${ENV}` in configuration fields. Inject secrets
-through typed source enums on the plugins that need them, so a secret
-has exactly one shape and the config names where it comes from rather
-than carrying it.
+There is no `${ENV}` substitution in configuration fields. A secret has
+exactly one shape and the config names where it comes from rather than
+carrying it.
 
-OAuth and CIBA client secrets use `client_secret_source`:
+### The `secrets:` block
+
+A **provider** reads one backend. A **value** binds a name to one
+provider and one reference. Everything downstream names the value, never
+the provider and never a raw reference, so the set of secrets the process
+can reach is the `values:` map and nothing else.
+
+```yaml
+secrets:
+  providers:
+    local: { kind: file, base_dir: /etc/ppe }
+    shell: { kind: env }
+  values:
+    upstream_api_key: { provider: local, ref: upstream.key }
+    session_password: { provider: shell, ref: VALKEY_PASSWORD }
+```
+
+Two provider kinds need no dependencies and ship in the engine:
+
+| kind | `ref` is | notes |
+|---|---|---|
+| `file` | a path | With `base_dir`, a reference must be relative and may not contain `..`. One trailing newline is stripped. An empty file is an error, not an empty value. |
+| `env` | a variable name | A process's environment is fixed at exec, so these never rotate without a restart. |
+
+`file` covers Kubernetes Secret volumes, CSI-projected secrets, container
+secret mounts, and a Vault Agent sidecar templating to disk, so a
+deployment using any of those needs no network backend.
+
+A name may contain letters, digits, `_`, `-`, and `/`. A `/` groups
+names on a large document but a name is a key rather than a path, so a
+leading, trailing, or repeated separator is refused: every name has one
+spelling. A repeated key in `providers:` or `values:` is a load error
+rather than a last-one-wins.
+
+### Resolution and refresh
+
+Shape is checked at load: a value naming an undeclared provider fails
+against the document, without contacting a backend.
+
+Every declared value is read during `PolicyEngine::initialize()`, before
+any plugin initializes. A value that cannot be read stops startup. A
+credential that has never resolved once has no last-good to serve, so
+there is no degraded state to start in.
+
+After startup the host decides when to re-read, by calling
+`refresh_secrets()`. Nothing in the engine spawns a ticker: a task binds
+to whichever runtime started it, and a host that initializes on a
+short-lived runtime would lose it before it ticked once, leaving a
+process that never rotates a credential and never says so.
+
+A value that fails to re-read keeps its last-good bytes, so a backend
+outage after startup degrades to a possibly-stale credential rather than
+to none. The returned report names every failure, and
+`provider_last_success()` is the staleness signal to alarm on. The
+interval a host picks is therefore the upper bound on how long a revoked
+credential stays in use.
+
+### Per-plugin secret sources
+
+Plugins that predate the `secrets:` block carry their own typed source
+enums. OAuth and CIBA client secrets use `client_secret_source`:
 
 <!-- validate: fragment -->
 ```yaml

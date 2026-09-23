@@ -11,7 +11,7 @@ for the change.
 
 ## Requirements
 
-- Rust stable 1.96+ (pinned in `rust-toolchain.toml`)
+- Rust stable 1.92+ (development toolchain pinned in `rust-toolchain.toml`)
 - No nightly required (formatting uses stable)
 
 ## Quick Reference

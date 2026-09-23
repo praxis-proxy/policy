@@ -91,6 +91,23 @@ pub use praxis_policy_core::engine::PolicyEngine;
 /// [`prelude`].
 pub use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 
+/// What a host needs to give the engine its secrets.
+///
+/// A host builds a [`SecretProviderRegistry`] holding the backends this build
+/// carries and installs it with `PolicyEngine::set_secret_providers` before
+/// `initialize()`. [`SecretProviderFactory`] is what a host implements to add a
+/// backend of its own, and [`SecretRef`] is the handle a consumer keeps so a
+/// later refresh reaches it.
+///
+/// There is no handle here that reads every declared value. A host drives
+/// refresh with `PolicyEngine::refresh_secrets` and watches for staleness with
+/// `PolicyEngine::secrets_last_success`, neither of which yields secret
+/// material.
+pub use praxis_policy_core::secrets::{
+    RefreshReport, SecretError, SecretProvider, SecretProviderFactory, SecretProviderRegistry,
+    SecretRef,
+};
+
 /// Curated re-exports for plugin authors, so a plugin crate can depend on this
 /// facade alone. See [`praxis_policy_core::prelude`].
 pub use praxis_policy_core::prelude;

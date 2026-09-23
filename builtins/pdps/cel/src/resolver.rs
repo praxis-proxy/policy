@@ -145,6 +145,8 @@ impl CelResolver {
     ///
     /// Composes: calling `with_functions` more than once stacks the
     /// callbacks. Each runs in registration order on every context.
+    /// Later registrations replace earlier custom functions with the same name.
+    /// Standard-library overloads take precedence; `has` is parser-reserved.
     ///
     /// # Example
     ///
@@ -669,6 +671,50 @@ mod tests {
             Decision::Allow,
             "subsequent with_functions calls must compose, not replace",
         );
+    }
+
+    #[tokio::test]
+    async fn custom_size_stdlib_overload_then_int_fallback() {
+        let r = CelResolver::new().with_functions(|ctx| {
+            ctx.add_function("size", |_n: i64| -> i64 { 777 });
+        });
+        let bag = bag_with(&[("subject.id", "alice")]);
+
+        let stdlib = r
+            .evaluate(&cel_call("size('hello') == 5"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(stdlib.decision, Decision::Allow);
+
+        let fallback = r
+            .evaluate(&cel_call("size(42) == 777"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(fallback.decision, Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn later_custom_function_overwrites_earlier_one() {
+        let r = CelResolver::new()
+            .with_functions(|ctx| {
+                ctx.add_function("magic", |n: i64| -> i64 { n + 100 });
+            })
+            .with_functions(|ctx| {
+                ctx.add_function("magic", |n: i64| -> i64 { n + 999 });
+            });
+        let bag = bag_with(&[("subject.id", "alice")]);
+
+        let out = r
+            .evaluate(&cel_call("magic(1) == 1000"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(out.decision, Decision::Allow);
+
+        let out = r
+            .evaluate(&cel_call("magic(1) == 101"), &bag)
+            .await
+            .unwrap();
+        assert!(matches!(out.decision, Decision::Deny { .. }));
     }
 
     /// The `regex` cel-feature is explicitly enabled in our Cargo.toml.
