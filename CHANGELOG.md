@@ -22,6 +22,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - Documented how to add and test provider-specific JWT claim mapper presets.
   ([#128](https://github.com/praxis-proxy/policy/pull/128))
 
+### Fixed
+
+- Prevented dotted subject and client membership names from creating ambiguous
+  flattened policy aliases. ([#126](https://github.com/praxis-proxy/policy/pull/126))
+
 ## [0.3.1] - 2026-09-22
 
 ### Changed

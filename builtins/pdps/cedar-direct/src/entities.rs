@@ -58,8 +58,10 @@ pub fn build(
 ///   - `subject.id`        → entity id (required)
 ///   - `subject.type`      → entity type (`User`, `Agent`, `Service`, or
 ///     `System`), defaulting to `User` when absent
-///   - `role.<name>=true`  → `attrs.roles : Set<String>`
-///   - `perm.<name>=true`  → `attrs.permissions : Set<String>`
+///   - `subject.roles`     → `attrs.roles : Set<String>`; when absent,
+///     `role.<name>=true` is used for compatibility with manually-built bags
+///   - `subject.permissions` → `attrs.permissions : Set<String>`; when absent,
+///     `perm.<name>=true` is used for compatibility with manually-built bags
 ///   - `claim.<name>=v`    → `attrs.claims.<name>` (record)
 ///   - `subject.teams`     → `attrs.teams : Set<String>`
 ///
@@ -120,10 +122,14 @@ pub fn build_principal(
     // need to move into praxis-policy-apl-core / a shared crate) before we can
     // reference them by symbol here. Left literal for now — the gap is
     // tracked in the `project_vocab_consolidation` memory.
-    let roles = collect_prefixed_bools(bag, "role.");
+    // CMF keeps membership names exact in these sets. Prefer them over the
+    // flattened aliases so dotted names remain usable in Cedar too. The
+    // alias fallback preserves the public low-level API for callers that
+    // construct an AttributeBag directly instead of using the CMF bridge.
+    let roles = collect_memberships(bag, "subject.roles", "role.");
     attrs.insert(ATTR_ROLES.to_owned(), json!(roles));
 
-    let permissions = collect_prefixed_bools(bag, "perm.");
+    let permissions = collect_memberships(bag, "subject.permissions", "perm.");
     attrs.insert(ATTR_PERMISSIONS.to_owned(), json!(permissions));
 
     let teams: Vec<String> = bag
@@ -231,9 +237,28 @@ fn qualify_type(bare: &str, namespace: Option<&str>) -> String {
     }
 }
 
+/// Read an exact membership set, falling back to every `<prefix>X = true` key
+/// when the exact key is absent. An exact key with the wrong type is treated as
+/// an empty set rather than falling back, so a malformed canonical source
+/// cannot be widened by unrelated aliases.
+///
+/// The fallback keeps direct `AttributeBag` callers working while CMF-built
+/// bags retain dotted membership names without turning them into namespaces.
+fn collect_memberships(bag: &AttributeBag, exact_key: &str, prefix: &str) -> Vec<String> {
+    if let Some(set) = bag.get_string_set(exact_key) {
+        let mut out: Vec<String> = set.iter().cloned().collect();
+        out.sort();
+        return out;
+    }
+    if bag.contains(exact_key) {
+        return Vec::new();
+    }
+    collect_prefixed_bools(bag, prefix)
+}
+
 /// Read every `<prefix>X = true` key from the bag and return `[X, ...]`.
-/// Used for `role.*` → roles and `perm.*` → permissions, matching
-/// praxis-policy-apl-cmf's presence-only encoding for role / permission membership.
+/// Used as the compatibility path for callers that build bags without the
+/// canonical exact membership set.
 fn collect_prefixed_bools(bag: &AttributeBag, prefix: &str) -> Vec<String> {
     let mut out: HashSet<String> = HashSet::new();
     for (key, value) in bag.iter() {

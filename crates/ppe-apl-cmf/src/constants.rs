@@ -78,7 +78,7 @@ pub const CAP_WRITE_HEADERS: &str = "write_headers";
 // the praxis-policy-apl-cmf extractor modules write.
 //
 // Prefixes ending in `.` match any key starting with them
-// (e.g. `BAG_ROLE_PREFIX` matches `role.hr`, `role.admin`).
+// (e.g. `BAG_ROLE_PREFIX` matches atomic aliases `role.hr`, `role.admin`).
 // Prefixes WITHOUT a trailing `.` match the exact bag key
 // (e.g. `BAG_AUTHENTICATED` matches only `authenticated`).
 /// Bag key `subject.id`.
@@ -87,20 +87,20 @@ pub const BAG_SUBJECT_ID: &str = "subject.id";
 pub const BAG_SUBJECT_TYPE: &str = "subject.type";
 /// Bag key `subject.teams`.
 pub const BAG_SUBJECT_TEAMS: &str = "subject.teams";
-/// Bag key `subject.roles` — the full role set, mirroring the
-/// flattened `role.<name>` keys as one `StringSet` for `in`/`contains`
-/// membership tests (e.g. OPA `"hr" in input.subject.roles`).
+/// Bag key `subject.roles` — the full role set, with undotted members mirrored
+/// as flattened `role.<name>` keys, for `in`/`contains` membership tests (e.g.
+/// OPA `"hr" in input.subject.roles`).
 pub const BAG_SUBJECT_ROLES: &str = "subject.roles";
-/// Bag key `subject.permissions` — the full permission set, mirroring
-/// the flattened `perm.<name>` keys as one `StringSet`.
+/// Bag key `subject.permissions` — the full permission set, with undotted
+/// members mirrored as flattened `perm.<name>` keys.
 pub const BAG_SUBJECT_PERMISSIONS: &str = "subject.permissions";
 /// Bag key `authenticated`.
 pub const BAG_AUTHENTICATED: &str = "authenticated";
-/// Key prefix for role, as in `role.<name>`.
+/// Key prefix for atomic role aliases, as in `role.<name>`.
 pub const BAG_ROLE_PREFIX: &str = "role.";
-/// Key prefix for perm, as in `perm.<name>`.
+/// Key prefix for atomic permission aliases, as in `perm.<name>`.
 pub const BAG_PERM_PREFIX: &str = "perm.";
-/// Key prefix for team, as in `team.<name>`.
+/// Key prefix for atomic team aliases, as in `team.<name>`.
 pub const BAG_TEAM_PREFIX: &str = "team.";
 /// Key prefix for claim, as in `claim.<name>`.
 pub const BAG_CLAIM_PREFIX: &str = "claim.";
@@ -119,12 +119,12 @@ pub const BAG_RESULT_PREFIX: &str = "result.";
 /// Key prefix for the OAuth client, as in `client.<name>`.
 pub const BAG_CLIENT_PREFIX: &str = "client.";
 /// Bag key `client.roles` — the client's full role set, mirroring the
-/// flattened `client.role.<name>` keys as one `StringSet`. Symmetric
+/// flattened atomic `client.role.<name>` keys as one `StringSet`. Symmetric
 /// with [`BAG_SUBJECT_ROLES`] so the same membership idiom works on
 /// either principal.
 pub const BAG_CLIENT_ROLES: &str = "client.roles";
 /// Bag key `client.permissions` — the client's full permission set,
-/// mirroring the flattened `client.perm.<name>` keys as one `StringSet`.
+/// mirroring the flattened atomic `client.perm.<name>` keys as one `StringSet`.
 pub const BAG_CLIENT_PERMISSIONS: &str = "client.permissions";
 /// Key prefix for caller workload, as in `caller_workload.<name>`.
 pub const BAG_CALLER_WORKLOAD_PREFIX: &str = "caller_workload.";

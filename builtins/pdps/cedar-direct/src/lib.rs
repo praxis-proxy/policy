@@ -49,8 +49,9 @@
 //                            the key is absent this crate defaults to `User`
 //                            (PascalCase), so a type-scoped policy can miss a
 //                            principal whose type was omitted.
-//   - `role.<name>=true`  → principal.roles  : Set<String>
-//   - `perm.<name>=true`  → principal.permissions : Set<String>
+//   - `subject.roles`     → principal.roles  : Set<String>
+//   - `subject.permissions` → principal.permissions : Set<String>
+//     (with alias-only fallback for manually-built bags)
 //   - `claim.<name>=v`    → principal.claims.<name> = v
 //   - `subject.teams`     → principal.teams  : Set<String>
 //   - `subject.id`        → principal.id     : String
