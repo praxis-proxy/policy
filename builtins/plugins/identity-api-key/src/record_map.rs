@@ -8,19 +8,20 @@
 // produced it and a policy cannot tell them apart. This module is only the two
 // places a record differs from a claim set.
 
-use praxis_policy_core::identity::mapping::{ClaimMapConfig, ClaimsOverrides, ConfiguredClaimMap};
+use praxis_policy_core::identity::mapping::{
+    ClaimMapConfig, ClaimsOverrides, ConfiguredClaimMap, MappingProfile,
+};
 
 /// What a mapped workload identity records as its attestor.
 ///
 /// A policy gating on how an identity was established has to be told the truth
-/// about it: the mapper's default says `jwt`, which is what a JWT resolver
-/// verified and not what this one did.
+/// about it: this resolver verified an API key.
 pub const ATTESTOR: &str = "api_key";
 
 /// The field names the claims bag drops before projecting.
 ///
-/// Empty, and that is the point. The mapper's default drops the registered JWT
-/// claims, which a directory record does not carry: a record naming a field
+/// Empty, and that is the point. JWT mapping drops registered claims, which a
+/// directory record does not carry: a record naming a field
 /// `exp` or `iss` means its own thing by it, and dropping that loses an
 /// attribute a policy may be written against, silently. A backend's own storage
 /// fields are stripped by the backend instead, since only it knows which are
@@ -38,7 +39,11 @@ pub fn compile(
     claims: &ClaimsOverrides,
 ) -> Result<ConfiguredClaimMap, String> {
     let compiled = config.compile()?.with_claims(claims.compile()?);
-    Ok(ConfiguredClaimMap::new(compiled)
-        .with_reserved_names(RESERVED_FIELDS)
-        .with_attestor(ATTESTOR))
+    Ok(ConfiguredClaimMap::new(
+        compiled,
+        MappingProfile {
+            reserved_names: RESERVED_FIELDS,
+            attestor: ATTESTOR,
+        },
+    ))
 }

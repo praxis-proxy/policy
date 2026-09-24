@@ -24,6 +24,8 @@ pub mod payload;
 pub mod route_config;
 
 pub use hook::{HOOK_IDENTITY_RESOLVE, IdentityHook};
-pub use mapping::{ClaimMap, ClaimMapConfig, ClaimMapper, ClaimPath, ConfiguredClaimMap};
+pub use mapping::{
+    ClaimMap, ClaimMapConfig, ClaimMapper, ClaimPath, ConfiguredClaimMap, MappingProfile,
+};
 pub use payload::{IdentityPayload, TokenSource};
 pub use route_config::{RouteIdentityConfig, RouteIdentityStep};

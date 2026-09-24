@@ -30,7 +30,7 @@ pub use claim_map_config::{
     MergeMode, OnMissing, SplitMode,
 };
 pub use claim_path::ClaimPath;
-pub use configured_mapper::{ConfiguredClaimMap, REGISTERED_JWT_CLAIMS};
+pub use configured_mapper::{ConfiguredClaimMap, MappingProfile};
 
 /// Convert a record's fields into the typed identity slot for the resolver's
 /// configured role.

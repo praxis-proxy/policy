@@ -82,9 +82,10 @@ fn an_empty_namespace_is_treated_as_absent() {
     assert_eq!(e.uid().type_name().to_string(), "User");
 }
 
-/// `role.*` and `perm.*` are presence-only bag keys, and only a `true` value
-/// counts. A `false` key must not grant the role: that would invert the meaning
-/// of an explicit denial upstream.
+/// When the canonical exact sets are absent, `role.*` and `perm.*` are
+/// compatibility presence-only bag keys, and only a `true` value counts. A
+/// `false` key must not grant the role: that would invert the meaning of an
+/// explicit denial upstream.
 #[test]
 fn only_true_role_and_perm_keys_become_attributes() {
     let mut bag = bag_with(&[]);
@@ -104,6 +105,40 @@ fn only_true_role_and_perm_keys_become_attributes() {
     let perms = format!("{:?}", e.attr("permissions").unwrap().unwrap());
     assert!(perms.contains("read"), "{perms}");
     assert!(!perms.contains("write"), "{perms}");
+}
+
+/// Dotted identity memberships stay atomic through the CMF exact sets and
+/// remain available to Cedar as ordinary set members. They must not depend on
+/// a `role.admin.readonly` alias, because Cedar's adapter intentionally does
+/// not interpret flattened aliases as nested namespaces.
+#[test]
+fn exact_membership_sets_preserve_dotted_names() {
+    let mut bag = bag_with(&[]);
+    bag.set("subject.roles", set_of(["admin.readonly", "reader"]));
+    bag.set("subject.permissions", set_of(["data.read", "view"]));
+    let e = build_principal(&bag, None, None).unwrap();
+
+    let roles = format!("{:?}", e.attr("roles").unwrap().unwrap());
+    assert!(roles.contains("admin.readonly"), "{roles}");
+    assert!(roles.contains("reader"), "{roles}");
+    let permissions = format!("{:?}", e.attr("permissions").unwrap().unwrap());
+    assert!(permissions.contains("data.read"), "{permissions}");
+    assert!(permissions.contains("view"), "{permissions}");
+}
+
+/// An explicitly present canonical set is authoritative, including when it is
+/// empty. A stale or unrelated flattened alias must not widen that identity.
+#[test]
+fn canonical_membership_set_wins_over_legacy_aliases() {
+    let mut bag = bag_with(&[]);
+    bag.set("subject.roles", std::collections::HashSet::<String>::new());
+    bag.set("role.admin", true);
+    let e = build_principal(&bag, None, None).unwrap();
+    let roles = format!("{:?}", e.attr("roles").unwrap().unwrap());
+    assert!(
+        !roles.contains("admin"),
+        "canonical empty set was widened: {roles}"
+    );
 }
 
 #[test]

@@ -62,6 +62,11 @@ routes:
         - cel:
             expr: |
               subject.id == "alice" && has(role.reader) && role.reader
+  - tool: check_admin
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: has(role.admin) && role.admin
 "#;
 
 fn meta_for_tool(name: &str) -> MetaExtension {
@@ -174,6 +179,32 @@ async fn config_declared_cel_pdp_denies_non_matching_subject() {
     assert!(
         result.violation.is_some(),
         "deny path must surface a violation",
+    );
+}
+
+/// A dotted role is an atomic membership name, not a nested CEL namespace.
+/// The CMF bridge keeps it in `subject.roles` but must not emit
+/// `role.admin.readonly`, which CEL would interpret as `role.admin` existing.
+#[tokio::test]
+async fn config_declared_cel_pdp_rejects_dotted_role_as_atomic_alias() {
+    let mgr = build_manager().await;
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("check_admin"))),
+        security: Some(Arc::new(security_with_roles("alice", &["admin.readonly"]))),
+        ..Default::default()
+    };
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), ext, None)
+        .await;
+
+    assert!(
+        !result.continue_processing,
+        "admin.readonly must not satisfy the role.admin CEL alias guard",
+    );
+    assert!(
+        result.violation.is_some(),
+        "deny path must surface a violation"
     );
 }
 
