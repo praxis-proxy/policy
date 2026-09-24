@@ -443,6 +443,51 @@ mod tests {
         );
     }
 
+    /// The reason the `ibmverify` preset exists. IBM Verify emits `roles`,
+    /// `teams` and `permissions` as bare scalars at N=1, and the Rust mapper
+    /// reads them with an array accessor that yields nothing for a JSON string:
+    /// the field comes back empty with no error, so a single-valued subject
+    /// presents as a policy deny rather than the config fault it is. Narrowing
+    /// these candidates back to `array_only` would restore exactly that, and
+    /// nothing else in the suite would notice.
+    #[test]
+    fn the_ibmverify_preset_reads_a_scalar_collection_claim() {
+        let scalars = json!({
+            "sub": "alice",
+            "roles": "engineer",
+            "teams": "hr",
+            "permissions": "read:reports",
+        });
+
+        let subject = mapper("ibmverify")
+            .map_subject(&claims(scalars.clone()))
+            .expect("a single-valued Verify token resolves");
+        assert_eq!(sorted(&subject.roles), vec!["engineer"]);
+        assert_eq!(sorted(&subject.teams), vec!["hr"]);
+        assert_eq!(sorted(&subject.permissions), vec!["read:reports"]);
+
+        // The same token under `standard`, which is what the preset is here to
+        // avoid: an array accessor over a scalar contributes nothing.
+        let under_standard = mapper("standard")
+            .map_subject(&claims(scalars))
+            .expect("resolves; the fields are empty rather than absent");
+        assert!(
+            under_standard.roles.is_empty()
+                && under_standard.teams.is_empty()
+                && under_standard.permissions.is_empty(),
+            "a scalar claim must contribute nothing under the array-only standard preset"
+        );
+
+        // Widening to accept a scalar must not cost the array shape.
+        let arrays = mapper("ibmverify")
+            .map_subject(&claims(json!({
+                "sub": "alice", "roles": ["engineer", "hr-admin"], "teams": ["hr"],
+            })))
+            .expect("a multi-valued Verify token resolves");
+        assert_eq!(sorted(&arrays.roles), vec!["engineer", "hr-admin"]);
+        assert_eq!(sorted(&arrays.teams), vec!["hr"]);
+    }
+
     // ---- the deliberate omissions -----------------------------------------
 
     /// Each omission is asserted rather than left to review, because a candidate
