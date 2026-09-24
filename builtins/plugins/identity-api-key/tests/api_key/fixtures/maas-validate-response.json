@@ -1,0 +1,14 @@
+{
+  "valid": true,
+  "userId": "00000000-0000-4000-8000-000000000001",
+  "username": "system:serviceaccount:example-tenant:example-consumer",
+  "keyId": "00000000-0000-4000-8000-000000000001",
+  "keyName": "example-key",
+  "groups": [
+    "system:authenticated",
+    "system:serviceaccounts",
+    "system:serviceaccounts:example-tenant"
+  ],
+  "subscription": "example-subscription",
+  "tenant": "example-site"
+}

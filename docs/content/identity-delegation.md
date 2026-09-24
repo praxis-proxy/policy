@@ -60,6 +60,7 @@ delegator uses:
 | let a workload authenticate as *itself* by its SVID | `subject: caller_workload` → client assertion | RFC 7523 + `draft-ietf-oauth-spiffe-client-auth` |
 | record both the user *and* the calling agent in the token | `subject: user`, `actor: caller_workload` | RFC 8693 `actor_token` |
 | forward a token the caller already obtained | no `delegate`, pass the header through | — |
+| authenticate a caller holding an opaque API key | `identity/api-key` → directory lookup | — |
 
 ---
 
@@ -438,6 +439,213 @@ actor on the wire exactly as RFC 8693 delegation prescribes (`actor_token` +
 
 ---
 
+### Recipe 7: An opaque API key, resolved against a directory
+
+When: the caller holds an API key rather than a token. A key carries nothing,
+so authenticating one is a lookup: find the record it keys, and that record's
+fields become the identity.
+
+The projection is the same compiler the JWT resolver uses, so a policy written
+against `subject.roles` cannot tell which credential produced them.
+
+**Records in a file**, which needs no network and is the operator-authored
+case:
+
+```yaml
+plugins:
+  - name: api-keys
+    kind: identity/api-key
+    hooks: [identity.resolve]
+    config:
+      credential:
+        kind: header
+        name: X-API-Key
+      directory:
+        kind: file
+        path: /etc/ppe/keys.yaml
+        refresh_secs: 30          # this interval is the revocation window
+        max_staleness_secs: 300
+      record_map:
+        subject:
+          id: user
+          roles: groups
+      claims:
+        include: [tenant]
+
+global:
+  authentication: [api-keys]
+```
+
+The file holds digests, never plaintext, so a file that leaks hands over no
+usable credential:
+
+<!-- validate: fragment -->
+```yaml
+keys:
+  - hash: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    user: alice
+    groups: [reader, writer]
+    tenant: acme
+    expires_at: 2027-01-01T00:00:00Z
+```
+
+Generate one with `printf %s "$KEY" | sha256sum`.
+
+**Records in a service**, reached over HTTP. Written against the RHOAI MaaS
+`maas-api` validate contract:
+
+```yaml
+plugins:
+  - name: maas-keys
+    kind: identity/api-key
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      credential:
+        kind: header
+        name: Authorization
+      prefix: "Bearer sk-oai-"
+      directory:
+        kind: http
+        url: "https://maas-api.../internal/v1/api-keys/validate"
+        timeout_secs: 5
+      record_map:
+        subject:
+          id: username         # not `userId`: see below
+          roles: groups
+      claims:
+        # `exclude` drops; `include` restores something the inference dropped.
+        # Every field a path did not consume is already policy visible, so the
+        # per-key identifiers are dropped rather than the wanted ones listed.
+        exclude: [userId, keyId, keyName]
+      cache:
+        ttl_secs: 60           # this interval is the revocation window
+        negative_ttl_secs: 10
+```
+
+Three things about that contract are worth stating, because each is easy to
+get backwards:
+
+`subject.id` reads `username`. `maas-api` fills both `userId` and `keyId` from
+the key's own database row id, so mapping `subject.id` to `userId` gives every
+key its own identity and two keys for one person become two subjects. A
+response captured from a running deployment shows this plainly:
+
+<!-- validate: fragment -->
+```yaml
+userId:   "00000000-0000-4000-8000-000000000001"   # the key's row id
+keyId:    "00000000-0000-4000-8000-000000000001"   # the same value
+username: "system:serviceaccount:example-tenant:example-consumer"
+groups:   ["system:authenticated", "system:serviceaccounts",
+           "system:serviceaccounts:example-tenant"]
+subscription: "example-subscription"
+tenant:   "example-site"
+```
+
+Note what the subject *is* there: a Kubernetes service account, with that
+account's Kubernetes groups. In this deployment an API key names a workload,
+not a person. It is still the subject slot, because those names are not SPIFFE
+IDs and the workload slot requires one.
+
+Those group names change how a policy has to be written. `role.<name>` is an
+alias for names the predicate syntax can spell, and a `:` cannot appear in an
+attribute path, so `require(role.system:authenticated)` is a parse error. Use
+the canonical set:
+
+<!-- validate: apl-predicate -->
+```apl
+require(subject.roles contains "system:authenticated")
+```
+
+The same applies to any directory whose groups carry `:` or `.`. See
+[Identity](apl/identity.md#what-lands-in-the-bag).
+
+An invalid key answers HTTP 200 carrying `valid: false`. A 500 means the
+directory could not answer, which PPE denies as `auth.directory_unavailable`
+rather than as an unknown key: the two are the same denial to a caller and
+different problems to whoever is paged.
+
+A `prefix` splits into an auth scheme and a leader. The scheme (`Bearer`) is
+transport framing, so it is stripped and matched without case per RFC 7235.
+The leader (`sk-oai-`) is part of the key and is kept, because the record is
+stored under a digest of the whole string.
+
+**Several key populations on one route** are several plugin instances, each
+gated on its own prefix. A credential that is not a resolver's declines
+without reaching its directory, so N populations do not cost N lookups:
+
+```yaml
+plugins:
+  - name: maas-keys
+    kind: identity/api-key
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      credential: { kind: header, name: Authorization }
+      prefix: "Bearer sk-oai-"
+      directory:
+        kind: http
+        url: "https://maas-api.../internal/v1/api-keys/validate"
+      record_map:
+        subject: { id: username, roles: groups }
+
+  - name: partner-keys
+    kind: identity/api-key
+    hooks: [identity.resolve]
+    config:
+      credential: { kind: header, name: Authorization }
+      prefix: "Bearer pk-live-"
+      directory:
+        kind: file
+        path: /etc/ppe/partner-keys.yaml
+        refresh_secs: 30
+      record_map:
+        subject: { id: user, roles: groups }
+
+global:
+  authentication: [maas-keys, partner-keys]
+```
+
+#### What a key never does
+
+The presented key stops at the resolver. It is not written to
+`raw_credentials`, so no downstream step can forward a caller's own key to an
+upstream that never authenticated it, and `secret.<name>` on an
+[assertion](assertions.md) is how a credentialed upstream is reached instead.
+
+#### Denial codes
+
+| Code | Means |
+|---|---|
+| `auth.missing_credential` | nothing at the configured location |
+| `auth.empty_credential` | the location held an empty value |
+| `auth.key_unknown` | the directory answered, and no record matched |
+| `auth.key_expired` | a record matched and has expired |
+| `auth.directory_unavailable` | the directory could not answer |
+| `auth.mapping_failed` | a record resolved and the map could not project it |
+
+The first two are spelled as the JWT resolver spells them, because reading a
+credential off the wire fails the same way whatever it turns out to be.
+
+#### The revocation window
+
+A revoked key keeps authenticating until the window that governs its path
+closes: `refresh_secs` on the file backend, `cache.ttl_secs` when a cache is
+configured. Neither can be designed away, so both are named configuration
+rather than emergent behaviour. Authorino documents the same property for its
+own 60 second default.
+
+A cache over a file directory is refused at config load: the file backend is
+already an in-memory index, and two windows for one property is not what an
+operator who wrote one of them expects.
+
+Verified against one captured request and response from a running MaaS
+deployment on 2026-09-24, which agreed with the contract read from
+`maas-api`'s source. The captured answer is a test fixture, so a future change
+to how it is read has to face it. `tools/maas_stub.py` reproduces the contract
+for local development. Error responses have not been captured, so the status
+code handling is still read from source rather than observed.
+
 ## Reading claims the way your IdP writes them
 
 The JWT identity plugin infers a subject from a token's claims. Which
@@ -587,9 +795,10 @@ work" means the IdP documents support for the required standards, but the flow
 has no end-to-end result.
 
 <!-- Stubs to flesh out as recipes are validated:
-  - Recipe 7: per-tenant / tag-scoped identity (authentication via groups /
+  - Recipe 8: per-tenant / tag-scoped identity (authentication via groups /
     tags).
-  - Recipe 8: vault-backed delegation (exchange a token for a stored API key).
+  - Recipe 9: vault-backed delegation (exchange a token for a stored API key).
+  - Live-directory validation of Recipe 7 against a running MaaS.
   - Live-IdP validation of Recipe 6's actor_token / `act` claim (currently
     mock-tested).
   - Per-recipe "verified against <IdP> on <date>" as the support matrix grows.
