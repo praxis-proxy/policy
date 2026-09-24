@@ -23,7 +23,15 @@
 use serde_json::Value;
 
 use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
-use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper, is_spiffe_id, trust_domain_of};
+use praxis_policy_core::identity::mapping::{
+    ClaimMap, ClaimMapper, MappingProfile, is_spiffe_id, trust_domain_of,
+};
+
+/// The profile for mapping validated JWT claims into identity slots.
+pub const JWT_MAPPING_PROFILE: MappingProfile = MappingProfile {
+    reserved_names: &["aud", "exp", "iat", "iss", "jti", "nbf", "sub"],
+    attestor: "jwt",
+};
 
 /// Default `ClaimMapper` covering the OIDC-standard claim shape:
 ///

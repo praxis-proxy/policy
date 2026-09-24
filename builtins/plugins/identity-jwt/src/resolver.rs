@@ -59,6 +59,7 @@ use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
+use super::claim_map::JWT_MAPPING_PROFILE;
 use super::config::{
     JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError, TrustedIssuerConfig,
 };
@@ -318,7 +319,8 @@ impl JwtIdentityResolver {
             );
         }
 
-        let claim_mapper: Arc<dyn ClaimMapper> = Arc::new(ConfiguredClaimMap::new(compiled));
+        let claim_mapper: Arc<dyn ClaimMapper> =
+            Arc::new(ConfiguredClaimMap::new(compiled, JWT_MAPPING_PROFILE));
 
         if typed.header.trim().is_empty() {
             return Err(Box::new(PluginError::Config {

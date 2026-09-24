@@ -119,6 +119,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::claim_map::JWT_MAPPING_PROFILE;
     use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper as _, ConfiguredClaimMap};
 
     fn claims(value: Value) -> ClaimMap {
@@ -130,6 +131,7 @@ mod tests {
             lookup(preset)
                 .unwrap_or_else(|e| panic!("the '{preset}' preset must load: {e}"))
                 .into_claim_map(),
+            JWT_MAPPING_PROFILE,
         )
     }
 

@@ -31,6 +31,7 @@
 use std::collections::{HashMap, HashSet};
 
 use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
+use praxis_policy_plugin_identity_jwt::claim_map::JWT_MAPPING_PROFILE;
 use praxis_policy_plugin_identity_jwt::{
     ClaimMapper as _, ConfiguredClaimMap, StandardClaimMap, presets,
 };
@@ -529,6 +530,7 @@ fn standard_preset() -> ConfiguredClaimMap {
         presets::lookup("standard")
             .expect("the shipped standard preset must load")
             .into_claim_map(),
+        JWT_MAPPING_PROFILE,
     )
 }
 
