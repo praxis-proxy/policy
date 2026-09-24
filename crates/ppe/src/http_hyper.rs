@@ -207,8 +207,9 @@ impl HyperTransport {
     /// would refuse: loopback, RFC 1918, link-local (including cloud
     /// metadata), CGNAT.
     ///
-    /// Default is to refuse them. Reach for this when the `IdP` is on
-    /// the same machine, or in tests that bind a mock on `127.0.0.1`.
+    /// Default is to refuse them. Reach for this when the `IdP` or
+    /// in-cluster Vault is on a private address, or in tests that bind a
+    /// mock on `127.0.0.1`.
     /// A host that injects its own transport never sees this knob —
     /// that transport's egress policy is the one that counts.
     #[must_use]

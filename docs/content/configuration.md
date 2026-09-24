@@ -245,6 +245,54 @@ Two provider kinds need no dependencies and ship in the engine:
 secret mounts, and a Vault Agent sidecar templating to disk, so a
 deployment using any of those needs no network backend.
 
+### Vault KV v2
+
+The `vault` kind is the `secrets-vault` feature, absent from the default
+build. Compiling the feature does not register the factory:
+`install_builtins` does not wire it. The host calls
+`register_vault_secret_provider` (or `registry_with_vault`) with the same
+`HttpTransport` it installed on the engine.
+
+Every call goes through that transport. Auth is Kubernetes or AppRole,
+with no default. The address must be `https://` unless
+`insecure_http: true`. The `ref` is `<mount>/<path>#<field>`, which is
+`GET /v1/<mount>/data/<path>` and then that field of `data.data`.
+The mount and path may contain spaces, `#`, or query-like characters; they
+are percent-encoded as URL path segments. Empty segments and `..` are refused.
+The optional `namespace` is sent as `X-Vault-Namespace` on login, renewal, and
+KV reads.
+
+In-cluster Vault (Kubernetes service DNS, RFC 1918) is refused by the
+bundled `HyperTransport` unless the host builds it with
+`with_allow_private_destinations`. A proxy injecting its own transport
+already chose an egress policy.
+
+<!-- validate: fragment -->
+```yaml
+secrets:
+  providers:
+    vault-prod:
+      kind: vault
+      address: https://vault.example.com:8200
+      auth:
+        method: kubernetes
+        role: ppe
+  values:
+    session_password: { provider: vault-prod, ref: secret/ppe#password }
+```
+
+AppRole `secret_id` comes from an environment variable or a file. A
+development-only `literal` is refused unless the document also sets
+`allow_insecure_literal: true`. Kubernetes login rereads the projected
+service-account token on every login.
+
+Token renewal is lazy on the next `get_secret` (startup or
+`refresh_secrets()`). Nothing spawns a ticker: a host that initializes
+on a short-lived runtime would lose it. A renewable token is renewed
+after two thirds of `lease_duration`, minus jitter; a non-renewable one
+is obtained again. A `403` on a read triggers one reauthentication and
+one retry, which is not a missing secret.
+
 A name may contain letters, digits, `_`, `-`, and `/`. A `/` groups
 names on a large document but a name is a key rather than a path, so a
 leading, trailing, or repeated separator is refused: every name has one

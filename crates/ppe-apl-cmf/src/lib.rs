@@ -17,8 +17,9 @@
 // async, no I/O. Composition is via the convenience `BagBuilder`.
 //
 // Attribute namespace contract (each module owns the detail comment):
-//   SecurityExtension.subject         → subject.*, role.*, perm.*, claim.*, authenticated
-//   SecurityExtension.client          → client.*, client.role.*, client.perm.*, client.claim.*
+//   SecurityExtension.subject         → subject.*, atomic role/perm/team aliases,
+//                                         claim.*, authenticated
+//   SecurityExtension.client          → client.*, atomic role/perm aliases, claim.*
 //   SecurityExtension.caller_workload → caller_workload.*   (inbound attested peer)
 //   SecurityExtension.this_workload   → this_workload.*     (our own attested identity —
 //                                         not `agent.*`, which is `AgentExtension`)

@@ -17,6 +17,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Documented how to add and test provider-specific JWT claim mapper presets.
+  ([#128](https://github.com/praxis-proxy/policy/pull/128))
+
+### Fixed
+
+- Prevented dotted subject and client membership names from creating ambiguous
+  flattened policy aliases. ([#126](https://github.com/praxis-proxy/policy/pull/126))
+
 ## [0.3.1] - 2026-09-22
 
 ### Changed
@@ -36,6 +46,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#71](https://github.com/praxis-proxy/policy/pull/71))
 - Added Criterion benchmarks for hook dispatch, full decisions, throughput,
   PDP evaluation, and session memory. ([#35](https://github.com/praxis-proxy/policy/pull/35))
+- **Vault KV v2 secret backend**, behind the `secrets-vault` facade
+  feature. A `kind: vault` provider reads `<mount>/<path>#<field>` through
+  the host `HttpTransport` (no Vault SDK). Auth is Kubernetes or AppRole,
+  with no default. Token renewal is lazy on the next read — nothing
+  spawns a ticker — and a `403` reauthenticates once. Written against
+  the Vault 1.19 KV v2 HTTP API.
+  ([#94](https://github.com/praxis-proxy/policy/issues/94))
 
 ### Changed
 
@@ -67,6 +84,21 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#86](https://github.com/praxis-proxy/policy/pull/86))
 - Added multithreaded engine stress tests, a Loom memory-ordering model, and a
   nightly ThreadSanitizer job. ([#60](https://github.com/praxis-proxy/policy/pull/60))
+
+### Changed
+
+- `execute_with_retry` is public so a `SecretProvider` that holds a host
+  transport can use the same retry policy as plugins.
+
+### Internal
+
+- **Line coverage floor raised to 96%.** `COVERAGE_FLOOR` in the `Makefile` is the gate. Parser error-return sites, `load_config_yaml` visitor refusals (`visit_route` / `visit_complete`), and the Valkey empty-append path are now tested. About 25 unreachable defensive guards still cap the number below 100. ([#14](https://github.com/praxis-proxy/policy/issues/14))
+- **The coverage artifact now measures the gated run.** The coverage job built `lcov.info` from a second, narrower run (default features, ignored tests skipped), so the uploaded report understated the number the floor asserted. `make coverage-lcov` measures once and derives both the floor check and the report from that data. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **Line coverage raised to 96.5%, and a secret leak closed on the way.** `DecodingKeySource`'s derived `Debug` printed inline PEM keys and HMAC secrets verbatim, and `TrustedIssuer`'s hand-written `Debug` forwarded that field while its comment claimed the key was elided, so any host logging its plugin list disclosed the signing secret. It now redacts the material and keeps the locator (path, JWKS URL). Tests cover the redaction on all five hand-written `Debug` impls, the non-blocking and timeout arms of every executor phase, `AplRouteHandler`'s wiring guards, and the Valkey endpoint error paths. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`step_to_effect` no longer carries an unreachable branch.** A rule inside a `do:` list can only be conditional: `parse_predicate` never yields `Always`, and the spellings that build an unconditional rule are consumed upstream. The dead effect-count and no-effect arms are gone, replaced by an explicit refusal. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **A test that no longer tested its premise.** `a_rejected_load_drops_its_plugins_outside_the_writer_lock` was rejected by config validation before any factory ran, so the `Drop`-re-entrancy deadlock it guards was never exercised. It now loads under `dispatch: hooks` and asserts the instantiation count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`make coverage` cleans stale instrumented binaries first.** llvm-cov merges the mappings of every binary it finds, so one left by a run with a different feature set (or a cached `target/` in CI) was counted twice, inflating both the line count and the miss count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`rustls` bumped to 0.23.45** for [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285): TLS 1.3 handshake messages packed after a key-changing message in the same record were accepted at the wrong encryption level. It reaches the shipped graph through `redis` and `deadpool-redis`, so this is a dependency bump rather than an advisory ignore. Lockfile only, one package, still MSRV 1.96. ([#86](https://github.com/praxis-proxy/policy/pull/86))
 
 ## [0.2.0] - 2026-09-03
 

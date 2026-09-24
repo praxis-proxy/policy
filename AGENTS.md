@@ -63,6 +63,7 @@ builtins/
                 elicitation-ciba
   pdps/         cedar-direct, cel, opa
   session/      valkey
+  secrets/      vault
 
 reference/
   plugins/      pii-scanner, audit-logger (examples)
