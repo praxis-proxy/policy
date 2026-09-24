@@ -476,6 +476,8 @@ impl ClaimMapper for ConfiguredClaimMap {
             attestor: Some("jwt".to_owned()),
             selectors,
             client_id,
+            // Explicit fields only, no preset-style remaining-claims carry.
+            claims: Default::default(),
         })
     }
 }

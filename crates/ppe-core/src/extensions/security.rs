@@ -290,6 +290,24 @@ pub struct WorkloadIdentity {
     /// `ClientExtension` slot, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+
+    /// Remaining workload credential claims, keyed by name. `Value` mirrors
+    /// [`SubjectExtension::claims`] so a nested claim keeps its shape.
+    #[serde(default)]
+    pub claims: HashMap<String, Value>,
+}
+
+impl WorkloadIdentity {
+    /// A scalar claim's value as a string. Mirrors
+    /// [`SubjectExtension::claim_str`], returning `None` for structured claims.
+    pub fn claim_str(&self, name: &str) -> Option<Cow<'_, str>> {
+        match self.claims.get(name)? {
+            Value::String(s) => Some(Cow::Borrowed(s.as_str())),
+            Value::Number(n) => Some(Cow::Owned(n.to_string())),
+            Value::Bool(b) => Some(Cow::Owned(b.to_string())),
+            Value::Object(_) | Value::Array(_) | Value::Null => None,
+        }
+    }
 }
 
 /// Security-related extensions.

@@ -113,6 +113,18 @@ pub struct JwtIdentityResolverConfig {
     /// [`claim_map`]: Self::claim_map
     #[serde(default)]
     pub claims: Option<serde_json::Value>,
+
+    /// Whether a token must be present. `true` (default) denies a request
+    /// with no token. `false` is optional authentication: an absent token
+    /// resolves no identity and continues, but a present-but-invalid token
+    /// is still denied.
+    #[serde(default = "default_required")]
+    pub required: bool,
+}
+
+/// Default for [`JwtIdentityResolverConfig::required`]: fail closed.
+const fn default_required() -> bool {
+    true
 }
 
 fn default_role() -> TokenRole {
@@ -1026,6 +1038,22 @@ mod tests {
         assert_eq!(cfg.trusted_issuers.len(), 1);
         assert_eq!(cfg.trusted_issuers[0].issuer, "https://idp.example.com");
         assert_eq!(cfg.claim_mapper.as_deref(), Some("standard"));
+    }
+
+    #[test]
+    fn required_defaults_to_true() {
+        // A config that omits `required` must fail closed.
+        let raw = json!({
+            "trusted_issuers": [{
+                "issuer": "https://idp.example.com",
+                "audiences": ["my-api"],
+                "algorithms": ["HS256"],
+                "decoding_key": { "kind": "secret", "secret": "test-secret" },
+            }],
+            "claim_mapper": "standard",
+        });
+        let cfg: JwtIdentityResolverConfig = serde_json::from_value(raw).unwrap();
+        assert!(cfg.required, "required must default to true");
     }
 
     // ---- JWKS documents the IdP might actually serve -----------------------

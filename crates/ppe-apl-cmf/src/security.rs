@@ -65,6 +65,7 @@
 //   sec.caller_workload.attestor     → caller_workload.attestor     : String
 //   sec.caller_workload.selectors    → caller_workload.selectors    : StringSet (always)
 //   sec.caller_workload.client_id    → caller_workload.client_id    : String
+//   sec.caller_workload.claims       → caller_workload.claim.<k>    : flattened JSON
 //   sec.this_workload.*              → this_workload.*  (same shape, our identity)
 //
 // Note: `caller_workload.*` / `this_workload.*` are separate from
@@ -229,6 +230,10 @@ pub fn extract_workload(prefix: &str, w: &WorkloadIdentity, bag: &mut AttributeB
     bag.set(format!("{prefix}.selectors"), selectors);
     if let Some(id) = &w.client_id {
         bag.set(format!("{prefix}.client_id"), id.clone());
+    }
+    // Remaining credential claims, flattened like subject and client claims.
+    for (k, v) in &w.claims {
+        crate::payload::walk(v, &format!("{prefix}.claim.{k}"), bag);
     }
     // `attested_at` is not in the bag. `request.timestamp` and
     // `completion.created_at` are carried as plain strings, so the bag
@@ -711,6 +716,37 @@ mod tests {
             client_id: Some("foo-svc".into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn workload_claims_reach_the_bag_under_the_claim_namespace() {
+        let mut w = workload_fixture();
+        w.claims.insert(
+            "grid_model_families".to_owned(),
+            serde_json::json!(["foo", "bar"]),
+        );
+        w.claims.insert(
+            "grid_trust_domain".to_owned(),
+            serde_json::json!("internal"),
+        );
+
+        let mut bag = AttributeBag::new();
+        extract_workload("caller_workload", &w, &mut bag);
+
+        assert_eq!(
+            bag.get_string("caller_workload.claim.grid_trust_domain"),
+            Some("internal"),
+            "a scalar grant claim should be readable by policy"
+        );
+        assert!(
+            bag.set_contains("caller_workload.claim.grid_model_families", "foo"),
+            "an array grant claim should flatten to a set the policy can test membership on"
+        );
+        assert_eq!(
+            bag.get_string("this_workload.claim.grid_trust_domain"),
+            None,
+            "the caller's grant must not leak into the outbound workload namespace"
+        );
     }
 
     #[test]

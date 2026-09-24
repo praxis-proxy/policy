@@ -196,11 +196,21 @@ impl ClaimMapper for StandardClaimMap {
         // cannot be `None`.
         let trust_domain = trust_domain_of(&spiffe_id);
 
+        // Every other claim lands under `caller_workload.claim.<name>`.
+        // Reserved: the structured-field sources plus the JWT registered claims.
+        const RESERVED: &[&str] = &["sub", "spiffe_id", "iss", "aud", "exp", "nbf", "iat", "jti"];
+        let extra = claims
+            .iter()
+            .filter(|(k, _)| !RESERVED.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
         Some(WorkloadIdentity {
             spiffe_id: Some(spiffe_id),
             trust_domain,
             attested_at: None,
             attestor: Some("jwt".to_owned()),
+            claims: extra,
             ..Default::default()
         })
     }
@@ -695,5 +705,61 @@ mod tests {
         assert!(Nothing.map_subject(&claims).is_none());
         assert!(Nothing.map_client(&claims).is_none());
         assert!(Nothing.map_workload(&claims).is_none());
+    }
+
+    #[test]
+    fn workload_claims_carry_the_grant() {
+        let claims = make_claims(json!({
+            "sub": "spiffe://grid.example/site/site-a",
+            "grid_model_families": ["foo", "bar"],
+            "grid_trust_domain": "internal",
+        }));
+        let w = StandardClaimMap.map_workload(&claims).unwrap();
+        assert_eq!(
+            w.spiffe_id.as_deref(),
+            Some("spiffe://grid.example/site/site-a")
+        );
+        assert_eq!(w.trust_domain.as_deref(), Some("grid.example"));
+        assert_eq!(
+            w.claims.get("grid_model_families"),
+            Some(&json!(["foo", "bar"])),
+            "an array grant claim must reach policy with its shape intact"
+        );
+        assert_eq!(
+            w.claim_str("grid_trust_domain").as_deref(),
+            Some("internal")
+        );
+    }
+
+    #[test]
+    fn workload_reserved_claims_stay_out_of_the_claims_map() {
+        let claims = make_claims(json!({
+            "sub": "spiffe://grid.example/site/site-a",
+            "iss": "https://idp.example",
+            "aud": "grid",
+            "exp": 4102444800_u64,
+            "iat": 1_700_000_000_u64,
+            "grid_model_families": ["foo"],
+        }));
+        let w = StandardClaimMap.map_workload(&claims).unwrap();
+        for reserved in ["sub", "iss", "aud", "exp", "iat"] {
+            assert!(
+                !w.claims.contains_key(reserved),
+                "{reserved} is mapped or registered and must not reappear as a policy claim"
+            );
+        }
+        assert_eq!(w.claims.len(), 1, "only the grant claim should remain");
+    }
+
+    #[test]
+    fn workload_without_spiffe_sub_is_still_rejected() {
+        let claims = make_claims(json!({
+            "sub": "site-a",
+            "grid_model_families": ["foo"],
+        }));
+        assert!(
+            StandardClaimMap.map_workload(&claims).is_none(),
+            "a non-SPIFFE sub must not yield a workload identity, grant claims notwithstanding"
+        );
     }
 }
