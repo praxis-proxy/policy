@@ -23,6 +23,7 @@ use crate::claim_map_config::{ClaimMapConfig, CompiledClaimMap};
 const PRESETS: &[(&str, &str)] = &[
     ("auth0", include_str!("presets/auth0.json")),
     ("cognito", include_str!("presets/cognito.json")),
+    ("ibmverify", include_str!("presets/ibmverify.json")),
     ("keycloak", include_str!("presets/keycloak.json")),
     ("standard", include_str!("presets/standard.json")),
 ];
