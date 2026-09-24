@@ -49,22 +49,15 @@ async fn a_record_expiring_in_the_future_resolves() {
     );
 }
 
-/// `expiry: directory` hands enforcement to the backend. On the file backend
-/// that means nothing enforces it, which is the operator's stated choice and
-/// not something to quietly override.
-#[tokio::test]
-async fn expiry_directory_leaves_an_expired_record_resolving() {
+/// A file directory never enforces expiry itself, so delegating enforcement
+/// to it would allow an expired key to authenticate.
+#[test]
+fn expiry_directory_with_file_fails_at_config_load() {
     let file = file_with_expiry("2020-01-01T00:00:00Z");
     let mut config = file_config(file.path(), None);
     config["expiry"] = serde_json::Value::String("directory".to_owned());
-    let resolver = resolver(config).expect("the config builds");
-
-    let result = resolve_with_header(&resolver, "sk-oai-secret").await;
-
-    assert!(
-        denial_code(&result).is_none(),
-        "under `expiry: directory` this resolver must not apply its own check"
-    );
+    let error = resolver(config).expect_err("the file backend cannot enforce expiry");
+    assert!(error.contains("file backend does not"), "got: {error}");
 }
 
 /// A record with no expiry is not expired.

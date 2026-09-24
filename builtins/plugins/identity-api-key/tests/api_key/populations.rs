@@ -10,8 +10,13 @@
 //! without disturbing what another resolver has already established.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use praxis_policy_core::identity::IdentityPayload;
+use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::hooks::payload::Extensions;
+use praxis_policy_core::identity::{IdentityHook, IdentityPayload, TokenSource};
+use praxis_policy_core::plugin::PluginConfig;
+use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityResolver, KIND};
 
 use crate::support::{RecordFile, denial_code, file_config, hash, resolve_with_header, resolver};
 
@@ -65,15 +70,15 @@ async fn the_second_population_resolves_what_the_first_declined() {
         "Bearer sk-corp-secret".to_owned(),
     );
 
-    // The first declines and contributes nothing, so the payload reaching the
-    // second is the one the host built.
+    // The first carries a decline marker for the executor while preserving
+    // every identity slot for the next resolver.
     let declined = crate::support::resolve(&first, headers.clone()).await;
-    assert!(
-        declined.modified_payload.is_none(),
-        "a declining resolver must contribute nothing"
-    );
+    let payload = declined
+        .modified_payload
+        .expect("the decline marker must reach the next resolver");
+    assert!(payload.subject.is_none());
 
-    let resolved = crate::support::resolve(&second, headers).await;
+    let resolved = crate::support::resolve_with_payload(&second, &payload).await;
     let subject = resolved
         .modified_payload
         .expect("the servicing resolver modifies the payload")
@@ -116,12 +121,78 @@ async fn a_later_declining_resolver_does_not_erase_a_resolved_subject() {
     // Hand the first resolver's output to the second, as the executor would.
     let after = crate::support::resolve_with_payload(&declining, &payload).await;
 
-    assert!(
-        after.modified_payload.is_none(),
-        "the declining resolver must not replace the payload at all"
+    let carried = after
+        .modified_payload
+        .expect("the decline marker is carried in the payload");
+    assert_eq!(
+        carried
+            .subject
+            .as_ref()
+            .and_then(|subject| subject.id.as_deref()),
+        Some("alice"),
+        "declining must preserve the subject a prior resolver established"
     );
     assert!(
         after.continue_processing,
         "and must not halt the chain either"
+    );
+}
+
+fn register_population(engine: &PolicyEngine, name: &str, file: &RecordFile, prefix: &str) {
+    let config = PluginConfig {
+        name: name.to_owned(),
+        kind: KIND.to_owned(),
+        hooks: vec!["identity.resolve".to_owned()],
+        config: Some(file_config(file.path(), Some(prefix))),
+        ..Default::default()
+    };
+    let resolver = Arc::new(ApiKeyIdentityResolver::new(config.clone()).expect("valid resolver"));
+    engine
+        .register_handler::<IdentityHook, _>(resolver, config)
+        .expect("the population registers");
+}
+
+/// Exercise the complete executor: individual handlers must decline so the
+/// next population can run, but the completed authentication hook must deny
+/// if no population recognized the presented credential.
+#[tokio::test]
+async fn the_engine_denies_an_unmatched_population_and_accepts_a_later_match() {
+    let oai = file_for("sk-oai-secret", "alice");
+    let corp = file_for("sk-corp-secret", "bob");
+    let engine = PolicyEngine::default();
+    register_population(&engine, "oai", &oai, "Bearer sk-oai-");
+    register_population(&engine, "corp", &corp, "Bearer sk-corp-");
+    engine.initialize().await.expect("the engine initializes");
+
+    let invoke = |value: &str| {
+        IdentityPayload::new("", TokenSource::ApiKey).with_headers(HashMap::from([(
+            "authorization".to_owned(),
+            value.to_owned(),
+        )]))
+    };
+    let (unmatched, _) = engine
+        .invoke::<IdentityHook>(
+            invoke("Bearer sk-other-secret"),
+            Extensions::default(),
+            None,
+        )
+        .await;
+    assert!(!unmatched.continue_processing);
+    assert_eq!(
+        unmatched.violation.as_ref().map(|v| v.code.as_str()),
+        Some("auth.unrecognized_credential")
+    );
+
+    let (matched, _) = engine
+        .invoke::<IdentityHook>(invoke("Bearer sk-corp-secret"), Extensions::default(), None)
+        .await;
+    assert!(matched.continue_processing);
+    let identity = IdentityPayload::from_pipeline_result(&matched).expect("identity payload");
+    assert_eq!(
+        identity
+            .subject
+            .as_ref()
+            .and_then(|subject| subject.id.as_deref()),
+        Some("bob")
     );
 }

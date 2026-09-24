@@ -217,19 +217,17 @@ fn read_index(config: &FileDirectoryConfig) -> Result<HashMap<String, KeyRecord>
 fn normalize_digest(authored: &str, index: IndexKind) -> Result<String, String> {
     let (algorithm, hex) = authored
         .split_once(':')
-        .ok_or_else(|| format!("hash '{authored}' has no `<algorithm>:` prefix"))?;
+        .ok_or_else(|| "hash has no `<algorithm>:` prefix".to_owned())?;
     let expected = match index {
         IndexKind::Sha256 => "sha256",
     };
     if !algorithm.eq_ignore_ascii_case(expected) {
         return Err(format!(
-            "hash '{authored}' is '{algorithm}' where the index is '{expected}'"
+            "hash algorithm does not match the configured '{expected}' index"
         ));
     }
     if hex.len() != SHA256_HEX_LEN || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!(
-            "hash '{authored}' is not {SHA256_HEX_LEN} hex characters"
-        ));
+        return Err(format!("hash is not {SHA256_HEX_LEN} hex characters"));
     }
     Ok(format!("{expected}:{}", hex.to_ascii_lowercase()))
 }

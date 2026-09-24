@@ -53,6 +53,10 @@ fn a_record_whose_hash_is_not_a_digest_fails_at_load() {
         error.contains("no `<algorithm>:` prefix"),
         "the error must name the problem: {error}"
     );
+    assert!(
+        !error.contains("sk-oai-secret"),
+        "a rejected plaintext key must not be copied into diagnostics: {error}"
+    );
 }
 
 #[test]
@@ -65,6 +69,7 @@ fn a_digest_of_the_wrong_length_fails_at_load() {
         error.contains("64 hex characters"),
         "the error must say what is wrong: {error}"
     );
+    assert!(!error.contains("sha256:abcd"), "got: {error}");
 }
 
 /// Two records for one credential have no coherent answer, and picking either
@@ -406,9 +411,10 @@ fn a_digest_from_another_algorithm_fails_at_load() {
         resolver(file_config(file.path(), None)).expect_err("a sha512 digest must not load");
 
     assert!(
-        error.contains("where the index is 'sha256'"),
-        "the error must name both algorithms: {error}"
+        error.contains("configured 'sha256' index"),
+        "the error must name the expected algorithm: {error}"
     );
+    assert!(!error.contains("sha512"), "got: {error}");
 }
 
 /// Before the interval elapses the file is not re-read, so the revocation

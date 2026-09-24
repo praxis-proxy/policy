@@ -9,7 +9,7 @@
 use praxis_policy_core::error::PluginError;
 use praxis_policy_core::factory::PluginFactory as _;
 use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
-use praxis_policy_core::plugin::PluginConfig;
+use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityFactory, KIND};
 
 use crate::support::{RecordFile, file_config, hash};
@@ -81,5 +81,26 @@ fn a_config_fault_fails_the_factory_rather_than_the_first_request() {
             matches!(*error, PluginError::Config { .. }),
             "{faulty}: expected a config error, got {error:?}"
         );
+    }
+}
+
+/// Authentication decisions must not run in a mode that suppresses denials,
+/// or with an error policy that turns a failed resolver into an allow.
+#[test]
+fn a_non_blocking_mode_or_ignored_error_fails_at_config_load() {
+    let file = RecordFile::write("keys: []\n");
+    let block = file_config(file.path(), None);
+    for (mode, on_error) in [
+        (PluginMode::Transform, OnError::Fail),
+        (PluginMode::Sequential, OnError::Ignore),
+    ] {
+        let mut config = plugin_config(block.clone());
+        config.mode = mode;
+        config.on_error = on_error;
+        let error = ApiKeyIdentityFactory
+            .create(&config)
+            .err()
+            .expect("unsafe execution settings must fail at load");
+        assert!(matches!(*error, PluginError::Config { .. }));
     }
 }

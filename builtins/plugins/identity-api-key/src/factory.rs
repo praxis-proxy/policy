@@ -14,12 +14,12 @@
 //           credential:
 //             kind: header
 //             name: Authorization
-//             prefix: "Bearer sk-oai-"
+//           prefix: "Bearer sk-oai-"
 //           directory:
 //             kind: file
 //             path: /etc/ppe/keys.yaml
 //             index: sha256
-//             refresh: 30s
+//             refresh_secs: 30
 //           record_map:
 //             subject:
 //               id: user

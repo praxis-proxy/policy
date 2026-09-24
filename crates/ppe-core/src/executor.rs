@@ -399,6 +399,12 @@ impl Executor {
         // payload has been accepted. Reported on the result so callers
         // read an exact signal instead of comparing payload contents.
         let mut payload_modified = false;
+        // A later resolver may construct a fresh payload rather than clone the
+        // previous one. Keep declines sticky independently of that payload.
+        let mut credential_declined = current_payload
+            .as_any()
+            .downcast_ref::<crate::identity::IdentityPayload>()
+            .is_some_and(crate::identity::IdentityPayload::credential_declined);
 
         if let Some(v) = self
             .run_serial_phase(
@@ -411,6 +417,7 @@ impl Executor {
                 "SEQUENTIAL",
                 &mut errors,
                 &mut payload_modified,
+                &mut credential_declined,
             )
             .await
         {
@@ -432,6 +439,7 @@ impl Executor {
             "TRANSFORM",
             &mut errors,
             &mut payload_modified,
+            &mut credential_declined,
         )
         .await;
 
@@ -458,6 +466,31 @@ impl Executor {
             return (
                 PipelineResult::denied(violation, current_extensions, ctx_table)
                     .with_errors(errors),
+                BackgroundTasks::empty(),
+            );
+        }
+
+        // A credential resolver may decline a value so that another
+        // population's resolver can inspect it. Once all resolvers have run,
+        // an unmatched value cannot be treated as an authenticated request.
+        if let Some(identity) = current_payload
+            .as_any()
+            .downcast_ref::<crate::identity::IdentityPayload>()
+            && credential_declined
+            && identity.subject.is_none()
+            && identity.client.is_none()
+            && identity.caller_workload.is_none()
+        {
+            return (
+                PipelineResult::denied(
+                    crate::error::PluginViolation::new(
+                        "auth.unrecognized_credential",
+                        "no identity resolver recognized the presented credential",
+                    ),
+                    current_extensions,
+                    ctx_table,
+                )
+                .with_errors(errors),
                 BackgroundTasks::empty(),
             );
         }
@@ -510,6 +543,7 @@ impl Executor {
         phase_label: &str,
         errors: &mut Vec<crate::error::PluginErrorRecord>,
         payload_modified: &mut bool,
+        credential_declined: &mut bool,
     ) -> Option<crate::error::PluginViolation> {
         for entry in entries {
             // Borrow names/ids on the happy path — allocate only when
@@ -585,6 +619,12 @@ impl Executor {
                         // Accept modifications
                         if can_modify {
                             if let Some(mp) = erased.modified_payload {
+                                if let Some(identity) = mp
+                                    .as_any()
+                                    .downcast_ref::<crate::identity::IdentityPayload>()
+                                {
+                                    *credential_declined |= identity.credential_declined();
+                                }
                                 *payload = mp;
                                 *payload_modified = true;
                             }

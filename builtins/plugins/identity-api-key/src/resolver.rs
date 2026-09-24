@@ -18,7 +18,7 @@ use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::mapping::{ClaimMapper as _, ConfiguredClaimMap};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
-use praxis_policy_core::plugin::{Plugin, PluginConfig};
+use praxis_policy_core::plugin::{OnError, Plugin, PluginConfig, PluginMode};
 
 use crate::cache::CachingDirectory;
 use crate::config::{ApiKeyResolverConfig, DirectoryConfig, ExpiryPolicy};
@@ -75,6 +75,14 @@ impl ApiKeyIdentityResolver {
     /// so an unreadable or malformed one stops startup instead of denying every
     /// request as though the credentials were bad.
     pub fn new(config: PluginConfig) -> Result<Self, Box<PluginError>> {
+        if config.mode != PluginMode::Sequential || config.on_error != OnError::Fail {
+            return Err(Box::new(PluginError::Config {
+                message: format!(
+                    "{}: an identity resolver needs `mode: sequential` and `on_error: fail`",
+                    config.name
+                ),
+            }));
+        }
         let block = config.config.clone().ok_or_else(|| {
             Box::new(PluginError::Config {
                 message: format!("{}: `config:` block is required", config.name),
@@ -166,10 +174,14 @@ impl HookHandler<IdentityHook> for ApiKeyIdentityResolver {
                     format!("{} holds an empty credential", location.credential),
                 ));
             },
-            // Another resolver's key population. Declining leaves the payload
-            // untouched for whoever does service it; denying here would make
-            // two populations on one route impossible.
-            Extraction::WrongPrefix => return PluginResult::allow(),
+            // Another resolver's key population. Carry the decline to the
+            // executor while leaving identity slots untouched for whoever
+            // services it; denying here would make two populations impossible.
+            Extraction::WrongPrefix => {
+                let mut updated = payload.clone();
+                updated.mark_credential_declined();
+                return PluginResult::modify_payload(updated);
+            },
         };
 
         // `Extensions` is the request's carrier of host services, already

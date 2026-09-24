@@ -36,7 +36,7 @@ use crate::directory::PresentedKey;
 /// must not break an exhaustive `match` downstream.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Credential {
     /// An HTTP header, e.g. `Authorization: Bearer sk-oai-<key>`.
     Header {

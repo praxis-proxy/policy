@@ -97,9 +97,12 @@ async fn a_credential_without_this_resolvers_prefix_declines_rather_than_denies(
         denial_code(&result).is_none(),
         "a wrong prefix is not a denial"
     );
+    let declined = result
+        .modified_payload
+        .expect("the decline is carried to the executor");
     assert!(
-        result.modified_payload.is_none(),
-        "declining must leave the payload untouched for the resolver that does service it"
+        declined.subject.is_none(),
+        "declining must not assert an identity"
     );
 }
 
@@ -157,7 +160,11 @@ async fn a_scheme_needs_a_space_after_it() {
     let result = resolve_with_header(&resolver, "bearerish sk-oai-secret").await;
 
     assert!(
-        denial_code(&result).is_none() && result.modified_payload.is_none(),
+        denial_code(&result).is_none()
+            && result
+                .modified_payload
+                .as_ref()
+                .is_some_and(|payload| payload.subject.is_none()),
         "'bearerish' is not 'bearer'"
     );
 }
@@ -177,7 +184,10 @@ async fn a_prefix_with_no_scheme_is_required_and_kept() {
 
     let miscased = resolve_with_header(&resolver, "SK-OAI-secret").await;
     assert!(
-        miscased.modified_payload.is_none(),
+        miscased
+            .modified_payload
+            .as_ref()
+            .is_some_and(|payload| payload.subject.is_none()),
         "a leader is part of the credential and must not fold case"
     );
 }
@@ -235,4 +245,16 @@ fn a_prefix_starting_with_a_space_is_refused_at_config_load() {
         .expect_err("a leading space must not build");
 
     assert!(error.contains("starts with a space"), "got: {error}");
+}
+
+/// A misplaced gate used to be ignored by the nested credential parser,
+/// leaving a resolver that queried its directory for every presented value.
+#[test]
+fn a_prefix_inside_credential_is_refused_at_config_load() {
+    let file = one_record();
+    let mut config = file_config(file.path(), None);
+    config["credential"]["prefix"] = serde_json::Value::String("Bearer sk-oai-".to_owned());
+
+    let error = resolver(config).expect_err("a misplaced prefix must not build");
+    assert!(error.contains("unknown field"), "got: {error}");
 }

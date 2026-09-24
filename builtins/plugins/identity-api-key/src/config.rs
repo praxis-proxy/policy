@@ -145,6 +145,14 @@ impl ApiKeyResolverConfig {
                 self.role
             )
         })?;
+        if self.expiry == ExpiryPolicy::Directory
+            && matches!(self.directory, DirectoryConfig::File(_))
+        {
+            return Err(
+                "`expiry: directory` requires a directory that enforces expiry; the file backend does not"
+                    .to_owned(),
+            );
+        }
         // The cache's own settings are checked by `CachingDirectory::new`,
         // which is the type that has to hold them. Only the pairing is checked
         // here, because only this type can see both halves: a file directory is
