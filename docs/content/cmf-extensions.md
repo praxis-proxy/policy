@@ -32,7 +32,7 @@ missing slots is out of scope.
 |---|---|---|
 | `StringSet` | **Present and empty.** Membership is false. | CEL treats a missing key as an evaluation error. `!("banned" in subject.roles)` would deny every subject with no roles — a routine state, including a plugin that lacks `read_roles` and is handed an empty set. |
 | `Bool` as a real field (`delegation.delegated`) | **Present**, including `false`. | The field is not optional on the struct. |
-| `Bool` as a flattened member (`role.hr`) | **Omitted.** Presence means true. | Emitting `false` for every name that is not a member is impossible. APL reads a missing flattened bool as false. Do not guard CEL with `has(role.hr)`: when no `role.*` keys exist the `role` namespace was never written, and `has(role.hr)` is an evaluation error. Use the always-present `subject.roles` set (`"hr" in subject.roles`). |
+| `Bool` as a flattened member (`role.hr`) | **Omitted.** Presence means true. Only undotted membership names receive aliases. | Emitting `false` for every name that is not a member is impossible. APL reads a missing flattened bool as false. Do not guard CEL with `has(role.hr)`: when no `role.*` keys exist the `role` namespace was never written, and `has(role.hr)` is an evaluation error. Use the always-present `subject.roles` set (`"hr" in subject.roles`). |
 | `Bool` derived (`authenticated`) | **Omitted** unless `subject.id` is set. | Absence is "not authenticated" in APL (`!authenticated` is true; `require(authenticated)` denies). `has(authenticated)` is a compile error (`has()` rejects a bare name), so that key itself cannot be guarded in CEL. When the `subject` namespace exists — a present subject writes empty `subject.roles` / `permissions` / `teams` even with no id — `has(subject.id)` is a valid substitute. Only a completely absent subject (no `subject.*` keys) leaves CEL with no guard; the deny then reaches the operator as a key error. Contrast `delegation.delegated`, a non-option field that is always written, including `false`. |
 | `String` | **Omitted** when `Option::None`. A non-option string (`client.client_id`) is always written, even if empty. | Empty string and missing are different questions (`exists(subject.id)` vs `subject.id == ""`). |
 | `Int` | **Omitted** when `Option::None` (`http.status`, `agent.turn`, `completion.latency_ms`). A non-option int (`delegation.depth`) is always written, including `0`. | Emitting `0` for an unset HTTP status would make `http.status >= 500` and `http.status == 0` both lie. |
@@ -65,11 +65,11 @@ were already there.
 
 | Original (the set) | Flattened (presence-only) | Write |
 |---|---|---|
-| `subject.roles` | `role.<name> = true` | Both, from the same `HashSet`. |
-| `subject.permissions` | `perm.<name> = true` | Same. |
-| `subject.teams` | `team.<name> = true` | Same. |
-| `client.roles` | `client.role.<name> = true` | Same. |
-| `client.permissions` | `client.perm.<name> = true` | Same. |
+| `subject.roles` | `role.<name> = true` | Alias for each undotted member. |
+| `subject.permissions` | `perm.<name> = true` | Alias for each undotted member. |
+| `subject.teams` | `team.<name> = true` | Alias for each undotted member. |
+| `client.roles` | `client.role.<name> = true` | Alias for each undotted member. |
+| `client.permissions` | `client.perm.<name> = true` | Alias for each undotted member. |
 
 The set is the primary form. The five flattened collections exist because
 `require(role.hr)` predates the original sets; no more are added. Nine
@@ -78,6 +78,13 @@ other `StringSet`s are set-only — `client.teams`,
 `caller_workload.selectors`, `this_workload.selectors`, `security.labels`,
 `agent.conversation.topics`, `meta.tags`, `llm.capabilities` — so
 `require(tag.pii)` is false forever, by design.
+
+Membership names are atomic values. A dotted name such as `admin.readonly`
+stays unchanged in `subject.roles`, but it does not emit
+`role.admin.readonly`. Emitting that key would make CEL construct nested maps
+and incorrectly satisfy `has(role.admin)`. Address dotted names through the
+original set: `subject.roles contains "admin.readonly"` in APL or
+`"admin.readonly" in subject.roles` in CEL.
 
 **Authors should use the original set** for membership (`subject.roles contains
 "hr"` in APL, `"hr" in subject.roles` in CEL, `"hr" in input.subject.roles` in
@@ -91,11 +98,14 @@ derives them from the set, so as emitted they cannot disagree. A later
 that key; the other key is left as it was. Do not mix a hand-built bag with
 the bridge if you need them to stay paired.
 
-Cedar does not read the bag the way CEL and OPA do. `principal.roles` and
-`principal.permissions` are rebuilt from flattened `role.*` / `perm.*` trues.
-`principal.teams` is read from the original `subject.teams` set. Cedar does
-not surface `client.*`, `http.*`, or the other slots as principal attributes.
-A Cedar policy that needs those values does not get them from this mapping.
+Cedar does not read the bag the way CEL and OPA do. `principal.roles`,
+`principal.permissions`, and `principal.teams` are read from the canonical
+`subject.roles`, `subject.permissions`, and `subject.teams` sets, preserving
+dotted membership names. When a manually built bag omits a canonical roles or
+permissions set, Cedar falls back to flattened `role.*` / `perm.*` trues for
+compatibility. A present canonical set is authoritative. Cedar does not
+surface `client.*`, `http.*`, or the other slots as principal attributes. A
+Cedar policy that needs those values does not get them from this mapping.
 
 ---
 
@@ -157,9 +167,8 @@ Authors who need the denylist to stay closed when the key is missing write
 `require(exists(claim.tenant) & claim.tenant != "acme")`.
 
 A policy written against a **present-empty set** therefore agrees — including
-when Cedar reads flattened `role.*` and CEL reads `subject.roles`, because the
-bridge filled both from the same set. A policy written against an **omitted
-claim scalar** agrees on the verdict (all Deny) for `==`, order, and
+when Cedar and CEL both read `subject.roles`. A policy written against an
+**omitted claim scalar** agrees on the verdict (all Deny) for `==`, order, and
 membership, and is an `AgreeDeny` in `ppe-pdp-diff`; the cause still differs.
 `!=` and `not in` do **not** agree across all four engines: they are
 `missing-claim-not-eq` / `missing-not-in` on the allowlist. A flattened bool
@@ -184,11 +193,11 @@ map has no entry.
 | `subject.id` | String | `id` is `Some` |
 | `subject.type` | String (`user` / `agent` / `service` / `system`) | `subject_type` is `Some`. cedar-direct, given no key, still builds a principal typed `User`; bridged values are lowercase. |
 | `subject.roles` | StringSet | always |
-| `role.<name>` | Bool (`true`) | each member of `roles` |
+| `role.<name>` | Bool (`true`) | each undotted member of `roles` |
 | `subject.permissions` | StringSet | always |
-| `perm.<name>` | Bool (`true`) | each member of `permissions` |
+| `perm.<name>` | Bool (`true`) | each undotted member of `permissions` |
 | `subject.teams` | StringSet | always |
-| `team.<name>` | Bool (`true`) | each member of `teams` |
+| `team.<name>` | Bool (`true`) | each undotted member of `teams` |
 | `claim.<dotted>` | flattened JSON | each claim; see [`subject.claims`](#subjectclaims) |
 | `authenticated` | Bool (`true`) | `id` is `Some` |
 
@@ -200,9 +209,9 @@ map has no entry.
 | `client.client_name` | String | `Some` |
 | `client.trust_level` | String | always (`first_party` / `third_party` / `internal` / custom / `unknown`) |
 | `client.roles` | StringSet | always |
-| `client.role.<name>` | Bool (`true`) | each member |
+| `client.role.<name>` | Bool (`true`) | each undotted member |
 | `client.permissions` | StringSet | always |
-| `client.perm.<name>` | Bool (`true`) | each member |
+| `client.perm.<name>` | Bool (`true`) | each undotted member |
 | `client.authorized_scopes` | StringSet | always |
 | `client.authorized_audiences` | StringSet | always |
 | `client.teams` | StringSet | always |

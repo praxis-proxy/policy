@@ -85,6 +85,9 @@ pub mod plugin;
 pub mod prelude;
 /// Plugin instance and hook registries.
 pub mod registry;
+/// Secret material: providers, the declared values bound to them, and the
+/// handles consumers read through.
+pub mod secrets;
 /// Captures emitted diagnostics for tests that assert on them.
 #[cfg(test)]
 mod trace_capture;

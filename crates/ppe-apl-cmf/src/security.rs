@@ -33,11 +33,11 @@
 //   sec.subject.id                   → subject.id           : String
 //   sec.subject.subject_type         → subject.type         : String
 //   sec.subject.roles                → subject.roles        : StringSet (always)
-//                                    → role.<r>             : Bool(true)
+//                                    → role.<r>             : Bool(true) for atomic names
 //   sec.subject.permissions          → subject.permissions  : StringSet (always)
-//                                    → perm.<p>             : Bool(true)
+//                                    → perm.<p>             : Bool(true) for atomic names
 //   sec.subject.teams                → subject.teams        : StringSet (always)
-//                                    → team.<t>             : Bool(true)
+//                                    → team.<t>             : Bool(true) for atomic names
 //   sec.subject.claims               → claim.<k>            : flattened JSON
 //        Scalars keep their type; scalar arrays (empty included) become a
 //        StringSet, numbers and bools as strings. `{}`, `null` and an array
@@ -52,9 +52,9 @@
 //   sec.client.authorized_scopes     → client.authorized_scopes : StringSet (always)
 //   sec.client.authorized_audiences  → client.authorized_audiences : StringSet (always)
 //   sec.client.roles                 → client.roles         : StringSet (always)
-//                                    → client.role.<r>      : Bool(true)
+//                                    → client.role.<r>      : Bool(true) for atomic names
 //   sec.client.permissions           → client.permissions   : StringSet (always)
-//                                    → client.perm.<p>      : Bool(true)
+//                                    → client.perm.<p>      : Bool(true) for atomic names
 //   sec.client.teams                 → client.teams         : StringSet (always)
 //   sec.client.claims                → client.claim.<k>     : flattened JSON
 //        Same shape as `claim.<k>` above.
@@ -109,21 +109,28 @@ pub fn extract_security(sec: &SecurityExtension, bag: &mut AttributeBag) {
         // tests (`"hr" in subject.roles`) without enumerating names. Set
         // unconditionally — see the empty-set note in the module header.
         bag.set(BAG_SUBJECT_ROLES, subject.roles.clone());
-        // Plus the flattened role.<name> = true keys. DSL: `require(role.hr)`.
-        // No guard needed: iterating an empty set writes nothing.
+        // Plus the flattened role.<name> = true keys for atomic membership
+        // names. Dotted names stay in the exact set so CEL cannot reinterpret
+        // an alias such as `role.admin.readonly` as a nested `role.admin` map.
         for role in &subject.roles {
-            bag.set(format!("{BAG_ROLE_PREFIX}{role}"), true);
+            if is_atomic_membership_name(role) {
+                bag.set(format!("{BAG_ROLE_PREFIX}{role}"), true);
+            }
         }
         bag.set(BAG_SUBJECT_PERMISSIONS, subject.permissions.clone());
         for perm in &subject.permissions {
-            bag.set(format!("{BAG_PERM_PREFIX}{perm}"), true);
+            if is_atomic_membership_name(perm) {
+                bag.set(format!("{BAG_PERM_PREFIX}{perm}"), true);
+            }
         }
         bag.set(BAG_SUBJECT_TEAMS, subject.teams.clone());
         // Mirror the role.X / perm.X namespace so policies can
         // gate on team membership with the same DSL shape, e.g.
         // `require(team.engineering | team.security)`.
         for team in &subject.teams {
-            bag.set(format!("{BAG_TEAM_PREFIX}{team}"), true);
+            if is_atomic_membership_name(team) {
+                bag.set(format!("{BAG_TEAM_PREFIX}{team}"), true);
+            }
         }
         for (k, v) in &subject.claims {
             // Nested JSON claims flatten through the same walker
@@ -168,6 +175,8 @@ pub fn extract_security(sec: &SecurityExtension, bag: &mut AttributeBag) {
 /// (`"partner" in client.roles`), and as presence-only
 /// `client.role.<r> = true` / `client.perm.<p> = true` keys so policies
 /// can write `require(client.role.partner)` the same way as `role.hr`.
+/// Only atomic membership names receive presence-only aliases; dotted names
+/// remain addressable through the exact sets without becoming CEL namespaces.
 /// Claims are flattened through the same JSON walker as `custom.*`, so
 /// nested objects produce dotted-path keys.
 pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
@@ -179,12 +188,16 @@ pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
     let roles: HashSet<String> = client.roles.iter().cloned().collect();
     bag.set(BAG_CLIENT_ROLES, roles);
     for role in &client.roles {
-        bag.set(format!("client.role.{role}"), true);
+        if is_atomic_membership_name(role) {
+            bag.set(format!("client.role.{role}"), true);
+        }
     }
     let perms: HashSet<String> = client.permissions.iter().cloned().collect();
     bag.set(BAG_CLIENT_PERMISSIONS, perms);
     for perm in &client.permissions {
-        bag.set(format!("client.perm.{perm}"), true);
+        if is_atomic_membership_name(perm) {
+            bag.set(format!("client.perm.{perm}"), true);
+        }
     }
     let scopes: HashSet<String> = client.authorized_scopes.iter().cloned().collect();
     bag.set("client.authorized_scopes", scopes);
@@ -248,6 +261,14 @@ fn subject_type_str(t: SubjectType) -> &'static str {
         SubjectType::Service => "service",
         SubjectType::System => "system",
     }
+}
+
+/// Membership names are atomic in the exact-set representation. A dotted
+/// name must not also become a flattened alias because CEL interprets dotted
+/// bag keys as nested maps (`role.admin.readonly` would make `role.admin`
+/// appear present).
+fn is_atomic_membership_name(name: &str) -> bool {
+    !name.contains('.')
 }
 
 #[cfg(test)]
@@ -330,6 +351,31 @@ mod tests {
         extract_security(&alice(), &mut bag);
         assert!(bag.set_contains("subject.teams", "compliance"));
         assert!(!bag.set_contains("subject.teams", "engineering"));
+    }
+
+    #[test]
+    fn dotted_subject_memberships_stay_exact_without_aliases() {
+        let sec = SecurityExtension {
+            subject: Some(SubjectExtension {
+                roles: HashSet::from(["admin.readonly".to_owned(), "reader".to_owned()]),
+                permissions: HashSet::from(["data.read".to_owned(), "view".to_owned()]),
+                teams: HashSet::from(["engineering.platform".to_owned(), "security".to_owned()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_security(&sec, &mut bag);
+
+        assert!(bag.set_contains("subject.roles", "admin.readonly"));
+        assert!(bag.set_contains("subject.permissions", "data.read"));
+        assert!(bag.set_contains("subject.teams", "engineering.platform"));
+        assert_eq!(bag.get_bool("role.admin.readonly"), None);
+        assert_eq!(bag.get_bool("perm.data.read"), None);
+        assert_eq!(bag.get_bool("team.engineering.platform"), None);
+        assert_eq!(bag.get_bool("role.reader"), Some(true));
+        assert_eq!(bag.get_bool("perm.view"), Some(true));
+        assert_eq!(bag.get_bool("team.security"), Some(true));
     }
 
     #[test]
@@ -529,6 +575,25 @@ mod tests {
         assert!(bag.set_contains("client.roles", "partner"));
         assert!(!bag.set_contains("client.roles", "nonexistent"));
         assert!(bag.set_contains("client.permissions", "call_tool"));
+    }
+
+    #[test]
+    fn dotted_client_memberships_stay_exact_without_aliases() {
+        let client = ClientExtension {
+            client_id: "dotted-app".into(),
+            roles: vec!["admin.readonly".into(), "partner".into()],
+            permissions: vec!["data.read".into(), "call_tool".into()],
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_client(&client, &mut bag);
+
+        assert!(bag.set_contains("client.roles", "admin.readonly"));
+        assert!(bag.set_contains("client.permissions", "data.read"));
+        assert_eq!(bag.get_bool("client.role.admin.readonly"), None);
+        assert_eq!(bag.get_bool("client.perm.data.read"), None);
+        assert_eq!(bag.get_bool("client.role.partner"), Some(true));
+        assert_eq!(bag.get_bool("client.perm.call_tool"), Some(true));
     }
 
     #[test]

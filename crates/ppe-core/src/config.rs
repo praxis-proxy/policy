@@ -65,6 +65,15 @@ pub struct PolicyConfig {
     #[serde(default)]
     pub routes: Vec<RouteEntry>,
 
+    /// Secret material: the providers that read a backend and the values bound
+    /// to them.
+    ///
+    /// Top level rather than under `global:` because nothing here is policy. It
+    /// is read before any policy is resolved, and the values it declares are
+    /// named from places that are not routes.
+    #[serde(default)]
+    pub secrets: crate::secrets::SecretsConfig,
+
     /// Engine-wide settings (timeout, error behavior, dispatch mode).
     #[serde(default)]
     pub engine_settings: EngineSettings,
@@ -1219,6 +1228,7 @@ const DOCUMENT_KEYS: &[ConfigKey] = &[
     structural_key("plugins", KeyOwner::Core),
     structural_key("groups", KeyOwner::Core),
     structural_key("routes", KeyOwner::Core),
+    structural_key("secrets", KeyOwner::Core),
     structural_key("engine_settings", KeyOwner::Core),
 ];
 
@@ -2248,6 +2258,16 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     validate_declared_hooks(config)?;
     reject_reserved_route_names(config)?;
     validate_assertions(config)?;
+
+    // Shape only. Nothing is read from a backend here: a document that names a
+    // provider it never declared is wrong whether or not the backend is
+    // reachable, and an operator should hear about it without waiting for a
+    // network timeout.
+    config.secrets.validate().map_err(|e| {
+        Box::new(PluginError::Config {
+            message: format!("{e}"),
+        })
+    })?;
 
     let mut seen_names = HashSet::new();
     for plugin in &config.plugins {

@@ -51,6 +51,7 @@ builtins = [
     "cel",
     "opa",
     "valkey",
+    "secrets-vault",
 ]
 
 # One feature per builtin crate. The names are the public API: a host writes
@@ -62,12 +63,16 @@ cedar = ["_builtin", "dep:praxis-policy-pdp-cedar-direct"]
 cel = ["_builtin", "dep:praxis-policy-pdp-cel"]
 opa = ["_builtin", "dep:praxis-policy-pdp-opa"]
 valkey = ["_builtin", "dep:praxis-policy-session-valkey"]
+# Vault KV v2 secret backend. Off the default build; compiled with
+# `builtins` or by name. The host still registers it with a transport —
+# this feature only makes the factory available.
+secrets-vault = ["dep:praxis-policy-secrets-vault"]
 
 # A default `HttpTransport` for hosts that inject none, built on hyper.
 #
 # Deliberately NOT a separate crate, unlike every other feature above. We
-# publish 15 crates at a shared version and a full publish runs about 90
-# minutes against crates.io rate limits (hence `tools/publish.sh`); a 16th
+# publish 16 crates at a shared version and a full publish runs about 90
+# minutes against crates.io rate limits (hence `tools/publish.sh`); a 17th
 # crate is that cost on every release, forever. The trait lives in
 # praxis-policy-core; only this implementation lives here.
 #
@@ -113,6 +118,7 @@ praxis-policy-pdp-cedar-direct = { workspace = true, optional = true }
 praxis-policy-pdp-cel = { workspace = true, optional = true }
 praxis-policy-pdp-opa = { workspace = true, optional = true }
 praxis-policy-session-valkey = { workspace = true, optional = true }
+praxis-policy-secrets-vault = { workspace = true, optional = true }
 
 # --- `http-hyper` only -------------------------------------------------
 #

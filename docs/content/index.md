@@ -64,6 +64,8 @@ history.
   the `http:` route selector, precedence, and the catch-all report
 - [Identity and Delegation](identity-delegation.md):
   inbound identity slots, outbound delegation subjects, and six recipes
+- [Identity Claim Mapping](identity-claim-mapping.md):
+  adding and testing a provider-specific JWT claim mapper preset
 - [Header Assertions](assertions.md):
   projecting derived identity onto upstream requests
 - [Deployment](deployment.md):

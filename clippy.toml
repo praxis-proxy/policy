@@ -23,7 +23,7 @@ future-size-threshold = 4096
 type-complexity-threshold = 200
 stack-size-threshold = 16384
 # Keep in sync with rust-toolchain.toml `channel` and Cargo.toml `rust-version`.
-msrv = "1.96"
+msrv = "1.92"
 avoid-breaking-exported-api = false
 
 # Identifiers `clippy::doc_markdown` should not flag as needing backticks.

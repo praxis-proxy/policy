@@ -21,7 +21,7 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 
 | Extension | Carries | Bag namespace | Read capability |
 |-----------|---------|---------------|-----------------|
-| Security (subject) | subject id and type, roles, permissions, teams, claims, authentication status | `subject.id`, `subject.type`, `authenticated`, `role.*`, `perm.*`, `subject.teams`, `team.*`, `claim.*` | `read_subject`, `read_roles`, `read_permissions`, `read_teams`, `read_claims` |
+| Security (subject) | subject id and type, roles, permissions, teams, claims, authentication status | `subject.id`, `subject.type`, `authenticated`, `subject.roles`, `subject.permissions`, `subject.teams`, `role.*`, `perm.*`, `team.*`, `claim.*` | `read_subject`, `read_roles`, `read_permissions`, `read_teams`, `read_claims` |
 | Security (client) | OAuth application identity: client id, trust level, roles, permissions, scopes, audiences, teams, claims | `client.*` | `read_client` |
 | Security (workload) | attested workload identity (SPIFFE / mTLS) for the inbound caller and for this instance | `caller_workload.*`, `this_workload.*` | `read_workload` |
 | Security (labels) | taint / classification labels for information-flow control | `security.labels`, `security.classification` | `read_labels`, `append_labels` |
@@ -77,9 +77,9 @@ plugins:
 | Capability | Unlocks |
 |-----------|---------|
 | `read_subject` | `subject.id`, `subject.type`, `authenticated` |
-| `read_roles` | `role.*` (plus the `read_subject` baseline) |
-| `read_permissions` | `perm.*` (plus baseline) |
-| `read_teams` | `subject.teams` (plus baseline; `team.*` mirrors teams) |
+| `read_roles` | `subject.roles` and `role.*` aliases for undotted members (plus the `read_subject` baseline) |
+| `read_permissions` | `subject.permissions` and `perm.*` aliases for undotted members (plus baseline) |
+| `read_teams` | `subject.teams` and `team.*` aliases for undotted members (plus baseline) |
 | `read_claims` | `claim.*` (plus baseline) |
 | `read_client` | `client.*` |
 | `read_workload` | `caller_workload.*`, `this_workload.*` |
@@ -105,6 +105,12 @@ typed extension, and credential material flows through plugin payloads rather
 than the bag. APL predicates read `security.labels` from the bag directly, which
 is how `security.labels contains "secret"` works (see [Session
 Taint](apl/tainting.md)).
+
+Membership names containing `.` remain atomic values in the canonical sets and
+do not receive flattened aliases. For example, test a dotted role with
+`subject.roles contains "admin.readonly"`; there is no
+`role.admin.readonly` key. The same rule applies to subject permissions and
+teams, and to client roles and permissions.
 
 ### Write capabilities
 
