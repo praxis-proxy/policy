@@ -1,7 +1,7 @@
 ---
 title: "refactor(builtins): consolidate bundled extensions into one published crate"
 type: refactor
-status: active
+status: completed
 date: 2026-09-25
 deepened: 2026-09-25
 ---
