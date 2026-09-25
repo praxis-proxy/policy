@@ -8,7 +8,7 @@
 // document so `input.subject.id` reads as field selection. This module rebuilds
 // the flat bag into a nested JSON object that becomes the engine's `input`.
 //
-// This mirrors the tree-building and type coercions in `praxis-policy-pdp-cel`'s
+// This mirrors the tree-building and type coercions in the `cel` module's
 // `activation.rs` so a policy author's mental model of the attribute
 // vocabulary is identical across the two backends. It is ported rather than
 // shared so this crate stays praxis-policy-apl-core-only at compile time.

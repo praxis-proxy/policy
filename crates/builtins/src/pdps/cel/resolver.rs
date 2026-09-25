@@ -152,7 +152,7 @@ impl CelResolver {
     ///
     /// ```rust,ignore
     /// use std::sync::Arc;
-    /// use praxis_policy_pdp_cel::CelResolver;
+    /// use praxis_policy_builtins::pdps::cel::CelResolver;
     ///
     /// let resolver = CelResolver::new().with_functions(|ctx| {
     ///     // Regex helper — authors can write `args.path.matches_prefix("/api/")`.

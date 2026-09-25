@@ -67,7 +67,7 @@ use crate::pdps::opa::input::bag_to_input;
 /// are legitimate denials, always honored. Parse/compile errors, inline/global
 /// package collisions, and cache-full rejections are never governed by this
 /// either: they always deny (an author bug, a trust-boundary violation, or a
-/// resource limit must never flip to allow). Mirrors `praxis-policy-pdp-cel`'s `OnError`.
+/// resource limit must never flip to allow). Mirrors the `cel` module's `OnError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnError {
     /// Fail-closed: a degenerate runtime outcome denies. The APL default.
@@ -83,7 +83,7 @@ pub enum OnError {
 /// author-supplied in route YAML, so the cache fills with the policy's static
 /// set of distinct inline modules. 1024 is generous for any realistic policy
 /// and small enough that a templating bug trips the cap before it balloons
-/// memory. Mirrors `praxis-policy-pdp-cel`'s cache cap.
+/// memory. Mirrors the `cel` module's cache cap.
 pub const DEFAULT_MAX_CACHE_ENTRIES: usize = 1024;
 
 /// Virtual filename regorus uses for the query's inline module. Distinct from

@@ -4,7 +4,7 @@
 // Build-time errors for the OPA PDP. These surface at config-load time (when
 // the praxis-policy-apl-runtime visitor calls the factory), so an operator sees bad policy or
 // malformed config at deploy rather than on the first request. Mirrors the
-// shape of `praxis-policy-pdp-cedar-direct`'s `BuildError`.
+// shape of the `cedar_direct` module's `BuildError`.
 
 use thiserror::Error;
 

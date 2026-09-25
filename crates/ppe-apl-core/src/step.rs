@@ -303,7 +303,7 @@ pub struct PdpCall {
 #[non_exhaustive]
 /// Which decision point a `Pdp` step routes to.
 pub enum PdpDialect {
-    /// Bare Cedar policy evaluation (`praxis-policy-pdp-cedar-direct`).
+    /// Bare Cedar policy evaluation.
     Cedar,
     /// Open Policy Agent, queried by path.
     Opa,
@@ -311,7 +311,7 @@ pub enum PdpDialect {
     AuthZen,
     /// `NeMo` Guardrails.
     NeMo,
-    /// CEL (Common Expression Language) evaluation — `praxis-policy-pdp-cel`.
+    /// CEL (Common Expression Language) evaluation.
     /// The `cel:` step carries an `expr:` string that must evaluate to a
     /// boolean against the policy `AttributeBag` (exposed to CEL as nested
     /// namespaces: `subject.id`, `delegation.depth`, `session.labels`, …).

@@ -9,12 +9,12 @@
 // The PDP backends that ship in this workspace, each its own crate
 // registered here by dialect:
 //
-//   - **cedar** (`praxis-policy-pdp-cedar-direct`) — in-process Cedar policy-set
+//   - **cedar** — in-process Cedar policy-set
 //     evaluation.
 //   - **opa** — Open Policy Agent / Rego.
 //   - **authzen** — AuthZen-protocol external decision point.
 //   - **nemo** — NeMo reasoning backend.
-//   - **cel** (`praxis-policy-pdp-cel`) — inline CEL boolean predicates authored in
+//   - **cel** — inline CEL boolean predicates authored in
 //     the route YAML (`cel: { expr: "..." }`); smallest dep tree, no
 //     external policy store.
 //
