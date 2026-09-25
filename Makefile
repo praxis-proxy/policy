@@ -28,6 +28,7 @@ help:
 	@echo "  build             Build the workspace (debug)"
 	@echo "  build-release     Build the workspace (release)"
 	@echo "  check             cargo check the workspace"
+	@echo "  check-features    cargo check praxis-policy-builtins per feature"
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
@@ -112,6 +113,7 @@ fmt:
 .PHONY: clippy
 clippy:
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 # CI-safe gate: read-only fmt check plus clippy. Lint levels come from
 # [workspace.lints] in Cargo.toml.
@@ -120,6 +122,10 @@ lint:
 	@echo "fmt --check + clippy -D warnings ..."
 	@$(CARGO) +$(NIGHTLY) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+# The all-features pass is not redundant. `praxis-policy-builtins` is
+# `default = []`, so a default-feature clippy run compiles none of the bundled
+# extensions and the denied-lint table never reaches them.
+	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
 	@echo "lint passed"
 
@@ -290,6 +296,9 @@ semver:
 .PHONY: doc
 doc:
 	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps
+# Second pass for the same reason as `lint`: the bundled extensions are behind
+# features, so a default-feature rustdoc run documents none of them.
+	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
 
 # Link and style checks for the markdown under docs/. Advisory, like
 # lint-extra: neither is part of `make ci`, because both reach for a tool the
@@ -324,8 +333,26 @@ docs-lint:
 # CI
 # =============================================================================
 
+# Compile `praxis-policy-builtins` with no features, then with each one alone.
+# Neither the default nor the all-features pass can catch a feature body that
+# omits its own `dep:` edge or its module-group marker: under --all-features
+# another feature supplies the dependency, and under default features nothing
+# compiles at all. This is the only gate that builds a partial feature set.
+BUILTIN_FEATURES := jwt api-key oauth elicitation-ciba cedar cel opa valkey secrets-vault
+
+.PHONY: check-features
+check-features:
+	@echo "per-feature check: praxis-policy-builtins ..."
+	@$(CARGO) check -p praxis-policy-builtins --all-targets --no-default-features
+	@for f in $(BUILTIN_FEATURES); do \
+		echo "  --features $$f"; \
+		$(CARGO) check -p praxis-policy-builtins --all-targets \
+			--no-default-features --features "$$f" || exit 1; \
+	done
+	@echo "check-features passed"
+
 .PHONY: ci
-ci: lint test
+ci: lint check-features test
 
 # =============================================================================
 # Release
@@ -362,6 +389,9 @@ release: release-tool
 .PHONY: publish-dry
 publish-dry:
 	@$(CARGO) package --workspace --locked --allow-dirty
+# Packaging with default features compiles none of the bundled extensions, so
+# the dry run would prove nothing about them.
+	@$(CARGO) package --workspace --locked --allow-dirty --all-features
 
 # Tag the current commit and push it. The tag is what the release workflow
 # triggers on. VERSION must be semver with no leading `v`.

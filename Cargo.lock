@@ -2766,6 +2766,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxis-policy-builtins"
+version = "0.3.1"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "cedar-policy",
+ "cel",
+ "chrono",
+ "deadpool-redis",
+ "futures",
+ "getrandom 0.4.3",
+ "hmac",
+ "jsonwebtoken",
+ "moka",
+ "praxis-policy-apl-core",
+ "praxis-policy-apl-runtime",
+ "praxis-policy-core",
+ "rand 0.8.8",
+ "redis",
+ "regorus",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
+ "stacker",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+ "yaml_serde",
+ "zeroize",
+]
+
+[[package]]
 name = "praxis-policy-core"
 version = "0.3.1"
 dependencies = [

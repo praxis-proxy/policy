@@ -1,0 +1,373 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+[package]
+name = "praxis-policy-builtins"
+description = "PPE bundled extensions — Cedar, CEL and OPA decision points, JWT and API-key identity, OAuth delegation, CIBA elicitation, Valkey sessions, Vault secrets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# Not publishable until the implementations actually live here. `release.yaml`
+# fires on any matching tag from any commit with no branch guard, so a tag
+# pushed while this crate is still a scaffold would permanently upload a
+# builtins crate that holds nothing anyone can use. Flipped when the move is
+# complete.
+publish = false
+
+# Build docs.rs with every extension enabled. The default build enables no
+# module at all (`default = []`), so without this the rendered page is empty —
+# and the facade's re-exports resolve into it.
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+
+# Every extension at once. `praxis-policy-pdp-diff`, `ppe-benches` and docs.rs
+# each want one name for "all of it" rather than a list to keep in sync.
+all = [
+  "jwt",
+  "api-key",
+  "oauth",
+  "elicitation-ciba",
+  "cedar",
+  "cel",
+  "opa",
+  "valkey",
+  "secrets-vault",
+]
+
+# Feature names match the facade's exactly, so each facade body is a one-line
+# forward and a rename is a lockstep two-file edit rather than a translation
+# table nobody maintains.
+jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64"]
+api-key = ["_engine-core", "_plugins", "dep:sha2"]
+oauth = [
+  "_engine-core",
+  "_plugins",
+  "dep:base64",
+  "dep:hmac",
+  "dep:sha2",
+  "dep:getrandom",
+  "dep:moka",
+]
+elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
+cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
+# The feature and the crate share a name, so `dep:cel` is required: without it
+# the feature would shadow the implicit optional-dependency feature instead of
+# enabling the crate.
+cel = ["_engine-apl-core", "_pdps", "dep:cel"]
+opa = ["_engine-apl-core", "_pdps", "dep:regorus"]
+valkey = [
+  "_engine-apl-runtime",
+  "_session",
+  "dep:sha2",
+  "dep:url",
+  "dep:redis",
+  "dep:deadpool-redis",
+]
+secrets-vault = ["_engine-core", "_secrets"]
+
+# Private upstream-edge markers. Each engine dependency is named in exactly one
+# place, so changing how an edge is declared is a one-line edit rather than five.
+_engine-core = ["dep:praxis-policy-core"]
+_engine-apl-core = ["dep:praxis-policy-apl-core"]
+_engine-apl-runtime = ["dep:praxis-policy-apl-runtime"]
+
+# Private module-group markers. Each group's `cfg` gate names one predicate
+# instead of an `any(feature = ...)` list — a forgotten arm in such a list is
+# silent, since `unexpected_cfgs` catches a stale feature *name* but not a
+# missing alternative.
+_plugins = []
+_pdps = []
+_session = []
+_secrets = []
+
+[dependencies]
+# Engine crates, optional so a consumer resolves only the layer it asked for.
+# The three PDPs must stay apl-core-only on their normal edges: a non-optional
+# `apl-runtime` here would silently hand a Cedar-only consumer the runtime.
+praxis-policy-core = { workspace = true, optional = true }
+praxis-policy-apl-core = { workspace = true, optional = true }
+praxis-policy-apl-runtime = { workspace = true, optional = true }
+
+# Shared runtime crates, deliberately NOT optional. Every feature enables one
+# engine crate, and `praxis-policy-core` already pulls each of these
+# unconditionally, so gating them would shrink no consumer's resolved graph
+# while roughly tripling the hand-maintained `dep:` edge count — in the one
+# region no gate builds a partial feature set for.
+async-trait = { workspace = true }
+arc-swap = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+zeroize = { workspace = true }
+
+# --- jwt ---------------------------------------------------------------------
+
+# `jsonwebtoken` is the de facto JWT library for Rust. Supports
+# RS256/RS384/RS512, ES256/ES384, EdDSA, HS256/HS384/HS512. Default
+# features include `use_pem` (load DecodingKey from PEM strings) which
+# we want. Since v10 the crypto backend is a required feature
+# (neither `rust_crypto` nor `aws_lc_rs` is on by default) and panics
+# at first sign/verify if none is selected. We pick `aws_lc_rs`: the
+# alternative, `rust_crypto`, pulls the pure-Rust `rsa` crate as a
+# runtime dependency, and that crate carries RUSTSEC-2023-0071 (Marvin
+# timing sidechannel) with no fixed release — which then propagates the
+# advisory to every downstream consumer. aws-lc-rs keeps `rsa` out of the
+# runtime tree at the cost of a C/cmake build step.
+jsonwebtoken = { version = "11", optional = true, features = ["aws_lc_rs"] }
+
+# --- jwt, oauth, elicitation-ciba -------------------------------------------
+
+# `base64` for the peek-at-iss helper in the JWT resolver, the read-only `act`
+# claim interop check in the OAuth delegator, and the approver-claim decode in
+# CIBA. None of the three verifies a signature with it. jsonwebtoken 11 still
+# pulls 0.22, so both versions sit in the tree until it catches up.
+base64 = { version = "0.23", optional = true }
+
+# --- api-key, oauth, valkey --------------------------------------------------
+
+# `sha2` for the API-key hash index (keys compared by digest, never plaintext),
+# the OAuth cache-key HMAC, and the Valkey key derivation.
+#
+# 0.11 pairs with `digest` 0.11, so it moves in lockstep with `hmac` 0.13
+# below. Splitting them would put two `sha2` lines in the tree.
+sha2 = { version = "0.11", optional = true }
+
+# --- oauth -------------------------------------------------------------------
+
+# Cache-key derivation: HMAC-SHA256 under a per-process secret, so a key
+# is safe to log and a caller who controls the anchor bytes still cannot
+# steer the output.
+#
+# Deliberately not blake3, which is the obvious pick for a keyed hash.
+# `sha2` is already in the tree, and with it `digest`, `crypto-common`,
+# `block-buffer`, `hybrid-array`, `typenum`, `const-oid` and `ctutils`
+# — so `hmac` adds one crate and nothing transitive, where blake3
+# brings a new tree.
+# Its speed advantage is real and irrelevant at this size: one hash of a
+# couple of kilobytes per delegation, against an IdP round trip.
+hmac = { version = "0.13", optional = true }
+
+# 32 bytes for the per-process HMAC secret. The only runtime user; the
+# 0.3 line in the tree comes from `rand_core` under dev-only deps.
+getrandom = { version = "0.4", optional = true }
+
+# The bounded, coalescing store behind the delegated-token cache.
+#
+# Two of its guarantees are acceptance criteria rather than conveniences,
+# which is why this is a dependency instead of a few hundred lines here.
+# `try_get_with` "guarantees that concurrent calls on the same
+# not-existing key are coalesced into one evaluation", so N concurrent
+# requests for one uncached key produce one exchange. And on `Err` it
+# "does not insert a value", so a failed or indeterminate mint cannot be
+# cached even by mistake.
+#
+# The alternative shape, a `HashMap<Key, Arc<Mutex<()>>>` guarding a
+# separate map, is what `oauth2-broker` does; its guard map is only ever
+# inserted into, never pruned, so the structure protecting the cache
+# grows without the bound that protects the cache. moka's coalescing
+# lives inside the bounded map, so `max_entries` covers both.
+moka = { version = "0.12", optional = true, features = ["future"] }
+
+# --- cedar -------------------------------------------------------------------
+
+# Permissive caret spec — `"4"` means "any 4.x that Cargo can find."
+#
+# Code-side note: we use `Request::new(...)` (added in 4.11 alongside
+# the deprecated builder; still available in older 4.x via the
+# constructor form). Tracked separately if we ever need to support
+# pre-4.x or post-5.x.
+cedar-policy = { version = "4", optional = true }
+
+# Stack-growth guard for the cedar evaluation path. cedar-policy-core aborts
+# with "recursion limit reached" when `stacker::remaining_stack()` is below
+# ~100 KiB; hosts that hand the FFI a small thread stack (musl defaults to
+# 128 KiB) trip that on inputs glibc's 8 MiB stack handles fine. We use the
+# same crate cedar does — 0.1.x dedups with cedar's transitive pin — to grow
+# onto a fresh segment before calling in.
+stacker = { version = "0.1", optional = true }
+
+# --- cel ---------------------------------------------------------------------
+
+# The CEL interpreter from cel-rust/cel-rust (formerly
+# clarkmcc/cel-rust). Sync eval, comprehension macros (`has`, `all`,
+# `exists`, `map`, `filter`), custom functions. Caret spec tracks 0.x
+# patch/minor; pin tighter if the activation API churns.
+#
+# Features pinned explicitly so a future change to the upstream
+# `default = [...]` set can't silently add or remove capabilities
+# operator policies depend on:
+#   - regex: enables `matches(s, pattern)` for URL/path predicates
+#     ("did the request target match `^/api/v1/`?"); virtually every
+#     real policy needs this.
+#   - chrono: enables `timestamp()`, `duration()`, and date/time
+#     arithmetic for time-window policies ("business hours", "this
+#     credential is fresh enough").
+# `json` and `bytes` are deliberately off — APL marshals JSON at its
+# own layer, and CEL bytes ops aren't needed for ABAC predicates.
+cel = { version = "0.14.5", optional = true, default-features = false, features = [
+  "regex",
+  "chrono",
+] }
+
+# --- opa ---------------------------------------------------------------------
+
+# regorus — Microsoft's pure-Rust Rego interpreter (Apache-2.0).
+#
+# `default-features = false` is deliberate. regorus's `default`
+# (`arc + full-opa + rvm`) bundles the `http`, `net`, `opa-runtime`, and
+# `jsonschema` builtins. Inline Rego is authored by a less-trusted actor than
+# the operator, so this opts out of that surface and enables only the
+# pure, local builtins an authorization predicate needs — the same discipline
+# the `cel` feature applies when it pins CEL features explicitly. Excluded on
+# purpose:
+#   - http        → `http.send` network egress
+#   - net         → ipnet/CIDR builtins
+#   - opa-runtime → `opa.runtime()` environment/config introspection
+#   - jsonschema  → large dependency, unused for allow/deny predicates
+# `arc` is load-bearing: it switches regorus's internal reference counting to
+# atomic `Arc` so `Engine` is `Send`/`Sync` and the resolver can be shared
+# across worker threads behind `Arc<dyn PdpResolver>`.
+regorus = { version = "0.12", optional = true, default-features = false, features = [
+  "arc",
+  "std",
+  "rvm",
+  "regex",
+  "time",
+  "base64",
+  "base64url",
+  "hex",
+  "glob",
+  "graph",
+  "semver",
+  "urlquery",
+  "uuid",
+  "yaml",
+  # `cache` bounds and reuses compiled regex and glob patterns in a
+  # process-global LRU keyed by pattern text (regorus defaults: 256 regex, 128
+  # glob). It caches compiled patterns only, never evaluation results, so it
+  # holds no input-derived state and is safe to share across requests. Without
+  # it, every regex and glob in a policy recompiles on every evaluation.
+  "cache",
+] }
+
+# --- valkey ------------------------------------------------------------------
+
+# URL building/parsing so connection credentials are percent-encoded and
+# the wire scheme is consistent with the TLS setting (already in the tree
+# via redis-rs).
+url = { version = "2", optional = true }
+
+# Async Valkey/Redis client. `default-features = false` drops the command
+# groups we don't use (acl/geo/script/streams/json). `tokio-rustls-comp`
+# selects the rustls TLS path (tokio-rustls + rustls), keeping the tree
+# openssl-free; `connection-manager` adds reconnect-with-backoff.
+redis = { version = "1.7", optional = true, default-features = false, features = [
+  "aio",
+  "tokio-comp",
+  "tokio-rustls-comp",
+  "connection-manager",
+] }
+
+# External async connection pool over redis-rs. Forward the rustls TLS
+# feature explicitly so the rediss:// path is robust even if feature
+# unification with the redis dep ever changes.
+deadpool-redis = { version = "0.23", optional = true, default-features = false, features = [
+  "rt_tokio_1",
+  "tokio-rustls-comp",
+] }
+
+[dev-dependencies]
+# Cargo forbids `optional` in dev-dependencies, so everything here is
+# unconditional for a test build of this crate. Two consequences worth knowing:
+# the engine edges below are present on the *dev* graph regardless of features
+# (so assertions about the apl-core-only property must use `--edges normal`),
+# and the testcontainers stack compiles whenever this crate's tests are built.
+praxis-policy-core = { workspace = true, features = ["test-util"] }
+praxis-policy-apl-runtime = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11"
+
+# RSA keypair + JWK fixtures for the JWT tests. `rsa` generates keypairs;
+# `pkcs8` encodes them in the PEM format jsonwebtoken accepts.
+rsa = { version = "0.9", features = ["pem"] }
+
+# rsa 0.9's `RsaPrivateKey::new(&mut rng, bits)` takes an rng
+# implementing `rand_core::CryptoRngCore` — `rand::thread_rng()`
+# satisfies that. Pinned to 0.8: rsa 0.9 (latest stable) depends on
+# rand_core 0.6, and every later rand tracks a rand_core that no longer
+# implements it (0.9 -> rand_core 0.9, 0.10 -> rand_core 0.10). rsa 0.10
+# is the fix and is still pre-release, so this stays until it ships;
+# `dependabot.yml` ignores rand majors for the same reason.
+rand = "0.8"
+
+# Spins a real `valkey/valkey` container for the session-store integration
+# tests; those are `#[ignore]`d by default.
+testcontainers-modules = { version = "0.15", features = ["valkey"] }
+testcontainers = "0.27"
+
+# One harness per extension, each gated on its own single feature.
+# `required-features` is all-or-nothing, so a harness covering several
+# extensions would be skipped entirely under a single-feature build and its
+# cases would silently not run. Auto-discovered `tests/*.rs` roots cannot carry
+# `required-features` at all, which is why these are declared.
+[[test]]
+name = "jwt"
+path = "tests/jwt/main.rs"
+required-features = ["jwt"]
+
+[[test]]
+name = "api_key"
+path = "tests/api_key/main.rs"
+required-features = ["api-key"]
+
+[[test]]
+name = "oauth"
+path = "tests/oauth/main.rs"
+required-features = ["oauth"]
+
+[[test]]
+name = "ciba"
+path = "tests/ciba/main.rs"
+required-features = ["elicitation-ciba"]
+
+[[test]]
+name = "cedar"
+path = "tests/cedar/main.rs"
+required-features = ["cedar"]
+
+[[test]]
+name = "cel"
+path = "tests/cel/main.rs"
+required-features = ["cel"]
+
+[[test]]
+name = "opa"
+path = "tests/opa/main.rs"
+required-features = ["opa"]
+
+[[test]]
+name = "valkey"
+path = "tests/valkey/main.rs"
+required-features = ["valkey"]
+
+[lints]
+workspace = true

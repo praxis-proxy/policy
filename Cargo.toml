@@ -18,6 +18,7 @@ members = [
     "crates/ppe-apl-cmf",
     "crates/ppe-apl-runtime",
     "crates/ppe-pdp-diff",
+    "crates/builtins",
     "builtins/plugins/identity-jwt",
     "builtins/plugins/identity-api-key",
     "builtins/plugins/delegator-oauth",
@@ -50,6 +51,7 @@ default-members = [
     "crates/ppe-apl-cmf",
     "crates/ppe-apl-runtime",
     "crates/ppe-pdp-diff",
+    "crates/builtins",
     "builtins/plugins/identity-jwt",
     "builtins/plugins/identity-api-key",
     "builtins/plugins/delegator-oauth",
@@ -140,6 +142,7 @@ praxis-policy-orchestration            = { path = "crates/ppe-orchestration",   
 praxis-policy-apl-core                      = { path = "crates/ppe-apl-core",          version = "0.3.1" }
 praxis-policy-apl-cmf                       = { path = "crates/ppe-apl-cmf",           version = "0.3.1" }
 praxis-policy-apl-runtime                      = { path = "crates/ppe-apl-runtime",       version = "0.3.1" }
+praxis-policy-builtins                 = { path = "crates/builtins",                   version = "0.3.1" }
 praxis-policy-plugin-identity-jwt      = { path = "builtins/plugins/identity-jwt",     version = "0.3.1" }
 praxis-policy-plugin-identity-api-key  = { path = "builtins/plugins/identity-api-key", version = "0.3.1" }
 praxis-policy-plugin-delegator-oauth   = { path = "builtins/plugins/delegator-oauth",  version = "0.3.1" }

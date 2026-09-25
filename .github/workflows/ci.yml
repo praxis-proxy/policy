@@ -40,7 +40,9 @@ jobs:
   lint:
     name: fmt and clippy
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Raised from 15: `make lint` gained an --all-features clippy pass, which
+    # lints the bundled extensions that a default-feature run skips.
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
@@ -88,7 +90,9 @@ jobs:
   doc:
     name: docs build
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Raised from 15: `make doc` gained an --all-features pass, which documents
+    # the bundled extensions that a default-feature run compiles none of.
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
@@ -106,3 +110,27 @@ jobs:
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-doc-
       - run: make doc
+
+  check-features:
+    name: per-feature check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-check-features-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-check-features-
+      # `make ci` is not what CI runs — the jobs here invoke targets directly —
+      # so the per-feature gate needs its own job or it never executes.
+      - run: make check-features
