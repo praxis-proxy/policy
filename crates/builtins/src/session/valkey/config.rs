@@ -9,7 +9,7 @@
 
 use serde::Deserialize;
 
-use crate::error::BuildError;
+use crate::session::valkey::error::BuildError;
 
 /// Default key prefix/namespace for the label keyspace. The `v1` segment
 /// lets a future value-schema change bump the namespace cleanly.

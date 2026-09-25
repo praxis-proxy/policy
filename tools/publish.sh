@@ -46,7 +46,6 @@ ORDER=(
   praxis-policy-core
   praxis-policy-apl-cmf
   praxis-policy-apl-runtime
-  praxis-policy-session-valkey
   praxis-policy
 )
 

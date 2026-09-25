@@ -19,9 +19,8 @@ members = [
   "crates/ppe-apl-runtime",
   "crates/ppe-pdp-diff",
   "crates/builtins",
-  "builtins/session/valkey",
-  # Reference implementations, not published and not in the `builtins`
-  # umbrella. Workspace members so they stay built, linted and tested, and so
+  # Reference implementations, not published and not part of
+  # `praxis-policy-builtins`. Workspace members so they stay built, linted and tested, and so
   # they keep working as examples of an out-of-tree plugin. Each manifest says
   # why it is not a builtin.
   "reference/plugins/pii-scanner",
@@ -33,8 +32,10 @@ members = [
 ]
 
 # The session store pulls a redis client and a TLS stack, which slows a default
-# build noticeably. Excluding it from default-members keeps everyday iteration
-# fast; `--workspace` still picks it up, and CI runs the full sweep.
+# build noticeably. That cost is now held off by features rather than by
+# membership: `praxis-policy-builtins` is `default = []` and marks redis,
+# deadpool-redis and url optional behind `valkey`, so a default build resolves
+# none of them even though the crate is a default member.
 default-members = [
   "crates/ppe",
   "crates/ppe-core",
@@ -44,8 +45,8 @@ default-members = [
   "crates/ppe-apl-runtime",
   "crates/ppe-pdp-diff",
   "crates/builtins",
-  # Reference implementations, not published and not in the `builtins`
-  # umbrella. Workspace members so they stay built, linted and tested, and so
+  # Reference implementations, not published and not part of
+  # `praxis-policy-builtins`. Workspace members so they stay built, linted and tested, and so
   # they keep working as examples of an out-of-tree plugin. Each manifest says
   # why it is not a builtin.
   "reference/plugins/pii-scanner",
@@ -127,7 +128,6 @@ praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.3.1" }
 praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.3.1" }
 praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.3.1" }
 praxis-policy-builtins = { path = "crates/builtins", version = "0.3.1" }
-praxis-policy-session-valkey = { path = "builtins/session/valkey", version = "0.3.1" }
 
 # Criterion is only consumed by the unpublished `ppe-benches` crate (issue #19).
 # Kept in the workspace table so version bumps stay one-line.

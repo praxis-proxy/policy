@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// praxis-policy-session-valkey — a Valkey-backed `praxis_policy_apl_runtime::SessionStore` for
+// Valkey session store: a Valkey-backed `praxis_policy_apl_runtime::SessionStore` for
 // distributed, cross-restart persistence of session security labels.
 //
 // # Where this sits
@@ -9,7 +9,7 @@
 //   praxis-policy-apl-runtime (SessionStore trait, SessionStoreFactory)
 //        ▲
 //        │ implements
-//   praxis-policy-session-valkey  ──uses──▶  redis-rs + deadpool-redis (rustls)
+//   praxis-policy-builtins  ──uses──▶  redis-rs + deadpool-redis (rustls)
 //
 // The host registers `ValkeySessionStoreFactory` via
 // `AplOptions.session_store_factories`; a `global.session_store:

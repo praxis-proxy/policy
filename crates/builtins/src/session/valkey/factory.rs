@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use praxis_policy_apl_runtime::{SessionStore, SessionStoreFactory};
 
-use crate::config::ValkeyConfig;
-use crate::store::ValkeySessionStore;
+use crate::session::valkey::config::ValkeyConfig;
+use crate::session::valkey::store::ValkeySessionStore;
 
 /// The `kind:` discriminator this factory builds. Part of the public
 /// surface — it is the string operators write in their config.

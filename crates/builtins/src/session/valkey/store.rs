@@ -28,9 +28,9 @@ use praxis_policy_apl_runtime::{SessionStore, SessionStoreError};
 use redis::AsyncCommands as _;
 use sha2::{Digest as _, Sha256};
 
-use crate::config::ValkeyConfig;
-use crate::connection::build_pool;
-use crate::error::BuildError;
+use crate::session::valkey::config::ValkeyConfig;
+use crate::session::valkey::connection::build_pool;
+use crate::session::valkey::error::BuildError;
 
 /// Valkey-backed session label store.
 /// The configured TTL as the `i64` valkey expects.

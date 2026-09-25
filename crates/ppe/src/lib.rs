@@ -146,7 +146,7 @@ pub use praxis_policy_builtins::secrets::vault::{
     register as register_vault_secret_provider, registry_with_vault,
 };
 #[cfg(feature = "valkey")]
-pub use praxis_policy_session_valkey::{
+pub use praxis_policy_builtins::session::valkey::{
     KIND as VALKEY_KIND, ValkeyConfig, ValkeySessionStoreFactory,
 };
 

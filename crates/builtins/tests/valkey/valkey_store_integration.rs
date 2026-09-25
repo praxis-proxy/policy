@@ -5,7 +5,7 @@
 // container (testcontainers). These are `#[ignore]`d by default so unit
 // runs don't require Docker; run them with:
 //
-//   cargo test -p praxis-policy-session-valkey -- --ignored
+//   cargo nextest run -p praxis-policy-builtins --features valkey -- --ignored
 //
 // Skip discipline:
 //   - If `VALKEY_TEST_URL` is set, run against that endpoint (a CI service
@@ -34,7 +34,7 @@
     reason = "test and example code"
 )]
 use praxis_policy_apl_runtime::{SessionStore as _, SessionStoreError};
-use praxis_policy_session_valkey::{ValkeyConfig, ValkeySessionStore};
+use praxis_policy_builtins::session::valkey::{ValkeyConfig, ValkeySessionStore};
 use sha2::{Digest as _, Sha256};
 use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::runners::AsyncRunner as _;

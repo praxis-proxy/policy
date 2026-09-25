@@ -9,14 +9,14 @@
 
 use deadpool_redis::{Config as PoolConfig, Pool, Runtime};
 
-use crate::config::ValkeyConfig;
-use crate::error::BuildError;
+use crate::session::valkey::config::ValkeyConfig;
+use crate::session::valkey::error::BuildError;
 
 /// Build the connection pool from validated config. The pool is created
 /// lazily — `create_pool` does not dial Valkey, so a bad endpoint surfaces
 /// on first use (where it correctly fails the request closed) rather than
 /// blocking `load_config_yaml`.
-pub(crate) fn build_pool(cfg: &ValkeyConfig) -> Result<Pool, BuildError> {
+pub(in crate::session::valkey) fn build_pool(cfg: &ValkeyConfig) -> Result<Pool, BuildError> {
     let url = cfg.connection_url()?;
     let pool_cfg = PoolConfig::from_url(url);
     // Note: the pool-create error is intentionally not interpolated with

@@ -68,7 +68,7 @@ elicitation-ciba = [
 cedar = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cedar"]
 cel = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cel"]
 opa = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/opa"]
-valkey = ["_builtin", "dep:praxis-policy-session-valkey"]
+valkey = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/valkey"]
 # Vault KV v2 secret backend. Off the default build; compiled with
 # `builtins` or by name. The host still registers it with a transport —
 # this feature only makes the factory available.
@@ -118,7 +118,6 @@ praxis-policy-apl-runtime = { workspace = true }
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
 praxis-policy-builtins = { workspace = true, optional = true }
-praxis-policy-session-valkey = { workspace = true, optional = true }
 
 # --- `http-hyper` only -------------------------------------------------
 #

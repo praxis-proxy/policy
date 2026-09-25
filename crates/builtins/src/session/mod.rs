@@ -10,3 +10,6 @@
 //!
 //! The only group needing `praxis-policy-apl-runtime`, and the only one that
 //! pulls a Redis client and a TLS stack.
+
+#[cfg(feature = "valkey")]
+pub mod valkey;
