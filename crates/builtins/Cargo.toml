@@ -14,13 +14,6 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-# Not publishable until the implementations actually live here. `release.yaml`
-# fires on any matching tag from any commit with no branch guard, so a tag
-# pushed while this crate is still a scaffold would permanently upload a
-# builtins crate that holds nothing anyone can use. Flipped when the move is
-# complete.
-publish = false
-
 # Build docs.rs with every extension enabled. The default build enables no
 # module at all (`default = []`), so without this the rendered page is empty —
 # and the facade's re-exports resolve into it.

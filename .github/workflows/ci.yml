@@ -134,3 +134,29 @@ jobs:
       # `make ci` is not what CI runs — the jobs here invoke targets directly —
       # so the per-feature gate needs its own job or it never executes.
       - run: make check-features
+
+  release-readiness:
+    name: packaging + publish order
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-release-readiness-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-release-readiness-
+      # Nothing outside a tagged release used to exercise either of these, which
+      # is how the publish order drifted for a whole release cycle without
+      # anyone noticing. Both are cheap and neither uploads anything.
+      - run: cargo package --workspace --locked --all-features
+      - run: tools/publish.sh --dry-run

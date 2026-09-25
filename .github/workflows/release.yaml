@@ -57,6 +57,11 @@ jobs:
       # extensions, so this second pass is what actually proves they build
       # from their packaged sources.
       - run: cargo package --workspace --locked --all-features
+      # Scoped to the facade and run with all features: the facade is
+      # `default = []`, so a default-feature run inspects none of the
+      # re-exports this check exists to protect. A floor, not a proof —
+      # cross-crate re-export coverage in semver-checks is incomplete.
+      - run: make semver-facade
 
   tag-matches-manifest:
     name: tag matches manifest version

@@ -77,7 +77,7 @@ secrets-vault = ["dep:praxis-policy-builtins", "praxis-policy-builtins/secrets-v
 # A default `HttpTransport` for hosts that inject none, built on hyper.
 #
 # Deliberately NOT a separate crate, unlike every other feature above. We
-# publish 16 crates at a shared version and a full publish runs about 90
+# publish a handful of crates at a shared version and a full publish runs long
 # minutes against crates.io rate limits (hence `tools/publish.sh`); a 17th
 # crate is that cost on every release, forever. The trait lives in
 # praxis-policy-core; only this implementation lives here.

@@ -38,6 +38,7 @@ help:
 	@echo "  clippy            Run clippy on the workspace (-D warnings)"
 	@echo "  lint-fix          Auto-fix: cargo fmt + clippy --fix"
 	@echo "  machete           Report unused dependencies (advisory)"
+	@echo "  semver-facade     Facade API compatibility vs the last release"
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
@@ -285,6 +286,16 @@ mutants:
 
 # Semver compatibility check against the last published version.
 .PHONY: semver
+# Facade-scoped API compatibility against the last release. --all-features is
+# required, not optional: the facade is `default = []`, so a default-feature run
+# sees no builtin re-export and passes without inspecting the surface this
+# guards. Scoped to the facade deliberately — a workspace-wide run is noisy from
+# the retired names and from a crate with no published baseline.
+.PHONY: semver-facade
+semver-facade:
+	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
+	@cargo semver-checks --package praxis-policy --all-features
+
 semver:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
 	@cargo semver-checks

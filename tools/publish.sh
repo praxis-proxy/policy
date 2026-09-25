@@ -8,7 +8,7 @@
 # Why this exists rather than a bare `cargo publish --workspace`:
 #
 #   crates.io limits *new* crate publishes to a burst of 5 and one per 10 minutes
-#   thereafter. A first release of 13 new crates therefore cannot complete in one
+#   thereafter. A first release of several new crates therefore cannot complete in one
 #   pass, and a version, once uploaded, cannot be deleted — only yanked. So the
 #   failure mode of the bare command is a permanently half-published release with
 #   the tag already consumed.
@@ -46,6 +46,7 @@ ORDER=(
   praxis-policy-core
   praxis-policy-apl-cmf
   praxis-policy-apl-runtime
+  praxis-policy-builtins
   praxis-policy
 )
 
@@ -68,6 +69,27 @@ if [ "$PUBLISHABLE" != "$ORDERED_SORTED" ]; then
   echo "  workspace publishable: $PUBLISHABLE" >&2
   echo "  listed in ORDER:       $ORDERED_SORTED" >&2
   echo "  Update ORDER (dependency order) and re-run." >&2
+  exit 1
+fi
+
+# The check above compares sorted sets, so it proves membership and nothing
+# about order. Order is what a serial publish depends on: a crate uploaded
+# before something it requires fails mid-run, and the version is already
+# consumed. Assert the two edges that matter rather than trusting the list.
+order_index() {
+  local i=0 n
+  for n in "${ORDER[@]}"; do
+    [ "$n" = "$1" ] && { echo "$i"; return; }
+    i=$((i + 1))
+  done
+  echo "-1"
+}
+if [ "$(order_index praxis-policy-builtins)" -lt "$(order_index praxis-policy-apl-runtime)" ]; then
+  echo "error: praxis-policy-builtins must follow praxis-policy-apl-runtime in ORDER." >&2
+  exit 1
+fi
+if [ "$(order_index praxis-policy)" -ne "$((${#ORDER[@]} - 1))" ]; then
+  echo "error: praxis-policy must be last in ORDER." >&2
   exit 1
 fi
 
