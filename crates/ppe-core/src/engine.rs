@@ -652,6 +652,20 @@ pub struct PolicyEngine {
     /// plugin that needs one fails at `initialize_with` with a message
     /// naming the omission — see `crate::host::ServiceError`.
     http_transport: std::sync::OnceLock<Arc<dyn crate::http::HttpTransport>>,
+
+    /// The secret-provider factories a host registered, by `kind`.
+    ///
+    /// Installed once during wiring like the transport, and for the same
+    /// reason: which backends exist is a property of how the binary was built,
+    /// not of the document it loaded.
+    secret_providers: std::sync::OnceLock<crate::secrets::SecretProviderRegistry>,
+
+    /// Every declared value, resolved.
+    ///
+    /// Populated by `initialize()` before any plugin initializes, so a plugin
+    /// that reads a secret finds one. Empty when the document declares none,
+    /// which costs nothing and keeps every read site free of an `Option`.
+    secrets: std::sync::OnceLock<Arc<crate::secrets::SecretStore>>,
 }
 
 /// Fold top-level `groups:` into the internal bundle store and validate, the
@@ -976,6 +990,8 @@ impl PolicyEngine {
             task_tracker: tokio_util::task::TaskTracker::new(),
             visitors: RwLock::new(Vec::new()),
             http_transport: std::sync::OnceLock::new(),
+            secret_providers: std::sync::OnceLock::new(),
+            secrets: std::sync::OnceLock::new(),
         }
     }
 
@@ -1689,6 +1705,91 @@ impl PolicyEngine {
         installed
     }
 
+    /// Register the secret-provider factories this build carries.
+    ///
+    /// Call before `initialize()`. A document declaring a provider `kind` with
+    /// no registered factory fails there, naming what is registered, so an
+    /// operator who built without a backend's feature is told that rather than
+    /// left with an unexplained failure.
+    ///
+    /// A build that registers nothing still loads a document with no
+    /// `secrets:` block.
+    pub fn set_secret_providers(&self, registry: crate::secrets::SecretProviderRegistry) -> bool {
+        let installed = self.secret_providers.set(registry).is_ok();
+        if !installed {
+            warn!(
+                "policy: secret providers are already registered; ignoring the second \
+                 registration"
+            );
+        }
+        installed
+    }
+
+    /// When `provider` last re-read all of its values without a failure.
+    ///
+    /// `None` once a refresh against it has failed, and until one succeeds
+    /// again. A host that alarms on the gap between this and now is alarming on
+    /// "the credentials in memory may no longer be the ones in the backend",
+    /// which is what this design trades for staying available during an outage.
+    #[must_use]
+    pub fn secrets_last_success(&self, provider: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.secrets.get()?.provider_last_success(provider)
+    }
+
+    /// Re-read every declared secret, returning what changed and what failed.
+    ///
+    /// The host decides when. Nothing here spawns a ticker: a task binds to
+    /// whichever runtime started it, and a host that initializes on a
+    /// short-lived runtime would lose it before it ticked once, leaving a
+    /// process that never rotates a credential and never says so.
+    ///
+    /// A value that fails to re-read keeps its last-good bytes, so a backend
+    /// outage after startup degrades to a possibly-stale credential rather than
+    /// to none. The report names every failure for the host to log and alarm
+    /// on.
+    pub async fn refresh_secrets(&self) -> crate::secrets::RefreshReport {
+        match self.secrets.get() {
+            Some(store) => store.refresh().await,
+            None => crate::secrets::RefreshReport::default(),
+        }
+    }
+
+    /// Build every provider and read every declared value.
+    ///
+    /// Ordered ahead of plugin initialization so a plugin that reads a secret
+    /// during `initialize_with` finds one already resolved.
+    async fn resolve_secrets(&self) -> Result<(), Box<PluginError>> {
+        let snapshot = self.load_runtime();
+        // A host that registered plugins in Rust rather than loading a
+        // document declares no secrets and needs no store.
+        let Some(policy_config) = snapshot.policy_config.as_ref() else {
+            return Ok(());
+        };
+        let config = policy_config.secrets.clone();
+        if config.is_empty() && config.providers.is_empty() {
+            return Ok(());
+        }
+
+        // A document declaring secrets against a build that registered no
+        // factories is a wiring mistake, and resolving against an empty
+        // registry turns it into an error naming the kind rather than a
+        // silent skip.
+        let empty = crate::secrets::SecretProviderRegistry::new();
+        let registry = self.secret_providers.get().unwrap_or(&empty);
+
+        let store = crate::secrets::SecretStore::resolve(&config, registry)
+            .await
+            .map_err(|e| {
+                Box::new(PluginError::Config {
+                    message: format!("{e}"),
+                })
+            })?;
+
+        info!("Resolved {} secret(s)", store.names().len());
+        let _ = self.secrets.set(Arc::new(store));
+        Ok(())
+    }
+
     /// The host services `plugin_name` may borrow, per its capabilities.
     ///
     /// The withheld case is carried rather than dropped so the plugin's
@@ -1738,6 +1839,11 @@ impl PolicyEngine {
         if self.initialized.load(Ordering::Acquire) {
             return Ok(());
         }
+
+        // Before any plugin. A secret a plugin reads at `initialize_with` has
+        // to already be resolved, and a document whose credentials cannot be
+        // read must not reach a request with one of them missing.
+        self.resolve_secrets().await?;
 
         // Snapshot once at start — subsequent registrations don't affect
         // this initialize() call. They'd need their own initialize.
@@ -3540,6 +3646,7 @@ mod tests {
     use crate::error::PluginViolation;
     use crate::hooks::metadata::{HookMetadata, register_hook_metadata};
     use crate::plugin::{OnError, PluginMode};
+    use crate::trace_capture::capturing;
     use async_trait::async_trait;
 
     /// Every mock handler here answers for the same fixture hook. The trait
@@ -6559,6 +6666,131 @@ plugins:
     kind: test/allow
     hooks: [test_hook]
 "#;
+
+    /// A directory holding one secret file, and the config that reads it.
+    fn secret_fixture(contents: &str) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("ppe-engine-secrets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("upstream.key"), contents).expect("write");
+        let yaml = format!(
+            "
+engine_settings:
+  dispatch: hooks
+secrets:
+  providers:
+    local: {{ kind: file, base_dir: {} }}
+  values:
+    upstream_key: {{ provider: local, ref: upstream.key }}
+",
+            dir.display()
+        );
+        (dir, yaml)
+    }
+
+    /// The resolved store.
+    ///
+    /// The engine exposes no accessor for it. A handle that reads every
+    /// declared value cannot re-check anything, so the only callers are the
+    /// ones that read a single value they were pointed at.
+    fn resolved_secrets(engine: &PolicyEngine) -> Arc<crate::secrets::SecretStore> {
+        engine.secrets.get().map_or_else(
+            || Arc::new(crate::secrets::SecretStore::empty()),
+            Arc::clone,
+        )
+    }
+
+    fn engine_reading_secrets(yaml: &str) -> PolicyEngine {
+        let config = parse_fixture_config(yaml).expect("config parses");
+        let engine = PolicyEngine::from_config(config, &allow_factories()).expect("engine builds");
+        assert!(
+            engine.set_secret_providers(
+                crate::secrets::SecretProviderRegistry::with_builtin_backends()
+            )
+        );
+        engine
+    }
+
+    #[tokio::test]
+    async fn a_declared_secret_is_resolved_by_initialize() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let engine = engine_reading_secrets(&yaml);
+
+        assert!(
+            resolved_secrets(&engine).is_empty(),
+            "nothing is resolved before initialize"
+        );
+        engine.initialize().await.expect("initializes");
+
+        let value = resolved_secrets(&engine)
+            .value("upstream_key")
+            .expect("declared");
+        assert_eq!(value.as_str(), "hunter2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_secret_that_cannot_be_read_stops_initialize() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        std::fs::remove_file(dir.join("upstream.key")).expect("remove");
+        let engine = engine_reading_secrets(&yaml);
+
+        let err = engine
+            .initialize()
+            .await
+            .expect_err("a credential that never resolved has no last-good to serve");
+        let msg = format!("{err}");
+        assert!(msg.contains("upstream_key"), "{msg}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_provider_kind_this_build_lacks_stops_initialize() {
+        let yaml = "
+engine_settings:
+  dispatch: hooks
+secrets:
+  providers:
+    vault-prod: { kind: vault }
+  values:
+    upstream_key: { provider: vault-prod, ref: \"secret/x#y\" }
+";
+        let engine = engine_reading_secrets(yaml);
+        let err = engine
+            .initialize()
+            .await
+            .expect_err("no vault backend here");
+        let msg = format!("{err}");
+        assert!(msg.contains("vault"), "{msg}");
+        assert!(
+            msg.contains("file"),
+            "the failure names what this build does carry: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_reaches_a_ref_taken_before_it() {
+        let (dir, yaml) = secret_fixture("first\n");
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.expect("initializes");
+
+        // Taken once, the way a plugin would hold it.
+        let handle = resolved_secrets(&engine)
+            .secret("upstream_key")
+            .expect("declared");
+        assert_eq!(handle.get().as_str(), "first");
+
+        std::fs::write(dir.join("upstream.key"), "second\n").expect("rotate");
+        let report = engine.refresh_secrets().await;
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(report.updated, vec!["upstream_key".to_owned()]);
+
+        assert_eq!(handle.get().as_str(), "second");
+        assert_eq!(handle.generation(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A route joining a top-level `groups:` bundle. Resolving the group is what
     /// makes the membership valid; skipping the merge leaves the route joining a
@@ -9779,109 +10011,6 @@ routes:
         );
     }
 
-    // -- Capturing what the engine emits --
-    //
-    // A subscriber installed once for the whole binary, always interested, so
-    // callsite interest never depends on which test reached it first. The
-    // thread-local sink keeps each test reading only its own events.
-
-    #[derive(Clone, Default)]
-    struct Events(Arc<std::sync::Mutex<Vec<String>>>);
-
-    impl Events {
-        fn matching(&self, needle: &str) -> Vec<String> {
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-                .filter(|event| event.contains(needle))
-                .cloned()
-                .collect()
-        }
-    }
-
-    std::thread_local! {
-        static SINK: std::cell::RefCell<Option<Events>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    struct Capture;
-
-    /// Clears the sink even if the body panics, so a failing test cannot leak
-    /// its events into whichever test the runner puts on this thread next.
-    struct Sink;
-
-    impl Drop for Sink {
-        fn drop(&mut self) {
-            SINK.with_borrow_mut(|sink| *sink = None);
-        }
-    }
-
-    struct Render(String);
-
-    impl tracing::field::Visit for Render {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!(" {}={value:?}", field.name()));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.push_str(&format!(" {}={value}", field.name()));
-        }
-    }
-
-    impl tracing::Subscriber for Capture {
-        fn register_callsite(&self, _: &tracing::Metadata<'_>) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::always()
-        }
-
-        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-            Some(tracing::level_filters::LevelFilter::TRACE)
-        }
-
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            SINK.with_borrow(|sink| {
-                let Some(events) = sink.as_ref() else {
-                    return;
-                };
-                let mut render = Render(format!("[{}]", event.metadata().level()));
-                event.record(&mut render);
-                events
-                    .0
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(render.0);
-            });
-        }
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    /// Capture what the engine emits until the returned guard is dropped.
-    fn capturing() -> (Events, Sink) {
-        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        INSTALLED.get_or_init(|| {
-            tracing::subscriber::set_global_default(Capture)
-                .expect("no other subscriber is installed in this test binary");
-        });
-        let events = Events::default();
-        SINK.with_borrow_mut(|sink| *sink = Some(events.clone()));
-        (events, Sink)
-    }
-
     // =====================================================================
     // Audit sinks
     // =====================================================================
@@ -10342,7 +10471,7 @@ routes:
         assert!(!warned(&engine, Direction::Request));
     }
 
-    /// R30's case: a host that supplies the request line on the way in and not
+    /// A host that supplies the request line on the way in and not
     /// on the way out gets a warning naming the response direction, which is the
     /// actionable half. One combined gate would have been spent already.
     #[tokio::test]

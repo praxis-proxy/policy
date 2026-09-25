@@ -54,8 +54,8 @@
 //!
 //! No plugins are on by default (`praxis-policy` alone is the engine).
 //! `builtins` enables every bundled extension, including the Valkey session
-//! store; or pick a granular subset (`jwt`, `oauth`, `elicitation-ciba`,
-//! `cedar`, `cel`, `opa`, `valkey`). Any of them brings in the registration
+//! store; or pick a granular subset (`jwt`, `api-key`, `oauth`, `elicitation-ciba`,
+//! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
 //! # Plugins the host supplies
@@ -91,25 +91,62 @@ pub use praxis_policy_core::engine::PolicyEngine;
 /// [`prelude`].
 pub use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 
+/// What a host needs to give the engine its secrets.
+///
+/// A host builds a [`SecretProviderRegistry`] holding the backends this build
+/// carries and installs it with `PolicyEngine::set_secret_providers` before
+/// `initialize()`. [`SecretProviderFactory`] is what a host implements to add a
+/// backend of its own, and [`SecretRef`] is the handle a consumer keeps so a
+/// later refresh reaches it.
+///
+/// `env` and `file` are always registered by
+/// [`SecretProviderRegistry::with_builtin_backends`]. Vault KV v2 is behind
+/// the `secrets-vault` feature: the host constructs `VaultSecretProviderFactory`
+/// with its `HttpTransport` and registers it (or calls `registry_with_vault`).
+/// Nothing here spawns a Vault session ticker; token renewal is lazy on
+/// the next read.
+///
+/// There is no handle here that reads every declared value. A host drives
+/// refresh with `PolicyEngine::refresh_secrets` and watches for staleness with
+/// `PolicyEngine::secrets_last_success`, neither of which yields secret
+/// material.
+pub use praxis_policy_core::secrets::{
+    RefreshReport, SecretError, SecretProvider, SecretProviderFactory, SecretProviderRegistry,
+    SecretRef,
+};
+
 /// Curated re-exports for plugin authors, so a plugin crate can depend on this
 /// facade alone. See [`praxis_policy_core::prelude`].
 pub use praxis_policy_core::prelude;
 
 // Concrete factory types + KIND consts, each behind its feature.
 #[cfg(feature = "cedar")]
-pub use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
+pub use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
 #[cfg(feature = "cel")]
-pub use praxis_policy_pdp_cel::CelPdpFactory;
+pub use praxis_policy_builtins::pdps::cel::CelPdpFactory;
 #[cfg(feature = "opa")]
-pub use praxis_policy_pdp_opa::OpaPdpFactory;
+pub use praxis_policy_builtins::pdps::opa::OpaPdpFactory;
 #[cfg(feature = "oauth")]
-pub use praxis_policy_plugin_delegator_oauth::{KIND as OAUTH_KIND, OAuthDelegatorFactory};
+pub use praxis_policy_builtins::plugins::delegator_oauth::{
+    KIND as OAUTH_KIND, OAuthDelegatorFactory,
+};
 #[cfg(feature = "elicitation-ciba")]
-pub use praxis_policy_plugin_elicitation_ciba::{CibaApproverFactory, KIND as CIBA_KIND};
+pub use praxis_policy_builtins::plugins::elicitation_ciba::{
+    CibaApproverFactory, KIND as CIBA_KIND,
+};
+#[cfg(feature = "api-key")]
+pub use praxis_policy_builtins::plugins::identity_api_key::{
+    ApiKeyIdentityFactory, KIND as API_KEY_KIND,
+};
 #[cfg(feature = "jwt")]
-pub use praxis_policy_plugin_identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
+pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
+#[cfg(feature = "secrets-vault")]
+pub use praxis_policy_builtins::secrets::vault::{
+    KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
+    register as register_vault_secret_provider, registry_with_vault,
+};
 #[cfg(feature = "valkey")]
-pub use praxis_policy_session_valkey::{
+pub use praxis_policy_builtins::session::valkey::{
     KIND as VALKEY_KIND, ValkeyConfig, ValkeySessionStoreFactory,
 };
 
@@ -157,11 +194,25 @@ macro_rules! register_builtins {
     };
 }
 
+// Module aliases for the `register_builtins!` arms below. The macro matches a
+// single identifier and uses it for both `KIND` and the factory type, which a
+// multi-segment module path cannot satisfy; aliasing keeps the registration
+// keyed off each extension's own `KIND` const.
+#[cfg(feature = "oauth")]
+use praxis_policy_builtins::plugins::delegator_oauth as oauth_builtin;
+#[cfg(feature = "elicitation-ciba")]
+use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
+#[cfg(feature = "api-key")]
+use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
+#[cfg(feature = "jwt")]
+use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
+
 #[cfg(feature = "_builtin")]
 register_builtins! {
-    feature "jwt"              => praxis_policy_plugin_identity_jwt::JwtIdentityFactory,
-    feature "oauth"            => praxis_policy_plugin_delegator_oauth::OAuthDelegatorFactory,
-    feature "elicitation-ciba" => praxis_policy_plugin_elicitation_ciba::CibaApproverFactory,
+    feature "jwt"              => jwt_builtin::JwtIdentityFactory,
+    feature "api-key"          => api_key_builtin::ApiKeyIdentityFactory,
+    feature "oauth"            => oauth_builtin::OAuthDelegatorFactory,
+    feature "elicitation-ciba" => ciba_builtin::CibaApproverFactory,
 }
 
 /// The enabled PDP factories, ready to drop into
@@ -199,6 +250,11 @@ pub fn builtin_session_store_factories() -> Vec<std::sync::Arc<dyn SessionStoreF
 /// `mgr` with in-process defaults (a [`MemorySessionStore`] and the default
 /// baseline capabilities). The enabled PDP and session-store factories are wired
 /// in, so a later config load can reference any of them by `kind`.
+///
+/// Secret backends are not registered here. `env` and `file` live on
+/// `SecretProviderRegistry::with_builtin_backends`. Vault (`kind: vault`)
+/// is compiled with the `secrets-vault` feature but still needs
+/// `register_vault_secret_provider` with a host `HttpTransport`.
 ///
 /// This is the one-call path; reach for [`register_builtin_plugins`] and
 /// [`AplOptions`] directly when you need to customize capabilities or the
@@ -244,7 +300,8 @@ pub use http_hyper::HyperTransport;
 /// Destinations in the shared address table — loopback, RFC 1918,
 /// link-local (including cloud metadata), CGNAT — are refused as
 /// [`praxis_policy_core::http::HttpTransportError::Rejected`], including
-/// a hostname that resolves only to those addresses. A local `IdP` needs
+/// a hostname that resolves only to those addresses. A local `IdP` or
+/// in-cluster Vault needs
 /// [`HyperTransport::with_allow_private_destinations`] installed via
 /// [`PolicyEngine::set_http_transport`] instead of this helper.
 ///
@@ -335,6 +392,7 @@ mod tests {
     fn every_enabled_builtin_resolves_its_kind() {
         let expected = [
             (cfg!(feature = "jwt"), "identity/jwt"),
+            (cfg!(feature = "api-key"), "identity/api-key"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),
         ];

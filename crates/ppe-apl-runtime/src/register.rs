@@ -132,7 +132,7 @@ impl AplOptions {
 /// use std::sync::Arc;
 /// use praxis_policy_core::engine::PolicyEngine;
 /// use praxis_policy_apl_runtime::{register_apl, AplOptions};
-/// use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
+/// use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
 ///
 /// let mgr = Arc::new(PolicyEngine::default());
 /// mgr.register_factory("scope-gate", Box::new(ScopeGateFactory));

@@ -36,7 +36,7 @@ use async_trait::async_trait;
 ///
 /// String-typed deliberately, matching the trait's own philosophy (see
 /// the module header): the error stays free of backend-specific types so
-/// non-CMF bridges and the cross-crate `praxis-policy-session-valkey` backend can
+/// non-CMF bridges and the Valkey backend can
 /// construct it without dragging dependencies into this surface.
 ///
 /// Note the distinction this enables: a **positively-confirmed key-miss**

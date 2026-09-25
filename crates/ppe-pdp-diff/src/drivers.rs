@@ -42,20 +42,22 @@ pub(crate) async fn evaluate(dialect: Dialect, case: &Case) -> Result<PdpDecisio
 
 async fn evaluate_cedar(case: &Case) -> Result<PdpDecision, PdpError> {
     let resolver =
-        praxis_policy_pdp_cedar_direct::CedarDirectResolver::from_policy_text(&case.cedar_policy)
-            .map_err(|e| PdpError::Dispatch(e.to_string()))?;
+        praxis_policy_builtins::pdps::cedar_direct::CedarDirectResolver::from_policy_text(
+            &case.cedar_policy,
+        )
+        .map_err(|e| PdpError::Dispatch(e.to_string()))?;
     resolver.evaluate(&cedar_call(case), &case.bag).await
 }
 
 async fn evaluate_cel(case: &Case) -> Result<PdpDecision, PdpError> {
-    let resolver = praxis_policy_pdp_cel::CelResolver::new();
+    let resolver = praxis_policy_builtins::pdps::cel::CelResolver::new();
     resolver.evaluate(&cel_call(case), &case.bag).await
 }
 
 async fn evaluate_opa(case: &Case) -> Result<PdpDecision, PdpError> {
-    let resolver = praxis_policy_pdp_opa::OpaResolver::from_config(&serde_yaml::Value::Mapping(
-        serde_yaml::Mapping::new(),
-    ))
+    let resolver = praxis_policy_builtins::pdps::opa::OpaResolver::from_config(
+        &serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+    )
     .map_err(|e| PdpError::Dispatch(e.to_string()))?;
     resolver.evaluate(&opa_call(case), &case.bag).await
 }

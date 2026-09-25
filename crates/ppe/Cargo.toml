@@ -44,48 +44,59 @@ default = []
 # Every builtin, including the Valkey session store and the redis + TLS stack it
 # carries.
 builtins = [
-    "jwt",
-    "oauth",
-    "elicitation-ciba",
-    "cedar",
-    "cel",
-    "opa",
-    "valkey",
+  "jwt",
+  "api-key",
+  "oauth",
+  "elicitation-ciba",
+  "cedar",
+  "cel",
+  "opa",
+  "valkey",
+  "secrets-vault",
 ]
 
-# One feature per builtin crate. The names are the public API: a host writes
+# One feature per bundled extension. The names are the public API: a host writes
 # these, so they are deliberately shorter than the crate names they pull.
-jwt = ["_builtin", "dep:praxis-policy-plugin-identity-jwt"]
-oauth = ["_builtin", "dep:praxis-policy-plugin-delegator-oauth"]
-elicitation-ciba = ["_builtin", "dep:praxis-policy-plugin-elicitation-ciba"]
-cedar = ["_builtin", "dep:praxis-policy-pdp-cedar-direct"]
-cel = ["_builtin", "dep:praxis-policy-pdp-cel"]
-opa = ["_builtin", "dep:praxis-policy-pdp-opa"]
-valkey = ["_builtin", "dep:praxis-policy-session-valkey"]
+jwt = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/jwt"]
+api-key = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/api-key"]
+oauth = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/oauth"]
+elicitation-ciba = [
+  "_builtin",
+  "dep:praxis-policy-builtins",
+  "praxis-policy-builtins/elicitation-ciba",
+]
+cedar = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cedar"]
+cel = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cel"]
+opa = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/opa"]
+valkey = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/valkey"]
+# Vault KV v2 secret backend. Off the default build; compiled with
+# `builtins` or by name. The host still registers it with a transport —
+# this feature only makes the factory available.
+secrets-vault = ["dep:praxis-policy-builtins", "praxis-policy-builtins/secrets-vault"]
 
 # A default `HttpTransport` for hosts that inject none, built on hyper.
 #
-# Deliberately NOT a separate crate, unlike every other feature above. We
-# publish 15 crates at a shared version and a full publish runs about 90
-# minutes against crates.io rate limits (hence `tools/publish.sh`); a 16th
-# crate is that cost on every release, forever. The trait lives in
-# praxis-policy-core; only this implementation lives here.
+# Deliberately NOT a separate crate. Publishing is serial and rate-limited
+# (hence `tools/publish.sh`), so each additional crate is that cost on every
+# release, forever — the same reasoning that puts the bundled extensions in one
+# crate. The trait lives in praxis-policy-core; only this implementation lives
+# here.
 #
 # Off by default and never auto-wired: a host calls
 # `install_default_http_transport` explicitly. Praxis injects its own
 # pingora-backed transport instead and builds without this feature, so it
 # links no hyper at all.
 http-hyper = [
-    "dep:hyper-util",
-    "dep:hyper-rustls",
-    "dep:rustls",
-    "dep:webpki-roots",
-    "dep:http-body-util",
-    "dep:bytes",
-    "dep:http",
-    "dep:async-trait",
-    "dep:tokio",
-    "dep:tower-service",
+  "dep:hyper-util",
+  "dep:hyper-rustls",
+  "dep:rustls",
+  "dep:webpki-roots",
+  "dep:http-body-util",
+  "dep:bytes",
+  "dep:http",
+  "dep:async-trait",
+  "dep:tokio",
+  "dep:tower-service",
 ]
 
 # Private marker meaning "at least one builtin is enabled", which is what gates
@@ -106,13 +117,7 @@ praxis-policy-apl-runtime = { workspace = true }
 # Not everything shipped in this repository belongs here. `reference/` holds
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
-praxis-policy-plugin-identity-jwt = { workspace = true, optional = true }
-praxis-policy-plugin-delegator-oauth = { workspace = true, optional = true }
-praxis-policy-plugin-elicitation-ciba = { workspace = true, optional = true }
-praxis-policy-pdp-cedar-direct = { workspace = true, optional = true }
-praxis-policy-pdp-cel = { workspace = true, optional = true }
-praxis-policy-pdp-opa = { workspace = true, optional = true }
-praxis-policy-session-valkey = { workspace = true, optional = true }
+praxis-policy-builtins = { workspace = true, optional = true }
 
 # --- `http-hyper` only -------------------------------------------------
 #
@@ -127,23 +132,23 @@ praxis-policy-session-valkey = { workspace = true, optional = true }
 # require it. `default-features = false` throughout so no OpenSSL and no
 # native-cert store creep in.
 hyper-util = { version = "0.1", optional = true, default-features = false, features = [
-    "client-legacy",
-    "http1",
-    "http2",
-    "tokio",
+  "client-legacy",
+  "http1",
+  "http2",
+  "tokio",
 ] }
 hyper-rustls = { version = "0.27", optional = true, default-features = false, features = [
-    "http1",
-    "http2",
-    "ring",
-    "tls12",
-    "webpki-roots",
+  "http1",
+  "http2",
+  "ring",
+  "tls12",
+  "webpki-roots",
 ] }
 # Direct dependencies let the transport select `ring` without reading or setting
 # rustls's process-wide default provider.
 rustls = { version = "0.23", optional = true, default-features = false, features = [
-    "ring",
-    "tls12",
+  "ring",
+  "tls12",
 ] }
 webpki-roots = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }

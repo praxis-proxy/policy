@@ -2563,7 +2563,7 @@ mod tests {
             d => panic!("\"25000\" > 10000 must deny, got {d:?}"),
         }
 
-        // Missing stays false (F5): the cap does not fire.
+        // Missing stays false: the cap does not fire.
         assert_eq!(
             evaluate_rules(std::slice::from_ref(&rule), &AttributeBag::new()),
             Decision::Allow,

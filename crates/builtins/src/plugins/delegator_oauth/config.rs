@@ -1,0 +1,239 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+// Typed configuration for `OAuthDelegator`. Deserializes from the
+// plugin's `PluginConfig.config: Option<JsonValue>` field; the
+// delegator's constructor reads this and builds the runtime state
+// (the `reqwest::Client`, the loaded client secret).
+//
+// Serializable intermediate representations stand in for non-
+// serializable runtime types (e.g., the secret is loaded from
+// env-var / file / literal at construction time, never serialized
+// back out).
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+/// Top-level plugin config — what operators write under
+/// `plugins[<name>].config:` in unified-config YAML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthDelegatorConfig {
+    /// `IdP`'s token endpoint URL — where the token-exchange POST
+    /// lands (e.g., `https://auth.example.com/oauth/token`).
+    pub token_endpoint: String,
+
+    /// OAuth `client_id` identifying our gateway to the `IdP`. The
+    /// `IdP` authenticates us with `(client_id, client_secret)` over
+    /// HTTP Basic / form-body before honoring the exchange request.
+    pub client_id: String,
+
+    /// Where to load the client secret from. See [`ClientSecretSource`].
+    pub client_secret_source: ClientSecretSource,
+
+    /// What `subject_token_type` we tell the `IdP` the inbound token
+    /// is. RFC 8693 defines `access_token`, `refresh_token`,
+    /// `id_token`, `jwt`, `saml1`, `saml2`. Most deployments use
+    /// `access_token` — that's the default.
+    #[serde(default = "default_subject_token_type")]
+    pub subject_token_type: String,
+
+    /// Request timeout. The exchange is on the request hot path —
+    /// a 5s default keeps requests bounded if the `IdP` is slow.
+    #[serde(default = "default_timeout_seconds")]
+    pub timeout_seconds: u64,
+
+    /// Header name the forwarding plugin should attach the minted
+    /// token under when calling the downstream service.
+    /// Most targets expect `Authorization`; some bespoke services
+    /// want a different header (`X-Service-Token`, etc.).
+    #[serde(default = "default_outbound_header")]
+    pub default_outbound_header: String,
+
+    /// Explicitly allow `http://` for `token_endpoint`. By default,
+    /// the constructor rejects non-https URLs because the
+    /// token-exchange POST sends `client_id:client_secret` and the
+    /// inbound user JWT — leaking either over plaintext defeats the
+    /// whole exchange. Set to `true` ONLY for `http://localhost`
+    /// development against a docker-compose `IdP`. Production
+    /// deployments must leave this at the default (`false`).
+    #[serde(default)]
+    pub insecure_http: bool,
+
+    /// The `actor_token_type` we tell the `IdP` the RFC 8693
+    /// `actor_token` is — a token-type URN. Defaults to
+    /// `...:token-type:jwt` because the actor is almost always a
+    /// JWT-SVID. Only consulted when the `DelegationPayload` carries a
+    /// non-empty `actor_token` (attached upstream by the invoker from
+    /// the inbound workload SVID); otherwise the exchange stays
+    /// single-token and behaves exactly as before.
+    #[serde(default = "default_actor_token_type")]
+    pub actor_token_type: String,
+
+    /// The `client_assertion_type` used in leg 1 of a workload
+    /// delegation (`subject: caller_workload`), where the calling
+    /// agent authenticates by presenting its JWT-SVID as an RFC 7523
+    /// client assertion rather than a secret. Defaults to the
+    /// SPIFFE-specific URN from draft-ietf-oauth-spiffe-client-auth —
+    /// NOT the generic `...:jwt-bearer` — because that's what a SPIFFE
+    /// authorization server (e.g. Keycloak's SPIFFE provider) expects.
+    /// Only consulted on the `caller_workload` path; every other
+    /// subject authenticates with the client secret as before.
+    #[serde(default = "default_workload_assertion_type")]
+    pub workload_assertion_type: String,
+
+    /// Reuse of live delegated tokens. Off unless an operator turns it
+    /// on, so an upgrade changes no behaviour; see
+    /// [`CacheConfig`](crate::plugins::delegator_oauth::cache::CacheConfig) for what enabling it
+    /// costs as well as what it saves.
+    #[serde(default)]
+    pub cache: crate::plugins::delegator_oauth::cache::CacheConfig,
+
+    /// Header to carry each mint's effect key to the `IdP`, if the `IdP`
+    /// honours one.
+    ///
+    /// A mint that times out is indeterminate: the token may exist and we do
+    /// not hold it. Resolving that means asking the `IdP` about the attempt,
+    /// and the only handle we have is the effect key. OAuth gives us nowhere
+    /// to put it — neither RFC 6749 nor RFC 8693 defines an idempotency or
+    /// client-reference parameter for the token endpoint — so this is left
+    /// unset and no header is sent.
+    ///
+    /// Name one and the key travels with both legs, which is what a
+    /// vendor-specific idempotency key needs to be useful. It is opt-in
+    /// because the effect is entirely the `IdP`'s: an `IdP` that recognises
+    /// the header makes a retried mint replay-safe, and one that does not
+    /// ignores it. Neither case changes what this plugin records, and neither
+    /// on its own makes an indeterminate mint reconcilable — that still wants
+    /// an `EffectReconciler` that knows how to query this particular `IdP`.
+    #[serde(default)]
+    pub idempotency_header: Option<String>,
+}
+
+/// Where the gateway's OAuth client secret is loaded from. Three
+/// modes covering the common deployment patterns:
+///
+///   * **`env_var`** — read from a named environment variable at
+///     resolver construction. Production-friendly; secret lives in
+///     the host's environment, not in committed config.
+///   * **`file`** — read from a file path at construction. Useful
+///     for Kubernetes secret volumes (`/var/run/secrets/...`) or
+///     similar mounted-secret patterns.
+///   * **`literal`** — inline secret string. Convenient for tests
+///     and dev configs; **never** for production (secret ends up
+///     in committed YAML).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClientSecretSource {
+    /// Read from an environment variable.
+    EnvVar {
+        /// The environment variable holding the secret.
+        name: String,
+    },
+    /// Read from a file, which suits a mounted secret.
+    File {
+        /// Path to a file holding the secret.
+        path: PathBuf,
+    },
+    /// Given inline in the config.
+    Literal {
+        /// The secret inline. Avoid outside local development.
+        secret: String,
+    },
+}
+
+fn default_subject_token_type() -> String {
+    "urn:ietf:params:oauth:token-type:access_token".to_owned()
+}
+
+fn default_actor_token_type() -> String {
+    "urn:ietf:params:oauth:token-type:jwt".to_owned()
+}
+
+fn default_workload_assertion_type() -> String {
+    "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe".to_owned()
+}
+
+fn default_timeout_seconds() -> u64 {
+    5
+}
+
+fn default_outbound_header() -> String {
+    "Authorization".to_owned()
+}
+
+impl OAuthDelegatorConfig {
+    /// Helper used by the constructor — exposed for tests.
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_seconds)
+    }
+}
+
+impl ClientSecretSource {
+    /// Resolve the secret at runtime, returning the raw bytes.
+    /// Errors as a string so the caller wraps in `PluginError::Config`
+    /// with context.
+    /// # Errors
+    ///
+    /// Returns a message when the named environment variable is unset or the
+    /// file cannot be read. The secret itself never appears in the error.
+    pub fn resolve(&self) -> Result<String, String> {
+        match self {
+            Self::EnvVar { name } => {
+                std::env::var(name).map_err(|e| format!("env var '{name}' unavailable: {e}"))
+            },
+            Self::File { path } => std::fs::read_to_string(path)
+                .map(|s| s.trim().to_owned())
+                .map_err(|e| format!("secret file '{}' unreadable: {e}", path.display())),
+            Self::Literal { secret } => Ok(secret.clone()),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn config_deserializes_from_json() {
+        let raw = json!({
+            "token_endpoint": "https://auth.example.com/oauth/token",
+            "client_id": "gateway",
+            "client_secret_source": { "kind": "literal", "secret": "dev-only" },
+        });
+        let cfg: OAuthDelegatorConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(cfg.token_endpoint, "https://auth.example.com/oauth/token");
+        assert_eq!(cfg.client_id, "gateway");
+        assert_eq!(cfg.timeout_seconds, 5);
+        assert_eq!(cfg.default_outbound_header, "Authorization");
+        // actor_token_type defaults to the JWT token-type URN (the
+        // actor is almost always a JWT-SVID); only used when the
+        // payload carries a non-empty actor_token.
+        assert_eq!(cfg.actor_token_type, "urn:ietf:params:oauth:token-type:jwt");
+        // workload_assertion_type defaults to the SPIFFE-specific
+        // client-assertion URN (leg 1 of a caller_workload delegation).
+        assert_eq!(
+            cfg.workload_assertion_type,
+            "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
+        );
+    }
+
+    #[test]
+    fn literal_secret_resolves() {
+        let src = ClientSecretSource::Literal {
+            secret: "hush".into(),
+        };
+        assert_eq!(src.resolve().unwrap(), "hush");
+    }
+
+    #[test]
+    fn missing_env_var_errors() {
+        let src = ClientSecretSource::EnvVar {
+            name: "_THIS_VAR_DEFINITELY_NOT_SET_FOR_TESTS_".into(),
+        };
+        src.resolve().unwrap_err();
+    }
+}

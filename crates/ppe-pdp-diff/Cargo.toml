@@ -24,10 +24,8 @@ categories.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+praxis-policy-builtins = { workspace = true, features = ["cedar", "cel", "opa"] }
 praxis-policy-apl-core = { workspace = true }
-praxis-policy-pdp-cedar-direct = { workspace = true }
-praxis-policy-pdp-cel = { workspace = true }
-praxis-policy-pdp-opa = { workspace = true }
 serde_yaml = { workspace = true }
 
 [dev-dependencies]

@@ -422,7 +422,14 @@ fn a_misspelled_key_is_offered_no_replacement() {
 fn the_document_table_is_the_accept_set() {
     assert_eq!(
         names(ConfigScope::Document),
-        vec!["global", "plugins", "groups", "routes", "engine_settings"],
+        vec![
+            "global",
+            "plugins",
+            "groups",
+            "routes",
+            "secrets",
+            "engine_settings"
+        ],
         "the document's accept set changed"
     );
 }

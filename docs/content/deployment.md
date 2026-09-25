@@ -68,7 +68,7 @@ the enforced path for the operations you want mediated.
 
 - [Patterns](patterns.md): production patterns for rollout and layered
   enforcement.
-- [Upgrading APL](../upgrade-apl.md): migrate existing policy before deployment.
+- [Upgrading APL](upgrade-apl.md): migrate existing policy before deployment.
 - [Configuration](configuration.md): the full configuration structure.
 - [Identity](apl/identity.md) and [Delegation](apl/delegation.md): wiring IdP
   verification and token exchange in a real stack.

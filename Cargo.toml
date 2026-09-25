@@ -11,58 +11,53 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/ppe",
-    "crates/ppe-core",
-    "crates/ppe-orchestration",
-    "crates/ppe-apl-core",
-    "crates/ppe-apl-cmf",
-    "crates/ppe-apl-runtime",
-    "crates/ppe-pdp-diff",
-    "builtins/plugins/identity-jwt",
-    "builtins/plugins/delegator-oauth",
-    "builtins/plugins/elicitation-ciba",
-    "builtins/pdps/cedar-direct",
-    "builtins/pdps/cel",
-    "builtins/pdps/opa",
-    "builtins/session/valkey",
-    # Reference implementations, not published and not in the `builtins`
-    # umbrella. Workspace members so they stay built, linted and tested, and so
-    # they keep working as examples of an out-of-tree plugin. Each manifest says
-    # why it is not a builtin.
-    "reference/plugins/pii-scanner",
-    "reference/plugins/audit-logger",
+  "crates/ppe",
+  "crates/ppe-core",
+  "crates/ppe-orchestration",
+  "crates/ppe-apl-core",
+  "crates/ppe-apl-cmf",
+  "crates/ppe-apl-runtime",
+  "crates/ppe-pdp-diff",
+  "crates/builtins",
+  # Reference implementations, not published and not part of
+  # `praxis-policy-builtins`. Workspace members so they stay built, linted and tested, and so
+  # they keep working as examples of an out-of-tree plugin. Each manifest says
+  # why it is not a builtin.
+  "reference/plugins/pii-scanner",
+  "reference/plugins/audit-logger",
+  # Criterion suite for issue #19. Unpublished; excluded from default-members
+  # so everyday `cargo build` stays lean. `cargo bench -p ppe-benches` /
+  # `make bench` still pick it up, and `clippy --all-targets` compiles it.
+  "crates/ppe-benches",
 ]
 
 # The session store pulls a redis client and a TLS stack, which slows a default
-# build noticeably. Excluding it from default-members keeps everyday iteration
-# fast; `--workspace` still picks it up, and CI runs the full sweep.
+# build noticeably. That cost is now held off by features rather than by
+# membership: `praxis-policy-builtins` is `default = []` and marks redis,
+# deadpool-redis and url optional behind `valkey`, so a default build resolves
+# none of them even though the crate is a default member.
 default-members = [
-    "crates/ppe",
-    "crates/ppe-core",
-    "crates/ppe-orchestration",
-    "crates/ppe-apl-core",
-    "crates/ppe-apl-cmf",
-    "crates/ppe-apl-runtime",
-    "crates/ppe-pdp-diff",
-    "builtins/plugins/identity-jwt",
-    "builtins/plugins/delegator-oauth",
-    "builtins/plugins/elicitation-ciba",
-    "builtins/pdps/cedar-direct",
-    "builtins/pdps/cel",
-    "builtins/pdps/opa",
-    # Reference implementations, not published and not in the `builtins`
-    # umbrella. Workspace members so they stay built, linted and tested, and so
-    # they keep working as examples of an out-of-tree plugin. Each manifest says
-    # why it is not a builtin.
-    "reference/plugins/pii-scanner",
-    "reference/plugins/audit-logger",
+  "crates/ppe",
+  "crates/ppe-core",
+  "crates/ppe-orchestration",
+  "crates/ppe-apl-core",
+  "crates/ppe-apl-cmf",
+  "crates/ppe-apl-runtime",
+  "crates/ppe-pdp-diff",
+  "crates/builtins",
+  # Reference implementations, not published and not part of
+  # `praxis-policy-builtins`. Workspace members so they stay built, linted and tested, and so
+  # they keep working as examples of an out-of-tree plugin. Each manifest says
+  # why it is not a builtin.
+  "reference/plugins/pii-scanner",
+  "reference/plugins/audit-logger",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.1"
 edition = "2024"
 # MSRV. Keep in sync with rust-toolchain.toml `channel` and clippy.toml `msrv`.
-rust-version = "1.96"
+rust-version = "1.92"
 license = "Apache-2.0"
 authors = ["Teryl Taylor", "Fred Araujo"]
 repository = "https://github.com/praxis-proxy/policy"
@@ -93,9 +88,11 @@ readme = "README.md"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive", "rc"] }
-serde_yaml = "0.9"
+# NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
+serde_yaml = { package = "yaml_serde", version = "0.10.4" }
 serde_json = "1"
 async-trait = "0.1"
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 # HTTP types only (no client, no I/O) for the `HttpTransport` seam in
 # praxis-policy-core. Both are already in the tree via the plugins' HTTP
 # clients, so this adds nothing transitively.
@@ -130,18 +127,16 @@ sha2 = "0.11"
 # The keys are package names, which still carry the engine's previous naming.
 # Renaming them is a manifest change across every crate and lands separately, so
 # that the import stays a move and the rename stays a rename.
-praxis-policy-core                     = { path = "crates/ppe-core",              version = "0.2.0" }
-praxis-policy-orchestration            = { path = "crates/ppe-orchestration",     version = "0.2.0" }
-praxis-policy-apl-core                      = { path = "crates/ppe-apl-core",          version = "0.2.0" }
-praxis-policy-apl-cmf                       = { path = "crates/ppe-apl-cmf",           version = "0.2.0" }
-praxis-policy-apl-runtime                      = { path = "crates/ppe-apl-runtime",       version = "0.2.0" }
-praxis-policy-plugin-identity-jwt      = { path = "builtins/plugins/identity-jwt",     version = "0.2.0" }
-praxis-policy-plugin-delegator-oauth   = { path = "builtins/plugins/delegator-oauth",  version = "0.2.0" }
-praxis-policy-plugin-elicitation-ciba  = { path = "builtins/plugins/elicitation-ciba", version = "0.2.0" }
-praxis-policy-pdp-cedar-direct         = { path = "builtins/pdps/cedar-direct",        version = "0.2.0" }
-praxis-policy-pdp-cel                  = { path = "builtins/pdps/cel",                 version = "0.2.0" }
-praxis-policy-pdp-opa                  = { path = "builtins/pdps/opa",                 version = "0.2.0" }
-praxis-policy-session-valkey           = { path = "builtins/session/valkey",           version = "0.2.0" }
+praxis-policy-core = { path = "crates/ppe-core", version = "0.3.1" }
+praxis-policy-orchestration = { path = "crates/ppe-orchestration", version = "0.3.1" }
+praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.3.1" }
+praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.3.1" }
+praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.3.1" }
+praxis-policy-builtins = { path = "crates/builtins", version = "0.3.1" }
+
+# Criterion is only consumed by the unpublished `ppe-benches` crate (issue #19).
+# Kept in the workspace table so version bumps stay one-line.
+criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
 
 # Cross-crate inlining and dead-code elimination, one codegen unit for
 # optimization quality.

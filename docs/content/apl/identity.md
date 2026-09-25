@@ -38,6 +38,11 @@ The token is verified against the issuer's JWKS. Only after verification do its
 claims become attributes. An unverified or expired token resolves to no subject,
 and `require(authenticated)` denies.
 
+`identity/api-key` looks up an opaque key in a file or HTTP directory and maps
+its record into the same attributes. Policies such as `require(role.hr)` work
+with either resolver. See [Recipe 7](../identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory)
+for configuration and revocation timing.
+
 ## What lands in the bag
 
 A resolved identity populates a flat attribute namespace that predicates read
@@ -45,15 +50,20 @@ directly:
 
 | Source | Attributes |
 |--------|-----------|
-| Subject | `subject.id`, `authenticated`, `subject.teams` |
-| Roles | `role.<r>` (for example `role.hr`, `role.security`) |
-| Permissions | `perm.<p>` (for example `perm.view_ssn`) |
+| Subject | `subject.id`, `authenticated`, `subject.roles`, `subject.permissions`, `subject.teams` |
+| Roles | `role.<r>` for undotted names (for example `role.hr`, `role.security`) |
+| Permissions | `perm.<p>` for undotted names (for example `perm.view_ssn`) |
 | Claims | `claim.<k>` |
-| OAuth client | `client.client_id`, `client.authorized_scopes`, `client.role.<r>` |
+| OAuth client | `client.client_id`, `client.authorized_scopes`, `client.roles`, `client.permissions`, and aliases for undotted members under `client.role.<r>` / `client.perm.<p>` |
 | Workload (SPIFFE / mTLS) | `caller_workload.spiffe_id`, `caller_workload.trust_domain` |
 
 `require(role.hr)` is true when the verified token carried the `hr` role, and
 `redact(!perm.view_ssn)` redacts unless it carried the `view_ssn` permission.
+Membership names containing `.` do not receive aliases because policy engines
+can interpret dotted keys as nested namespaces. Names containing `:` cannot be
+written as attribute paths. Use the canonical sets for either case:
+`subject.roles contains "admin.readonly"` or
+`subject.roles contains "system:authenticated"`.
 
 ## Multiple sources
 
@@ -123,6 +133,8 @@ PDP ([PDP Integration](pdp.md)).
 
 ## Next
 
+- [Identity Claim Mapping](../identity-claim-mapping.md): add and test a
+  provider-specific JWT claim mapper preset.
 - [Static Attributes](attributes.md): combine verified identity with
   operator-maintained facts.
 - [Delegation](delegation.md): exchange verified credentials for scoped

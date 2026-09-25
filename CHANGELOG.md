@@ -19,33 +19,44 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **Safety invariants, written down and tested as a catalog.** The engine's
-  fail-closed promise lived in comments and per-seam judgment. `docs/safety-invariants.md`
-  lists each claim as something a test can fail, and a fault-injection plugin
-  and PDP resolver drive `{panic, error, timeout}` across every plugin phase and
-  the three shipped PDP dialects. Malformed config and a missing attribute are
-  their own cells. Serial and audit panics are contained the same way concurrent
-  already was: they route through `on_error` instead of unwinding `execute()`.
-  Transform and audit still cannot halt — that difference is written down with
-  the reason, including that a failed transform continues with the original
-  payload. Adding a phase or a shipped dialect without a cell fails the
-  build. ([#24](https://github.com/praxis-proxy/policy/issues/24))
+- Added the `ibmverify` JWT claim mapper preset for tenant-provisioned scalar or
+  array collection claims. ([#134](https://github.com/praxis-proxy/policy/pull/134))
+- Added the `identity/api-key` resolver with hash-indexed file and HTTP
+  directories, shared identity mapping, and bounded lookup caching. The facade
+  exposes it through the `api-key` feature.
+  ([#125](https://github.com/praxis-proxy/policy/pull/125))
+- Documented how to add and test provider-specific JWT claim mapper presets.
+  ([#128](https://github.com/praxis-proxy/policy/pull/128))
 
-- **`docs/content/cmf-extensions.md`, the bag contract.** The CMF bridge writes
-  twelve extension slots into a flat `AttributeBag`, and until now the empty-set
-  rule for `StringSet`, the original-vs-flattened role keys, and the
-  `subject.claims` gap lived only as comments beside the extractors. The
-  document is the per-type absent-value contract, which key a policy author
-  should write, why there is no `subject.claims` map in the bag, and a
-  catalog of every key each slot emits. `ppe-pdp-diff` checks that a
-  present-empty set and an omitted claim scalar Deny on APL, CEL,
-  cedar-direct, and OPA for presence, equality, membership, and order; APL
-  `!=` on a missing key Allows while the other engines Deny; APL `not in`
-  Allows with OPA (`not` of undefined is true) while CEL and cedar-direct
-  Deny. A flattened bool with no namespace, and a missing `subject.id`,
-  stay on the allowlist. ([#18](https://github.com/praxis-proxy/policy/issues/18))
+### Changed
 
-- Added PPE documentation ([#82](https://github.com/praxis-proxy/policy/pull/82))
+- Consolidated the nine bundled extensions into one published crate,
+  `praxis-policy-builtins`, each behind its own Cargo feature. The facade's
+  features, `install_builtins`, its re-exports, and every policy `kind` string
+  are unchanged, so hosts reaching these through `praxis-policy` need no change.
+  A dependency naming one of the retired crates directly should be **replaced**
+  by `praxis-policy-builtins` with the matching feature: keeping both links two
+  copies of the same implementation registering the same `kind`, and the registry
+  is last-write-wins. Versions up to 0.3.1 of the old crates stay on crates.io;
+  later releases publish only the consolidated crate. See
+  [Crates](docs/content/crates.md) for the mapping.
+  ([#137](https://github.com/praxis-proxy/policy/issues/137))
+- Config-load errors from the JWT, OAuth and CIBA extensions now name the
+  plugin kind (`identity/jwt`, `delegator/oauth`, `elicitation/ciba`) instead of
+  the crate they used to live in. Operators matching on that text in logs or
+  alerts need to update the pattern.
+  ([#137](https://github.com/praxis-proxy/policy/issues/137))
+
+- Moved the configurable identity claim mapper from
+  `praxis-policy-plugin-identity-jwt` to `praxis_policy_core::identity::mapping`.
+  **Breaking for Rust callers using the JWT plugin's module paths**
+  (`claim_map_config`, `claim_path`, `configured_mapper`, or
+  `claim_map::{ClaimMap, ClaimMapper}`): import those items from core instead.
+  `ConfiguredClaimMap::new` now requires a `MappingProfile` with the reserved
+  names and attestor for the verified credential; JWT callers can use
+  `praxis_policy_plugin_identity_jwt::claim_map::JWT_MAPPING_PROFILE`.
+  The JWT plugin's crate-root re-exports and the operator's `claim_map:` config
+  remain available. ([#119](https://github.com/praxis-proxy/policy/pull/119))
 
 - **Every verdict now reaches an audit sink, denials included.** An observation-only plugin runs as a post-hook, so it only ever saw traffic that was allowed through: a blocked call, an approval rejection, or a delegation failure produced no audit record at all. The executor now builds a `DecisionLog` recording what each plugin did and how the pipeline ruled, and hands it to any registered sink at the verdict itself rather than in a pipeline phase, so allow, deny, and modify all produce exactly one record. A hook resolving to zero plugins emits one allow record too, so a consumer counting records per invocation does not read "nothing configured" as a dropped record.
 
@@ -69,23 +80,71 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- **`ppe-core` self-dev-dependency is path-only.** Same as `ppe-apl-core`: a
-  versioned workspace self-dep cannot be packaged (`make publish-dry`).
-- **Contained plugin and PDP tasks abort on drop.** Cancelling a request
-  (timeout, disconnect, shutdown) no longer leaves the spawned work running.
-- **Serial/transform panics keep prior `local_state`.** The executor snapshots
-  context into the task so a contained panic does not remove the plugin's
-  existing map.
-- **`read_labels` / `read_workload` bag prefixes.** `capability_namespaces`
-  advertised nothing for `read_labels` and `workload.*` for `read_workload`,
-  neither of which the extractors write. It now returns `security.labels`
-  and `caller_workload.*` / `this_workload.*`.
+- Prevented dotted subject and client membership names from creating ambiguous
+  flattened policy aliases. ([#126](https://github.com/praxis-proxy/policy/pull/126))
+
+## [0.3.1] - 2026-09-22
+
+### Changed
+
+- Lowered the MSRV to 1.92 to match Red Hat's rust-toolset, which the FIPS
+  build compiles against.
+- Upgraded the `cel` and `redis` dependencies.
+
+## [0.3.0] - 2026-09-18
+
+### Added
+
+- Added comprehensive PPE documentation and tested examples. ([#82](https://github.com/praxis-proxy/policy/pull/82))
+- Documented the CMF extension bag contract and expanded cross-PDP conformance
+  tests. ([#59](https://github.com/praxis-proxy/policy/pull/59))
+- Added a catalog of fail-closed safety invariants with fault-injection tests.
+  ([#71](https://github.com/praxis-proxy/policy/pull/71))
+- Added Criterion benchmarks for hook dispatch, full decisions, throughput,
+  PDP evaluation, and session memory. ([#35](https://github.com/praxis-proxy/policy/pull/35))
+- **Vault KV v2 secret backend**, behind the `secrets-vault` facade
+  feature. A `kind: vault` provider reads `<mount>/<path>#<field>` through
+  the host `HttpTransport` (no Vault SDK). Auth is Kubernetes or AppRole,
+  with no default. Token renewal is lazy on the next read — nothing
+  spawns a ticker — and a `403` reauthenticates once. Written against
+  the Vault 1.19 KV v2 HTTP API.
+  ([#94](https://github.com/praxis-proxy/policy/issues/94))
+
+### Changed
+
+- Updated `base64`, CEL, Redis, deadpool-redis, UUID, and related dependencies.
+  ([#111](https://github.com/praxis-proxy/policy/pull/111))
 
 ### Removed
 
-- **`BAG_WORKLOAD_PREFIX`.** The unused public `workload.` constant is gone.
-  Extractors write `caller_workload.*` and `this_workload.*`; nothing
-  emitted `workload.*`.
+- Removed the unused public `BAG_WORKLOAD_PREFIX` constant. ([#59](https://github.com/praxis-proxy/policy/pull/59))
+
+### Fixed
+
+- Contained serial, transform, audit, and PDP panics through `on_error`; cancelled
+  requests now abort spawned work and preserve prior plugin state. ([#71](https://github.com/praxis-proxy/policy/pull/71))
+- Made the `ppe-core` self-test dependency path-only so release packaging can
+  resolve it. ([#71](https://github.com/praxis-proxy/policy/pull/71))
+- Corrected `read_labels` and `read_workload` capability namespaces to match the
+  keys emitted by the CMF bridge. ([#59](https://github.com/praxis-proxy/policy/pull/59))
+
+### Security
+
+- Redacted inline PEM keys and HMAC secrets from identity configuration debug
+  output. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- Updated `rustls` to 0.23.45 for RUSTSEC-2026-0285. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+
+### Internal
+
+- Raised line coverage above 96% and made the LCOV artifact match the gated run.
+  ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- Added multithreaded engine stress tests, a Loom memory-ordering model, and a
+  nightly ThreadSanitizer job. ([#60](https://github.com/praxis-proxy/policy/pull/60))
+
+### Changed
+
+- `execute_with_retry` is public so a `SecretProvider` that holds a host
+  transport can use the same retry policy as plugins.
 
 ### Internal
 
@@ -398,7 +457,7 @@ First release. The engine was extracted from another project rather than written
 
 ### Added
 
-- **The policy engine, ported from [`contextforge-org/cpex`](https://github.com/contextforge-org/cpex) with history intact.** Extracted with `git-filter-repo` at source commit `aed0f15`, 192 files across 37 filtered commits, so `git log` and `git blame` reach back before this repository existed. The Rego decision point came in a second pass from `fa222c4`. [`docs/port-provenance.md`](docs/port-provenance.md) records both anchors, which is what any later comparison between the two trees needs.
+- **The policy engine, ported from [`contextforge-org/cpex`](https://github.com/contextforge-org/cpex) with history intact.** Extracted with `git-filter-repo` at source commit `aed0f15`, 192 files across 37 filtered commits, so `git log` and `git blame` reach back before this repository existed. The Rego decision point came in a second pass from `fa222c4`. [`docs/dev/port-provenance.md`](docs/dev/port-provenance.md) records both anchors, which is what any later comparison between the two trees needs.
 
 - **`praxis-policy`, a host facade.** One dependency instead of a dozen. It re-exports the runtime (`PolicyEngine`, `AplOptions`, `register_apl`) and owns registration of the bundled extensions, each behind its own feature. `default` is empty, so the bare dependency is the engine alone with nothing extra compiled in; `builtins` turns on the whole set, or name a subset (`jwt`, `oauth`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`).
 
@@ -438,8 +497,10 @@ First release. The engine was extracted from another project rather than written
 
 - **Line coverage at 95%,** gated in CI by `COVERAGE_FLOOR` so it cannot silently regress. The `nbf` gap and the Cedar float defect both surfaced while writing those tests, which is the argument for the exercise.
 
-- **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/lints.md`](docs/lints.md) explains each group that is not.
+- **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/praxis-proxy/policy/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/praxis-proxy/policy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/praxis-proxy/policy/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/praxis-proxy/policy/releases/tag/v0.1.0

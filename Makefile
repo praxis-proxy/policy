@@ -28,6 +28,7 @@ help:
 	@echo "  build             Build the workspace (debug)"
 	@echo "  build-release     Build the workspace (release)"
 	@echo "  check             cargo check the workspace"
+	@echo "  check-features    cargo check praxis-policy-builtins per feature"
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
@@ -37,10 +38,16 @@ help:
 	@echo "  clippy            Run clippy on the workspace (-D warnings)"
 	@echo "  lint-fix          Auto-fix: cargo fmt + clippy --fix"
 	@echo "  machete           Report unused dependencies (advisory)"
+	@echo "  semver-facade     Facade API compatibility vs the last release"
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
 	@echo "  test-tsan         Engine concurrency stress under ThreadSanitizer (nightly)"
+	@echo ""
+	@echo "Benchmarks (on demand — not part of make ci; see docs/dev/benchmarks.md):"
+	@echo "  bench             Criterion suite (ppe-benches / issue #19)"
+	@echo "  bench-percentiles p50/p95/p99 from target/criterion samples"
+	@echo "  bench-heap        dhat per-decision + policy-size footprint"
 	@echo ""
 	@echo "Supply chain & coverage:"
 	@echo "  audit             cargo deny check (advisories, licenses, bans, sources)"
@@ -58,6 +65,8 @@ help:
 	@echo ""
 	@echo "CI:"
 	@echo "  ci                What CI runs: lint + test"
+	@echo "                    (ppe-benches compiles via clippy --all-targets"
+	@echo "                     plus a dhat-heap pass; make bench is on-demand)"
 	@echo ""
 	@echo "Release:"
 	@echo "  release-dry       Preview a release (no changes)"
@@ -105,6 +114,7 @@ fmt:
 .PHONY: clippy
 clippy:
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 # CI-safe gate: read-only fmt check plus clippy. Lint levels come from
 # [workspace.lints] in Cargo.toml.
@@ -113,6 +123,12 @@ lint:
 	@echo "fmt --check + clippy -D warnings ..."
 	@$(CARGO) +$(NIGHTLY) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+# The all-features pass is not redundant. `praxis-policy-builtins` is
+# `default = []`, and a default-feature workspace run only reaches cedar, cel
+# and opa — the three `ppe-pdp-diff` turns on through feature unification. The
+# other six extensions are linted by this pass alone.
+	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
 	@echo "lint passed"
 
 .PHONY: lint-fix
@@ -174,6 +190,33 @@ test-tsan:
 	@echo "test-tsan passed"
 
 # =============================================================================
+# Benchmarks (issue #19) — on demand, never part of `make ci`
+# =============================================================================
+#
+# Wall-clock benches do not gate PRs: CI runners are noisy and a flaky
+# p99 gate would train people to ignore failures. Workspace clippy
+# --all-targets plus a dhat-heap clippy pass compile every [[bench]]
+# (including heap_profile). See docs/dev/benchmarks.md.
+
+.PHONY: bench
+bench:
+	@echo "Criterion suite (ppe-benches) — on demand, not a CI gate ..."
+	@$(CARGO) bench -p ppe-benches
+	@echo "HTML reports under target/criterion/; write-up in docs/dev/benchmarks.md"
+
+.PHONY: bench-percentiles
+bench-percentiles:
+	@command -v python3 >/dev/null 2>&1 || { echo "python3 not found"; exit 1; }
+	@python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" \
+		|| { echo "bench-percentiles requires Python 3.10+"; exit 1; }
+	@python3 tools/bench_percentiles.py
+
+.PHONY: bench-heap
+bench-heap:
+	@echo "dhat heap_profile (per-decision + policy-size) ..."
+	@$(CARGO) bench -p ppe-benches --features dhat-heap --bench heap_profile
+
+# =============================================================================
 # Supply chain & coverage
 # =============================================================================
 
@@ -209,7 +252,7 @@ COVERAGE_FLOOR ?= 96
 #
 # Both coverage targets share these flags. A report built from a narrower run
 # understates what the floor asserted.
-COVERAGE_ARGS := --workspace --all-features
+COVERAGE_ARGS := --workspace --all-features --exclude ppe-benches
 COVERAGE_TEST_ARGS := -- --include-ignored
 
 # `clean` first: llvm-cov merges the mappings of every instrumented binary it
@@ -244,6 +287,16 @@ mutants:
 
 # Semver compatibility check against the last published version.
 .PHONY: semver
+# Facade-scoped API compatibility against the last release. --all-features is
+# required, not optional: the facade is `default = []`, so a default-feature run
+# sees no builtin re-export and passes without inspecting the surface this
+# guards. Scoped to the facade deliberately — a workspace-wide run is noisy from
+# the retired names and from a crate with no published baseline.
+.PHONY: semver-facade
+semver-facade:
+	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
+	@cargo semver-checks --package praxis-policy --all-features
+
 semver:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
 	@cargo semver-checks
@@ -255,6 +308,10 @@ semver:
 .PHONY: doc
 doc:
 	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps
+# Second pass for the same reason as `lint`: a default-feature workspace run
+# documents only the cedar, cel and opa modules, so the other six are covered
+# here alone.
+	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
 
 # Link and style checks for the markdown under docs/. Advisory, like
 # lint-extra: neither is part of `make ci`, because both reach for a tool the
@@ -289,8 +346,26 @@ docs-lint:
 # CI
 # =============================================================================
 
+# Compile `praxis-policy-builtins` with no features, then with each one alone.
+# Neither the default nor the all-features pass can catch a feature body that
+# omits its own `dep:` edge or its module-group marker: under --all-features
+# another feature supplies the dependency, and under default features nothing
+# compiles at all. This is the only gate that builds a partial feature set.
+BUILTIN_FEATURES := jwt api-key oauth elicitation-ciba cedar cel opa valkey secrets-vault
+
+.PHONY: check-features
+check-features:
+	@echo "per-feature check: praxis-policy-builtins ..."
+	@$(CARGO) check -p praxis-policy-builtins --all-targets --no-default-features
+	@for f in $(BUILTIN_FEATURES); do \
+		echo "  --features $$f"; \
+		$(CARGO) check -p praxis-policy-builtins --all-targets \
+			--no-default-features --features "$$f" || exit 1; \
+	done
+	@echo "check-features passed"
+
 .PHONY: ci
-ci: lint test
+ci: lint check-features test
 
 # =============================================================================
 # Release
@@ -327,6 +402,9 @@ release: release-tool
 .PHONY: publish-dry
 publish-dry:
 	@$(CARGO) package --workspace --locked --allow-dirty
+# Packaging with default features compiles none of the bundled extensions, so
+# the dry run would prove nothing about them.
+	@$(CARGO) package --workspace --locked --allow-dirty --all-features
 
 # Tag the current commit and push it. The tag is what the release workflow
 # triggers on. VERSION must be semver with no leading `v`.

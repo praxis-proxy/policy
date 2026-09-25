@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![crates.io](https://img.shields.io/crates/v/praxis-policy.svg)](https://crates.io/crates/praxis-policy)
 [![docs.rs](https://img.shields.io/docsrs/praxis-policy)](https://docs.rs/praxis-policy)
-[![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](rust-toolchain.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.92-blue.svg)](rust-toolchain.toml)
 
 Policy engine for [Praxis](https://github.com/praxis-proxy/praxis), covering
 both standard policy use cases as well as AI inference and agents.
@@ -34,15 +34,15 @@ go next.
 Add one dependency to get the engine and all bundled extensions:
 
 ```toml
-praxis-policy = { version = "0.2", features = ["builtins"] }
+praxis-policy = { version = "0.3", features = ["builtins"] }
 ```
 
 Without `builtins`, you get the engine alone and no extensions compiled in.
 Declare individual features instead: `jwt`, `oauth`, `elicitation-ciba`,
 `cedar`, `cel`, `opa`, `valkey`.
 
-The crates are versioned together and released together, so a single `0.2`
-requirement covers the set. Requires Rust 1.96 or newer.
+The crates are versioned together and released together, so a single `0.3`
+requirement covers the set. Requires Rust 1.92 or newer.
 
 ## Documentation
 
@@ -56,7 +56,7 @@ a breaking change gets a minor bump and is documented in the CHANGELOG.
 ## Layout
 
     crates/             the engine, APL implementation, and host facade
-    builtins/           bundled plugins, decision points, and session stores
+    crates/builtins/    the nine bundled extensions, one feature each
     reference/          worked examples, not published and not bundled
 
 A host may replace any bundled plugin. Implement a Plugin Factory through
@@ -77,4 +77,4 @@ one. `make help` lists the available targets.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+[Apache-2.0](LICENSE)

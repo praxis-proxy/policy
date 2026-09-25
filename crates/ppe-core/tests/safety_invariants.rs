@@ -8,7 +8,7 @@
 //! allow was returned. A new [`PluginMode`] variant fails to compile
 //! until [`expected_plugin_verdict`] gains an arm.
 //!
-//! `docs/safety-invariants.md` is the prose form of this table.
+//! `docs/dev/safety-invariants.md` is the prose form of this table.
 
 #![allow(
     clippy::expect_used,
