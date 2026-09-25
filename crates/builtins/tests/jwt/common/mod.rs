@@ -27,6 +27,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
+use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityResolver, KIND};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::executor::PipelineResult;
 use praxis_policy_core::hooks::payload::Extensions;
@@ -34,7 +35,6 @@ use praxis_policy_core::identity::{
     HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource,
 };
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
-use praxis_policy_plugin_identity_jwt::{JwtIdentityResolver, KIND};
 use rsa::pkcs8::{EncodePrivateKey as _, EncodePublicKey as _, LineEnding};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde_json::{Value, json};

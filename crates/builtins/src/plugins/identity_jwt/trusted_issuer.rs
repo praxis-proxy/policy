@@ -189,7 +189,7 @@ pub struct TrustedIssuer {
     /// `IdP` rolled, an empty store means the boot fetch failed — and
     /// both need the source to fetch again. There is no background task
     /// holding a copy any more; see [`RefreshGate`] for why.
-    pub source: crate::config::DecodingKeySource,
+    pub source: crate::plugins::identity_jwt::config::DecodingKeySource,
 
     /// Coordinates on-demand refresh for this issuer.
     pub refresh: RefreshGate,
@@ -219,7 +219,7 @@ pub struct RefreshGate {
     /// Held for the duration of a fetch. Losers wait, then re-check the
     /// store: the winner has usually already fixed things, so they
     /// proceed rather than fetching again.
-    pub(crate) fetching: tokio::sync::Mutex<()>,
+    pub(super) fetching: tokio::sync::Mutex<()>,
 
     /// When the last attempt *started*, successful or not.
     ///
@@ -263,7 +263,7 @@ impl RefreshGate {
     /// is always allowed through, so the first token after a failed boot
     /// fetch recovers immediately rather than waiting out an interval it
     /// did nothing to earn.
-    pub(crate) fn claim_attempt(&self, min_interval: std::time::Duration) -> bool {
+    pub(super) fn claim_attempt(&self, min_interval: std::time::Duration) -> bool {
         let mut last = self
             .last_attempt
             .lock()
@@ -279,7 +279,7 @@ impl RefreshGate {
     }
 
     /// Record that a fetch replaced the key set.
-    pub(crate) fn mark_success(&self) {
+    pub(super) fn mark_success(&self) {
         self.mark_current();
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -292,7 +292,7 @@ impl RefreshGate {
     /// refresh again — but must *not* bump the generation, because a
     /// caller queued on the single-flight lock reads that to decide
     /// whether re-validating is worth anything, and nothing changed.
-    pub(crate) fn mark_current(&self) {
+    pub(super) fn mark_current(&self) {
         *self
             .last_success
             .lock()
@@ -300,7 +300,7 @@ impl RefreshGate {
     }
 
     /// The validator for the document behind the current key set.
-    pub(crate) fn etag(&self) -> Option<String> {
+    pub(super) fn etag(&self) -> Option<String> {
         self.etag
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -313,7 +313,7 @@ impl RefreshGate {
     /// leave a stale validator behind, or every later refresh would send
     /// an `If-None-Match` the peer cannot match and might answer `304`
     /// to, freezing the key set.
-    pub(crate) fn set_etag(&self, etag: Option<String>) {
+    pub(super) fn set_etag(&self, etag: Option<String>) {
         *self
             .etag
             .lock()
@@ -326,7 +326,7 @@ impl RefreshGate {
     /// after acquiring it: a change means the winner refreshed while
     /// this caller waited, so it should re-validate rather than fetch
     /// again.
-    pub(crate) fn generation(&self) -> u64 {
+    pub(super) fn generation(&self) -> u64 {
         self.generation.load(std::sync::atomic::Ordering::Acquire)
     }
 
@@ -337,7 +337,7 @@ impl RefreshGate {
     /// never been successfully fetched is stale by definition — that is
     /// the failed-boot-fetch case, and it is what makes the first
     /// request after an `IdP` recovers try again.
-    pub(crate) fn is_stale(&self, max_age: Option<std::time::Duration>) -> bool {
+    pub(super) fn is_stale(&self, max_age: Option<std::time::Duration>) -> bool {
         let Some(max_age) = max_age else {
             return false;
         };
@@ -387,7 +387,7 @@ mod tests {
             ))),
             algorithms: vec![Algorithm::HS256],
             leeway_seconds: 60,
-            source: crate::config::DecodingKeySource::Secret {
+            source: crate::plugins::identity_jwt::config::DecodingKeySource::Secret {
                 secret: secret.to_owned(),
             },
             refresh: RefreshGate::default(),
@@ -417,7 +417,7 @@ mod tests {
     /// The same guarantee one level down, where the material actually lives.
     #[test]
     fn debug_for_a_secret_key_source_is_redacted() {
-        let source = crate::config::DecodingKeySource::Secret {
+        let source = crate::plugins::identity_jwt::config::DecodingKeySource::Secret {
             secret: "hunter2-shared-hmac".to_owned(),
         };
         let rendered = format!("{source:?}");
@@ -432,7 +432,7 @@ mod tests {
     /// wrong endpoint is only actionable if it names the endpoint.
     #[test]
     fn debug_for_a_jwks_source_keeps_the_url() {
-        let source = crate::config::DecodingKeySource::JwksUrl {
+        let source = crate::plugins::identity_jwt::config::DecodingKeySource::JwksUrl {
             url: "https://idp.example/jwks".to_owned(),
             insecure_http: false,
             refresh_secs: 600,

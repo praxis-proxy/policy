@@ -57,7 +57,7 @@ use praxis_policy_core::{
     plugin::PluginConfig,
 };
 
-use crate::JwtIdentityResolver;
+use crate::plugins::identity_jwt::JwtIdentityResolver;
 
 /// The plugin `kind:` string operators write in PPE YAML to declare
 /// a JWT identity resolver.
@@ -176,7 +176,7 @@ mod tests {
             .get("trusted_issuers")
             .expect("the base config declares issuers")
             .clone();
-        for name in crate::presets::names() {
+        for name in crate::plugins::identity_jwt::presets::names() {
             let config = serde_json::json!({
                 "trusted_issuers": issuers.clone(),
                 "claim_mapper": name,

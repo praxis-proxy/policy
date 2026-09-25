@@ -43,7 +43,9 @@ use praxis_policy_core::identity::{
 };
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
-use praxis_policy_plugin_identity_jwt::{DecodingKeySource, JwksFetchBudget, JwtIdentityResolver};
+use praxis_policy_builtins::plugins::identity_jwt::{
+    DecodingKeySource, JwksFetchBudget, JwtIdentityResolver,
+};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rsa::pkcs1::EncodeRsaPublicKey as _;

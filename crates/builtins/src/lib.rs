@@ -16,7 +16,7 @@
 //!
 //! | Feature | Module |
 //! |---|---|
-//! | `jwt` | `plugins::identity_jwt` |
+//! | `jwt` | [`plugins::identity_jwt`] |
 //! | `api-key` | `plugins::identity_api_key` |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |

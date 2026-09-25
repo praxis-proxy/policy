@@ -120,6 +120,8 @@ pub use praxis_policy_core::secrets::{
 pub use praxis_policy_core::prelude;
 
 // Concrete factory types + KIND consts, each behind its feature.
+#[cfg(feature = "jwt")]
+pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
 #[cfg(feature = "cedar")]
 pub use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
 #[cfg(feature = "cel")]
@@ -132,8 +134,6 @@ pub use praxis_policy_plugin_delegator_oauth::{KIND as OAUTH_KIND, OAuthDelegato
 pub use praxis_policy_plugin_elicitation_ciba::{CibaApproverFactory, KIND as CIBA_KIND};
 #[cfg(feature = "api-key")]
 pub use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityFactory, KIND as API_KEY_KIND};
-#[cfg(feature = "jwt")]
-pub use praxis_policy_plugin_identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
 #[cfg(feature = "secrets-vault")]
 pub use praxis_policy_secrets_vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
@@ -188,9 +188,16 @@ macro_rules! register_builtins {
     };
 }
 
+// Module aliases for the `register_builtins!` arms below. The macro matches a
+// single identifier and uses it for both `KIND` and the factory type, which a
+// multi-segment module path cannot satisfy; aliasing keeps the registration
+// keyed off each extension's own `KIND` const.
+#[cfg(feature = "jwt")]
+use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
+
 #[cfg(feature = "_builtin")]
 register_builtins! {
-    feature "jwt"              => praxis_policy_plugin_identity_jwt::JwtIdentityFactory,
+    feature "jwt"              => jwt_builtin::JwtIdentityFactory,
     feature "api-key"          => praxis_policy_plugin_identity_api_key::ApiKeyIdentityFactory,
     feature "oauth"            => praxis_policy_plugin_delegator_oauth::OAuthDelegatorFactory,
     feature "elicitation-ciba" => praxis_policy_plugin_elicitation_ciba::CibaApproverFactory,

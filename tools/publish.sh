@@ -48,7 +48,6 @@ ORDER=(
   praxis-policy-plugin-delegator-oauth
   praxis-policy-plugin-elicitation-ciba
   praxis-policy-plugin-identity-api-key
-  praxis-policy-plugin-identity-jwt
   praxis-policy-apl-runtime
   praxis-policy-pdp-cedar-direct
   praxis-policy-pdp-cel

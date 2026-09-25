@@ -28,9 +28,9 @@
     reason = "test and example code"
 )]
 
-mod common;
-
-use common::{TEST_AUDIENCE, TEST_ISSUER, invoke, mint_exact as mint_jwt, now_unix, plugin_config};
+use crate::common::{
+    TEST_AUDIENCE, TEST_ISSUER, invoke, mint_exact as mint_jwt, now_unix, plugin_config,
+};
 
 use praxis_policy_core::extensions::raw_credentials::{TokenKind, TokenRole};
 use praxis_policy_core::identity::{IdentityPayload, TokenSource};

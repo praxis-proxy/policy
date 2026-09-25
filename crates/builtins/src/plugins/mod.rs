@@ -10,3 +10,7 @@
 //! - `identity_api_key` (`api-key`) — kind `identity/api-key`
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
+
+/// JWT validation and claim mapping.
+#[cfg(feature = "jwt")]
+pub mod identity_jwt;

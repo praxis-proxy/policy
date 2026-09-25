@@ -59,11 +59,11 @@ use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
-use super::claim_map::JWT_MAPPING_PROFILE;
-use super::config::{
+use crate::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE;
+use crate::plugins::identity_jwt::config::{
     JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError, TrustedIssuerConfig,
 };
-use super::presets;
+use crate::plugins::identity_jwt::presets;
 use praxis_policy_core::identity::mapping::ConfiguredClaimMap;
 use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper};
 use praxis_policy_core::identity::mapping::{ClaimsOverrides, CompiledClaimsOverrides};
@@ -76,7 +76,7 @@ use praxis_policy_core::identity::mapping::{ClaimsOverrides, CompiledClaimsOverr
 /// alternative, an unbounded `lock().await`, is what let a slow `IdP`
 /// stall every concurrent request for an issuer at once.
 const REFRESH_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
-use super::trusted_issuer::{KeyStore, TrustedIssuer};
+use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, TrustedIssuer};
 use praxis_policy_core::host::InitExtensions;
 
 /// Default clock-skew tolerance, in seconds. Matches what most OIDC
@@ -165,7 +165,7 @@ impl JwtIdentityResolver {
         let raw_config = cfg.config.as_ref().ok_or_else(|| {
             Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-plugin-identity-jwt) requires a `config:` block — \
+                    "plugin '{}' (praxis-policy-builtins) requires a `config:` block — \
                      missing trusted_issuers etc.",
                     cfg.name
                 ),
@@ -176,7 +176,7 @@ impl JwtIdentityResolver {
             serde_json::from_value(raw_config.clone()).map_err(|e| {
                 Box::new(PluginError::Config {
                     message: format!(
-                        "plugin '{}' (praxis-policy-plugin-identity-jwt) config parse failed: {e}",
+                        "plugin '{}' (praxis-policy-builtins) config parse failed: {e}",
                         cfg.name
                     ),
                 })
@@ -185,7 +185,7 @@ impl JwtIdentityResolver {
         if typed.trusted_issuers.is_empty() {
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-plugin-identity-jwt) requires at least one \
+                    "plugin '{}' (praxis-policy-builtins) requires at least one \
                      entry in `trusted_issuers`",
                     cfg.name
                 ),
@@ -205,10 +205,7 @@ impl JwtIdentityResolver {
             // rather than at the async initialize() boundary.
             raw.validate().map_err(|e| {
                 Box::new(PluginError::Config {
-                    message: format!(
-                        "plugin '{}' (praxis-policy-plugin-identity-jwt): {e}",
-                        cfg.name
-                    ),
+                    message: format!("plugin '{}' (praxis-policy-builtins): {e}", cfg.name),
                 })
             })?;
             if raw.decoding_key.needs_async() {
@@ -216,10 +213,7 @@ impl JwtIdentityResolver {
             } else {
                 let built = raw.build().map_err(|e| {
                     Box::new(PluginError::Config {
-                        message: format!(
-                            "plugin '{}' (praxis-policy-plugin-identity-jwt): {e}",
-                            cfg.name
-                        ),
+                        message: format!("plugin '{}' (praxis-policy-builtins): {e}", cfg.name),
                     })
                 })?;
                 trusted_issuers.push(Arc::new(built));
@@ -235,7 +229,7 @@ impl JwtIdentityResolver {
         if matches!(typed.role, TokenRole::Custom(_)) {
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-plugin-identity-jwt): role: Custom(...) is not \
+                    "plugin '{}' (praxis-policy-builtins): role: Custom(...) is not \
                      yet supported — pick one of `user`, `client`, `workload`",
                     cfg.name
                 ),
@@ -248,10 +242,7 @@ impl JwtIdentityResolver {
         // typo fails at load rather than denying every request.
         let config_error = |message: String| {
             Box::new(PluginError::Config {
-                message: format!(
-                    "plugin '{}' (praxis-policy-plugin-identity-jwt): {message}",
-                    cfg.name
-                ),
+                message: format!("plugin '{}' (praxis-policy-builtins): {message}", cfg.name),
             })
         };
 
@@ -325,7 +316,7 @@ impl JwtIdentityResolver {
         if typed.header.trim().is_empty() {
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-plugin-identity-jwt): `header:` must be a \
+                    "plugin '{}' (praxis-policy-builtins): `header:` must be a \
                      non-empty HTTP header name",
                     cfg.name
                 ),
@@ -481,7 +472,8 @@ impl Plugin for JwtIdentityResolver {
                         // a key will re-fetch rather than denying for the
                         // life of the process.
                         source: cfg.decoding_key.clone(),
-                        refresh: crate::trusted_issuer::RefreshGate::default(),
+                        refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(
+                        ),
                     }
                 },
             };
@@ -535,7 +527,7 @@ impl JwtIdentityResolver {
     /// and floored by `min_refresh_interval_secs`, and neither retries
     /// in-call — see [`JwksFetchBudget::RequestPath`].
     ///
-    /// [`JwksFetchBudget::RequestPath`]: super::config::JwksFetchBudget::RequestPath
+    /// [`JwksFetchBudget::RequestPath`]: crate::plugins::identity_jwt::config::JwksFetchBudget::RequestPath
     async fn refresh_issuer(
         &self,
         issuer: &TrustedIssuer,
@@ -1169,8 +1161,10 @@ mod tests {
             ))),
             algorithms: vec![],
             leeway_seconds: 0,
-            source: crate::config::DecodingKeySource::Secret { secret: "k".into() },
-            refresh: crate::trusted_issuer::RefreshGate::default(),
+            source: crate::plugins::identity_jwt::config::DecodingKeySource::Secret {
+                secret: "k".into(),
+            },
+            refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(),
         };
         let token = jwt_with_payload(r#"{"iss":"https://idp.example","sub":"alice"}"#);
 
@@ -1197,8 +1191,10 @@ mod tests {
             ))),
             algorithms: vec![jsonwebtoken::Algorithm::HS256],
             leeway_seconds: 0,
-            source: crate::config::DecodingKeySource::Secret { secret: "k".into() },
-            refresh: crate::trusted_issuer::RefreshGate::default(),
+            source: crate::plugins::identity_jwt::config::DecodingKeySource::Secret {
+                secret: "k".into(),
+            },
+            refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(),
         };
         let token = jwt_with_payload(r#"{"iss":"https://idp.example","sub":"alice"}"#);
 
@@ -1228,7 +1224,7 @@ mod tests {
                 algorithms: current.algorithms.clone(),
                 leeway_seconds: current.leeway_seconds,
                 source: current.source.clone(),
-                refresh: crate::trusted_issuer::RefreshGate::default(),
+                refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(),
             };
             issuers[0] = Arc::new(replacement);
         }
@@ -1576,7 +1572,7 @@ mod tests {
             };
             let err = format!("{err}");
             assert!(
-                err.contains("praxis-policy-plugin-identity-jwt"),
+                err.contains("praxis-policy-builtins"),
                 "{map}: the message must name the plugin: {err}"
             );
         }
@@ -2297,8 +2293,10 @@ mod tests {
             keys: std::sync::Arc::new(std::sync::RwLock::new(KeyStore::empty())),
             algorithms: vec![jsonwebtoken::Algorithm::HS256],
             leeway_seconds: 0,
-            source: crate::config::DecodingKeySource::Secret { secret: "k".into() },
-            refresh: crate::trusted_issuer::RefreshGate::default(),
+            source: crate::plugins::identity_jwt::config::DecodingKeySource::Secret {
+                secret: "k".into(),
+            },
+            refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(),
         };
         let token = sign_with(b"test-secret", &valid_claims(json!({})));
         let err = validate_token(&token, &issuer).expect_err("no keys, no verification");
@@ -2325,8 +2323,10 @@ mod tests {
             )]))),
             algorithms: vec![jsonwebtoken::Algorithm::HS256],
             leeway_seconds: 0,
-            source: crate::config::DecodingKeySource::Secret { secret: "k".into() },
-            refresh: crate::trusted_issuer::RefreshGate::default(),
+            source: crate::plugins::identity_jwt::config::DecodingKeySource::Secret {
+                secret: "k".into(),
+            },
+            refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(),
         };
 
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);

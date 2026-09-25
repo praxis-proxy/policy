@@ -17,3 +17,10 @@
 //! Integration harness for the `jwt` extension. One linked binary per
 //! extension: cargo links one executable per test target, and these cases share
 //! their fixtures.
+
+mod claim_map_e2e;
+mod jwks_url_e2e;
+mod jwt_e2e;
+mod standard_preset_equivalence;
+
+pub mod common;

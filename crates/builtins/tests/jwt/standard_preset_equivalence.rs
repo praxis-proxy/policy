@@ -30,11 +30,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
-use praxis_policy_plugin_identity_jwt::claim_map::JWT_MAPPING_PROFILE;
-use praxis_policy_plugin_identity_jwt::{
+use praxis_policy_builtins::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE;
+use praxis_policy_builtins::plugins::identity_jwt::{
     ClaimMapper as _, ConfiguredClaimMap, StandardClaimMap, presets,
 };
+use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
 use serde::Deserialize;
 use serde_json::{Value, json};
 

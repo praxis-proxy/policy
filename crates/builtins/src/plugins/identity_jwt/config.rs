@@ -21,7 +21,7 @@ use praxis_policy_core::host::{HostServices, HttpRequestError};
 use praxis_policy_core::http::HttpRequest;
 use praxis_policy_core::http_retry::RetryPolicy;
 
-use super::trusted_issuer::{KeyStore, TrustedIssuer};
+use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, TrustedIssuer};
 use praxis_policy_core::identity::mapping::ClaimMapConfig;
 
 /// Top-level plugin config — what operators write under
@@ -844,7 +844,7 @@ impl TrustedIssuerConfig {
             algorithms: self.algorithms,
             leeway_seconds: self.leeway_seconds,
             source: self.decoding_key,
-            refresh: crate::trusted_issuer::RefreshGate::default(),
+            refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(),
         })
     }
 
@@ -883,7 +883,7 @@ impl TrustedIssuerConfig {
                 )));
             },
         };
-        let refresh = crate::trusted_issuer::RefreshGate::default();
+        let refresh = crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default();
         refresh.set_etag(etag);
         Ok(TrustedIssuer {
             issuer: self.issuer,

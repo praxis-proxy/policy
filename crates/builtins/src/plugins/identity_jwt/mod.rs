@@ -1,42 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// praxis-policy-plugin-identity-jwt — JWT-based `IdentityResolveHandler` for APL.
-//
-// Validates inbound JWTs against configured trusted issuers and
-// maps validated claims into the request's `IdentityPayload`
-// (subject / client / raw_credentials slots). The lightweight
-// identity path: validate a Bearer token and extract identity,
-// independent of any PDP step that runs later in the route.
-//
-// Scope: data shapes + module structure only. Actual validation
-// logic, multi-issuer + key rotation, and integration tests land later.
-//
-// # Error handling
-//
-// No bespoke error type. Two surfaces:
-//
-//   * **Build / config errors** — constructors return
-//     `Result<Self, Box<PluginError>>`. Bad PEM, missing issuer
-//     URL, etc. surface as `PluginError::Config { message }`.
-//   * **Runtime token-rejection errors** — handler returns
-//     `PluginResult::deny(PluginViolation::new(code, reason))`.
-//     `code` is a stable identifier the host can map to HTTP
-//     status (`auth.token_expired`, `auth.signature_invalid`,
-//     `auth.untrusted_issuer`, …); `reason` is the operator-
-//     readable message.
-//
-// # When to use this vs alternatives
-//
-// - **`praxis-policy-plugin-identity-jwt`** (this crate) — JWT-only flow.
-//   Lightweight, ~5-15 transitive deps. The default choice for
-//   "validate a Bearer token, extract identity."
-// - **Custom resolver** — anyone with bespoke identity flows
-//   (mTLS-only, opaque tokens with introspection, capability
-//   tokens) writes their own `HookHandler<IdentityHook>`. This
-//   crate's API surface is the reference shape but nothing
-//   prevents other resolvers from coexisting.
-
 //! Validates inbound JWTs and fills the request's identity slots.
 //!
 //! Checks a token against the configured trusted issuers, then maps its claims
@@ -46,9 +10,31 @@
 //!
 //! Which claims fill which field is configuration. Name a shipped preset with
 //! `claim_mapper` (`standard`, `keycloak`, `auth0`, `cognito`, `ibmverify`) or write a
-//! [`ClaimMapConfig`] under `claim_map` for a shape no preset covers, including
+//! [`ClaimMapConfig`](praxis_policy_core::identity::mapping::ClaimMapConfig) under
+//! `claim_map` for a shape no preset covers, including
 //! the nested and URL-namespaced claims that otherwise need Rust. Naming no
 //! mapper resolves to `standard`, which maps what this plugin has always mapped.
+//!
+//! # Error handling
+//!
+//! No bespoke error type. Two surfaces:
+//!
+//! - **Build and config errors** — constructors return
+//!   `Result<Self, Box<PluginError>>`. Bad PEM, a missing issuer URL and the
+//!   like surface as `PluginError::Config { message }`.
+//! - **Runtime token rejection** — the handler returns
+//!   `PluginResult::deny(PluginViolation::new(code, reason))`. `code` is a
+//!   stable identifier a host can map to an HTTP status
+//!   (`auth.token_expired`, `auth.signature_invalid`,
+//!   `auth.untrusted_issuer`, …); `reason` is the operator-readable message.
+//!
+//! # When to use this
+//!
+//! This is the JWT-only flow, and the default choice for "validate a Bearer
+//! token, extract identity". Bespoke identity flows — mTLS-only, opaque tokens
+//! with introspection, capability tokens — implement
+//! `HookHandler<IdentityHook>` instead. This module's API surface is the
+//! reference shape, and nothing prevents other resolvers coexisting with it.
 
 /// The OIDC-standard claim map.
 pub mod claim_map;

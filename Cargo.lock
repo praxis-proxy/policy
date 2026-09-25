@@ -2700,6 +2700,7 @@ dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
  "praxis-policy-apl-runtime",
+ "praxis-policy-builtins",
  "praxis-policy-core",
  "praxis-policy-pdp-cedar-direct",
  "praxis-policy-pdp-cel",
@@ -2708,7 +2709,6 @@ dependencies = [
  "praxis-policy-plugin-delegator-oauth",
  "praxis-policy-plugin-elicitation-ciba",
  "praxis-policy-plugin-identity-api-key",
- "praxis-policy-plugin-identity-jwt",
  "praxis-policy-secrets-vault",
  "praxis-policy-session-valkey",
  "rustls",
@@ -2961,24 +2961,6 @@ dependencies = [
  "tracing",
  "yaml_serde",
  "zeroize",
-]
-
-[[package]]
-name = "praxis-policy-plugin-identity-jwt"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "chrono",
- "futures",
- "jsonwebtoken",
- "praxis-policy-core",
- "rand 0.8.8",
- "rsa",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]

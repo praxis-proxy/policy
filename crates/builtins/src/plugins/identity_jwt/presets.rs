@@ -120,7 +120,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::claim_map::JWT_MAPPING_PROFILE;
+    use crate::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE;
     use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper as _, ConfiguredClaimMap};
 
     fn claims(value: Value) -> ClaimMap {

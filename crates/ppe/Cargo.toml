@@ -57,7 +57,7 @@ builtins = [
 
 # One feature per builtin crate. The names are the public API: a host writes
 # these, so they are deliberately shorter than the crate names they pull.
-jwt = ["_builtin", "dep:praxis-policy-plugin-identity-jwt"]
+jwt = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/jwt"]
 api-key = ["_builtin", "dep:praxis-policy-plugin-identity-api-key"]
 oauth = ["_builtin", "dep:praxis-policy-plugin-delegator-oauth"]
 elicitation-ciba = ["_builtin", "dep:praxis-policy-plugin-elicitation-ciba"]
@@ -113,7 +113,7 @@ praxis-policy-apl-runtime = { workspace = true }
 # Not everything shipped in this repository belongs here. `reference/` holds
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
-praxis-policy-plugin-identity-jwt = { workspace = true, optional = true }
+praxis-policy-builtins = { workspace = true, optional = true }
 praxis-policy-plugin-identity-api-key = { workspace = true, optional = true }
 praxis-policy-plugin-delegator-oauth = { workspace = true, optional = true }
 praxis-policy-plugin-elicitation-ciba = { workspace = true, optional = true }

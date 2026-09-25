@@ -18,16 +18,14 @@
     reason = "test and example code"
 )]
 
-mod common;
+use crate::common::{TEST_ISSUER, invoke, mint, plugin_config, sorted};
 
-use common::{TEST_ISSUER, invoke, mint, plugin_config, sorted};
-
+use praxis_policy_builtins::plugins::identity_jwt::JwtIdentityFactory;
 use praxis_policy_core::error::PluginError;
 use praxis_policy_core::extensions::SubjectExtension;
 use praxis_policy_core::extensions::raw_credentials::{TokenKind, TokenRole};
 use praxis_policy_core::factory::PluginFactory as _;
 use praxis_policy_core::identity::{IdentityPayload, TokenSource};
-use praxis_policy_plugin_identity_jwt::JwtIdentityFactory;
 use serde_json::{Value, json};
 
 /// Resolve a token and return the identity, failing with the violation when the
