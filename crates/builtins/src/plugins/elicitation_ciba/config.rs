@@ -134,7 +134,10 @@ impl ClientSecretSource {
 /// always allowed; `http://` only when `insecure_http` is set. Other
 /// schemes defer to the upstream URL parser. Returns a short fragment
 /// the caller prefixes with field + plugin name.
-pub(crate) fn require_https(url: &str, insecure_http: bool) -> Result<(), String> {
+pub(in crate::plugins::elicitation_ciba) fn require_https(
+    url: &str,
+    insecure_http: bool,
+) -> Result<(), String> {
     let lowered = url.trim_start().to_ascii_lowercase();
     if lowered.starts_with("https://") {
         return Ok(());

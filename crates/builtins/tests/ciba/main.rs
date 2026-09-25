@@ -17,3 +17,6 @@
 //! Integration harness for the `ciba` extension. One linked binary per
 //! extension: cargo links one executable per test target, and these cases share
 //! their fixtures.
+
+mod ciba_e2e;
+mod live_keycloak;

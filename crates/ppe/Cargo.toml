@@ -59,8 +59,12 @@ builtins = [
 # these, so they are deliberately shorter than the crate names they pull.
 jwt = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/jwt"]
 api-key = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/api-key"]
-oauth = ["_builtin", "dep:praxis-policy-plugin-delegator-oauth"]
-elicitation-ciba = ["_builtin", "dep:praxis-policy-plugin-elicitation-ciba"]
+oauth = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/oauth"]
+elicitation-ciba = [
+  "_builtin",
+  "dep:praxis-policy-builtins",
+  "praxis-policy-builtins/elicitation-ciba",
+]
 cedar = ["_builtin", "dep:praxis-policy-pdp-cedar-direct"]
 cel = ["_builtin", "dep:praxis-policy-pdp-cel"]
 opa = ["_builtin", "dep:praxis-policy-pdp-opa"]
@@ -114,8 +118,6 @@ praxis-policy-apl-runtime = { workspace = true }
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
 praxis-policy-builtins = { workspace = true, optional = true }
-praxis-policy-plugin-delegator-oauth = { workspace = true, optional = true }
-praxis-policy-plugin-elicitation-ciba = { workspace = true, optional = true }
 praxis-policy-pdp-cedar-direct = { workspace = true, optional = true }
 praxis-policy-pdp-cel = { workspace = true, optional = true }
 praxis-policy-pdp-opa = { workspace = true, optional = true }

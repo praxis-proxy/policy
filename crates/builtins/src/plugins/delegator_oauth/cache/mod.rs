@@ -62,8 +62,8 @@
 // *before* the fetch so a burst sees the floor immediately — is the one
 // that applies here.
 
-pub(crate) mod config;
-pub(crate) mod key;
-pub(crate) mod store;
+pub(in crate::plugins::delegator_oauth) mod config;
+pub(in crate::plugins::delegator_oauth) mod key;
+pub(in crate::plugins::delegator_oauth) mod store;
 
 pub use config::{CacheConfig, StalenessConfig};

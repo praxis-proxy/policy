@@ -112,7 +112,7 @@ const DOMAIN: &[u8] = b"ppe.delegation.cache.v1";
 /// accurate about: this is protection against the secret lingering in a
 /// buffer, not against an attacker who can already read our heap. An
 /// attacker at that level has the cached tokens themselves.
-pub(crate) struct KeySecret(Hmac<Sha256>);
+pub(in crate::plugins::delegator_oauth) struct KeySecret(Hmac<Sha256>);
 
 impl KeySecret {
     /// Draw a fresh secret from the OS CSPRNG.
@@ -123,7 +123,7 @@ impl KeySecret {
     /// produce 32 random bytes cannot be given a working cache, and that
     /// is a construction-time failure rather than a silent fallback to
     /// something weaker.
-    pub(crate) fn random() -> Result<Self, String> {
+    pub(in crate::plugins::delegator_oauth) fn random() -> Result<Self, String> {
         let mut bytes = Zeroizing::new([0_u8; 32]);
         getrandom::fill(bytes.as_mut())
             .map_err(|e| format!("could not draw a cache-key secret from the OS CSPRNG: {e}"))?;
@@ -148,20 +148,20 @@ impl std::fmt::Debug for KeySecret {
 /// never leaves the process, so it reveals nothing about the credential
 /// it was derived from.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct CacheKey([u8; 32]);
+pub(in crate::plugins::delegator_oauth) struct CacheKey([u8; 32]);
 
 impl CacheKey {
     /// A byte for decorrelating this entry's retirement from its
     /// neighbours'. See `CacheConfig::serve_window` for why the jitter
     /// comes from the key rather than from an RNG.
-    pub(crate) fn jitter_byte(&self) -> u8 {
+    pub(in crate::plugins::delegator_oauth) fn jitter_byte(&self) -> u8 {
         self.0[0]
     }
 
     /// A key with chosen bytes, for tests that need to call an expiry
     /// policy directly rather than through a derivation.
     #[cfg(test)]
-    pub(crate) fn from_bytes_for_test(bytes: [u8; 32]) -> Self {
+    pub(in crate::plugins::delegator_oauth) fn from_bytes_for_test(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 }
@@ -186,14 +186,14 @@ impl std::fmt::Debug for CacheKey {
 /// two differently-configured delegators from sharing an entry for a
 /// token that speaks for two different clients.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct DelegatorIdentity<'a> {
+pub(in crate::plugins::delegator_oauth) struct DelegatorIdentity<'a> {
     /// The plugin instance name, which distinguishes two configured
     /// delegators.
-    pub(crate) instance: &'a str,
+    pub(in crate::plugins::delegator_oauth) instance: &'a str,
     /// The `IdP` token endpoint.
-    pub(crate) token_endpoint: &'a str,
+    pub(in crate::plugins::delegator_oauth) token_endpoint: &'a str,
     /// The OAuth client this delegator authenticates as.
-    pub(crate) client_id: &'a str,
+    pub(in crate::plugins::delegator_oauth) client_id: &'a str,
 }
 
 /// Length-prefixed encoder feeding an HMAC.
@@ -332,7 +332,7 @@ fn token_role_tag(role: &TokenRole) -> Option<(u8, Option<&str>)> {
 /// which one happened. Two of these are configuration problems an
 /// operator wants to hear about once; the others are ordinary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NotCacheable {
+pub(in crate::plugins::delegator_oauth) enum NotCacheable {
     /// The credential being exchanged was empty, and the subject is not
     /// `this_workload` (where an empty anchor is correct).
     ///
@@ -374,7 +374,7 @@ pub(crate) enum NotCacheable {
 /// [`DOMAIN`]: two deployments disagreeing about the order would agree
 /// about nothing, and one deployment changing it mid-rollout would have
 /// old and new entries in the same map.
-pub(crate) fn derive(
+pub(in crate::plugins::delegator_oauth) fn derive(
     secret: &KeySecret,
     delegator: DelegatorIdentity<'_>,
     payload: &DelegationPayload,

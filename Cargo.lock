@@ -2706,8 +2706,6 @@ dependencies = [
  "praxis-policy-pdp-cel",
  "praxis-policy-pdp-diff",
  "praxis-policy-pdp-opa",
- "praxis-policy-plugin-delegator-oauth",
- "praxis-policy-plugin-elicitation-ciba",
  "praxis-policy-secrets-vault",
  "praxis-policy-session-valkey",
  "rustls",
@@ -2908,40 +2906,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "praxis-policy-plugin-delegator-oauth"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "bytes",
- "chrono",
- "getrandom 0.4.3",
- "hmac",
- "moka",
- "praxis-policy-core",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "praxis-policy-plugin-elicitation-ciba"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "chrono",
- "praxis-policy-core",
- "serde",
- "serde_json",
- "tokio",
- "zeroize",
 ]
 
 [[package]]

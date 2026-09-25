@@ -46,8 +46,10 @@ use praxis_policy_core::http::{HttpRequest, HttpTransportError, form_urlencode};
 use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
-use crate::config::{CibaConfig, require_https};
-use crate::store::{Correlation, CorrelationStore, InMemoryCorrelationStore};
+use crate::plugins::elicitation_ciba::config::{CibaConfig, require_https};
+use crate::plugins::elicitation_ciba::store::{
+    Correlation, CorrelationStore, InMemoryCorrelationStore,
+};
 
 /// OIDC CIBA grant type for the token-endpoint poll.
 const GRANT_TYPE_CIBA: &str = "urn:openid:params:grant-type:ciba";
@@ -538,7 +540,7 @@ struct OAuthError {
 
 fn cfg_err(plugin: &str, msg: String) -> Box<PluginError> {
     Box::new(PluginError::Config {
-        message: format!("plugin '{plugin}' (praxis-policy-plugin-elicitation-ciba): {msg}"),
+        message: format!("plugin '{plugin}' (praxis-policy-builtins): {msg}"),
     })
 }
 

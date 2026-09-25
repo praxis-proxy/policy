@@ -32,7 +32,7 @@ use praxis_policy_core::http::{HttpTransport, HttpTransportError};
 use praxis_policy_core::http_testing::FakeTransport;
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
-use praxis_policy_plugin_elicitation_ciba::CibaApprover;
+use praxis_policy_builtins::plugins::elicitation_ciba::CibaApprover;
 
 // ---------------------------------------------------------------------
 // Harness

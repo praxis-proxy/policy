@@ -10,8 +10,7 @@
 //!
 //! Which claims fill which field is configuration. Name a shipped preset with
 //! `claim_mapper` (`standard`, `keycloak`, `auth0`, `cognito`, `ibmverify`) or write a
-//! [`ClaimMapConfig`](praxis_policy_core::identity::mapping::ClaimMapConfig) under
-//! `claim_map` for a shape no preset covers, including
+//! [`ClaimMapConfig`] under `claim_map` for a shape no preset covers, including
 //! the nested and URL-namespaced claims that otherwise need Rust. Naming no
 //! mapper resolves to `standard`, which maps what this plugin has always mapped.
 //!

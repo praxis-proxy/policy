@@ -38,7 +38,7 @@ use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
-use praxis_policy_plugin_delegator_oauth::OAuthDelegator;
+use praxis_policy_builtins::plugins::delegator_oauth::OAuthDelegator;
 
 const TOKEN_ENDPOINT: &str = "https://idp.test/oauth/token";
 

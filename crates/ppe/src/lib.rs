@@ -120,6 +120,14 @@ pub use praxis_policy_core::secrets::{
 pub use praxis_policy_core::prelude;
 
 // Concrete factory types + KIND consts, each behind its feature.
+#[cfg(feature = "oauth")]
+pub use praxis_policy_builtins::plugins::delegator_oauth::{
+    KIND as OAUTH_KIND, OAuthDelegatorFactory,
+};
+#[cfg(feature = "elicitation-ciba")]
+pub use praxis_policy_builtins::plugins::elicitation_ciba::{
+    CibaApproverFactory, KIND as CIBA_KIND,
+};
 #[cfg(feature = "api-key")]
 pub use praxis_policy_builtins::plugins::identity_api_key::{
     ApiKeyIdentityFactory, KIND as API_KEY_KIND,
@@ -132,10 +140,6 @@ pub use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
 pub use praxis_policy_pdp_cel::CelPdpFactory;
 #[cfg(feature = "opa")]
 pub use praxis_policy_pdp_opa::OpaPdpFactory;
-#[cfg(feature = "oauth")]
-pub use praxis_policy_plugin_delegator_oauth::{KIND as OAUTH_KIND, OAuthDelegatorFactory};
-#[cfg(feature = "elicitation-ciba")]
-pub use praxis_policy_plugin_elicitation_ciba::{CibaApproverFactory, KIND as CIBA_KIND};
 #[cfg(feature = "secrets-vault")]
 pub use praxis_policy_secrets_vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
@@ -194,6 +198,10 @@ macro_rules! register_builtins {
 // single identifier and uses it for both `KIND` and the factory type, which a
 // multi-segment module path cannot satisfy; aliasing keeps the registration
 // keyed off each extension's own `KIND` const.
+#[cfg(feature = "oauth")]
+use praxis_policy_builtins::plugins::delegator_oauth as oauth_builtin;
+#[cfg(feature = "elicitation-ciba")]
+use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 #[cfg(feature = "api-key")]
 use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
 #[cfg(feature = "jwt")]
@@ -203,8 +211,8 @@ use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 register_builtins! {
     feature "jwt"              => jwt_builtin::JwtIdentityFactory,
     feature "api-key"          => api_key_builtin::ApiKeyIdentityFactory,
-    feature "oauth"            => praxis_policy_plugin_delegator_oauth::OAuthDelegatorFactory,
-    feature "elicitation-ciba" => praxis_policy_plugin_elicitation_ciba::CibaApproverFactory,
+    feature "oauth"            => oauth_builtin::OAuthDelegatorFactory,
+    feature "elicitation-ciba" => ciba_builtin::CibaApproverFactory,
 }
 
 /// The enabled PDP factories, ready to drop into

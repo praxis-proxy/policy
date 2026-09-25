@@ -32,7 +32,7 @@ use praxis_policy_core::{
     plugin::PluginConfig,
 };
 
-use crate::OAuthDelegator;
+use crate::plugins::delegator_oauth::OAuthDelegator;
 
 /// The plugin `kind:` string operators write in PPE YAML to declare
 /// an OAuth RFC 8693 token-exchange delegator.

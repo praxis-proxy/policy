@@ -85,10 +85,10 @@ pub struct OAuthDelegatorConfig {
 
     /// Reuse of live delegated tokens. Off unless an operator turns it
     /// on, so an upgrade changes no behaviour; see
-    /// [`CacheConfig`](crate::cache::CacheConfig) for what enabling it
+    /// [`CacheConfig`](crate::plugins::delegator_oauth::cache::CacheConfig) for what enabling it
     /// costs as well as what it saves.
     #[serde(default)]
-    pub cache: crate::cache::CacheConfig,
+    pub cache: crate::plugins::delegator_oauth::cache::CacheConfig,
 }
 
 /// Where the gateway's OAuth client secret is loaded from. Three

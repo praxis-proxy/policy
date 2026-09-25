@@ -10,13 +10,15 @@
 //! factories; depend on this crate directly only to use an extension without
 //! the facade.
 //!
-//! Module paths are written as plain code spans, not intra-doc links: the
-//! modules land one extension at a time, and `broken_intra_doc_links` is
-//! denied. Promote each to a link as its module arrives.
+//! Module paths are written as plain code spans rather than intra-doc links.
+//! They cannot be links: every module here is feature-gated, `default = []`
+//! compiles none of them, and `make doc` runs a default-features pass under
+//! `-D warnings`. docs.rs builds with all features, so the modules themselves
+//! are reachable from the sidebar.
 //!
 //! | Feature | Module |
 //! |---|---|
-//! | `jwt` | [`plugins::identity_jwt`] |
+//! | `jwt` | `plugins::identity_jwt` |
 //! | `api-key` | `plugins::identity_api_key` |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |

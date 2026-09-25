@@ -17,7 +17,7 @@
 //   CIBA_CLIENT_ID=praxis-policy-gateway \
 //   CIBA_CLIENT_SECRET=<secret> \
 //   CIBA_LOGIN_HINT=alice \
-//   cargo test -p praxis-policy-plugin-elicitation-ciba --test live_keycloak -- --ignored --nocapture
+//   cargo nextest run -p praxis-policy-builtins --test live_keycloak -- --ignored --nocapture
 
 #![allow(
     missing_docs,
@@ -39,7 +39,7 @@ use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::HookHandler as _;
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
-use praxis_policy_plugin_elicitation_ciba::CibaApprover;
+use praxis_policy_builtins::plugins::elicitation_ciba::CibaApprover;
 
 /// Read a required env var, or `None` (so the test skips cleanly).
 fn env(name: &str) -> Option<String> {

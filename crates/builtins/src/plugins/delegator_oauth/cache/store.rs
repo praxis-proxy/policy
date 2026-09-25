@@ -63,21 +63,21 @@ use super::key::{CacheKey, KeySecret};
 /// What one exchange produced, before the cache decides how long it may
 /// be reused.
 #[derive(Debug, Clone)]
-pub(crate) struct Mint {
+pub(in crate::plugins::delegator_oauth) struct Mint {
     /// The minted credential.
-    pub(crate) token: RawDelegatedToken,
+    pub(in crate::plugins::delegator_oauth) token: RawDelegatedToken,
     /// The `issued_token_type` the `IdP` reported, carried so a cache
     /// hit reconstructs exactly the payload a fresh mint would have.
-    pub(crate) issued_token_type: String,
+    pub(in crate::plugins::delegator_oauth) issued_token_type: String,
 }
 
 /// A mint plus the cache's decision about it.
 #[derive(Debug, Clone)]
-pub(crate) struct CachedMint {
+pub(in crate::plugins::delegator_oauth) struct CachedMint {
     /// The mint itself.
-    pub(crate) mint: Mint,
+    pub(in crate::plugins::delegator_oauth) mint: Mint,
     /// When the exchange happened, in wall-clock terms.
-    pub(crate) minted_at: DateTime<Utc>,
+    pub(in crate::plugins::delegator_oauth) minted_at: DateTime<Utc>,
     /// How long this entry may be served for, or `None` when the
     /// staleness margin consumes the token's entire lifetime.
     ///
@@ -189,7 +189,7 @@ impl Expiry<CacheKey, CachedMint> for ServeWindow {
 
 /// Where a token came from, for telemetry and for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Source {
+pub(in crate::plugins::delegator_oauth) enum Source {
     /// Served from an existing entry.
     Cache,
     /// Freshly exchanged with the `IdP`.
@@ -198,11 +198,11 @@ pub(crate) enum Source {
 
 /// A token handed back to the delegator, and where it came from.
 #[derive(Debug, Clone)]
-pub(crate) struct Served {
+pub(in crate::plugins::delegator_oauth) struct Served {
     /// The mint.
-    pub(crate) mint: Mint,
+    pub(in crate::plugins::delegator_oauth) mint: Mint,
     /// Whether this call performed an exchange.
-    pub(crate) source: Source,
+    pub(in crate::plugins::delegator_oauth) source: Source,
     /// When the exchange that produced this token happened.
     ///
     /// Carried rather than recomputed by the caller, because on a hit
@@ -210,11 +210,11 @@ pub(crate) struct Served {
     /// records this for audit, and a cached token that claims to have
     /// been minted on every request it serves would make the delegation
     /// chain say something untrue.
-    pub(crate) minted_at: DateTime<Utc>,
+    pub(in crate::plugins::delegator_oauth) minted_at: DateTime<Utc>,
 }
 
 /// Bounded, coalescing store of live delegated tokens.
-pub(crate) struct DelegatedTokenCache {
+pub(in crate::plugins::delegator_oauth) struct DelegatedTokenCache {
     inner: Cache<CacheKey, CachedMint>,
     config: CacheConfig,
     secret: KeySecret,
@@ -245,7 +245,9 @@ impl DelegatedTokenCache {
     ///
     /// Returns a message when the settings cannot describe a working
     /// cache, or when the host cannot produce a key secret.
-    pub(crate) fn new(config: CacheConfig) -> Result<Option<Self>, String> {
+    pub(in crate::plugins::delegator_oauth) fn new(
+        config: CacheConfig,
+    ) -> Result<Option<Self>, String> {
         config.validate()?;
         if !config.enabled {
             return Ok(None);
@@ -264,12 +266,12 @@ impl DelegatedTokenCache {
     }
 
     /// The key secret, for deriving keys against this cache.
-    pub(crate) fn secret(&self) -> &KeySecret {
+    pub(in crate::plugins::delegator_oauth) fn secret(&self) -> &KeySecret {
         &self.secret
     }
 
     /// The settings this cache was built with.
-    pub(crate) fn config(&self) -> &CacheConfig {
+    pub(in crate::plugins::delegator_oauth) fn config(&self) -> &CacheConfig {
         &self.config
     }
 
@@ -284,7 +286,7 @@ impl DelegatedTokenCache {
     ///
     /// Returns whatever `mint` returned, shared behind an `Arc` because
     /// one failure may have to be reported to several waiters.
-    pub(crate) async fn get_or_mint<E, Fut>(
+    pub(in crate::plugins::delegator_oauth) async fn get_or_mint<E, Fut>(
         &self,
         key: CacheKey,
         mint: Fut,
@@ -371,7 +373,7 @@ impl DelegatedTokenCache {
     /// yet; tests exercise it so the invalidate path stays covered until
     /// a host-facing flush exists.
     #[cfg(test)]
-    pub(crate) async fn flush(&self) {
+    pub(in crate::plugins::delegator_oauth) async fn flush(&self) {
         self.inner.invalidate_all();
         self.inner.run_pending_tasks().await;
     }

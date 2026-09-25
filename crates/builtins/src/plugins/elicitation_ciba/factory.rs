@@ -32,7 +32,7 @@ use praxis_policy_core::{
     plugin::PluginConfig,
 };
 
-use crate::CibaApprover;
+use crate::plugins::elicitation_ciba::CibaApprover;
 
 /// The plugin `kind:` string operators write in PPE YAML to declare a
 /// CIBA elicitation handler.
