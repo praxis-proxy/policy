@@ -226,6 +226,25 @@ async fn a_preset_named_in_claim_mapper_resolves_a_provider_token() {
     assert_eq!(sorted(&subject.permissions), vec!["openid", "profile"]);
 }
 
+/// Verify's custom collection claims can be strings when they hold one value.
+/// The configured name must preserve that value through JWT validation and
+/// identity construction.
+#[tokio::test]
+async fn the_ibmverify_preset_resolves_scalar_collection_claims() {
+    let token = mint(json!({
+        "sub": "alice",
+        "roles": "engineer",
+        "teams": "hr",
+        "permissions": "read:reports",
+    }));
+
+    let subject = subject_from(json!({"claim_mapper": "ibmverify"}), token).await;
+    assert_eq!(subject.id.as_deref(), Some("alice"));
+    assert_eq!(sorted(&subject.roles), vec!["engineer"]);
+    assert_eq!(sorted(&subject.teams), vec!["hr"]);
+    assert_eq!(sorted(&subject.permissions), vec!["read:reports"]);
+}
+
 /// The default is unchanged: a config naming no mapper maps what it always did.
 #[tokio::test]
 async fn a_config_naming_no_mapper_resolves_the_standard_shape() {

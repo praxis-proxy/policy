@@ -568,11 +568,11 @@ The JWT identity plugin infers a subject from a token's claims. Which
 claims, and where they sit, differs by IdP, so the mapping is
 configuration rather than something to patch a crate for.
 
-Name one of the four shipped presets:
+Name one of the five shipped presets:
 
 <!-- validate: fragment -->
 ```yaml
-claim_mapper: keycloak       # standard | keycloak | auth0 | cognito
+claim_mapper: keycloak       # standard | keycloak | auth0 | cognito | ibmverify
 ```
 
 Or write the map inline, with candidate paths tried in order:
@@ -607,6 +607,10 @@ custom map because the client ID varies by deployment. Auth0 roles also require
 a custom map because their namespace is deployment-specific. Presets leave
 fields empty rather than assign the wrong concept: Keycloak's `groups` can
 contain realm roles, and Cognito's `cognito:roles` contains IAM role ARNs.
+The `ibmverify` preset accepts scalar or array values for tenant-provisioned
+roles, teams, permissions, client roles, and authorized scopes. Verify can emit
+a scalar when one value is present; the `standard` preset reads these collections
+as arrays and would leave a scalar value empty.
 
 Naming no mapper resolves to `standard`, so an existing configuration
 is unaffected.

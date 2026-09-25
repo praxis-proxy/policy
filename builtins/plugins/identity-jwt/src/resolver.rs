@@ -1515,7 +1515,7 @@ mod tests {
     /// guesses about a shape the provider does not mint.
     #[test]
     fn a_preset_without_a_workload_section_refuses_the_workload_role() {
-        for name in ["auth0", "cognito", "keycloak"] {
+        for name in ["auth0", "cognito", "ibmverify", "keycloak"] {
             let err = build_err(json!({"claim_mapper": name, "role": "workload"}));
             assert!(err.contains("workload"), "'{name}': {err}");
         }

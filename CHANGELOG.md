@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Added the `ibmverify` JWT claim mapper preset for tenant-provisioned scalar or
+  array collection claims. ([#134](https://github.com/praxis-proxy/policy/pull/134))
 - Added the `identity/api-key` resolver with hash-indexed file and HTTP
   directories, shared identity mapping, and bounded lookup caching. The facade
   exposes it through the `api-key` feature.

@@ -314,6 +314,45 @@ mod tests {
             ("cognito", TokenRole::User, "id", vec!["sub"]),
             ("cognito", TokenRole::User, "teams", vec!["cognito:groups"]),
             ("cognito", TokenRole::Client, "client_id", vec!["client_id"]),
+            ("ibmverify", TokenRole::User, "id", vec!["sub"]),
+            ("ibmverify", TokenRole::User, "roles", vec!["roles"]),
+            (
+                "ibmverify",
+                TokenRole::User,
+                "permissions",
+                vec!["permissions", "scope"],
+            ),
+            (
+                "ibmverify",
+                TokenRole::User,
+                "teams",
+                vec!["teams", "groups"],
+            ),
+            (
+                "ibmverify",
+                TokenRole::Client,
+                "client_id",
+                vec!["client_id", "azp"],
+            ),
+            (
+                "ibmverify",
+                TokenRole::Client,
+                "client_name",
+                vec!["client_name"],
+            ),
+            (
+                "ibmverify",
+                TokenRole::Client,
+                "authorized_scopes",
+                vec!["authorized_scopes", "scope"],
+            ),
+            (
+                "ibmverify",
+                TokenRole::Client,
+                "authorized_audiences",
+                vec!["aud"],
+            ),
+            ("ibmverify", TokenRole::Client, "roles", vec!["roles"]),
         ] {
             let map = lookup(name)
                 .unwrap_or_else(|e| panic!("'{name}': {e}"))
@@ -370,7 +409,7 @@ mod tests {
     /// the role, which is the right outcome: better than a section of guesses.
     #[test]
     fn a_provider_preset_refuses_the_workload_role_and_names_it() {
-        for name in ["auth0", "cognito", "keycloak"] {
+        for name in ["auth0", "cognito", "ibmverify", "keycloak"] {
             let err = lookup(name)
                 .unwrap_or_else(|e| panic!("'{name}': {e}"))
                 .claim_map()
@@ -489,6 +528,32 @@ mod tests {
         assert_eq!(sorted(&arrays.teams), vec!["hr"]);
     }
 
+    #[test]
+    fn the_ibmverify_preset_reads_scalar_client_collections() {
+        let client = mapper("ibmverify")
+            .map_client(&claims(json!({
+                "client_id": "my-api",
+                "client_name": "My API",
+                "authorized_scopes": "reports:read",
+                "roles": "reporter",
+            })))
+            .expect("a single-valued Verify client token resolves");
+        assert_eq!(client.client_name.as_deref(), Some("My API"));
+        assert_eq!(client.authorized_scopes, vec!["reports:read"]);
+        assert_eq!(client.roles, vec!["reporter"]);
+
+        let fallback = mapper("ibmverify")
+            .map_client(&claims(json!({
+                "azp": "my-api", "scope": "reports:read reports:write",
+            })))
+            .expect("the fallback client claims resolve");
+        assert_eq!(fallback.client_id, "my-api");
+        assert_eq!(
+            fallback.authorized_scopes,
+            vec!["reports:read", "reports:write"]
+        );
+    }
+
     // ---- the deliberate omissions -----------------------------------------
 
     /// Each omission is asserted rather than left to review, because a candidate
@@ -579,7 +644,7 @@ mod tests {
         }
     }
 
-    /// The four presets have to agree on the same token. A present but unusable
+    /// The presets have to agree on the same token. A present but unusable
     /// anchor declines everywhere rather than falling through to the next
     /// candidate in some presets and not others.
     #[test]
@@ -594,10 +659,10 @@ mod tests {
         }
     }
 
-    /// A field no preset declares is still reachable, which is the point of the
-    /// map: no provider mints `client_name`, so only a hand-written map fills it.
+    /// Providers that lack `client_name` leave it for an inline map. Verify's
+    /// tenant mapping explicitly provisions it as a custom claim.
     #[test]
-    fn no_preset_declares_a_client_name_candidate_except_standard() {
+    fn other_provider_presets_leave_client_name_unmapped() {
         for name in ["auth0", "cognito", "keycloak"] {
             let preset = lookup(name).unwrap_or_else(|e| panic!("'{name}': {e}"));
             let section = preset
@@ -606,7 +671,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("'{name}': {e}"));
             assert!(
                 section.field("client_name").is_none(),
-                "'{name}': no researched provider mints client_name"
+                "'{name}': this provider does not mint client_name"
             );
             for field in ["permissions", "teams"] {
                 assert!(
