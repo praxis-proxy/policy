@@ -43,7 +43,7 @@ cargo test -p praxis-policy-core --lib -- test_name
 
 ## Architecture
 
-17-crate workspace implementing a policy engine for
+Cargo workspace implementing a policy engine for
 AI agent traffic. The engine decides who may call
 which tool, what data comes back, and where that
 data goes next.
@@ -63,12 +63,13 @@ crates/
   ppe-pdp-diff  differential tests across cedar/cel/opa
   ppe-benches   criterion benches, not a default member
 
-builtins/
-  plugins/      identity-jwt, delegator-oauth,
-                elicitation-ciba
-  pdps/         cedar-direct, cel, opa
-  session/      valkey
-  secrets/      vault
+  builtins      the nine bundled extensions, one
+                Cargo feature each:
+                  plugins::  identity_jwt, identity_api_key,
+                             delegator_oauth, elicitation_ciba
+                  pdps::     cedar_direct, cel, opa
+                  session::  valkey
+                  secrets::  vault
 
 reference/
   plugins/      pii-scanner, audit-logger (examples)
@@ -100,8 +101,10 @@ These are settled decisions, not a backlog:
 - **`elided_lifetimes_in_paths`,
   `single_use_lifetimes` at `allow`**: style
   items that do not affect runtime behavior
-- **`mod.rs` module style**: three module directories
-  use `mod.rs`; not switching to file-adjacent style
+- **`mod.rs` module style**: several module
+  directories use `mod.rs`, including every group and
+  extension in `crates/builtins`; not switching to
+  file-adjacent style
 
 ### File headers
 

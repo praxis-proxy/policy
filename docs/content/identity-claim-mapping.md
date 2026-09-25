@@ -18,14 +18,14 @@ Avoid guessing mappings. Presets intentionally leave uncertain fields empty.
 
 Test the intended mapping using `claim_map` first. It uses exactly the same schema as a preset.
 Supported destination fields are listed in
-[`claim_map_config.rs`](../../builtins/plugins/identity-jwt/src/claim_map_config.rs).
+[`claim_map_config.rs`](../../crates/ppe-core/src/identity/mapping/claim_map_config.rs).
 
 ## 3. Add the preset JSON
 
 Create:
 
 ```text
-builtins/plugins/identity-jwt/src/presets/<name>.json
+crates/builtins/src/plugins/identity_jwt/presets/<name>.json
 ```
 
 A typical provider preset looks like:
@@ -75,7 +75,7 @@ A typical provider preset looks like:
 ```
 
 The three field forms and their options are documented in
-[`claim_map_config.rs`](../../builtins/plugins/identity-jwt/src/claim_map_config.rs):
+[`claim_map_config.rs`](../../crates/ppe-core/src/identity/mapping/claim_map_config.rs):
 
 - `"id": "sub"` — one path.
 - `"teams": ["teams", "groups"]` — ordered candidates.
@@ -95,7 +95,7 @@ In JSON paths, a literal dot requires `\\.`. Colons do not need escaping.
 ## 4. Register it alphabetically
 
 Add one entry to `PRESETS` in
-[`presets.rs`](../../builtins/plugins/identity-jwt/src/presets.rs):
+[`presets.rs`](../../crates/builtins/src/plugins/identity_jwt/presets.rs):
 
 ```rust
 ("vendor", include_str!("presets/vendor.json")),
@@ -108,8 +108,8 @@ Do not change `DEFAULT_PRESET` unless intentionally making a breaking behavioral
 ## 5. Pin the exact mapping in tests
 
 Extend `every_provider_preset_declares_the_candidates_it_is_documented_to` in
-[`presets.rs`](../../builtins/plugins/identity-jwt/src/presets.rs) with every important destination
-field and its ordered paths.
+[`presets.rs`](../../crates/builtins/src/plugins/identity_jwt/presets.rs)
+with every important destination field and its ordered paths.
 
 Then add tests covering:
 
@@ -131,7 +131,7 @@ Review these tests when adding another provider:
 - The explicit provider-name loop in `presets.rs`.
 - Fields intentionally absent from providers in `presets.rs`.
 - Resolver workload-role expectations in
-  [`resolver.rs`](../../builtins/plugins/identity-jwt/src/resolver.rs).
+  [`resolver.rs`](../../crates/builtins/src/plugins/identity_jwt/resolver.rs).
 
 Current generic tests expect every preset to support both `subject` and `client`. If the new
 preset legitimately supports fewer roles, adjust those invariants explicitly instead of adding
@@ -140,7 +140,7 @@ speculative mappings.
 ## 7. Add an end-to-end case
 
 Add a signed-token test to
-[`claim_map_e2e.rs`](../../builtins/plugins/identity-jwt/tests/claim_map_e2e.rs) using:
+[`claim_map_e2e.rs`](../../crates/builtins/tests/jwt/claim_map_e2e.rs) using:
 
 ```json
 {"claim_mapper": "vendor"}
@@ -152,7 +152,7 @@ This verifies registry lookup, JWT validation, and identity construction togethe
 
 Update:
 
-- Crate documentation in [`lib.rs`](../../builtins/plugins/identity-jwt/src/lib.rs).
+- Module documentation in [`mod.rs`](../../crates/builtins/src/plugins/identity_jwt/mod.rs).
 - Identity documentation in [`identity-delegation.md`](identity-delegation.md).
 
 Add a new changelog entry if appropriate. Do not rewrite an older release note merely because it
@@ -161,8 +161,8 @@ historically says "four presets."
 ## 9. Validate
 
 ```console
-cargo nextest run -p praxis-policy-plugin-identity-jwt --lib
-cargo nextest run -p praxis-policy-plugin-identity-jwt --test claim_map_e2e
+cargo nextest run -p praxis-policy-builtins --features jwt --lib
+cargo nextest run -p praxis-policy-builtins --features jwt --test jwt
 make check
 make ci
 ```

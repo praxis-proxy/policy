@@ -104,7 +104,7 @@ dialect so a new dialect without a cell fails to compile.
 defaults to `Deny`. `on_error: allow` is an operator-chosen default for
 runtime eval errors only; compile errors still deny.
 Test: `membership_on_absent_key_denies_but_empty_set_evaluates` in
-`builtins/pdps/cel/src/resolver.rs`, and the missing-attribute cells
+`crates/builtins/src/pdps/cel/resolver.rs`, and the missing-attribute cells
 below.
 
 **I9. A missing attribute is not an allow.** Each shipped dialect's

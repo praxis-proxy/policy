@@ -30,6 +30,22 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Consolidated the nine bundled extensions into one published crate,
+  `praxis-policy-builtins`, each behind its own Cargo feature. The facade's
+  features, `install_builtins`, its re-exports, and every policy `kind` string
+  are unchanged, so hosts reaching these through `praxis-policy` need no change.
+  A dependency naming one of the retired crates directly should be **replaced**
+  by `praxis-policy-builtins` with the matching feature: keeping both links two
+  copies of the same implementation registering the same `kind`, and the registry
+  is last-write-wins. Versions up to 0.3.1 of the old crates stay on crates.io;
+  later releases publish only the consolidated crate. See
+  [Crates](docs/content/crates.md) for the mapping.
+  ([#137](https://github.com/praxis-proxy/policy/issues/137))
+- Config-load errors from the JWT, OAuth and CIBA extensions now name
+  `praxis-policy-builtins` rather than their former crate. Operators matching on
+  that text in logs or alerts need to update the pattern.
+  ([#137](https://github.com/praxis-proxy/policy/issues/137))
+
 - Moved the configurable identity claim mapper from
   `praxis-policy-plugin-identity-jwt` to `praxis_policy_core::identity::mapping`.
   **Breaking for Rust callers using the JWT plugin's module paths**

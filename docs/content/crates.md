@@ -26,18 +26,50 @@ praxis-policy (facade)
 
 ## Bundled extensions
 
-Each is its own published crate, reached through a feature on the
-facade rather than named directly. See [Builtins](builtins.md).
+All nine ship in one published crate, `praxis-policy-builtins`, each behind
+its own feature and reached through the matching feature on the facade rather
+than named directly. See [Builtins](builtins.md).
 
-| Crate | Kind |
+| Feature | Module | Kind |
+|---|---|---|
+| `jwt` | `plugins::identity_jwt` | `identity/jwt` |
+| `api-key` | `plugins::identity_api_key` | `identity/api-key` |
+| `oauth` | `plugins::delegator_oauth` | `delegator/oauth` |
+| `elicitation-ciba` | `plugins::elicitation_ciba` | `elicitation/ciba` |
+| `cedar` | `pdps::cedar_direct` | `cedar-direct` |
+| `cel` | `pdps::cel` | `cel` |
+| `opa` | `pdps::opa` | `opa` |
+| `valkey` | `session::valkey` | `valkey` |
+| `secrets-vault` | `secrets::vault` | `vault` |
+
+### Migrating from a per-extension crate
+
+Releases up to 0.3.1 published each extension separately. Those versions stay
+on crates.io; later releases publish only `praxis-policy-builtins`. Most hosts
+reach these through the facade and need no change.
+
+If a dependency names one of the old crates directly, **remove it** and add the
+consolidated crate with the matching feature. Removing it matters: keeping both
+links two copies of the same implementation, each registering the same `kind`,
+and the registry is last-write-wins, so the stale copy can win silently rather
+than failing loudly.
+
+| Retired crate | Replacement |
 |---|---|
-| `praxis-policy-plugin-identity-jwt` | `identity/jwt` |
-| `praxis-policy-plugin-delegator-oauth` | `delegator/oauth` |
-| `praxis-policy-plugin-elicitation-ciba` | `elicitation/ciba` |
-| `praxis-policy-pdp-cedar-direct` | `cedar-direct` |
-| `praxis-policy-pdp-cel` | `cel` |
-| `praxis-policy-pdp-opa` | `opa` |
-| `praxis-policy-session-valkey` | `valkey` |
+| `praxis-policy-plugin-identity-jwt` | `praxis-policy-builtins`, feature `jwt` |
+| `praxis-policy-plugin-delegator-oauth` | `praxis-policy-builtins`, feature `oauth` |
+| `praxis-policy-plugin-elicitation-ciba` | `praxis-policy-builtins`, feature `elicitation-ciba` |
+| `praxis-policy-pdp-cedar-direct` | `praxis-policy-builtins`, feature `cedar` |
+| `praxis-policy-pdp-cel` | `praxis-policy-builtins`, feature `cel` |
+| `praxis-policy-pdp-opa` | `praxis-policy-builtins`, feature `opa` |
+| `praxis-policy-session-valkey` | `praxis-policy-builtins`, feature `valkey` |
+
+`praxis-policy-plugin-identity-api-key` and `praxis-policy-secrets-vault` were
+never published, so nothing depends on them by name.
+
+A new extension belongs in `praxis-policy-builtins` as a feature when it is a
+bundled integration the facade exposes and the maintainers commit to publishing
+and supporting. Anything else is a reference plugin under `reference/plugins/`.
 
 ## Not published
 

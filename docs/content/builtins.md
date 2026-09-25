@@ -17,6 +17,7 @@ name it by `kind`.
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
 | `valkey` | session store | `valkey` | Persist Session Taint labels across processes. See [Session Taint](apl/tainting.md). |
+| `vault` | secret provider | `secrets-vault` | Resolve `secret:` references from Vault KV v2. Not auto-registered: it needs an `HttpTransport` the host supplies. |
 
 The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
@@ -52,7 +53,7 @@ praxis-policy = { version = "0.3", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all eight below: `jwt`, `api-key`, `oauth`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey` |
+| `builtins` | all nine below: `jwt`, `api-key`, `oauth`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
 | `jwt` | `identity/jwt` |
 | `api-key` | `identity/api-key` |
 | `oauth` | `delegator/oauth` |
@@ -61,6 +62,7 @@ praxis-policy = { version = "0.3", features = ["jwt", "cedar"] }
 | `cel` | the `cel` decision point |
 | `opa` | the `opa` decision point |
 | `valkey` | the Valkey session store, and the redis and TLS stack it carries |
+| `secrets-vault` | the Vault KV v2 secret provider. Not auto-registered: it needs an `HttpTransport` the host supplies |
 | `http-hyper` | a default outbound HTTP transport, off by default |
 
 The default build is the engine alone, so a host that needs only the

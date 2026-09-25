@@ -56,7 +56,7 @@ a breaking change gets a minor bump and is documented in the CHANGELOG.
 ## Layout
 
     crates/             the engine, APL implementation, and host facade
-    builtins/           bundled plugins, decision points, and session stores
+    crates/builtins/    the nine bundled extensions, one feature each
     reference/          worked examples, not published and not bundled
 
 A host may replace any bundled plugin. Implement a Plugin Factory through
