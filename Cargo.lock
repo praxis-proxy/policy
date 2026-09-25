@@ -2727,6 +2727,7 @@ dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-core",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -2948,6 +2949,19 @@ name = "praxis-policy-plugin-pii-scanner"
 version = "0.3.1"
 dependencies = [
  "async-trait",
+ "praxis-policy-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "praxis-policy-plugin-transcript-scanner"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "praxis-policy-apl-runtime",
  "praxis-policy-core",
  "regex",
  "serde",

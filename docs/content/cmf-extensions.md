@@ -321,6 +321,19 @@ A default request slot adds nothing.
 | `llm.model_id` | String | `Some` |
 | `llm.provider` | String | `Some` |
 | `llm.capabilities` | StringSet | always |
+| `llm.offered_tools` | StringSet | request present (always then); tool names |
+| `llm.stop_sequences` | StringSet | request present (always then) |
+| `llm.tool_choice` | String | request present and `tool_choice` `Some` (`auto` / `none` / `required` / `tool`) |
+| `llm.forced_tool` | String | `tool_choice` is `tool` |
+| `llm.max_tokens` | Int | request present and `Some` |
+| `llm.temperature` | Float | request present and `Some` |
+| `llm.top_p` | Float | request present and `Some` |
+| `llm.stream` | Bool | request present and `Some` |
+| `llm.system_prompt_digest` | String | request present and `system_prompt` `Some`; `sha256:<hex>` |
+
+"Request present" means `LLMExtension.request` is `Some`. When it is `None`
+none of these keys is written, not even the two sets: an empty set would claim
+the model was offered no tools. The system prompt's text is not flattened.
 
 ### 8. `mcp` — `MCPExtension`
 

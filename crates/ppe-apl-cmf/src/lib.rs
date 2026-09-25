@@ -68,7 +68,7 @@ pub mod extensions_bridge;
 pub mod framework;
 /// Bridges request and response headers into `http.*` keys.
 pub mod http;
-/// Bridges model identity into `llm.*` keys.
+/// Bridges model identity, and the request when reported, into `llm.*` keys.
 pub mod llm;
 /// Bridges tool and resource metadata into `mcp.*` keys.
 pub mod mcp;

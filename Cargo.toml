@@ -33,6 +33,7 @@ members = [
     # why it is not a builtin.
     "reference/plugins/pii-scanner",
     "reference/plugins/audit-logger",
+    "reference/plugins/transcript-scanner",
     # Criterion suite for issue #19. Unpublished; excluded from default-members
     # so everyday `cargo build` stays lean. `cargo bench -p ppe-benches` /
     # `make bench` still pick it up, and `clippy --all-targets` compiles it.
@@ -64,6 +65,7 @@ default-members = [
     # why it is not a builtin.
     "reference/plugins/pii-scanner",
     "reference/plugins/audit-logger",
+    "reference/plugins/transcript-scanner",
 ]
 
 [workspace.package]
@@ -126,6 +128,10 @@ rmp-serde = "1"
 serde_bytes = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+# Every crate that hashes shares this line, so a bump touches one place.
+# `hmac` in delegator-oauth pairs with the `digest` this pulls in; move the
+# two together.
+sha2 = "0.11"
 
 # Internal crates. Single source of truth for each one's path and version
 # requirement; members depend on these with `{ workspace = true }` so a version
