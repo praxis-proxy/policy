@@ -72,7 +72,7 @@ valkey = ["_builtin", "dep:praxis-policy-session-valkey"]
 # Vault KV v2 secret backend. Off the default build; compiled with
 # `builtins` or by name. The host still registers it with a transport —
 # this feature only makes the factory available.
-secrets-vault = ["dep:praxis-policy-secrets-vault"]
+secrets-vault = ["dep:praxis-policy-builtins", "praxis-policy-builtins/secrets-vault"]
 
 # A default `HttpTransport` for hosts that inject none, built on hyper.
 #
@@ -119,7 +119,6 @@ praxis-policy-apl-runtime = { workspace = true }
 # is not a builtin.
 praxis-policy-builtins = { workspace = true, optional = true }
 praxis-policy-session-valkey = { workspace = true, optional = true }
-praxis-policy-secrets-vault = { workspace = true, optional = true }
 
 # --- `http-hyper` only -------------------------------------------------
 #

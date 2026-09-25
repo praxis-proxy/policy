@@ -11,3 +11,6 @@
 //! Unlike the other groups this one is not auto-registered: a provider needs an
 //! `HttpTransport` the host supplies, so the facade exposes a registration
 //! helper rather than wiring it into `install_builtins`.
+
+#[cfg(feature = "secrets-vault")]
+pub mod vault;

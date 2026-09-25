@@ -141,7 +141,7 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
 #[cfg(feature = "jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
 #[cfg(feature = "secrets-vault")]
-pub use praxis_policy_secrets_vault::{
+pub use praxis_policy_builtins::secrets::vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
     register as register_vault_secret_provider, registry_with_vault,
 };

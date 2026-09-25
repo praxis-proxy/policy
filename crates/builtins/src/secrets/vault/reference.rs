@@ -12,7 +12,7 @@ use praxis_policy_core::secrets::SecretError;
 
 /// One KV v2 lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct KvRef {
+pub(in crate::secrets::vault) struct KvRef {
     pub mount: String,
     pub path: String,
     pub field: String,
@@ -22,7 +22,7 @@ impl KvRef {
     /// Parse `reference`. The last `#` starts the field. Path characters are
     /// encoded when the URL is built, so unusual names cannot become URI
     /// syntax.
-    pub(crate) fn parse(reference: &str) -> Result<Self, SecretError> {
+    pub(in crate::secrets::vault) fn parse(reference: &str) -> Result<Self, SecretError> {
         let (left, field) = reference.rsplit_once('#').ok_or_else(|| {
             SecretError::reference(reference, "expected `<mount>/<path>#<field>`")
         })?;
@@ -61,7 +61,7 @@ impl KvRef {
     }
 
     /// Path on the Vault origin, including the KV v2 `/data/` infix.
-    pub(crate) fn kv_url_path(&self) -> String {
+    pub(in crate::secrets::vault) fn kv_url_path(&self) -> String {
         let path = self
             .path
             .split('/')

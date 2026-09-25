@@ -20,7 +20,6 @@ members = [
   "crates/ppe-pdp-diff",
   "crates/builtins",
   "builtins/session/valkey",
-  "builtins/secrets/vault",
   # Reference implementations, not published and not in the `builtins`
   # umbrella. Workspace members so they stay built, linted and tested, and so
   # they keep working as examples of an out-of-tree plugin. Each manifest says
@@ -45,7 +44,6 @@ default-members = [
   "crates/ppe-apl-runtime",
   "crates/ppe-pdp-diff",
   "crates/builtins",
-  "builtins/secrets/vault",
   # Reference implementations, not published and not in the `builtins`
   # umbrella. Workspace members so they stay built, linted and tested, and so
   # they keep working as examples of an out-of-tree plugin. Each manifest says
@@ -130,7 +128,6 @@ praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.3.1" }
 praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.3.1" }
 praxis-policy-builtins = { path = "crates/builtins", version = "0.3.1" }
 praxis-policy-session-valkey = { path = "builtins/session/valkey", version = "0.3.1" }
-praxis-policy-secrets-vault = { path = "builtins/secrets/vault", version = "0.3.1" }
 
 # Criterion is only consumed by the unpublished `ppe-benches` crate (issue #19).
 # Kept in the workspace table so version bumps stay one-line.

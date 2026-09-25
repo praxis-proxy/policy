@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use praxis_policy_core::secrets::SecretError;
 
-use crate::KIND;
+use crate::secrets::vault::KIND;
 
 /// Default Kubernetes auth mount.
 fn default_kubernetes_mount() -> String {
@@ -35,7 +35,7 @@ fn default_token_path() -> PathBuf {
 /// Flattened `kind: vault` settings.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct VaultSettings {
+pub(in crate::secrets::vault) struct VaultSettings {
     /// Vault origin, for example `https://vault.example.com:8200`.
     pub address: String,
     /// Vault namespace, sent as `X-Vault-Namespace` when set.
@@ -56,7 +56,7 @@ pub(crate) struct VaultSettings {
 /// How this instance authenticates. No default, no other methods.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, tag = "method", rename_all = "snake_case")]
-pub(crate) enum VaultAuth {
+pub(in crate::secrets::vault) enum VaultAuth {
     Kubernetes {
         role: String,
         #[serde(default = "default_kubernetes_mount")]
@@ -78,7 +78,7 @@ pub(crate) enum VaultAuth {
 /// `{ literal: VALUE }` rather than a YAML tag.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, untagged)]
-pub(crate) enum SecretIdSource {
+pub(in crate::secrets::vault) enum SecretIdSource {
     Env {
         env: String,
     },
@@ -94,7 +94,7 @@ pub(crate) enum SecretIdSource {
 
 impl VaultSettings {
     /// Parse and validate. Does not contact Vault.
-    pub(crate) fn from_config(
+    pub(in crate::secrets::vault) fn from_config(
         settings: &serde_yaml::Value,
     ) -> Result<ValidatedSettings, SecretError> {
         if settings.is_null() {
@@ -154,7 +154,7 @@ impl VaultSettings {
 
 /// Settings after address and auth checks.
 #[derive(Debug)]
-pub(crate) struct ValidatedSettings {
+pub(in crate::secrets::vault) struct ValidatedSettings {
     pub address: String,
     pub namespace: Option<String>,
     pub auth: VaultAuth,
@@ -195,7 +195,7 @@ impl fmt::Debug for SecretIdSource {
 }
 
 impl VaultAuth {
-    pub(crate) fn kind_name(&self) -> &'static str {
+    pub(in crate::secrets::vault) fn kind_name(&self) -> &'static str {
         match self {
             Self::Kubernetes { .. } => "kubernetes",
             Self::Approle { .. } => "approle",
@@ -206,7 +206,7 @@ impl VaultAuth {
 impl SecretIdSource {
     /// Read the current `secret_id`. Env and file are re-read on every
     /// login so a rotated credential is picked up without a restart.
-    pub(crate) fn read(&self) -> Result<Zeroizing<String>, SecretError> {
+    pub(in crate::secrets::vault) fn read(&self) -> Result<Zeroizing<String>, SecretError> {
         match self {
             Self::Env { env: name } => match std::env::var(name) {
                 Ok(value) if value.is_empty() => Err(SecretError::config(format!(
@@ -231,7 +231,9 @@ impl SecretIdSource {
 
 /// Kubernetes service-account JWT, reread on every login because kubelet
 /// rotates a projected token in place.
-pub(crate) fn read_service_account_token(path: &Path) -> Result<Zeroizing<String>, SecretError> {
+pub(in crate::secrets::vault) fn read_service_account_token(
+    path: &Path,
+) -> Result<Zeroizing<String>, SecretError> {
     read_trimmed_file(path, "Kubernetes service-account token")
 }
 

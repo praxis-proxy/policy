@@ -24,9 +24,9 @@ use praxis_policy_core::secrets::{
     SecretError, SecretProvider, SecretProviderConfig, SecretProviderFactory,
 };
 
-use crate::KIND;
-use crate::config::{ValidatedSettings, VaultAuth, read_service_account_token};
-use crate::reference::KvRef;
+use crate::secrets::vault::KIND;
+use crate::secrets::vault::config::{ValidatedSettings, VaultAuth, read_service_account_token};
+use crate::secrets::vault::reference::KvRef;
 
 /// Process-wide counter so concurrent providers do not share a renew
 /// deadline. Same trick as HTTP retry jitter, no extra dependency.
@@ -62,7 +62,7 @@ impl SecretProviderFactory for VaultSecretProviderFactory {
     }
 
     fn build(&self, config: &SecretProviderConfig) -> Result<Arc<dyn SecretProvider>, SecretError> {
-        let settings = crate::config::VaultSettings::from_config(&config.settings)?;
+        let settings = crate::secrets::vault::config::VaultSettings::from_config(&config.settings)?;
         Ok(Arc::new(VaultSecretProvider {
             transport: Arc::clone(&self.transport),
             settings,
@@ -769,7 +769,7 @@ auth:
 
     #[test]
     fn debug_does_not_print_tokens_or_secret_ids() {
-        let settings = crate::config::VaultSettings::from_config(
+        let settings = crate::secrets::vault::config::VaultSettings::from_config(
             &serde_yaml::from_str(approle_yaml()).expect("yaml"),
         )
         .expect("settings");

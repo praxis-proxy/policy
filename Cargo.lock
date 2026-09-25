@@ -2701,7 +2701,6 @@ dependencies = [
  "praxis-policy-builtins",
  "praxis-policy-core",
  "praxis-policy-pdp-diff",
- "praxis-policy-secrets-vault",
  "praxis-policy-session-valkey",
  "rustls",
  "serde_json",
@@ -2863,21 +2862,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "praxis-policy-secrets-vault"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "bytes",
- "praxis-policy-core",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "yaml_serde",
- "zeroize",
 ]
 
 [[package]]
