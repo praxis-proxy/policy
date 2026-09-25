@@ -9873,7 +9873,7 @@ routes:
         assert!(!warned(&engine, Direction::Request));
     }
 
-    /// R30's case: a host that supplies the request line on the way in and not
+    /// A host that supplies the request line on the way in and not
     /// on the way out gets a warning naming the response direction, which is the
     /// actionable half. One combined gate would have been spent already.
     #[tokio::test]

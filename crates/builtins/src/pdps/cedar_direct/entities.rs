@@ -116,12 +116,11 @@ pub fn build_principal(
     attrs.insert(ATTR_ID.to_owned(), json!(id));
     attrs.insert(ATTR_TYPE.to_owned(), json!(kind));
 
-    // TODO(vocab consolidation, Phase C): `"role."`, `"perm."`, and
-    // `"subject.teams"` are praxis-policy-apl-cmf bag-key conventions. The cedar
-    // crate would need a dependency on praxis-policy-apl-cmf (or the BAG_* constants
-    // need to move into praxis-policy-apl-core / a shared crate) before we can
-    // reference them by symbol here. Left literal for now — the gap is
-    // tracked in the `project_vocab_consolidation` memory.
+    // `"role."`, `"perm."` and `"subject.teams"` are praxis-policy-apl-cmf
+    // bag-key conventions, written literally rather than by symbol: naming them
+    // would require a dependency on praxis-policy-apl-cmf, and the cedar feature
+    // resolves against praxis-policy-apl-core alone.
+    //
     // CMF keeps membership names exact in these sets. Prefer them over the
     // flattened aliases so dotted names remain usable in Cedar too. The
     // alias fallback preserves the public low-level API for callers that

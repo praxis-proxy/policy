@@ -173,7 +173,7 @@ impl SourcePath {
         {
             return rejected(SourceRejection::NeverUsable);
         }
-        // A claim root names the whole map, which R4's message is about. Read
+        // A claim root names the whole map, which the ClaimRoot rejection is about. Read
         // before the table so `claim` and `claim.` share one answer.
         if path == "claim" || path == "claim." || path == "client.claim" || path == "client.claim."
         {
