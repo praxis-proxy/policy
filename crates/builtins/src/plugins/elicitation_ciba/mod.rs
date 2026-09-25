@@ -10,7 +10,7 @@
 //! The host registers this handler against the `elicit` hook; APL
 //! policies select it by name (`require_approval(manager-approver, ...)`).
 //! The praxis-policy-apl-runtime bridge invokes it once per dispatch / check / validate
-//! across the elicitation's lifetime; this crate turns each into the
+//! across the elicitation's lifetime; this module turns each into the
 //! corresponding CIBA round-trip against the configured OP (Keycloak by
 //! default).
 //!

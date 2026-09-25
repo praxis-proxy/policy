@@ -6,7 +6,7 @@
 // Cedar policy authors write `principal.roles.contains("hr")`,
 // `principal.permissions.contains("view_ssn")`, etc. — the strings on
 // the right side of `principal.` are *Cedar entity attribute names*
-// that this crate produces when it builds the principal entity from the
+// that this module produces when it builds the principal entity from the
 // `AttributeBag`. Author-facing vocabulary, distinct from the
 // `praxis-policy-apl-cmf::constants::BAG_*` bag-key vocabulary even when the words
 // happen to match.

@@ -16,9 +16,6 @@
 //! `subject_token` / `audience` / `scope` parameters; the response's
 //! `access_token` becomes the `RawDelegatedToken` the framework
 //! stashes under `Extensions.raw_credentials.delegated_tokens`.
-//!
-//! Scope: data shapes + module structure only. Actual HTTP exchange
-//! logic and mock-IdP integration tests land later.
 
 /// Reuse of live delegated tokens: key derivation and cache settings.
 pub mod cache;

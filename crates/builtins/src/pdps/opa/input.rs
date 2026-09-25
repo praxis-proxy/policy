@@ -11,7 +11,8 @@
 // This mirrors the tree-building and type coercions in the `cel` module's
 // `activation.rs` so a policy author's mental model of the attribute
 // vocabulary is identical across the two backends. It is ported rather than
-// shared so this crate stays praxis-policy-apl-core-only at compile time.
+// shared so the `opa` feature resolves against praxis-policy-apl-core alone,
+// with no normal edge to the runtime.
 //
 // Type mapping (`AttributeValue` → JSON):
 //   Bool      → bool

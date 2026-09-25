@@ -46,7 +46,7 @@
 //   - `subject.id`        → entity id (required; missing → request-time error)
 //   - `subject.type`      → entity type. The CMF bridge writes lowercase
 //                            (`user` / `agent` / `service` / `system`). When
-//                            the key is absent this crate defaults to `User`
+//                            the key is absent this module defaults to `User`
 //                            (PascalCase), so a type-scoped policy can miss a
 //                            principal whose type was omitted.
 //   - `subject.roles`     → principal.roles  : Set<String>

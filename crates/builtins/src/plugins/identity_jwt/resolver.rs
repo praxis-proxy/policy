@@ -993,7 +993,7 @@ enum ValidateError {
     /// verify a signature against.
     ///
     /// `TrustedIssuerConfig::validate` rejects an empty list, and every
-    /// construction path inside this crate runs it, so a configured issuer
+    /// construction path inside this module runs it, so a configured issuer
     /// cannot reach this. It stays reachable because `algorithms` is a public
     /// field: a caller holding `&mut TrustedIssuer` can empty it after a valid
     /// build. Rejecting the token is the only safe response. Treating an empty
