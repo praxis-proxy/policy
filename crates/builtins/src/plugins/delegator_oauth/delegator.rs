@@ -39,6 +39,7 @@
 //                                    scopes don't include all
 //                                    requested permissions
 
+use crate::plugins::delegator_oauth::KIND;
 use std::borrow::Cow;
 
 use async_trait::async_trait;
@@ -129,25 +130,19 @@ impl OAuthDelegator {
     pub fn new(cfg: PluginConfig) -> Result<Self, Box<PluginError>> {
         let raw = cfg.config.as_ref().ok_or_else(|| {
             Box::new(PluginError::Config {
-                message: format!(
-                    "plugin '{}' (praxis-policy-builtins) requires a `config:` block",
-                    cfg.name
-                ),
+                message: format!("plugin '{}' ({KIND}) requires a `config:` block", cfg.name),
             })
         })?;
         let typed: OAuthDelegatorConfig = serde_json::from_value(raw.clone()).map_err(|e| {
             Box::new(PluginError::Config {
-                message: format!(
-                    "plugin '{}' (praxis-policy-builtins) config parse failed: {e}",
-                    cfg.name
-                ),
+                message: format!("plugin '{}' ({KIND}) config parse failed: {e}", cfg.name),
             })
         })?;
 
         if typed.token_endpoint.trim().is_empty() {
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-builtins): token_endpoint must be non-empty",
+                    "plugin '{}' ({KIND}): token_endpoint must be non-empty",
                     cfg.name
                 ),
             }));
@@ -159,16 +154,13 @@ impl OAuthDelegator {
         // localhost docker-compose demos.
         if let Err(e) = require_https(&typed.token_endpoint, typed.insecure_http) {
             return Err(Box::new(PluginError::Config {
-                message: format!(
-                    "plugin '{}' (praxis-policy-builtins): token_endpoint {e}",
-                    cfg.name,
-                ),
+                message: format!("plugin '{}' ({KIND}): token_endpoint {e}", cfg.name,),
             }));
         }
         if typed.client_id.trim().is_empty() {
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-builtins): client_id must be non-empty",
+                    "plugin '{}' ({KIND}): client_id must be non-empty",
                     cfg.name
                 ),
             }));
@@ -177,7 +169,7 @@ impl OAuthDelegator {
         let secret = typed.client_secret_source.resolve().map_err(|e| {
             Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-builtins) client secret resolve failed: {e}",
+                    "plugin '{}' ({KIND}) client secret resolve failed: {e}",
                     cfg.name
                 ),
             })
@@ -191,7 +183,7 @@ impl OAuthDelegator {
         // delegation to reach it.
         let cache = DelegatedTokenCache::new(typed.cache.clone()).map_err(|e| {
             Box::new(PluginError::Config {
-                message: format!("plugin '{}' (praxis-policy-builtins) cache: {e}", cfg.name),
+                message: format!("plugin '{}' ({KIND}) cache: {e}", cfg.name),
             })
         })?;
 

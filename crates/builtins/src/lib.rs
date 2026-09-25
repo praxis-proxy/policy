@@ -11,10 +11,10 @@
 //! the facade.
 //!
 //! Module paths are written as plain code spans rather than intra-doc links.
-//! They cannot be links: every module here is feature-gated, `default = []`
-//! compiles none of them, and `make doc` runs a default-features pass under
-//! `-D warnings`. docs.rs builds with all features, so the modules themselves
-//! are reachable from the sidebar.
+//! They cannot be links: every module here is feature-gated and `make doc` runs
+//! a default-features pass under `-D warnings`, where most of them are absent.
+//! docs.rs builds with all features, so the modules are reachable from the
+//! sidebar.
 //!
 //! | Feature | Module |
 //! |---|---|

@@ -55,7 +55,7 @@ builtins = [
   "secrets-vault",
 ]
 
-# One feature per builtin crate. The names are the public API: a host writes
+# One feature per bundled extension. The names are the public API: a host writes
 # these, so they are deliberately shorter than the crate names they pull.
 jwt = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/jwt"]
 api-key = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/api-key"]
@@ -76,11 +76,11 @@ secrets-vault = ["dep:praxis-policy-builtins", "praxis-policy-builtins/secrets-v
 
 # A default `HttpTransport` for hosts that inject none, built on hyper.
 #
-# Deliberately NOT a separate crate, unlike every other feature above. We
-# publish a handful of crates at a shared version and a full publish runs long
-# minutes against crates.io rate limits (hence `tools/publish.sh`); a 17th
-# crate is that cost on every release, forever. The trait lives in
-# praxis-policy-core; only this implementation lives here.
+# Deliberately NOT a separate crate. Publishing is serial and rate-limited
+# (hence `tools/publish.sh`), so each additional crate is that cost on every
+# release, forever — the same reasoning that puts the bundled extensions in one
+# crate. The trait lives in praxis-policy-core; only this implementation lives
+# here.
 #
 # Off by default and never auto-wired: a host calls
 # `install_default_http_transport` explicitly. Praxis injects its own

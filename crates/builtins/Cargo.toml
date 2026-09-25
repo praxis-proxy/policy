@@ -23,20 +23,6 @@ all-features = true
 [features]
 default = []
 
-# Every extension at once. `praxis-policy-pdp-diff`, `ppe-benches` and docs.rs
-# each want one name for "all of it" rather than a list to keep in sync.
-all = [
-  "jwt",
-  "api-key",
-  "oauth",
-  "elicitation-ciba",
-  "cedar",
-  "cel",
-  "opa",
-  "valkey",
-  "secrets-vault",
-]
-
 # Feature names match the facade's exactly, so each facade body is a one-line
 # forward and a rename is a lockstep two-file edit rather than a translation
 # table nobody maintains.

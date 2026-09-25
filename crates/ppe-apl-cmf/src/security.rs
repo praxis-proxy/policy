@@ -13,7 +13,7 @@
 // deny every subject that happens to have no roles. Emitting the empty
 // set makes the membership test simply evaluate false. `cedar-direct`
 // reaches the same conclusion independently — see the empty-defaults
-// note in `builtins/pdps/cedar-direct/src/entities.rs`.
+// note in `crates/builtins/src/pdps/cedar_direct/entities.rs`.
 //
 // This matters most for the capability-gated sub-fields. When a plugin
 // lacks `read_roles`, core's `build_filtered_subject` hands us an empty

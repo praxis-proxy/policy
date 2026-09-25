@@ -41,9 +41,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   later releases publish only the consolidated crate. See
   [Crates](docs/content/crates.md) for the mapping.
   ([#137](https://github.com/praxis-proxy/policy/issues/137))
-- Config-load errors from the JWT, OAuth and CIBA extensions now name
-  `praxis-policy-builtins` rather than their former crate. Operators matching on
-  that text in logs or alerts need to update the pattern.
+- Config-load errors from the JWT, OAuth and CIBA extensions now name the
+  plugin kind (`identity/jwt`, `delegator/oauth`, `elicitation/ciba`) instead of
+  the crate they used to live in. Operators matching on that text in logs or
+  alerts need to update the pattern.
   ([#137](https://github.com/praxis-proxy/policy/issues/137))
 
 - Moved the configurable identity claim mapper from

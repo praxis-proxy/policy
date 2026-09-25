@@ -46,6 +46,7 @@ use praxis_policy_core::http::{HttpRequest, HttpTransportError, form_urlencode};
 use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
+use crate::plugins::elicitation_ciba::KIND;
 use crate::plugins::elicitation_ciba::config::{CibaConfig, require_https};
 use crate::plugins::elicitation_ciba::store::{
     Correlation, CorrelationStore, InMemoryCorrelationStore,
@@ -540,7 +541,7 @@ struct OAuthError {
 
 fn cfg_err(plugin: &str, msg: String) -> Box<PluginError> {
     Box::new(PluginError::Config {
-        message: format!("plugin '{plugin}' (praxis-policy-builtins): {msg}"),
+        message: format!("plugin '{plugin}' ({KIND}): {msg}"),
     })
 }
 

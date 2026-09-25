@@ -124,8 +124,9 @@ lint:
 	@$(CARGO) +$(NIGHTLY) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
 # The all-features pass is not redundant. `praxis-policy-builtins` is
-# `default = []`, so a default-feature clippy run compiles none of the bundled
-# extensions and the denied-lint table never reaches them.
+# `default = []`, and a default-feature workspace run only reaches cedar, cel
+# and opa — the three `ppe-pdp-diff` turns on through feature unification. The
+# other six extensions are linted by this pass alone.
 	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
 	@echo "lint passed"
@@ -307,8 +308,9 @@ semver:
 .PHONY: doc
 doc:
 	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps
-# Second pass for the same reason as `lint`: the bundled extensions are behind
-# features, so a default-feature rustdoc run documents none of them.
+# Second pass for the same reason as `lint`: a default-feature workspace run
+# documents only the cedar, cel and opa modules, so the other six are covered
+# here alone.
 	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
 
 # Link and style checks for the markdown under docs/. Advisory, like

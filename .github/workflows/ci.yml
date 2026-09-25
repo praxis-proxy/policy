@@ -91,7 +91,7 @@ jobs:
     name: docs build
     runs-on: ubuntu-24.04
     # Raised from 15: `make doc` gained an --all-features pass, which documents
-    # the bundled extensions that a default-feature run compiles none of.
+    # the six extensions a default-feature workspace run does not reach.
     timeout-minutes: 25
     permissions:
       contents: read
@@ -160,3 +160,6 @@ jobs:
       # anyone noticing. Both are cheap and neither uploads anything.
       - run: cargo package --workspace --locked --all-features
       - run: tools/publish.sh --dry-run
+      # The re-export paths all changed, so this is the check most likely to
+      # surprise at tag time. It runs here as well as in release.yaml.
+      - run: make semver-facade

@@ -59,6 +59,7 @@ use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
+use crate::plugins::identity_jwt::KIND;
 use crate::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE;
 use crate::plugins::identity_jwt::config::{
     JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError, TrustedIssuerConfig,
@@ -165,7 +166,7 @@ impl JwtIdentityResolver {
         let raw_config = cfg.config.as_ref().ok_or_else(|| {
             Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-builtins) requires a `config:` block — \
+                    "plugin '{}' ({KIND}) requires a `config:` block — \
                      missing trusted_issuers etc.",
                     cfg.name
                 ),
@@ -175,17 +176,14 @@ impl JwtIdentityResolver {
         let typed: JwtIdentityResolverConfig =
             serde_json::from_value(raw_config.clone()).map_err(|e| {
                 Box::new(PluginError::Config {
-                    message: format!(
-                        "plugin '{}' (praxis-policy-builtins) config parse failed: {e}",
-                        cfg.name
-                    ),
+                    message: format!("plugin '{}' ({KIND}) config parse failed: {e}", cfg.name),
                 })
             })?;
 
         if typed.trusted_issuers.is_empty() {
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-builtins) requires at least one \
+                    "plugin '{}' ({KIND}) requires at least one \
                      entry in `trusted_issuers`",
                     cfg.name
                 ),
@@ -205,7 +203,7 @@ impl JwtIdentityResolver {
             // rather than at the async initialize() boundary.
             raw.validate().map_err(|e| {
                 Box::new(PluginError::Config {
-                    message: format!("plugin '{}' (praxis-policy-builtins): {e}", cfg.name),
+                    message: format!("plugin '{}' ({KIND}): {e}", cfg.name),
                 })
             })?;
             if raw.decoding_key.needs_async() {
@@ -213,7 +211,7 @@ impl JwtIdentityResolver {
             } else {
                 let built = raw.build().map_err(|e| {
                     Box::new(PluginError::Config {
-                        message: format!("plugin '{}' (praxis-policy-builtins): {e}", cfg.name),
+                        message: format!("plugin '{}' ({KIND}): {e}", cfg.name),
                     })
                 })?;
                 trusted_issuers.push(Arc::new(built));
@@ -229,7 +227,7 @@ impl JwtIdentityResolver {
         if matches!(typed.role, TokenRole::Custom(_)) {
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-builtins): role: Custom(...) is not \
+                    "plugin '{}' ({KIND}): role: Custom(...) is not \
                      yet supported — pick one of `user`, `client`, `workload`",
                     cfg.name
                 ),
@@ -242,7 +240,7 @@ impl JwtIdentityResolver {
         // typo fails at load rather than denying every request.
         let config_error = |message: String| {
             Box::new(PluginError::Config {
-                message: format!("plugin '{}' (praxis-policy-builtins): {message}", cfg.name),
+                message: format!("plugin '{}' ({KIND}): {message}", cfg.name),
             })
         };
 
@@ -316,7 +314,7 @@ impl JwtIdentityResolver {
         if typed.header.trim().is_empty() {
             return Err(Box::new(PluginError::Config {
                 message: format!(
-                    "plugin '{}' (praxis-policy-builtins): `header:` must be a \
+                    "plugin '{}' ({KIND}): `header:` must be a \
                      non-empty HTTP header name",
                     cfg.name
                 ),
@@ -1572,7 +1570,7 @@ mod tests {
             };
             let err = format!("{err}");
             assert!(
-                err.contains("praxis-policy-builtins"),
+                err.contains(KIND),
                 "{map}: the message must name the plugin: {err}"
             );
         }
