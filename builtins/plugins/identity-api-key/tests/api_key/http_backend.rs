@@ -405,58 +405,42 @@ fn the_backend_names_itself() {
     assert_eq!(directory().kind(), "http");
 }
 
-/// A validate response captured from a `MaaS` deployment, 2026-09-24. The
-/// tenant, namespace, service account, key name and UUID are stand-ins; the
-/// `system:serviceaccount:<ns>:<name>` form of the username is kept, since
-/// that form is what the assertions are about.
+// Deployment capture from 2026-09-24 with identifying values replaced.
 const CAPTURED_RESPONSE: &str = include_str!("fixtures/maas-validate-response.json");
 
-/// A captured response, through the documented mapping.
-///
-/// The subject is a Kubernetes service account rather than a person, and the
-/// groups are that account's Kubernetes groups. Both are colon-heavy, which is
-/// worth pinning: they are values rather than paths, so nothing escapes them.
 #[tokio::test]
 async fn a_captured_deployment_response_projects_as_documented() {
-    let (services, _transport) = serving(200, CAPTURED_RESPONSE);
+    let transport =
+        Arc::new(FakeTransport::new().json("api-keys/validate", 200, CAPTURED_RESPONSE));
+    let resolver = crate::support::resolver(serde_json::json!({
+        "credential": { "kind": "header", "name": "Authorization" },
+        "prefix": "Bearer sk-oai-",
+        "directory": { "kind": "http", "url": URL },
+        "record_map": { "subject": { "id": "username", "roles": "groups" } },
+        "claims": { "exclude": ["userId", "keyId", "keyName"] },
+    }))
+    .expect("the config builds");
 
-    let record = directory()
-        .lookup(&PresentedKey::new(KEY), &services)
-        .await
-        .expect("the directory answers")
-        .expect("a valid answer is a record");
-
-    let username = record
-        .fields
-        .get("username")
-        .and_then(|v| v.as_str())
-        .expect("`username` is what a record map reads for the subject id");
-    assert!(
-        username.starts_with("system:serviceaccount:"),
-        "a key there names a Kubernetes service account, not a person: {username}"
-    );
+    let result =
+        crate::support::resolve_over_http(&resolver, "Bearer sk-oai-abc123_secret", transport)
+            .await;
+    let subject = result
+        .modified_payload
+        .expect("the payload is modified")
+        .subject
+        .expect("the subject slot is filled");
     assert_eq!(
-        record.fields.get("userId"),
-        record.fields.get("keyId"),
-        "both come from the key's row id"
+        subject.id.as_deref(),
+        Some("system:serviceaccount:example-tenant:example-consumer")
     );
-    assert_ne!(
-        record.fields.get("userId").and_then(|v| v.as_str()),
-        record.fields.get("username").and_then(|v| v.as_str()),
-        "so `userId` is not the subject"
-    );
-    let groups = record.fields.get("groups").and_then(|v| v.as_array());
-    assert_eq!(groups.map(Vec::len), Some(3), "three Kubernetes groups");
-    assert!(
-        record
-            .fields
-            .get("tenant")
-            .and_then(|v| v.as_str())
-            .is_some(),
-        "`tenant` has no `omitempty` upstream, so it is always present"
-    );
-    assert!(
-        !record.fields.contains_key("valid"),
-        "the verdict is stripped here too"
+    let mut roles: Vec<&str> = subject.roles.iter().map(String::as_str).collect();
+    roles.sort_unstable();
+    assert_eq!(
+        roles,
+        vec![
+            "system:authenticated",
+            "system:serviceaccounts",
+            "system:serviceaccounts:example-tenant"
+        ]
     );
 }

@@ -38,29 +38,10 @@ The token is verified against the issuer's JWKS. Only after verification do its
 claims become attributes. An unverified or expired token resolves to no subject,
 and `require(authenticated)` denies.
 
-A JWT is not the only credential that fills the bag. `identity/api-key` resolves
-an opaque key by looking it up in a directory, and projects the record it finds
-through the same mapping the JWT resolver uses. A predicate reading `role.hr`
-cannot tell which of the two established it, which is the point:
-
-```yaml
-plugins:
-  - name: api-keys
-    kind: identity/api-key
-    hooks: [identity.resolve]
-    config:
-      credential: { kind: header, name: X-API-Key }
-      directory: { kind: file, path: /etc/ppe/keys.yaml, refresh_secs: 30 }
-      record_map:
-        subject:
-          id: user
-          roles: groups
-```
-
-The lookup is what differs. A JWT carries its own claims, so verification is
-local; a key carries nothing, so the record behind it is the identity, and a
-revoked key keeps working until the directory's revocation window closes. See
-[Recipe 7](../identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory).
+`identity/api-key` looks up an opaque key in a file or HTTP directory and maps
+its record into the same attributes. Policies such as `require(role.hr)` work
+with either resolver. See [Recipe 7](../identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory)
+for configuration and revocation timing.
 
 ## What lands in the bag
 
@@ -78,18 +59,11 @@ directly:
 
 `require(role.hr)` is true when the verified token carried the `hr` role, and
 `redact(!perm.view_ssn)` redacts unless it carried the `view_ssn` permission.
-Membership names containing `.` do not receive these aliases because policy
-engines can interpret dotted keys as nested namespaces. Test them through the
-canonical sets instead, for example
-`subject.roles contains "admin.readonly"`.
-
-The canonical sets are also the only way to reach a name the predicate syntax
-cannot spell. A directory-resolved identity often carries Kubernetes group
-names, and `require(role.system:authenticated)` does not parse: a `:` cannot
-appear in an attribute path. Write
-`require(subject.roles contains "system:authenticated")`. Note the order, too:
-a comparison names the attribute first, so `"x" in subject.roles` is not
-accepted.
+Membership names containing `.` do not receive aliases because policy engines
+can interpret dotted keys as nested namespaces. Names containing `:` cannot be
+written as attribute paths. Use the canonical sets for either case:
+`subject.roles contains "admin.readonly"` or
+`subject.roles contains "system:authenticated"`.
 
 ## Multiple sources
 

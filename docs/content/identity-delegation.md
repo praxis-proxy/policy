@@ -441,15 +441,10 @@ actor on the wire exactly as RFC 8693 delegation prescribes (`actor_token` +
 
 ### Recipe 7: An opaque API key, resolved against a directory
 
-When: the caller holds an API key rather than a token. A key carries nothing,
-so authenticating one is a lookup: find the record it keys, and that record's
-fields become the identity.
+Use `identity/api-key` when a caller presents an opaque key. The resolver looks
+up its record and maps fields into the same identity attributes as `identity/jwt`.
 
-The projection is the same compiler the JWT resolver uses, so a policy written
-against `subject.roles` cannot tell which credential produced them.
-
-**Records in a file**, which needs no network and is the operator-authored
-case:
+**File directory:**
 
 ```yaml
 plugins:
@@ -463,36 +458,33 @@ plugins:
       directory:
         kind: file
         path: /etc/ppe/keys.yaml
-        refresh_secs: 30          # this interval is the revocation window
+        refresh_secs: 30
         max_staleness_secs: 300
       record_map:
         subject:
           id: user
           roles: groups
-      claims:
-        include: [tenant]
 
 global:
   authentication: [api-keys]
 ```
 
-The file holds digests, never plaintext, so a file that leaks hands over no
-usable credential:
+The file stores SHA-256 digests, not plaintext keys. Use high-entropy keys to
+resist offline guessing if the file leaks:
 
 <!-- validate: fragment -->
 ```yaml
 keys:
-  - hash: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+  - hash: "sha256:59ecf12ac9ef5ee967ddd8aa324f39c7fe13f2a54fb76e3e69bc866887cff903"
     user: alice
     groups: [reader, writer]
     tenant: acme
     expires_at: 2027-01-01T00:00:00Z
 ```
 
-Generate one with `printf %s "$KEY" | sha256sum`.
+Generate a digest with `printf %s "$KEY" | sha256sum` and add the `sha256:` prefix.
 
-**Records in a service**, reached over HTTP. Written against the RHOAI MaaS
-`maas-api` validate contract:
+**HTTP directory:** This example uses the RHOAI MaaS `maas-api` validate endpoint.
 
 ```yaml
 plugins:
@@ -507,111 +499,45 @@ plugins:
       prefix: "Bearer sk-oai-"
       directory:
         kind: http
-        url: "https://maas-api.../internal/v1/api-keys/validate"
+        url: "https://maas-api.example.com/internal/v1/api-keys/validate"
         timeout_secs: 5
       record_map:
         subject:
-          id: username         # not `userId`: see below
+          id: username
           roles: groups
       claims:
-        # `exclude` drops; `include` restores something the inference dropped.
-        # Every field a path did not consume is already policy visible, so the
-        # per-key identifiers are dropped rather than the wanted ones listed.
         exclude: [userId, keyId, keyName]
       cache:
-        ttl_secs: 60           # this interval is the revocation window
+        ttl_secs: 60
         negative_ttl_secs: 10
+
+global:
+  authentication: [maas-keys]
 ```
 
-Three things about that contract are worth stating, because each is easy to
-get backwards:
+`maas-api` sets both `userId` and `keyId` to the key's database row ID. Map
+`username` to `subject.id` instead. A captured response uses a Kubernetes
+service account name (`system:serviceaccount:example-tenant:example-consumer`)
+and Kubernetes groups. These are subject values; `caller_workload` requires a
+SPIFFE ID.
 
-`subject.id` reads `username`. `maas-api` fills both `userId` and `keyId` from
-the key's own database row id, so mapping `subject.id` to `userId` gives every
-key its own identity and two keys for one person become two subjects. A
-response captured from a running deployment shows this plainly:
-
-<!-- validate: fragment -->
-```yaml
-userId:   "00000000-0000-4000-8000-000000000001"   # the key's row id
-keyId:    "00000000-0000-4000-8000-000000000001"   # the same value
-username: "system:serviceaccount:example-tenant:example-consumer"
-groups:   ["system:authenticated", "system:serviceaccounts",
-           "system:serviceaccounts:example-tenant"]
-subscription: "example-subscription"
-tenant:   "example-site"
-```
-
-Note what the subject *is* there: a Kubernetes service account, with that
-account's Kubernetes groups. In this deployment an API key names a workload,
-not a person. It is still the subject slot, because those names are not SPIFFE
-IDs and the workload slot requires one.
-
-Those group names change how a policy has to be written. `role.<name>` is an
-alias for names the predicate syntax can spell, and a `:` cannot appear in an
-attribute path, so `require(role.system:authenticated)` is a parse error. Use
-the canonical set:
+Group names containing `:` cannot be used in attribute paths such as
+`role.system:authenticated`. Use the canonical set:
 
 <!-- validate: apl-predicate -->
 ```apl
 require(subject.roles contains "system:authenticated")
 ```
 
-The same applies to any directory whose groups carry `:` or `.`. See
-[Identity](apl/identity.md#what-lands-in-the-bag).
+An invalid key returns HTTP 200 with `valid: false`; a failed directory request
+denies as `auth.directory_unavailable`. In `prefix: "Bearer sk-oai-"`, the
+`Bearer` scheme is matched without case and removed. The `sk-oai-` prefix stays
+in the key sent to the directory. To accept several key populations on one
+route, configure a resolver for each prefix; nonmatching resolvers skip their
+directory lookup.
 
-An invalid key answers HTTP 200 carrying `valid: false`. A 500 means the
-directory could not answer, which PPE denies as `auth.directory_unavailable`
-rather than as an unknown key: the two are the same denial to a caller and
-different problems to whoever is paged.
-
-A `prefix` splits into an auth scheme and a leader. The scheme (`Bearer`) is
-transport framing, so it is stripped and matched without case per RFC 7235.
-The leader (`sk-oai-`) is part of the key and is kept, because the record is
-stored under a digest of the whole string.
-
-**Several key populations on one route** are several plugin instances, each
-gated on its own prefix. A credential that is not a resolver's declines
-without reaching its directory, so N populations do not cost N lookups:
-
-```yaml
-plugins:
-  - name: maas-keys
-    kind: identity/api-key
-    hooks: [identity.resolve]
-    capabilities: [perform_http]
-    config:
-      credential: { kind: header, name: Authorization }
-      prefix: "Bearer sk-oai-"
-      directory:
-        kind: http
-        url: "https://maas-api.../internal/v1/api-keys/validate"
-      record_map:
-        subject: { id: username, roles: groups }
-
-  - name: partner-keys
-    kind: identity/api-key
-    hooks: [identity.resolve]
-    config:
-      credential: { kind: header, name: Authorization }
-      prefix: "Bearer pk-live-"
-      directory:
-        kind: file
-        path: /etc/ppe/partner-keys.yaml
-        refresh_secs: 30
-      record_map:
-        subject: { id: user, roles: groups }
-
-global:
-  authentication: [maas-keys, partner-keys]
-```
-
-#### What a key never does
-
-The presented key stops at the resolver. It is not written to
-`raw_credentials`, so no downstream step can forward a caller's own key to an
-upstream that never authenticated it, and `secret.<name>` on an
-[assertion](assertions.md) is how a credentialed upstream is reached instead.
+The presented key is not stored in `raw_credentials` for downstream forwarding.
+Use `secret.<name>` on an [assertion](assertions.md) to authenticate to an upstream.
 
 #### Denial codes
 
@@ -624,27 +550,17 @@ upstream that never authenticated it, and `secret.<name>` on an
 | `auth.directory_unavailable` | the directory could not answer |
 | `auth.mapping_failed` | a record resolved and the map could not project it |
 
-The first two are spelled as the JWT resolver spells them, because reading a
-credential off the wire fails the same way whatever it turns out to be.
-
 #### The revocation window
 
-A revoked key keeps authenticating until the window that governs its path
-closes: `refresh_secs` on the file backend, `cache.ttl_secs` when a cache is
-configured. Neither can be designed away, so both are named configuration
-rather than emergent behaviour. Authorino documents the same property for its
-own 60 second default.
+A revoked key may still authenticate until the file's next successful reload
+(`refresh_secs`) or the HTTP cache entry expires (`cache.ttl_secs`). If a file
+reload fails, old records remain in use until `max_staleness_secs`; after that,
+lookups deny as `auth.directory_unavailable`. A cache cannot be configured over
+a file directory.
 
-A cache over a file directory is refused at config load: the file backend is
-already an in-memory index, and two windows for one property is not what an
-operator who wrote one of them expects.
-
-Verified against one captured request and response from a running MaaS
-deployment on 2026-09-24, which agreed with the contract read from
-`maas-api`'s source. The captured answer is a test fixture, so a future change
-to how it is read has to face it. `tools/maas_stub.py` reproduces the contract
-for local development. Error responses have not been captured, so the status
-code handling is still read from source rather than observed.
+The MaaS mapping was checked against a captured valid response on 2026-09-24.
+HTTP error handling follows the `maas-api` source; error responses were not
+captured from the deployment.
 
 ## Reading claims the way your IdP writes them
 
