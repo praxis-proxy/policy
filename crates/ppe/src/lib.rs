@@ -140,6 +140,8 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
 };
 #[cfg(feature = "jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
+#[cfg(feature = "quota")]
+pub use praxis_policy_builtins::plugins::quota::{KIND as QUOTA_KIND, QuotaFactory};
 #[cfg(feature = "secrets-vault")]
 pub use praxis_policy_builtins::secrets::vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
@@ -206,6 +208,8 @@ use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
 #[cfg(feature = "jwt")]
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
+#[cfg(feature = "quota")]
+use praxis_policy_builtins::plugins::quota as quota_builtin;
 
 #[cfg(feature = "_builtin")]
 register_builtins! {
@@ -213,6 +217,7 @@ register_builtins! {
     feature "api-key"          => api_key_builtin::ApiKeyIdentityFactory,
     feature "oauth"            => oauth_builtin::OAuthDelegatorFactory,
     feature "elicitation-ciba" => ciba_builtin::CibaApproverFactory,
+    feature "quota"            => quota_builtin::QuotaFactory,
 }
 
 /// The enabled PDP factories, ready to drop into

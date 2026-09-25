@@ -22,6 +22,7 @@
 //! | `api-key` | `plugins::identity_api_key` |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
+//! | `quota` | `plugins::quota` |
 //! | `cedar` | `pdps::cedar_direct` |
 //! | `cel` | `pdps::cel` |
 //! | `opa` | `pdps::opa` |

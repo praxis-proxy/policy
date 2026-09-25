@@ -38,6 +38,10 @@ oauth = [
   "dep:moka",
 ]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
+# Durable per-consumer token quota against a standalone Limitador. Carries no
+# HTTP client of its own: the Limitador calls go through the host transport, so
+# it needs no dep beyond core and the shared serde/bytes already in this crate.
+quota = ["_engine-core", "_plugins"]
 cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
@@ -53,6 +57,11 @@ valkey = [
   "dep:deadpool-redis",
 ]
 secrets-vault = ["_engine-core", "_secrets"]
+
+# Exposes the quota plugin's per-request hot-path functions for its
+# microbenchmark. Off by default, so a normal build keeps them private. Paired
+# with `quota` by the `[[bench]]` target below.
+bench = []
 
 # Private upstream-edge markers. Each engine dependency is named in exactly one
 # place, so changing how an edge is declared is a one-line edit rather than five.
@@ -303,6 +312,10 @@ rand = "0.8"
 testcontainers-modules = { version = "0.15", features = ["valkey"] }
 testcontainers = "0.27"
 
+# Hot-path microbenchmark harness for the quota plugin, behind the `bench`
+# feature. Light dep tree, so it stays a dev-dependency.
+divan = "0.1"
+
 # One harness per extension, each gated on its own single feature.
 # `required-features` is all-or-nothing, so a harness covering several
 # extensions would be skipped entirely under a single-feature build and its
@@ -347,6 +360,17 @@ required-features = ["opa"]
 name = "valkey"
 path = "tests/valkey/main.rs"
 required-features = ["valkey"]
+
+[[test]]
+name = "quota"
+path = "tests/quota/main.rs"
+required-features = ["quota"]
+
+[[bench]]
+name = "quota_hot_path"
+path = "benches/quota_hot_path.rs"
+harness = false
+required-features = ["quota", "bench"]
 
 [lints]
 workspace = true

@@ -48,6 +48,7 @@ builtins = [
   "api-key",
   "oauth",
   "elicitation-ciba",
+  "quota",
   "cedar",
   "cel",
   "opa",
@@ -65,6 +66,7 @@ elicitation-ciba = [
   "dep:praxis-policy-builtins",
   "praxis-policy-builtins/elicitation-ciba",
 ]
+quota = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/quota"]
 cedar = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cedar"]
 cel = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cel"]
 opa = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/opa"]
