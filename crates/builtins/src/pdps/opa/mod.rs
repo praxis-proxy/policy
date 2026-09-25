@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// praxis-policy-pdp-opa — `PdpResolver` over Microsoft's pure-Rust `regorus` Rego
-// interpreter.
+// OPA decision point: a `PdpResolver` over Microsoft's pure-Rust `regorus`
+// Rego interpreter.
 //
 // # Where this lives in the stack
 //

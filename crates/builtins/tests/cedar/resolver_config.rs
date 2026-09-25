@@ -19,12 +19,12 @@
 )]
 
 use praxis_policy_apl_core::step::{PdpDialect, PdpResolver as _};
-use praxis_policy_pdp_cedar_direct::CedarDirectResolver;
+use praxis_policy_builtins::pdps::cedar_direct::CedarDirectResolver;
 
 /// Fixtures live next to this file so the tests need no `tempfile`
 /// dev-dependency; the workspace does not have one.
 fn fixture(name: &str) -> String {
-    format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+    format!("{}/tests/cedar/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
 fn cfg(yaml: &str) -> serde_yaml::Value {

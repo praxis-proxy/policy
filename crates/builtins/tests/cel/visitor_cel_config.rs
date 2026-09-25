@@ -42,7 +42,7 @@ use praxis_policy_core::extensions::{
 use praxis_policy_core::hooks::payload::Extensions;
 
 use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, register_apl};
-use praxis_policy_pdp_cel::CelPdpFactory;
+use praxis_policy_builtins::pdps::cel::CelPdpFactory;
 
 // The config the visitor walks. A `cel:` step whose expression reads the
 // common attribute vocabulary (`subject.id`, `role.*`) the cmf BagBuilder

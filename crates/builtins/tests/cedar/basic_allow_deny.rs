@@ -20,7 +20,7 @@ use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect, PdpResolver as _};
 
-use praxis_policy_pdp_cedar_direct::CedarDirectResolver;
+use praxis_policy_builtins::pdps::cedar_direct::CedarDirectResolver;
 
 /// Build a `PdpCall` against `Action::"read"` on a `Document::"doc-1"`.
 /// Used across the test cases so the request side stays constant and

@@ -2669,10 +2669,8 @@ dependencies = [
  "dhat",
  "praxis-policy-apl-core",
  "praxis-policy-apl-runtime",
+ "praxis-policy-builtins",
  "praxis-policy-core",
- "praxis-policy-pdp-cedar-direct",
- "praxis-policy-pdp-cel",
- "praxis-policy-pdp-opa",
  "tokio",
  "yaml_serde",
 ]
@@ -2702,10 +2700,7 @@ dependencies = [
  "praxis-policy-apl-runtime",
  "praxis-policy-builtins",
  "praxis-policy-core",
- "praxis-policy-pdp-cedar-direct",
- "praxis-policy-pdp-cel",
  "praxis-policy-pdp-diff",
- "praxis-policy-pdp-opa",
  "praxis-policy-secrets-vault",
  "praxis-policy-session-valkey",
  "rustls",
@@ -2834,64 +2829,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "praxis-policy-pdp-cedar-direct"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "cedar-policy",
- "futures",
- "praxis-policy-apl-core",
- "praxis-policy-apl-runtime",
- "praxis-policy-core",
- "serde_json",
- "stacker",
- "thiserror",
- "tokio",
- "yaml_serde",
-]
-
-[[package]]
-name = "praxis-policy-pdp-cel"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "cel",
- "praxis-policy-apl-core",
- "praxis-policy-apl-runtime",
- "praxis-policy-core",
- "thiserror",
- "tokio",
- "tracing",
- "yaml_serde",
-]
-
-[[package]]
 name = "praxis-policy-pdp-diff"
 version = "0.3.1"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
+ "praxis-policy-builtins",
  "praxis-policy-core",
- "praxis-policy-pdp-cedar-direct",
- "praxis-policy-pdp-cel",
- "praxis-policy-pdp-opa",
  "tokio",
- "yaml_serde",
-]
-
-[[package]]
-name = "praxis-policy-pdp-opa"
-version = "0.3.1"
-dependencies = [
- "async-trait",
- "praxis-policy-apl-core",
- "praxis-policy-apl-runtime",
- "praxis-policy-core",
- "regorus",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
  "yaml_serde",
 ]
 

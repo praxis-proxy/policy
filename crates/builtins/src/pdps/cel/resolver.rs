@@ -27,8 +27,8 @@ use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
-use crate::activation::bag_to_context;
-use crate::error::BuildError;
+use crate::pdps::cel::activation::bag_to_context;
+use crate::pdps::cel::error::BuildError;
 
 /// What to do when an expression errors at runtime (an undeclared
 /// variable, a type error, a custom-function panic) or returns a

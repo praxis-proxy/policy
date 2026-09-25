@@ -46,13 +46,13 @@ const MAX_DIAGNOSTIC_LEN: usize = 1024;
 /// Outcome of mapping a query result. A `Decision` is terminal (allow/deny);
 /// `Degenerate` means the value carries no decision and the caller applies
 /// `on_error`.
-pub(crate) enum Mapped {
+pub(in crate::pdps::opa) enum Mapped {
     Decision(PdpDecision),
     Degenerate(String),
 }
 
 /// Map a successful query result into a decision (or a degenerate marker).
-pub(crate) fn map_query_result(value: &Value, decision_field: &str) -> Mapped {
+pub(in crate::pdps::opa) fn map_query_result(value: &Value, decision_field: &str) -> Mapped {
     match value {
         Value::Bool(true) => Mapped::Decision(allow()),
         Value::Bool(false) => Mapped::Decision(deny(

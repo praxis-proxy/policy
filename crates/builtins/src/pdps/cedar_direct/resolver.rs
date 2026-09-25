@@ -34,10 +34,10 @@ use cedar_policy::{Authorizer, PolicySet, Schema};
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
-use crate::decision::translate;
-use crate::entities::build as build_entities;
-use crate::error::BuildError;
-use crate::request::parse as parse_call;
+use crate::pdps::cedar_direct::decision::translate;
+use crate::pdps::cedar_direct::entities::build as build_entities;
+use crate::pdps::cedar_direct::error::BuildError;
+use crate::pdps::cedar_direct::request::parse as parse_call;
 
 /// Grow the cedar evaluation stack when the current thread has less than this
 /// much headroom. cedar-policy-core's own guard is 100 `KiB`
@@ -218,7 +218,7 @@ impl PdpResolver for CedarDirectResolver {
         // the bag before any parsing. The author writes things like
         // `id: ${args.repo_name}`; this pass turns them into concrete
         // values so downstream entity / UID builders can stay literal.
-        let resolved_args = crate::template::resolve_refs(&call.args, bag)?;
+        let resolved_args = crate::pdps::cedar_direct::template::resolve_refs(&call.args, bag)?;
         let resolved_call = PdpCall {
             dialect: call.dialect.clone(),
             args: resolved_args,

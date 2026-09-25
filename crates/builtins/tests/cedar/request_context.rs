@@ -21,7 +21,7 @@
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect};
-use praxis_policy_pdp_cedar_direct::request::parse;
+use praxis_policy_builtins::pdps::cedar_direct::request::parse;
 
 fn call(args: &str) -> PdpCall {
     PdpCall {

@@ -17,3 +17,5 @@
 //! Integration harness for the `cel` extension. One linked binary per
 //! extension: cargo links one executable per test target, and these cases share
 //! their fixtures.
+
+mod visitor_cel_config;

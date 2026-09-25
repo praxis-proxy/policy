@@ -23,9 +23,9 @@ use criterion::{Criterion, SamplingMode, criterion_group, criterion_main};
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect, PdpResolver as _};
-use praxis_policy_pdp_cedar_direct::CedarDirectResolver;
-use praxis_policy_pdp_cel::CelResolver;
-use praxis_policy_pdp_opa::OpaResolver;
+use praxis_policy_builtins::pdps::cedar_direct::CedarDirectResolver;
+use praxis_policy_builtins::pdps::cel::CelResolver;
+use praxis_policy_builtins::pdps::opa::OpaResolver;
 use tokio::runtime::Runtime;
 
 /// Fail loud in setup if a fixture times a deny path (same idea as `invoke_once`).

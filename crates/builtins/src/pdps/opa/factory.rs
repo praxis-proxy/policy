@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
-use crate::resolver::OpaResolver;
+use crate::pdps::opa::resolver::OpaResolver;
 
 /// Factory for `OpaResolver`. Reports `kind() = "opa"`; builds resolvers from
 /// the unified-config block via [`OpaResolver::from_config`].

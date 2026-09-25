@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// praxis-policy-pdp-cel — `PdpResolver` over the `cel` (Common Expression Language)
-// interpreter.
+// CEL decision point: a `PdpResolver` over the `cel` (Common Expression
+// Language) interpreter.
 //
 // # Where this lives in the stack
 //

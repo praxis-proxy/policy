@@ -120,6 +120,12 @@ pub use praxis_policy_core::secrets::{
 pub use praxis_policy_core::prelude;
 
 // Concrete factory types + KIND consts, each behind its feature.
+#[cfg(feature = "cedar")]
+pub use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
+#[cfg(feature = "cel")]
+pub use praxis_policy_builtins::pdps::cel::CelPdpFactory;
+#[cfg(feature = "opa")]
+pub use praxis_policy_builtins::pdps::opa::OpaPdpFactory;
 #[cfg(feature = "oauth")]
 pub use praxis_policy_builtins::plugins::delegator_oauth::{
     KIND as OAUTH_KIND, OAuthDelegatorFactory,
@@ -134,12 +140,6 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
 };
 #[cfg(feature = "jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
-#[cfg(feature = "cedar")]
-pub use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
-#[cfg(feature = "cel")]
-pub use praxis_policy_pdp_cel::CelPdpFactory;
-#[cfg(feature = "opa")]
-pub use praxis_policy_pdp_opa::OpaPdpFactory;
 #[cfg(feature = "secrets-vault")]
 pub use praxis_policy_secrets_vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,

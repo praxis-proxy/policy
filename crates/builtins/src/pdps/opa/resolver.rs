@@ -41,7 +41,7 @@
 // # Decision contract
 //
 // The configured query must resolve to a boolean, a decision object, or a
-// set/array (see `crate::decision`). Fail-closed by default: an evaluation
+// set/array (see `crate::pdps::opa::decision`). Fail-closed by default: an evaluation
 // error routes through `on_error` (default `Deny`); a Rego parse error, an
 // inline/global package collision, and a cache-full rejection always deny
 // regardless of `on_error` (a compile-time or resource condition must never
@@ -57,9 +57,9 @@ use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
-use crate::decision::{Mapped, map_query_result};
-use crate::error::BuildError;
-use crate::input::bag_to_input;
+use crate::pdps::opa::decision::{Mapped, map_query_result};
+use crate::pdps::opa::error::BuildError;
+use crate::pdps::opa::input::bag_to_input;
 
 /// What to do when a query errors at runtime or yields a value that carries no
 /// decision (a non-bool/object/set result, or a missing decision field). A
@@ -89,7 +89,7 @@ pub const DEFAULT_MAX_CACHE_ENTRIES: usize = 1024;
 /// Virtual filename regorus uses for the query's inline module. Distinct from
 /// the `global-<n>.rego` names global modules load under, so an inline module
 /// adds to the engine rather than replacing a global one.
-pub(crate) const INLINE_MODULE_NAME: &str = "__inline__.rego";
+pub(in crate::pdps::opa) const INLINE_MODULE_NAME: &str = "__inline__.rego";
 
 #[derive(Debug)]
 /// Evaluates Rego against the attribute bag, reusing a prepared base engine.

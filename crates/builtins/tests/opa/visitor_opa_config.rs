@@ -37,7 +37,7 @@ use praxis_policy_core::extensions::{
 use praxis_policy_core::hooks::payload::Extensions;
 
 use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, register_apl};
-use praxis_policy_pdp_opa::OpaPdpFactory;
+use praxis_policy_builtins::pdps::opa::OpaPdpFactory;
 
 // A boolean allow-rule policy declared globally; the route queries it. The bag
 // the cmf BagBuilder lifts from the SecurityExtension exposes `subject.id`,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// praxis-policy-pdp-cedar-direct — `PdpResolver` over the bare `cedar-policy` crate.
+// Cedar decision point: a `PdpResolver` over the bare `cedar-policy` crate.
 //
 // # Where this lives in the stack
 //

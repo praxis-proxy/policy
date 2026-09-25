@@ -65,9 +65,9 @@ elicitation-ciba = [
   "dep:praxis-policy-builtins",
   "praxis-policy-builtins/elicitation-ciba",
 ]
-cedar = ["_builtin", "dep:praxis-policy-pdp-cedar-direct"]
-cel = ["_builtin", "dep:praxis-policy-pdp-cel"]
-opa = ["_builtin", "dep:praxis-policy-pdp-opa"]
+cedar = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cedar"]
+cel = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cel"]
+opa = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/opa"]
 valkey = ["_builtin", "dep:praxis-policy-session-valkey"]
 # Vault KV v2 secret backend. Off the default build; compiled with
 # `builtins` or by name. The host still registers it with a transport —
@@ -118,9 +118,6 @@ praxis-policy-apl-runtime = { workspace = true }
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
 praxis-policy-builtins = { workspace = true, optional = true }
-praxis-policy-pdp-cedar-direct = { workspace = true, optional = true }
-praxis-policy-pdp-cel = { workspace = true, optional = true }
-praxis-policy-pdp-opa = { workspace = true, optional = true }
 praxis-policy-session-valkey = { workspace = true, optional = true }
 praxis-policy-secrets-vault = { workspace = true, optional = true }
 

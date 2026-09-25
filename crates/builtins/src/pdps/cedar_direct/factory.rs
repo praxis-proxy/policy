@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
-use crate::resolver::CedarDirectResolver;
+use crate::pdps::cedar_direct::resolver::CedarDirectResolver;
 
 /// Factory for `CedarDirectResolver`. Reports `kind() = "cedar-direct"`;
 /// builds resolvers from the unified-config block via

@@ -21,7 +21,7 @@
 )]
 
 use praxis_policy_apl_core::attributes::AttributeBag;
-use praxis_policy_pdp_cedar_direct::entities::{build_principal, build_resource};
+use praxis_policy_builtins::pdps::cedar_direct::entities::{build_principal, build_resource};
 
 fn set_of<const N: usize>(items: [&str; N]) -> std::collections::HashSet<String> {
     items.into_iter().map(str::to_owned).collect()

@@ -19,9 +19,6 @@ members = [
   "crates/ppe-apl-runtime",
   "crates/ppe-pdp-diff",
   "crates/builtins",
-  "builtins/pdps/cedar-direct",
-  "builtins/pdps/cel",
-  "builtins/pdps/opa",
   "builtins/session/valkey",
   "builtins/secrets/vault",
   # Reference implementations, not published and not in the `builtins`
@@ -48,9 +45,6 @@ default-members = [
   "crates/ppe-apl-runtime",
   "crates/ppe-pdp-diff",
   "crates/builtins",
-  "builtins/pdps/cedar-direct",
-  "builtins/pdps/cel",
-  "builtins/pdps/opa",
   "builtins/secrets/vault",
   # Reference implementations, not published and not in the `builtins`
   # umbrella. Workspace members so they stay built, linted and tested, and so
@@ -135,9 +129,6 @@ praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.3.1" }
 praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.3.1" }
 praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.3.1" }
 praxis-policy-builtins = { path = "crates/builtins", version = "0.3.1" }
-praxis-policy-pdp-cedar-direct = { path = "builtins/pdps/cedar-direct", version = "0.3.1" }
-praxis-policy-pdp-cel = { path = "builtins/pdps/cel", version = "0.3.1" }
-praxis-policy-pdp-opa = { path = "builtins/pdps/opa", version = "0.3.1" }
 praxis-policy-session-valkey = { path = "builtins/session/valkey", version = "0.3.1" }
 praxis-policy-secrets-vault = { path = "builtins/secrets/vault", version = "0.3.1" }
 

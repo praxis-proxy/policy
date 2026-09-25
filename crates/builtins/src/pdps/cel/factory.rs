@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
-use crate::resolver::CelResolver;
+use crate::pdps::cel::resolver::CelResolver;
 
 /// Factory for `CelResolver`. Reports `kind() = "cel"`; builds resolvers
 /// from the unified-config block via [`CelResolver::from_config`].

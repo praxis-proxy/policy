@@ -13,3 +13,12 @@
 //!
 //! Each reaches `praxis-policy-apl-core` only on its normal dependency edges,
 //! so a consumer enabling one PDP does not compile the runtime.
+
+#[cfg(feature = "cedar")]
+pub mod cedar_direct;
+
+#[cfg(feature = "cel")]
+pub mod cel;
+
+#[cfg(feature = "opa")]
+pub mod opa;
