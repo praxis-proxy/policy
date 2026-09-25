@@ -11,59 +11,57 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/ppe",
-    "crates/ppe-core",
-    "crates/ppe-orchestration",
-    "crates/ppe-apl-core",
-    "crates/ppe-apl-cmf",
-    "crates/ppe-apl-runtime",
-    "crates/ppe-pdp-diff",
-    "crates/builtins",
-    "builtins/plugins/identity-api-key",
-    "builtins/plugins/delegator-oauth",
-    "builtins/plugins/elicitation-ciba",
-    "builtins/pdps/cedar-direct",
-    "builtins/pdps/cel",
-    "builtins/pdps/opa",
-    "builtins/session/valkey",
-    "builtins/secrets/vault",
-    # Reference implementations, not published and not in the `builtins`
-    # umbrella. Workspace members so they stay built, linted and tested, and so
-    # they keep working as examples of an out-of-tree plugin. Each manifest says
-    # why it is not a builtin.
-    "reference/plugins/pii-scanner",
-    "reference/plugins/audit-logger",
-    # Criterion suite for issue #19. Unpublished; excluded from default-members
-    # so everyday `cargo build` stays lean. `cargo bench -p ppe-benches` /
-    # `make bench` still pick it up, and `clippy --all-targets` compiles it.
-    "crates/ppe-benches",
+  "crates/ppe",
+  "crates/ppe-core",
+  "crates/ppe-orchestration",
+  "crates/ppe-apl-core",
+  "crates/ppe-apl-cmf",
+  "crates/ppe-apl-runtime",
+  "crates/ppe-pdp-diff",
+  "crates/builtins",
+  "builtins/plugins/delegator-oauth",
+  "builtins/plugins/elicitation-ciba",
+  "builtins/pdps/cedar-direct",
+  "builtins/pdps/cel",
+  "builtins/pdps/opa",
+  "builtins/session/valkey",
+  "builtins/secrets/vault",
+  # Reference implementations, not published and not in the `builtins`
+  # umbrella. Workspace members so they stay built, linted and tested, and so
+  # they keep working as examples of an out-of-tree plugin. Each manifest says
+  # why it is not a builtin.
+  "reference/plugins/pii-scanner",
+  "reference/plugins/audit-logger",
+  # Criterion suite for issue #19. Unpublished; excluded from default-members
+  # so everyday `cargo build` stays lean. `cargo bench -p ppe-benches` /
+  # `make bench` still pick it up, and `clippy --all-targets` compiles it.
+  "crates/ppe-benches",
 ]
 
 # The session store pulls a redis client and a TLS stack, which slows a default
 # build noticeably. Excluding it from default-members keeps everyday iteration
 # fast; `--workspace` still picks it up, and CI runs the full sweep.
 default-members = [
-    "crates/ppe",
-    "crates/ppe-core",
-    "crates/ppe-orchestration",
-    "crates/ppe-apl-core",
-    "crates/ppe-apl-cmf",
-    "crates/ppe-apl-runtime",
-    "crates/ppe-pdp-diff",
-    "crates/builtins",
-    "builtins/plugins/identity-api-key",
-    "builtins/plugins/delegator-oauth",
-    "builtins/plugins/elicitation-ciba",
-    "builtins/pdps/cedar-direct",
-    "builtins/pdps/cel",
-    "builtins/pdps/opa",
-    "builtins/secrets/vault",
-    # Reference implementations, not published and not in the `builtins`
-    # umbrella. Workspace members so they stay built, linted and tested, and so
-    # they keep working as examples of an out-of-tree plugin. Each manifest says
-    # why it is not a builtin.
-    "reference/plugins/pii-scanner",
-    "reference/plugins/audit-logger",
+  "crates/ppe",
+  "crates/ppe-core",
+  "crates/ppe-orchestration",
+  "crates/ppe-apl-core",
+  "crates/ppe-apl-cmf",
+  "crates/ppe-apl-runtime",
+  "crates/ppe-pdp-diff",
+  "crates/builtins",
+  "builtins/plugins/delegator-oauth",
+  "builtins/plugins/elicitation-ciba",
+  "builtins/pdps/cedar-direct",
+  "builtins/pdps/cel",
+  "builtins/pdps/opa",
+  "builtins/secrets/vault",
+  # Reference implementations, not published and not in the `builtins`
+  # umbrella. Workspace members so they stay built, linted and tested, and so
+  # they keep working as examples of an out-of-tree plugin. Each manifest says
+  # why it is not a builtin.
+  "reference/plugins/pii-scanner",
+  "reference/plugins/audit-logger",
 ]
 
 [workspace.package]
@@ -135,20 +133,19 @@ regex = "1"
 # The keys are package names, which still carry the engine's previous naming.
 # Renaming them is a manifest change across every crate and lands separately, so
 # that the import stays a move and the rename stays a rename.
-praxis-policy-core                     = { path = "crates/ppe-core",              version = "0.3.1" }
-praxis-policy-orchestration            = { path = "crates/ppe-orchestration",     version = "0.3.1" }
-praxis-policy-apl-core                      = { path = "crates/ppe-apl-core",          version = "0.3.1" }
-praxis-policy-apl-cmf                       = { path = "crates/ppe-apl-cmf",           version = "0.3.1" }
-praxis-policy-apl-runtime                      = { path = "crates/ppe-apl-runtime",       version = "0.3.1" }
-praxis-policy-builtins                 = { path = "crates/builtins",                   version = "0.3.1" }
-praxis-policy-plugin-identity-api-key  = { path = "builtins/plugins/identity-api-key", version = "0.3.1" }
-praxis-policy-plugin-delegator-oauth   = { path = "builtins/plugins/delegator-oauth",  version = "0.3.1" }
-praxis-policy-plugin-elicitation-ciba  = { path = "builtins/plugins/elicitation-ciba", version = "0.3.1" }
-praxis-policy-pdp-cedar-direct         = { path = "builtins/pdps/cedar-direct",        version = "0.3.1" }
-praxis-policy-pdp-cel                  = { path = "builtins/pdps/cel",                 version = "0.3.1" }
-praxis-policy-pdp-opa                  = { path = "builtins/pdps/opa",                 version = "0.3.1" }
-praxis-policy-session-valkey           = { path = "builtins/session/valkey",           version = "0.3.1" }
-praxis-policy-secrets-vault            = { path = "builtins/secrets/vault",            version = "0.3.1" }
+praxis-policy-core = { path = "crates/ppe-core", version = "0.3.1" }
+praxis-policy-orchestration = { path = "crates/ppe-orchestration", version = "0.3.1" }
+praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.3.1" }
+praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.3.1" }
+praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.3.1" }
+praxis-policy-builtins = { path = "crates/builtins", version = "0.3.1" }
+praxis-policy-plugin-delegator-oauth = { path = "builtins/plugins/delegator-oauth", version = "0.3.1" }
+praxis-policy-plugin-elicitation-ciba = { path = "builtins/plugins/elicitation-ciba", version = "0.3.1" }
+praxis-policy-pdp-cedar-direct = { path = "builtins/pdps/cedar-direct", version = "0.3.1" }
+praxis-policy-pdp-cel = { path = "builtins/pdps/cel", version = "0.3.1" }
+praxis-policy-pdp-opa = { path = "builtins/pdps/opa", version = "0.3.1" }
+praxis-policy-session-valkey = { path = "builtins/session/valkey", version = "0.3.1" }
+praxis-policy-secrets-vault = { path = "builtins/secrets/vault", version = "0.3.1" }
 
 # Criterion is only consumed by the unpublished `ppe-benches` crate (issue #19).
 # Kept in the workspace table so version bumps stay one-line.

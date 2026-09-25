@@ -6,12 +6,12 @@
 
 use std::collections::HashMap;
 
+use praxis_policy_builtins::plugins::identity_api_key::{ApiKeyIdentityResolver, KIND};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload, TokenSource};
 use praxis_policy_core::plugin::PluginConfig;
-use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityResolver, KIND};
 use sha2::{Digest as _, Sha256};
 
 /// A record file written to a temporary path, removed when the guard drops.

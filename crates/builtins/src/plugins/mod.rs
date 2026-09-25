@@ -14,3 +14,7 @@
 /// JWT validation and claim mapping.
 #[cfg(feature = "jwt")]
 pub mod identity_jwt;
+
+/// API key directory lookup and record projection.
+#[cfg(feature = "api-key")]
+pub mod identity_api_key;

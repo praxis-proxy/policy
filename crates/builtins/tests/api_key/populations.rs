@@ -12,11 +12,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use praxis_policy_builtins::plugins::identity_api_key::{ApiKeyIdentityResolver, KIND};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload, TokenSource};
 use praxis_policy_core::plugin::PluginConfig;
-use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityResolver, KIND};
 
 use crate::support::{RecordFile, denial_code, file_config, hash, resolve_with_header, resolver};
 

@@ -28,7 +28,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::directory::PresentedKey;
+use crate::plugins::identity_api_key::directory::PresentedKey;
 
 /// Where the credential sits on the request.
 ///

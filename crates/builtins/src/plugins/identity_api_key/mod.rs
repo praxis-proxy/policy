@@ -1,26 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// praxis-policy-plugin-identity-api-key — API key `IdentityResolveHandler`.
-//
-// # Why this is a lookup and not a validation
-//
-// A JWT is self describing: it carries signed claims, so verifying one is
-// local and stateless. An API key is an opaque handle that carries nothing.
-// Authenticating one means finding the record keyed by it, and that record's
-// fields become the identity. Every design decision here follows from that.
-//
-// # Error handling
-//
-// Two surfaces, matching the JWT plugin:
-//
-//   * **Build / config errors** — constructors return
-//     `Result<Self, Box<PluginError>>`, surfacing as `PluginError::Config`.
-//   * **Runtime rejection** — the handler returns
-//     `PluginResult::deny(PluginViolation::new(code, reason))`, with `code`
-//     from `resolver::codes`.
-
 //! Resolves an API key to an identity by looking it up in a directory.
+//!
+//! # Why this is a lookup and not a validation
+//!
+//! A JWT is self describing: it carries signed claims, so verifying one is
+//! local and stateless. An API key is an opaque handle that carries nothing.
+//! Authenticating one means finding the record keyed by it, and that record's
+//! fields become the identity. Every design decision here follows from that.
+//!
+//! # Error handling
+//!
+//! Two surfaces, matching the JWT plugin:
+//!
+//!   * **Build / config errors** — constructors return
+//!     `Result<Self, Box<PluginError>>`, surfacing as `PluginError::Config`.
+//!   * **Runtime rejection** — the handler returns
+//!     `PluginResult::deny(PluginViolation::new(code, reason))`, with `code`
+//!     from `resolver::codes`.
 //!
 //! An API key carries nothing, so authentication is a lookup: find the record
 //! this credential keys, and project its fields onto the subject, client, or
@@ -36,7 +34,7 @@
 //! `raw_credentials`, so no downstream step can forward a caller's own
 //! credential to an upstream that never authenticated it.
 //!
-//! [`record_map`]: crate::config::ApiKeyResolverConfig::record_map
+//! [`record_map`]: crate::plugins::identity_api_key::config::ApiKeyResolverConfig::record_map
 
 /// A cache in front of a directory.
 pub mod cache;

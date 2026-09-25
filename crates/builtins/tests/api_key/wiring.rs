@@ -6,11 +6,11 @@
 //! The factory is the only path a real deployment takes, and it is the one a
 //! unit test of the resolver skips.
 
+use praxis_policy_builtins::plugins::identity_api_key::{ApiKeyIdentityFactory, KIND};
 use praxis_policy_core::error::PluginError;
 use praxis_policy_core::factory::PluginFactory as _;
 use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
-use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityFactory, KIND};
 
 use crate::support::{RecordFile, file_config, hash};
 

@@ -5,12 +5,12 @@
 
 use std::sync::Arc;
 
-use praxis_policy_core::host::InitExtensions;
-use praxis_policy_core::http_testing::{FakeTransport, granting};
-use praxis_policy_plugin_identity_api_key::{
+use praxis_policy_builtins::plugins::identity_api_key::{
     CacheConfig, CachingDirectory, DirectoryError, HttpDirectory, HttpDirectoryConfig,
     KeyDirectory as _, PresentedKey,
 };
+use praxis_policy_core::host::InitExtensions;
+use praxis_policy_core::http_testing::{FakeTransport, granting};
 
 const URL: &str = "https://maas-api.example/internal/v1/api-keys/validate";
 const KEY: &[u8] = b"sk-oai-abc123_secret";

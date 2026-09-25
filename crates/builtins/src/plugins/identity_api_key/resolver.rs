@@ -20,12 +20,14 @@ use praxis_policy_core::identity::mapping::{ClaimMapper as _, ConfiguredClaimMap
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{OnError, Plugin, PluginConfig, PluginMode};
 
-use crate::cache::CachingDirectory;
-use crate::config::{ApiKeyResolverConfig, ExpiryPolicy, ProviderConfig};
-use crate::credential::{CredentialLocation, Extraction};
-use crate::directory::KeyDirectory;
-use crate::file_directory::FileDirectory;
-use crate::http_directory::HttpDirectory;
+use crate::plugins::identity_api_key::cache::CachingDirectory;
+use crate::plugins::identity_api_key::config::{
+    ApiKeyResolverConfig, ExpiryPolicy, ProviderConfig,
+};
+use crate::plugins::identity_api_key::credential::{CredentialLocation, Extraction};
+use crate::plugins::identity_api_key::directory::KeyDirectory;
+use crate::plugins::identity_api_key::file_directory::FileDirectory;
+use crate::plugins::identity_api_key::http_directory::HttpDirectory;
 
 /// Denial codes, which a host maps to a status.
 ///

@@ -46,7 +46,9 @@ use praxis_policy_core::host::HostServices;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
+use crate::plugins::identity_api_key::directory::{
+    DirectoryError, KeyDirectory, KeyRecord, PresentedKey,
+};
 
 fn default_max_entries() -> usize {
     10_000

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+//! End to end behaviour of the API key resolver, from a config block and a
+//! record file through to a populated identity slot.
+//!
+//! One harness rather than a binary per concern: cargo links one executable
+//! per `tests/*.rs`, and these cases share their fixtures.
+
 #![allow(
     missing_docs,
     clippy::expect_used,
@@ -14,6 +20,13 @@
     reason = "test and example code"
 )]
 
-//! Integration harness for the `api_key` extension. One linked binary per
-//! extension: cargo links one executable per test target, and these cases share
-//! their fixtures.
+mod caching;
+mod expiry;
+mod extraction;
+mod file_backend;
+mod http_backend;
+mod populations;
+mod projection;
+mod wiring;
+
+pub mod support;

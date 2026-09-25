@@ -39,7 +39,7 @@ use praxis_policy_core::{
     plugin::PluginConfig,
 };
 
-use crate::ApiKeyIdentityResolver;
+use crate::plugins::identity_api_key::ApiKeyIdentityResolver;
 
 /// The plugin `kind:` string operators write in PPE YAML.
 pub const KIND: &str = "identity/api-key";

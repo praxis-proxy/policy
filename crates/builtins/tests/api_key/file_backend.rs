@@ -6,7 +6,7 @@
 
 use crate::support::{RecordFile, denial_code, file_config, hash, resolve_with_header, resolver};
 
-use praxis_policy_plugin_identity_api_key::{
+use praxis_policy_builtins::plugins::identity_api_key::{
     DirectoryError, FileDirectory, FileDirectoryConfig, KeyDirectory as _, PresentedKey,
 };
 

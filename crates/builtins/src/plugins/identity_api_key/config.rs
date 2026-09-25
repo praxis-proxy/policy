@@ -11,10 +11,10 @@ use praxis_policy_core::extensions::raw_credentials::TokenRole;
 use praxis_policy_core::identity::mapping::{ClaimMapConfig, ClaimsOverrides, ConfiguredClaimMap};
 use serde::{Deserialize, Serialize};
 
-use crate::cache::CacheConfig;
-use crate::credential::{Credential, CredentialLocation};
-use crate::file_directory::FileDirectoryConfig;
-use crate::http_directory::HttpDirectoryConfig;
+use crate::plugins::identity_api_key::cache::CacheConfig;
+use crate::plugins::identity_api_key::credential::{Credential, CredentialLocation};
+use crate::plugins::identity_api_key::file_directory::FileDirectoryConfig;
+use crate::plugins::identity_api_key::http_directory::HttpDirectoryConfig;
 
 /// Which backend holds the records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +135,8 @@ impl ApiKeyResolverConfig {
     /// index.
     pub fn validate(&self) -> Result<ConfiguredClaimMap, String> {
         self.location().validate()?;
-        let mapper = crate::record_map::compile(&self.record_map, &self.claims)?;
+        let mapper =
+            crate::plugins::identity_api_key::record_map::compile(&self.record_map, &self.claims)?;
         // A map that declares no section for the role this resolver fills maps
         // nothing, every time, and the resulting `auth.mapping_failed` names a
         // record rather than the config that cannot project one.

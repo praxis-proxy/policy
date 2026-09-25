@@ -42,7 +42,9 @@ use praxis_policy_core::http_retry::RetryPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
+use crate::plugins::identity_api_key::directory::{
+    DirectoryError, KeyDirectory, KeyRecord, PresentedKey,
+};
 
 /// The `kind:` string an operator writes under `provider:`.
 pub const KIND: &str = "http";
