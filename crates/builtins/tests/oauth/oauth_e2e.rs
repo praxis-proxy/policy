@@ -1248,3 +1248,363 @@ async fn a_host_refusal_is_reported_as_egress_denied_and_not_retried() {
         "retrying into an open circuit is pointless and feeds the breaker"
     );
 }
+
+// =====================================================================
+// Effect recording
+// =====================================================================
+//
+// A mint is irreversible and outlives the request, so the record has to
+// survive a crash between deciding to mint and minting. These assert what
+// reaches the log, since that is the only evidence a later reconciliation
+// has to work from.
+
+/// A log that keeps every record in memory.
+#[derive(Debug, Default)]
+struct SpyLog(std::sync::Mutex<Vec<praxis_policy_core::effect::EffectRecord>>);
+
+impl SpyLog {
+    fn states(&self) -> Vec<praxis_policy_core::effect::EffectState> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.state.clone())
+            .collect()
+    }
+
+    fn records(&self) -> Vec<praxis_policy_core::effect::EffectRecord> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl praxis_policy_core::effect::DurableEffectLog for SpyLog {
+    async fn append(
+        &self,
+        effect: &praxis_policy_core::effect::EffectRecord,
+    ) -> Result<(), Box<praxis_policy_core::error::PluginError>> {
+        self.0.lock().unwrap().push(effect.clone());
+        Ok(())
+    }
+}
+
+/// A log that refuses every write, standing in for a full disk.
+#[derive(Debug)]
+struct RefusingLog;
+
+#[async_trait::async_trait]
+impl praxis_policy_core::effect::DurableEffectLog for RefusingLog {
+    async fn append(
+        &self,
+        _effect: &praxis_policy_core::effect::EffectRecord,
+    ) -> Result<(), Box<praxis_policy_core::error::PluginError>> {
+        Err(Box::new(praxis_policy_core::error::PluginError::Config {
+            message: "disk full".into(),
+        }))
+    }
+}
+
+async fn manager_with_log(
+    http: &Arc<FakeTransport>,
+    log: Arc<dyn praxis_policy_core::effect::DurableEffectLog>,
+) -> Arc<PolicyEngine> {
+    let cfg = plugin_config(&token_endpoint());
+    let delegator = OAuthDelegator::new(cfg.clone()).expect("delegator constructs");
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_handler_for_names::<TokenDelegateHook, _>(
+        Arc::new(delegator),
+        cfg,
+        &[HOOK_TOKEN_DELEGATE],
+    )
+    .unwrap();
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    mgr.set_http_transport(transport);
+    mgr.set_effect_log(log);
+    mgr.initialize().await.unwrap();
+    mgr
+}
+
+#[tokio::test]
+async fn a_successful_mint_records_intent_then_confirmation() {
+    use praxis_policy_core::effect::EffectState;
+
+    let log = Arc::new(SpyLog::default());
+    let mgr = manager_with_log(&idp(200, &ok_token_response()), log.clone()).await;
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+
+    assert!(result.continue_processing);
+    assert_eq!(
+        log.states(),
+        vec![EffectState::Prepared, EffectState::Confirmed],
+        "the intent is recorded before the mint and the outcome after"
+    );
+    let records = log.records();
+    assert_eq!(records[0].kind, "token_mint");
+    // Attribution is the framework's, so the record names the plugin that
+    // actually caused the act.
+    assert_eq!(records[0].plugin_name.as_deref(), Some("oauth-delegator"));
+    assert_eq!(
+        records[0].details["audience"],
+        "https://downstream.example.com"
+    );
+    // The key ties the intent to its outcome, and is per attempt.
+    assert_eq!(records[0].key, records[1].key);
+}
+
+/// The `IdP` said no, so provably nothing was issued. Recording this as
+/// unknown would leave an operator chasing a token that never existed.
+#[tokio::test]
+async fn a_refused_mint_is_recorded_rejected() {
+    use praxis_policy_core::effect::EffectState;
+
+    let log = Arc::new(SpyLog::default());
+    let mgr = manager_with_log(&idp(400, r#"{"error":"invalid_grant"}"#), log.clone()).await;
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+
+    assert!(!result.continue_processing);
+    assert_eq!(
+        log.states(),
+        vec![EffectState::Prepared, EffectState::Rejected]
+    );
+}
+
+/// The answer was lost, not refused. The mint may still have landed at the
+/// `IdP`, so the record stays open for reconciliation rather than claiming
+/// nothing happened.
+#[tokio::test]
+async fn a_lost_answer_is_recorded_unknown_not_rejected() {
+    use praxis_policy_core::effect::EffectState;
+
+    let log = Arc::new(SpyLog::default());
+    let http = Arc::new(
+        FakeTransport::new().fail(TOKEN_PATH, HttpTransportError::Connect("refused".into())),
+    );
+    let mgr = manager_with_log(&http, log.clone()).await;
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+
+    assert!(!result.continue_processing);
+    assert_eq!(
+        log.states(),
+        vec![EffectState::Prepared, EffectState::Unknown],
+        "an unreachable IdP leaves the outcome open, never rejected"
+    );
+}
+
+/// The write-ahead guarantee, at the one place it costs something: if the
+/// intent cannot be recorded, the delegation fails rather than minting a
+/// credential nothing accounts for.
+#[tokio::test]
+async fn a_mint_does_not_happen_when_its_intent_cannot_be_recorded() {
+    let http = idp(200, &ok_token_response());
+    let mgr = manager_with_log(&http, Arc::new(RefusingLog)).await;
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+
+    assert!(!result.continue_processing);
+    assert_eq!(
+        result.violation.expect("a refused write denies").code,
+        "delegation.effect_log_failed"
+    );
+    assert!(
+        http.requests().is_empty(),
+        "the IdP must never be called when the intent was not recorded"
+    );
+}
+
+/// The key that identifies a mint exists before the request does, and travels
+/// with it when an operator has named a header to carry it.
+///
+/// Nothing in OAuth defines where to put it — neither RFC 6749 nor RFC 8693
+/// gives the token endpoint an idempotency or client-reference parameter — so
+/// the header is opt-in. What was wrong was the ordering: the key was minted
+/// inside the effect bracket, after the request had already been assembled, so
+/// it was provably absent from anything the `IdP` saw and no lookup by it could
+/// ever have succeeded.
+#[tokio::test]
+async fn a_named_idempotency_header_carries_the_effect_key_to_the_idp() {
+    let mut cfg = plugin_config(&token_endpoint());
+    let config = cfg.config.as_mut().expect("the delegator has config");
+    config["idempotency_header"] = json!("idempotency-key");
+    let delegator = OAuthDelegator::new(cfg.clone()).expect("delegator constructs");
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_handler_for_names::<TokenDelegateHook, _>(
+        Arc::new(delegator),
+        cfg,
+        &[HOOK_TOKEN_DELEGATE],
+    )
+    .unwrap();
+    let http = idp(200, &ok_token_response());
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    mgr.set_http_transport(transport);
+    let log = Arc::new(SpyLog::default());
+    let log_dyn: Arc<dyn praxis_policy_core::effect::DurableEffectLog> = log.clone();
+    mgr.set_effect_log(log_dyn);
+    mgr.initialize().await.unwrap();
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+    assert!(result.continue_processing);
+
+    let sent = http.last_request().expect("the IdP was called");
+    let header = sent
+        .headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .expect("the header was attached");
+    let records = log.records();
+    assert_eq!(
+        header, records[0].key,
+        "the IdP is sent the same key the effect log recorded, which is what a \
+         lookup by key would need"
+    );
+}
+
+/// Unset by default, so no header of our own invention reaches an `IdP` that
+/// never asked for one.
+#[tokio::test]
+async fn without_a_named_header_nothing_extra_is_sent() {
+    let http = idp(200, &ok_token_response());
+    let mgr = manager_with_log(&http, Arc::new(SpyLog::default())).await;
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+    assert!(result.continue_processing);
+
+    let sent = http.last_request().expect("the IdP was called");
+    assert!(
+        sent.headers.get("idempotency-key").is_none(),
+        "no header unless one is named: {:?}",
+        sent.headers
+    );
+}
+
+/// With no log configured the delegator behaves exactly as it did before
+/// effects existed. This is the default an operator gets, and the reason
+/// auditing is not load-bearing.
+#[tokio::test]
+async fn without_a_log_the_delegation_still_works() {
+    let mgr = build_manager(&idp(200, &ok_token_response())).await;
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+
+    assert!(result.continue_processing);
+}
+
+/// A delegator configured in a non-serial mode refuses to mint, and says so.
+///
+/// This is a behaviour change, and a deliberate one. The concurrent phase
+/// never applies a plugin's payload modification, so a delegator configured
+/// there used to mint a real credential at the `IdP` and have the result
+/// thrown away: an irreversible act that produced nothing and that nobody
+/// was tracking. Refusing before the call is the improvement. The violation
+/// names the mode rather than the log, because the fix is a `mode:` line and
+/// not a disk.
+#[tokio::test]
+async fn a_delegator_in_a_non_serial_mode_refuses_before_calling_the_idp() {
+    let mut cfg = plugin_config(&token_endpoint());
+    cfg.mode = PluginMode::Concurrent;
+    let delegator = OAuthDelegator::new(cfg.clone()).expect("delegator constructs");
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_handler_for_names::<TokenDelegateHook, _>(
+        Arc::new(delegator),
+        cfg,
+        &[HOOK_TOKEN_DELEGATE],
+    )
+    .unwrap();
+    let http = idp(200, &ok_token_response());
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    mgr.set_http_transport(transport);
+    mgr.initialize().await.unwrap();
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+
+    assert!(!result.continue_processing);
+    let violation = result.violation.expect("a refusal surfaces");
+    assert_eq!(violation.code, "delegation.effects_not_permitted");
+    // The code is the category; the message has to carry what an operator
+    // needs to act, which is this plugin, this mode, and the line to change.
+    assert!(
+        violation.reason.contains("oauth-delegator"),
+        "should name the plugin to move: {}",
+        violation.reason
+    );
+    assert!(
+        violation.reason.contains("Concurrent"),
+        "should name the mode that refused: {}",
+        violation.reason
+    );
+    assert!(
+        violation.reason.contains("`mode:`"),
+        "should name the config key to change: {}",
+        violation.reason
+    );
+    assert!(
+        http.requests().is_empty(),
+        "no credential is minted for a result that would be discarded"
+    );
+}

@@ -26,14 +26,24 @@ impl PluginFactory for AuditLoggerFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
         let logger = Arc::new(AuditLogger::new(config.clone())?);
 
+        // No `hooks:` means sink mode: the logger registers no CMF handlers
+        // and instead attaches to the executor's verdict path, where it sees
+        // denied requests too. Listing hooks keeps the post-hook observer,
+        // which only ever sees traffic that was allowed through.
         if config.hooks.is_empty() {
-            return Err(Box::new(PluginError::Config {
-                message: format!(
-                    "plugin '{}' (praxis-policy-plugin-audit-logger): `hooks:` must list at \
-                     least one CMF hook to audit (e.g. cmf.tool_pre_invoke)",
-                    config.name
-                ),
-            }));
+            tracing::info!(
+                plugin = %config.name,
+                "audit-logger '{}' running as a decision sink (no `hooks:` listed)",
+                config.name,
+            );
+        } else {
+            tracing::info!(
+                plugin = %config.name,
+                hooks = ?config.hooks,
+                "audit-logger '{}' running as a CMF post-hook observer on {:?}",
+                config.name,
+                config.hooks,
+            );
         }
 
         let handlers: Vec<_> = config
@@ -55,7 +65,12 @@ impl PluginFactory for AuditLoggerFactory {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
     use praxis_policy_core::plugin::{OnError, PluginMode};
@@ -103,24 +118,52 @@ mod tests {
         assert_eq!(names, hooks, "one handler per hook, in config order");
     }
 
-    /// An audit logger wired to no hooks would load without error and then never
-    /// run, which is worse than refusing: the operator believes they have an
-    /// audit trail.
+    /// No `hooks:` means sink mode: the logger registers no per-hook handlers
+    /// and instead attaches to the executor's verdict path. The reason an
+    /// empty list is no longer a config error is that this is now the
+    /// recommended way to run it, and the mode that sees denied requests.
     #[test]
-    fn empty_hooks_is_rejected_and_the_message_names_the_key() {
-        // `.err()` rather than `expect_err`: PluginInstance is not Debug.
-        let err = AuditLoggerFactory
-            .create(&cfg(vec![]))
-            .err()
-            .expect("no hooks must not build");
+    fn empty_hooks_builds_a_sink_with_no_per_hook_handlers() {
+        let Ok(inst) = AuditLoggerFactory.create(&cfg(vec![])) else {
+            panic!("no hooks is sink mode, not an error");
+        };
         assert!(
-            matches!(*err, PluginError::Config { .. }),
-            "expected a config error, got {err:?}"
+            inst.handlers.is_empty(),
+            "sink mode registers no per-hook handlers"
         );
-        let msg = err.to_string();
         assert!(
-            msg.contains("hooks:"),
-            "the message must name the key the operator has to fix: {msg}"
+            inst.plugin.clone().as_audit_handler().is_some(),
+            "and attaches as a decision sink instead"
+        );
+    }
+
+    /// The sink-mode config in `docs/content/auditing.md`, built through the factory
+    /// the way the engine would. A documented example that does not construct
+    /// is a bug report waiting to be filed.
+    #[test]
+    fn the_documented_sink_config_builds_a_sink() {
+        let config = PluginConfig {
+            name: "audit".into(),
+            kind: KIND.into(),
+            hooks: Vec::new(),
+            mode: PluginMode::Audit,
+            config: Some(serde_json::json!({
+                "destination": "stderr",
+                "source": "gateway-eu-1",
+            })),
+            ..Default::default()
+        };
+
+        let Ok(inst) = AuditLoggerFactory.create(&config) else {
+            panic!("the documented sink config must build");
+        };
+        assert!(
+            inst.handlers.is_empty(),
+            "sink mode registers no hook handlers"
+        );
+        assert!(
+            inst.plugin.clone().as_audit_handler().is_some(),
+            "and attaches as a decision sink"
         );
     }
 }

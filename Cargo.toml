@@ -113,6 +113,11 @@ rmp-serde = "1"
 serde_bytes = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+# One `sha2` for the whole tree. Four crates hash for unrelated reasons
+# (audit provenance, session ids, a PKCE verifier), and `hmac` 0.13 pairs
+# with the `digest` 0.11 that this major brings. Splitting the requirement
+# would put two `sha2` and two `digest` in the build.
+sha2 = "0.11"
 
 # Internal crates. Single source of truth for each one's path and version
 # requirement; members depend on these with `{ workspace = true }` so a version

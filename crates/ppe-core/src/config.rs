@@ -177,6 +177,61 @@ pub struct EngineSettings {
     /// investigate the entity-name growth.
     #[serde(default = "default_route_cache_max_entries")]
     pub route_cache_max_entries: usize,
+
+    /// Path to a durable write-ahead log for irreversible effects: token
+    /// mints, approval grants.
+    ///
+    /// With a path set, a plugin's intent is recorded and `fsync`'d before it
+    /// acts, so a process that dies mid-act leaves a record to reconcile
+    /// against the participant. Unset (the default) leaves effects
+    /// unrecorded: they still run, and a plugin behaves identically either
+    /// way. Auditing is a choice the operator makes, not one a plugin
+    /// depends on.
+    #[serde(default)]
+    pub effect_log_path: Option<String>,
+
+    /// Appends between automatic compactions of the effect log.
+    ///
+    /// Only meaningful with `effect_log_path` set. `0` disables automatic
+    /// compaction, leaving it to the recovery run at startup. Unset uses the
+    /// built-in default.
+    #[serde(default)]
+    pub effect_log_compaction_threshold: Option<usize>,
+
+    /// Record a content hash of the payload for audit provenance.
+    ///
+    /// The executor hashes the payload at pipeline entry and an audit sink
+    /// hashes the output, so a reader can tell whether a stage changed the
+    /// content without the trail holding either version. Only the digest is
+    /// kept, never the bytes.
+    ///
+    /// Off by default: hashing sits on the request path, so it is a cost an
+    /// operator opts into.
+    #[serde(default)]
+    pub capture_content_provenance: bool,
+
+    /// Prefix for the audit stream ids, so records from one process are
+    /// attributable to it rather than to the bare per-type labels.
+    ///
+    /// `gw-1` gives stream ids `gw-1:decision` and `gw-1:effect`. The type
+    /// suffix always survives, so each stream stays independently gap-free.
+    /// A consumer recovering the type splits on the last colon, since a
+    /// namespace may itself contain one. Empty or whitespace is refused at
+    /// load rather than producing a stream id starting with a colon.
+    #[serde(default)]
+    pub audit_stream_namespace: Option<String>,
+
+    /// Override the audit epoch, the executor's generation identifier.
+    ///
+    /// Deliberately not part of the YAML surface. The epoch has to strictly
+    /// increase per generation so a new one is distinguishable from records
+    /// going missing, and a value fixed in a file cannot do that: it would pin
+    /// the epoch across every restart and silently break the guarantee. A host
+    /// that sets this in code owns the invariant, and must supply a larger
+    /// value on every load, not once per boot, because a reload builds a fresh
+    /// executor with the counters back at zero.
+    #[serde(skip)]
+    pub audit_epoch: Option<u64>,
 }
 
 impl Default for EngineSettings {
@@ -186,6 +241,11 @@ impl Default for EngineSettings {
             plugin_timeout: 30,
             short_circuit_on_deny: true,
             route_cache_max_entries: default_route_cache_max_entries(),
+            effect_log_path: None,
+            effect_log_compaction_threshold: None,
+            capture_content_provenance: false,
+            audit_stream_namespace: None,
+            audit_epoch: None,
         }
     }
 }
@@ -1277,16 +1337,27 @@ const ROUTE_STRUCTURAL_KEYS: &[ConfigKey] = &[
     structural_key("response", KeyOwner::Apl),
 ];
 
-/// The keys the `engine_settings:` block carries, the [`EngineSettings`] fields.
+/// The keys the `engine_settings:` block carries, the [`EngineSettings`] fields
+/// that have a YAML spelling.
 ///
 /// [`EngineSettings`] drops an unknown field, so a setting the runtime never
 /// honored used to load clean and warn. The table is what makes it a load error
 /// naming its per-plugin replacement.
+///
+/// The table is the whole accept set, so a field this list omits is refused at
+/// load however well [`EngineSettings`] reads it. `audit_epoch` is the one
+/// field deliberately absent: it is `#[serde(skip)]` and settable only by a
+/// host in code, so a line here would accept a YAML key that pins the epoch
+/// across restarts, which is the guarantee the epoch exists to give.
 const ENGINE_SETTINGS_KEYS: &[ConfigKey] = &[
     structural_key("dispatch", KeyOwner::Core),
     structural_key("plugin_timeout", KeyOwner::Core),
     structural_key("short_circuit_on_deny", KeyOwner::Core),
     structural_key("route_cache_max_entries", KeyOwner::Core),
+    structural_key("effect_log_path", KeyOwner::Core),
+    structural_key("effect_log_compaction_threshold", KeyOwner::Core),
+    structural_key("capture_content_provenance", KeyOwner::Core),
+    structural_key("audit_stream_namespace", KeyOwner::Core),
 ];
 
 /// The keys one map-form step of an `authentication:` block carries.
@@ -2258,6 +2329,20 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     validate_declared_hooks(config)?;
     reject_reserved_route_names(config)?;
     validate_assertions(config)?;
+
+    // An empty namespace would compose stream ids like ":decision", which is
+    // neither the bare label nor a usable namespace, so refuse it rather than
+    // emit records nobody can attribute.
+    if let Some(ns) = &config.engine_settings.audit_stream_namespace
+        && ns.trim().is_empty()
+    {
+        {
+            return Err(Box::new(PluginError::Config {
+                message: "engine_settings.audit_stream_namespace is empty; remove the key to                           use the bare stream labels, or give it a value naming this process"
+                    .to_owned(),
+            }));
+        }
+    }
 
     // Shape only. Nothing is read from a backend here: a document that names a
     // provider it never declared is wrong whether or not the backend is
@@ -9149,5 +9234,109 @@ routes:
     fn a_config_with_no_flag_above_a_route_reports_nothing() {
         let config = load(FOUR_LEVELS);
         assert!(dropped_inherited_assertions(&config).is_empty());
+    }
+    /// The configuration in `docs/content/auditing.md` has to load. A doc whose
+    /// examples do not parse is worse than no doc: it sends an operator
+    /// debugging their YAML instead of their policy.
+    ///
+    /// Through `parse_config` rather than `serde_yaml`, because the allowlist
+    /// is the half that rejects: a typed parse drops a key the table omits and
+    /// succeeds, so only the loader catches the doc and `ENGINE_SETTINGS_KEYS`
+    /// disagreeing.
+    #[test]
+    fn the_documented_auditing_config_loads() {
+        let yaml = "
+engine_settings:
+  effect_log_path: /var/lib/praxis/effects.ndjson
+  effect_log_compaction_threshold: 1024
+  capture_content_provenance: true
+  audit_stream_namespace: gw-1
+plugins:
+  - name: audit
+    kind: audit/logger
+    mode: audit
+    config:
+      destination: stderr
+      source: gateway-eu-1
+";
+        let config = parse_config(yaml).expect("the documented config must load");
+        assert_eq!(
+            config.engine_settings.effect_log_path.as_deref(),
+            Some("/var/lib/praxis/effects.ndjson")
+        );
+        assert_eq!(
+            config.engine_settings.effect_log_compaction_threshold,
+            Some(1024)
+        );
+        assert!(config.engine_settings.capture_content_provenance);
+        assert_eq!(
+            config.engine_settings.audit_stream_namespace.as_deref(),
+            Some("gw-1")
+        );
+        assert_eq!(config.plugins[0].kind, "audit/logger");
+    }
+
+    /// An empty namespace would compose stream ids like ":decision", which is
+    /// neither the bare label nor an attributable one, so it is refused rather
+    /// than emitting records nobody can place.
+    #[test]
+    fn an_empty_audit_stream_namespace_is_rejected() {
+        let mut config = PolicyConfig::default();
+        config.engine_settings.audit_stream_namespace = Some("   ".to_owned());
+
+        let err = validate_config(&config).expect_err("an empty namespace must not load");
+
+        assert!(
+            err.to_string().contains("audit_stream_namespace"),
+            "the message must name the key to fix: {err}"
+        );
+    }
+
+    #[test]
+    fn a_named_audit_stream_namespace_loads() {
+        let mut config = PolicyConfig::default();
+        config.engine_settings.audit_stream_namespace = Some("gw-1".to_owned());
+
+        validate_config(&config).expect("a named namespace is fine");
+    }
+
+    /// [`ENGINE_SETTINGS_KEYS`] is synced by hand with [`EngineSettings`], so
+    /// a field can be added to the struct, read by the runtime, and refused by
+    /// the loader for every config that sets it. This holds the two together
+    /// across every field rather than the ones a test names.
+    ///
+    /// `audit_epoch` is `#[serde(skip)]`, so it is absent from both sides and
+    /// the comparison stays honest about it having no YAML spelling.
+    #[test]
+    fn every_engine_setting_field_is_an_accepted_key() {
+        let serialized = serde_yaml::to_value(EngineSettings::default())
+            .expect("engine settings must serialize");
+        let fields = serialized
+            .as_mapping()
+            .expect("engine settings serialize as a mapping");
+
+        for key in fields.keys() {
+            let name = key.as_str().expect("field names are strings");
+            assert!(
+                ENGINE_SETTINGS_KEYS.iter().any(|k| k.name == name),
+                "`{name}` is an EngineSettings field but not an accepted key, \
+                 so a config setting it is refused at load"
+            );
+        }
+    }
+
+    /// The epoch strictly increases per generation, which a value fixed in a
+    /// file cannot do: pinned across restarts, it makes records going missing
+    /// indistinguishable from a new generation. The loader refuses the key so
+    /// the only way to set it stays the host code that owns the invariant.
+    #[test]
+    fn the_audit_epoch_has_no_yaml_key() {
+        let err = parse_config("engine_settings:\n  audit_epoch: 7\n")
+            .expect_err("audit_epoch must not be settable from YAML");
+
+        assert!(
+            err.to_string().contains("audit_epoch"),
+            "the message must name the refused key: {err}"
+        );
     }
 }

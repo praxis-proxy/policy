@@ -49,11 +49,12 @@ use zeroize::Zeroizing;
 
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::delegation::{DelegationPayload, DelegationSubject, TokenDelegateHook};
+use praxis_policy_core::effect::{EffectRecord, EffectState};
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::extensions::raw_credentials::RawDelegatedToken;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
-use praxis_policy_core::host::{HostServices, HttpRequestError};
+use praxis_policy_core::host::{HostServices as _, HttpRequestError};
 use praxis_policy_core::http::{HttpRequest, HttpTransportError, form_urlencode};
 use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
@@ -245,6 +246,30 @@ impl OAuthDelegator {
             })
     }
 
+    /// Attach the mint's effect key, when the operator has named a header to
+    /// carry it.
+    ///
+    /// Unset by default and a no-op then, because there is nowhere standard to
+    /// put it: the token endpoint takes no idempotency or client-reference
+    /// parameter in either RFC 6749 or RFC 8693. Sending a header of our own
+    /// invention to every `IdP` would claim a guarantee neither spec makes, so
+    /// the operator names one their `IdP` actually honours or nothing is sent.
+    fn with_idempotency_key(
+        &self,
+        request: HttpRequest,
+        key: &str,
+    ) -> Result<HttpRequest, Box<PluginViolation>> {
+        let Some(header) = self.typed.idempotency_header.as_deref() else {
+            return Ok(request);
+        };
+        request.header(header, key).map_err(|e| {
+            Box::new(PluginViolation::new(
+                "delegation.bad_request",
+                format!("could not attach the idempotency header `{header}`: {e}"),
+            ))
+        })
+    }
+
     /// `Authorization: Basic base64(client_id:client_secret)`.
     ///
     /// Built here rather than in the transport for the same reason as
@@ -312,7 +337,7 @@ impl OAuthDelegator {
     async fn mint_base_token(
         &self,
         svid: &str,
-        svc: &dyn HostServices,
+        ext: &Extensions,
     ) -> Result<String, PluginViolation> {
         let form = [
             ("grant_type", GRANT_TYPE_CLIENT_CREDENTIALS),
@@ -322,42 +347,150 @@ impl OAuthDelegator {
             ),
             ("client_assertion", svid),
         ];
+        // The key comes first so it can travel with the request. Generating it
+        // inside `audit_mint`, after the request was already assembled, left it
+        // provably absent from what the IdP saw, which is the one thing that
+        // could have made an indeterminate mint answerable.
+        let key = new_effect_key();
+        // Built before the intent is recorded. A request we could not even
+        // assemble was never sent, so it is not an effect and must not leave
+        // one to reconcile.
+        let request = self
+            .token_request(&form)
+            .and_then(|r| self.with_idempotency_key(r, &key));
+        let request = request.map_err(|v| *v)?;
 
-        // Minting is not idempotent: repeat one that already landed and
-        // the IdP issues a second credential nobody holds. So retry only
-        // failures that provably never reached it — a timeout ends the
-        // attempt and the caller treats the outcome as indeterminate.
-        let response = svc
-            .http_request(
-                self.token_request(&form).map_err(|v| *v)?,
-                RetryPolicy::undelivered_only(),
-            )
-            .await
-            .map_err(|e| self.violation_for("workload client_assertion POST", &e))?;
+        self.audit_mint(
+            ext,
+            &key,
+            "workload client_assertion mint",
+            &[("leg", "client_assertion")],
+            || async {
+                // Minting is not idempotent: repeat one that already landed and
+                // the IdP issues a second credential nobody holds. So retry only
+                // failures that provably never reached it — a timeout ends the
+                // attempt and the caller treats the outcome as indeterminate.
+                let response = ext
+                    .http_request(request, RetryPolicy::undelivered_only())
+                    .await
+                    .map_err(|e| self.violation_for("workload client_assertion POST", &e))?;
 
-        let status = response.status;
-        if !response.is_success() {
-            let body = String::from_utf8_lossy(&response.body).into_owned();
-            // Sanitize: surface only the OAuth `error` CODE (a fixed
-            // vocabulary — invalid_client, invalid_grant, …), never the
-            // free-text `error_description` or the raw body. Leg 1 submits
-            // the SVID as a `client_assertion`, and an IdP may echo that
-            // credential material back in those fields.
-            let reason = match serde_json::from_str::<TokenErrorResponse>(&body) {
-                Ok(err) => format!("workload client_assertion rejected: {}", err.error),
-                Err(_) => format!("workload client_assertion rejected (HTTP {status})"),
-            };
-            return Err(PluginViolation::new("delegation.idp_rejected", reason));
-        }
+                let status = response.status;
+                if !response.is_success() {
+                    let body = String::from_utf8_lossy(&response.body).into_owned();
+                    // Sanitize: surface only the OAuth `error` CODE (a fixed
+                    // vocabulary — invalid_client, invalid_grant, …), never the
+                    // free-text `error_description` or the raw body. Leg 1 submits
+                    // the SVID as a `client_assertion`, and an IdP may echo that
+                    // credential material back in those fields.
+                    let reason = match serde_json::from_str::<TokenErrorResponse>(&body) {
+                        Ok(err) => format!("workload client_assertion rejected: {}", err.error),
+                        Err(_) => format!("workload client_assertion rejected (HTTP {status})"),
+                    };
+                    return Err(PluginViolation::new("delegation.idp_rejected", reason));
+                }
 
-        match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {
-            Ok(parsed) => Ok(parsed.access_token),
-            Err(e) => Err(PluginViolation::new(
-                "delegation.bad_response",
-                format!("workload client_assertion response wasn't valid token JSON: {e}"),
-            )),
-        }
+                match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {
+                    Ok(parsed) => Ok(parsed.access_token),
+                    Err(e) => Err(PluginViolation::new(
+                        "delegation.bad_response",
+                        format!("workload client_assertion response wasn't valid token JSON: {e}"),
+                    )),
+                }
+            },
+        )
+        .await
     }
+
+    /// Bracket a mint with write-ahead effect recording.
+    ///
+    /// The intent is durably recorded before `mint` runs and fails closed: no
+    /// record, no mint. The outcome is then recorded from what the `IdP`
+    /// actually said, which is finer than the default the core bracket would
+    /// infer, because this plugin can tell a refusal from a lost answer:
+    ///
+    /// - `Confirmed` on success, and on a 2xx whose body would not parse. The
+    ///   token was minted either way; only our reading of it failed.
+    /// - `Rejected` on a non-2xx, where the `IdP` said no and provably issued
+    ///   nothing.
+    /// - `Unknown` on a timeout or an unreachable `IdP`, where the mint may
+    ///   still have landed. Recovery reconciles it by key rather than
+    ///   assuming it did not happen.
+    ///
+    /// With no effect log configured this just runs `mint`.
+    async fn audit_mint<F, Fut, T>(
+        &self,
+        ext: &Extensions,
+        key: &str,
+        description: &str,
+        details: &[(&str, &str)],
+        mint: F,
+    ) -> Result<T, PluginViolation>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, PluginViolation>>,
+    {
+        let mut intent = EffectRecord::prepared("token_mint", description, key)
+            .with_detail("token_endpoint", self.typed.token_endpoint.clone());
+        for (k, v) in details {
+            intent = intent.with_detail(*k, (*v).to_owned());
+        }
+
+        if let Err(e) = ext.begin_effect(&intent).await {
+            // Two very different problems, and an operator fixes them in
+            // different places: the phase this plugin runs in cannot perform
+            // an irreversible act at all, or it can and the record would not
+            // persist. Reporting both as a write failure would send someone
+            // looking at their disk when the answer is a `mode:` line.
+            let wrong_phase = matches!(
+                e.as_ref(),
+                PluginError::Execution { code: Some(c), .. }
+                    if c == "effect_phase_not_permitted" || c == "effect_extensions_detached"
+            );
+            return Err(if wrong_phase {
+                PluginViolation::new("delegation.effects_not_permitted", format!("{e}"))
+            } else {
+                PluginViolation::new(
+                    "delegation.effect_log_failed",
+                    format!("could not durably record the token-mint intent: {e}"),
+                )
+            });
+        }
+
+        let outcome = mint().await;
+
+        let state = match &outcome {
+            Ok(_) => EffectState::Confirmed,
+            Err(v) => match v.code.as_str() {
+                "delegation.idp_rejected" => EffectState::Rejected,
+                "delegation.bad_response" => EffectState::Confirmed,
+                _ => EffectState::Unknown,
+            },
+        };
+        // Best effort: the mint already happened, so a failure here cannot
+        // un-happen it and must not fail the delegation. It is logged rather
+        // than swallowed, so a persistently failing log is visible and the
+        // intent is left for recovery to reconcile by key.
+        if let Err(e) = ext.complete_effect(&intent, state).await {
+            tracing::warn!(
+                effect_key = %intent.key,
+                error = %e,
+                "could not record the token-mint outcome; recovery will reconcile by key"
+            );
+        }
+
+        outcome
+    }
+}
+
+/// A fresh key per mint attempt.
+///
+/// Recovery resolves keys across the whole log, so this must never be reused:
+/// a stable key would let an earlier attempt's outcome mask a later attempt's
+/// orphaned intent, and the one mint nobody can account for would be the one
+/// skipped.
+fn new_effect_key() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Subset of the RFC 8693 response we care about.
@@ -483,9 +616,16 @@ impl OAuthDelegator {
         // Same non-idempotency as leg 1, and it matters more here: this
         // is the exchange that mints the delegated credential. Retrying a
         // timed-out exchange could leave a live token nobody is tracking.
+        //
+        // Same ordering as leg 1: the key exists before the request does, so
+        // an operator who has named an idempotency header gets it sent.
+        let key = new_effect_key();
         let request = match self.token_request(&form) {
             Ok(r) => match r.header("authorization", self.basic_auth_header()) {
-                Ok(r) => r,
+                Ok(r) => match self.with_idempotency_key(r, &key) {
+                    Ok(r) => r,
+                    Err(v) => return Err(*v),
+                },
                 Err(e) => {
                     return Err(PluginViolation::new(
                         "delegation.bad_request",
@@ -496,39 +636,51 @@ impl OAuthDelegator {
             Err(v) => return Err(*v),
         };
 
-        let response = match ext
-            .http_request(request, RetryPolicy::undelivered_only())
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(self.violation_for("token-exchange POST", &e));
-            },
-        };
+        // The bracket covers the POST and reading the answer, and stops
+        // there. Everything below works on a token the IdP has already
+        // issued, so a later refusal (narrower scopes than asked for) is a
+        // delegation failure and not a mint that failed to happen.
+        let parsed = self
+            .audit_mint(
+                ext,
+                &key,
+                "token exchange",
+                &[("audience", audience), ("scope", scope.as_str())],
+                || async {
+                    let response = match ext
+                        .http_request(request, RetryPolicy::undelivered_only())
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return Err(self.violation_for("token-exchange POST", &e));
+                        },
+                    };
 
-        let status = response.status;
-        if !response.is_success() {
-            let body = String::from_utf8_lossy(&response.body).into_owned();
-            // Same sanitization as leg 1: the OAuth `error` CODE only,
-            // never `error_description` or the raw body. Leg 2 submits
-            // the caller's bearer as `subject_token`, and an IdP may
-            // echo that credential back in those fields.
-            let reason = match serde_json::from_str::<TokenErrorResponse>(&body) {
-                Ok(err) => format!("token exchange rejected: {}", err.error),
-                Err(_) => format!("token exchange rejected (HTTP {status})"),
-            };
-            return Err(PluginViolation::new("delegation.idp_rejected", reason));
-        }
+                    let status = response.status;
+                    if !response.is_success() {
+                        let body = String::from_utf8_lossy(&response.body).into_owned();
+                        // Same sanitization as leg 1: the OAuth `error` CODE only,
+                        // never `error_description` or the raw body. Leg 2 submits
+                        // the caller's bearer as `subject_token`, and an IdP may
+                        // echo that credential back in those fields.
+                        let reason = match serde_json::from_str::<TokenErrorResponse>(&body) {
+                            Ok(err) => format!("token exchange rejected: {}", err.error),
+                            Err(_) => format!("token exchange rejected (HTTP {status})"),
+                        };
+                        return Err(PluginViolation::new("delegation.idp_rejected", reason));
+                    }
 
-        let parsed = match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(PluginViolation::new(
-                    "delegation.bad_response",
-                    format!("IdP response wasn't valid token-exchange JSON: {e}"),
-                ));
-            },
-        };
+                    match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {
+                        Ok(p) => Ok(p),
+                        Err(e) => Err(PluginViolation::new(
+                            "delegation.bad_response",
+                            format!("IdP response wasn't valid token-exchange JSON: {e}"),
+                        )),
+                    }
+                },
+            )
+            .await?;
 
         // Compute effective scopes. IdP's `scope` field wins (it
         // reflects what was actually granted, possibly narrower

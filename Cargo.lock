@@ -2789,6 +2789,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "yaml_serde",
  "zeroize",
 ]
@@ -2801,6 +2802,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "futures",
  "hashbrown 0.17.1",
  "http",
  "loom",
@@ -2808,6 +2810,7 @@ dependencies = [
  "praxis-policy-orchestration",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "tokio-util",

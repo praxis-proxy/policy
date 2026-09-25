@@ -68,6 +68,8 @@ history.
   adding and testing a provider-specific JWT claim mapper preset
 - [Header Assertions](assertions.md):
   projecting derived identity onto upstream requests
+- [Auditing](auditing.md):
+  decision records, write-ahead effect records, and writing a sink
 - [Deployment](deployment.md):
   the same policy at a gateway, a sidecar, or in-framework
 - [Patterns](patterns.md):

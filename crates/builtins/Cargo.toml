@@ -93,6 +93,8 @@ serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+# A unique key per OAuth mint attempt, so recovery can tell attempts apart.
+uuid = { workspace = true }
 zeroize = { workspace = true }
 
 # --- jwt ---------------------------------------------------------------------
@@ -123,9 +125,9 @@ base64 = { version = "0.23", optional = true }
 # `sha2` for the API-key hash index (keys compared by digest, never plaintext),
 # the OAuth cache-key HMAC, and the Valkey key derivation.
 #
-# 0.11 pairs with `digest` 0.11, so it moves in lockstep with `hmac` 0.13
-# below. Splitting them would put two `sha2` lines in the tree.
-sha2 = { version = "0.11", optional = true }
+# 0.13 `hmac` below pairs with the `digest` 0.11 that the workspace `sha2`
+# brings, so a bump to either has to move both.
+sha2 = { workspace = true, optional = true }
 
 # --- oauth -------------------------------------------------------------------
 
@@ -283,7 +285,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 bytes = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.11"
+sha2 = { workspace = true }
 
 # RSA keypair + JWK fixtures for the JWT tests. `rsa` generates keypairs;
 # `pkcs8` encodes them in the PEM format jsonwebtoken accepts.

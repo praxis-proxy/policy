@@ -329,7 +329,7 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
     // is the whole reason this is a `ServiceSlot` and not an `Option`.
     if extensions.http_transport.is_available() {
         filtered.http_transport = if capabilities.contains(&cap_str(Capability::PerformHttp)) {
-            extensions.http_transport.clone()
+            extensions.http_transport.rebuilt()
         } else {
             HttpTransportSlot::withheld()
         };
@@ -658,13 +658,12 @@ mod tests {
         };
         let caps: HashSet<String> = ["perform_http".to_owned()].into();
 
-        // The real chain: engine seeds the request, the executor filters
-        // per plugin, the plugin's view gets cloned onward.
+        // The real chain: the engine seeds the request and the executor
+        // filters per plugin.
         let a = filter_extensions(&ext, &caps);
         let b = filter_extensions(&ext, &caps);
-        let c = a.clone();
 
-        for (name, view) in [("plugin a", &a), ("plugin b", &b), ("a clone", &c)] {
+        for (name, view) in [("plugin a", &a), ("plugin b", &b)] {
             assert!(
                 reachable(view).await.is_ok(),
                 "{name} could not reach the transport"
@@ -672,22 +671,32 @@ mod tests {
         }
 
         // Handles outstanding, one object: the original plus the slot on
-        // `ext` plus three filtered/cloned views.
-        assert_eq!(Arc::strong_count(&transport), 5);
+        // `ext` plus the two filtered views.
+        assert_eq!(Arc::strong_count(&transport), 4);
     }
 
+    /// A copy of a plugin's extensions carries no host services.
+    ///
+    /// The slot records the verdict `filter_extensions` reached at the moment
+    /// it was built, so a copy that kept it would answer with that verdict
+    /// forever: a plugin could stash its extensions and keep making requests
+    /// after an operator revoked `perform_http` on a reload. Every dispatch
+    /// entry point re-seeds the transport through `with_host_services` before
+    /// the executor runs, so nothing legitimate depends on a copy carrying it.
     #[tokio::test]
-    async fn the_transport_survives_a_clone_but_write_tokens_do_not() {
-        // A write token is a one-shot authorization checked at the merge
-        // boundary, so cloning must not widen it. A transport handle is
-        // a borrowed service whose gate already ran; dropping it on
-        // clone would only break a plugin that legitimately holds it.
+    async fn neither_the_transport_nor_a_write_token_survives_a_clone() {
         let mut ext = extensions_with_transport();
         ext.http_write_token = Some(super::super::guarded::WriteToken::new());
+
         let cloned = ext.clone();
+
         assert!(
-            reachable(&cloned).await.is_ok(),
-            "the transport must survive a clone"
+            reachable(&cloned).await.is_err(),
+            "a stashed copy must not keep reaching the transport"
+        );
+        assert!(
+            reachable(&ext).await.is_ok(),
+            "the extensions the plugin was handed still work"
         );
         assert!(
             cloned.http_write_token.is_none(),
