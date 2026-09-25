@@ -19,6 +19,7 @@ members = [
     "crates/ppe-apl-runtime",
     "crates/ppe-pdp-diff",
     "builtins/plugins/identity-jwt",
+    "builtins/plugins/identity-api-key",
     "builtins/plugins/delegator-oauth",
     "builtins/plugins/elicitation-ciba",
     "builtins/pdps/cedar-direct",
@@ -50,6 +51,7 @@ default-members = [
     "crates/ppe-apl-runtime",
     "crates/ppe-pdp-diff",
     "builtins/plugins/identity-jwt",
+    "builtins/plugins/identity-api-key",
     "builtins/plugins/delegator-oauth",
     "builtins/plugins/elicitation-ciba",
     "builtins/pdps/cedar-direct",
@@ -139,6 +141,7 @@ praxis-policy-apl-core                      = { path = "crates/ppe-apl-core",   
 praxis-policy-apl-cmf                       = { path = "crates/ppe-apl-cmf",           version = "0.3.1" }
 praxis-policy-apl-runtime                      = { path = "crates/ppe-apl-runtime",       version = "0.3.1" }
 praxis-policy-plugin-identity-jwt      = { path = "builtins/plugins/identity-jwt",     version = "0.3.1" }
+praxis-policy-plugin-identity-api-key  = { path = "builtins/plugins/identity-api-key", version = "0.3.1" }
 praxis-policy-plugin-delegator-oauth   = { path = "builtins/plugins/delegator-oauth",  version = "0.3.1" }
 praxis-policy-plugin-elicitation-ciba  = { path = "builtins/plugins/elicitation-ciba", version = "0.3.1" }
 praxis-policy-pdp-cedar-direct         = { path = "builtins/pdps/cedar-direct",        version = "0.3.1" }

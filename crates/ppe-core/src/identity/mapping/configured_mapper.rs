@@ -13,20 +13,29 @@
 
 use std::collections::{HashMap, HashSet};
 
-use praxis_policy_core::extensions::raw_credentials::TokenRole;
-use praxis_policy_core::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
+use crate::extensions::raw_credentials::TokenRole;
+use crate::extensions::{ClientExtension, SubjectExtension, WorkloadIdentity};
 use serde_json::Value;
 
-use crate::claim_map::{ClaimMap, ClaimMapper, is_spiffe_id, trust_domain_of};
-use crate::claim_map_config::{
+use super::claim_map_config::{
     CompiledCandidate, CompiledClaimMap, CompiledField, CompiledRoleMap, MergeMode, OnMissing,
     SplitMode,
 };
+use super::{ClaimMap, ClaimMapper, is_spiffe_id, trust_domain_of};
 
-/// The registered JWT claims, which the claims bag drops unless a map asks for
-/// one back. They are properties of token validation rather than subject
-/// attributes.
-const REGISTERED_CLAIMS: &[&str] = &["aud", "exp", "iat", "iss", "jti", "nbf", "sub"];
+/// Credential-specific values a resolver supplies to the shared mapper.
+///
+/// Neither field has a default: omitting a credential's reserved names could
+/// expose validation fields as subject claims, while a wrong attestor would
+/// misstate how a workload identity was established.
+#[derive(Debug, Clone, Copy)]
+pub struct MappingProfile {
+    /// Top-level record names to omit from the policy-visible claims bag unless
+    /// an operator explicitly includes them.
+    pub reserved_names: &'static [&'static str],
+    /// The verified credential recorded on a mapped workload identity.
+    pub attestor: &'static str,
+}
 
 /// A `ClaimMapper` driven by a compiled claim map.
 ///
@@ -35,12 +44,13 @@ const REGISTERED_CLAIMS: &[&str] = &["aud", "exp", "iat", "iss", "jti", "nbf", "
 #[derive(Debug, Clone)]
 pub struct ConfiguredClaimMap {
     map: CompiledClaimMap,
+    profile: MappingProfile,
 }
 
 impl ConfiguredClaimMap {
-    /// Wrap a compiled map as a mapper.
-    pub fn new(map: CompiledClaimMap) -> Self {
-        Self { map }
+    /// Wrap a compiled map with the credential profile the resolver verified.
+    pub fn new(map: CompiledClaimMap, profile: MappingProfile) -> Self {
+        Self { map, profile }
     }
 
     /// The compiled map this mapper runs.
@@ -57,7 +67,7 @@ impl ConfiguredClaimMap {
     /// `permissions` won. Only a single-segment path consumes its claim, so a
     /// nested path leaves its parent whole.
     fn claims_bag(&self, section: &CompiledRoleMap, claims: &ClaimMap) -> HashMap<String, Value> {
-        let mut excluded: HashSet<&str> = REGISTERED_CLAIMS.iter().copied().collect();
+        let mut excluded: HashSet<&str> = self.profile.reserved_names.iter().copied().collect();
         for (_, field) in section.fields() {
             for candidate in field.candidates() {
                 if let Some(name) = candidate.path().single_segment() {
@@ -473,7 +483,7 @@ impl ClaimMapper for ConfiguredClaimMap {
             spiffe_id: Some(spiffe_id),
             trust_domain,
             attested_at: None,
-            attestor: Some("jwt".to_owned()),
+            attestor: Some(self.profile.attestor.to_owned()),
             selectors,
             client_id,
         })
@@ -488,13 +498,15 @@ impl ClaimMapper for ConfiguredClaimMap {
     reason = "tests"
 )]
 mod tests {
-    use std::cell::RefCell;
-    use std::sync::{Arc, Mutex, OnceLock};
-
     use serde_json::json;
 
     use super::*;
-    use crate::claim_map_config::{ClaimMapConfig, ClaimsOverrides};
+    use crate::identity::mapping::claim_map_config::{ClaimMapConfig, ClaimsOverrides};
+
+    const JWT_TEST_PROFILE: MappingProfile = MappingProfile {
+        reserved_names: &["aud", "exp", "iat", "iss", "jti", "nbf", "sub"],
+        attestor: "jwt",
+    };
 
     fn claims(value: Value) -> ClaimMap {
         value.as_object().unwrap().clone().into_iter().collect()
@@ -505,8 +517,12 @@ mod tests {
     }
 
     fn mapper(map: Value) -> ConfiguredClaimMap {
+        mapper_with_profile(map, JWT_TEST_PROFILE)
+    }
+
+    fn mapper_with_profile(map: Value, profile: MappingProfile) -> ConfiguredClaimMap {
         let config: ClaimMapConfig = serde_json::from_value(map).expect("the map deserializes");
-        ConfiguredClaimMap::new(config.compile().expect("the map compiles"))
+        ConfiguredClaimMap::new(config.compile().expect("the map compiles"), profile)
     }
 
     /// A mapper with the plugin-level claims-bag overrides attached, which is how
@@ -520,6 +536,7 @@ mod tests {
                 .compile()
                 .expect("the map compiles")
                 .with_claims(overrides.compile().expect("the overrides are coherent")),
+            JWT_TEST_PROFILE,
         )
     }
 
@@ -529,123 +546,7 @@ mod tests {
         items
     }
 
-    // ---- tracing capture --------------------------------------------------
-    //
-    // A minimal subscriber rather than a dev-dependency: the diagnostics are
-    // asserted on, so they need capturing, and `tracing` alone is enough to do
-    // it.
-    //
-    // One global subscriber with a thread-local sink, not `with_default` per
-    // test. Callsite interest is cached process-wide, so a thread-local
-    // subscriber does not own whether an event fires: installing one rebuilds
-    // the cache, and a test running in parallel can have its callsite recached
-    // as disabled between the `debug!` and the assertion. A subscriber that is
-    // installed once and always interested takes the cache out of the race, and
-    // the sink keeps each test reading only its own events.
-
-    #[derive(Clone, Default)]
-    struct Events(Arc<Mutex<Vec<String>>>);
-
-    impl Events {
-        fn recorded(&self) -> Vec<String> {
-            self.0
-                .lock()
-                .expect("the event log is not poisoned")
-                .clone()
-        }
-
-        fn matching(&self, needle: &str) -> Vec<String> {
-            self.recorded()
-                .into_iter()
-                .filter(|event| event.contains(needle))
-                .collect()
-        }
-    }
-
-    thread_local! {
-        static SINK: RefCell<Option<Events>> = const { RefCell::new(None) };
-    }
-
-    struct Capture;
-
-    /// Clears the sink even if the body panics, so a failing test cannot leak
-    /// its events into whichever test the runner puts on this thread next.
-    struct Sink;
-
-    impl Drop for Sink {
-        fn drop(&mut self) {
-            SINK.with_borrow_mut(|sink| *sink = None);
-        }
-    }
-
-    struct Render(String);
-
-    impl tracing::field::Visit for Render {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!(" {}={value:?}", field.name()));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.push_str(&format!(" {}={value}", field.name()));
-        }
-    }
-
-    impl tracing::Subscriber for Capture {
-        /// Always, so the cached interest never depends on which thread first
-        /// reached the callsite.
-        fn register_callsite(&self, _: &tracing::Metadata<'_>) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::always()
-        }
-
-        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-            Some(tracing::level_filters::LevelFilter::TRACE)
-        }
-
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            SINK.with_borrow(|sink| {
-                let Some(events) = sink.as_ref() else {
-                    return;
-                };
-                let mut render = Render(format!("[{}]", event.metadata().level()));
-                event.record(&mut render);
-                events
-                    .0
-                    .lock()
-                    .expect("the event log is not poisoned")
-                    .push(render.0);
-            });
-        }
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    /// Run `body` with events captured.
-    fn capturing<T>(body: impl FnOnce() -> T) -> (T, Events) {
-        static INSTALLED: OnceLock<()> = OnceLock::new();
-        INSTALLED.get_or_init(|| {
-            tracing::subscriber::set_global_default(Capture)
-                .expect("no other subscriber is installed in this test binary");
-        });
-
-        let events = Events::default();
-        SINK.with_borrow_mut(|sink| *sink = Some(events.clone()));
-        let _guard = Sink;
-        (body(), events)
-    }
+    use crate::trace_capture::capturing_body as capturing;
 
     // ---- candidate resolution and merge -----------------------------------
 
@@ -1473,6 +1374,67 @@ mod tests {
     }
 
     // ---- escaped and prefixed claim names end to end ----------------------
+
+    /// A directory record naming a field `exp` or `iss` means its own thing by
+    /// it. A resolver whose records are not JWTs supplies an empty reserved
+    /// list so the record keeps what it carries.
+    #[test]
+    fn cleared_reserved_names_keep_a_record_field_a_jwt_would_drop() {
+        let record = claims(json!({
+            "user": "alice",
+            "exp": "2027-01-01T00:00:00Z",
+            "iss": "maas-api",
+        }));
+        let map = json!({"subject": {"id": "user"}});
+
+        let dropped = mapper(map.clone())
+            .map_subject(&record)
+            .expect("the record maps");
+        assert!(
+            !dropped.claims.contains_key("exp") && !dropped.claims.contains_key("iss"),
+            "the JWT default drops both: {:?}",
+            dropped.claims
+        );
+
+        let kept = mapper_with_profile(
+            map,
+            MappingProfile {
+                reserved_names: &[],
+                attestor: "api_key",
+            },
+        )
+        .map_subject(&record)
+        .expect("the record maps");
+        assert_eq!(
+            sorted(&kept.claims.keys().cloned().collect()),
+            vec!["exp", "iss"],
+            "a cleared list keeps every field the map did not consume"
+        );
+    }
+
+    /// The attestor names the credential the resolver verified, so a policy
+    /// gating on it cannot be told a key was a JWT.
+    #[test]
+    fn the_attestor_names_the_credential_the_resolver_verified() {
+        let record = claims(json!({"workload_id": "spiffe://corp.example/ns/prod/sa/batch"}));
+        let map = json!({"workload": {"spiffe_id": "workload_id"}});
+
+        let default = mapper(map.clone())
+            .map_workload(&record)
+            .expect("the record maps");
+        assert_eq!(default.attestor.as_deref(), Some("jwt"));
+
+        let named = mapper_with_profile(
+            map,
+            MappingProfile {
+                reserved_names: &[],
+                attestor: "api_key",
+            },
+        )
+        .map_workload(&record)
+        .expect("the record maps");
+        assert_eq!(named.attestor.as_deref(), Some("api_key"));
+    }
 
     /// An escaped URL-named claim and a colon-prefixed one each populate their
     /// field through the mapper, which is the pair a policy language cannot

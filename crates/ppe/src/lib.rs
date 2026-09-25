@@ -54,7 +54,7 @@
 //!
 //! No plugins are on by default (`praxis-policy` alone is the engine).
 //! `builtins` enables every bundled extension, including the Valkey session
-//! store; or pick a granular subset (`jwt`, `oauth`, `elicitation-ciba`,
+//! store; or pick a granular subset (`jwt`, `api-key`, `oauth`, `elicitation-ciba`,
 //! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
@@ -130,6 +130,8 @@ pub use praxis_policy_pdp_opa::OpaPdpFactory;
 pub use praxis_policy_plugin_delegator_oauth::{KIND as OAUTH_KIND, OAuthDelegatorFactory};
 #[cfg(feature = "elicitation-ciba")]
 pub use praxis_policy_plugin_elicitation_ciba::{CibaApproverFactory, KIND as CIBA_KIND};
+#[cfg(feature = "api-key")]
+pub use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityFactory, KIND as API_KEY_KIND};
 #[cfg(feature = "jwt")]
 pub use praxis_policy_plugin_identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
 #[cfg(feature = "secrets-vault")]
@@ -189,6 +191,7 @@ macro_rules! register_builtins {
 #[cfg(feature = "_builtin")]
 register_builtins! {
     feature "jwt"              => praxis_policy_plugin_identity_jwt::JwtIdentityFactory,
+    feature "api-key"          => praxis_policy_plugin_identity_api_key::ApiKeyIdentityFactory,
     feature "oauth"            => praxis_policy_plugin_delegator_oauth::OAuthDelegatorFactory,
     feature "elicitation-ciba" => praxis_policy_plugin_elicitation_ciba::CibaApproverFactory,
 }
@@ -370,6 +373,7 @@ mod tests {
     fn every_enabled_builtin_resolves_its_kind() {
         let expected = [
             (cfg!(feature = "jwt"), "identity/jwt"),
+            (cfg!(feature = "api-key"), "identity/api-key"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),
         ];

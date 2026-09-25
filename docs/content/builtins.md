@@ -10,6 +10,7 @@ name it by `kind`.
 | Kind | Type | Feature | Purpose |
 |---|---|---|---|
 | `identity/jwt` | identity | `jwt` | Resolve a subject from a verified JWT, with configurable claim mapping. See [Identity](apl/identity.md). |
+| `identity/api-key` | identity | `api-key` | Resolve an API key against a file or HTTP directory. See [Recipe 7](identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory). |
 | `delegator/oauth` | delegator | `oauth` | RFC 8693 token exchange, with optional caching. See [Delegation](apl/delegation.md). |
 | `elicitation/ciba` | elicitation | `elicitation-ciba` | OIDC CIBA human approval. See [Elicitation](apl/elicitation.md). |
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
@@ -51,8 +52,9 @@ praxis-policy = { version = "0.3", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all seven below: `jwt`, `oauth`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey` |
+| `builtins` | all eight below: `jwt`, `api-key`, `oauth`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey` |
 | `jwt` | `identity/jwt` |
+| `api-key` | `identity/api-key` |
 | `oauth` | `delegator/oauth` |
 | `elicitation-ciba` | `elicitation/ciba` |
 | `cedar` | the `cedar-direct` decision point |

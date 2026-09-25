@@ -38,6 +38,11 @@ The token is verified against the issuer's JWKS. Only after verification do its
 claims become attributes. An unverified or expired token resolves to no subject,
 and `require(authenticated)` denies.
 
+`identity/api-key` looks up an opaque key in a file or HTTP directory and maps
+its record into the same attributes. Policies such as `require(role.hr)` work
+with either resolver. See [Recipe 7](../identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory)
+for configuration and revocation timing.
+
 ## What lands in the bag
 
 A resolved identity populates a flat attribute namespace that predicates read
@@ -54,10 +59,11 @@ directly:
 
 `require(role.hr)` is true when the verified token carried the `hr` role, and
 `redact(!perm.view_ssn)` redacts unless it carried the `view_ssn` permission.
-Membership names containing `.` do not receive these aliases because policy
-engines can interpret dotted keys as nested namespaces. Test them through the
-canonical sets instead, for example
-`subject.roles contains "admin.readonly"`.
+Membership names containing `.` do not receive aliases because policy engines
+can interpret dotted keys as nested namespaces. Names containing `:` cannot be
+written as attribute paths. Use the canonical sets for either case:
+`subject.roles contains "admin.readonly"` or
+`subject.roles contains "system:authenticated"`.
 
 ## Multiple sources
 

@@ -16,11 +16,16 @@
 
 /// The identity resolution hook.
 pub mod hook;
+/// Maps a JSON record onto the typed identity slots.
+pub mod mapping;
 /// The payload carrying resolved subject, client, and workload.
 pub mod payload;
 /// Per-route identity configuration.
 pub mod route_config;
 
 pub use hook::{HOOK_IDENTITY_RESOLVE, IdentityHook};
+pub use mapping::{
+    ClaimMap, ClaimMapConfig, ClaimMapper, ClaimPath, ConfiguredClaimMap, MappingProfile,
+};
 pub use payload::{IdentityPayload, TokenSource};
 pub use route_config::{RouteIdentityConfig, RouteIdentityStep};

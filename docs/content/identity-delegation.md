@@ -60,6 +60,7 @@ delegator uses:
 | let a workload authenticate as *itself* by its SVID | `subject: caller_workload` → client assertion | RFC 7523 + `draft-ietf-oauth-spiffe-client-auth` |
 | record both the user *and* the calling agent in the token | `subject: user`, `actor: caller_workload` | RFC 8693 `actor_token` |
 | forward a token the caller already obtained | no `delegate`, pass the header through | — |
+| authenticate a caller holding an opaque API key | `identity/api-key` → directory lookup | — |
 
 ---
 
@@ -438,6 +439,129 @@ actor on the wire exactly as RFC 8693 delegation prescribes (`actor_token` +
 
 ---
 
+### Recipe 7: An opaque API key, resolved against a directory
+
+Use `identity/api-key` when a caller presents an opaque key. The resolver looks
+up its record and maps fields into the same identity attributes as `identity/jwt`.
+
+**File directory:**
+
+```yaml
+plugins:
+  - name: api-keys
+    kind: identity/api-key
+    hooks: [identity.resolve]
+    config:
+      credential:
+        kind: header
+        name: X-API-Key
+      provider:
+        kind: file
+        path: /etc/ppe/keys.yaml
+        refresh_secs: 30
+        max_staleness_secs: 300
+      record_map:
+        subject:
+          id: user
+          roles: groups
+
+global:
+  authentication: [api-keys]
+```
+
+The file stores SHA-256 digests, not plaintext keys. Use high-entropy keys to
+resist offline guessing if the file leaks:
+
+<!-- validate: fragment -->
+```yaml
+keys:
+  - hash: "sha256:59ecf12ac9ef5ee967ddd8aa324f39c7fe13f2a54fb76e3e69bc866887cff903"
+    user: alice
+    groups: [reader, writer]
+    tenant: acme
+    expires_at: 2027-01-01T00:00:00Z
+```
+
+Generate a digest with `printf %s "$KEY" | sha256sum` and add the `sha256:` prefix.
+
+**HTTP directory:** This example uses the RHOAI MaaS `maas-api` validate endpoint.
+
+```yaml
+plugins:
+  - name: maas-keys
+    kind: identity/api-key
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      credential:
+        kind: header
+        name: Authorization
+      prefix: "Bearer sk-oai-"
+      provider:
+        kind: http
+        url: "https://maas-api.example.com/internal/v1/api-keys/validate"
+        timeout_secs: 5
+      record_map:
+        subject:
+          id: username
+          roles: groups
+      claims:
+        exclude: [userId, keyId, keyName]
+      cache:
+        ttl_secs: 60
+        negative_ttl_secs: 10
+
+global:
+  authentication: [maas-keys]
+```
+
+`maas-api` sets both `userId` and `keyId` to the key's database row ID. Map
+`username` to `subject.id` instead. A captured response uses a Kubernetes
+service account name (`system:serviceaccount:example-tenant:example-consumer`)
+and Kubernetes groups. These are subject values; `caller_workload` requires a
+SPIFFE ID.
+
+Group names containing `:` cannot be used in attribute paths such as
+`role.system:authenticated`. Use the canonical set:
+
+<!-- validate: apl-predicate -->
+```apl
+require(subject.roles contains "system:authenticated")
+```
+
+An invalid key returns HTTP 200 with `valid: false`; a failed directory request
+denies as `auth.directory_unavailable`. In `prefix: "Bearer sk-oai-"`, the
+`Bearer` scheme is matched without case and removed. The `sk-oai-` prefix stays
+in the key sent to the directory. To accept several key populations on one
+route, configure a resolver for each prefix; nonmatching resolvers skip their
+directory lookup.
+
+The presented key is not stored in `raw_credentials` for downstream forwarding.
+Use `secret.<name>` on an [assertion](assertions.md) to authenticate to an upstream.
+
+#### Denial codes
+
+| Code | Means |
+|---|---|
+| `auth.missing_credential` | nothing at the configured location |
+| `auth.empty_credential` | the location held an empty value |
+| `auth.key_unknown` | the directory answered, and no record matched |
+| `auth.key_expired` | a record matched and has expired |
+| `auth.directory_unavailable` | the directory could not answer |
+| `auth.mapping_failed` | a record resolved and the map could not project it |
+
+#### The revocation window
+
+A revoked key may still authenticate until the file's next successful reload
+(`refresh_secs`) or the HTTP cache entry expires (`cache.ttl_secs`). If a file
+reload fails, old records remain in use until `max_staleness_secs`; after that,
+lookups deny as `auth.directory_unavailable`. A cache cannot be configured over
+a file directory.
+
+The MaaS mapping was checked against a captured valid response on 2026-09-24.
+HTTP error handling follows the `maas-api` source; error responses were not
+captured from the deployment.
+
 ## Reading claims the way your IdP writes them
 
 The JWT identity plugin infers a subject from a token's claims. Which
@@ -587,9 +711,10 @@ work" means the IdP documents support for the required standards, but the flow
 has no end-to-end result.
 
 <!-- Stubs to flesh out as recipes are validated:
-  - Recipe 7: per-tenant / tag-scoped identity (authentication via groups /
+  - Recipe 8: per-tenant / tag-scoped identity (authentication via groups /
     tags).
-  - Recipe 8: vault-backed delegation (exchange a token for a stored API key).
+  - Recipe 9: vault-backed delegation (exchange a token for a stored API key).
+  - Live-directory validation of Recipe 7 against a running MaaS.
   - Live-IdP validation of Recipe 6's actor_token / `act` claim (currently
     mock-tested).
   - Per-recipe "verified against <IdP> on <date>" as the support matrix grows.

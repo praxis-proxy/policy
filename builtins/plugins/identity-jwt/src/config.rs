@@ -22,7 +22,7 @@ use praxis_policy_core::http::HttpRequest;
 use praxis_policy_core::http_retry::RetryPolicy;
 
 use super::trusted_issuer::{KeyStore, TrustedIssuer};
-use crate::claim_map_config::ClaimMapConfig;
+use praxis_policy_core::identity::mapping::ClaimMapConfig;
 
 /// Top-level plugin config — what operators write under
 /// `plugins[<name>].config:` in unified-config YAML.

@@ -88,5 +88,8 @@ pub mod registry;
 /// Secret material: providers, the declared values bound to them, and the
 /// handles consumers read through.
 pub mod secrets;
+/// Captures emitted diagnostics for tests that assert on them.
+#[cfg(test)]
+mod trace_capture;
 /// Config visitors, which let a dialect compile its own route blocks at load time.
 pub mod visitor;

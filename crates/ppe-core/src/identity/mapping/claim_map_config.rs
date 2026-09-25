@@ -12,11 +12,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use praxis_policy_core::extensions::raw_credentials::TokenRole;
+use crate::extensions::raw_credentials::TokenRole;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::claim_path::ClaimPath;
+use super::claim_path::ClaimPath;
 
 /// Fields a `subject` section may map.
 pub const SUBJECT_FIELDS: &[&str] = &["id", "permissions", "roles", "teams"];
