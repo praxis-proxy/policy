@@ -172,11 +172,11 @@ async fn templated_values_that_fail_never_reach_the_error() {
         (
             "action: 'Action::\"read\"'\nresource:\n  type: Document\n  id: ${args.repo}\n  \
              attributes:\n    owner: ${args.owner}\n",
-            "failed to construct resource entity of type `Document`",
+            "failed to construct resource entity:",
         ),
         (
             "action: 'Action::\"read\"'\nresource:\n  type: ${args.kind}\n  id: ${args.repo}\n",
-            "type is not a valid Cedar entity type name",
+            "failed to construct resource entity:",
         ),
         (
             "action: ${args.action}\nresource:\n  type: Document\n  id: ${args.repo}\n",
@@ -194,6 +194,31 @@ async fn templated_values_that_fail_never_reach_the_error() {
         assert!(!text.contains(MARKER), "{args}: {text}");
         assert!(text.contains(expected), "{args}: {text}");
     }
+}
+
+/// A templated resource type that parses as a Cedar type name is still not
+/// named when the resource entity fails to build.
+#[tokio::test]
+async fn a_valid_templated_resource_type_is_not_named() {
+    const TYPE_MARKER: &str = "Secretmarkertype";
+    let mut bag = alice();
+    bag.set("args.kind", TYPE_MARKER);
+    bag.set("args.owner", MARKER);
+    let args = "action: 'Action::\"read\"'\nresource:\n  type: ${args.kind}\n  id: r1\n  \
+                attributes:\n    owner: ${args.owner}\n";
+    let Err(e) = resolver(PERMIT_ALL, "{}", None)
+        .evaluate_structured(&call(args), &bag, &StructuredInput::default())
+        .await
+    else {
+        panic!("an undeclared resource type must fail");
+    };
+    let text = format!("{e} / {e:?}");
+    assert!(!text.contains(TYPE_MARKER), "{text}");
+    assert!(!text.contains(MARKER), "{text}");
+    assert!(
+        text.contains("failed to construct resource entity"),
+        "{text}"
+    );
 }
 
 /// Hosts that attach a schema in code opt in through the builder.
