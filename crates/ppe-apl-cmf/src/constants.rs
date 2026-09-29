@@ -56,6 +56,8 @@ pub const CAP_READ_REQUEST: &str = "read_request";
 pub const CAP_READ_HEADERS: &str = "read_headers";
 /// Capability permitting a plugin to read model identity.
 pub const CAP_READ_LLM: &str = "read_llm";
+/// Capability permitting a plugin to read the host-parsed LLM request document.
+pub const CAP_READ_LLM_REQUEST: &str = "read_llm_request";
 /// Capability permitting a plugin to read tool and resource metadata.
 pub const CAP_READ_MCP: &str = "read_mcp";
 /// Capability permitting a plugin to read completion metadata.

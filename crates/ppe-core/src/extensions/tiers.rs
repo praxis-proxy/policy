@@ -70,6 +70,11 @@ pub enum Capability {
     /// `read_subject` / `read_client` / `read_workload`.
     ReadAgent,
 
+    /// Read the host-parsed LLM request document (`Extensions.llm_request`).
+    /// It carries prompt text and client-supplied JSON, so it is never flattened
+    /// into the attribute bag.
+    ReadLlmRequest,
+
     /// Read HTTP headers.
     ReadHeaders,
     /// Write (modify) HTTP headers.
@@ -179,5 +184,11 @@ mod tests {
         let cap = Capability::AppendLabels;
         let json = serde_json::to_string(&cap).unwrap();
         assert_eq!(json, "\"append_labels\"");
+    }
+
+    #[test]
+    fn test_read_llm_request_serde() {
+        let json = serde_json::to_string(&Capability::ReadLlmRequest).unwrap();
+        assert_eq!(json, "\"read_llm_request\"");
     }
 }

@@ -37,7 +37,7 @@ use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::PluginError as CoreError;
-use praxis_policy_core::extensions::{MetaExtension, SecurityExtension};
+use praxis_policy_core::extensions::{LlmRequestDocument, MetaExtension, SecurityExtension};
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
 use praxis_policy_core::hooks::payload::Extensions;
@@ -138,6 +138,54 @@ impl PluginFactory for LabelWriterFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
         let plugin = Arc::new(LabelWriter {
             cfg: config.clone(),
+        });
+        Ok(PluginInstance {
+            plugin: plugin.clone(),
+            handlers: vec![(
+                "cmf.tool_pre_invoke",
+                Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(plugin)),
+            )],
+        })
+    }
+}
+
+/// Plugin that records the `llm_request` slot it was handed.
+struct LlmRequestReader {
+    cfg: PluginConfig,
+    observed: Arc<std::sync::Mutex<Vec<Option<LlmRequestDocument>>>>,
+}
+
+#[async_trait]
+impl Plugin for LlmRequestReader {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for LlmRequestReader {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push(extensions.llm_request.clone());
+        PluginResult::allow()
+    }
+}
+
+struct LlmRequestReaderFactory {
+    observed: Arc<std::sync::Mutex<Vec<Option<LlmRequestDocument>>>>,
+}
+
+impl PluginFactory for LlmRequestReaderFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
+        let plugin = Arc::new(LlmRequestReader {
+            cfg: config.clone(),
+            observed: Arc::clone(&self.observed),
         });
         Ok(PluginInstance {
             plugin: plugin.clone(),
@@ -463,4 +511,89 @@ routes:
         "empty baseline should cause require(authenticated) to deny \
          even with subject set — capability gating proves it can't see"
     );
+}
+
+/// Runs `llm-reader` on a tool route with the host baseline replaced by an
+/// empty set, and returns the slot the plugin observed alongside the host's.
+async fn observe_llm_request(
+    capabilities: &str,
+) -> (Option<LlmRequestDocument>, LlmRequestDocument) {
+    let yaml = format!(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: llm-reader
+    kind: llm-reader
+    hooks: [cmf.tool_pre_invoke]
+    capabilities: {capabilities}
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "run(llm-reader)"
+"#
+    );
+
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory(
+        "llm-reader",
+        Box::new(LlmRequestReaderFactory {
+            observed: Arc::clone(&observed),
+        }),
+    );
+    register_apl(
+        &mgr,
+        AplOptions {
+            dispatch_cache: Arc::new(DispatchCache::new()),
+            session_store: Arc::new(MemorySessionStore::new()),
+            pdps: Vec::new(),
+            pdp_factories: Vec::new(),
+            session_store_factories: Vec::new(),
+            base_capabilities: Some(std::collections::HashSet::new()),
+        },
+    );
+    mgr.load_config_yaml(&yaml).expect("load_config_yaml");
+    mgr.initialize().await.expect("initialize");
+
+    let document = LlmRequestDocument::new(serde_json::json!({
+        "model": "gpt-4o",
+        "tools": [{"type": "function", "name": "search"}],
+    }));
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_weather"))),
+        llm_request: Some(document.clone()),
+        ..Default::default()
+    };
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", cmf_payload("hi"), ext, None)
+        .await;
+    assert!(
+        result.continue_processing,
+        "llm-reader should allow: {:?}",
+        result.violation
+    );
+
+    let mut seen = std::mem::take(&mut *observed.lock().unwrap());
+    assert_eq!(seen.len(), 1, "llm-reader must run exactly once");
+    (seen.remove(0), document)
+}
+
+/// The synthetic handler keeps the parsed request through the executor filter
+/// even with an empty host baseline, and a plugin holding `read_llm_request`
+/// sees the host's `Arc` rather than a copy.
+#[tokio::test]
+async fn llm_request_reaches_plugin_through_apl_handler_with_replaced_baseline() {
+    let (seen, document) = observe_llm_request("[read_llm_request]").await;
+    let seen = seen.expect("plugin holding read_llm_request must see the slot");
+    assert!(Arc::ptr_eq(seen.shared(), document.shared()));
+}
+
+/// A plugin without `read_llm_request` sees no document, even though the
+/// synthetic handler it runs under holds the capability.
+#[tokio::test]
+async fn llm_request_hidden_from_plugin_without_capability() {
+    let (seen, _document) = observe_llm_request("[]").await;
+    assert!(seen.is_none());
 }
