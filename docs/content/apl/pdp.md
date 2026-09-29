@@ -248,6 +248,39 @@ A step's own `context:` may not define `llm` or `args`, since those keys carry
 the structured input. Config load rejects such a step, including one nested in
 a reaction.
 
+**With a schema.** A Cedar schema gives each action a closed context type, so
+an undeclared `args` or `llm` key fails request validation and the step denies.
+A `cedar-direct` resolver with `schema_text` or `schema_file` therefore adds
+structured input only when its config sets `structured_context: true`. Without
+the flag, `context.args` and `context.llm` are absent and the input is not
+sanitized, so an escape key does not deny either. Before setting the flag,
+declare both keys as optional in the context type of every action a
+structured route calls:
+
+```yaml
+global:
+  pdp:
+    - kind: cedar-direct
+      structured_context: true
+      policy_file: /etc/praxis/policy.cedar
+      schema_text: |
+        entity User = { ... };
+        entity Tool;
+        action call appliesTo {
+          principal: User,
+          resource: Tool,
+          context: {
+            args?: { repo: String, limit?: Long },
+            llm?: { request: { model: String } },
+          },
+        };
+```
+
+Cedar record types are closed, so declare every field the input can carry,
+after sanitizing: a float is a `String` and an array is a `Set`. A request
+whose structured input does not match denies with `Cedar request validation
+failed: context does not match the action's context type`.
+
 **Do not use Cedar for deny-lists over `llm.request.tools`.** Set `contains`
 over records needs an exact match on the whole record. This rule misses a
 forbidden tool that carries one extra field, such as a `name`:
@@ -272,7 +305,9 @@ not values:
   `OPA eval error: policy runtime error at global-0.rego:2:33`. A result that
   carries no decision is described by its type.
 - Cedar errors name the policy and a category, such as
-  ``policy `limit-cap`: type error``.
+  ``policy `limit-cap`: type error``. Entity, action, and request validation
+  errors name at most the entity type, never an id or value that `${args.X}`
+  filled in.
 
 Text the policy author wrote passes through unchanged: an OPA `reason` or
 `message`, a string violation or its `msg`, and an APL `deny('...')` message.

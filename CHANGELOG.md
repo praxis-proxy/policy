@@ -53,6 +53,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   engine error text is replaced by a fixed category. Author-written reasons
   pass through unchanged. Operators matching on the old reason text need to
   update the pattern. ([#142](https://github.com/praxis-proxy/policy/issues/142))
+- A `cedar-direct` resolver with a schema adds structured input to the context
+  only when its config sets `structured_context: true`, since the schema must
+  declare `args` and `llm` in each action's context type. Without the flag,
+  schema-backed steps decide as before. See
+  [Cedar limits](docs/content/apl/pdp.md#cedar-limits).
+- Cedar entity, action, and request validation errors name the entity type and
+  a fixed category instead of the id, value, or Cedar's own text.
 - Cedar steps may not define `llm` or `args` in their `context:`, which now
   carry structured input; such a step fails config load. A Cedar step whose
   structured input holds an `__entity`, `__extn`, or `__expr` key denies with

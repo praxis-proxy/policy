@@ -18,8 +18,8 @@
 //                                   `policy_file` (or both — policy_text
 //                                   wins). Also accepts `schema_text` /
 //                                   `schema_file` for optional schema
-//                                   loading, plus `entity_namespace`
-//                                   and `dialect`.
+//                                   loading, plus `structured_context`,
+//                                   `entity_namespace` and `dialect`.
 //
 // Construction errors carry rich Cedar-specific messages via
 // [`BuildError`]; the visitor wraps these into `VisitorError` →
@@ -29,7 +29,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cedar_policy::{Authorizer, PolicySet, Schema};
+use cedar_policy::{Authorizer, EntityId, EntityTypeName, EntityUid, PolicySet, Schema};
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::route::StructuredInput;
@@ -39,20 +39,10 @@ use crate::pdps::cedar_direct::decision::{translate, withheld};
 use crate::pdps::cedar_direct::entities::build as build_entities;
 use crate::pdps::cedar_direct::error::BuildError;
 use crate::pdps::cedar_direct::request::{
-    parse as parse_call, reserved_context_key, reserved_key_message, sanitize_structured,
+    CedarStructured, parse as parse_call, request_error_category, reserved_context_key,
+    reserved_key_message, sanitize_structured,
 };
-
-/// Grow the cedar evaluation stack when the current thread has less than this
-/// much headroom. cedar-policy-core's own guard is 100 `KiB`
-/// (`REQUIRED_STACK_SPACE`); we grow at 10x that so the guard never fires
-/// mid-descent. On glibc (8 MiB thread stacks) there is always more than this
-/// available, so `maybe_grow` is a cheap no-op; on musl (128 `KiB` default) we
-/// fall below it and grow onto a fresh segment.
-const CEDAR_STACK_RED_ZONE: usize = 1024 * 1024;
-/// Size of the fresh stack segment to run cedar on when we grow. Matches
-/// glibc's default 8 MiB thread stack — the headroom cedar is validated
-/// against. Allocated only on small-stack hosts, freed when evaluation returns.
-const CEDAR_STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+use crate::pdps::stack;
 
 /// `PdpResolver` wrapping a bare `cedar-policy` engine. Constructed from
 /// policy text / file / config block at startup; evaluates each call
@@ -67,6 +57,10 @@ pub struct CedarDirectResolver {
     /// entity. Lets schemas that namespace their entity types work
     /// without policy authors having to hand-prefix every reference.
     entity_namespace: Option<String>,
+    /// Add structured input to the context even when a schema is set. Off by
+    /// default, since a schema must declare `args` and `llm` in each action's
+    /// context type or every request fails validation.
+    structured_context: bool,
 }
 
 impl CedarDirectResolver {
@@ -87,6 +81,7 @@ impl CedarDirectResolver {
             authorizer: Authorizer::new(),
             dialect: PdpDialect::Cedar,
             entity_namespace: None,
+            structured_context: false,
         })
     }
 
@@ -118,17 +113,20 @@ impl CedarDirectResolver {
     /// schema_text: |              # optional
     ///   ...
     /// schema_file: /etc/...       # alternative to schema_text
+    /// structured_context: true    # optional; default false
     /// ```
     ///
     /// `policy_text` wins over `policy_file` when both are present.
-    /// Same for `schema_text` over `schema_file`. Called by
+    /// Same for `schema_text` over `schema_file`. Without a schema, structured
+    /// input always reaches the context. With one, it does only when
+    /// `structured_context` is `true`. Called by
     /// `AplConfigVisitor` when it sees a Cedar PDP block in the
     /// unified-config YAML.
     /// # Errors
     ///
     /// Returns `BuildError` when the block names neither inline policies nor a
-    /// policy file, when the file cannot be read, or when the policies or schema
-    /// do not parse.
+    /// policy file, when the file cannot be read, when the policies or schema
+    /// do not parse, or when `structured_context` is not a bool.
     pub fn from_config(value: &serde_yaml::Value) -> Result<Self, BuildError> {
         let map = value
             .as_mapping()
@@ -176,12 +174,24 @@ impl CedarDirectResolver {
 
         let entity_namespace = read_yaml_string(map, "entity_namespace");
 
+        let structured_context =
+            match map.get(serde_yaml::Value::String("structured_context".to_owned())) {
+                None => false,
+                Some(serde_yaml::Value::Bool(flag)) => *flag,
+                Some(_) => {
+                    return Err(BuildError::ConfigShape(
+                        "Cedar PDP config `structured_context` must be a bool".into(),
+                    ));
+                },
+            };
+
         Ok(Self {
             policies: Arc::new(policy_set),
             schema: schema.map(Arc::new),
             authorizer: Authorizer::new(),
             dialect,
             entity_namespace,
+            structured_context,
         })
     }
 
@@ -207,6 +217,20 @@ impl CedarDirectResolver {
     pub fn with_schema(mut self, schema: Schema) -> Self {
         self.schema = Some(Arc::new(schema));
         self
+    }
+
+    /// Add structured input to the context even when a schema is set. The
+    /// schema must then declare `args` and `llm` in each affected action's
+    /// context type. Has no effect without a schema, where structured input is
+    /// always added.
+    pub fn with_structured_context(mut self, enabled: bool) -> Self {
+        self.structured_context = enabled;
+        self
+    }
+
+    /// Whether structured input reaches the Cedar context.
+    fn injects_structured(&self) -> bool {
+        self.schema.is_none() || self.structured_context
     }
 }
 
@@ -252,13 +276,20 @@ impl PdpResolver for CedarDirectResolver {
         // segment when headroom is low (a no-op when there's already room, so
         // glibc pays nothing), making cedar host-stack-agnostic. The block is
         // fully synchronous — no `.await` — so it is safe to run inside the
-        // grown segment. See CEDAR_STACK_RED_ZONE / CEDAR_STACK_GROW_SIZE.
+        // grown segment. See `pdps::stack`.
         //
         // Sanitizing recurses too, so it runs inside the grown segment. Input
-        // holding a Cedar escape key denies here, before Cedar sees it.
-        stacker::maybe_grow(CEDAR_STACK_RED_ZONE, CEDAR_STACK_GROW_SIZE, || {
-            let Ok(sanitized) = sanitize_structured(structured) else {
-                return Ok(withheld());
+        // holding a Cedar escape key denies here, before Cedar sees it. When a
+        // schema is set without `structured_context`, the input is not added,
+        // so it is neither sanitized nor checked.
+        stack::guarded(|| {
+            let sanitized = if self.injects_structured() {
+                let Ok(sanitized) = sanitize_structured(structured) else {
+                    return Ok(withheld());
+                };
+                sanitized
+            } else {
+                CedarStructured::default()
             };
             let parsed = parse_call(&resolved_call, bag, sanitized, self.schema.as_deref())?;
             let entities = build_entities(
@@ -278,7 +309,12 @@ impl PdpResolver for CedarDirectResolver {
                 parsed.context,
                 self.schema.as_deref(),
             )
-            .map_err(|e| PdpError::Dispatch(format!("Cedar request validation failed: {e}")))?;
+            .map_err(|e| {
+                PdpError::Dispatch(format!(
+                    "Cedar request validation failed: {}",
+                    request_error_category(&e)
+                ))
+            })?;
 
             let response = self
                 .authorizer
@@ -305,10 +341,7 @@ fn read_yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
 /// SAME UID that `entities::build_principal` produces; both have to
 /// agree on type + id since Cedar resolves the request's principal
 /// reference into the entity set by UID equality.
-fn build_principal_uid(
-    bag: &AttributeBag,
-    namespace: Option<&str>,
-) -> Result<cedar_policy::EntityUid, PdpError> {
+fn build_principal_uid(bag: &AttributeBag, namespace: Option<&str>) -> Result<EntityUid, PdpError> {
     let id = bag
         .get_string("subject.id")
         .ok_or_else(|| PdpError::Dispatch("bag missing `subject.id`".to_owned()))?;
@@ -319,15 +352,18 @@ fn build_principal_uid(
         Some(ns) if !ns.is_empty() => format!("{ns}::{kind}"),
         _ => kind.to_owned(),
     };
-    let uid_str = format!("{}::\"{}\"", entity_type, escape_id(id));
-    uid_str
-        .parse()
-        .map_err(|e| PdpError::Dispatch(format!("failed to parse principal UID '{uid_str}': {e}")))
+    let type_name: EntityTypeName = entity_type.parse().map_err(|_value_text| {
+        PdpError::Dispatch("principal type is not a valid Cedar entity type name".to_owned())
+    })?;
+    Ok(EntityUid::from_type_name_and_id(
+        type_name,
+        EntityId::new(id),
+    ))
 }
 
-fn build_resource_uid(
-    resource_args: &serde_yaml::Value,
-) -> Result<cedar_policy::EntityUid, PdpError> {
+/// Build the resource `EntityUid`. The type and id may be filled from
+/// `${args.X}`, so a parse error names neither.
+fn build_resource_uid(resource_args: &serde_yaml::Value) -> Result<EntityUid, PdpError> {
     let map = resource_args
         .as_mapping()
         .ok_or_else(|| PdpError::Dispatch("cedar:() `resource` must be a mapping".to_owned()))?;
@@ -335,15 +371,13 @@ fn build_resource_uid(
         .ok_or_else(|| PdpError::Dispatch("cedar:() `resource.type` missing".to_owned()))?;
     let id = read_yaml_string(map, "id")
         .ok_or_else(|| PdpError::Dispatch("cedar:() `resource.id` missing".to_owned()))?;
-    let uid_str = format!("{}::\"{}\"", type_name, escape_id(&id));
-    uid_str
-        .parse()
-        .map_err(|e| PdpError::Dispatch(format!("failed to parse resource UID '{uid_str}': {e}")))
-}
-
-/// Cedar identifiers in double-quoted form need backslash + quote
-/// escaping. Most subject IDs are well-behaved (UUIDs, JWT sub
-/// claims) — escape defensively for the cases that aren't.
-fn escape_id(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    let type_name: EntityTypeName = type_name.parse().map_err(|_value_text| {
+        PdpError::Dispatch(
+            "cedar:() `resource.type` is not a valid Cedar entity type name".to_owned(),
+        )
+    })?;
+    Ok(EntityUid::from_type_name_and_id(
+        type_name,
+        EntityId::new(id),
+    ))
 }

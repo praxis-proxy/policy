@@ -745,6 +745,26 @@ async fn tool_route_pdp_receives_structured_args() {
     assert!(seen.llm_request.is_none());
 }
 
+/// A tool invocation whose message has no tool-call part carries no structured
+/// args, never an empty object.
+#[tokio::test]
+async fn tool_route_without_tool_call_part_has_no_args() {
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for("tool", "classify"))),
+        ..Default::default()
+    };
+    let (seen, _) = observe_structured(
+        "tool: classify",
+        "",
+        "cmf.tool_pre_invoke",
+        cmf_payload("hi"),
+        ext,
+    )
+    .await;
+    assert!(seen.args.is_none());
+    assert!(seen.llm_request.is_none());
+}
+
 /// With no plugin on the route, the PDP still sees the host's document: the
 /// synthetic handler's own grant is what lets it through the executor filter.
 #[tokio::test]

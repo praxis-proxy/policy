@@ -198,12 +198,20 @@ fn a_missing_action_is_rejected_and_the_message_shows_the_expected_form() {
 }
 
 /// A bare action name is the likely mistake, and Cedar needs a fully-qualified
-/// UID. The message has to say which value was wrong.
+/// UID. `${args.X}` can fill the action, so the message shows the expected
+/// form but never the value.
 #[test]
 fn an_action_that_is_not_a_valid_entity_uid_is_rejected() {
-    let e = parse_err("action: read\nresource:\n  type: Document\n  id: doc-1\n");
+    let e = parse_err("action: bogus-action\nresource:\n  type: Document\n  id: doc-1\n");
     assert!(e.contains("not a valid EntityUid"), "{e}");
-    assert!(e.contains("read"), "the message must quote the value: {e}");
+    assert!(
+        e.contains("Action::"),
+        "the message must show the shape to write: {e}"
+    );
+    assert!(
+        !e.contains("bogus-action"),
+        "the message must not quote the value: {e}"
+    );
 }
 
 #[test]

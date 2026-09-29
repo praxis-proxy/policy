@@ -61,6 +61,7 @@ use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, P
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
 use crate::pdps::opa::input::build_input;
+use crate::pdps::stack;
 
 /// What to do when a query errors at runtime or yields a value that carries no
 /// decision (a non-bool/object/set result, or a missing decision field). A
@@ -480,21 +481,29 @@ impl PdpResolver for OpaResolver {
         //    Error text from regorus can quote input values, so no cause below
         //    carries it: each is a fixed category, plus the policy location for
         //    an eval error.
-        let input_json = build_input(bag, structured).to_string();
+        //
+        //    Building, converting, evaluating and dropping nested client JSON
+        //    recurses, so each synchronous part runs with stack headroom.
+        let input = stack::guarded(|| build_input(bag, structured));
         let query = query.to_owned();
         let decision_field = self.decision_field.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            let mut engine = engine;
-            if engine.set_input_json(&input_json).is_err() {
-                return EvalOutcome::OnError("OPA failed to set input".to_owned());
-            }
-            match engine.eval_rule(query) {
-                Ok(value) => match map_query_result(&value, &decision_field) {
-                    Mapped::Decision(decision) => EvalOutcome::Decision(decision),
-                    Mapped::Degenerate(cause) => EvalOutcome::OnError(cause),
-                },
-                Err(e) => EvalOutcome::OnError(eval_error_cause(&e.to_string())),
-            }
+            stack::guarded(move || {
+                let mut engine = engine;
+                // `From` yields `Undefined` when the document does not convert.
+                let input = regorus::Value::from(input);
+                if input == regorus::Value::Undefined {
+                    return EvalOutcome::OnError("OPA failed to set input".to_owned());
+                }
+                engine.set_input(input);
+                match engine.eval_rule(query) {
+                    Ok(value) => match map_query_result(&value, &decision_field) {
+                        Mapped::Decision(decision) => EvalOutcome::Decision(decision),
+                        Mapped::Degenerate(cause) => EvalOutcome::OnError(cause),
+                    },
+                    Err(e) => EvalOutcome::OnError(eval_error_cause(&e.to_string())),
+                }
+            })
         })
         .await;
 
@@ -520,13 +529,15 @@ fn eval_error_cause(message: &str) -> String {
     }
 }
 
-/// The `file:line:col` from a regorus source-span message (`--> file:line:col`).
-/// Only a well-formed location is returned, so no other message text can slip
-/// through.
+/// The `file:line:col` from a regorus source-span line (`--> file:line:col`).
+/// Only the first line that starts with `-->` counts, and only a well-formed
+/// location is returned, so no other message text can slip through.
 fn policy_location(message: &str) -> Option<&str> {
     const MAX_LOCATION_LEN: usize = 256;
-    let (_, rest) = message.split_once("--> ")?;
-    let at = rest.lines().next()?.trim_end();
+    let at = message
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("-->"))?
+        .trim();
     let mut parts = at.rsplitn(3, ':');
     let col = parts.next()?;
     let line = parts.next()?;
@@ -1314,9 +1325,67 @@ modules:
         assert_eq!(policy_location("no span here"), None);
         assert_eq!(policy_location("--> file with space.rego:1:1"), None);
         assert_eq!(policy_location("--> f.rego:x:1"), None);
+        assert_eq!(policy_location("error: x --> evil:1:1"), None);
+        assert_eq!(
+            policy_location("error: bad\n  --> f.rego:2:3"),
+            Some("f.rego:2:3")
+        );
         assert_eq!(
             eval_error_cause("Got `secret` instead"),
             "OPA eval error: policy runtime error"
         );
+    }
+
+    /// Nesting that overflows a 256 `KiB` stack without headroom, yet fits the
+    /// grown segment in unoptimized builds.
+    const DEEP: usize = 1_000;
+
+    /// Evaluate `module` against `DEEP`-nested args on 256 `KiB` threads, for
+    /// both the caller and the blocking pool. The document is built and
+    /// dropped on a large stack, since `serde_json::Value` drop recurses too.
+    fn deep_args_on_a_small_stack(module: &'static str) -> PdpDecision {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let resolver = resolver(&[module], OnError::Deny);
+                let mut doc = serde_json::json!(true);
+                for _ in 0..DEEP {
+                    let mut level = serde_json::Map::new();
+                    level.insert("a".to_owned(), doc);
+                    doc = serde_json::Value::Object(level);
+                }
+                let structured = StructuredInput {
+                    llm_request: None,
+                    args: Some(std::sync::Arc::new(doc)),
+                };
+                std::thread::scope(|scope| {
+                    std::thread::Builder::new()
+                        .stack_size(256 * 1024)
+                        .spawn_scoped(scope, || {
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .thread_stack_size(256 * 1024)
+                                .build()
+                                .unwrap();
+                            runtime.block_on(resolver.evaluate_structured(
+                                &call("data.authz.allow", None),
+                                &bag("alice"),
+                                &structured,
+                            ))
+                        })
+                        .unwrap()
+                        .join()
+                        .expect("evaluation must not overflow the small stack")
+                        .unwrap()
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deeply_nested_args_evaluate_on_a_small_stack() {
+        let out = deep_args_on_a_small_stack("package authz\nallow if input.args.a\n");
+        assert_eq!(out.decision, Decision::Allow, "{out:?}");
     }
 }

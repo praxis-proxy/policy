@@ -1120,4 +1120,58 @@ mod tests {
         let back: PdpDialect = serde_json::from_str(&json).unwrap();
         assert_eq!(back, PdpDialect::Cel);
     }
+
+    /// Records the bag it was handed and overrides nothing but `evaluate`.
+    #[derive(Default)]
+    struct BagOnly {
+        seen: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl PdpResolver for BagOnly {
+        fn dialect(&self) -> PdpDialect {
+            PdpDialect::Custom("bag-only".to_owned())
+        }
+
+        async fn evaluate(
+            &self,
+            _call: &PdpCall,
+            bag: &crate::attributes::AttributeBag,
+        ) -> Result<PdpDecision, PdpError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(bag.get_string("subject.id").map(str::to_owned));
+            Ok(PdpDecision {
+                decision: Decision::Allow,
+                diagnostics: Vec::new(),
+            })
+        }
+    }
+
+    /// The default `evaluate_structured` hands the resolver the bag alone, so a
+    /// resolver that never opted in cannot see structured input.
+    #[tokio::test]
+    async fn default_evaluate_structured_forwards_only_the_bag() {
+        let resolver = BagOnly::default();
+        let mut bag = crate::attributes::AttributeBag::new();
+        bag.set("subject.id", "alice");
+        let structured = crate::route::StructuredInput {
+            llm_request: Some(std::sync::Arc::new(serde_json::json!({"model": "m"}))),
+            args: Some(std::sync::Arc::new(serde_json::json!({"a": 1}))),
+        };
+        let call = PdpCall {
+            dialect: resolver.dialect(),
+            args: serde_yaml::Value::Null,
+        };
+        let out = resolver
+            .evaluate_structured(&call, &bag, &structured)
+            .await
+            .unwrap();
+        assert_eq!(out.decision, Decision::Allow);
+        assert_eq!(
+            *resolver.seen.lock().unwrap(),
+            vec![Some("alice".to_owned())]
+        );
+    }
 }

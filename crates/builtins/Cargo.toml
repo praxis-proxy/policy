@@ -38,7 +38,7 @@ oauth = [
   "dep:moka",
 ]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
-cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
+cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
 # enabling the crate.
@@ -65,7 +65,7 @@ _engine-apl-runtime = ["dep:praxis-policy-apl-runtime"]
 # silent, since `unexpected_cfgs` catches a stale feature *name* but not a
 # missing alternative.
 _plugins = []
-_pdps = []
+_pdps = ["dep:stacker"]
 _session = []
 _secrets = []
 
@@ -173,12 +173,13 @@ moka = { version = "0.12", optional = true, features = ["future"] }
 # pre-4.x or post-5.x.
 cedar-policy = { version = "4", optional = true }
 
-# Stack-growth guard for the cedar evaluation path. cedar-policy-core aborts
+# Stack-growth guard for the PDP evaluation paths. cedar-policy-core aborts
 # with "recursion limit reached" when `stacker::remaining_stack()` is below
 # ~100 KiB; hosts that hand the FFI a small thread stack (musl defaults to
-# 128 KiB) trip that on inputs glibc's 8 MiB stack handles fine. We use the
-# same crate cedar does — 0.1.x dedups with cedar's transitive pin — to grow
-# onto a fresh segment before calling in.
+# 128 KiB) trip that on inputs glibc's 8 MiB stack handles fine. CEL and OPA
+# convert and evaluate nested client JSON recursively, so they grow the same
+# way. We use the same crate cedar does (0.1.x dedups with cedar's transitive
+# pin) to grow onto a fresh segment before calling in.
 stacker = { version = "0.1", optional = true }
 
 # --- cel ---------------------------------------------------------------------

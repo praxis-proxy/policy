@@ -37,6 +37,7 @@ use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, P
 
 use crate::pdps::cel::activation::bag_to_context;
 use crate::pdps::cel::error::BuildError;
+use crate::pdps::stack;
 
 /// What to do when an expression errors at runtime (an undeclared
 /// variable, a type error, a custom-function panic) or returns a
@@ -435,11 +436,31 @@ impl PdpResolver for CelResolver {
             },
         };
 
-        // 3. Build the activation from the bag, structured input, and
-        //    author-supplied extra args. Then layer any host-supplied
-        //    custom-function bundles on top so expressions can call into them. Setups run in
-        //    registration order; later setups can shadow earlier ones,
-        //    which is the documented contract.
+        // 3. Build the activation from the bag, the structured input the
+        //    expression references, and author-supplied extra args. Then layer
+        //    any host-supplied custom-function bundles on top so expressions
+        //    can call into them. Setups run in registration order; later
+        //    setups can shadow earlier ones, which is the documented contract.
+        //
+        //    Converting, evaluating and dropping nested client JSON recurses,
+        //    so the whole synchronous block runs with stack headroom.
+        let structured = referenced_structured(&program, structured);
+        Ok(stack::guarded(|| {
+            self.decide(expr, &program, bag, call, &structured)
+        }))
+    }
+}
+
+impl CelResolver {
+    /// Evaluate a compiled program and map the result to a decision.
+    fn decide(
+        &self,
+        expr: &str,
+        program: &Program,
+        bag: &AttributeBag,
+        call: &PdpCall,
+        structured: &StructuredInput,
+    ) -> PdpDecision {
         let mut ctx = bag_to_context(bag, &call.args, structured);
         for setup in &self.function_setups {
             setup(&mut ctx);
@@ -447,10 +468,10 @@ impl PdpResolver for CelResolver {
 
         // 4. Evaluate and map the result to a decision.
         match program.execute(&ctx) {
-            Ok(Value::Bool(true)) => Ok(PdpDecision {
+            Ok(Value::Bool(true)) => PdpDecision {
                 decision: Decision::Allow,
                 diagnostics: vec![],
-            }),
+            },
             Ok(Value::Bool(false)) => {
                 // Enrich the deny diagnostics with a snapshot of the
                 // values the expression actually references, so an
@@ -458,19 +479,19 @@ impl PdpResolver for CelResolver {
                 // logging. Bounded — a typical predicate touches 2-5
                 // namespaces.
                 let mut diagnostics = vec![format!("cel: {expr}")];
-                diagnostics.extend(snapshot_referenced_values(&program, bag, structured));
-                Ok(PdpDecision {
+                diagnostics.extend(snapshot_referenced_values(program, bag, structured));
+                PdpDecision {
                     decision: Decision::Deny {
                         reason: Some("CEL expression evaluated to false".to_owned()),
                         rule_source: "cel".to_owned(),
                     },
                     diagnostics,
-                })
+                }
             },
-            Ok(other) => Ok(self.on_error_decision(format!(
+            Ok(other) => self.on_error_decision(format!(
                 "CEL expression must return bool, got {}",
                 value_type(&other)
-            ))),
+            )),
             Err(e) => {
                 // Eval errors are usually undeclared-variable typos.
                 // Enumerate the variables the expression references AND
@@ -489,9 +510,26 @@ impl PdpResolver for CelResolver {
                          present: {found:?}; missing: {missing:?})"
                     ));
                 }
-                Ok(self.on_error_decision(cause))
+                self.on_error_decision(cause)
             },
         }
+    }
+}
+
+/// The structured entries the program reads: `llm.request` only when it
+/// references `llm`, and `args` only when it references `args`. An entry it
+/// never reads is not converted.
+fn referenced_structured(program: &Program, structured: &StructuredInput) -> StructuredInput {
+    let refs = program.references();
+    StructuredInput {
+        llm_request: structured
+            .llm_request
+            .clone()
+            .filter(|_| refs.has_variable("llm")),
+        args: structured
+            .args
+            .clone()
+            .filter(|_| refs.has_variable("args")),
     }
 }
 
@@ -641,7 +679,12 @@ fn read_yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, reason = "tests")]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -1331,6 +1374,99 @@ mod tests {
             reason_of(&out).contains("present: [\"args\", \"llm\"]; missing: []"),
             "{out:?}"
         );
+    }
+
+    /// Nesting that overflows a 256 `KiB` stack without headroom, yet fits the
+    /// grown segment. CEL's own variable conversion recurses at several `KiB`
+    /// per level in unoptimized builds, so a much deeper document overflows
+    /// even the grown segment.
+    const DEEP: usize = 1_000;
+
+    /// Evaluate `expr` against `DEEP`-nested args on a 256 `KiB` thread. The
+    /// program is compiled first on a large stack, and the document is built
+    /// and dropped there, since `serde_json::Value` drop recurses too.
+    fn deep_args_on_a_small_stack(expr: &'static str) -> PdpDecision {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let resolver = CelResolver::new();
+                let bag = AttributeBag::new();
+                let call = cel_call(expr);
+                futures::executor::block_on(resolver.evaluate(&call, &bag)).unwrap();
+                let mut doc = serde_json::json!(true);
+                for _ in 0..DEEP {
+                    let mut level = serde_json::Map::new();
+                    level.insert("a".to_owned(), doc);
+                    doc = serde_json::Value::Object(level);
+                }
+                let structured = StructuredInput {
+                    llm_request: None,
+                    args: Some(Arc::new(doc)),
+                };
+                std::thread::scope(|scope| {
+                    std::thread::Builder::new()
+                        .stack_size(256 * 1024)
+                        .spawn_scoped(scope, || {
+                            futures::executor::block_on(resolver.evaluate_structured(
+                                &call,
+                                &bag,
+                                &structured,
+                            ))
+                        })
+                        .unwrap()
+                        .join()
+                        .expect("evaluation must not overflow the small stack")
+                        .unwrap()
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deeply_nested_args_evaluate_on_a_small_stack() {
+        let out = deep_args_on_a_small_stack("has(args.a)");
+        assert_eq!(out.decision, Decision::Allow, "{out:?}");
+    }
+
+    #[test]
+    fn only_referenced_structured_entries_are_kept() {
+        let structured = StructuredInput {
+            llm_request: Some(Arc::new(serde_json::json!({"model": "m"}))),
+            args: Some(Arc::new(serde_json::json!({"a": 1}))),
+        };
+        let kept = |expr: &str| {
+            let program = Program::compile(expr).unwrap();
+            let out = referenced_structured(&program, &structured);
+            (out.llm_request.is_some(), out.args.is_some())
+        };
+        assert_eq!(kept("subject.id == 'alice'"), (false, false));
+        assert_eq!(kept("args.a == 1"), (false, true));
+        assert_eq!(kept("has(llm.request.model)"), (true, false));
+        assert_eq!(
+            kept("[1].all(x, x == args.a) && llm.request.model == 'm'"),
+            (true, true)
+        );
+    }
+
+    /// An expression that never reads `args` evaluates as before when
+    /// structured args are present.
+    #[tokio::test]
+    async fn unreferenced_structured_args_do_not_change_the_decision() {
+        let structured = StructuredInput {
+            llm_request: None,
+            args: Some(Arc::new(serde_json::json!({"subject": "x"}))),
+        };
+        let out = CelResolver::new()
+            .evaluate_structured(
+                &cel_call("subject.id == 'alice'"),
+                &bag_with(&[("subject.id", "alice")]),
+                &structured,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.decision, Decision::Allow, "{out:?}");
     }
 
     #[test]

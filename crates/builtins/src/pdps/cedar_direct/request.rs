@@ -42,16 +42,20 @@
 //
 // A missing entry stays missing, never an empty record.
 //
-// Context construction errors name a fixed category only, since Cedar's text
-// can quote the value it rejected.
+// Context construction and request validation errors name a fixed category
+// only, since Cedar's text can quote the value it rejected. So does an action
+// that does not parse, since `${args.X}` can fill it.
 //
 // # Schema
 //
-// When a schema is supplied, Cedar's `Context::from_json_value` validates
-// the context's record shape against the action's declared context type.
-// Without a schema, Cedar accepts any record.
+// When a schema is supplied, `Request::new` validates the context against the
+// action's declared context type. Structured input is added under a schema
+// only when the resolver sets `structured_context`, so the schema must declare
+// `args` and `llm` for it. Without a schema, Cedar accepts any record.
 
-use cedar_policy::{ContextCreationError, ContextJsonError, EntityUid, Schema};
+use cedar_policy::{
+    ContextCreationError, ContextJsonError, EntityUid, RequestValidationError, Schema,
+};
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpError};
@@ -145,6 +149,31 @@ fn context_error_category(error: &ContextJsonError) -> &'static str {
     }
 }
 
+/// A value-free description of a request validation error.
+pub(crate) fn request_error_category(error: &RequestValidationError) -> &'static str {
+    match error {
+        RequestValidationError::UndeclaredAction(_) => "action is not declared in the schema",
+        RequestValidationError::UndeclaredPrincipalType(_) => {
+            "principal type is not declared in the schema"
+        },
+        RequestValidationError::UndeclaredResourceType(_) => {
+            "resource type is not declared in the schema"
+        },
+        RequestValidationError::InvalidPrincipalType(_) => {
+            "principal type is not valid for the action"
+        },
+        RequestValidationError::InvalidResourceType(_) => {
+            "resource type is not valid for the action"
+        },
+        RequestValidationError::InvalidContext(_) => {
+            "context does not match the action's context type"
+        },
+        RequestValidationError::TypeOfContext(_) => "context type could not be computed",
+        RequestValidationError::InvalidEnumEntity(_) => "entity id is not a declared enum value",
+        _ => "request does not match the schema",
+    }
+}
+
 /// Parsed pieces of a `PdpCall` ready to feed into
 /// `cedar_policy::Request::builder()`. We pull this into its own
 /// struct so the resolver can sequence "build entities → build request"
@@ -188,10 +217,12 @@ pub fn parse<'a>(
                     .to_owned(),
             )
         })?;
-    let action: EntityUid = action_str.parse().map_err(|e| {
-        PdpError::Dispatch(format!(
-            "cedar:() `action` '{action_str}' not a valid EntityUid: {e}"
-        ))
+    let action: EntityUid = action_str.parse().map_err(|_value_text| {
+        PdpError::Dispatch(
+            "cedar:() `action` is not a valid EntityUid; provide a fully-qualified UID \
+             like 'Action::\"read\"'"
+                .to_owned(),
+        )
     })?;
 
     let resource_args = map

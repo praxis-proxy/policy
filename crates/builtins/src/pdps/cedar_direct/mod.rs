@@ -74,6 +74,8 @@
 //   - `context.llm.request`: the host-parsed LLM request, when present.
 //   - `context.args`: structured tool-call arguments, when present.
 //
+// Under a schema the last two are added only when `structured_context` is set.
+//
 // The last two are sanitized for Cedar (see `request.rs`), and the operator's
 // `context:` may not define `llm` or `args`; a step that does fails config load.
 // Cedar `contains` on a set of records needs an exact match on the whole
@@ -88,6 +90,11 @@
 // evaluation time. Recommended for production deployments; skipped here
 // by default to keep the construction surface simple. Add via
 // `CedarDirectResolver::with_schema(schema)`.
+//
+// A schema's context types are closed records, so structured input reaches
+// the context under a schema only with `structured_context: true` (or
+// `with_structured_context(true)`), and the schema must declare `args` and
+// `llm` for it.
 //
 // # Decision attribution
 //

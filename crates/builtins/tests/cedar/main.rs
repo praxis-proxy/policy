@@ -22,5 +22,6 @@ mod basic_allow_deny;
 mod entities_unit;
 mod request_context;
 mod resolver_config;
+mod schema_context;
 mod small_stack_eval;
 mod visitor_pdp_config;
