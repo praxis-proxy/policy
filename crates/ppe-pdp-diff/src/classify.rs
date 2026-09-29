@@ -101,7 +101,7 @@ mod tests {
     fn cel_eval_error_is_classified_by_prefix() {
         let d = deny_decision(
             "CEL eval error: no such key (expr references variables: [\"role\"]; \
-             present in bag: []; missing: [\"role\"])",
+             present: []; missing: [\"role\"])",
             "cel",
         );
         assert_eq!(classify(Ok(d)), Outcome::deny(CauseKind::EvalError));

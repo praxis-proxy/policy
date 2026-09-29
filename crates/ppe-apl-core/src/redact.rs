@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+use crate::attributes::AttributeValue;
+
 /// Namespaces whose values come from the request or response payload.
 const PAYLOAD_NAMESPACES: &[&str] = &["args", "result", "llm.request"];
 
@@ -42,6 +44,33 @@ pub enum TypeLabel {
     Set(usize),
     /// A map or object.
     Map,
+}
+
+impl TypeLabel {
+    /// The label of a JSON value.
+    pub fn of_json(value: &serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Null => Self::Null,
+            serde_json::Value::Bool(_) => Self::Bool,
+            serde_json::Value::Number(n) if n.is_f64() => Self::Float,
+            serde_json::Value::Number(_) => Self::Int,
+            serde_json::Value::String(_) => Self::String,
+            serde_json::Value::Array(items) => Self::List(items.len()),
+            serde_json::Value::Object(_) => Self::Map,
+        }
+    }
+}
+
+impl From<&AttributeValue> for TypeLabel {
+    fn from(value: &AttributeValue) -> Self {
+        match value {
+            AttributeValue::Bool(_) => Self::Bool,
+            AttributeValue::Int(_) => Self::Int,
+            AttributeValue::Float(_) => Self::Float,
+            AttributeValue::String(_) => Self::String,
+            AttributeValue::StringSet(set) => Self::Set(set.len()),
+        }
+    }
 }
 
 impl fmt::Display for TypeLabel {
@@ -86,6 +115,42 @@ mod tests {
         ] {
             assert_eq!(payload_namespace(path), None, "{path}");
         }
+    }
+
+    #[test]
+    fn json_values_label_by_type() {
+        let labels: Vec<String> = [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(0.5),
+            serde_json::json!("secret"),
+            serde_json::json!([1, 1]),
+            serde_json::json!({"secret": "x"}),
+        ]
+        .iter()
+        .map(|v| TypeLabel::of_json(v).to_string())
+        .collect();
+        assert_eq!(
+            labels,
+            [
+                "null", "bool", "int", "int", "float", "string", "list(2)", "map"
+            ]
+        );
+    }
+
+    #[test]
+    fn attribute_values_label_by_type() {
+        let set = std::collections::HashSet::from(["a".to_owned(), "b".to_owned()]);
+        assert_eq!(
+            TypeLabel::from(&AttributeValue::StringSet(set)),
+            TypeLabel::Set(2)
+        );
+        assert_eq!(
+            TypeLabel::from(&AttributeValue::String("secret".into())),
+            TypeLabel::String
+        );
     }
 
     #[test]
