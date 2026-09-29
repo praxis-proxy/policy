@@ -366,6 +366,25 @@ pub trait PdpResolver: Send + Sync {
         call: &PdpCall,
         bag: &crate::attributes::AttributeBag,
     ) -> Result<PdpDecision, PdpError>;
+
+    /// Evaluate a call against the bag plus structured request JSON.
+    ///
+    /// The evaluator always calls this method. The default ignores
+    /// `structured` and calls [`Self::evaluate`], so only a resolver that
+    /// overrides it sees the structured input.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::evaluate`].
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &crate::attributes::AttributeBag,
+        structured: &crate::route::StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
+        let _ = structured;
+        self.evaluate(call, bag).await
+    }
 }
 
 /// Build a [`PdpResolver`] from a unified-config block. Implemented per

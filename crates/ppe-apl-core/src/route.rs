@@ -32,6 +32,28 @@ use crate::step::{
     DelegationInvoker, DispatchPhase, ElicitationInvoker, PdpResolver, PluginInvoker,
 };
 
+/// Structured JSON handed to PDPs beside the flat bag.
+///
+/// Entries are shared, so cloning only bumps reference counts. An absent
+/// entry stays `None` and is never defaulted to an empty object. `Debug`
+/// prints presence only, so logging a payload never dumps request JSON.
+#[derive(Clone, Default)]
+pub struct StructuredInput {
+    /// The host-parsed LLM request body, when the route handler can read it.
+    pub llm_request: Option<Arc<serde_json::Value>>,
+    /// Tool-call arguments as they were before any `args:` pipeline ran.
+    pub args: Option<Arc<serde_json::Value>>,
+}
+
+impl std::fmt::Debug for StructuredInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StructuredInput")
+            .field("llm_request", &self.llm_request.as_ref().map(|_| "<set>"))
+            .field("args", &self.args.as_ref().map(|_| "<set>"))
+            .finish()
+    }
+}
+
 /// Mutable payload for a route invocation. `args` is the request arguments
 /// object; `result` is the response object (`None` on the inbound path,
 /// `Some` once the tool/resource has produced a value).
@@ -41,12 +63,19 @@ pub struct RoutePayload {
     pub args: serde_json::Value,
     /// The response, once the call has been made.
     pub result: Option<serde_json::Value>,
+    /// Structured JSON passed to PDPs through
+    /// [`PdpResolver::evaluate_structured`]. Pipelines never rewrite it.
+    pub structured: StructuredInput,
 }
 
 impl RoutePayload {
     /// A pre-call payload carrying only arguments.
     pub fn new(args: serde_json::Value) -> Self {
-        Self { args, result: None }
+        Self {
+            args,
+            result: None,
+            structured: StructuredInput::default(),
+        }
     }
 
     /// A post-call payload carrying both arguments and response.
@@ -54,7 +83,15 @@ impl RoutePayload {
         Self {
             args,
             result: Some(result),
+            structured: StructuredInput::default(),
         }
+    }
+
+    /// Attach the structured input PDPs receive.
+    #[must_use]
+    pub fn with_structured(mut self, structured: StructuredInput) -> Self {
+        self.structured = structured;
+        self
     }
 }
 
@@ -543,6 +580,24 @@ mod tests {
     };
     use async_trait::async_trait;
     use serde_json::json;
+
+    #[test]
+    fn structured_input_clone_shares_and_debug_hides_values() {
+        let doc = Arc::new(json!({"input": "secret prompt"}));
+        let payload = RoutePayload::new(json!({})).with_structured(StructuredInput {
+            llm_request: Some(Arc::clone(&doc)),
+            args: None,
+        });
+        let cloned = payload.clone();
+        assert!(Arc::ptr_eq(
+            cloned.structured.llm_request.as_ref().unwrap(),
+            &doc
+        ));
+        assert!(cloned.structured.args.is_none());
+        let rendered = format!("{:?}", payload.structured);
+        assert!(!rendered.contains("secret"), "{rendered}");
+        assert!(rendered.contains("<set>"), "{rendered}");
+    }
 
     struct AllowPdp;
     #[async_trait]

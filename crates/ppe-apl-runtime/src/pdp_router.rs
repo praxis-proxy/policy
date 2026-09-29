@@ -34,6 +34,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
+use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
 /// Dispatches PDP calls to the right resolver based on
@@ -116,6 +117,19 @@ impl PdpResolver for PdpRouter {
             .get(&call.dialect)
             .ok_or_else(|| PdpError::NoResolver(call.dialect.clone()))?;
         resolver.evaluate(call, bag).await
+    }
+
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
+        let resolver = self
+            .resolvers
+            .get(&call.dialect)
+            .ok_or_else(|| PdpError::NoResolver(call.dialect.clone()))?;
+        resolver.evaluate_structured(call, bag, structured).await
     }
 }
 

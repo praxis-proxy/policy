@@ -1331,7 +1331,8 @@ fn install_handler(
         Arc::clone(session_store),
         engine.clone(),
     )
-    .with_attribute_tree(attribute_tree);
+    .with_attribute_tree(attribute_tree)
+    .with_structured_args(entity_type == ENTITY_TOOL);
     if let Some(pdp) = pdp {
         handler = handler.with_pdp(pdp);
     }
