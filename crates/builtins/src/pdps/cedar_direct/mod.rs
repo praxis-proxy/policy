@@ -71,6 +71,13 @@
 //   - `context.meta`       — `{ entity_type, entity_name, scope, tags }`
 //                            from `MetaExtension`.
 //   - `context.security`   — `{ labels: [...], classification }`.
+//   - `context.llm.request`: the host-parsed LLM request, when present.
+//   - `context.args`: structured tool-call arguments, when present.
+//
+// The last two are sanitized for Cedar (see `request.rs`), and the operator's
+// `context:` may not define `llm` or `args`; a step that does fails config load.
+// Cedar `contains` on a set of records needs an exact match on the whole
+// record, so a tool with one extra field escapes a deny-list written that way.
 //
 // Operators document this layout in their Cedar schema; policy authors
 // rely on it.

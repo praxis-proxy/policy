@@ -18,6 +18,7 @@
 )]
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
+use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect, PdpResolver as _};
 
 use praxis_policy_builtins::pdps::cedar_direct::CedarDirectResolver;
@@ -179,7 +180,7 @@ async fn forbid_attribution_carries_policy_id() {
 /// evaluation. Cedar still Allows on the permit; we must Deny. A lone
 /// erroring policy also Denies (default-deny), so that fixture would
 /// not catch the override going missing. The reason must say
-/// fail-closed and name the evaluation error.
+/// fail-closed and name the erroring policy and the error category.
 #[tokio::test]
 async fn evaluation_error_denies_even_when_a_permit_fired() {
     const POLICY: &str = r#"
@@ -212,8 +213,8 @@ async fn evaluation_error_denies_even_when_a_permit_fired() {
                 "reason must say fail-closed: {reason}"
             );
             assert!(
-                reason.contains("department"),
-                "reason must name the evaluation error: {reason}"
+                reason.contains("policy `dept`: entity attribute or tag does not exist"),
+                "reason must name the policy and error category: {reason}"
             );
         },
         other => panic!("expected Deny on a partially failed Allow, got {other:?}"),
@@ -282,4 +283,86 @@ async fn with_dialect_overrides_default() {
         resolver.dialect(),
         PdpDialect::Custom("workload".to_owned())
     );
+}
+
+fn structured_args(args: serde_json::Value) -> StructuredInput {
+    StructuredInput {
+        llm_request: None,
+        args: Some(std::sync::Arc::new(args)),
+    }
+}
+
+/// Error-derived reasons and diagnostics carry no payload value, for each
+/// Cedar error that quotes its operands.
+#[tokio::test]
+async fn evaluation_errors_on_payload_values_omit_them() {
+    const MARKER: &str = "SECRET-MARKER";
+    let cases = [
+        (
+            "context.args.limit > 5",
+            serde_json::json!({"limit": MARKER}),
+            "type error",
+        ),
+        (
+            "ip(context.args.addr).isLoopback()",
+            serde_json::json!({"addr": MARKER}),
+            "extension function failed",
+        ),
+        (
+            "context.args.n + 9223372036854775807 > 0",
+            serde_json::json!({"n": 424_242}),
+            "integer overflow",
+        ),
+    ];
+    for (condition, args, category) in cases {
+        let policy =
+            format!("@id(\"p\")\npermit(principal, action, resource) when {{ {condition} }};");
+        let resolver = CedarDirectResolver::from_policy_text(&policy).expect("policy parses");
+        let decision = resolver
+            .evaluate_structured(&read_doc_call(), &alice_bag(), &structured_args(args))
+            .await
+            .expect("evaluate");
+        let rendered = format!("{decision:?}");
+        assert!(!rendered.contains(MARKER), "{rendered}");
+        assert!(!rendered.contains("424242"), "{rendered}");
+        match decision.decision {
+            Decision::Deny {
+                reason,
+                rule_source,
+            } => {
+                assert_eq!(rule_source, "cedar.evaluation_error");
+                assert_eq!(
+                    reason.as_deref(),
+                    Some(
+                        format!(
+                            "Cedar evaluation produced errors (fail-closed): policy `p`: {category}"
+                        )
+                        .as_str()
+                    )
+                );
+            },
+            other => panic!("expected Deny for {condition}, got {other:?}"),
+        }
+    }
+}
+
+/// A withheld document denies with the dedicated code and no diagnostics.
+#[tokio::test]
+async fn withheld_input_denies_before_evaluation() {
+    let resolver = CedarDirectResolver::from_policy_text("permit(principal, action, resource);")
+        .expect("policy parses");
+    let args = serde_json::json!({"who": {"__entity": {"type": "User", "id": "admin"}}});
+    let decision = resolver
+        .evaluate_structured(&read_doc_call(), &alice_bag(), &structured_args(args))
+        .await
+        .expect("evaluate");
+    assert!(
+        decision.diagnostics.is_empty(),
+        "{:?}",
+        decision.diagnostics
+    );
+    match decision.decision {
+        Decision::Deny { rule_source, .. } => assert_eq!(rule_source, "cedar.input_withheld"),
+        other => panic!("expected Deny, got {other:?}"),
+    }
 }

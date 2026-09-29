@@ -21,7 +21,7 @@
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect};
-use praxis_policy_builtins::pdps::cedar_direct::request::parse;
+use praxis_policy_builtins::pdps::cedar_direct::request::{CedarStructured, parse};
 
 fn call(args: &str) -> PdpCall {
     PdpCall {
@@ -39,7 +39,7 @@ fn read_doc() -> PdpCall {
 /// field accessor, so its `Debug` output is the only way to assert on what a
 /// policy would see.
 fn context_of(bag: &AttributeBag, args: &PdpCall) -> String {
-    let parsed = parse(args, bag, None).expect("call must parse");
+    let parsed = parse(args, bag, CedarStructured::default(), None).expect("call must parse");
     format!("{:?}", parsed.context)
 }
 
@@ -175,7 +175,7 @@ fn a_non_mapping_operator_context_leaves_the_ppe_context_intact() {
 fn parse_err(args: &str) -> String {
     let mut bag = AttributeBag::new();
     bag.set("subject.id", "alice");
-    let Err(e) = parse(&call(args), &bag, None) else {
+    let Err(e) = parse(&call(args), &bag, CedarStructured::default(), None) else {
         panic!("this call must be rejected")
     };
     e.to_string()

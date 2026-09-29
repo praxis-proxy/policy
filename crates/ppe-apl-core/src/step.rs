@@ -385,6 +385,20 @@ pub trait PdpResolver: Send + Sync {
         let _ = structured;
         self.evaluate(call, bag).await
     }
+
+    /// Check a compiled call at config load, before any request reaches it.
+    ///
+    /// The default accepts every call. A resolver overrides this to reject
+    /// arguments it can never evaluate, so the fault fails the load instead
+    /// of denying each request.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the call is invalid. The caller names the step.
+    fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+        let _ = call;
+        Ok(())
+    }
 }
 
 /// Build a [`PdpResolver`] from a unified-config block. Implemented per

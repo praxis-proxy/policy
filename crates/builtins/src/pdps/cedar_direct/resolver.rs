@@ -32,12 +32,15 @@ use async_trait::async_trait;
 use cedar_policy::{Authorizer, PolicySet, Schema};
 
 use praxis_policy_apl_core::attributes::AttributeBag;
+use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
-use crate::pdps::cedar_direct::decision::translate;
+use crate::pdps::cedar_direct::decision::{translate, withheld};
 use crate::pdps::cedar_direct::entities::build as build_entities;
 use crate::pdps::cedar_direct::error::BuildError;
-use crate::pdps::cedar_direct::request::parse as parse_call;
+use crate::pdps::cedar_direct::request::{
+    parse as parse_call, reserved_context_key, reserved_key_message, sanitize_structured,
+};
 
 /// Grow the cedar evaluation stack when the current thread has less than this
 /// much headroom. cedar-policy-core's own guard is 100 `KiB`
@@ -214,6 +217,22 @@ impl PdpResolver for CedarDirectResolver {
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
+        self.evaluate_structured(call, bag, &StructuredInput::default())
+            .await
+    }
+
+    /// Rejects an operator `context:` that defines a key reserved for
+    /// structured input.
+    fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+        reserved_context_key(call).map_or(Ok(()), |key| Err(reserved_key_message(key)))
+    }
+
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
         // Resolve `${bag-key}` placeholders in the call's args against
         // the bag before any parsing. The author writes things like
         // `id: ${args.repo_name}`; this pass turns them into concrete
@@ -234,8 +253,14 @@ impl PdpResolver for CedarDirectResolver {
         // glibc pays nothing), making cedar host-stack-agnostic. The block is
         // fully synchronous — no `.await` — so it is safe to run inside the
         // grown segment. See CEDAR_STACK_RED_ZONE / CEDAR_STACK_GROW_SIZE.
+        //
+        // Sanitizing recurses too, so it runs inside the grown segment. Input
+        // holding a Cedar escape key denies here, before Cedar sees it.
         stacker::maybe_grow(CEDAR_STACK_RED_ZONE, CEDAR_STACK_GROW_SIZE, || {
-            let parsed = parse_call(&resolved_call, bag, self.schema.as_deref())?;
+            let Ok(sanitized) = sanitize_structured(structured) else {
+                return Ok(withheld());
+            };
+            let parsed = parse_call(&resolved_call, bag, sanitized, self.schema.as_deref())?;
             let entities = build_entities(
                 bag,
                 parsed.resource_args,
