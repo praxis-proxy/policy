@@ -55,11 +55,12 @@ use regorus::Engine;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
+use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
-use crate::pdps::opa::input::bag_to_input;
+use crate::pdps::opa::input::build_input;
 
 /// What to do when a query errors at runtime or yields a value that carries no
 /// decision (a non-bool/object/set result, or a missing decision field). A
@@ -428,6 +429,16 @@ impl PdpResolver for OpaResolver {
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
+        self.evaluate_structured(call, bag, &StructuredInput::default())
+            .await
+    }
+
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
         // 1. Required `query` and optional inline `module` from the step args.
         //    A missing `query` is an author/config bug — hard error.
         let args = call.args.as_mapping();
@@ -461,23 +472,28 @@ impl PdpResolver for OpaResolver {
             },
         };
 
-        // 3. Map the bag into the Rego `input` document, then set input and
-        //    evaluate on a blocking thread — Rego eval is synchronous and can
-        //    be CPU-heavy, and must not monopolize an async worker.
-        let input_json = bag_to_input(bag).to_string();
+        // 3. Map the bag and structured input into the Rego `input` document,
+        //    then set input and evaluate on a blocking thread. Rego eval is
+        //    synchronous and can be CPU-heavy, and must not monopolize an
+        //    async worker.
+        //
+        //    Error text from regorus can quote input values, so no cause below
+        //    carries it: each is a fixed category, plus the policy location for
+        //    an eval error.
+        let input_json = build_input(bag, structured).to_string();
         let query = query.to_owned();
         let decision_field = self.decision_field.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let mut engine = engine;
-            if let Err(e) = engine.set_input_json(&input_json) {
-                return EvalOutcome::OnError(format!("OPA failed to set input: {e}"));
+            if engine.set_input_json(&input_json).is_err() {
+                return EvalOutcome::OnError("OPA failed to set input".to_owned());
             }
             match engine.eval_rule(query) {
                 Ok(value) => match map_query_result(&value, &decision_field) {
                     Mapped::Decision(decision) => EvalOutcome::Decision(decision),
                     Mapped::Degenerate(cause) => EvalOutcome::OnError(cause),
                 },
-                Err(e) => EvalOutcome::OnError(format!("OPA eval error: {e}")),
+                Err(e) => EvalOutcome::OnError(eval_error_cause(&e.to_string())),
             }
         })
         .await;
@@ -489,11 +505,35 @@ impl PdpResolver for OpaResolver {
         match outcome {
             Ok(EvalOutcome::Decision(decision)) => Ok(decision),
             Ok(EvalOutcome::OnError(cause)) => Ok(self.on_error_decision(cause)),
-            Err(join_err) => Ok(
-                self.compile_error_decision(format!("OPA evaluation task panicked: {join_err}"))
-            ),
+            Err(_) => Ok(self.compile_error_decision("OPA evaluation task panicked".to_owned())),
         }
     }
+}
+
+/// A value-free cause for a regorus eval error: a fixed category plus the
+/// policy location when the error names one. The message itself is dropped
+/// because builtins quote their arguments, which can be payload values.
+fn eval_error_cause(message: &str) -> String {
+    match policy_location(message) {
+        Some(at) => format!("OPA eval error: policy runtime error at {at}"),
+        None => "OPA eval error: policy runtime error".to_owned(),
+    }
+}
+
+/// The `file:line:col` from a regorus source-span message (`--> file:line:col`).
+/// Only a well-formed location is returned, so no other message text can slip
+/// through.
+fn policy_location(message: &str) -> Option<&str> {
+    const MAX_LOCATION_LEN: usize = 256;
+    let (_, rest) = message.split_once("--> ")?;
+    let at = rest.lines().next()?.trim_end();
+    let mut parts = at.rsplitn(3, ':');
+    let col = parts.next()?;
+    let line = parts.next()?;
+    let file = parts.next()?;
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let plain_file = !file.is_empty() && !file.chars().any(|c| c.is_whitespace() || c.is_control());
+    (at.len() <= MAX_LOCATION_LEN && numeric(line) && numeric(col) && plain_file).then_some(at)
 }
 
 /// Normalize a YAML/JSON data document to JSON and merge it into the engine's
@@ -1234,6 +1274,49 @@ modules:
         assert!(
             matches!(out.decision, Decision::Deny { .. }),
             "http.send must be unavailable and deny, not allow",
+        );
+    }
+
+    /// A builtin type error quotes its argument in regorus's message. The deny
+    /// reason keeps only the category and the policy location.
+    #[tokio::test]
+    async fn eval_error_reason_omits_payload_values() {
+        const MARKER: &str = "zz-marker-7f3a";
+        let r = resolver(
+            &["package authz\nallow if upper(input.llm.request.tools) == \"X\"\n"],
+            OnError::Deny,
+        );
+        let structured = StructuredInput {
+            llm_request: Some(std::sync::Arc::new(serde_json::json!({
+                "tools": [{"name": MARKER}],
+            }))),
+            args: None,
+        };
+        let out = r
+            .evaluate_structured(&call("data.authz.allow", None), &bag("alice"), &structured)
+            .await
+            .unwrap();
+        let Decision::Deny { reason, .. } = &out.decision else {
+            panic!("a runtime error must deny, got {:?}", out.decision);
+        };
+        let reason = reason.as_deref().unwrap_or_default();
+        assert_eq!(
+            reason,
+            "OPA eval error: policy runtime error at global-0.rego:2:33"
+        );
+        assert!(!format!("{out:?}").contains(MARKER), "{out:?}");
+    }
+
+    #[test]
+    fn policy_location_accepts_only_a_well_formed_span() {
+        let msg = "\n--> global-0.rego:3:5\n  |\n3 | upper(input.x)\n  | ^\nerror: `upper` expects string argument. Got `[1]` instead";
+        assert_eq!(policy_location(msg), Some("global-0.rego:3:5"));
+        assert_eq!(policy_location("no span here"), None);
+        assert_eq!(policy_location("--> file with space.rego:1:1"), None);
+        assert_eq!(policy_location("--> f.rego:x:1"), None);
+        assert_eq!(
+            eval_error_cause("Got `secret` instead"),
+            "OPA eval error: policy runtime error"
         );
     }
 }

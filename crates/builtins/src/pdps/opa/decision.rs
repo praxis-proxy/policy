@@ -26,10 +26,17 @@
 // both element count and line length, since their content is policy-authored
 // and can be derived from arbitrarily large `data`. Truncation is always marked,
 // so a bounded diagnostic never reads as a complete one.
+//
+// A query result can hold values copied from `input`, including the client's
+// payload, and nothing marks where a value came from. So text this module
+// generates names only types: a degenerate result, a non-string violation, and
+// the decision object summary render as type labels. Strings the policy chose
+// as a reason, message, or violation pass through as author-written text.
 
 use regorus::Value;
 
 use praxis_policy_apl_core::evaluator::Decision;
+use praxis_policy_apl_core::redact::TypeLabel;
 use praxis_policy_apl_core::step::PdpDecision;
 
 /// The fallback attribution when a policy does not name a rule id.
@@ -73,7 +80,7 @@ pub(in crate::pdps::opa) fn map_query_result(value: &Value, decision_field: &str
         )),
         other => Mapped::Degenerate(format!(
             "OPA query returned a value that carries no decision: {}",
-            render(other)
+            type_label(other)
         )),
     }
 }
@@ -86,9 +93,8 @@ fn map_object(value: &Value, decision_field: &str) -> Mapped {
         Err(_) => return Mapped::Degenerate("OPA query object was not an object".to_owned()),
     };
 
-    let decision = obj
-        .get(&Value::from(decision_field))
-        .and_then(|v| v.as_bool().ok().copied());
+    let field = obj.get(&Value::from(decision_field));
+    let decision = field.and_then(|v| v.as_bool().ok().copied());
 
     match decision {
         Some(true) => Mapped::Decision(allow()),
@@ -107,15 +113,18 @@ fn map_object(value: &Value, decision_field: &str) -> Mapped {
                     diagnostics.extend(bounded_elements(list.iter()));
                 }
             }
-            // Serialize the whole object so nothing the author returned is lost
-            // to the audit trail, even fields we did not specifically read.
-            diagnostics.push(bounded(format!("opa: {}", render(value))));
+            // Summarize the object's shape so an auditor sees what came back
+            // without any value that may have been copied from the payload.
+            diagnostics.push(bounded(format!(
+                "opa: {}",
+                object_summary(obj, decision_field)
+            )));
 
             Mapped::Decision(deny(reason, rule_source, diagnostics))
         },
         None => Mapped::Degenerate(format!(
-            "OPA decision object has no boolean `{decision_field}` field: {}",
-            render(value)
+            "OPA decision object has no boolean `{decision_field}` field (found {})",
+            field.map_or_else(|| "none".to_owned(), |v| type_label(v).to_string())
         )),
     }
 }
@@ -181,7 +190,7 @@ fn bounded_elements<'a>(items: impl ExactSizeIterator<Item = &'a Value>) -> Vec<
     let total = items.len();
     let mut out: Vec<String> = items
         .take(MAX_DIAGNOSTIC_ELEMENTS)
-        .map(|item| bounded(render(item)))
+        .map(|item| bounded(render_violation(item)))
         .collect();
     if total > out.len() {
         out.push(format!("[{} more element(s) omitted]", total - out.len()));
@@ -189,19 +198,76 @@ fn bounded_elements<'a>(items: impl ExactSizeIterator<Item = &'a Value>) -> Vec<
     out
 }
 
-/// Render a value for a diagnostic line: a bare string as-is, everything else
-/// as compact JSON (falling back to a placeholder if it cannot be rendered).
-fn render(value: &Value) -> String {
+/// Fields of a decision object the contract reads. Only these keys are named
+/// in the summary; any other key could have been copied from the payload.
+const CONTRACT_FIELDS: &[&str] = &[
+    "reason",
+    "message",
+    "rule_source",
+    "id",
+    "violations",
+    "errors",
+];
+
+/// Render one violation: a string as written, the `msg`, `message`, or
+/// `reason` string of an object element, and anything else as its type.
+fn render_violation(value: &Value) -> String {
     if let Ok(s) = value.as_string() {
         return s.to_string();
     }
-    value
-        .to_json_str()
-        .unwrap_or_else(|_| "<unrenderable value>".to_owned())
+    if let Ok(obj) = value.as_object()
+        && let Some(text) = ["msg", "message", "reason"]
+            .iter()
+            .find_map(|key| get_str(obj, key))
+    {
+        return text;
+    }
+    type_label(value).to_string()
+}
+
+/// Summarize a decision object: the decision and contract fields with their
+/// types, then a count of any other fields.
+fn object_summary(obj: &regorus::value::Object, decision_field: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut other = 0_usize;
+    for (key, value) in obj.iter() {
+        match key.as_string() {
+            Ok(name)
+                if name.as_ref() == decision_field || CONTRACT_FIELDS.contains(&name.as_ref()) =>
+            {
+                parts.push(format!("{name}: {}", type_label(value)));
+            },
+            _ => other += 1,
+        }
+    }
+    if other > 0 {
+        parts.push(format!("{other} other field(s)"));
+    }
+    format!("{{{}}}", parts.join(", "))
+}
+
+/// The type of a Rego value, never its contents.
+fn type_label(value: &Value) -> TypeLabel {
+    match value {
+        // Undefined never survives into a returned value; label it as null.
+        Value::Null | Value::Undefined => TypeLabel::Null,
+        Value::Bool(_) => TypeLabel::Bool,
+        Value::Number(n) if n.is_integer() => TypeLabel::Int,
+        Value::Number(_) => TypeLabel::Float,
+        Value::String(_) => TypeLabel::String,
+        Value::Array(items) => TypeLabel::List(items.len()),
+        Value::Set(items) => TypeLabel::Set(items.len()),
+        Value::Object(_) => TypeLabel::Map,
+    }
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, reason = "tests")]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
 
@@ -422,9 +488,12 @@ mod tests {
             );
         }
         assert!(
-            diagnostics.iter().all(|d| d.contains("more bytes omitted")),
-            "both the element and the whole-object line must be marked truncated; got \
-             {diagnostics:?}"
+            diagnostics[0].contains("more bytes omitted"),
+            "the element must be marked truncated; got {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics.last().map(String::as_str),
+            Some("opa: {allow: bool, violations: list(1)}")
         );
     }
 
@@ -474,5 +543,90 @@ mod tests {
             )),
             Decision::Allow
         );
+    }
+
+    const MARKER: &str = "zz-marker-7f3a";
+
+    fn degenerate_cause(m: Mapped) -> String {
+        match m {
+            Mapped::Degenerate(cause) => cause,
+            Mapped::Decision(d) => panic!("expected degenerate, got {:?}", d.decision),
+        }
+    }
+
+    /// A query that hands back the request document names only its type.
+    #[test]
+    fn degenerate_object_names_type_not_contents() {
+        let cause = degenerate_cause(map_query_result(
+            &val(&format!(r#"{{"secret": "{MARKER}", "tools": [1, 2]}}"#)),
+            "allow",
+        ));
+        assert_eq!(
+            cause,
+            "OPA decision object has no boolean `allow` field (found none)"
+        );
+        let cause = degenerate_cause(map_query_result(
+            &val(&format!(r#"{{"allow": "{MARKER}"}}"#)),
+            "allow",
+        ));
+        assert_eq!(
+            cause,
+            "OPA decision object has no boolean `allow` field (found string)"
+        );
+    }
+
+    #[test]
+    fn degenerate_scalar_names_type_not_contents() {
+        for (json, label) in [
+            (format!(r#""{MARKER}""#), "string"),
+            ("12".to_owned(), "int"),
+            ("0.5".to_owned(), "float"),
+            ("null".to_owned(), "null"),
+        ] {
+            let cause = degenerate_cause(map_query_result(&val(&json), "allow"));
+            assert_eq!(
+                cause,
+                format!("OPA query returned a value that carries no decision: {label}")
+            );
+        }
+    }
+
+    /// The object summary names contract fields and counts the rest, so a
+    /// payload key or value copied into the object never reaches diagnostics.
+    #[test]
+    fn deny_object_summary_omits_other_keys_and_values() {
+        let m = map_query_result(
+            &val(&format!(
+                r#"{{"allow": false, "reason": "blocked", "{MARKER}": 1, "echo": ["{MARKER}"]}}"#
+            )),
+            "allow",
+        );
+        match m {
+            Mapped::Decision(d) => {
+                assert!(matches!(
+                    d.decision,
+                    Decision::Deny { reason: Some(ref r), .. } if r == "blocked"
+                ));
+                assert_eq!(
+                    d.diagnostics,
+                    ["opa: {allow: bool, reason: string, 2 other field(s)}"]
+                );
+            },
+            Mapped::Degenerate(c) => panic!("degenerate: {c}"),
+        }
+    }
+
+    /// String violations and an object's `msg` are author text; other
+    /// elements render as their type.
+    #[test]
+    fn violation_elements_keep_author_text_only() {
+        let m = map_query_result(
+            &val(&format!(
+                r#"["plain", {{"msg": "from msg", "detail": "{MARKER}"}}, {{"k": "{MARKER}"}}, [1, 2]]"#
+            )),
+            "allow",
+        );
+        let diagnostics = diagnostics_of(m);
+        assert_eq!(diagnostics, ["plain", "from msg", "map", "list(2)"]);
     }
 }

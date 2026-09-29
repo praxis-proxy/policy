@@ -30,6 +30,8 @@ pub mod parser;
 pub mod pipeline;
 /// Plugin declarations and their per-route overrides.
 pub mod plugin_decl;
+// Documented by its own inner doc comment.
+pub mod redact;
 /// A compiled route and the phases it runs.
 pub mod route;
 /// Rules, predicates, and effects.

@@ -24,24 +24,65 @@
 // Collision rule: if a key is both a leaf and a namespace prefix (`delegation`
 // AND `delegation.depth`), the namespace (object) wins and the scalar leaf is
 // dropped with a `tracing::warn!`, matching the CEL resolver.
+//
+// Structured input is overlaid after the bag tree is built. Structured `args`
+// replaces the whole bag-derived `args` subtree, so a field's type never
+// depends on whether the flattener could represent it. `llm.request` is added
+// beside the bag's other `llm.*` fields. Either entry, when absent, leaves the
+// bag-derived input untouched: a missing document stays undefined in Rego.
 
 use std::collections::BTreeMap;
 
 use praxis_policy_apl_core::attributes::{AttributeBag, AttributeValue};
+use praxis_policy_apl_core::redact::payload_namespace;
+use praxis_policy_apl_core::route::StructuredInput;
 use serde_json::{Map, Number, Value};
 
-/// Build the Rego `input` document from the policy bag.
+/// Build the Rego `input` document from the policy bag and structured input.
 ///
 /// Every dotted bag key becomes a nested field: `subject.id` → `{"subject":
 /// {"id": ...}}`. Single-segment keys (`authenticated`) become top-level
-/// fields. The result is always a JSON object (an empty bag yields `{}`).
-pub fn bag_to_input(bag: &AttributeBag) -> Value {
+/// fields. Structured `args` then replaces `input.args`, and a structured
+/// request document becomes `input.llm.request`. The result is always a JSON
+/// object (an empty bag with no structured input yields `{}`).
+pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
+    let mut root = bag_to_map(bag);
+    if let Some(document) = &structured.llm_request {
+        let llm = root
+            .entry("llm")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !llm.is_object() {
+            tracing::warn!(
+                key = "llm",
+                "OPA input: scalar key collides with the request document; \
+                 keeping the document and dropping the scalar"
+            );
+            *llm = Value::Object(Map::new());
+        }
+        if let Value::Object(llm) = llm {
+            llm.insert("request".to_owned(), Value::clone(document));
+        }
+    }
+    if let Some(args) = &structured.args {
+        root.insert("args".to_owned(), Value::clone(args));
+    }
+    Value::Object(root)
+}
+
+/// Rebuild the flat bag into a nested JSON object.
+fn bag_to_map(bag: &AttributeBag) -> Map<String, Value> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
         let segments: Vec<&str> = key.split('.').collect();
         insert(&mut root, key, &segments, attr_to_value(value));
     }
-    node_map_to_value(root)
+    node_map_to_map(root)
+}
+
+/// A bag key as it may appear in a log line. Keys below a payload namespace
+/// are client-chosen, so only the namespace is shown.
+fn loggable_key(key: &str) -> &str {
+    payload_namespace(key).unwrap_or(key)
 }
 
 /// Internal tree node: either a leaf scalar/array or a nested namespace.
@@ -64,7 +105,7 @@ fn insert(level: &mut BTreeMap<String, Node>, full_key: &str, segments: &[&str],
         match level.get(&head) {
             Some(Node::Branch(_)) => {
                 tracing::warn!(
-                    key = %full_key,
+                    key = %loggable_key(full_key),
                     "OPA input: scalar key collides with an existing namespace; \
                      keeping the namespace and dropping the scalar"
                 );
@@ -81,7 +122,7 @@ fn insert(level: &mut BTreeMap<String, Node>, full_key: &str, segments: &[&str],
         .or_insert_with(|| Node::Branch(BTreeMap::new()));
     if let Node::Leaf(_) = entry {
         tracing::warn!(
-            key = %full_key,
+            key = %loggable_key(full_key),
             "OPA input: namespace prefix collides with an existing scalar; \
              promoting to a namespace and dropping the scalar"
         );
@@ -92,19 +133,19 @@ fn insert(level: &mut BTreeMap<String, Node>, full_key: &str, segments: &[&str],
     }
 }
 
-/// Recursively convert a tree of nodes into a JSON object value.
-fn node_map_to_value(children: BTreeMap<String, Node>) -> Value {
+/// Recursively convert a tree of nodes into a JSON object.
+fn node_map_to_map(children: BTreeMap<String, Node>) -> Map<String, Value> {
     let mut map = Map::new();
     for (k, child) in children {
         map.insert(k, node_to_value(child));
     }
-    Value::Object(map)
+    map
 }
 
 fn node_to_value(node: Node) -> Value {
     match node {
         Node::Leaf(v) => v,
-        Node::Branch(children) => node_map_to_value(children),
+        Node::Branch(children) => Value::Object(node_map_to_map(children)),
     }
 }
 
@@ -159,6 +200,9 @@ fn float_to_value(f: f64) -> Value {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use serde_json::json;
 
     use regorus::Engine;
 
@@ -166,7 +210,11 @@ mod tests {
     /// Wraps the expression in a rule so we exercise the exact input path the
     /// resolver uses (`set_input_json` + `eval_rule`).
     fn rego_eval(expr: &str, bag: &AttributeBag) -> bool {
-        let input = bag_to_input(bag);
+        rego_eval_structured(expr, bag, &StructuredInput::default())
+    }
+
+    fn rego_eval_structured(expr: &str, bag: &AttributeBag, structured: &StructuredInput) -> bool {
+        let input = build_input(bag, structured);
         let mut engine = Engine::new();
         engine
             .add_policy(
@@ -181,6 +229,29 @@ mod tests {
             .as_bool()
             .copied()
             .unwrap_or(false)
+    }
+
+    fn bag_to_input(bag: &AttributeBag) -> Value {
+        build_input(bag, &StructuredInput::default())
+    }
+
+    fn with_args(args: Value) -> StructuredInput {
+        StructuredInput {
+            llm_request: None,
+            args: Some(Arc::new(args)),
+        }
+    }
+
+    /// Read `input` back out of regorus as JSON after the engine has parsed it.
+    fn rego_input_roundtrip(structured: &StructuredInput) -> Value {
+        let input = build_input(&AttributeBag::new(), structured);
+        let mut engine = Engine::new();
+        engine
+            .add_policy("t.rego".to_owned(), "package t\nv := input\n".to_owned())
+            .unwrap();
+        engine.set_input_json(&input.to_string()).unwrap();
+        let v = engine.eval_rule("data.t.v".to_owned()).unwrap();
+        serde_json::from_str(&v.to_json_str().unwrap()).unwrap()
     }
 
     #[test]
@@ -251,5 +322,136 @@ mod tests {
     fn empty_bag_is_empty_object() {
         let bag = AttributeBag::new();
         assert_eq!(bag_to_input(&bag), serde_json::json!({}));
+    }
+
+    #[test]
+    fn structured_args_replace_flattened_args() {
+        let mut bag = AttributeBag::new();
+        bag.set("args.region", "eu");
+        bag.set("args.stale", "flattened-only");
+        bag.set("subject.id", "alice");
+        let structured = with_args(json!({"region": "eu", "items": [{"k": 1}]}));
+        let input = build_input(&bag, &structured);
+        assert_eq!(input["args"], json!({"region": "eu", "items": [{"k": 1}]}));
+        assert_eq!(input["subject"]["id"], "alice");
+        assert!(rego_eval_structured(
+            "input.args.region == \"eu\"",
+            &bag,
+            &structured
+        ));
+        assert!(!rego_eval_structured("input.args.stale", &bag, &structured));
+    }
+
+    #[test]
+    fn flattened_args_kept_when_structured_args_absent() {
+        let mut bag = AttributeBag::new();
+        bag.set("args", "prompt text");
+        let input = build_input(&bag, &StructuredInput::default());
+        assert_eq!(input["args"], "prompt text");
+    }
+
+    #[test]
+    fn request_document_sits_beside_llm_metadata() {
+        let mut bag = AttributeBag::new();
+        bag.set("llm.model_id", "gpt-4o");
+        let structured = StructuredInput {
+            llm_request: Some(Arc::new(json!({"model": "gpt-4o", "tools": []}))),
+            args: None,
+        };
+        let input = build_input(&bag, &structured);
+        assert_eq!(input["llm"]["model_id"], "gpt-4o");
+        assert_eq!(
+            input["llm"]["request"],
+            json!({"model": "gpt-4o", "tools": []})
+        );
+    }
+
+    #[test]
+    fn request_document_replaces_scalar_llm_key() {
+        let mut bag = AttributeBag::new();
+        bag.set("llm", "scalar");
+        let structured = StructuredInput {
+            llm_request: Some(Arc::new(json!({"model": "m"}))),
+            args: None,
+        };
+        let input = build_input(&bag, &structured);
+        assert_eq!(input["llm"], json!({"request": {"model": "m"}}));
+    }
+
+    #[test]
+    fn absent_document_stays_undefined() {
+        let mut bag = AttributeBag::new();
+        bag.set("llm.model_id", "gpt-4o");
+        let input = build_input(&bag, &StructuredInput::default());
+        assert!(input["llm"].get("request").is_none());
+        assert!(rego_eval("not input.llm.request", &bag));
+    }
+
+    #[test]
+    fn json_shapes_round_trip_through_regorus() {
+        let args = json!({
+            "empty_list": [],
+            "empty_map": {},
+            "nothing": null,
+            "dupes": [1, 1],
+            "mixed": [1, "a", true, null, 1.5, {"k": "v"}],
+            "nested": [[{"a": 1}, {"b": [2, 3]}], []],
+            "float": 0.7,
+        });
+        let structured = StructuredInput {
+            llm_request: Some(Arc::new(json!({"tools": [{"type": "function"}]}))),
+            args: Some(Arc::new(args.clone())),
+        };
+        let back = rego_input_roundtrip(&structured);
+        assert_eq!(back["args"], args);
+        assert_eq!(
+            back["llm"]["request"],
+            json!({"tools": [{"type": "function"}]})
+        );
+    }
+
+    /// Structured `args` arrays keep numbers, client order, and duplicates,
+    /// unlike the sorted string set the bag used to supply.
+    #[test]
+    fn structured_args_arrays_keep_numbers_order_and_duplicates() {
+        let bag = AttributeBag::new();
+        let structured = with_args(json!({"ids": [2, 1, 1]}));
+        assert!(rego_eval_structured(
+            "1 in input.args.ids",
+            &bag,
+            &structured
+        ));
+        assert!(!rego_eval_structured(
+            "\"1\" in input.args.ids",
+            &bag,
+            &structured
+        ));
+        assert!(rego_eval_structured(
+            "input.args.ids == [2, 1, 1]",
+            &bag,
+            &structured
+        ));
+        assert!(rego_eval_structured(
+            "count(input.args.ids) == 3",
+            &bag,
+            &structured
+        ));
+    }
+
+    /// An explicit `null` is present, so `not input.args.note` no longer holds.
+    #[test]
+    fn structured_null_is_present_not_absent() {
+        let bag = AttributeBag::new();
+        let structured = with_args(json!({"note": null}));
+        assert!(!rego_eval_structured(
+            "not input.args.note",
+            &bag,
+            &structured
+        ));
+        assert!(rego_eval_structured(
+            "input.args.note == null",
+            &bag,
+            &structured
+        ));
     }
 }
