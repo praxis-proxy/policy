@@ -962,6 +962,416 @@ routes:
     );
 }
 
+// =====================================================================
+// Glob coverage for every named entity type (issue #74, criterion 4)
+// =====================================================================
+
+/// A `resource:` glob route dispatches its policy body.
+///
+/// Mirrors `a_glob_entity_route_dispatches_its_body` (which covers `tool:`)
+/// for the resource entity type. Resources are addressed by URI, making globs
+/// the natural selector shape — and the shape that was broken before the
+/// fallback landed.
+#[tokio::test]
+async fn a_glob_resource_route_dispatches_its_body() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: body-audit
+    kind: test/record
+    hooks: [cmf.resource_pre_fetch]
+routes:
+  - resource: "hr://employees/*"
+    authorization:
+      pre_invocation:
+        - "run(body-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    assert!(
+        fire(
+            &mgr,
+            "cmf.resource_pre_fetch",
+            entity_request("resource", "hr://employees/E001234")
+        )
+        .await
+    );
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "the resource glob must resolve hr://employees/E001234 to the annotation"
+    );
+
+    clear(&ledger);
+    assert!(
+        fire(
+            &mgr,
+            "cmf.resource_pre_fetch",
+            entity_request("resource", "hr://employees/E999999")
+        )
+        .await
+    );
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "a different URI under the same glob reaches the same body"
+    );
+}
+
+/// A `prompt:` glob route dispatches its policy body.
+#[tokio::test]
+async fn a_glob_prompt_route_dispatches_its_body() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: body-audit
+    kind: test/record
+    hooks: [cmf.prompt_pre_invoke]
+routes:
+  - prompt: "system_*"
+    authorization:
+      pre_invocation:
+        - "run(body-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    assert!(
+        fire(
+            &mgr,
+            "cmf.prompt_pre_invoke",
+            entity_request("prompt", "system_greeting")
+        )
+        .await
+    );
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "the prompt glob must resolve system_greeting to the annotation"
+    );
+}
+
+/// An `llm:` glob route dispatches its policy body.
+#[tokio::test]
+async fn a_glob_llm_route_dispatches_its_body() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: body-audit
+    kind: test/record
+    hooks: [cmf.llm_input]
+routes:
+  - llm: "gpt-*"
+    authorization:
+      pre_invocation:
+        - "run(body-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    assert!(fire(&mgr, "cmf.llm_input", entity_request("llm", "gpt-4o")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "the llm glob must resolve gpt-4o to the annotation"
+    );
+
+    clear(&ledger);
+    assert!(
+        fire(
+            &mgr,
+            "cmf.llm_input",
+            entity_request("llm", "gpt-3.5-turbo")
+        )
+        .await
+    );
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "a different model name under the same glob reaches the same body"
+    );
+}
+
+/// A `*` wildcard route dispatches across all names for each entity type.
+#[tokio::test]
+async fn a_wildcard_route_dispatches_for_any_name() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: tool-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+  - name: resource-audit
+    kind: test/record
+    hooks: [cmf.resource_pre_fetch]
+  - name: prompt-audit
+    kind: test/record
+    hooks: [cmf.prompt_pre_invoke]
+  - name: llm-audit
+    kind: test/record
+    hooks: [cmf.llm_input]
+routes:
+  - tool: "*"
+    authorization:
+      pre_invocation:
+        - "run(tool-audit)"
+  - resource: "*"
+    authorization:
+      pre_invocation:
+        - "run(resource-audit)"
+  - prompt: "*"
+    authorization:
+      pre_invocation:
+        - "run(prompt-audit)"
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "run(llm-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    for (hook, ext, expected) in [
+        (
+            "cmf.tool_pre_invoke",
+            tool_request("any_tool"),
+            "tool-audit",
+        ),
+        (
+            "cmf.resource_pre_fetch",
+            entity_request("resource", "s3://bucket/file"),
+            "resource-audit",
+        ),
+        (
+            "cmf.prompt_pre_invoke",
+            entity_request("prompt", "some_prompt"),
+            "prompt-audit",
+        ),
+        (
+            "cmf.llm_input",
+            entity_request("llm", "claude-4"),
+            "llm-audit",
+        ),
+    ] {
+        clear(&ledger);
+        assert!(fire(&mgr, hook, ext).await, "{hook} must be allowed");
+        assert_eq!(
+            fired(&ledger),
+            vec![expected.to_owned()],
+            "wildcard route must dispatch for {hook}"
+        );
+    }
+}
+
+// =====================================================================
+// Authentication and authorization both fire on a glob route (issue #74, criterion 5)
+// =====================================================================
+
+/// Both halves of a glob route fire: `authentication:` dispatches the
+/// identity resolver, then `authorization:` dispatches the policy body.
+///
+/// This is the invariant issue #74 reported as broken: authentication
+/// ran (through `resolve_route`) but authorization did not (the `HashMap`
+/// lookup missed). After the fallback fix both halves fire.
+#[tokio::test]
+async fn a_glob_route_fires_both_authentication_and_authorization() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: corp-jwt
+    kind: test/identity
+  - name: body-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "hr-*"
+    authentication:
+      - corp-jwt
+    authorization:
+      pre_invocation:
+        - "run(body-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+    let ext = tool_request("hr-get-salary");
+
+    // Phase 1: identity resolution — the authentication list fires.
+    resolve_identity(&mgr, ext.clone()).await;
+    assert_eq!(
+        fired(&ledger),
+        vec!["corp-jwt".to_owned()],
+        "authentication must fire for a glob route"
+    );
+
+    // Phase 2: authorization — the policy body fires.
+    clear(&ledger);
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", ext).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["body-audit".to_owned()],
+        "authorization must fire for the same glob route"
+    );
+}
+
+/// A glob outranks a wildcard: `tool: "hr-*"` wins over `tool: "*"` for a
+/// name both match.
+#[tokio::test]
+async fn a_glob_outranks_a_wildcard_for_the_same_name() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: glob-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+  - name: wildcard-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "*"
+    authorization:
+      pre_invocation:
+        - "run(wildcard-audit)"
+  - tool: "hr-*"
+    authorization:
+      pre_invocation:
+        - "run(glob-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    // hr-get-salary matches both routes; the glob must win.
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-get-salary")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["glob-audit".to_owned()],
+        "the glob route must outrank the wildcard"
+    );
+
+    // finance-report matches only the wildcard.
+    clear(&ledger);
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("finance-report")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["wildcard-audit".to_owned()],
+        "a name outside the glob falls through to the wildcard"
+    );
+}
+
+/// A scoped glob route wins over an unscoped glob for a request that
+/// carries the matching scope.
+#[tokio::test]
+async fn a_scoped_glob_route_outranks_an_unscoped_glob() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: global-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+  - name: scoped-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "hr-*"
+    authorization:
+      pre_invocation:
+        - "run(global-audit)"
+  - tool: "hr-*"
+    meta:
+      scope: tenant-a
+    authorization:
+      pre_invocation:
+        - "run(scoped-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    // A request carrying scope=tenant-a → scoped route wins.
+    let mut meta = MetaExtension::default();
+    meta.entity_type = Some("tool".to_owned());
+    meta.entity_name = Some("hr-get-salary".to_owned());
+    meta.scope = Some("tenant-a".to_owned());
+    let scoped_ext = Extensions {
+        meta: Some(Arc::new(meta)),
+        ..Default::default()
+    };
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", scoped_ext).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["scoped-audit".to_owned()],
+        "the scoped glob route must outrank the unscoped one"
+    );
+
+    // A request without a scope → unscoped route wins.
+    clear(&ledger);
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-get-salary")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["global-audit".to_owned()],
+        "without a scope, the unscoped glob route governs"
+    );
+}
+
+/// The full specificity ladder in one config: exact > glob > wildcard,
+/// each at the dispatch level.
+#[tokio::test]
+async fn specificity_ladder_exact_then_glob_then_wildcard() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: exact-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+  - name: glob-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+  - name: wildcard-audit
+    kind: test/record
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: "*"
+    authorization:
+      pre_invocation:
+        - "run(wildcard-audit)"
+  - tool: "hr-*"
+    authorization:
+      pre_invocation:
+        - "run(glob-audit)"
+  - tool: hr-get-salary
+    authorization:
+      pre_invocation:
+        - "run(exact-audit)"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    // Exact name → exact route wins.
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-get-salary")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["exact-audit".to_owned()],
+        "exact must win"
+    );
+
+    // Glob-only name → glob wins.
+    clear(&ledger);
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("hr-adjust-comp")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["glob-audit".to_owned()],
+        "glob must win"
+    );
+
+    // Wildcard-only name → wildcard wins.
+    clear(&ledger);
+    assert!(fire(&mgr, "cmf.tool_pre_invoke", tool_request("finance-report")).await);
+    assert_eq!(
+        fired(&ledger),
+        vec!["wildcard-audit".to_owned()],
+        "wildcard must win"
+    );
+}
+
 /// A list selector still dispatches per element.
 #[tokio::test]
 async fn a_list_selector_dispatches_per_element() {

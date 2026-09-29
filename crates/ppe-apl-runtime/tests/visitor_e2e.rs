@@ -814,21 +814,28 @@ routes:
     );
 }
 
-/// `resource:` route → annotation lands on `cmf.resource_pre_fetch`.
+/// `resource:` glob route → the annotation fires on `cmf.resource_pre_fetch`.
+///
+/// Uses `deny-gate` to prove the handler actually evaluates: if the glob
+/// fallback fails to resolve the annotation the handler never runs, the
+/// request is silently allowed, and the `!continue_processing` assertion
+/// catches it. The previous version used `allow-gate` and asserted
+/// `continue_processing == true`, which could not distinguish "the route
+/// fired and allowed" from "the route never fired" (issue #74).
 #[tokio::test]
 async fn resource_route_annotates_on_resource_pre_fetch_hook() {
     const YAML: &str = r#"
 engine_settings:
   dispatch: policy
 plugins:
-  - name: allow-gate
-    kind: allow-gate
+  - name: deny-gate
+    kind: deny-gate
     hooks: [cmf.resource_pre_fetch]
 routes:
   - resource: hr://employees/*
     authorization:
       pre_invocation:
-        - "run(allow-gate)"
+        - "run(deny-gate)"
 "#;
     let mgr = build_manager_with_visitor(YAML).await;
 
@@ -844,10 +851,15 @@ routes:
         .await;
 
     assert!(
-        result.continue_processing,
-        "resource route should fire on cmf.resource_pre_fetch: violation = {:?}",
-        result.violation
+        !result.continue_processing,
+        "resource glob route must fire its deny-gate on cmf.resource_pre_fetch; \
+         if this is an allow, the handler never ran (issue #74)"
     );
+    let violation = result
+        .violation
+        .expect("deny-gate must surface a violation");
+    assert_eq!(violation.reason, "deny-gate fired");
+    assert_eq!(violation.code, "policy.forbidden");
 }
 
 /// Cross-check: an llm route's APL annotation MUST NOT install on
