@@ -9,8 +9,11 @@
 //! agreement is actually testable.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
+use praxis_policy_apl_core::route::StructuredInput;
+use serde_json::{Value, json};
 
 use crate::outcome::CauseKind;
 
@@ -34,6 +37,8 @@ pub(crate) enum Expect {
 pub(crate) struct Case {
     pub(crate) name: &'static str,
     pub(crate) bag: AttributeBag,
+    /// Structured request JSON beside the bag. Empty for bag-only cases.
+    pub(crate) structured: StructuredInput,
     pub(crate) cedar_policy: String,
     pub(crate) cel_expr: String,
     pub(crate) opa_module: String,
@@ -70,6 +75,13 @@ pub(crate) fn catalog() -> Vec<Case> {
         missing_claim_int(),
         missing_claim_not_eq(),
         missing_not_in(),
+        tool_forbidden_second(),
+        tool_forbidden_exact(),
+        tool_permitted_only(),
+        tools_empty(),
+        null_field(),
+        float_field(),
+        duplicate_elements(),
     ]
 }
 
@@ -111,6 +123,7 @@ fn case(
     Case {
         name,
         bag,
+        structured: StructuredInput::default(),
         cedar_policy: cedar_when(cedar_when_body),
         cel_expr: cel_expr.to_owned(),
         opa_module: opa_allow(opa_rule, opa_default),
@@ -304,6 +317,7 @@ fn float_resource() -> Case {
     Case {
         name: "float-resource",
         bag,
+        structured: StructuredInput::default(),
         cedar_policy: cedar_permit(),
         cel_expr: "resource.score > 1.0".to_owned(),
         opa_module: opa_allow("allow if input.resource.score > 1.0", true),
@@ -318,6 +332,7 @@ fn missing_subject_id() -> Case {
     Case {
         name: "missing-subject-id",
         bag: AttributeBag::new(),
+        structured: StructuredInput::default(),
         cedar_policy: cedar_permit(),
         cel_expr: r#"subject.id == "alice""#.to_owned(),
         opa_module: opa_allow(r#"allow if input.subject.id == "alice""#, false),
@@ -329,8 +344,6 @@ fn missing_subject_id() -> Case {
 }
 
 fn alice_via_bridge() -> AttributeBag {
-    use std::sync::Arc;
-
     use praxis_policy_apl_cmf::extract_extensions;
     use praxis_policy_core::extensions::{
         Extensions, SecurityExtension, SubjectExtension, SubjectType,
@@ -506,5 +519,146 @@ fn missing_not_in() -> Case {
             Expect::Diverge("missing-not-in"),
         ),
         "require(subject.type not in blocked_types)",
+    )
+}
+
+fn with_request(mut case: Case, document: Value) -> Case {
+    case.structured.llm_request = Some(Arc::new(document));
+    case
+}
+
+fn with_args(mut case: Case, args: Value) -> Case {
+    case.structured.args = Some(Arc::new(args));
+    case
+}
+
+/// A function tool as clients send it, with a description beside the name.
+fn tool(name: &str) -> Value {
+    json!({
+        "type": "function",
+        "function": {"name": name, "description": "a tool"},
+    })
+}
+
+// Deny-list over `llm.request.tools`. Cedar has no "any element whose field
+// equals X"; record-set `contains` needs the whole record to match, so the
+// nearest Cedar text only catches a bare tool with no description.
+const FORBIDDEN_TOOL_CEDAR: &str = r#"!context.llm.request.tools.contains(
+    {"type": "function", "function": {"name": "transfer_funds"}})"#;
+const FORBIDDEN_TOOL_CEL: &str =
+    r#"!llm.request.tools.exists(t, has(t.function) && t.function.name == "transfer_funds")"#;
+const FORBIDDEN_TOOL_OPA: &str = r#"allow if {
+    input.llm.request
+    not forbidden
+}
+forbidden if {
+    some t in input.llm.request.tools
+    t.function.name == "transfer_funds"
+}"#;
+
+fn forbidden_tool_case(name: &'static str, tools: Vec<Value>, expect: Expect) -> Case {
+    with_request(
+        case(
+            name,
+            alice(),
+            FORBIDDEN_TOOL_CEDAR,
+            FORBIDDEN_TOOL_CEL,
+            FORBIDDEN_TOOL_OPA,
+            true,
+            expect,
+        ),
+        json!({"model": "gpt-4o", "tools": tools}),
+    )
+}
+
+fn tool_forbidden_second() -> Case {
+    forbidden_tool_case(
+        "tool-forbidden-second",
+        vec![tool("search"), tool("transfer_funds")],
+        Expect::Diverge("tool-deny-list-evaded"),
+    )
+}
+
+fn tool_forbidden_exact() -> Case {
+    // A bare record is the one shape Cedar's exact match catches, so the
+    // Cedar text above is not vacuous.
+    forbidden_tool_case(
+        "tool-forbidden-exact",
+        vec![
+            tool("search"),
+            json!({"type": "function", "function": {"name": "transfer_funds"}}),
+        ],
+        agree_deny(),
+    )
+}
+
+fn tool_permitted_only() -> Case {
+    forbidden_tool_case(
+        "tool-permitted-only",
+        vec![tool("search"), tool("lookup")],
+        Expect::Diverge("tool-deny-list-unexpressible"),
+    )
+}
+
+fn tools_empty() -> Case {
+    // `isEmpty` / `size` / `count` mean the same thing on every engine.
+    with_request(
+        case(
+            "tools-empty",
+            alice(),
+            "context.llm.request.tools.isEmpty()",
+            "size(llm.request.tools) == 0",
+            "allow if count(input.llm.request.tools) == 0",
+            true,
+            Expect::AgreeAllow,
+        ),
+        json!({"model": "gpt-4o", "tools": []}),
+    )
+}
+
+fn null_field() -> Case {
+    with_args(
+        case(
+            "null-field",
+            alice(),
+            "context.args has note",
+            "has(args.note)",
+            r#"allow if "note" in object.keys(input.args)"#,
+            true,
+            Expect::Diverge("null-absent"),
+        ),
+        json!({"region": "eu", "note": null}),
+    )
+}
+
+fn float_field() -> Case {
+    // Cedar receives the float as its string form; `decimal()` parses it
+    // back, so a range check agrees with the native numeric compare.
+    with_request(
+        case(
+            "float-field",
+            alice(),
+            r#"decimal(context.llm.request.temperature).lessThanOrEqual(decimal("1.0"))"#,
+            "llm.request.temperature <= 1.0",
+            "allow if input.llm.request.temperature <= 1.0",
+            true,
+            Expect::AgreeAllow,
+        ),
+        json!({"model": "gpt-4o", "temperature": 0.75}),
+    )
+}
+
+fn duplicate_elements() -> Case {
+    with_args(
+        case(
+            "duplicate-elements",
+            alice(),
+            "context.args.ids == [7, 9]",
+            "args.ids == [7, 9]",
+            "allow if input.args.ids == [7, 9]",
+            true,
+            Expect::Diverge("duplicates-collapse"),
+        ),
+        json!({"ids": [7, 7, 9]}),
     )
 }

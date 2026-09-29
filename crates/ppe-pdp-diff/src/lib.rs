@@ -32,6 +32,8 @@ mod classify;
 #[cfg(test)]
 mod drivers;
 #[cfg(test)]
+mod leak;
+#[cfg(test)]
 mod outcome;
 #[cfg(test)]
 mod safety;

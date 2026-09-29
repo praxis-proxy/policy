@@ -46,6 +46,24 @@ APL `!=` Allows while CEL, cedar-direct, and OPA Deny
 (`missing-claim-not-eq`). APL `not in` Allows, OPA Allows with it (`not`
 of undefined is true), and CEL/cedar-direct Deny (`missing-not-in`).
 
+## Structured input
+
+Cases may carry a `StructuredInput` beside the bag. The drivers call
+`evaluate_structured`, so OPA and CEL see `llm.request` and `args` as
+native JSON and Cedar sees the sanitized record at `context.llm.request`
+and `context.args`. Bag-only cases pass an empty one.
+
+Empty `tools` (`tools-empty`) and a float compared through Cedar
+`decimal()` (`float-field`) agree. A bare forbidden tool
+(`tool-forbidden-exact`) denies everywhere, because it is the one shape
+Cedar's exact-match `contains` catches. Cedar's sanitizing rules (nulls
+dropped, floats as strings, arrays as sets) are documented in
+[`cedar_direct/request.rs`](../builtins/src/pdps/cedar_direct/request.rs).
+
+`src/leak.rs` denies a request whose messages and tools carry a marker,
+through several deny paths per engine, and asserts that no decision text
+contains it.
+
 ## Out of subset (allowlist)
 
 | Id | Shape | Why they cannot be required to agree |
@@ -57,6 +75,10 @@ of undefined is true), and CEL/cedar-direct Deny (`missing-not-in`).
 | `missing-subject-id` | no `subject.id` | Cedar cannot build a principal. CEL eval error. OPA undefined. |
 | `missing-claim-not-eq` | omitted `claim.tenant`, `!=` | APL `!=` is true so `require` Allows. CEL/Cedar eval error. OPA undefined. |
 | `missing-not-in` | omitted denylist set, `not in` | APL Allows. OPA `not (x in y)` on undefined `y` is true (Allow). CEL/Cedar eval error (Deny). |
+| `tool-deny-list-evaded` | forbidden tool with an extra field | Cedar record-set `contains` needs an exact match, so Cedar Allows. CEL/OPA Deny. Do not use Cedar for deny-lists over `llm.request.tools`. |
+| `tool-deny-list-unexpressible` | permitted tools only | All Allow, but Cedar only by coincidence (see above). |
+| `null-absent` | `null` field, key presence | Cedar drops nulls, so `has` is false. CEL `has` / OPA `object.keys` see the key. |
+| `duplicates-collapse` | `[7, 7, 9] == [7, 9]` | Cedar sets collapse duplicates (Allow). CEL/OPA keep them (Deny). |
 
 Each allowlist row in `src/allowlist.rs` carries a `reason`. An unused id
 or an empty reason fails the meta tests.

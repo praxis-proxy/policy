@@ -31,7 +31,8 @@ impl Dialect {
     }
 }
 
-/// Run the case's equivalent policy for `dialect` against the case bag.
+/// Run the case's equivalent policy for `dialect` against the case bag and
+/// structured input.
 pub(crate) async fn evaluate(dialect: Dialect, case: &Case) -> Result<PdpDecision, PdpError> {
     match dialect {
         Dialect::Cedar => evaluate_cedar(case).await,
@@ -46,12 +47,16 @@ async fn evaluate_cedar(case: &Case) -> Result<PdpDecision, PdpError> {
             &case.cedar_policy,
         )
         .map_err(|e| PdpError::Dispatch(e.to_string()))?;
-    resolver.evaluate(&cedar_call(case), &case.bag).await
+    resolver
+        .evaluate_structured(&cedar_call(case), &case.bag, &case.structured)
+        .await
 }
 
 async fn evaluate_cel(case: &Case) -> Result<PdpDecision, PdpError> {
     let resolver = praxis_policy_builtins::pdps::cel::CelResolver::new();
-    resolver.evaluate(&cel_call(case), &case.bag).await
+    resolver
+        .evaluate_structured(&cel_call(case), &case.bag, &case.structured)
+        .await
 }
 
 async fn evaluate_opa(case: &Case) -> Result<PdpDecision, PdpError> {
@@ -59,7 +64,9 @@ async fn evaluate_opa(case: &Case) -> Result<PdpDecision, PdpError> {
         &serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
     )
     .map_err(|e| PdpError::Dispatch(e.to_string()))?;
-    resolver.evaluate(&opa_call(case), &case.bag).await
+    resolver
+        .evaluate_structured(&opa_call(case), &case.bag, &case.structured)
+        .await
 }
 
 fn yaml_str(s: &str) -> serde_yaml::Value {
