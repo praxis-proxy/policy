@@ -521,16 +521,7 @@ impl CelResolver {
 /// never reads is not converted.
 fn referenced_structured(program: &Program, structured: &StructuredInput) -> StructuredInput {
     let refs = program.references();
-    StructuredInput {
-        llm_request: structured
-            .llm_request
-            .clone()
-            .filter(|_| refs.has_variable("llm")),
-        args: structured
-            .args
-            .clone()
-            .filter(|_| refs.has_variable("args")),
-    }
+    structured.retain(refs.has_variable("llm"), refs.has_variable("args"))
 }
 
 /// Snapshot the values under every top-level name the expression references,
@@ -559,7 +550,7 @@ fn snapshot_referenced_values(
             None => {
                 snapshot.insert(format!("{key}={value:?}"));
             },
-            Some("args") if structured.args.is_some() => {},
+            Some("args") if structured.args().is_some() => {},
             Some(ns) if ns == key => {
                 snapshot.insert(format!("{key}={}", TypeLabel::from(value)));
             },
@@ -568,12 +559,12 @@ fn snapshot_referenced_values(
             },
         }
     }
-    if let Some(args) = &structured.args
+    if let Some(args) = structured.args()
         && referenced_set.contains("args")
     {
         snapshot.insert(format!("args={}", TypeLabel::of_json(args)));
     }
-    if let Some(document) = &structured.llm_request
+    if let Some(document) = structured.llm_request()
         && referenced_set.contains("llm")
     {
         snapshot.insert(format!("llm.request={}", TypeLabel::of_json(document)));
@@ -585,8 +576,8 @@ fn snapshot_referenced_values(
 /// structured input? Classifies referenced variables in eval-error causes.
 fn variable_present(bag: &AttributeBag, structured: &StructuredInput, name: &str) -> bool {
     match name {
-        "args" if structured.args.is_some() => return true,
-        "llm" if structured.llm_request.is_some() => return true,
+        "args" if structured.args().is_some() => return true,
+        "llm" if structured.llm_request().is_some() => return true,
         _ => {},
     }
     bag.iter().any(|(key, _)| {
@@ -1169,14 +1160,14 @@ mod tests {
     fn leaky_input() -> (AttributeBag, StructuredInput) {
         let mut bag = bag_with(&[("subject.id", "alice")]);
         bag.set("args.hidden_key", MARKER);
-        let structured = StructuredInput {
-            llm_request: Some(Arc::new(serde_json::json!({
+        let structured = StructuredInput::new(
+            Some(Arc::new(serde_json::json!({
                 "model": "gpt-4o",
                 "messages": [{"role": "user", "content": MARKER}],
                 "hidden_key": MARKER,
             }))),
-            args: None,
-        };
+            None,
+        );
         (bag, structured)
     }
 
@@ -1221,12 +1212,12 @@ mod tests {
         let r = CelResolver::new();
         let mut bag = AttributeBag::new();
         bag.set("args.hidden_key", MARKER);
-        let structured = StructuredInput {
-            llm_request: None,
-            args: Some(Arc::new(
+        let structured = StructuredInput::new(
+            None,
+            Some(Arc::new(
                 serde_json::json!({"hidden_key": [MARKER, MARKER]}),
             )),
-        };
+        );
         let out = r
             .evaluate_structured(&cel_call("size(args) == 0"), &bag, &structured)
             .await
@@ -1289,10 +1280,10 @@ mod tests {
     #[tokio::test]
     async fn data_derived_missing_key_is_not_named() {
         let r = CelResolver::new();
-        let structured = StructuredInput {
-            llm_request: None,
-            args: Some(Arc::new(serde_json::json!({"m": {}, "k": MARKER}))),
-        };
+        let structured = StructuredInput::new(
+            None,
+            Some(Arc::new(serde_json::json!({"m": {}, "k": MARKER}))),
+        );
         let out = r
             .evaluate_structured(
                 &cel_call("args.m[args.k] == 1"),
@@ -1358,10 +1349,10 @@ mod tests {
     #[tokio::test]
     async fn structured_variables_count_as_present() {
         let r = CelResolver::new();
-        let structured = StructuredInput {
-            llm_request: Some(Arc::new(serde_json::json!({}))),
-            args: Some(Arc::new(serde_json::json!({}))),
-        };
+        let structured = StructuredInput::new(
+            Some(Arc::new(serde_json::json!({}))),
+            Some(Arc::new(serde_json::json!({}))),
+        );
         let out = r
             .evaluate_structured(
                 &cel_call("args.a == llm.request.b"),
@@ -1399,10 +1390,7 @@ mod tests {
                     level.insert("a".to_owned(), doc);
                     doc = serde_json::Value::Object(level);
                 }
-                let structured = StructuredInput {
-                    llm_request: None,
-                    args: Some(Arc::new(doc)),
-                };
+                let structured = StructuredInput::new(None, Some(Arc::new(doc)));
                 std::thread::scope(|scope| {
                     std::thread::Builder::new()
                         .stack_size(256 * 1024)
@@ -1432,14 +1420,14 @@ mod tests {
 
     #[test]
     fn only_referenced_structured_entries_are_kept() {
-        let structured = StructuredInput {
-            llm_request: Some(Arc::new(serde_json::json!({"model": "m"}))),
-            args: Some(Arc::new(serde_json::json!({"a": 1}))),
-        };
+        let structured = StructuredInput::new(
+            Some(Arc::new(serde_json::json!({"model": "m"}))),
+            Some(Arc::new(serde_json::json!({"a": 1}))),
+        );
         let kept = |expr: &str| {
             let program = Program::compile(expr).unwrap();
             let out = referenced_structured(&program, &structured);
-            (out.llm_request.is_some(), out.args.is_some())
+            (out.llm_request().is_some(), out.args().is_some())
         };
         assert_eq!(kept("subject.id == 'alice'"), (false, false));
         assert_eq!(kept("args.a == 1"), (false, true));
@@ -1454,10 +1442,8 @@ mod tests {
     /// structured args are present.
     #[tokio::test]
     async fn unreferenced_structured_args_do_not_change_the_decision() {
-        let structured = StructuredInput {
-            llm_request: None,
-            args: Some(Arc::new(serde_json::json!({"subject": "x"}))),
-        };
+        let structured =
+            StructuredInput::new(None, Some(Arc::new(serde_json::json!({"subject": "x"}))));
         let out = CelResolver::new()
             .evaluate_structured(
                 &cel_call("subject.id == 'alice'"),

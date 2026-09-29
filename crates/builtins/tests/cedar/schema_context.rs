@@ -65,10 +65,7 @@ fn alice() -> AttributeBag {
 }
 
 fn tool_args(args: serde_json::Value) -> StructuredInput {
-    StructuredInput {
-        llm_request: None,
-        args: Some(Arc::new(args)),
-    }
+    StructuredInput::new(None, Some(Arc::new(args)))
 }
 
 const PERMIT_ALL: &str = "permit(principal, action, resource);";

@@ -112,6 +112,12 @@ See [Migrating `args` policies](#migrating-args-policies). Cedar never read
 substitution in step arguments still read the flattened bag. On `llm:` routes
 there is no structured `args`, and `args` stays the prompt string.
 
+Structured input nested more than 128 levels deep, the limit serde_json
+applies when parsing, is refused for any engine: every PDP step on that
+request denies with the code `pdp.input_too_deep` and a reason that quotes no
+value, and the engine never runs. A scalar is depth 1, and each enclosing
+array or object adds one. APL-only steps are unaffected.
+
 ### Types across engines
 
 | JSON | OPA | CEL | Cedar |
@@ -324,7 +330,7 @@ bag, structured)`, whose default ignores `structured` and calls
 `evaluate(call, bag)`. A host resolver opts in by overriding
 `evaluate_structured` and reading `StructuredInput::llm_request` and
 `StructuredInput::args`. It may also override `validate_call` to reject a step
-at config load.
+at config load. Input past the depth limit never reaches a resolver.
 
 ### Migrating `args` policies
 

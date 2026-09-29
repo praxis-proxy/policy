@@ -641,16 +641,17 @@ impl PdpResolver for StructuredRecorder {
 }
 
 /// Runs one invocation of `hook` against a route whose only step is a PDP
-/// call, with no plugins and an empty host baseline, and returns what the
-/// PDP received. Any route-level `args:` block goes in `route_extra`.
-async fn observe_structured(
+/// call, with no plugins and an empty host baseline, and returns every
+/// structured input the PDP received. Any route-level `args:` block goes in
+/// `route_extra`.
+async fn run_structured(
     selector: &str,
     route_extra: &str,
     hook: &str,
     payload: MessagePayload,
     ext: Extensions,
 ) -> (
-    StructuredInput,
+    Vec<StructuredInput>,
     praxis_policy_core::executor::PipelineResult,
 ) {
     let yaml = format!(
@@ -682,12 +683,28 @@ routes:
     mgr.initialize().await.expect("initialize");
 
     let (result, _bg) = mgr.invoke_named::<CmfHook>(hook, payload, ext, None).await;
+    let seen = std::mem::take(&mut *recorder.seen.lock().unwrap());
+    (seen, result)
+}
+
+/// Like [`run_structured`], for a route that must allow after exactly one
+/// PDP call. Returns what that call received.
+async fn observe_structured(
+    selector: &str,
+    route_extra: &str,
+    hook: &str,
+    payload: MessagePayload,
+    ext: Extensions,
+) -> (
+    StructuredInput,
+    praxis_policy_core::executor::PipelineResult,
+) {
+    let (mut seen, result) = run_structured(selector, route_extra, hook, payload, ext).await;
     assert!(
         result.continue_processing,
         "route should allow: {:?}",
         result.violation
     );
-    let mut seen = std::mem::take(&mut *recorder.seen.lock().unwrap());
     assert_eq!(seen.len(), 1, "the PDP must run exactly once");
     (seen.remove(0), result)
 }
@@ -738,11 +755,14 @@ async fn tool_route_pdp_receives_structured_args() {
     }));
     let (seen, _) =
         observe_structured("tool: classify", "", "cmf.tool_pre_invoke", payload, ext).await;
-    let args = seen.args.expect("tool route must carry structured args");
+    let args = seen
+        .args()
+        .cloned()
+        .expect("tool route must carry structured args");
     let items = args["items"].as_array().expect("items stays an array");
     assert_eq!(items.len(), 2);
     assert_eq!(items[1]["classification"], "secret");
-    assert!(seen.llm_request.is_none());
+    assert!(seen.llm_request().is_none());
 }
 
 /// A tool invocation whose message has no tool-call part carries no structured
@@ -761,8 +781,8 @@ async fn tool_route_without_tool_call_part_has_no_args() {
         ext,
     )
     .await;
-    assert!(seen.args.is_none());
-    assert!(seen.llm_request.is_none());
+    assert!(seen.args().is_none());
+    assert!(seen.llm_request().is_none());
 }
 
 /// With no plugin on the route, the PDP still sees the host's document: the
@@ -777,9 +797,12 @@ async fn llm_route_pdp_receives_host_document_without_plugins() {
     };
     let (seen, _) =
         observe_structured("llm: gpt-4o", "", "cmf.llm_input", cmf_payload("hi"), ext).await;
-    let seen_doc = seen.llm_request.expect("llm route must carry the document");
+    let seen_doc = seen
+        .llm_request()
+        .cloned()
+        .expect("llm route must carry the document");
     assert!(Arc::ptr_eq(&seen_doc, document.shared()));
-    assert!(seen.args.is_none(), "llm routes carry no structured args");
+    assert!(seen.args().is_none(), "llm routes carry no structured args");
 }
 
 /// No slot on the request means no document, never an empty object.
@@ -791,8 +814,8 @@ async fn llm_route_without_slot_has_no_document() {
     };
     let (seen, _) =
         observe_structured("llm: gpt-4o", "", "cmf.llm_input", cmf_payload("hi"), ext).await;
-    assert!(seen.llm_request.is_none());
-    assert!(seen.args.is_none());
+    assert!(seen.llm_request().is_none());
+    assert!(seen.args().is_none());
 }
 
 /// A tool call replayed inside an LLM message does not become structured args.
@@ -804,7 +827,7 @@ async fn llm_route_tool_call_part_does_not_fill_args() {
     };
     let payload = tool_call_payload(serde_json::json!({"items": [{"classification": "secret"}]}));
     let (seen, _) = observe_structured("llm: gpt-4o", "", "cmf.llm_input", payload, ext).await;
-    assert!(seen.args.is_none());
+    assert!(seen.args().is_none());
 }
 
 /// An `args:` pipeline that rewrites a field does not change what the PDP
@@ -828,6 +851,34 @@ async fn tool_route_pdp_sees_args_before_pipeline_rewrite() {
         result.modified_payload.is_some(),
         "the pipeline must have rewritten the forwarded args"
     );
-    let args = seen.args.expect("tool route must carry structured args");
+    let args = seen
+        .args()
+        .cloned()
+        .expect("tool route must carry structured args");
     assert_eq!(args["city"], "Paris");
+}
+
+/// Tool arguments nested past the depth limit deny the PDP step before the
+/// resolver runs, with a reason that quotes nothing from the arguments.
+#[tokio::test]
+async fn tool_route_too_deep_args_deny_before_the_pdp() {
+    const MARKER: &str = "deep-args-marker";
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for("tool", "classify"))),
+        ..Default::default()
+    };
+    // The arguments object adds one level above the nested chain.
+    let deep = (1..praxis_policy_apl_core::MAX_STRUCTURED_DEPTH).fold(
+        serde_json::json!(MARKER),
+        |inner, _| serde_json::json!({MARKER: inner}),
+    );
+    let payload = tool_call_payload(serde_json::json!({"deep": deep}));
+    let (seen, result) =
+        run_structured("tool: classify", "", "cmf.tool_pre_invoke", payload, ext).await;
+    assert!(seen.is_empty(), "the PDP must not run");
+    assert!(!result.continue_processing, "expected deny");
+    let violation = result.violation.expect("deny must carry a violation");
+    assert_eq!(violation.code, praxis_policy_apl_core::INPUT_TOO_DEEP_CODE);
+    let rendered = format!("{violation:?}");
+    assert!(!rendered.contains(MARKER), "{rendered}");
 }

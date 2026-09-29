@@ -1297,12 +1297,12 @@ modules:
             &["package authz\nallow if upper(input.llm.request.tools) == \"X\"\n"],
             OnError::Deny,
         );
-        let structured = StructuredInput {
-            llm_request: Some(std::sync::Arc::new(serde_json::json!({
+        let structured = StructuredInput::new(
+            Some(std::sync::Arc::new(serde_json::json!({
                 "tools": [{"name": MARKER}],
             }))),
-            args: None,
-        };
+            None,
+        );
         let out = r
             .evaluate_structured(&call("data.authz.allow", None), &bag("alice"), &structured)
             .await
@@ -1354,10 +1354,7 @@ modules:
                     level.insert("a".to_owned(), doc);
                     doc = serde_json::Value::Object(level);
                 }
-                let structured = StructuredInput {
-                    llm_request: None,
-                    args: Some(std::sync::Arc::new(doc)),
-                };
+                let structured = StructuredInput::new(None, Some(std::sync::Arc::new(doc)));
                 std::thread::scope(|scope| {
                     std::thread::Builder::new()
                         .stack_size(256 * 1024)

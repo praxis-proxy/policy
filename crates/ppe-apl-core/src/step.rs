@@ -1156,10 +1156,10 @@ mod tests {
         let resolver = BagOnly::default();
         let mut bag = crate::attributes::AttributeBag::new();
         bag.set("subject.id", "alice");
-        let structured = crate::route::StructuredInput {
-            llm_request: Some(std::sync::Arc::new(serde_json::json!({"model": "m"}))),
-            args: Some(std::sync::Arc::new(serde_json::json!({"a": 1}))),
-        };
+        let structured = crate::route::StructuredInput::new(
+            Some(std::sync::Arc::new(serde_json::json!({"model": "m"}))),
+            Some(std::sync::Arc::new(serde_json::json!({"a": 1}))),
+        );
         let call = PdpCall {
             dialect: resolver.dialect(),
             args: serde_yaml::Value::Null,

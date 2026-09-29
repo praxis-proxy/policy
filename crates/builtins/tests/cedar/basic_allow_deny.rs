@@ -286,10 +286,7 @@ async fn with_dialect_overrides_default() {
 }
 
 fn structured_args(args: serde_json::Value) -> StructuredInput {
-    StructuredInput {
-        llm_request: None,
-        args: Some(std::sync::Arc::new(args)),
-    }
+    StructuredInput::new(None, Some(std::sync::Arc::new(args)))
 }
 
 /// Error-derived reasons and diagnostics carry no payload value, for each

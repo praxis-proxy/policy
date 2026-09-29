@@ -90,8 +90,8 @@ pub fn sanitize_structured(structured: &StructuredInput) -> Result<CedarStructur
         None => Ok(None),
     };
     Ok(CedarStructured {
-        llm_request: convert(structured.llm_request.as_ref())?,
-        args: convert(structured.args.as_ref())?,
+        llm_request: convert(structured.llm_request())?,
+        args: convert(structured.args())?,
     })
 }
 
@@ -371,10 +371,7 @@ mod tests {
     use super::*;
 
     fn structured(llm_request: Option<Value>, args: Option<Value>) -> StructuredInput {
-        StructuredInput {
-            llm_request: llm_request.map(Arc::new),
-            args: args.map(Arc::new),
-        }
+        StructuredInput::new(llm_request.map(Arc::new), args.map(Arc::new))
     }
 
     fn sanitized_args(args: Value) -> Result<Option<Value>, Withheld> {

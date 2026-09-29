@@ -94,7 +94,7 @@ pub fn bag_to_context(
 
 /// Overlay structured input on the bag tree.
 fn overlay_structured(root: &mut BTreeMap<String, Node>, structured: &StructuredInput) {
-    if let Some(document) = &structured.llm_request {
+    if let Some(document) = structured.llm_request() {
         let llm = root
             .entry("llm".to_owned())
             .or_insert_with(|| Node::Branch(BTreeMap::new()));
@@ -110,7 +110,7 @@ fn overlay_structured(root: &mut BTreeMap<String, Node>, structured: &Structured
             children.insert("request".to_owned(), Node::Leaf(json_to_value(document)));
         }
     }
-    if let Some(args) = &structured.args {
+    if let Some(args) = structured.args() {
         root.insert("args".to_owned(), Node::Leaf(json_to_value(args)));
     }
 }
@@ -311,17 +311,11 @@ mod tests {
     }
 
     fn with_args(args: serde_json::Value) -> StructuredInput {
-        StructuredInput {
-            llm_request: None,
-            args: Some(Arc::new(args)),
-        }
+        StructuredInput::new(None, Some(Arc::new(args)))
     }
 
     fn with_document(document: serde_json::Value) -> StructuredInput {
-        StructuredInput {
-            llm_request: Some(Arc::new(document)),
-            args: None,
-        }
+        StructuredInput::new(Some(Arc::new(document)), None)
     }
 
     fn holds(expr: &str, ctx: &Context<'static>) -> bool {

@@ -35,11 +35,15 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `PdpResolver::evaluate_structured`, and may reject a step at config load
   through `PdpResolver::validate_call`. `RoutePayload` gains a public
   `structured` field, so code that builds it with a struct literal must set
-  it. See [Structured request input](docs/content/apl/pdp.md#structured-request-input).
+  it, and `StructuredInput::new` builds that value. See
+  [Structured request input](docs/content/apl/pdp.md#structured-request-input).
   ([#142](https://github.com/praxis-proxy/policy/issues/142))
 
 ### Changed
 
+- Structured PDP input nested more than 128 levels deep is refused before any
+  engine runs: each PDP step on the request denies with the code
+  `pdp.input_too_deep`. APL-only steps are unaffected.
 - **Breaking:** on `tool:` routes, `args` in OPA, CEL, and Cedar input is the
   tool call's native JSON, replacing the flattened `args.*` view in OPA and
   CEL. Scalar arrays keep numbers, bools, client order, and duplicates instead

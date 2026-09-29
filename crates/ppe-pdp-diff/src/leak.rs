@@ -122,10 +122,7 @@ fn probe_case(probe: &Probe, document: Value) -> Case {
     Case {
         name: "leak-probe",
         bag,
-        structured: StructuredInput {
-            llm_request: Some(Arc::new(document)),
-            args: None,
-        },
+        structured: StructuredInput::new(Some(Arc::new(document)), None),
         cedar_policy: pick(Dialect::Cedar),
         cel_expr: pick(Dialect::Cel),
         opa_module: format!("package diff\n{}\n", pick(Dialect::Opa)),

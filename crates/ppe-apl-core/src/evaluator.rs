@@ -569,13 +569,18 @@ impl Drop for AbortOnDrop {
 /// PDP would keep running. The handle itself aborts on drop so a
 /// cancelled request does not leave the resolver running.
 ///
-/// The structured input moves into the task as `Arc` clones only.
+/// The structured input moves into the task as `Arc` clones only. Input
+/// that is [too deep](crate::route::StructuredInput::too_deep) denies here,
+/// so no resolver sees it.
 async fn evaluate_pdp_contained(
     pdp: &Arc<dyn PdpResolver>,
     call: &crate::step::PdpCall,
     bag: &AttributeBag,
     structured: &crate::route::StructuredInput,
 ) -> Result<crate::step::PdpDecision, crate::step::PdpError> {
+    if structured.too_deep() {
+        return Ok(input_too_deep());
+    }
     let pdp = Arc::clone(pdp);
     let call = call.clone();
     let bag = bag.clone();
@@ -600,6 +605,21 @@ async fn evaluate_pdp_contained(
             };
             Err(crate::step::PdpError::Dispatch(message))
         },
+    }
+}
+
+/// Deny for a PDP step whose structured input is too deep. The reason names
+/// no value from the input.
+fn input_too_deep() -> crate::step::PdpDecision {
+    crate::step::PdpDecision {
+        decision: Decision::Deny {
+            reason: Some(format!(
+                "PDP step denied: structured input nests deeper than {} levels",
+                crate::route::MAX_STRUCTURED_DEPTH
+            )),
+            rule_source: crate::route::INPUT_TOO_DEEP_CODE.to_owned(),
+        },
+        diagnostics: Vec::new(),
     }
 }
 
@@ -3731,10 +3751,7 @@ mod tests {
         let request = Arc::new(serde_json::json!({"tools": [{"name": "search"}]}));
         let args = Arc::new(serde_json::json!({"items": [{"classification": "secret"}]}));
         let mut payload = crate::route::RoutePayload::new(serde_json::Value::Null).with_structured(
-            crate::route::StructuredInput {
-                llm_request: Some(Arc::clone(&request)),
-                args: Some(Arc::clone(&args)),
-            },
+            crate::route::StructuredInput::new(Some(Arc::clone(&request)), Some(Arc::clone(&args))),
         );
         let recorder = Arc::new(StructuredRecordingPdp::default());
         let pdp: Arc<dyn PdpResolver> = recorder.clone();
@@ -3758,8 +3775,8 @@ mod tests {
         let (recorder, request, args) = run_structured(&[pdp_step("one")]).await;
         let seen = recorder.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
-        assert!(Arc::ptr_eq(seen[0].llm_request.as_ref().unwrap(), &request));
-        assert!(Arc::ptr_eq(seen[0].args.as_ref().unwrap(), &args));
+        assert!(Arc::ptr_eq(seen[0].llm_request().unwrap(), &request));
+        assert!(Arc::ptr_eq(seen[0].args().unwrap(), &args));
     }
 
     #[tokio::test]
@@ -3769,9 +3786,100 @@ mod tests {
         let seen = recorder.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         for s in seen.iter() {
-            assert!(Arc::ptr_eq(s.llm_request.as_ref().unwrap(), &request));
-            assert!(Arc::ptr_eq(s.args.as_ref().unwrap(), &args));
+            assert!(Arc::ptr_eq(s.llm_request().unwrap(), &request));
+            assert!(Arc::ptr_eq(s.args().unwrap(), &args));
         }
+    }
+
+    /// PDP that fails the test if the evaluator ever calls it.
+    struct UnreachablePdp;
+    #[async_trait]
+    impl PdpResolver for UnreachablePdp {
+        fn dialect(&self) -> PdpDialect {
+            PdpDialect::Cedar
+        }
+        async fn evaluate(
+            &self,
+            _call: &PdpCall,
+            _bag: &AttributeBag,
+        ) -> Result<PdpDecision, PdpError> {
+            panic!("the PDP must not run");
+        }
+    }
+
+    const DEEP_KEY: &str = "deep-key-marker";
+    const DEEP_LEAF: &str = "deep-leaf-marker";
+
+    /// Objects nested so the value has `depth`, built without recursion.
+    fn nested_object(depth: usize) -> serde_json::Value {
+        let mut value = serde_json::json!(DEEP_LEAF);
+        for _ in 1..depth {
+            let mut map = serde_json::Map::new();
+            map.insert(DEEP_KEY.to_owned(), value);
+            value = serde_json::Value::Object(map);
+        }
+        value
+    }
+
+    async fn run_with_args(
+        effects: &[Effect],
+        pdp: Arc<dyn PdpResolver>,
+        args: serde_json::Value,
+    ) -> Decision {
+        let mut payload = crate::route::RoutePayload::new(serde_json::Value::Null).with_structured(
+            crate::route::StructuredInput::new(None, Some(Arc::new(args))),
+        );
+        evaluate_effects(
+            effects,
+            &mut AttributeBag::new(),
+            &pdp,
+            &null_plugins(),
+            &noop_delegations(),
+            &noop_elicitations(),
+            crate::step::DispatchPhase::Pre,
+            &mut payload,
+        )
+        .await
+        .decision
+    }
+
+    #[tokio::test]
+    async fn input_at_the_depth_limit_reaches_the_pdp() {
+        let recorder = Arc::new(StructuredRecordingPdp::default());
+        let args = nested_object(crate::route::MAX_STRUCTURED_DEPTH);
+        let decision = run_with_args(&[pdp_step("one")], recorder.clone(), args).await;
+        assert_eq!(decision, Decision::Allow);
+        assert_eq!(recorder.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn too_deep_input_denies_without_calling_the_pdp() {
+        let args = nested_object(crate::route::MAX_STRUCTURED_DEPTH + 1);
+        let effects = [Effect::Parallel(vec![pdp_step("a"), pdp_step("b")])];
+        let decision = run_with_args(&effects, Arc::new(UnreachablePdp), args).await;
+        let Decision::Deny {
+            reason,
+            rule_source,
+        } = decision
+        else {
+            panic!("expected deny, got {decision:?}");
+        };
+        assert_eq!(rule_source, crate::route::INPUT_TOO_DEEP_CODE);
+        let reason = reason.unwrap();
+        assert!(!reason.contains(DEEP_KEY), "{reason}");
+        assert!(!reason.contains(DEEP_LEAF), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn apl_only_steps_ignore_too_deep_input() {
+        let steps = [Effect::When {
+            condition: Expression::Always,
+            body: vec![Effect::Allow],
+            source: "test".into(),
+        }];
+        let args = nested_object(crate::route::MAX_STRUCTURED_DEPTH + 1);
+        let decision = run_with_args(&steps, Arc::new(UnreachablePdp), args).await;
+        assert_eq!(decision, Decision::Allow);
     }
 
     #[tokio::test]

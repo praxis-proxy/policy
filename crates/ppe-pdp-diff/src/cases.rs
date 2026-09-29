@@ -523,12 +523,14 @@ fn missing_not_in() -> Case {
 }
 
 fn with_request(mut case: Case, document: Value) -> Case {
-    case.structured.llm_request = Some(Arc::new(document));
+    case.structured =
+        StructuredInput::new(Some(Arc::new(document)), case.structured.args().cloned());
     case
 }
 
 fn with_args(mut case: Case, args: Value) -> Case {
-    case.structured.args = Some(Arc::new(args));
+    case.structured =
+        StructuredInput::new(case.structured.llm_request().cloned(), Some(Arc::new(args)));
     case
 }
 

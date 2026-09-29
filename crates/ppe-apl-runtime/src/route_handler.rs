@@ -433,14 +433,14 @@ impl AplRouteHandler {
         // matches the bag. The request body comes from this handler's
         // filtered view and shares the host's `Arc`. Arguments count only
         // on tool routes and only as an object, the shape a tool call has.
-        let structured = StructuredInput {
-            llm_request: post_extensions
+        // Depth is measured here, once for every PDP step on the request.
+        let structured = StructuredInput::new(
+            post_extensions
                 .llm_request
                 .as_ref()
                 .map(|doc| Arc::clone(doc.shared())),
-            args: (self.structured_args && args_value.is_object())
-                .then(|| Arc::new(args_value.clone())),
-        };
+            (self.structured_args && args_value.is_object()).then(|| Arc::new(args_value.clone())),
+        );
         let mut route_payload = match self.phase {
             Phase::Pre => RoutePayload::new(args_value),
             Phase::Post => {

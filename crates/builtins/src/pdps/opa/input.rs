@@ -47,7 +47,7 @@ use serde_json::{Map, Number, Value};
 /// object (an empty bag with no structured input yields `{}`).
 pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
     let mut root = bag_to_map(bag);
-    if let Some(document) = &structured.llm_request {
+    if let Some(document) = structured.llm_request() {
         let llm = root
             .entry("llm")
             .or_insert_with(|| Value::Object(Map::new()));
@@ -63,7 +63,7 @@ pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
             llm.insert("request".to_owned(), Value::clone(document));
         }
     }
-    if let Some(args) = &structured.args {
+    if let Some(args) = structured.args() {
         root.insert("args".to_owned(), Value::clone(args));
     }
     Value::Object(root)
@@ -236,10 +236,7 @@ mod tests {
     }
 
     fn with_args(args: Value) -> StructuredInput {
-        StructuredInput {
-            llm_request: None,
-            args: Some(Arc::new(args)),
-        }
+        StructuredInput::new(None, Some(Arc::new(args)))
     }
 
     /// Read `input` back out of regorus as JSON after the engine has parsed it.
@@ -354,10 +351,10 @@ mod tests {
     fn request_document_sits_beside_llm_metadata() {
         let mut bag = AttributeBag::new();
         bag.set("llm.model_id", "gpt-4o");
-        let structured = StructuredInput {
-            llm_request: Some(Arc::new(json!({"model": "gpt-4o", "tools": []}))),
-            args: None,
-        };
+        let structured = StructuredInput::new(
+            Some(Arc::new(json!({"model": "gpt-4o", "tools": []}))),
+            None,
+        );
         let input = build_input(&bag, &structured);
         assert_eq!(input["llm"]["model_id"], "gpt-4o");
         assert_eq!(
@@ -370,10 +367,7 @@ mod tests {
     fn request_document_replaces_scalar_llm_key() {
         let mut bag = AttributeBag::new();
         bag.set("llm", "scalar");
-        let structured = StructuredInput {
-            llm_request: Some(Arc::new(json!({"model": "m"}))),
-            args: None,
-        };
+        let structured = StructuredInput::new(Some(Arc::new(json!({"model": "m"}))), None);
         let input = build_input(&bag, &structured);
         assert_eq!(input["llm"], json!({"request": {"model": "m"}}));
     }
@@ -398,10 +392,10 @@ mod tests {
             "nested": [[{"a": 1}, {"b": [2, 3]}], []],
             "float": 0.7,
         });
-        let structured = StructuredInput {
-            llm_request: Some(Arc::new(json!({"tools": [{"type": "function"}]}))),
-            args: Some(Arc::new(args.clone())),
-        };
+        let structured = StructuredInput::new(
+            Some(Arc::new(json!({"tools": [{"type": "function"}]}))),
+            Some(Arc::new(args.clone())),
+        );
         let back = rego_input_roundtrip(&structured);
         assert_eq!(back["args"], args);
         assert_eq!(
