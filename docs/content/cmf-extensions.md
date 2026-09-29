@@ -7,8 +7,10 @@ document is the contract for what the bridge emits, how original collections
 relate to flattened booleans, and which keys exist.
 
 The twelve slots dispatched by `extract_extensions` are listed below.
-`raw_credentials` and `candidate_constraint` are not among them: credentials
-never enter the bag, and a routing constraint is not a policy attribute.
+`raw_credentials`, `candidate_constraint`, and `llm_request` are not among
+them: credentials never enter the bag, a routing constraint is not a policy
+attribute, and the parsed LLM request reaches PDPs as structured JSON instead
+(see [Structured request input](apl/pdp.md#structured-request-input)).
 
 ## Contents
 
@@ -322,6 +324,10 @@ A default request slot adds nothing.
 | `llm.provider` | String | `Some` |
 | `llm.capabilities` | StringSet | always |
 
+The parsed request body is a separate slot, `llm_request`, and is never
+flattened. OPA and CEL read it as `llm.request` beside these keys, and Cedar
+as `context.llm.request`.
+
 ### 8. `mcp` — `MCPExtension`
 
 **Tool** present:
@@ -406,3 +412,9 @@ These use the same walker and the same absent-value rules, but they are not
 | Upstream result | Same shapes under `result` / `result.<dotted>`. |
 | Static `data:` tree | Same walker under `data` / `data.<dotted>`. |
 | Route identifier | `route.key` |
+
+On `tool:` routes, OPA and CEL do not read the request argument rows
+above. They receive the arguments as native JSON instead, so arrays of
+objects, array order, duplicates, numbers, and `null` survive. Cedar receives
+the same JSON, sanitized, as `context.args`. APL still reads the flattened
+keys. See [Structured request input](apl/pdp.md#structured-request-input).

@@ -33,6 +33,10 @@
 // asserts nothing. It is correct for a deliberately invalid example, the
 // "before" half of a migration note, and for a snippet no document could
 // hold.
+//
+// A few examples are also run, not only loaded. `llm_request.rs` evaluates
+// the blocks marked `<!-- evaluate: llm-tool-allowlist -->` with the builtin
+// PDPs; the marker does not change how this file validates them.
 
 #![allow(
     missing_docs,
@@ -51,6 +55,9 @@ use praxis_policy_apl_core::{
 };
 use praxis_policy_apl_runtime::merge_attribute_docs;
 use praxis_policy_core::config::parse_config;
+
+#[cfg(all(feature = "opa", feature = "cel"))]
+mod llm_request;
 
 /// Indent every non-empty line of a block by `spaces`, so it can be spliced
 /// into a document at depth.

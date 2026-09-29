@@ -57,8 +57,9 @@ Empty `tools` (`tools-empty`) and a float compared through Cedar
 `decimal()` (`float-field`) agree. A bare forbidden tool
 (`tool-forbidden-exact`) denies everywhere, because it is the one shape
 Cedar's exact-match `contains` catches. Cedar's sanitizing rules (nulls
-dropped, floats as strings, arrays as sets) are documented in
-[`cedar_direct/request.rs`](../builtins/src/pdps/cedar_direct/request.rs).
+dropped, floats as strings, arrays as sets) are listed in the
+[types table](../../docs/content/apl/pdp.md#types-across-engines) and under
+[Cedar limits](../../docs/content/apl/pdp.md#cedar-limits).
 
 `src/leak.rs` denies a request whose messages and tools carry a marker,
 through several deny paths per engine, and asserts that no decision text
@@ -79,6 +80,10 @@ contains it.
 | `tool-deny-list-unexpressible` | permitted tools only | All Allow, but Cedar only by coincidence (see above). |
 | `null-absent` | `null` field, key presence | Cedar drops nulls, so `has` is false. CEL `has` / OPA `object.keys` see the key. |
 | `duplicates-collapse` | `[7, 7, 9] == [7, 9]` | Cedar sets collapse duplicates (Allow). CEL/OPA keep them (Deny). |
+
+The last four rows are the Cedar divergences documented in the
+[types table](../../docs/content/apl/pdp.md#types-across-engines) and under
+[Cedar limits](../../docs/content/apl/pdp.md#cedar-limits).
 
 Each allowlist row in `src/allowlist.rs` carries a `reason`. An unused id
 or an empty reason fails the meta tests.

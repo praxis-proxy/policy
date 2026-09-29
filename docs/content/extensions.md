@@ -31,6 +31,7 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | `read_request` |
 | HTTP | request line (method, path, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
 | LLM | model id, provider, capabilities | `llm.*` | `read_llm` |
+| LLM request | the host-parsed inference request body | not flattened; OPA, CEL, and Cedar read it as `llm.request` | `read_llm_request` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | `read_mcp` |
 | Completion | stop reason, token counts, model, latency | `completion.*` | `read_completion` |
 | Provenance | source, message id, parent id | `provenance.*` | `read_provenance` |
@@ -89,6 +90,7 @@ plugins:
 | `read_request` | `request.*` |
 | `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` |
 | `read_llm` | `llm.*` |
+| `read_llm_request` | no bag keys; gates the parsed request body on `Extensions.llm_request` |
 | `read_mcp` | `mcp.*` |
 | `read_completion` | `completion.*` |
 | `read_provenance` | `provenance.*` |
@@ -105,6 +107,16 @@ typed extension, and credential material flows through plugin payloads rather
 than the bag. APL predicates read `security.labels` from the bag directly, which
 is how `security.labels contains "secret"` works (see [Session
 Taint](apl/tainting.md)).
+
+`read_llm_request` also widens no bag view. The host sets
+`Extensions.llm_request` to the request body it parsed. The body carries
+prompt text and client-supplied JSON, so it is never flattened into the bag,
+and a plugin without the capability sees the slot as absent. APL's route
+handler is always granted it, which is how OPA, CEL, and Cedar steps receive
+the body as `llm.request` (see [Structured request
+input](apl/pdp.md#structured-request-input)). The capability gates plugins,
+not PDP resolvers: a host resolver opts in by overriding
+`PdpResolver::evaluate_structured`.
 
 Membership names containing `.` remain atomic values in the canonical sets and
 do not receive flattened aliases. For example, test a dotted role with
@@ -153,8 +165,9 @@ Extensions differ in how they may change during a request, and the runtime
 enforces the tier:
 
 - Immutable: fixed once resolved. The verified subject identity, client,
-  workload, agent, meta, request, LLM, MCP, completion, provenance, and
-  framework extensions.
+  workload, agent, meta, request, LLM, LLM request, MCP, completion,
+  provenance, and framework extensions. The LLM request is also never
+  serialized, so it stays out of extension dumps and session stores.
 - Monotonic: may only grow. Security labels (added via `append_labels`,
   never removed) and the delegation chain (extended via `append_delegation`).
 - Mutable: may be rewritten. HTTP headers (via `write_headers`) and the
