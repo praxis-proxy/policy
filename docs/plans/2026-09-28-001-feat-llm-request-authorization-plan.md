@@ -1,7 +1,7 @@
 ---
 title: "feat: Authorize LLM request JSON and lists of complex request objects"
 type: feat
-status: active
+status: completed
 date: 2026-09-28
 origin: docs/brainstorms/2026-09-28-llm-request-authorization-requirements.md
 ---
