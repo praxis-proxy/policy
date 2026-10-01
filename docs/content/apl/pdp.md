@@ -104,6 +104,14 @@ Each engine names them as follows:
 | CEL | `llm.request` | `args` |
 | Cedar | `context.llm.request` | `context.args` |
 
+The request document keeps the provider's wire shape. Prefer normalized bag
+attributes for rules that must work across providers, and use `llm.request`
+when the rule intentionally targets one provider format.
+
+Provider-side MCP declarations can be checked in `llm.request`, but their
+later calls do not pass through a `tool:` route. Allowing a server here does
+not add per-call policy enforcement for tools the provider invokes itself.
+
 In OPA and CEL, `llm.request` sits beside the existing `llm.model_id`,
 `llm.provider`, and `llm.capabilities`. Structured `args` replaces the
 flattened `args.*` keys, so a field has one type whatever the client sent.
@@ -131,6 +139,14 @@ array or object adds one. APL-only steps are unaffected.
 | document absent | undefined | missing key: evaluation error, so the step denies | missing attribute: evaluation error, so the step denies |
 
 A document the host did not supply is absent, never an empty object.
+
+Set `require_llm_request: true` on a PDP step when its decision depends on the
+document. The evaluator then denies an absent document with
+`pdp.llm_request_missing` before invoking the engine. The option is accepted
+only on `llm:` routes.
+
+Structured `args` is the received value. An `args:` pipeline can change the
+value forwarded to the tool after this snapshot is taken.
 
 ### Absent and null values
 
@@ -211,6 +227,7 @@ routes:
       pre_invocation:
         - opa:
             query: data.ssrf.allow
+            require_llm_request: true
 ```
 
 CEL, with `matches`. Extra keys on a `cel:` step become variables, so the
@@ -256,12 +273,11 @@ a reaction.
 
 **With a schema.** A Cedar schema gives each action a closed context type, so
 an undeclared `args` or `llm` key fails request validation and the step denies.
-A `cedar-direct` resolver with `schema_text` or `schema_file` therefore adds
-structured input only when its config sets `structured_context: true`. Without
-the flag, `context.args` and `context.llm` are absent and the input is not
-sanitized, so an escape key does not deny either. Before setting the flag,
-declare both keys as optional in the context type of every action a
-structured route calls:
+A `cedar-direct` resolver with `schema_text` or `schema_file` therefore
+requires `structured_context: true` when a Cedar step reaches an `llm:` or
+`tool:` route. Config load rejects that combination without the flag. Declare
+both keys as optional in the context type of every action a structured route
+calls:
 
 ```yaml
 global:
@@ -329,8 +345,9 @@ the whole bag. The evaluator calls `PdpResolver::evaluate_structured(call,
 bag, structured)`, whose default ignores `structured` and calls
 `evaluate(call, bag)`. A host resolver opts in by overriding
 `evaluate_structured` and reading `StructuredInput::llm_request` and
-`StructuredInput::args`. It may also override `validate_call` to reject a step
-at config load. Input past the depth limit never reaches a resolver.
+`StructuredInput::args`. It may override `validate_call` for call-local checks
+and `validate_call_with_input` for checks that depend on the route's available
+structured values. Input past the depth limit never reaches a resolver.
 
 ### Migrating `args` policies
 

@@ -61,9 +61,8 @@ dropped, floats as strings, arrays as sets) are listed in the
 [types table](../../docs/content/apl/pdp.md#types-across-engines) and under
 [Cedar limits](../../docs/content/apl/pdp.md#cedar-limits).
 
-`src/leak.rs` denies a request whose messages and tools carry a marker,
-through several deny paths per engine, and asserts that no decision text
-contains it.
+`src/leak.rs` places markers in the request and tool arguments, denies through
+several paths per engine, and asserts that no decision text contains them.
 
 ## Out of subset (allowlist)
 
