@@ -149,19 +149,93 @@ pub fn canonical_audit_bytes<T: serde::Serialize>(value: &T) -> Option<Vec<u8>> 
     serde_json::to_vec(&sort_keys(value)).ok()
 }
 
-/// Hash bytes for a content reference, as `sha256:<hex>`.
+/// The key audit content provenance digests a payload under.
 ///
-/// Only the digest is ever recorded. A reader can tell whether two payloads
-/// were identical without the audit trail holding either one.
-#[must_use]
-pub fn content_hash(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
+/// Two digests are comparable only when taken under the same key, so every
+/// digest names its key: `hmac-sha256:<key_id>:<hex>` for a keyed digest and
+/// `sha256:<hex>` for an unkeyed one. A reader comparing digests across a key
+/// rotation sees two key ids and knows not to compare them, rather than
+/// reading the rotation as the content changing.
+///
+/// The key is deployment-scoped rather than per record so that equal content
+/// gives equal digests across requests, which is what lets a reader spot the
+/// same payload replayed. A per-record salt would keep the within-record
+/// comparison and lose that.
+#[derive(Debug, Clone)]
+pub enum ContentKey {
+    /// Plain SHA-256, chosen explicitly with `content_provenance_key: unkeyed`.
+    ///
+    /// Anyone holding a record can test a guess at the payload against it, so
+    /// a short or templated message carrying a redacted value can be
+    /// enumerated back out of the digest.
+    Unkeyed,
+    /// HMAC-SHA256 under an operator secret. Read on every digest, so a
+    /// refresh that rotates the secret takes effect without a reload.
+    Keyed(crate::secrets::SecretRef),
+}
 
-    use sha2::{Digest as _, Sha256};
-    let digest = Sha256::digest(bytes);
-    let mut s = String::with_capacity("sha256:".len() + 64);
-    s.push_str("sha256:");
-    for b in digest {
+/// The shortest secret accepted as a content provenance key: the HMAC-SHA256
+/// block of strength. A shorter key is the weak point an attacker brute-forces
+/// instead of the content.
+pub const MIN_CONTENT_KEY_BYTES: usize = 32;
+
+/// What the key id is the MAC of. Fixed, so the id is stable across restarts
+/// and changes only when the key does.
+const KEY_ID_LABEL: &[u8] = b"praxis-policy/content-provenance/key-id";
+
+impl ContentKey {
+    /// A keyed digest under `secret`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the minimum when the secret is shorter than
+    /// [`MIN_CONTENT_KEY_BYTES`].
+    pub fn keyed(secret: crate::secrets::SecretRef) -> Result<Self, String> {
+        let len = secret.get().len();
+        if len < MIN_CONTENT_KEY_BYTES {
+            return Err(format!(
+                "the content provenance key is {len} bytes; it needs at least \
+                 {MIN_CONTENT_KEY_BYTES}"
+            ));
+        }
+        Ok(Self::Keyed(secret))
+    }
+
+    /// Digest `bytes`, prefixed with the scheme and, for a keyed digest, the
+    /// key id.
+    ///
+    /// `None` only if the HMAC cannot be initialized, which it accepts any key
+    /// length for. Handled rather than asserted, since a panic here would take
+    /// the request down over an audit field.
+    #[must_use]
+    pub fn digest(&self, bytes: &[u8]) -> Option<String> {
+        use hmac::{Hmac, KeyInit as _, Mac as _};
+        use sha2::{Digest as _, Sha256};
+
+        match self {
+            Self::Unkeyed => Some(format!("sha256:{}", hex(&Sha256::digest(bytes)))),
+            Self::Keyed(secret) => {
+                let key = secret.get();
+                let mac = |data: &[u8]| {
+                    let mut m = <Hmac<Sha256>>::new_from_slice(key.as_bytes()).ok()?;
+                    m.update(data);
+                    Some(m.finalize().into_bytes())
+                };
+                let id = mac(KEY_ID_LABEL)?;
+                Some(format!(
+                    "hmac-sha256:{}:{}",
+                    hex(id.get(..8).unwrap_or_default()),
+                    hex(&mac(bytes)?)
+                ))
+            },
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
         let _ = write!(s, "{b:02x}");
     }
     s
@@ -225,7 +299,12 @@ macro_rules! impl_plugin_payload {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
 
@@ -240,14 +319,76 @@ mod tests {
     struct Plain;
     crate::impl_plugin_payload!(Plain);
 
+    fn unkeyed(bytes: &[u8]) -> String {
+        ContentKey::Unkeyed.digest(bytes).unwrap()
+    }
+
+    fn keyed(secret: &str) -> ContentKey {
+        ContentKey::keyed(crate::secrets::SecretRef::fixed(secret)).unwrap()
+    }
+
+    const KEY_A: &str = "a-provenance-key-of-thirty-two-bytes-or-more";
+    const KEY_B: &str = "another-provenance-key-of-thirty-two-bytes";
+
     #[test]
-    fn a_content_hash_is_prefixed_deterministic_and_content_dependent() {
-        let h = content_hash(b"hello");
+    fn an_unkeyed_digest_is_prefixed_deterministic_and_content_dependent() {
+        let h = unkeyed(b"hello");
 
         assert!(h.starts_with("sha256:"));
         assert_eq!(h.len(), "sha256:".len() + 64);
-        assert_eq!(content_hash(b"hello"), h, "the same bytes hash the same");
-        assert_ne!(content_hash(b"world"), h);
+        assert_eq!(unkeyed(b"hello"), h, "the same bytes hash the same");
+        assert_ne!(unkeyed(b"world"), h);
+    }
+
+    #[test]
+    fn a_keyed_digest_names_its_scheme_and_key() {
+        let h = keyed(KEY_A).digest(b"hello").unwrap();
+        let parts: Vec<&str> = h.split(':').collect();
+
+        assert_eq!(parts.len(), 3, "scheme, key id, digest: {h}");
+        assert_eq!(parts[0], "hmac-sha256");
+        assert_eq!(parts[1].len(), 16);
+        assert_eq!(parts[2].len(), 64);
+    }
+
+    /// Equal content under one key gives equal digests, which is what lets a
+    /// reader spot a payload replayed across requests.
+    #[test]
+    fn the_same_key_and_content_digest_the_same() {
+        assert_eq!(keyed(KEY_A).digest(b"hello"), keyed(KEY_A).digest(b"hello"));
+        assert_ne!(keyed(KEY_A).digest(b"hello"), keyed(KEY_A).digest(b"world"));
+    }
+
+    /// A rotated key shows up as a different key id, so a reader does not
+    /// compare digests across it and read the rotation as the content changing.
+    #[test]
+    fn a_different_key_has_a_different_id() {
+        let id = |key: &str| {
+            keyed(key)
+                .digest(b"hello")
+                .unwrap()
+                .split(':')
+                .nth(1)
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(id(KEY_A), id(KEY_A), "the id is stable for one key");
+        assert_ne!(id(KEY_A), id(KEY_B));
+    }
+
+    /// The keyed digest is not the plain hash of the content, which is the
+    /// whole point: a guess cannot be checked without the key.
+    #[test]
+    fn a_keyed_digest_is_not_the_plain_hash() {
+        let plain = unkeyed(b"hello");
+        let keyed = keyed(KEY_A).digest(b"hello").unwrap();
+        assert!(!keyed.ends_with(plain.trim_start_matches("sha256:")));
+    }
+
+    #[test]
+    fn a_short_key_is_refused() {
+        let err = ContentKey::keyed(crate::secrets::SecretRef::fixed("too-short")).unwrap_err();
+        assert!(err.contains("at least 32"), "{err}");
     }
 
     /// A payload that did not opt in produces no bytes, so provenance costs it
@@ -281,8 +422,8 @@ mod tests {
             name: "x".to_owned(),
         };
 
-        let fh = content_hash(&first.audit_bytes().expect("opted in"));
-        let sh = content_hash(&second.audit_bytes().expect("opted in"));
+        let fh = unkeyed(&first.audit_bytes().expect("opted in"));
+        let sh = unkeyed(&second.audit_bytes().expect("opted in"));
         assert_eq!(fh, sh, "insertion order must not change the digest");
     }
 
@@ -326,8 +467,8 @@ mod tests {
         };
 
         assert_ne!(
-            content_hash(&one.audit_bytes().unwrap()),
-            content_hash(&two.audit_bytes().unwrap())
+            unkeyed(&one.audit_bytes().unwrap()),
+            unkeyed(&two.audit_bytes().unwrap())
         );
     }
 }

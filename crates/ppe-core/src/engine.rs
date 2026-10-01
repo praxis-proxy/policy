@@ -714,6 +714,60 @@ fn warn_on_inactive_settings(cfg: &PolicyConfig) {
     for gap in crate::config::http_routing_gaps(cfg) {
         warn!("{gap}");
     }
+    let settings = &cfg.engine_settings;
+    if !settings.capture_content_provenance && settings.content_provenance_key.is_some() {
+        warn!(
+            "engine_settings.content_provenance_key is set but capture_content_provenance is \
+             off, so nothing is digested"
+        );
+    }
+    if settings.content_key_source() == Some(crate::config::ContentKeySource::Unkeyed) {
+        warn!(
+            alarm = "content_provenance_unkeyed",
+            "content provenance is UNKEYED: every audit record carries a plain SHA-256 of the \
+             payload, and anyone holding a record can test guesses at that payload against it. \
+             A short or templated message carrying a redacted value can be recovered this way. \
+             Name a secret in engine_settings.content_provenance_key outside development"
+        );
+    }
+}
+
+/// The content provenance key a config calls for, from the secrets resolved
+/// so far.
+///
+/// `store` is `None` before the first `initialize`, and a named key then waits
+/// for `initialize` to attach it. After that, secrets are resolved once and
+/// not again on reload, so a key the store does not hold cannot be supplied
+/// and the load is refused rather than left digesting nothing.
+fn content_key_for(
+    cfg: &PolicyConfig,
+    store: Option<&crate::secrets::SecretStore>,
+) -> Result<Option<crate::hooks::payload::ContentKey>, Box<PluginError>> {
+    use crate::config::ContentKeySource;
+    use crate::hooks::payload::ContentKey;
+
+    let name = match cfg.engine_settings.content_key_source() {
+        None => return Ok(None),
+        Some(ContentKeySource::Unkeyed) => return Ok(Some(ContentKey::Unkeyed)),
+        Some(ContentKeySource::Secret(name)) => name,
+    };
+    let Some(store) = store else {
+        return Ok(None);
+    };
+    let Some(secret) = store.secret(name) else {
+        return Err(Box::new(PluginError::Config {
+            message: format!(
+                "engine_settings.content_provenance_key names `{name}`, which was not resolved \
+                 when the engine started. Secrets are read once, at startup, so adding or \
+                 renaming one takes a restart"
+            ),
+        }));
+    };
+    ContentKey::keyed(secret).map(Some).map_err(|e| {
+        Box::new(PluginError::Config {
+            message: format!("engine_settings.content_provenance_key `{name}`: {e}"),
+        })
+    })
 }
 
 /// Report what a contract on an `http:` route depends on the host for, and every
@@ -870,6 +924,7 @@ fn snapshot_from_config(
     registry: PluginRegistry,
     policy_config: PolicyConfig,
     prev: Option<&RuntimeSnapshot>,
+    content_key: Option<crate::hooks::payload::ContentKey>,
 ) -> RuntimeSnapshot {
     let mut executor = Executor::new(ExecutorConfig {
         timeout_seconds: policy_config.engine_settings.plugin_timeout,
@@ -879,6 +934,9 @@ fn snapshot_from_config(
         audit_epoch: policy_config.engine_settings.audit_epoch,
     })
     .with_audit_handlers(registry.audit_handlers());
+    if let Some(key) = content_key {
+        executor = executor.with_content_key(key);
+    }
 
     if let Some(path) = &policy_config.engine_settings.effect_log_path {
         // Reuse the running log when a reload leaves the path unchanged. Two
@@ -894,8 +952,13 @@ fn snapshot_from_config(
                     .and_then(|c| c.engine_settings.effect_log_path.as_ref())
                     == Some(path)
             })
-            .and_then(|p| p.executor.effect_log());
-        let log = if let Some(existing) = reused {
+            .and_then(|p| {
+                p.executor
+                    .effect_log()
+                    .map(|log| (log, p.executor.in_flight()))
+            });
+        let log = if let Some((existing, in_flight)) = reused {
+            executor = executor.with_in_flight(in_flight);
             existing
         } else {
             let mut file_log = crate::effect::FileEffectLog::new(path);
@@ -1012,7 +1075,12 @@ impl PolicyEngine {
     ///
     /// Completed effects are compacted away and unresolved ones are returned.
     /// A no-op when no effect log is configured. `initialize` calls this
-    /// already; call it directly only to sweep again later.
+    /// already, before any traffic.
+    ///
+    /// Safe to call while serving. Effects this process is still acting on
+    /// are skipped and come back among the unresolved, since an intent whose
+    /// act is running looks the same in the log as one a crash orphaned. See
+    /// [`crate::effect::InFlightEffects`].
     ///
     /// # Errors
     ///
@@ -1031,6 +1099,9 @@ impl PolicyEngine {
     /// The reconciler reads the self-describing record, so it is specific to
     /// the participant at most, never to the plugin that caused the effect.
     ///
+    /// `reconciler` is never asked about an effect this process is still
+    /// acting on.
+    ///
     /// Whatever reconciliation settles is emitted to the audit sinks before
     /// this returns. Without that the answer would be unobservable: the
     /// resolving record is appended and compacted away inside the same sweep,
@@ -1048,7 +1119,13 @@ impl PolicyEngine {
         let Some(log) = snapshot.executor.effect_log() else {
             return Ok(Vec::new());
         };
-        let outcome = log.recover_and_reconcile(reconciler).await?;
+        let in_flight = snapshot.executor.in_flight();
+        let _sweep = in_flight.sweep();
+        let guarded = crate::effect::SkipInFlight {
+            inner: reconciler,
+            in_flight: &in_flight,
+        };
+        let outcome = log.recover_and_reconcile(&guarded).await?;
         snapshot.executor.emit_reconciled(outcome.resolved).await;
         Ok(outcome.unresolved)
     }
@@ -1255,6 +1332,13 @@ impl PolicyEngine {
             resolve_factories(&policy_config.plugins, &registry)?
         };
         let instances = create_plugin_instances(&policy_config.plugins, &factories)?;
+        let content_key = if self.initialized.load(Ordering::Acquire) {
+            let empty = crate::secrets::SecretStore::empty();
+            let store = self.secrets.get().map_or(&empty, |s| s.as_ref());
+            content_key_for(&policy_config, Some(store))?
+        } else {
+            content_key_for(&policy_config, None)?
+        };
 
         // Build the new snapshot from the current one — copy-on-write so
         // concurrent invokes keep using the existing config until we swap.
@@ -1274,6 +1358,7 @@ impl PolicyEngine {
                 new_registry,
                 policy_config,
                 Some(current.as_ref()),
+                content_key,
             )));
             // Same generation bump as mutate_runtime — load_config doesn't
             // go through that helper because it has to swap registry + executor
@@ -1549,11 +1634,13 @@ impl PolicyEngine {
         let instances = create_plugin_instances(&policy_config.plugins, &resolved)?;
         let mut new_registry = PluginRegistry::new();
         register_instances_into(&mut new_registry, &policy_config.plugins, &instances)?;
+        let content_key = content_key_for(&policy_config, None)?;
 
         engine.runtime.store(Arc::new(snapshot_from_config(
             new_registry,
             policy_config,
             None,
+            content_key,
         )));
 
         Ok(engine)
@@ -1790,6 +1877,23 @@ impl PolicyEngine {
         Ok(())
     }
 
+    /// Hand the executor the content provenance key, once secrets are read.
+    ///
+    /// The executor is built at `load_config`, before any secret is resolved,
+    /// so a key named in config reaches it here.
+    fn attach_content_key(&self) -> Result<(), Box<PluginError>> {
+        let snapshot = self.load_runtime();
+        let Some(cfg) = snapshot.policy_config.as_ref() else {
+            return Ok(());
+        };
+        let empty = crate::secrets::SecretStore::empty();
+        let store = self.secrets.get().map_or(&empty, |s| s.as_ref());
+        if let Some(key) = content_key_for(cfg, Some(store))? {
+            self.mutate_runtime(|snap| snap.executor.set_content_key(key));
+        }
+        Ok(())
+    }
+
     /// The host services `plugin_name` may borrow, per its capabilities.
     ///
     /// The withheld case is carried rather than dropped so the plugin's
@@ -1844,6 +1948,7 @@ impl PolicyEngine {
         // to already be resolved, and a document whose credentials cannot be
         // read must not reach a request with one of them missing.
         self.resolve_secrets().await?;
+        self.attach_content_key()?;
 
         // Snapshot once at start — subsequent registrations don't affect
         // this initialize() call. They'd need their own initialize.
@@ -2556,6 +2661,15 @@ impl PolicyEngine {
             // The extensions the pipeline finished with. Sinks are filtered
             // from these per sink, inside the emit.
             let extensions = result.modified_extensions.take().unwrap_or_default();
+            // Every pipeline the executor ran comes back with a verdict, so a
+            // log without one is a result the engine built itself: a hook with
+            // no plugins, or a route that denied before the pipeline started.
+            // Nothing captured its entry provenance, and a sink would get a
+            // record with no span or input hash and no arrival taint to diff
+            // the final labels against.
+            if result.decision_log.verdict().is_none() {
+                result.decision_log = snapshot.executor.entry_decisions(payload, &extensions);
+            }
             snapshot
                 .executor
                 .emit_decision(payload, &extensions, &mut result.decision_log, verdict)
@@ -6745,6 +6859,96 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A secret long enough to key content provenance.
+    const PROVENANCE_KEY: &str = "a-provenance-key-of-thirty-two-bytes-or-more";
+
+    /// The secret fixture with provenance keyed by `upstream_key`.
+    fn provenance_fixture(contents: &str) -> (std::path::PathBuf, String) {
+        let (dir, yaml) = secret_fixture(contents);
+        let yaml = yaml.replace(
+            "  dispatch: hooks\n",
+            "  dispatch: hooks\n  capture_content_provenance: true\n  \
+             content_provenance_key: upstream_key\n",
+        );
+        (dir, yaml)
+    }
+
+    /// The executor is built at load, before any secret is read, so the key
+    /// reaches it at `initialize`.
+    #[tokio::test]
+    async fn initialize_hands_the_executor_its_content_key() {
+        let (dir, yaml) = provenance_fixture(PROVENANCE_KEY);
+        let engine = engine_reading_secrets(&yaml);
+        assert!(engine.load_runtime().executor.provenance_key().is_none());
+
+        engine.initialize().await.expect("initializes");
+
+        assert!(matches!(
+            engine.load_runtime().executor.provenance_key(),
+            Some(crate::hooks::payload::ContentKey::Keyed(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_short_content_key_stops_initialize() {
+        let (dir, yaml) = provenance_fixture("too-short");
+        let engine = engine_reading_secrets(&yaml);
+
+        let err = engine
+            .initialize()
+            .await
+            .expect_err("a weak key is refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("upstream_key") && msg.contains("at least 32"),
+            "{msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reload rebuilds the executor, and the key comes with it.
+    #[tokio::test]
+    async fn a_reload_keeps_the_content_key() {
+        let (dir, yaml) = provenance_fixture(PROVENANCE_KEY);
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.expect("initializes");
+
+        engine
+            .load_config(parse_fixture_config(&yaml).unwrap())
+            .expect("the same document reloads");
+
+        assert!(engine.load_runtime().executor.provenance_key().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Secrets are read once, so a reload naming a value nobody resolved has
+    /// no key to give. Refused, rather than digesting nothing with no sign.
+    #[tokio::test]
+    async fn a_reload_naming_an_unresolved_key_is_refused() {
+        let (dir, yaml) = provenance_fixture(PROVENANCE_KEY);
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.expect("initializes");
+
+        let renamed = yaml
+            .replace("upstream_key", "rotated_key")
+            .replace("upstream.key", "rotated.key");
+        let err = engine
+            .load_config(parse_fixture_config(&renamed).unwrap())
+            .expect_err("the new value was never resolved");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rotated_key") && msg.contains("restart"),
+            "{msg}"
+        );
+        assert!(
+            engine.load_runtime().executor.provenance_key().is_some(),
+            "the running snapshot keeps its key"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_provider_kind_this_build_lacks_stops_initialize() {
         let yaml = "
@@ -10277,6 +10481,126 @@ routes:
                 .unresolved
                 .is_empty(),
             "and the pair is compacted out of the log"
+        );
+    }
+
+    /// A sweep during traffic leaves a mint that is still running alone.
+    ///
+    /// The regression: the sweep read the running mint's intent, a ledger
+    /// that had not seen it yet answered `Rejected`, and the plugin then
+    /// recorded `Confirmed` for the same key. Two answers for one act.
+    #[tokio::test]
+    async fn a_sweep_leaves_a_running_effect_alone() {
+        struct Rejecting;
+
+        #[async_trait]
+        impl crate::effect::EffectReconciler for Rejecting {
+            async fn reconcile(
+                &self,
+                _effect: &crate::effect::EffectRecord,
+            ) -> crate::effect::EffectState {
+                crate::effect::EffectState::Rejected
+            }
+        }
+
+        /// Records its intent, then holds the act open until released.
+        struct PausedMint {
+            cfg: PluginConfig,
+            began: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl Plugin for PausedMint {
+            fn config(&self) -> &PluginConfig {
+                &self.cfg
+            }
+        }
+
+        impl HookHandler<TestHook> for PausedMint {
+            async fn handle(
+                &self,
+                _payload: &TestPayload,
+                ext: &Extensions,
+                _ctx: &mut PluginContext,
+            ) -> PluginResult<TestPayload> {
+                let effect = crate::effect::EffectRecord::prepared("token_mint", "d", "live-key");
+                let outcome: Result<(), Box<PluginError>> = ext
+                    .perform_effect(&effect, || async {
+                        self.began.notify_one();
+                        self.release.notified().await;
+                        Ok(())
+                    })
+                    .await;
+                outcome.unwrap();
+                PluginResult::allow()
+            }
+        }
+
+        let path = effect_log_path("live_sweep");
+        let _c = RemoveOnDrop(path.clone());
+        let mut config = PolicyConfig::default();
+        config.engine_settings.effect_log_path = Some(path.display().to_string());
+        let engine = Arc::new(PolicyEngine::default());
+        engine.load_config(config).unwrap();
+
+        let began = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let cfg = make_config("minter", 10, PluginMode::Sequential);
+        engine
+            .register_handler::<TestHook, _>(
+                Arc::new(PausedMint {
+                    cfg: cfg.clone(),
+                    began: Arc::clone(&began),
+                    release: Arc::clone(&release),
+                }),
+                cfg,
+            )
+            .unwrap();
+        engine.initialize().await.unwrap();
+
+        let invoking = Arc::clone(&engine);
+        let request = tokio::spawn(async move {
+            invoking
+                .invoke::<TestHook>(
+                    TestPayload { value: "x".into() },
+                    Extensions::default(),
+                    None,
+                )
+                .await
+        });
+        began.notified().await;
+
+        let unresolved = engine.recover_effects_with(&Rejecting).await.unwrap();
+        assert_eq!(
+            unresolved
+                .iter()
+                .map(|r| r.key.as_str())
+                .collect::<Vec<_>>(),
+            ["live-key"],
+            "the running mint is left for later, not answered"
+        );
+
+        release.notify_one();
+        let (result, _) = request.await.unwrap();
+        assert!(result.continue_processing);
+
+        let states: Vec<_> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<crate::effect::EffectRecord>(l)
+                    .unwrap()
+                    .state
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [
+                crate::effect::EffectState::Prepared,
+                crate::effect::EffectState::Confirmed
+            ],
+            "one answer, from the plugin that acted"
         );
     }
 

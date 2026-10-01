@@ -593,6 +593,7 @@ fn the_engine_settings_table_is_the_accept_set() {
             "effect_log_path",
             "effect_log_compaction_threshold",
             "capture_content_provenance",
+            "content_provenance_key",
             "audit_stream_namespace",
         ],
         "the engine settings accept set changed"

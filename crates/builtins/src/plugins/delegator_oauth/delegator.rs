@@ -32,7 +32,8 @@
 // reason))`:
 //   * `delegation.idp_unreachable` — network failure
 //   * `delegation.idp_timeout` — exceeded `timeout_seconds`
-//   * `delegation.idp_rejected` — IdP returned 4xx/5xx
+//   * `delegation.idp_rejected` — IdP returned 4xx/5xx (status in
+//                                  `details.http_status`)
 //   * `delegation.bad_response` — response not valid JSON or
 //                                 missing required fields
 //   * `delegation.scope_too_broad` — IdP returned a token whose
@@ -41,6 +42,7 @@
 
 use crate::plugins::delegator_oauth::KIND;
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -55,7 +57,7 @@ use praxis_policy_core::extensions::raw_credentials::RawDelegatedToken;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::host::{HostServices as _, HttpRequestError};
-use praxis_policy_core::http::{HttpRequest, HttpTransportError, form_urlencode};
+use praxis_policy_core::http::{HttpRequest, HttpResponse, HttpTransportError, form_urlencode};
 use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
@@ -375,19 +377,10 @@ impl OAuthDelegator {
                     .await
                     .map_err(|e| self.violation_for("workload client_assertion POST", &e))?;
 
-                let status = response.status;
                 if !response.is_success() {
-                    let body = String::from_utf8_lossy(&response.body).into_owned();
-                    // Sanitize: surface only the OAuth `error` CODE (a fixed
-                    // vocabulary — invalid_client, invalid_grant, …), never the
-                    // free-text `error_description` or the raw body. Leg 1 submits
-                    // the SVID as a `client_assertion`, and an IdP may echo that
-                    // credential material back in those fields.
-                    let reason = match serde_json::from_str::<TokenErrorResponse>(&body) {
-                        Ok(err) => format!("workload client_assertion rejected: {}", err.error),
-                        Err(_) => format!("workload client_assertion rejected (HTTP {status})"),
-                    };
-                    return Err(PluginViolation::new("delegation.idp_rejected", reason));
+                    // Leg 1 submits the SVID as a `client_assertion`, which is
+                    // why `idp_rejection` never echoes the body.
+                    return Err(idp_rejection("workload client_assertion", &response));
                 }
 
                 match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {
@@ -411,11 +404,12 @@ impl OAuthDelegator {
     ///
     /// - `Confirmed` on success, and on a 2xx whose body would not parse. The
     ///   token was minted either way; only our reading of it failed.
-    /// - `Rejected` on a non-2xx, where the `IdP` said no and provably issued
-    ///   nothing.
-    /// - `Unknown` on a timeout or an unreachable `IdP`, where the mint may
-    ///   still have landed. Recovery reconciles it by key rather than
-    ///   assuming it did not happen.
+    /// - `Rejected` on a 4xx, the RFC 6749 section 5.2 error response, where
+    ///   the `IdP` said no and provably issued nothing.
+    /// - `Unknown` on a 5xx, a timeout, or an unreachable `IdP`, where the
+    ///   mint may still have landed. A 503 or 504 can come from a proxy in
+    ///   front of an `IdP` that minted anyway. Recovery reconciles it by key
+    ///   rather than assuming it did not happen.
     ///
     /// With no effect log configured this just runs `mint`.
     async fn audit_mint<F, Fut, T>(
@@ -462,7 +456,7 @@ impl OAuthDelegator {
         let state = match &outcome {
             Ok(_) => EffectState::Confirmed,
             Err(v) => match v.code.as_str() {
-                "delegation.idp_rejected" => EffectState::Rejected,
+                "delegation.idp_rejected" if refused_by_idp(v) => EffectState::Rejected,
                 "delegation.bad_response" => EffectState::Confirmed,
                 _ => EffectState::Unknown,
             },
@@ -482,6 +476,40 @@ impl OAuthDelegator {
         outcome
     }
 }
+
+/// The violation for a non-2xx from the token endpoint.
+///
+/// The reason carries only the OAuth `error` code (a fixed vocabulary:
+/// `invalid_client`, `invalid_grant`, and so on), never `error_description`
+/// or the raw body, because both legs submit a credential and an `IdP` may
+/// echo it back in either. The status goes in `details` so `audit_mint` can
+/// tell a refusal from a server error without parsing the reason.
+fn idp_rejection(leg: &str, response: &HttpResponse) -> PluginViolation {
+    let status = response.status;
+    let reason = match serde_json::from_slice::<TokenErrorResponse>(&response.body) {
+        Ok(err) => format!("{leg} rejected: {}", err.error),
+        Err(_) => format!("{leg} rejected (HTTP {status})"),
+    };
+    PluginViolation::new("delegation.idp_rejected", reason).with_details(HashMap::from([(
+        IDP_STATUS_DETAIL.to_owned(),
+        serde_json::Value::from(status),
+    )]))
+}
+
+/// Whether an `idp_rejected` violation is a refusal the `IdP` itself made.
+///
+/// Only a 4xx is: RFC 6749 section 5.2 puts its error responses there. A 5xx
+/// proves nothing about the mint, since a proxy or gateway in front of the
+/// `IdP` can answer 503 or 504 after the token was already issued.
+fn refused_by_idp(v: &PluginViolation) -> bool {
+    v.details
+        .get(IDP_STATUS_DETAIL)
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|s| (400..500).contains(&s))
+}
+
+/// The `details` key `idp_rejection` puts the HTTP status under.
+const IDP_STATUS_DETAIL: &str = "http_status";
 
 /// A fresh key per mint attempt.
 ///
@@ -657,18 +685,10 @@ impl OAuthDelegator {
                         },
                     };
 
-                    let status = response.status;
                     if !response.is_success() {
-                        let body = String::from_utf8_lossy(&response.body).into_owned();
-                        // Same sanitization as leg 1: the OAuth `error` CODE only,
-                        // never `error_description` or the raw body. Leg 2 submits
-                        // the caller's bearer as `subject_token`, and an IdP may
-                        // echo that credential back in those fields.
-                        let reason = match serde_json::from_str::<TokenErrorResponse>(&body) {
-                            Ok(err) => format!("token exchange rejected: {}", err.error),
-                            Err(_) => format!("token exchange rejected (HTTP {status})"),
-                        };
-                        return Err(PluginViolation::new("delegation.idp_rejected", reason));
+                        // Leg 2 submits the caller's bearer as `subject_token`,
+                        // which is why `idp_rejection` never echoes the body.
+                        return Err(idp_rejection("token exchange", &response));
                     }
 
                     match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {

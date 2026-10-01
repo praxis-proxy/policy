@@ -156,6 +156,7 @@ pub struct DecisionLog {
     span: Option<Span>,
     input_labels: Vec<String>,
     input_hash: Option<String>,
+    output_hash: Option<String>,
     epoch: Option<u64>,
     stream_id: Option<String>,
     stream_seq: Option<u64>,
@@ -212,15 +213,28 @@ impl DecisionLog {
         &self.input_labels
     }
 
-    /// Record the content hash of the payload at entry. Set only when content
-    /// provenance is enabled, since hashing sits on the request path.
+    /// Record the content digest of the payload at entry. Set only when
+    /// content provenance is enabled, since hashing sits on the request path.
     pub fn set_input_hash(&mut self, hash: Option<String>) {
         self.input_hash = hash;
     }
 
-    /// The content hash of the payload at entry, if it was captured.
+    /// The content digest of the payload at entry, if it was captured.
     pub fn input_hash(&self) -> Option<&str> {
         self.input_hash.as_deref()
+    }
+
+    /// Record the content digest of the payload the caller receives, or of
+    /// the one refused on a deny. Set by the executor at emission, so a sink
+    /// reads both digests here and never holds the key they were taken under.
+    pub fn set_output_hash(&mut self, hash: Option<String>) {
+        self.output_hash = hash;
+    }
+
+    /// The content digest of the payload at emission, if it was captured.
+    /// Comparable to [`Self::input_hash`] only when both name the same key.
+    pub fn output_hash(&self) -> Option<&str> {
+        self.output_hash.as_deref()
     }
 
     /// Stamp the audit stream identity and the two sequence numbers, assigned

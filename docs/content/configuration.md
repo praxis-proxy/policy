@@ -234,7 +234,11 @@ secrets:
     session_password: { provider: shell, ref: VALKEY_PASSWORD }
 ```
 
-Two provider kinds need no dependencies and ship in the engine:
+Two provider kinds need no dependencies and ship in the engine. They are not
+registered on their own: the host installs
+`SecretProviderRegistry::with_builtin_backends()` with
+`PolicyEngine::set_secret_providers` before `initialize`, and a document naming
+a kind no registered factory provides fails there, naming the kind.
 
 | kind | `ref` is | notes |
 |---|---|---|

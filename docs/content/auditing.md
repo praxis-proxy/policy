@@ -171,12 +171,88 @@ plugin exists to take content out of a request, and writing that content into an
 audit record puts it straight back. A digest says the content changed, or did
 not, and nothing else about it.
 
+A plain hash would undo that for short content. Anyone holding a record can
+hash a guess and compare, so a templated message with a redacted SSN in it is a
+billion guesses away from recovery. The digest is therefore an HMAC-SHA256
+under an operator secret, named from the `secrets:` block:
+
 ```yaml
 engine_settings:
   capture_content_provenance: true
+  content_provenance_key: provenance_key
+secrets:
+  providers:
+    local: { kind: file, base_dir: /etc/ppe }
+  values:
+    provenance_key: { provider: local, ref: provenance.key }
 ```
 
-Only payloads that opt in are hashed, which today means the CMF
+The key has to be at least 32 bytes. The engine takes both digests, at entry and
+at emission, and puts them on the decision log, so a sink reads them and never
+holds the key.
+
+#### Setting up the key
+
+The key is an ordinary declared secret, so everything in
+[the `secrets:` block](configuration.md#the-secrets-block) applies. Generate one
+with enough entropy and keep it wherever the deployment keeps credentials:
+
+```sh
+openssl rand -base64 48 > /etc/ppe/provenance.key
+```
+
+The key is the file's text, less one trailing newline, so the base64 output is
+used as written. In Kubernetes that is a Secret mounted as a volume, with
+`base_dir` pointing at the mount.
+
+An environment variable works too, and needs no file:
+
+```yaml
+engine_settings:
+  capture_content_provenance: true
+  content_provenance_key: provenance_key
+secrets:
+  providers:
+    shell: { kind: env }
+  values:
+    provenance_key: { provider: shell, ref: PPE_PROVENANCE_KEY }
+```
+
+The environment is fixed when the process starts, so an `env` key only rotates
+with a restart. A `file` key rotates when the host calls `refresh_secrets` after
+the file changes, and the new key id shows up in the next record.
+
+The host has to make the provider kinds available. `file` and `env` need no
+dependencies, but nothing registers them on its own: before `initialize`, the
+host installs `SecretProviderRegistry::with_builtin_backends()` with
+`PolicyEngine::set_secret_providers`. Without it, `initialize` fails naming the
+kind it could not find. A host embedding PPE through Praxis gets whatever Praxis
+registers.
+
+Every engine that writes into one audit stream should share a key. Otherwise the
+same content digests differently on each, and the replay signal is lost across
+them.
+
+Every digest names its scheme and key: `hmac-sha256:<key_id>:<hex>`. The key id
+is a fingerprint of the key, stable across restarts and different after a
+rotation. Two digests are comparable only when their key ids match; a reader
+seeing different ids knows the key changed, not the content. Rotating the bytes
+behind `provenance_key` takes effect on the next `refresh_secrets`. Naming a
+different value takes a restart, because secrets are read once at startup, and a
+reload that names a value nobody resolved is refused.
+
+The key is deployment-wide rather than drawn per record. Within one record either
+would show whether the pipeline altered the content, but a deployment key also
+gives equal digests for equal content across requests, which is how a reader
+spots the same payload replayed. A per-record salt would need no key management
+and would lose that.
+
+For development, `content_provenance_key: unkeyed` records plain SHA-256 as
+`sha256:<hex>` and logs a warning at every load. It has to be written out:
+provenance switched on with no key is a load error, so nobody ends up with
+guessable digests by leaving a line out.
+
+Only payloads that opt in are digested, which today means the CMF
 `MessagePayload`. Anything else records no digest rather than a misleading one.
 It is off by default because hashing sits on the request path.
 
@@ -254,7 +330,7 @@ never disappear, so the difference between the labels at entry and the labels at
 the end is exactly what this node added.
 
 `content` appears only with provenance enabled, holding `input_hash` and
-`output_hash`.
+`output_hash`, both read from the decision log.
 
 `epoch`, `stream_id`, `stream_seq` and `emission_seq` place the record in the
 audit stream, and they answer two different questions.
@@ -313,9 +389,11 @@ An effect moves through four states.
 `unknown` is the one that matters. A call that timed out may still have landed
 at the participant with the answer lost coming back, so recording it as
 `rejected` asserts no token was minted when nothing checked. The OAuth
-delegator maps precisely: a non-2xx is `rejected`, a timeout or unreachable IdP
-is `unknown`, and a 2xx whose body will not parse is `confirmed`, because the
-token exists whether or not we managed to read it.
+delegator maps precisely: a 4xx is `rejected`, since that is where RFC 6749
+puts the IdP's error responses; a 5xx, a timeout or an unreachable IdP is
+`unknown`, since a proxy can answer 503 or 504 after the token was minted; and
+a 2xx whose body will not parse is `confirmed`, because the token exists
+whether or not we managed to read it.
 
 ### Which phases may act
 
@@ -344,6 +422,15 @@ the key the intent recorded. Only the participant knows.
 `PolicyEngine::initialize` sweeps the log once, before traffic. Completed
 effects are compacted away and the rest are reconciled with an external service
 that can answer for the participant, if one is configured.
+
+Calling `recover_effects` again while serving is safe. From the log, an intent
+whose act is still running looks the same as one a crash orphaned, and
+reconciling it would race the plugin: a ledger that has not seen the mint yet
+says `rejected`, then the plugin records `confirmed` for the same key. So the
+engine tracks the keys it has an act open on, from just before the intent is
+written until just after the outcome is, and a sweep skips them. They come back
+among the unresolved and the next sweep picks them up. A plugin that panics
+mid-act leaves its key open until the process restarts, and is reconciled then.
 
 In practice there is nothing to configure. The question an orphaned intent
 raises is "did this mint land at the IdP before we died", and an OAuth IdP has
@@ -455,7 +542,7 @@ classify the outcome itself, as the OAuth delegator does.
 | Nothing configured | A length check. |
 | A sink attached | A span, so two UUIDs and two allocations, plus the taint labels, plus the sink's work. |
 | `effect_log_path` | One `fsync` per lifecycle transition. Effects are rare. |
-| `capture_content_provenance` | One hash of the payload, plus one per sink. |
+| `capture_content_provenance` | Two keyed digests of the payload, at entry and at emission. |
 
 Provenance is built only when a sink will read it. Decision steps and the
 verdict are recorded either way, since the phases record them as they run.

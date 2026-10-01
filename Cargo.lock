@@ -2804,6 +2804,7 @@ dependencies = [
  "chrono",
  "futures",
  "hashbrown 0.17.1",
+ "hmac",
  "http",
  "loom",
  "praxis-policy-core",

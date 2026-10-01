@@ -191,6 +191,11 @@ pub trait DurableEffectLog: Send + Sync + std::fmt::Debug {
     /// Recover after a restart: drop completed effects and reconcile the
     /// unresolved ones, recording each resolved outcome durably.
     ///
+    /// An intent whose act is still running looks exactly like one a crash
+    /// orphaned, so `reconciler` has to leave live keys alone. The engine
+    /// wraps its reconciler in [`SkipInFlight`] for this; a caller sweeping a
+    /// log directly while effects run has to do the same.
+    ///
     /// The default is a no-op, for logs with no recoverable on-disk state.
     ///
     /// # Errors
@@ -274,38 +279,45 @@ impl DurableEffectLog for FileEffectLog {
         line.push(b'\n');
 
         let path = Arc::clone(&self.path);
-        // The lock is released before any compaction below: `recover` takes
-        // the same lock, so holding it across the call would deadlock.
-        {
-            let _guard = self.write_lock.lock().await;
-            tokio::task::spawn_blocking(move || -> Result<(), Box<PluginError>> {
+        // The guard moves into the blocking task and is dropped when the task
+        // finishes, not when this future does. A caller cancelled mid-append
+        // drops the future, but `spawn_blocking` work cannot be cancelled and
+        // keeps writing, so a guard held out here would let the next writer in
+        // while this one is still in the file.
+        //
+        // It is also released before any compaction below: `recover` takes the
+        // same lock, so holding it across the call would deadlock.
+        let guard = Arc::clone(&self.write_lock).lock_owned().await;
+        tokio::task::spawn_blocking(move || -> Result<(), Box<PluginError>> {
+            let _guard = guard;
+            // Whether this call is what brings the file into existence.
+            // `fsync` on a file does not make its directory entry durable, so
+            // without the extra sync below a crash right after the first
+            // append can leave no file at all, and the intent this call
+            // promised to record would be gone while the act it guarded had
+            // already happened.
+            let creating = !path.exists();
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path.as_ref())
+                .map_err(|e| wal_error("open the log", Some(Box::new(e))))?;
+            append_or_roll_back(&mut file, |f| {
                 use std::io::Write as _;
-                // Whether this call is what brings the file into existence.
-                // `fsync` on a file does not make its directory entry durable,
-                // so without the extra sync below a crash right after the
-                // first append can leave no file at all, and the intent this
-                // call promised to record would be gone while the act it
-                // guarded had already happened.
-                let creating = !path.exists();
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path.as_ref())
-                    .map_err(|e| wal_error("open the log", Some(Box::new(e))))?;
-                file.write_all(&line)
+                f.write_all(&line)
                     .map_err(|e| wal_error("write a record", Some(Box::new(e))))?;
                 // The durability barrier. The record is on stable storage
                 // before this returns, and therefore before the caller acts.
-                file.sync_all()
-                    .map_err(|e| wal_error("fsync the log", Some(Box::new(e))))?;
-                if creating {
-                    sync_parent_dir(path.as_ref())?;
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|e| wal_error("the append task failed", Some(Box::new(e))))??;
-        }
+                f.sync_all()
+                    .map_err(|e| wal_error("fsync the log", Some(Box::new(e))))
+            })?;
+            if creating {
+                sync_parent_dir(path.as_ref())?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| wal_error("the append task failed", Some(Box::new(e))))??;
 
         // Bound the file. A compaction failure is logged rather than returned:
         // the record above is already durable, so the append succeeded, and
@@ -353,6 +365,38 @@ impl DurableEffectLog for FileEffectLog {
         }
         Ok(outcome)
     }
+}
+
+/// Write one record and `fsync` it, or leave the file as it was.
+///
+/// A failed `write_all` can leave part of the record behind with no newline,
+/// and a failed `fsync` leaves a record nobody acknowledged. Recovery forgives
+/// an unterminated final line, because that is what a crash mid-append looks
+/// like, but it cannot forgive one in the middle: once a later append succeeds
+/// behind a torn record, the two share a line that will not parse, and every
+/// recovery after that refuses the log. Cutting the file back to its length
+/// before the write keeps a refused append from outliving the refusal.
+fn append_or_roll_back(
+    file: &mut std::fs::File,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(), Box<PluginError>>,
+) -> Result<(), Box<PluginError>> {
+    let before = file
+        .metadata()
+        .map_err(|e| wal_error("read the log's length", Some(Box::new(e))))?
+        .len();
+    let written = write(file);
+    if written.is_err()
+        && let Err(e) = file.set_len(before).and_then(|()| file.sync_all())
+    {
+        // The append is refused either way, so the caller still does not act.
+        // What is lost is only the guarantee above, and recovery will say so
+        // when it next reads the file.
+        tracing::error!(
+            error = %e,
+            "effect log: could not roll back a failed append; the log may hold a partial record"
+        );
+    }
+    written
 }
 
 /// `fsync` the directory holding `path`, making a file creation or a rename in
@@ -413,9 +457,12 @@ impl FileEffectLog {
     pub async fn recover(&self) -> Result<RecoverySummary, Box<PluginError>> {
         let path = Arc::clone(&self.path);
         // Held across the read and the rewrite so no append lands in between
-        // and is lost to the rename.
-        let _guard = self.write_lock.lock().await;
+        // and is lost to the rename. Owned by the blocking task for the same
+        // reason as in `append`: a cancelled caller must not release the lock
+        // while the rename it guards is still to come.
+        let guard = Arc::clone(&self.write_lock).lock_owned().await;
         tokio::task::spawn_blocking(move || -> Result<RecoverySummary, Box<PluginError>> {
+            let _guard = guard;
             let raw = match std::fs::read(path.as_ref()) {
                 Ok(d) => d,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -556,6 +603,112 @@ pub struct EffectSink {
     emission_seq: Arc<AtomicU64>,
     /// How long a sink gets before it is skipped, matching the decision path.
     handler_timeout: std::time::Duration,
+    /// The keys this process is acting on, which a recovery sweep must leave
+    /// alone. Shared with the executor, and through it across a reload that
+    /// keeps the log.
+    in_flight: Arc<InFlightEffects>,
+}
+
+/// Effect keys this process has an act open on, so a recovery sweep leaves
+/// them alone.
+///
+/// In the log, an intent whose act is still running looks the same as one a
+/// crash orphaned. A sweep that reconciles a running act races the plugin's
+/// own outcome for the same key, and can settle it `Rejected` just before the
+/// plugin records `Confirmed`: two answers for one act, both dense in the
+/// stream, which a verifier cannot tell from tampering.
+///
+/// A key is open from just before its intent is appended until just after its
+/// outcome is. While a sweep runs, every key that opens or closes is also
+/// remembered until the sweep ends, because an outcome appended after the
+/// sweep read the file is invisible to that sweep even once the key is closed.
+///
+/// A plugin that panics between intent and outcome leaves its key open until
+/// the process restarts. A restart is what recovery exists for, so the key is
+/// reconciled then.
+#[derive(Debug, Default)]
+pub struct InFlightEffects {
+    state: std::sync::Mutex<InFlightState>,
+}
+
+#[derive(Debug, Default)]
+struct InFlightState {
+    open: std::collections::HashSet<String>,
+    sweeps: usize,
+    touched_during_sweep: std::collections::HashSet<String>,
+}
+
+impl InFlightEffects {
+    fn lock(&self) -> std::sync::MutexGuard<'_, InFlightState> {
+        // Every update leaves the sets consistent, so a poisoned guard is
+        // still safe to read.
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn open(&self, key: &str) {
+        let mut state = self.lock();
+        state.open.insert(key.to_owned());
+        if state.sweeps > 0 {
+            state.touched_during_sweep.insert(key.to_owned());
+        }
+    }
+
+    fn close(&self, key: &str) {
+        let mut state = self.lock();
+        state.open.remove(key);
+        if state.sweeps > 0 {
+            state.touched_during_sweep.insert(key.to_owned());
+        }
+    }
+
+    /// Mark a sweep as running until the guard drops. Taken before the sweep
+    /// reads the log.
+    pub fn sweep(self: &Arc<Self>) -> SweepGuard {
+        self.lock().sweeps += 1;
+        SweepGuard(Arc::clone(self))
+    }
+
+    /// Whether a sweep must leave `key` alone.
+    #[must_use]
+    pub fn is_busy(&self, key: &str) -> bool {
+        let state = self.lock();
+        state.open.contains(key) || state.touched_during_sweep.contains(key)
+    }
+}
+
+/// A running recovery sweep, from [`InFlightEffects::sweep`].
+#[derive(Debug)]
+pub struct SweepGuard(Arc<InFlightEffects>);
+
+impl Drop for SweepGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.lock();
+        state.sweeps = state.sweeps.saturating_sub(1);
+        if state.sweeps == 0 {
+            state.touched_during_sweep.clear();
+        }
+    }
+}
+
+/// A reconciler that leaves keys this process is still acting on unresolved,
+/// and asks `inner` about the rest.
+pub struct SkipInFlight<'a> {
+    /// The reconciler that answers for keys nobody is acting on.
+    pub inner: &'a dyn EffectReconciler,
+    /// The keys to leave alone.
+    pub in_flight: &'a InFlightEffects,
+}
+
+#[async_trait]
+impl EffectReconciler for SkipInFlight<'_> {
+    async fn reconcile(&self, effect: &EffectRecord) -> EffectState {
+        if self.in_flight.is_busy(&effect.key) {
+            return EffectState::Unknown;
+        }
+        self.inner.reconcile(effect).await
+    }
 }
 
 /// The stream identity an executor hands its effect sink.
@@ -602,7 +755,15 @@ impl EffectSink {
             stream_seq: stream.stream_seq,
             emission_seq: stream.emission_seq,
             handler_timeout: stream.handler_timeout,
+            in_flight: Arc::default(),
         }
+    }
+
+    /// Track open keys in `in_flight`, the set recovery sweeps consult.
+    #[must_use]
+    pub fn with_in_flight(mut self, in_flight: Arc<InFlightEffects>) -> Self {
+        self.in_flight = in_flight;
+        self
     }
 
     /// Whether this sink would record anything at all.
@@ -729,6 +890,9 @@ enum EffectLogState {
         /// Stamped onto every record, so attribution comes from the executor
         /// rather than from whatever the plugin put in the record.
         plugin_name: Arc<str>,
+        /// Where the time spent waiting on sinks is reported, so the executor
+        /// can keep it out of the plugin's timeout.
+        sink_wait: SinkWait,
     },
     /// Effects may not be performed from this phase.
     NotPermitted {
@@ -747,11 +911,16 @@ impl EffectLogSlot {
     }
 
     /// Effects permitted and recorded, attributed to `plugin_name`.
+    ///
+    /// Time spent handing each record to the audit sinks is added to
+    /// `sink_wait`, which the caller running the plugin under a timeout reads
+    /// back and credits to it.
     #[must_use]
-    pub fn recorded(sink: Arc<EffectSink>, plugin_name: &str) -> Self {
+    pub fn recorded(sink: Arc<EffectSink>, plugin_name: &str, sink_wait: SinkWait) -> Self {
         Self(EffectLogState::Recorded {
             sink,
             plugin_name: Arc::from(plugin_name),
+            sink_wait,
         })
     }
 
@@ -898,13 +1067,17 @@ impl crate::hooks::payload::Extensions {
         effect: &EffectRecord,
         state: EffectState,
     ) -> Result<(), Box<PluginError>> {
-        let (sink, plugin_name) = match &self.effect_log.0 {
+        let (sink, plugin_name, sink_wait) = match &self.effect_log.0 {
             EffectLogState::Unrecorded => return Ok(()),
             EffectLogState::Detached => return Err(detached_error()),
             EffectLogState::NotPermitted { mode, plugin_name } => {
                 return Err(phase_error(*mode, plugin_name));
             },
-            EffectLogState::Recorded { sink, plugin_name } => (sink, plugin_name),
+            EffectLogState::Recorded {
+                sink,
+                plugin_name,
+                sink_wait,
+            } => (sink, plugin_name, sink_wait),
         };
 
         let mut record = effect.clone().into_state(state);
@@ -915,7 +1088,19 @@ impl crate::hooks::payload::Extensions {
         // Durability first. A sink that saw the event while the log rejected
         // it would report an act the write-ahead guarantee says never happened.
         if let Some(log) = &sink.log {
-            log.append(&record).await?;
+            // Open before the intent can be read by a sweep, closed only after
+            // the outcome is on disk where the sweep will see it.
+            let opening = record.state == EffectState::Prepared;
+            if opening {
+                sink.in_flight.open(&record.key);
+            }
+            let appended = log.append(&record).await;
+            // A refused intent means the act never runs, so the key closes
+            // with it.
+            if !opening || appended.is_err() {
+                sink.in_flight.close(&record.key);
+            }
+            appended?;
         }
 
         // Stamped only now, because taking a sequence number is a promise to
@@ -936,8 +1121,35 @@ impl crate::hooks::payload::Extensions {
         // live stream anyway, and the position only means anything in the
         // stream a sink is reconstructing.
         sink.stamp(&mut record);
+        // The sinks run inside the plugin's invocation, but how long they take
+        // is not the plugin's doing. Reported so the executor can take it back
+        // out of the plugin's timeout: otherwise two slow sinks turn an act
+        // that succeeded into a `plugin_timeout`, and audit latency decides
+        // the outcome it is only meant to observe.
+        // Tokio's clock, the one the executor's timeout reads.
+        let started = tokio::time::Instant::now();
         sink.dispatch(&record, self).await;
+        sink_wait.add(started.elapsed());
         Ok(())
+    }
+}
+
+/// Time an invocation spent waiting on audit sinks.
+///
+/// Shared between the effect slot, which adds to it, and the executor, which
+/// extends the plugin's deadline by it. Cloning shares the total.
+#[derive(Debug, Clone, Default)]
+pub struct SinkWait(Arc<AtomicU64>);
+
+impl SinkWait {
+    fn add(&self, waited: std::time::Duration) {
+        let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+        self.0.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// Everything added so far.
+    pub(crate) fn total(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.0.load(Ordering::Relaxed))
     }
 }
 
@@ -1250,6 +1462,85 @@ mod tests {
         );
     }
 
+    /// A write that failed part-way is cut back out before anything else can
+    /// land behind it. Left in place, the next successful append would share
+    /// its line, and that line would fail recovery on every start from then
+    /// on, which is the case the test above refuses.
+    #[tokio::test]
+    async fn a_failed_append_leaves_nothing_for_the_next_one_to_land_behind() {
+        let path = wal_path("rolled_back");
+        let _c = Cleanup(path.clone());
+        let log = FileEffectLog::new(&path).with_compaction_threshold(0);
+        log.append(&EffectRecord::prepared("token_mint", "d", "first"))
+            .await
+            .unwrap();
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        // A disk that fills after half the record went out.
+        let refused = append_or_roll_back(&mut file, |f| {
+            use std::io::Write as _;
+            f.write_all(br#"{"key":"half-written","kind":"token_"#)
+                .unwrap();
+            Err(wal_error("write a record", None))
+        });
+        assert!(refused.is_err(), "the failure still reaches the caller");
+
+        log.append(&EffectRecord::prepared("token_mint", "d", "second"))
+            .await
+            .unwrap();
+
+        let summary = log.recover().await.expect("recovery reads the log");
+        let keys: Vec<_> = summary.unresolved.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(keys, ["first", "second"]);
+    }
+
+    /// Cancelling a sweep must not let an append in before its rename. The
+    /// rewrite runs on a blocking thread that outlives the dropped future, and
+    /// a lock released with the future let a later append succeed and then
+    /// vanish under the rename of a file read before it existed.
+    #[tokio::test]
+    async fn a_cancelled_sweep_keeps_later_appends_out_until_it_finishes() {
+        use futures::FutureExt as _;
+
+        let path = wal_path("cancelled_sweep");
+        let _c = Cleanup(path.clone());
+        let log = FileEffectLog::new(&path).with_compaction_threshold(0);
+        // Enough unresolved records that the rewrite takes a while.
+        let seeded: String = (0..10_000)
+            .map(|i| {
+                let rec = EffectRecord::prepared("token_mint", "d", format!("seed-{i}"));
+                format!("{}\n", serde_json::to_string(&rec).unwrap())
+            })
+            .collect();
+        std::fs::write(&path, seeded).unwrap();
+
+        // One poll takes the lock and starts the rewrite; dropping the future
+        // is the cancellation.
+        assert!(
+            log.recover().now_or_never().is_none(),
+            "the sweep is still running"
+        );
+        // Let the sweep read the file, so the append below lands between its
+        // read and its rename, which is the window the lock is there to close.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        log.append(&EffectRecord::prepared("token_mint", "d", "late"))
+            .await
+            .unwrap();
+        // Outlast the orphaned sweep without asking the lock, since the lock is
+        // what is under test. A loaded machine can make this miss the race; it
+        // cannot make a correct lock fail.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        assert!(
+            lines(&path).iter().any(|r| r.key == "late"),
+            "an acknowledged append survives the sweep it raced"
+        );
+    }
+
     /// The torn tail is not mistaken for a resolved effect. An interrupted
     /// append was never acknowledged, so the act it guarded never ran, and
     /// dropping it leaves nothing to reconcile.
@@ -1421,7 +1712,82 @@ mod tests {
         ext_with(EffectLogSlot::recorded(
             Arc::new(EffectSink::new(Some(log), Vec::new(), test_stream())),
             plugin,
+            SinkWait::default(),
         ))
+    }
+
+    #[test]
+    fn an_open_key_is_busy_and_a_closed_one_is_not() {
+        let in_flight = InFlightEffects::default();
+        in_flight.open("k");
+        assert!(in_flight.is_busy("k"));
+        in_flight.close("k");
+        assert!(!in_flight.is_busy("k"));
+    }
+
+    /// An outcome appended after a sweep read the file is invisible to that
+    /// sweep, so a key closed mid-sweep stays busy until the sweep ends.
+    #[test]
+    fn a_key_closed_during_a_sweep_stays_busy_until_it_ends() {
+        let in_flight = Arc::new(InFlightEffects::default());
+        in_flight.open("k");
+        let sweep = in_flight.sweep();
+        in_flight.close("k");
+        assert!(in_flight.is_busy("k"));
+        drop(sweep);
+        assert!(!in_flight.is_busy("k"));
+    }
+
+    #[tokio::test]
+    async fn skip_in_flight_answers_only_for_idle_keys() {
+        struct Rejecting;
+
+        #[async_trait]
+        impl EffectReconciler for Rejecting {
+            async fn reconcile(&self, _effect: &EffectRecord) -> EffectState {
+                EffectState::Rejected
+            }
+        }
+
+        let in_flight = InFlightEffects::default();
+        in_flight.open("busy");
+        let guarded = SkipInFlight {
+            inner: &Rejecting,
+            in_flight: &in_flight,
+        };
+
+        let busy = EffectRecord::prepared("token_mint", "d", "busy");
+        let idle = EffectRecord::prepared("token_mint", "d", "idle");
+        assert_eq!(guarded.reconcile(&busy).await, EffectState::Unknown);
+        assert_eq!(guarded.reconcile(&idle).await, EffectState::Rejected);
+    }
+
+    /// A refused intent means the act never runs, so its key does not stay
+    /// open and shield a record nobody will complete.
+    #[tokio::test]
+    async fn a_refused_intent_does_not_leave_its_key_open() {
+        #[derive(Debug)]
+        struct Refusing;
+
+        #[async_trait]
+        impl DurableEffectLog for Refusing {
+            async fn append(&self, _e: &EffectRecord) -> Result<(), Box<PluginError>> {
+                Err(wal_error("write a record", None))
+            }
+        }
+
+        let in_flight = Arc::new(InFlightEffects::default());
+        let sink = EffectSink::new(Some(Arc::new(Refusing)), Vec::new(), test_stream())
+            .with_in_flight(Arc::clone(&in_flight));
+        let ext = ext_with(EffectLogSlot::recorded(
+            Arc::new(sink),
+            "minter",
+            SinkWait::default(),
+        ));
+
+        let effect = EffectRecord::prepared("token_mint", "d", "k");
+        assert!(ext.begin_effect(&effect).await.is_err());
+        assert!(!in_flight.is_busy("k"));
     }
 
     /// Auditing off must not change what a plugin does. This is the case an

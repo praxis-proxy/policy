@@ -70,6 +70,9 @@ struct Seen {
     /// How many steps the record carried, so a test can tell a record built
     /// from a real pipeline from one built at a short-circuit.
     steps: usize,
+    /// Whether the record carried its place in the trace, which only entry
+    /// provenance supplies.
+    had_span: bool,
 }
 
 #[derive(Default)]
@@ -126,6 +129,7 @@ impl AuditHandler for SinkPlugin {
                 .is_some_and(|c| !c.inbound_tokens.is_empty()),
             had_http: extensions.http.is_some(),
             steps: decisions.steps().len(),
+            had_span: decisions.span().is_some(),
         });
     }
 
@@ -419,6 +423,10 @@ async fn a_route_resolution_denial_still_reaches_the_sink() {
     let seen = rec.seen();
     assert_eq!(seen.len(), 1, "and it is recorded rather than dropped");
     assert!(seen[0].denied, "as the denial it is");
+    assert!(
+        seen[0].had_span,
+        "with the entry provenance a pipeline run would have captured"
+    );
 }
 
 /// The zero-plugin path still emits exactly one allow, which is what keeps the
@@ -441,6 +449,10 @@ async fn a_zero_plugin_invocation_emits_one_allow() {
     let seen = rec.seen();
     assert_eq!(seen.len(), 1);
     assert!(!seen[0].denied);
+    assert!(
+        seen[0].had_span,
+        "no plugin ran, but the record still says where in the trace it belongs"
+    );
 }
 
 // =====================================================================

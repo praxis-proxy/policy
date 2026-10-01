@@ -303,10 +303,6 @@ impl AuditLogger {
                 );
             }
 
-            // Content: the hash at entry and this node's output hash, so a
-            // reader can tell whether a stage changed the payload. Gated on
-            // the input hash, which is absent unless an operator enabled
-            // provenance. Digests only, never content.
             // Stream identity and the two counters. `stream_seq` is gap-free
             // within its stream, so a consumer can prove nothing was dropped;
             // `emission_seq` is shared with the effect stream, so the two can
@@ -318,13 +314,14 @@ impl AuditLogger {
                 map.insert("emission_seq".into(), json!(decisions.emission_seq()));
             }
 
+            // Content: the digest at entry and at emission, so a reader can
+            // tell whether a stage changed the payload. Both come from the
+            // engine, which holds the key they were taken under; absent unless
+            // an operator enabled provenance. Digests only, never content.
             if let Some(input_hash) = decisions.input_hash() {
-                let output_hash = payload
-                    .and_then(PluginPayload::audit_bytes)
-                    .map(|b| praxis_policy_core::hooks::payload::content_hash(&b));
                 map.insert(
                     "content".into(),
-                    json!({ "input_hash": input_hash, "output_hash": output_hash }),
+                    json!({ "input_hash": input_hash, "output_hash": decisions.output_hash() }),
                 );
             }
         }
@@ -890,37 +887,36 @@ mod tests {
         assert!(record.get("taint").is_none(), "no labels either side");
     }
 
-    /// Both hashes, so a reader can tell whether a stage changed the payload.
-    /// Only digests are recorded; the content itself never reaches the trail.
+    /// Both digests, as the engine recorded them, so a reader can tell
+    /// whether a stage changed the payload. Only digests are recorded; the
+    /// content itself never reaches the trail.
     #[test]
     fn an_input_hash_brings_the_output_hash_with_it() {
         let plugin = AuditLogger::new(sink_cfg()).unwrap();
         let mut log = DecisionLog::new();
-        log.set_input_hash(Some("sha256:aaa".to_owned()));
+        log.set_input_hash(Some("hmac-sha256:k1:aaa".to_owned()));
+        log.set_output_hash(Some("hmac-sha256:k1:bbb".to_owned()));
         log.finalize(Verdict::Allow);
 
         let record =
             plugin.build_decision_record(Some(&empty_payload()), &Extensions::default(), &log);
 
-        assert_eq!(record["content"]["input_hash"], "sha256:aaa");
-        let output = record["content"]["output_hash"]
-            .as_str()
-            .expect("a CMF payload opts into hashing");
-        assert!(output.starts_with("sha256:"));
+        assert_eq!(record["content"]["input_hash"], "hmac-sha256:k1:aaa");
+        assert_eq!(record["content"]["output_hash"], "hmac-sha256:k1:bbb");
     }
 
-    /// A sink fires for every hook family, so it can be handed a payload it
-    /// cannot hash. The record still says what it knows.
+    /// A payload that cannot be digested has no output digest. The record
+    /// still says what it knows.
     #[test]
-    fn a_payload_that_cannot_be_hashed_leaves_the_output_hash_null() {
+    fn a_missing_output_digest_is_null() {
         let plugin = AuditLogger::new(sink_cfg()).unwrap();
         let mut log = DecisionLog::new();
-        log.set_input_hash(Some("sha256:aaa".to_owned()));
+        log.set_input_hash(Some("hmac-sha256:k1:aaa".to_owned()));
         log.finalize(Verdict::Allow);
 
         let record = plugin.build_decision_record(None, &Extensions::default(), &log);
 
-        assert_eq!(record["content"]["input_hash"], "sha256:aaa");
+        assert_eq!(record["content"]["input_hash"], "hmac-sha256:k1:aaa");
         assert!(record["content"]["output_hash"].is_null());
     }
 }

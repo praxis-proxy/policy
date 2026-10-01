@@ -1386,6 +1386,41 @@ async fn a_refused_mint_is_recorded_rejected() {
     );
 }
 
+/// A 5xx is not the `IdP` refusing. A gateway in front of it can answer 503 or
+/// 504 after the token was issued, and recording that as rejected would stop
+/// recovery from ever reconciling it.
+#[tokio::test]
+async fn a_server_error_is_recorded_unknown_not_rejected() {
+    use praxis_policy_core::effect::EffectState;
+
+    for status in [500, 503, 504] {
+        let log = Arc::new(SpyLog::default());
+        let mgr = manager_with_log(&idp(status, "<html>gateway timeout</html>"), log.clone()).await;
+
+        let result = invoke(
+            &mgr,
+            build_payload(
+                "tool",
+                "https://downstream.example.com",
+                &["read:compensation"],
+            ),
+        )
+        .await;
+
+        assert!(!result.continue_processing);
+        assert_eq!(
+            result.violation.expect("a 5xx denies").code,
+            "delegation.idp_rejected",
+            "the caller-facing code is unchanged; only the effect state moves"
+        );
+        assert_eq!(
+            log.states(),
+            vec![EffectState::Prepared, EffectState::Unknown],
+            "HTTP {status} must leave the mint open for reconciliation"
+        );
+    }
+}
+
 /// The answer was lost, not refused. The mint may still have landed at the
 /// `IdP`, so the record stays open for reconciliation rather than claiming
 /// nothing happened.

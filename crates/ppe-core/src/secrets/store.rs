@@ -87,6 +87,15 @@ impl SecretRef {
         self.cell.state.load().value.clone()
     }
 
+    /// A handle to a fixed value, for tests that need a secret without a
+    /// provider behind it.
+    #[cfg(test)]
+    pub(crate) fn fixed(value: &str) -> Self {
+        Self {
+            cell: Arc::new(SecretCell::new(Zeroizing::new(value.to_owned()))),
+        }
+    }
+
     /// How many times the value has changed since startup.
     ///
     /// For a consumer that has to act on rotation rather than just read the

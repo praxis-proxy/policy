@@ -210,6 +210,17 @@ pub struct EngineSettings {
     #[serde(default)]
     pub capture_content_provenance: bool,
 
+    /// What content provenance digests under: the name of a value in
+    /// `secrets.values`, for HMAC-SHA256 under that secret, or `unkeyed` for
+    /// plain SHA-256.
+    ///
+    /// Required when `capture_content_provenance` is on. An unkeyed digest
+    /// lets anyone holding a record test guesses at the payload, which puts a
+    /// redacted value in a short or templated message back within reach, so
+    /// it has to be chosen by name rather than fallen into by omission.
+    #[serde(default)]
+    pub content_provenance_key: Option<String>,
+
     /// Prefix for the audit stream ids, so records from one process are
     /// attributable to it rather than to the bare per-type labels.
     ///
@@ -234,6 +245,33 @@ pub struct EngineSettings {
     pub audit_epoch: Option<u64>,
 }
 
+/// The `content_provenance_key` value that selects plain SHA-256.
+pub const UNKEYED_CONTENT_PROVENANCE: &str = "unkeyed";
+
+/// Where content provenance gets its key, as `content_provenance_key` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentKeySource<'a> {
+    /// Plain SHA-256.
+    Unkeyed,
+    /// HMAC-SHA256 under the named value in `secrets.values`.
+    Secret(&'a str),
+}
+
+impl EngineSettings {
+    /// The key source in force, or `None` when provenance is off or no key is
+    /// named.
+    pub fn content_key_source(&self) -> Option<ContentKeySource<'_>> {
+        if !self.capture_content_provenance {
+            return None;
+        }
+        match self.content_provenance_key.as_deref() {
+            None => None,
+            Some(UNKEYED_CONTENT_PROVENANCE) => Some(ContentKeySource::Unkeyed),
+            Some(name) => Some(ContentKeySource::Secret(name)),
+        }
+    }
+}
+
 impl Default for EngineSettings {
     fn default() -> Self {
         Self {
@@ -244,6 +282,7 @@ impl Default for EngineSettings {
             effect_log_path: None,
             effect_log_compaction_threshold: None,
             capture_content_provenance: false,
+            content_provenance_key: None,
             audit_stream_namespace: None,
             audit_epoch: None,
         }
@@ -1357,6 +1396,7 @@ const ENGINE_SETTINGS_KEYS: &[ConfigKey] = &[
     structural_key("effect_log_path", KeyOwner::Core),
     structural_key("effect_log_compaction_threshold", KeyOwner::Core),
     structural_key("capture_content_provenance", KeyOwner::Core),
+    structural_key("content_provenance_key", KeyOwner::Core),
     structural_key("audit_stream_namespace", KeyOwner::Core),
 ];
 
@@ -2310,6 +2350,51 @@ fn reject_reserved_route_names(config: &PolicyConfig) -> Result<(), Box<PluginEr
     Ok(())
 }
 
+/// Check `content_provenance_key` names something this document can supply.
+///
+/// Shape only, like the `secrets:` check: whether the value resolves, and
+/// whether it is long enough, is decided when secrets are read.
+fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
+    let settings = &config.engine_settings;
+    let refuse = |message: String| Err(Box::new(PluginError::Config { message }));
+    let Some(key) = settings.content_provenance_key.as_deref() else {
+        if settings.capture_content_provenance {
+            return refuse(format!(
+                "engine_settings.capture_content_provenance is on but no \
+                 content_provenance_key is set. Name a value from secrets.values to digest \
+                 under an HMAC key, or set it to `{UNKEYED_CONTENT_PROVENANCE}` for plain \
+                 SHA-256, which anyone holding a record can test guesses at the payload against"
+            ));
+        }
+        return Ok(());
+    };
+    if key.trim().is_empty() {
+        return refuse(
+            "engine_settings.content_provenance_key is empty; name a value from \
+             secrets.values, or remove the key"
+                .to_owned(),
+        );
+    }
+    let declared = config.secrets.values.contains_key(key);
+    if key == UNKEYED_CONTENT_PROVENANCE {
+        if declared {
+            return refuse(format!(
+                "engine_settings.content_provenance_key is `{UNKEYED_CONTENT_PROVENANCE}`, which \
+                 selects plain SHA-256, and secrets.values also declares a value by that name. \
+                 Rename the value so the setting says one thing"
+            ));
+        }
+        return Ok(());
+    }
+    if !declared {
+        return refuse(format!(
+            "engine_settings.content_provenance_key names `{key}`, which secrets.values does \
+             not declare"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a parsed config for structural correctness.
 ///
 /// This checks declared hook names plus the *references* in the structural plugin
@@ -2336,13 +2421,14 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     if let Some(ns) = &config.engine_settings.audit_stream_namespace
         && ns.trim().is_empty()
     {
-        {
-            return Err(Box::new(PluginError::Config {
-                message: "engine_settings.audit_stream_namespace is empty; remove the key to                           use the bare stream labels, or give it a value naming this process"
-                    .to_owned(),
-            }));
-        }
+        return Err(Box::new(PluginError::Config {
+            message: "engine_settings.audit_stream_namespace is empty; remove the key to use the \
+                      bare stream labels, or give it a value naming this process"
+                .to_owned(),
+        }));
     }
+
+    validate_content_provenance_key(config)?;
 
     // Shape only. Nothing is read from a backend here: a document that names a
     // provider it never declared is wrong whether or not the backend is
@@ -9250,7 +9336,13 @@ engine_settings:
   effect_log_path: /var/lib/praxis/effects.ndjson
   effect_log_compaction_threshold: 1024
   capture_content_provenance: true
+  content_provenance_key: provenance_key
   audit_stream_namespace: gw-1
+secrets:
+  providers:
+    local: { kind: file, base_dir: /etc/ppe }
+  values:
+    provenance_key: { provider: local, ref: provenance.key }
 plugins:
   - name: audit
     kind: audit/logger
@@ -9290,6 +9382,54 @@ plugins:
             err.to_string().contains("audit_stream_namespace"),
             "the message must name the key to fix: {err}"
         );
+    }
+
+    fn provenance_config(key: Option<&str>, declared: &[&str]) -> PolicyConfig {
+        let mut config = PolicyConfig::default();
+        config.engine_settings.capture_content_provenance = true;
+        config.engine_settings.content_provenance_key = key.map(str::to_owned);
+        let values = declared
+            .iter()
+            .map(|name| format!("    {name}: {{ provider: local, ref: {name} }}\n"))
+            .collect::<String>();
+        config.secrets = serde_yaml::from_str(&format!(
+            "providers:\n  local: {{ kind: file, base_dir: /etc/ppe }}\nvalues:\n{values}"
+        ))
+        .unwrap();
+        config
+    }
+
+    /// Plain SHA-256 is a choice an operator makes by name. Leaving the key
+    /// out says nothing, so it is refused rather than read as that choice.
+    #[test]
+    fn provenance_without_a_key_is_refused_and_names_both_options() {
+        let err = validate_config(&provenance_config(None, &[])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("content_provenance_key"), "{msg}");
+        assert!(msg.contains("unkeyed"), "{msg}");
+    }
+
+    #[test]
+    fn an_unkeyed_choice_loads() {
+        validate_config(&provenance_config(Some("unkeyed"), &[])).unwrap();
+    }
+
+    #[test]
+    fn a_key_naming_a_declared_value_loads() {
+        validate_config(&provenance_config(Some("pk"), &["pk"])).unwrap();
+    }
+
+    #[test]
+    fn a_key_naming_an_undeclared_value_is_refused() {
+        let err = validate_config(&provenance_config(Some("pk"), &["other"])).unwrap_err();
+        assert!(err.to_string().contains("`pk`"), "{err}");
+    }
+
+    /// A value named `unkeyed` would make the setting mean two things.
+    #[test]
+    fn a_value_named_unkeyed_is_refused_when_the_key_says_unkeyed() {
+        let err = validate_config(&provenance_config(Some("unkeyed"), &["unkeyed"])).unwrap_err();
+        assert!(err.to_string().contains("Rename"), "{err}");
     }
 
     #[test]

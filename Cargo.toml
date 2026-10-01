@@ -118,6 +118,9 @@ regex = "1"
 # with the `digest` 0.11 that this major brings. Splitting the requirement
 # would put two `sha2` and two `digest` in the build.
 sha2 = "0.11"
+# Keyed digests: audit content provenance and the OAuth cache key. Moves with
+# `sha2` above, since both have to agree on `digest`.
+hmac = "0.13"
 
 # Internal crates. Single source of truth for each one's path and version
 # requirement; members depend on these with `{ workspace = true }` so a version
