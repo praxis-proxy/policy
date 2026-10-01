@@ -42,6 +42,10 @@ than named directly. See [Builtins](builtins.md).
 | `valkey` | `session::valkey` | `valkey` |
 | `secrets-vault` | `secrets::vault` | `vault` |
 
+The experimental `quota` policy plugin lives in
+`plugins::quota` behind the `experimental-quota` feature. It is excluded from
+the facade's `builtins` feature.
+
 ### Migrating from a per-extension crate
 
 Releases up to 0.3.1 published each extension separately. Those versions stay

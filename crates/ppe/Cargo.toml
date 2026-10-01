@@ -8,8 +8,8 @@
 # bundled plugins, PDPs and session stores. Each is behind a feature, so the bare
 # dependency is the engine alone, no plugins compiled.
 #
-#   praxis-policy = { version = "0.1", features = ["builtins"] }      # every builtin
-#   praxis-policy = { version = "0.1", features = ["jwt", "cedar"] }  # a subset
+#   praxis-policy = { version = "0.4", features = ["builtins"] }      # stable builtins
+#   praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }  # a subset
 #
 # then `praxis_policy::install_builtins(&mgr)` registers every enabled factory and
 # installs the APL config visitor in one call.
@@ -54,6 +54,10 @@ builtins = [
   "valkey",
   "secrets-vault",
 ]
+# quota is experimental: opt in via experimental-quota, never in a default build.
+
+# Marker set by every experimental feature; gates warn_experimental_features.
+experimental = ["dep:tracing"]
 
 # One feature per bundled extension. The names are the public API: a host writes
 # these, so they are deliberately shorter than the crate names they pull.
@@ -73,6 +77,15 @@ valkey = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/valk
 # `builtins` or by name. The host still registers it with a transport —
 # this feature only makes the factory available.
 secrets-vault = ["dep:praxis-policy-builtins", "praxis-policy-builtins/secrets-vault"]
+
+# Experimental token quota. Registers via the builtin path but only when named;
+# sets `experimental` so the host can warn. Not covered by semver.
+experimental-quota = [
+  "_builtin",
+  "experimental",
+  "dep:praxis-policy-builtins",
+  "praxis-policy-builtins/experimental-quota",
+]
 
 # A default `HttpTransport` for hosts that inject none, built on hyper.
 #
@@ -118,6 +131,9 @@ praxis-policy-apl-runtime = { workspace = true }
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
 praxis-policy-builtins = { workspace = true, optional = true }
+
+# `experimental` only: the one-line warn_experimental_features.
+tracing = { workspace = true, optional = true }
 
 # --- `http-hyper` only -------------------------------------------------
 #

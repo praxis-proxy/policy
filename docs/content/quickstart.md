@@ -10,13 +10,14 @@ right one.
 ## 1. Add PPE
 
 ```toml
-praxis-policy = { version = "0.3", features = ["builtins", "http-hyper"] }
+praxis-policy = { version = "0.4", features = ["builtins", "http-hyper"] }
 ```
 
-`builtins` compiles in every bundled extension: JWT identity, OAuth
-delegation, CIBA elicitation, the Cedar, CEL and OPA decision points,
-and the Valkey session store. For a smaller build, name a subset
-instead: `features = ["jwt", "cedar"]`. See [Builtins](builtins.md).
+`builtins` compiles in every stable bundled extension: JWT and API key
+identity, OAuth delegation, CIBA elicitation, the Cedar, CEL and OPA decision
+points, the Valkey session store, and the Vault secret provider. For a smaller
+build, name a subset instead: `features = ["jwt", "cedar"]`. See
+[Builtins](builtins.md).
 
 The default build is the engine alone. `http-hyper` is separate from
 `builtins` because it is the one piece a host commonly already owns: it

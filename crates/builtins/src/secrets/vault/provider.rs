@@ -7,6 +7,7 @@
 // logs in lazily, renews on the next read, and never spawns a task.
 
 use std::fmt;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -246,6 +247,10 @@ impl VaultSecretProvider {
             },
         };
         let operation = format!("login via auth mount `{mount}`");
+        // `body` is wiped when it is dropped. The transport request below necessarily
+        // owns a separate `Bytes` copy; `HttpTransport` exposes an immutable `Bytes`
+        // body, so that copy is released according to the host transport's lifetime,
+        // not zeroized by this provider.
         let bytes = Bytes::copy_from_slice(&body);
         drop(body);
         let path = format!("v1/auth/{mount}/login");
@@ -356,10 +361,35 @@ struct AppRoleLogin<'a> {
 }
 
 fn json_login_body<T: Serialize>(payload: &T) -> Result<Zeroizing<Vec<u8>>, SecretError> {
-    let mut out = Zeroizing::new(Vec::with_capacity(128));
+    // Count first so the zeroizing buffer is allocated at its final size. A direct
+    // write into a small Vec can reallocate, leaving the old allocation with a copy
+    // of the credential that `Zeroizing` does not own or wipe.
+    let mut count = CountingWriter::default();
+    serde_json::to_writer(&mut count, payload)
+        .map_err(|err| SecretError::backend(format!("Vault login JSON encoding failed: {err}")))?;
+    let mut out = Zeroizing::new(Vec::with_capacity(count.len));
     serde_json::to_writer(&mut *out, payload)
         .map_err(|err| SecretError::backend(format!("Vault login JSON encoding failed: {err}")))?;
     Ok(out)
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    len: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.len = self
+            .len
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("JSON body length overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn parse_auth_payload(response: &HttpResponse, operation: &str) -> Result<Value, SecretError> {
@@ -522,7 +552,7 @@ auth:
     }
 
     #[tokio::test]
-    async fn a_soft_deleted_kv_version_is_not_found() {
+    async fn a_200_null_data_response_is_not_found() {
         let http = FakeTransport::new()
             .json("/auth/approle/login", 200, login_body())
             .json("/data/deleted", 200, r#"{"data":{"data":null}}"#);
@@ -969,5 +999,19 @@ auth:
         let parsed: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
         assert_eq!(parsed["role"], "ppe");
         assert_eq!(parsed["jwt"], "a\"b\\c\n\r\t\u{0008}\u{000c}\u{0001}");
+    }
+
+    #[test]
+    fn login_json_body_larger_than_initial_buffer_round_trips() {
+        let jwt = "j".repeat(1024);
+        let encoded = json_login_body(&KubernetesLogin {
+            role: "ppe",
+            jwt: &jwt,
+        })
+        .expect("json");
+
+        let parsed: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+        assert_eq!(parsed["role"], "ppe");
+        assert_eq!(parsed["jwt"], jwt);
     }
 }

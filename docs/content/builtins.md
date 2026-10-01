@@ -18,6 +18,7 @@ name it by `kind`.
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
 | `valkey` | session store | `valkey` | Persist Session Taint labels across processes. See [Session Taint](apl/tainting.md). |
 | `vault` | secret provider | `secrets-vault` | Resolve `secret:` references from Vault KV v2. Not auto-registered: it needs an `HttpTransport` the host supplies. |
+| `quota` | policy plugin | `experimental-quota` | Enforce a per-principal token budget through Limitador. Experimental and excluded from `builtins`. |
 
 The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
@@ -42,13 +43,13 @@ stderr. Register them the way you would any host plugin.
 
 ```toml
 # engine only, the default
-praxis-policy = "0.3"
+praxis-policy = "0.4"
 
 # every bundled extension
-praxis-policy = { version = "0.3", features = ["builtins"] }
+praxis-policy = { version = "0.4", features = ["builtins"] }
 
 # a granular subset
-praxis-policy = { version = "0.3", features = ["jwt", "cedar"] }
+praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 ```
 
 | Feature | Pulls in |
@@ -63,6 +64,7 @@ praxis-policy = { version = "0.3", features = ["jwt", "cedar"] }
 | `opa` | the `opa` decision point |
 | `valkey` | the Valkey session store, and the redis and TLS stack it carries |
 | `secrets-vault` | the Vault KV v2 secret provider. Not auto-registered: it needs an `HttpTransport` the host supplies |
+| `experimental-quota` | the opt-in Limitador-backed token quota plugin; excluded from `builtins` |
 | `http-hyper` | a default outbound HTTP transport, off by default |
 
 The default build is the engine alone, so a host that needs only the

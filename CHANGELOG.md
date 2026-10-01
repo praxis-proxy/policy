@@ -17,14 +17,30 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-29
+
 ### Added
 
+- Added a `secrets:` configuration with named providers and values, fail-fast
+  startup resolution, and host-driven refresh. The built-in `file` and `env`
+  providers support local and Kubernetes-mounted credentials.
+  ([#97](https://github.com/praxis-proxy/policy/pull/97))
+- Added a Vault KV v2 secret provider behind the `secrets-vault` feature. It
+  reads through the host `HttpTransport`, supports Kubernetes and AppRole auth,
+  renews tokens lazily, and reauthenticates once after a `403`.
+  ([#103](https://github.com/praxis-proxy/policy/pull/103))
+- Added an opt-in `quota` policy plugin backed by Limitador. It checks a
+  per-principal token budget before an LLM call and reports usage afterward.
+  ([#116](https://github.com/praxis-proxy/policy/pull/116))
 - Added the `ibmverify` JWT claim mapper preset for tenant-provisioned scalar or
   array collection claims. ([#134](https://github.com/praxis-proxy/policy/pull/134))
 - Added the `identity/api-key` resolver with hash-indexed file and HTTP
   directories, shared identity mapping, and bounded lookup caching. The facade
-  exposes it through the `api-key` feature.
-  ([#125](https://github.com/praxis-proxy/policy/pull/125))
+  exposes it through the `api-key` feature. Its backend is configured with
+  `provider:`; the identity and delegation guide documents both backends and
+  denial behavior. ([#125](https://github.com/praxis-proxy/policy/pull/125),
+  [#135](https://github.com/praxis-proxy/policy/pull/135),
+  [#136](https://github.com/praxis-proxy/policy/pull/136))
 - Documented how to add and test provider-specific JWT claim mapper presets.
   ([#128](https://github.com/praxis-proxy/policy/pull/128))
 - Added structured request input for OPA, CEL, and Cedar. A host sets
@@ -84,12 +100,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   is last-write-wins. Versions up to 0.3.1 of the old crates stay on crates.io;
   later releases publish only the consolidated crate. See
   [Crates](docs/content/crates.md) for the mapping.
-  ([#137](https://github.com/praxis-proxy/policy/issues/137))
+  ([#140](https://github.com/praxis-proxy/policy/pull/140))
 - Config-load errors from the JWT, OAuth and CIBA extensions now name the
   plugin kind (`identity/jwt`, `delegator/oauth`, `elicitation/ciba`) instead of
   the crate they used to live in. Operators matching on that text in logs or
   alerts need to update the pattern.
-  ([#137](https://github.com/praxis-proxy/policy/issues/137))
+  ([#140](https://github.com/praxis-proxy/policy/pull/140))
 
 - Moved the configurable identity claim mapper from
   `praxis-policy-plugin-identity-jwt` to `praxis_policy_core::identity::mapping`.
@@ -98,14 +114,29 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `claim_map::{ClaimMap, ClaimMapper}`): import those items from core instead.
   `ConfiguredClaimMap::new` now requires a `MappingProfile` with the reserved
   names and attestor for the verified credential; JWT callers can use
-  `praxis_policy_plugin_identity_jwt::claim_map::JWT_MAPPING_PROFILE`.
-  The JWT plugin's crate-root re-exports and the operator's `claim_map:` config
-  remain available. ([#119](https://github.com/praxis-proxy/policy/pull/119))
+  `praxis_policy_builtins::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE`.
+  The JWT module's re-exports and the operator's `claim_map:` config remain
+  available. ([#119](https://github.com/praxis-proxy/policy/pull/119))
+- Exposed `execute_with_retry` so a `SecretProvider` using the host transport
+  can use the same retry policy as plugins.
+  ([#103](https://github.com/praxis-proxy/policy/pull/103))
+- Replaced deprecated `serde_yaml` with the maintained `yaml_serde` fork and
+  updated `regorus` from 0.11.0 to 0.12.0.
+  ([#121](https://github.com/praxis-proxy/policy/pull/121),
+  [#114](https://github.com/praxis-proxy/policy/pull/114))
 
 ### Fixed
 
 - Prevented dotted subject and client membership names from creating ambiguous
   flattened policy aliases. ([#126](https://github.com/praxis-proxy/policy/pull/126))
+- Sized Vault login JSON buffers before serialization so large credentials do
+  not leave bytes behind in a reallocated buffer. Added an optional live Vault
+  KV v2 integration test. ([#141](https://github.com/praxis-proxy/policy/pull/141))
+
+### Internal
+
+- Updated the Criterion benchmark dependency from 0.7.0 to 0.8.2.
+  ([#113](https://github.com/praxis-proxy/policy/pull/113))
 
 ## [0.3.1] - 2026-09-22
 
@@ -126,13 +157,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#71](https://github.com/praxis-proxy/policy/pull/71))
 - Added Criterion benchmarks for hook dispatch, full decisions, throughput,
   PDP evaluation, and session memory. ([#35](https://github.com/praxis-proxy/policy/pull/35))
-- **Vault KV v2 secret backend**, behind the `secrets-vault` facade
-  feature. A `kind: vault` provider reads `<mount>/<path>#<field>` through
-  the host `HttpTransport` (no Vault SDK). Auth is Kubernetes or AppRole,
-  with no default. Token renewal is lazy on the next read — nothing
-  spawns a ticker — and a `403` reauthenticates once. Written against
-  the Vault 1.19 KV v2 HTTP API.
-  ([#94](https://github.com/praxis-proxy/policy/issues/94))
 
 ### Changed
 
@@ -164,11 +188,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#86](https://github.com/praxis-proxy/policy/pull/86))
 - Added multithreaded engine stress tests, a Loom memory-ordering model, and a
   nightly ThreadSanitizer job. ([#60](https://github.com/praxis-proxy/policy/pull/60))
-
-### Changed
-
-- `execute_with_retry` is public so a `SecretProvider` that holds a host
-  transport can use the same retry policy as plugins.
 
 ### Internal
 
@@ -523,7 +542,8 @@ First release. The engine was extracted from another project rather than written
 
 - **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/praxis-proxy/policy/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/praxis-proxy/policy/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/praxis-proxy/policy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/praxis-proxy/policy/compare/v0.1.0...v0.2.0

@@ -38,7 +38,11 @@ oauth = [
   "dep:moka",
 ]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
-cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy"]
+# Experimental per-consumer token quota against a standalone Limitador. Calls go
+# through the host transport, so no HTTP dep beyond core, the shared serde, and
+# tokio-util (already under core) for draining in-flight debits.
+experimental-quota = ["_engine-core", "_plugins", "dep:tokio-util"]
+cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
 # enabling the crate.
@@ -94,6 +98,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 zeroize = { workspace = true }
+
+# --- experimental-quota ------------------------------------------------------
+
+# TaskTracker for the quota plugin's in-flight debits, drained on shutdown.
+# praxis-policy-core already depends on it, so this adds nothing to the tree.
+tokio-util = { workspace = true, optional = true }
 
 # --- jwt ---------------------------------------------------------------------
 
@@ -304,6 +314,11 @@ rand = "0.8"
 testcontainers-modules = { version = "0.15", features = ["valkey"] }
 testcontainers = "0.27"
 
+# Criterion drives the quota plugin's added-latency benchmark, matching the
+# workspace standard (ppe-benches). `async_tokio` (set in the workspace dep)
+# lets it await the async hook handlers.
+criterion = { workspace = true }
+
 # One harness per extension, each gated on its own single feature.
 # `required-features` is all-or-nothing, so a harness covering several
 # extensions would be skipped entirely under a single-feature build and its
@@ -348,6 +363,17 @@ required-features = ["opa"]
 name = "valkey"
 path = "tests/valkey/main.rs"
 required-features = ["valkey"]
+
+[[test]]
+name = "quota"
+path = "tests/quota/main.rs"
+required-features = ["experimental-quota"]
+
+[[bench]]
+name = "quota_hot_path"
+path = "benches/quota_hot_path.rs"
+harness = false
+required-features = ["experimental-quota"]
 
 [lints]
 workspace = true
