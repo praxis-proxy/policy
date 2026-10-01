@@ -159,6 +159,8 @@ jobs:
       # is how the publish order drifted for a whole release cycle without
       # anyone noticing. Both are cheap and neither uploads anything.
       - run: cargo package --workspace --locked --all-features
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-package-target
       - run: tools/publish.sh --dry-run
       # The re-export paths all changed, so this is the check most likely to
       # surprise at tag time. It runs here as well as in release.yaml.
