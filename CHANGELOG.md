@@ -63,11 +63,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - A PDP step may set `require_llm_request: true` to reject a missing host
   request document before engine evaluation. The option is valid only on
   `llm:` routes and denies with `pdp.llm_request_missing` at runtime.
-- **Breaking:** on `tool:` routes, `args` in OPA, CEL, and Cedar input is the
-  tool call's native JSON, replacing the flattened `args.*` view in OPA and
-  CEL. Scalar arrays keep numbers, bools, client order, and duplicates instead
-  of arriving as sorted, deduplicated string sets, and an explicit `null` is
-  present rather than absent. APL predicates and `${args.X}` substitution are
+- **Breaking:** on `tool:` routes, `args` in OPA and CEL input is the tool
+  call's native JSON, replacing the flattened `args.*` view. Their arrays keep
+  numbers, bools, client order, and duplicates, and an explicit `null` is
+  present rather than absent. Cedar converts arrays to unordered sets,
+  collapses duplicates, drops nulls, and converts floats and out-of-range
+  integers to strings. APL predicates and `${args.X}` substitution are
   unchanged. Review OPA and CEL rules that read `args` before upgrading; see
   [Migrating `args` policies](docs/content/apl/pdp.md#migrating-args-policies).
   ([#142](https://github.com/praxis-proxy/policy/issues/142))
