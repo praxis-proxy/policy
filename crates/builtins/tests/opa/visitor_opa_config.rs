@@ -534,6 +534,75 @@ deny contains "model not allowed" if input.llm.request.model != "gpt-4o""#;
     denied_violation(&run_llm(guarded, "data.authz.deny", None).await);
 }
 
+#[tokio::test]
+async fn required_request_document_fails_closed_before_opa_runs() {
+    let yaml = route_yaml(
+        "llm: gpt-4o",
+        "package authz\nallow := true",
+        "data.authz.allow",
+    )
+    .replace(
+        "            query: data.authz.allow\n",
+        "            query: data.authz.allow\n            require_llm_request: true\n",
+    );
+    let mgr = build_manager_with_yaml(&yaml)
+        .await
+        .expect("load_config_yaml");
+    let (missing, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.llm_input",
+            MessagePayload {
+                message: Message::text(Role::User, "prompt"),
+            },
+            llm_ext(None),
+            None,
+        )
+        .await;
+    let violation = missing.violation.expect("missing document must deny");
+    assert_eq!(violation.code, "pdp.llm_request_missing");
+
+    let (present, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.llm_input",
+            MessagePayload {
+                message: Message::text(Role::User, "prompt"),
+            },
+            llm_ext(Some(serde_json::json!({}))),
+            None,
+        )
+        .await;
+    assert_allowed(&present);
+}
+
+#[tokio::test]
+async fn request_requirement_is_validated_at_load() {
+    let base = route_yaml(
+        "tool: classify",
+        "package authz\nallow := true",
+        "data.authz.allow",
+    );
+    for value in ["true", "required"] {
+        let yaml = base.replace(
+            "            query: data.authz.allow\n",
+            &format!(
+                "            query: data.authz.allow\n            require_llm_request: {value}\n"
+            ),
+        );
+        let Err(error) = build_manager_with_yaml(&yaml).await else {
+            panic!("invalid request requirement must fail load");
+        };
+        let message = error.to_string();
+        if value == "true" {
+            assert!(
+                message.contains("valid only on an `llm:` route"),
+                "{message}"
+            );
+        } else {
+            assert!(message.contains("must be a bool"), "{message}");
+        }
+    }
+}
+
 /// A query that hands back the request document itself carries no decision,
 /// and the deny it produces names only the result's type.
 #[tokio::test]
@@ -609,4 +678,22 @@ async fn tool_args_explicit_null_is_present() {
 
     let result = run_tool(module, "data.authz.allow", serde_json::json!({})).await;
     assert_allowed(&result);
+}
+
+#[tokio::test]
+async fn tool_argument_errors_omit_payload_values() {
+    let module = "package authz\nallow if to_number(input.args.hidden_key) > 1";
+    let violation = denied_violation(
+        &run_tool(
+            module,
+            "data.authz.allow",
+            serde_json::json!({"hidden_key": MARKER}),
+        )
+        .await,
+    );
+    assert!(!violation.contains(MARKER), "{violation}");
+    assert!(
+        violation.contains("OPA eval error: policy runtime error"),
+        "{violation}"
+    );
 }

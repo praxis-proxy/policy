@@ -69,6 +69,72 @@ pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
     Value::Object(root)
 }
 
+/// Build Regorus input without cloning structured JSON into an intermediate tree.
+pub fn build_rego_input(bag: &AttributeBag, structured: &StructuredInput) -> regorus::Value {
+    let mut root = bag_to_map(bag);
+    let bag_args = root.remove("args");
+    let bag_llm = root.remove("llm");
+    let mut output = root
+        .iter()
+        .map(|(key, value)| (regorus::Value::from(key.as_str()), json_to_rego(value)))
+        .collect::<BTreeMap<_, _>>();
+
+    match structured.llm_request() {
+        Some(document) => {
+            let mut llm = match bag_llm {
+                Some(Value::Object(map)) => map
+                    .iter()
+                    .map(|(key, value)| (regorus::Value::from(key.as_str()), json_to_rego(value)))
+                    .collect::<BTreeMap<_, _>>(),
+                Some(_) => {
+                    tracing::warn!(
+                        key = "llm",
+                        "OPA input: scalar key collides with the request document; \
+                         keeping the document and dropping the scalar"
+                    );
+                    BTreeMap::new()
+                },
+                None => BTreeMap::new(),
+            };
+            llm.insert(regorus::Value::from("request"), json_to_rego(document));
+            output.insert(regorus::Value::from("llm"), regorus::Value::from(llm));
+        },
+        None => {
+            if let Some(value) = bag_llm {
+                output.insert(regorus::Value::from("llm"), json_to_rego(&value));
+            }
+        },
+    }
+
+    let args = structured
+        .args()
+        .map(|value| json_to_rego(value))
+        .or_else(|| bag_args.as_ref().map(json_to_rego));
+    if let Some(args) = args {
+        output.insert(regorus::Value::from("args"), args);
+    }
+    regorus::Value::from(output)
+}
+
+fn json_to_rego(value: &Value) -> regorus::Value {
+    match value {
+        Value::Null => regorus::Value::Null,
+        Value::Bool(value) => regorus::Value::from(*value),
+        Value::Number(value) => regorus::Value::from_numeric_string(&value.to_string())
+            .unwrap_or(regorus::Value::Undefined),
+        Value::String(value) => regorus::Value::from(value.as_str()),
+        Value::Array(values) => {
+            regorus::Value::from(values.iter().map(json_to_rego).collect::<Vec<_>>())
+        },
+        Value::Object(values) => regorus::Value::from(
+            values
+                .iter()
+                .map(|(key, value)| (regorus::Value::from(key.as_str()), json_to_rego(value)))
+                .collect::<BTreeMap<_, _>>(),
+        ),
+    }
+}
+
 /// Rebuild the flat bag into a nested JSON object.
 fn bag_to_map(bag: &AttributeBag) -> Map<String, Value> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
@@ -214,7 +280,6 @@ mod tests {
     }
 
     fn rego_eval_structured(expr: &str, bag: &AttributeBag, structured: &StructuredInput) -> bool {
-        let input = build_input(bag, structured);
         let mut engine = Engine::new();
         engine
             .add_policy(
@@ -222,7 +287,7 @@ mod tests {
                 format!("package t\nresult if {{ {expr} }}\n"),
             )
             .unwrap();
-        engine.set_input_json(&input.to_string()).unwrap();
+        engine.set_input(build_rego_input(bag, structured));
         engine
             .eval_rule("data.t.result".to_owned())
             .unwrap()
@@ -241,12 +306,11 @@ mod tests {
 
     /// Read `input` back out of regorus as JSON after the engine has parsed it.
     fn rego_input_roundtrip(structured: &StructuredInput) -> Value {
-        let input = build_input(&AttributeBag::new(), structured);
         let mut engine = Engine::new();
         engine
             .add_policy("t.rego".to_owned(), "package t\nv := input\n".to_owned())
             .unwrap();
-        engine.set_input_json(&input.to_string()).unwrap();
+        engine.set_input(build_rego_input(&AttributeBag::new(), structured));
         let v = engine.eval_rule("data.t.v".to_owned()).unwrap();
         serde_json::from_str(&v.to_json_str().unwrap()).unwrap()
     }

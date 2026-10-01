@@ -62,8 +62,8 @@ pub use plugin_decl::{
     CapsView, EffectivePlugin, PluginDeclaration, PluginOverride, PluginRegistry,
 };
 pub use route::{
-    INPUT_TOO_DEEP_CODE, MAX_STRUCTURED_DEPTH, RouteDecision, RoutePayload, StructuredInput,
-    evaluate_post, evaluate_pre, evaluate_route, get_dotted,
+    INPUT_TOO_DEEP_CODE, LLM_REQUEST_MISSING_CODE, MAX_STRUCTURED_DEPTH, RouteDecision,
+    RoutePayload, StructuredInput, evaluate_post, evaluate_pre, evaluate_route, get_dotted,
 };
 pub use rules::{
     CompareOp, CompiledRoute, Condition, DenyResponse, Effect, Expression, Literal, Phase,
@@ -75,5 +75,5 @@ pub use step::{
     ElicitationInvoker, ElicitationOutcome, ElicitationStatus, ElicitationValidation,
     NoopDelegationInvoker, NoopElicitationInvoker, PdpCall, PdpDecision, PdpDialect, PdpError,
     PdpFactory, PdpResolver, PendingElicitation, PluginError, PluginInvocation, PluginInvoker,
-    PluginOutcome, delegation_bag_keys, elicitation_bag_keys,
+    PluginOutcome, StructuredInputAvailability, delegation_bag_keys, elicitation_bag_keys,
 };

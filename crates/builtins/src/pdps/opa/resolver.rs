@@ -48,7 +48,7 @@
 // fail open).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use regorus::Engine;
@@ -60,7 +60,7 @@ use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, P
 
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
-use crate::pdps::opa::input::build_input;
+use crate::pdps::opa::input::build_rego_input;
 use crate::pdps::stack;
 
 /// What to do when a query errors at runtime or yields a value that carries no
@@ -109,6 +109,8 @@ pub struct OpaResolver {
     /// captured at build. A route-step inline module whose package is in this
     /// set is rejected fail-closed so it cannot override operator policy.
     global_packages: HashSet<String>,
+    /// Policy source names that may safely appear in evaluation diagnostics.
+    policy_sources: Arc<HashSet<String>>,
     /// Cache of prepared engines for inline modules, keyed by module source.
     /// `RwLock` so the steady-state read path is uncontended once a route's
     /// inline module has been prepared.
@@ -198,6 +200,7 @@ impl OpaResolver {
         // Track each global module's Rego package (the path `add_policy`
         // returns) so an inline step module can be rejected if it collides.
         let mut global_packages = HashSet::new();
+        let mut policy_sources = HashSet::from([INLINE_MODULE_NAME.to_owned()]);
 
         // 1. Global modules — inline texts first, then files. Each gets a
         //    unique virtual name so same-package modules merge (Rego
@@ -208,9 +211,10 @@ impl OpaResolver {
                 engine
                     .add_policy(name.clone(), text)
                     .map_err(|e| BuildError::ModuleParse {
-                        name,
+                        name: name.clone(),
                         cause: e.to_string(),
                     })?;
+            policy_sources.insert(name);
             global_packages.insert(package);
         }
         for path in read_string_seq(map, "module_files")? {
@@ -222,9 +226,10 @@ impl OpaResolver {
                 engine
                     .add_policy(path.clone(), text)
                     .map_err(|e| BuildError::ModuleParse {
-                        name: path,
+                        name: path.clone(),
                         cause: e.to_string(),
                     })?;
+            policy_sources.insert(path);
             global_packages.insert(package);
         }
 
@@ -255,6 +260,7 @@ impl OpaResolver {
             decision_field,
             base_engine: engine,
             global_packages,
+            policy_sources: Arc::new(policy_sources),
             inline_cache: RwLock::new(HashMap::new()),
             max_cache_entries: read_usize(map, "max_cache_entries")?
                 .unwrap_or(DEFAULT_MAX_CACHE_ENTRIES),
@@ -484,14 +490,13 @@ impl PdpResolver for OpaResolver {
         //
         //    Building, converting, evaluating and dropping nested client JSON
         //    recurses, so each synchronous part runs with stack headroom.
-        let input = stack::guarded(|| build_input(bag, structured));
+        let input = stack::guarded(|| build_rego_input(bag, structured));
         let query = query.to_owned();
         let decision_field = self.decision_field.clone();
+        let policy_sources = Arc::clone(&self.policy_sources);
         let outcome = tokio::task::spawn_blocking(move || {
             stack::guarded(move || {
                 let mut engine = engine;
-                // `From` yields `Undefined` when the document does not convert.
-                let input = regorus::Value::from(input);
                 if input == regorus::Value::Undefined {
                     return EvalOutcome::OnError("OPA failed to set input".to_owned());
                 }
@@ -501,7 +506,9 @@ impl PdpResolver for OpaResolver {
                         Mapped::Decision(decision) => EvalOutcome::Decision(decision),
                         Mapped::Degenerate(cause) => EvalOutcome::OnError(cause),
                     },
-                    Err(e) => EvalOutcome::OnError(eval_error_cause(&e.to_string())),
+                    Err(e) => {
+                        EvalOutcome::OnError(eval_error_cause(&e.to_string(), &policy_sources))
+                    },
                 }
             })
         })
@@ -522,8 +529,8 @@ impl PdpResolver for OpaResolver {
 /// A value-free cause for a regorus eval error: a fixed category plus the
 /// policy location when the error names one. The message itself is dropped
 /// because builtins quote their arguments, which can be payload values.
-fn eval_error_cause(message: &str) -> String {
-    match policy_location(message) {
+fn eval_error_cause(message: &str, policy_sources: &HashSet<String>) -> String {
+    match policy_location(message, policy_sources) {
         Some(at) => format!("OPA eval error: policy runtime error at {at}"),
         None => "OPA eval error: policy runtime error".to_owned(),
     }
@@ -532,7 +539,7 @@ fn eval_error_cause(message: &str) -> String {
 /// The `file:line:col` from a regorus source-span line (`--> file:line:col`).
 /// Only the first line that starts with `-->` counts, and only a well-formed
 /// location is returned, so no other message text can slip through.
-fn policy_location(message: &str) -> Option<&str> {
+fn policy_location<'a>(message: &'a str, policy_sources: &HashSet<String>) -> Option<&'a str> {
     const MAX_LOCATION_LEN: usize = 256;
     let at = message
         .lines()
@@ -544,7 +551,12 @@ fn policy_location(message: &str) -> Option<&str> {
     let file = parts.next()?;
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let plain_file = !file.is_empty() && !file.chars().any(|c| c.is_whitespace() || c.is_control());
-    (at.len() <= MAX_LOCATION_LEN && numeric(line) && numeric(col) && plain_file).then_some(at)
+    (at.len() <= MAX_LOCATION_LEN
+        && numeric(line)
+        && numeric(col)
+        && plain_file
+        && policy_sources.contains(file))
+    .then_some(at)
 }
 
 /// Normalize a YAML/JSON data document to JSON and merge it into the engine's
@@ -829,7 +841,6 @@ data:
 )]
 mod eval_tests {
     use super::*;
-    use std::sync::Arc;
 
     /// Build a resolver from a set of inline global modules.
     fn resolver(modules: &[&str], on_error: OnError) -> OpaResolver {
@@ -1320,18 +1331,26 @@ modules:
 
     #[test]
     fn policy_location_accepts_only_a_well_formed_span() {
+        let sources = HashSet::from(["global-0.rego".to_owned(), "f.rego".to_owned()]);
         let msg = "\n--> global-0.rego:3:5\n  |\n3 | upper(input.x)\n  | ^\nerror: `upper` expects string argument. Got `[1]` instead";
-        assert_eq!(policy_location(msg), Some("global-0.rego:3:5"));
-        assert_eq!(policy_location("no span here"), None);
-        assert_eq!(policy_location("--> file with space.rego:1:1"), None);
-        assert_eq!(policy_location("--> f.rego:x:1"), None);
-        assert_eq!(policy_location("error: x --> evil:1:1"), None);
+        assert_eq!(policy_location(msg, &sources), Some("global-0.rego:3:5"));
+        assert_eq!(policy_location("no span here", &sources), None);
         assert_eq!(
-            policy_location("error: bad\n  --> f.rego:2:3"),
+            policy_location("--> file with space.rego:1:1", &sources),
+            None
+        );
+        assert_eq!(policy_location("--> f.rego:x:1", &sources), None);
+        assert_eq!(policy_location("error: x --> evil:1:1", &sources), None);
+        assert_eq!(
+            policy_location("error: bad\n  --> f.rego:2:3", &sources),
             Some("f.rego:2:3")
         );
         assert_eq!(
-            eval_error_cause("Got `secret` instead"),
+            policy_location("payload\n  --> SECRET-MARKER:1:2", &sources),
+            None
+        );
+        assert_eq!(
+            eval_error_cause("Got `secret` instead", &sources),
             "OPA eval error: policy runtime error"
         );
     }

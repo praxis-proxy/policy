@@ -262,7 +262,7 @@ fn type_label(value: &Value) -> TypeLabel {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::indexing_slicing,
     clippy::panic,
     clippy::unwrap_used,

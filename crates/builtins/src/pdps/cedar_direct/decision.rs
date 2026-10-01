@@ -80,23 +80,30 @@ fn error_line(error: &AuthorizationError, policy_set: &PolicySet) -> String {
 
 /// A fixed category for an evaluation error, never Cedar's message text.
 fn error_category(error: &EvaluationError) -> &'static str {
-    match error {
-        EvaluationError::EntityDoesNotExist(_) => "entity does not exist",
-        EvaluationError::EntityAttrDoesNotExist(_) => "entity attribute or tag does not exist",
-        EvaluationError::RecordAttrDoesNotExist(_) => "record attribute does not exist",
-        EvaluationError::FailedExtensionFunctionLookup(_) => "extension function lookup failed",
-        EvaluationError::TypeError(_) => "type error",
-        EvaluationError::WrongNumArguments(_) => "wrong number of arguments",
-        EvaluationError::IntegerOverflow(_) => "integer overflow",
-        EvaluationError::UnlinkedSlot(_) => "unlinked template slot",
-        EvaluationError::FailedExtensionFunctionExecution(_) => "extension function failed",
-        EvaluationError::NonValue(_) => "expression contains unknowns",
-        EvaluationError::RecursionLimit(_) => "recursion limit reached",
-        #[allow(
-            unreachable_patterns,
-            reason = "an optional cedar feature adds a variant"
-        )]
-        _ => "evaluation error",
+    if matches!(error, EvaluationError::EntityDoesNotExist(_)) {
+        "entity does not exist"
+    } else if matches!(error, EvaluationError::EntityAttrDoesNotExist(_)) {
+        "entity attribute or tag does not exist"
+    } else if matches!(error, EvaluationError::RecordAttrDoesNotExist(_)) {
+        "record attribute does not exist"
+    } else if matches!(error, EvaluationError::FailedExtensionFunctionLookup(_)) {
+        "extension function lookup failed"
+    } else if matches!(error, EvaluationError::TypeError(_)) {
+        "type error"
+    } else if matches!(error, EvaluationError::WrongNumArguments(_)) {
+        "wrong number of arguments"
+    } else if matches!(error, EvaluationError::IntegerOverflow(_)) {
+        "integer overflow"
+    } else if matches!(error, EvaluationError::UnlinkedSlot(_)) {
+        "unlinked template slot"
+    } else if matches!(error, EvaluationError::FailedExtensionFunctionExecution(_)) {
+        "extension function failed"
+    } else if matches!(error, EvaluationError::NonValue(_)) {
+        "expression contains unknowns"
+    } else if matches!(error, EvaluationError::RecursionLimit(_)) {
+        "recursion limit reached"
+    } else {
+        "evaluation error"
     }
 }
 

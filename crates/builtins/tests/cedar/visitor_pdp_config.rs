@@ -228,6 +228,65 @@ routes:
     )
 }
 
+fn schema_route_yaml(selector: &str, structured_context: bool) -> String {
+    format!(
+        r#"
+engine_settings:
+  dispatch: policy
+global:
+  pdp:
+    - kind: cedar-direct
+      structured_context: {structured_context}
+      policy_text: permit(principal, action, resource);
+      schema_text: |
+        entity User = {{
+          "id": String,
+          "type": String,
+          "roles": Set<String>,
+          "permissions": Set<String>,
+          "teams": Set<String>,
+          "claims": {{}},
+        }};
+        entity Document;
+        action read appliesTo {{
+          principal: User,
+          resource: Document,
+          context: {{
+            args?: {{}},
+            llm?: {{ request: {{}} }},
+          }},
+        }};
+routes:
+  - {selector}
+    authorization:
+      pre_invocation:
+        - cedar:
+            action: 'Action::"read"'
+            resource:
+              type: Document
+              id: doc-42
+"#
+    )
+}
+
+#[tokio::test]
+async fn schema_backed_structured_routes_require_the_opt_in() {
+    for selector in ["llm: gpt-4o", "tool: classify"] {
+        let Err(error) = build_manager_with_yaml(&schema_route_yaml(selector, false)).await else {
+            panic!("structured route must reject an omitted Cedar context");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("requires `structured_context: true`"),
+            "{selector}: {error}"
+        );
+        build_manager_with_yaml(&schema_route_yaml(selector, true))
+            .await
+            .expect("declared structured context must load");
+    }
+}
+
 async fn run_llm(policy: &str, document: Option<serde_json::Value>) -> PipelineResult {
     let mgr = build_manager_with_yaml(&route_yaml("llm: gpt-4o", policy, ""))
         .await
@@ -367,6 +426,17 @@ when {
     let (code, violation) = denied(&run_llm(policy, Some(document)).await);
     assert_eq!(code, "cedar.input_withheld");
     assert!(!violation.contains("admin"), "{violation}");
+}
+
+#[tokio::test]
+async fn an_escape_key_in_tool_arguments_is_withheld_without_values() {
+    let policy = "permit(principal, action, resource);";
+    let args = serde_json::json!({
+        "target": {"__entity": {"type": "User", "id": MARKER}}
+    });
+    let (code, violation) = denied(&run_tool(policy, args).await);
+    assert_eq!(code, "cedar.input_withheld");
+    assert!(!violation.contains(MARKER), "{violation}");
 }
 
 /// A `null` field is dropped, so `has` is false. A float becomes its string.

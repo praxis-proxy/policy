@@ -35,7 +35,9 @@ use async_trait::async_trait;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::route::StructuredInput;
-use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
+use praxis_policy_apl_core::step::{
+    PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver, StructuredInputAvailability,
+};
 
 /// Dispatches PDP calls to the right resolver based on
 /// `Step::Pdp.call.dialect`. Construct with `new()`, add resolvers via
@@ -135,9 +137,26 @@ impl PdpResolver for PdpRouter {
     /// Forwards to the resolver for the call's dialect. A dialect with no
     /// resolver passes, so it still fails per request as `NoResolver`.
     fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+        call.validate_input_options()?;
         self.resolvers
             .get(&call.dialect)
-            .map_or(Ok(()), |resolver| resolver.validate_call(call))
+            .map_or_else(|| Ok(()), |resolver| resolver.validate_call(call))
+    }
+
+    fn validate_call_with_input(
+        &self,
+        call: &PdpCall,
+        input: StructuredInputAvailability,
+    ) -> Result<(), String> {
+        call.validate_input_options()?;
+        if call.requires_llm_request() && !input.llm_request {
+            return Err("`require_llm_request: true` is valid only on an `llm:` route".to_owned());
+        }
+        self.resolvers
+            .get(&call.dialect)
+            .map_or(Ok(()), |resolver| {
+                resolver.validate_call_with_input(call, input)
+            })
     }
 }
 

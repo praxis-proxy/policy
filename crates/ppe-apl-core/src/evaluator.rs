@@ -578,6 +578,9 @@ async fn evaluate_pdp_contained(
     bag: &AttributeBag,
     structured: &crate::route::StructuredInput,
 ) -> Result<crate::step::PdpDecision, crate::step::PdpError> {
+    if call.requires_llm_request() && structured.llm_request().is_none() {
+        return Ok(llm_request_missing());
+    }
     if structured.too_deep() {
         return Ok(input_too_deep());
     }
@@ -605,6 +608,17 @@ async fn evaluate_pdp_contained(
             };
             Err(crate::step::PdpError::Dispatch(message))
         },
+    }
+}
+
+/// Deny a PDP step that requires a request document the host did not supply.
+fn llm_request_missing() -> crate::step::PdpDecision {
+    crate::step::PdpDecision {
+        decision: Decision::Deny {
+            reason: Some("PDP step denied: LLM request document is missing".to_owned()),
+            rule_source: crate::route::LLM_REQUEST_MISSING_CODE.to_owned(),
+        },
+        diagnostics: Vec::new(),
     }
 }
 
@@ -3868,6 +3882,26 @@ mod tests {
         let reason = reason.unwrap();
         assert!(!reason.contains(DEEP_KEY), "{reason}");
         assert!(!reason.contains(DEEP_LEAF), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn required_missing_request_denies_without_calling_the_pdp() {
+        let mut args = serde_yaml::Mapping::new();
+        args.insert("require_llm_request".into(), true.into());
+        let effects = [Effect::Pdp {
+            call: PdpCall {
+                dialect: PdpDialect::Cedar,
+                args: serde_yaml::Value::Mapping(args),
+            },
+            on_deny: vec![],
+            on_allow: vec![],
+        }];
+        let decision =
+            run_with_args(&effects, Arc::new(UnreachablePdp), serde_json::json!({})).await;
+        let Decision::Deny { rule_source, .. } = decision else {
+            panic!("expected deny, got {decision:?}");
+        };
+        assert_eq!(rule_source, crate::route::LLM_REQUEST_MISSING_CODE);
     }
 
     #[tokio::test]

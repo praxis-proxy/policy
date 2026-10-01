@@ -4,8 +4,8 @@
 // Structured input under a Cedar schema, and errors that must not echo values.
 //
 // With a schema, `Request::new` checks the context against the action's
-// context type, which is a closed record. Structured input is added only when
-// the resolver sets `structured_context`, so an existing schema keeps working.
+// context type, which is a closed record. Direct resolver construction keeps
+// structured input opt-in; route configuration validates the opt-in at load.
 
 use std::sync::Arc;
 
@@ -70,8 +70,7 @@ fn tool_args(args: serde_json::Value) -> StructuredInput {
 
 const PERMIT_ALL: &str = "permit(principal, action, resource);";
 
-/// A tool route always carries structured args. Under a schema that does not
-/// declare them, the step must decide as it did before they existed.
+/// Direct resolver use keeps structured input absent when it is not enabled.
 #[tokio::test]
 async fn schema_without_the_flag_ignores_structured_input() {
     let decision = resolver(PERMIT_ALL, "{}", None)

@@ -468,6 +468,40 @@ impl AplConfigVisitor {
         }
         Ok(())
     }
+
+    /// Validate the effective route against the structured values it carries.
+    fn validate_pdp_input(
+        &self,
+        scope: &str,
+        compiled: &CompiledRoute,
+        input: praxis_policy_apl_core::step::StructuredInputAvailability,
+    ) -> Result<(), VisitorError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (phase, effects) in [
+            ("pre_invocation", &compiled.pre_invocation),
+            ("post_invocation", &compiled.post_invocation),
+        ] {
+            let mut failure = None;
+            walk_effects(effects, &mut |effect| {
+                if failure.is_none()
+                    && let Effect::Pdp { call, .. } = effect
+                    && let Err(msg) = state.pdp_router.validate_call_with_input(call, input)
+                {
+                    failure = Some(format!(
+                        "{scope}: {phase}: invalid {:?} step: {msg}",
+                        call.dialect
+                    ));
+                }
+            });
+            if let Some(msg) = failure {
+                return Err(msg.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The plugin names an `authentication:` block on a section lists.
@@ -1063,6 +1097,15 @@ impl ConfigVisitor for AplConfigVisitor {
             // (host default denial), never a leaked `global` response.
             effective.response = route_response.clone();
 
+            self.validate_pdp_input(
+                &format!("routes.{route_key}"),
+                &effective,
+                praxis_policy_apl_core::step::StructuredInputAvailability {
+                    llm_request: entity_type == ENTITY_LLM,
+                    args: entity_type == ENTITY_TOOL,
+                },
+            )?;
+
             // Load-time lint, once per route: flag any APL `plugins:`
             // override declared for a plugin that no policy / delegate step
             // references. Checked on the fully-stacked `effective` route so
@@ -1362,6 +1405,15 @@ fn install_handler(
         capabilities,
         ..Default::default()
     };
+    let effects = match phase {
+        Phase::Pre => &route.pre_invocation,
+        Phase::Post => &route.post_invocation,
+    };
+    let mut has_pdp = false;
+    walk_effects(effects, &mut |effect| {
+        has_pdp |= matches!(effect, Effect::Pdp { .. });
+    });
+
     let mut handler = AplRouteHandler::new(
         plugin_config.clone(),
         route,
@@ -1373,7 +1425,8 @@ fn install_handler(
         engine.clone(),
     )
     .with_attribute_tree(attribute_tree)
-    .with_structured_args(entity_type == ENTITY_TOOL);
+    .with_structured_args(entity_type == ENTITY_TOOL)
+    .with_structured_input(has_pdp);
     if let Some(pdp) = pdp {
         handler = handler.with_pdp(pdp);
     }

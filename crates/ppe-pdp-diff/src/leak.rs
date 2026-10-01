@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Payload text never reaches a deny. Each probe denies a request whose
-//! messages and tools carry a marker, through a distinct deny path, and the
+//! request and tool arguments carry a marker through distinct deny paths, and the
 //! whole decision (reason, rule source, diagnostics) must not hold it.
 
-#![allow(clippy::panic, reason = "tests")]
+#![expect(clippy::panic, reason = "tests")]
 
 use std::sync::Arc;
 
@@ -64,6 +64,12 @@ when { context.llm.request.tools like "x*" };"#,
             EvalError,
         ),
         probe(
+            Cedar,
+            r#"permit(principal, action, resource)
+when { context.args.items.contains({"classification": "public"}) };"#,
+            DefaultDeny,
+        ),
+        probe(
             Cel,
             r#"llm.request.messages.exists(m, m.content == "x")"#,
             PolicyFalse,
@@ -75,6 +81,7 @@ when { context.llm.request.tools like "x*" };"#,
             r#"llm.request.tools[0].function.missing == "x""#,
             EvalError,
         ),
+        probe(Cel, "args.items[0].classification + 1 == 2", EvalError),
         probe(
             Opa,
             "default allow := false\nallow if input.llm.request.messages[0].content == \"x\"",
@@ -90,6 +97,11 @@ when { context.llm.request.tools like "x*" };"#,
             Opa,
             "allow contains t if some t in input.llm.request.tools",
             PolicyFalse,
+        ),
+        probe(
+            Opa,
+            "allow if to_number(input.args.items[0].classification) > 1",
+            EvalError,
         ),
     ]
 }
@@ -108,6 +120,13 @@ fn marked_request() -> Value {
     })
 }
 
+fn marked_args() -> Value {
+    json!({
+        "items": [{"classification": MARKER}],
+        format!("{MARKER}-key"): MARKER,
+    })
+}
+
 fn probe_case(probe: &Probe, document: Value) -> Case {
     let mut bag = AttributeBag::new();
     bag.set("subject.id", "alice");
@@ -122,7 +141,7 @@ fn probe_case(probe: &Probe, document: Value) -> Case {
     Case {
         name: "leak-probe",
         bag,
-        structured: StructuredInput::new(Some(Arc::new(document)), None),
+        structured: StructuredInput::new(Some(Arc::new(document)), Some(Arc::new(marked_args()))),
         cedar_policy: pick(Dialect::Cedar),
         cel_expr: pick(Dialect::Cel),
         opa_module: format!("package diff\n{}\n", pick(Dialect::Opa)),

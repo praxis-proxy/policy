@@ -189,6 +189,8 @@ pub struct AplRouteHandler {
     /// Set for `tool:` routes only, so a tool call replayed inside an LLM
     /// message never fills it.
     structured_args: bool,
+    /// Whether this phase contains a PDP effect that can read structured input.
+    structured_input: bool,
 }
 
 impl AplRouteHandler {
@@ -222,6 +224,7 @@ impl AplRouteHandler {
             pdp: Arc::new(PdpRouter::new()),
             attribute_tree: Arc::new(praxis_policy_apl_core::AttributeTree::empty()),
             structured_args: false,
+            structured_input: false,
         }
     }
 
@@ -229,6 +232,12 @@ impl AplRouteHandler {
     /// visitor enables it on `tool:` routes. Off by default.
     pub fn with_structured_args(mut self, enabled: bool) -> Self {
         self.structured_args = enabled;
+        self
+    }
+
+    /// Build structured input only for a phase that contains a PDP effect.
+    pub fn with_structured_input(mut self, enabled: bool) -> Self {
+        self.structured_input = enabled;
         self
     }
 
@@ -433,14 +442,20 @@ impl AplRouteHandler {
         // matches the bag. The request body comes from this handler's
         // filtered view and shares the host's `Arc`. Arguments count only
         // on tool routes and only as an object, the shape a tool call has.
-        // Depth is measured here, once for every PDP step on the request.
-        let structured = StructuredInput::new(
-            post_extensions
-                .llm_request
-                .as_ref()
-                .map(|doc| Arc::clone(doc.shared())),
-            (self.structured_args && args_value.is_object()).then(|| Arc::new(args_value.clone())),
-        );
+        // A phase without a PDP skips the clone and depth walk. Otherwise,
+        // depth is measured once and shared by every PDP step in the phase.
+        let structured = if self.structured_input {
+            StructuredInput::new(
+                post_extensions
+                    .llm_request
+                    .as_ref()
+                    .map(|doc| Arc::clone(doc.shared())),
+                (self.structured_args && args_value.is_object())
+                    .then(|| Arc::new(args_value.clone())),
+            )
+        } else {
+            StructuredInput::default()
+        };
         let mut route_payload = match self.phase {
             Phase::Pre => RoutePayload::new(args_value),
             Phase::Post => {

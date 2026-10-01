@@ -40,6 +40,9 @@ pub const MAX_STRUCTURED_DEPTH: usize = 128;
 /// nests deeper than [`MAX_STRUCTURED_DEPTH`].
 pub const INPUT_TOO_DEEP_CODE: &str = "pdp.input_too_deep";
 
+/// Violation code for a PDP step that requires an absent request document.
+pub const LLM_REQUEST_MISSING_CODE: &str = "pdp.llm_request_missing";
+
 /// Structured JSON handed to PDPs beside the flat bag.
 ///
 /// Entries are shared, so cloning only bumps reference counts. An absent

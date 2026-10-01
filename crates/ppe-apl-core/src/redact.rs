@@ -12,7 +12,14 @@ use std::fmt;
 use crate::attributes::AttributeValue;
 
 /// Namespaces whose values come from the request or response payload.
-const PAYLOAD_NAMESPACES: &[&str] = &["args", "result", "llm.request"];
+const PAYLOAD_NAMESPACES: &[&str] = &[
+    "args",
+    "result",
+    "llm.request",
+    "custom.llm",
+    "http.request_headers",
+    "http.response_headers",
+];
 
 /// The payload namespace a dotted path falls under, if any.
 ///
@@ -99,6 +106,18 @@ mod tests {
         assert_eq!(payload_namespace("result.rows"), Some("result"));
         assert_eq!(payload_namespace("llm.request"), Some("llm.request"));
         assert_eq!(payload_namespace("llm.request.tools"), Some("llm.request"));
+        assert_eq!(
+            payload_namespace("custom.llm.temperature"),
+            Some("custom.llm")
+        );
+        assert_eq!(
+            payload_namespace("http.request_headers.authorization"),
+            Some("http.request_headers")
+        );
+        assert_eq!(
+            payload_namespace("http.response_headers.server"),
+            Some("http.response_headers")
+        );
     }
 
     #[test]

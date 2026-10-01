@@ -362,7 +362,7 @@ fn merge_into(target: &mut Value, overlay: Value) {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::panic, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use std::sync::Arc;
 

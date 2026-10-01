@@ -298,6 +298,37 @@ pub struct PdpCall {
     pub args: serde_yaml::Value,
 }
 
+impl PdpCall {
+    /// Whether the step requires a host-supplied LLM request document.
+    pub fn requires_llm_request(&self) -> bool {
+        self.args
+            .as_mapping()
+            .and_then(|map| map.get(serde_yaml::Value::String("require_llm_request".to_owned())))
+            .and_then(serde_yaml::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Validate generic structured-input options on this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an option has the wrong type.
+    pub fn validate_input_options(&self) -> Result<(), String> {
+        let Some(value) = self
+            .args
+            .as_mapping()
+            .and_then(|map| map.get(serde_yaml::Value::String("require_llm_request".to_owned())))
+        else {
+            return Ok(());
+        };
+        if value.is_bool() {
+            Ok(())
+        } else {
+            Err("`require_llm_request` must be a bool".to_owned())
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -396,9 +427,36 @@ pub trait PdpResolver: Send + Sync {
     ///
     /// Returns why the call is invalid. The caller names the step.
     fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
-        let _ = call;
+        call.validate_input_options()
+    }
+
+    /// Check a call with the structured input its route can supply.
+    ///
+    /// The default retains the route-independent validation contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the call is invalid for the route.
+    fn validate_call_with_input(
+        &self,
+        call: &PdpCall,
+        input: StructuredInputAvailability,
+    ) -> Result<(), String> {
+        self.validate_call(call)?;
+        if call.requires_llm_request() && !input.llm_request {
+            return Err("`require_llm_request: true` is valid only on an `llm:` route".to_owned());
+        }
         Ok(())
     }
+}
+
+/// Structured values an APL route can supply to a PDP step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StructuredInputAvailability {
+    /// The route can carry the host-parsed inference request.
+    pub llm_request: bool,
+    /// The route carries native tool arguments.
+    pub args: bool,
 }
 
 /// Build a [`PdpResolver`] from a unified-config block. Implemented per

@@ -670,7 +670,7 @@ fn read_yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::panic,
     clippy::unwrap_used,
@@ -1160,6 +1160,9 @@ mod tests {
     fn leaky_input() -> (AttributeBag, StructuredInput) {
         let mut bag = bag_with(&[("subject.id", "alice")]);
         bag.set("args.hidden_key", MARKER);
+        bag.set("custom.llm.client_value", MARKER);
+        bag.set("http.request_headers.authorization", MARKER);
+        bag.set("http.response_headers.server", MARKER);
         let structured = StructuredInput::new(
             Some(Arc::new(serde_json::json!({
                 "model": "gpt-4o",
@@ -1205,6 +1208,34 @@ mod tests {
         );
         assert!(out.diagnostics.contains(&"llm.request=map".to_owned()));
         assert!(out.diagnostics.contains(&"args=map".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn false_result_snapshot_redacts_projected_values_and_headers() {
+        let r = CelResolver::new();
+        let (bag, structured) = leaky_input();
+        let out = r
+            .evaluate_structured(
+                &cel_call(
+                    "custom.llm.client_value == 'other' && \
+                     http.request_headers.authorization == 'other' && \
+                     http.response_headers.server == 'other'",
+                ),
+                &bag,
+                &structured,
+            )
+            .await
+            .unwrap();
+        assert_no_leak(&out);
+        assert!(out.diagnostics.contains(&"custom.llm=map".to_owned()));
+        assert!(
+            out.diagnostics
+                .contains(&"http.request_headers=map".to_owned())
+        );
+        assert!(
+            out.diagnostics
+                .contains(&"http.response_headers=map".to_owned())
+        );
     }
 
     #[tokio::test]

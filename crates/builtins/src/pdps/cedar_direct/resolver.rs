@@ -33,7 +33,9 @@ use cedar_policy::{Authorizer, EntityId, EntityTypeName, EntityUid, PolicySet, S
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::route::StructuredInput;
-use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
+use praxis_policy_apl_core::step::{
+    PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver, StructuredInputAvailability,
+};
 
 use crate::pdps::cedar_direct::decision::{translate, withheld};
 use crate::pdps::cedar_direct::entities::build as build_entities;
@@ -248,7 +250,24 @@ impl PdpResolver for CedarDirectResolver {
     /// Rejects an operator `context:` that defines a key reserved for
     /// structured input.
     fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+        call.validate_input_options()?;
         reserved_context_key(call).map_or(Ok(()), |key| Err(reserved_key_message(key)))
+    }
+
+    fn validate_call_with_input(
+        &self,
+        call: &PdpCall,
+        input: StructuredInputAvailability,
+    ) -> Result<(), String> {
+        self.validate_call(call)?;
+        if self.schema.is_some() && !self.structured_context && (input.llm_request || input.args) {
+            return Err(
+                "schema-backed Cedar on an `llm:` or `tool:` route requires \
+                 `structured_context: true` and matching optional context fields"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 
     async fn evaluate_structured(

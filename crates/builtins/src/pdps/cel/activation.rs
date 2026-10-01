@@ -63,7 +63,7 @@ pub fn bag_to_context(
     if let Some(map) = extra_args.as_mapping() {
         for (k, v) in map {
             let Some(name) = k.as_str() else { continue };
-            if name == "expr" {
+            if matches!(name, "expr" | "require_llm_request") {
                 continue;
             }
             extra_names.insert(name.to_owned());
