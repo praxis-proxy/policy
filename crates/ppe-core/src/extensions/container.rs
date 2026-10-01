@@ -148,10 +148,10 @@ pub struct Extensions {
     /// Whether this plugin may perform an irreversible external effect, and
     /// where the record goes. Set by the executor per plugin, NOT serialized.
     ///
-    /// Not carried across `clone()`, unlike the transport handle: the slot
-    /// names the plugin every record is attributed to, so a clone that
-    /// outlived the invocation would let records be written under a name that
-    /// is no longer the one running.
+    /// Dropped on `clone()`, like the transport handle: the slot names the
+    /// plugin every record is attributed to, so a clone that outlived the
+    /// invocation would let records be written under a name that is no longer
+    /// the one running.
     #[serde(skip)]
     pub effect_log: crate::effect::EffectLogSlot,
 }
@@ -168,8 +168,8 @@ impl HostServices for Extensions {
 }
 
 impl Clone for Extensions {
-    /// All Arc bumps — zero data copies. Write tokens are NOT cloned;
-    /// the transport handle is (see the field docs for why they differ).
+    /// All Arc bumps, zero data copies. Write tokens, the transport handle and
+    /// the effect slot are not carried; see each field's docs for why.
     fn clone(&self) -> Self {
         Self {
             request: self.request.clone(),

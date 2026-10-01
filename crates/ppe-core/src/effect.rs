@@ -623,9 +623,9 @@ pub struct EffectSink {
 /// remembered until the sweep ends, because an outcome appended after the
 /// sweep read the file is invisible to that sweep even once the key is closed.
 ///
-/// A plugin that panics between intent and outcome leaves its key open until
-/// the process restarts. A restart is what recovery exists for, so the key is
-/// reconciled then.
+/// An invocation that ends between intent and outcome, by timing out,
+/// panicking or being cancelled, closes its keys as its extensions drop. The
+/// intent is an orphan from then on, and the next sweep may reconcile it.
 #[derive(Debug, Default)]
 pub struct InFlightEffects {
     state: std::sync::Mutex<InFlightState>,
@@ -787,6 +787,9 @@ impl EffectSink {
         mut record: EffectRecord,
         extensions: &crate::hooks::payload::Extensions,
     ) {
+        if self.handlers.is_empty() {
+            return;
+        }
         self.stamp(&mut record);
         self.dispatch(&record, extensions).await;
     }
@@ -893,6 +896,8 @@ enum EffectLogState {
         /// Where the time spent waiting on sinks is reported, so the executor
         /// can keep it out of the plugin's timeout.
         sink_wait: SinkWait,
+        /// The keys this invocation has opened and not yet closed.
+        opened: OpenedKeys,
     },
     /// Effects may not be performed from this phase.
     NotPermitted {
@@ -917,10 +922,12 @@ impl EffectLogSlot {
     /// back and credits to it.
     #[must_use]
     pub fn recorded(sink: Arc<EffectSink>, plugin_name: &str, sink_wait: SinkWait) -> Self {
+        let opened = OpenedKeys::new(Arc::clone(&sink.in_flight));
         Self(EffectLogState::Recorded {
             sink,
             plugin_name: Arc::from(plugin_name),
             sink_wait,
+            opened,
         })
     }
 
@@ -1067,7 +1074,7 @@ impl crate::hooks::payload::Extensions {
         effect: &EffectRecord,
         state: EffectState,
     ) -> Result<(), Box<PluginError>> {
-        let (sink, plugin_name, sink_wait) = match &self.effect_log.0 {
+        let (sink, plugin_name, sink_wait, opened) = match &self.effect_log.0 {
             EffectLogState::Unrecorded => return Ok(()),
             EffectLogState::Detached => return Err(detached_error()),
             EffectLogState::NotPermitted { mode, plugin_name } => {
@@ -1077,7 +1084,8 @@ impl crate::hooks::payload::Extensions {
                 sink,
                 plugin_name,
                 sink_wait,
-            } => (sink, plugin_name, sink_wait),
+                opened,
+            } => (sink, plugin_name, sink_wait, opened),
         };
 
         let mut record = effect.clone().into_state(state);
@@ -1092,15 +1100,22 @@ impl crate::hooks::payload::Extensions {
             // the outcome is on disk where the sweep will see it.
             let opening = record.state == EffectState::Prepared;
             if opening {
-                sink.in_flight.open(&record.key);
+                opened.open(&record.key);
             }
             let appended = log.append(&record).await;
             // A refused intent means the act never runs, so the key closes
             // with it.
             if !opening || appended.is_err() {
-                sink.in_flight.close(&record.key);
+                opened.close(&record.key);
             }
             appended?;
+        }
+
+        // Nobody will receive it, so it takes no place in the stream. The
+        // counters are shared with every later sink the executor attaches, and
+        // a number spent here reads to that sink as a lost record.
+        if sink.handlers.is_empty() {
+            return Ok(());
         }
 
         // Stamped only now, because taking a sequence number is a promise to
@@ -1126,31 +1141,109 @@ impl crate::hooks::payload::Extensions {
         // out of the plugin's timeout: otherwise two slow sinks turn an act
         // that succeeded into a `plugin_timeout`, and audit latency decides
         // the outcome it is only meant to observe.
-        // Tokio's clock, the one the executor's timeout reads.
-        let started = tokio::time::Instant::now();
+        let _waiting = sink_wait.start();
         sink.dispatch(&record, self).await;
-        sink_wait.add(started.elapsed());
         Ok(())
     }
 }
 
-/// Time an invocation spent waiting on audit sinks.
+/// The keys one invocation has opened, closed in [`InFlightEffects`] when
+/// the invocation ends whichever way it ends.
 ///
-/// Shared between the effect slot, which adds to it, and the executor, which
-/// extends the plugin's deadline by it. Cloning shares the total.
+/// A plugin that times out or is cancelled between intent and outcome never
+/// closes its key, and an open key is one every recovery sweep skips. Its
+/// intent is an orphan from that moment, so it closes when the invocation's
+/// extensions are dropped and the next sweep can reconcile it.
+#[derive(Debug)]
+struct OpenedKeys {
+    in_flight: Arc<InFlightEffects>,
+    keys: std::sync::Mutex<Vec<String>>,
+}
+
+impl OpenedKeys {
+    fn new(in_flight: Arc<InFlightEffects>) -> Self {
+        Self {
+            in_flight,
+            keys: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn keys(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
+        self.keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn open(&self, key: &str) {
+        self.keys().push(key.to_owned());
+        self.in_flight.open(key);
+    }
+
+    fn close(&self, key: &str) {
+        self.keys().retain(|k| k != key);
+        self.in_flight.close(key);
+    }
+}
+
+impl Drop for OpenedKeys {
+    fn drop(&mut self) {
+        for key in self.keys().drain(..) {
+            self.in_flight.close(&key);
+        }
+    }
+}
+
+/// Time an invocation spent waiting on audit sinks, including a wait still
+/// under way.
+///
+/// Shared between the effect slot, which reports it, and the executor, which
+/// extends the plugin's deadline by it. A wait counts from the moment it
+/// starts, so a deadline that passes in the middle of a slow sink is pushed
+/// out rather than firing on time the plugin never had. Cloning shares the
+/// total.
 #[derive(Debug, Clone, Default)]
-pub struct SinkWait(Arc<AtomicU64>);
+pub struct SinkWait(Arc<std::sync::Mutex<SinkWaitState>>);
+
+/// One lock over both fields, so a total read while a wait is being folded in
+/// counts it exactly once.
+#[derive(Debug, Default)]
+struct SinkWaitState {
+    finished: std::time::Duration,
+    /// Tokio's clock, the one the executor's timeout reads.
+    running_since: Option<tokio::time::Instant>,
+}
+
+/// A sink wait under way, from [`SinkWait::start`]. Dropping it, including by
+/// cancellation, moves the elapsed time into the finished total.
+struct SinkWaiting<'a>(&'a SinkWait);
 
 impl SinkWait {
-    fn add(&self, waited: std::time::Duration) {
-        let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
-        self.0.fetch_add(nanos, Ordering::Relaxed);
+    fn start(&self) -> SinkWaiting<'_> {
+        lock(&self.0).running_since = Some(tokio::time::Instant::now());
+        SinkWaiting(self)
     }
 
-    /// Everything added so far.
+    /// Everything waited so far, the wait under way included.
     pub(crate) fn total(&self) -> std::time::Duration {
-        std::time::Duration::from_nanos(self.0.load(Ordering::Relaxed))
+        let state = lock(&self.0);
+        state.finished
+            + state
+                .running_since
+                .map_or(std::time::Duration::ZERO, |s| s.elapsed())
     }
+}
+
+impl Drop for SinkWaiting<'_> {
+    fn drop(&mut self) {
+        let mut state = lock(&self.0.0);
+        if let Some(since) = state.running_since.take() {
+            state.finished += since.elapsed();
+        }
+    }
+}
+
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -1760,6 +1853,31 @@ mod tests {
         let idle = EffectRecord::prepared("token_mint", "d", "idle");
         assert_eq!(guarded.reconcile(&busy).await, EffectState::Unknown);
         assert_eq!(guarded.reconcile(&idle).await, EffectState::Rejected);
+    }
+
+    /// With a log and no sink, an effect takes no stream position. The
+    /// counters are shared with any sink attached later, which would read a
+    /// number spent here as a lost record.
+    #[tokio::test]
+    async fn no_sequence_number_is_spent_without_a_sink() {
+        let stream = test_stream();
+        let seq = Arc::clone(&stream.stream_seq);
+        let emission = Arc::clone(&stream.emission_seq);
+        let log: Arc<dyn DurableEffectLog> = Arc::new(SpyLog::default());
+        let ext = ext_with(EffectLogSlot::recorded(
+            Arc::new(EffectSink::new(Some(log), Vec::new(), stream)),
+            "minter",
+            SinkWait::default(),
+        ));
+
+        ext.perform_effect(&EffectRecord::prepared("token_mint", "d", "k"), || async {
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(seq.load(Ordering::Relaxed), 0);
+        assert_eq!(emission.load(Ordering::Relaxed), 0);
     }
 
     /// A refused intent means the act never runs, so its key does not stay

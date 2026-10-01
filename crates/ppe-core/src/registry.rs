@@ -524,12 +524,17 @@ impl PluginRegistry {
     /// because a sink reaches every invocation and is filtered on the same
     /// terms as any other plugin. The capabilities come from `trusted_config`,
     /// the engine's copy, not from anything the plugin reports about itself.
+    ///
+    /// A plugin configured `mode: disabled` is left out. Sinks are called
+    /// beside the phases rather than from one, so the phase dispatch that
+    /// skips a disabled plugin never sees them.
     pub fn audit_handlers(&self) -> Vec<crate::audit::AttachedSink> {
         self.plugins
             .values()
+            .filter(|r| r.trusted_config().mode != crate::plugin::PluginMode::Disabled)
             .filter_map(|r| {
                 let handler = r.plugin().clone().as_audit_handler()?;
-                let capabilities = r.trusted_config().capabilities.iter().cloned().collect();
+                let capabilities = r.trusted_config().capabilities.clone();
                 Some(crate::audit::AttachedSink::new(handler, capabilities))
             })
             .collect()
@@ -1099,6 +1104,22 @@ mod audit_handler_tests {
         );
 
         assert_eq!(reg.audit_handlers().len(), 1);
+    }
+
+    /// `mode: disabled` turns a sink off like any other plugin.
+    #[test]
+    fn a_disabled_sink_is_not_collected() {
+        let mut reg = PluginRegistry::new();
+        let sink_cfg = PluginConfig {
+            mode: crate::plugin::PluginMode::Disabled,
+            ..cfg("sink")
+        };
+        reg.plugins.insert(
+            "sink".to_owned(),
+            Arc::new(PluginRef::new(Arc::new(Sink(sink_cfg.clone())), sink_cfg)),
+        );
+
+        assert!(reg.audit_handlers().is_empty());
     }
 
     #[test]

@@ -1421,6 +1421,36 @@ async fn a_server_error_is_recorded_unknown_not_rejected() {
     }
 }
 
+/// A 2xx that is not a token response does not say a token exists: a proxy in
+/// front of the `IdP` can answer 200 without the `IdP` ever running. The mint
+/// is left open rather than claimed.
+#[tokio::test]
+async fn an_unreadable_success_is_recorded_unknown_not_confirmed() {
+    use praxis_policy_core::effect::EffectState;
+
+    let log = Arc::new(SpyLog::default());
+    let mgr = manager_with_log(&idp(200, "<html>sign in</html>"), log.clone()).await;
+
+    let result = invoke(
+        &mgr,
+        build_payload(
+            "tool",
+            "https://downstream.example.com",
+            &["read:compensation"],
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        result.violation.expect("an unreadable answer denies").code,
+        "delegation.bad_response"
+    );
+    assert_eq!(
+        log.states(),
+        vec![EffectState::Prepared, EffectState::Unknown]
+    );
+}
+
 /// The answer was lost, not refused. The mint may still have landed at the
 /// `IdP`, so the record stays open for reconciliation rather than claiming
 /// nothing happened.

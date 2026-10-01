@@ -402,14 +402,15 @@ impl OAuthDelegator {
     /// actually said, which is finer than the default the core bracket would
     /// infer, because this plugin can tell a refusal from a lost answer:
     ///
-    /// - `Confirmed` on success, and on a 2xx whose body would not parse. The
-    ///   token was minted either way; only our reading of it failed.
+    /// - `Confirmed` on success.
     /// - `Rejected` on a 4xx, the RFC 6749 section 5.2 error response, where
     ///   the `IdP` said no and provably issued nothing.
-    /// - `Unknown` on a 5xx, a timeout, or an unreachable `IdP`, where the
-    ///   mint may still have landed. A 503 or 504 can come from a proxy in
-    ///   front of an `IdP` that minted anyway. Recovery reconciles it by key
-    ///   rather than assuming it did not happen.
+    /// - `Unknown` on a 5xx, a timeout, an unreachable `IdP`, or a 2xx whose
+    ///   body is not a token response. None of these says whether a token
+    ///   was issued: a 503 or 504 can come from a proxy in front of an `IdP`
+    ///   that minted anyway, and a 200 that will not parse can come from a
+    ///   proxy that never reached it. Recovery reconciles by key rather than
+    ///   assuming either way.
     ///
     /// With no effect log configured this just runs `mint`.
     async fn audit_mint<F, Fut, T>(
@@ -457,7 +458,6 @@ impl OAuthDelegator {
             Ok(_) => EffectState::Confirmed,
             Err(v) => match v.code.as_str() {
                 "delegation.idp_rejected" if refused_by_idp(v) => EffectState::Rejected,
-                "delegation.bad_response" => EffectState::Confirmed,
                 _ => EffectState::Unknown,
             },
         };

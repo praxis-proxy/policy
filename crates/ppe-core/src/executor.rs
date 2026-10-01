@@ -3081,6 +3081,137 @@ mod audit_seam_tests {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
     }
 
+    /// Works for `before`, records an intent, then either acts at once or
+    /// never finishes.
+    struct PausingActor {
+        cfg: PluginConfig,
+        before: Duration,
+        hang: bool,
+    }
+
+    #[async_trait]
+    impl Plugin for PausingActor {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+    }
+
+    #[async_trait]
+    impl AnyHookHandler for PausingActor {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            tokio::time::sleep(self.before).await;
+            let effect = crate::effect::EffectRecord::prepared("token_mint", "d", "k-1");
+            let hang = self.hang;
+            extensions
+                .perform_effect(&effect, || async move {
+                    if hang {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(())
+                })
+                .await?;
+            Ok(erase_result(PluginResult::<P>::allow()))
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            "test_hook"
+        }
+    }
+
+    fn pausing_entry(before: Duration, hang: bool) -> HookEntry {
+        let cfg = PluginConfig {
+            name: "minter".into(),
+            mode: PluginMode::Sequential,
+            on_error: OnError::Fail,
+            ..Default::default()
+        };
+        let actor = || PausingActor {
+            cfg: cfg.clone(),
+            before,
+            hang,
+        };
+        HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(Arc::new(actor()), cfg.clone())),
+            handler: Arc::new(actor()),
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct NullLog;
+
+    #[async_trait]
+    impl crate::effect::DurableEffectLog for NullLog {
+        async fn append(&self, _e: &crate::effect::EffectRecord) -> Result<(), Box<PluginError>> {
+            Ok(())
+        }
+    }
+
+    /// The deadline passes while a sink is still running. That time is the
+    /// sink's, so it is credited as it accrues rather than once the sink
+    /// returns, which would be after the plugin was already cancelled.
+    #[tokio::test(start_paused = true)]
+    async fn a_deadline_inside_a_slow_sink_is_pushed_out() {
+        struct SlowSink;
+
+        #[async_trait]
+        impl AuditHandler for SlowSink {
+            async fn handle(&self, _p: &dyn PluginPayload, _e: &Extensions, _d: &DecisionLog) {}
+
+            async fn on_effect(&self, _effect: &crate::effect::EffectRecord, _e: &Extensions) {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+            }
+        }
+
+        // 500 ms of the plugin's own work, then a 600 ms sink that is still
+        // running when the one-second budget runs out.
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 1,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(SlowSink))]);
+        let (result, _bg) = executor
+            .execute(
+                &[pausing_entry(Duration::from_millis(500), false)],
+                Box::new(P("in".into())),
+                Extensions::default(),
+                None,
+                &tokio_util::task::TaskTracker::new(),
+            )
+            .await;
+
+        assert!(result.continue_processing, "{:?}", result.violation);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    /// A plugin cancelled between intent and outcome leaves an orphaned
+    /// intent, and recovery has to be free to reconcile it. Its key closes
+    /// when the invocation ends rather than staying open until a restart.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_act_releases_its_key() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 1,
+            ..Default::default()
+        })
+        .with_effect_log(Arc::new(NullLog));
+        let (result, _bg) = executor
+            .execute(
+                &[pausing_entry(Duration::ZERO, true)],
+                Box::new(P("in".into())),
+                Extensions::default(),
+                None,
+                &tokio_util::task::TaskTracker::new(),
+            )
+            .await;
+
+        assert!(result.is_denied(), "on_error: fail halts on the timeout");
+        assert!(!executor.in_flight().is_busy("k-1"));
+    }
+
     /// The credit covers sink time only. A plugin that is itself too slow
     /// still times out.
     #[tokio::test(start_paused = true)]

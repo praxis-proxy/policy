@@ -390,10 +390,10 @@ An effect moves through four states.
 at the participant with the answer lost coming back, so recording it as
 `rejected` asserts no token was minted when nothing checked. The OAuth
 delegator maps precisely: a 4xx is `rejected`, since that is where RFC 6749
-puts the IdP's error responses; a 5xx, a timeout or an unreachable IdP is
-`unknown`, since a proxy can answer 503 or 504 after the token was minted; and
-a 2xx whose body will not parse is `confirmed`, because the token exists
-whether or not we managed to read it.
+puts the IdP's error responses, and everything else that fails is `unknown`. A
+5xx can come from a proxy after the token was minted, and a 2xx whose body is
+not a token response can come from a proxy that never reached the IdP, so
+neither says whether a token exists.
 
 ### Which phases may act
 
@@ -429,8 +429,9 @@ reconciling it would race the plugin: a ledger that has not seen the mint yet
 says `rejected`, then the plugin records `confirmed` for the same key. So the
 engine tracks the keys it has an act open on, from just before the intent is
 written until just after the outcome is, and a sweep skips them. They come back
-among the unresolved and the next sweep picks them up. A plugin that panics
-mid-act leaves its key open until the process restarts, and is reconciled then.
+among the unresolved and the next sweep picks them up. A plugin that times out,
+panics or is cancelled mid-act releases its key when the invocation ends, so its
+orphaned intent is reconciled like any other.
 
 In practice there is nothing to configure. The question an orphaned intent
 raises is "did this mint land at the IdP before we died", and an OAuth IdP has
@@ -508,8 +509,10 @@ rather than calls.
 A sink fires for every hook family, so `payload` is not always a CMF
 `MessagePayload`. Downcast and handle the case where it is not.
 
-The executor awaits every sink before returning the pipeline result, so a
-verdict that was emitted cannot be lost to a crash. The cost is that sink
+The executor awaits every sink before returning the pipeline result, so each
+sink has returned before the caller gets its answer. That is not durability: a
+sink that buffers, or writes to a stream nobody fsyncs, can still lose a record
+to a crash, and only the effect log promises otherwise. The cost is that sink
 latency is request latency. A sink writing to a network destination should hand
 off to its own queue rather than block. Each call is bounded by the plugin
 timeout and its panics are contained; a sink that fails is logged and skipped,
