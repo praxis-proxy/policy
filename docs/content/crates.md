@@ -26,7 +26,7 @@ praxis-policy (facade)
 
 ## Bundled extensions
 
-All nine ship in one published crate, `praxis-policy-builtins`, each behind
+All ten ship in one published crate, `praxis-policy-builtins`, each behind
 its own feature and reached through the matching feature on the facade rather
 than named directly. See [Builtins](builtins.md).
 
@@ -34,6 +34,7 @@ than named directly. See [Builtins](builtins.md).
 |---|---|---|
 | `jwt` | `plugins::identity_jwt` | `identity/jwt` |
 | `api-key` | `plugins::identity_api_key` | `identity/api-key` |
+| `forward-auth` | `plugins::identity_forward_auth` | `identity/forward_auth` |
 | `oauth` | `plugins::delegator_oauth` | `delegator/oauth` |
 | `elicitation-ciba` | `plugins::elicitation_ciba` | `elicitation/ciba` |
 | `cedar` | `pdps::cedar_direct` | `cedar-direct` |

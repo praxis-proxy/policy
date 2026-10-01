@@ -43,6 +43,24 @@ its record into the same attributes. Policies such as `require(role.hr)` work
 with either resolver. See [Recipe 7](../identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory)
 for configuration and revocation timing.
 
+`identity/forward_auth` resolves an opaque session credential — a cookie minted
+by a BFF, which PPE cannot read — by delegating to the endpoint that issued it.
+It forwards the configured inbound headers verbatim to an external auth
+sub-request (the Traefik `ForwardAuth` / nginx `auth_request` pattern), and on a
+success status maps the endpoint's response headers (oauth2-proxy's
+`X-Auth-Request-*`) into the same attributes. The credential never leaves the
+plugin: it is not written to `raw_credentials`, so no downstream step can forward
+a caller's own cookie to an upstream that never authenticated it.
+
+Its three outcomes are kept apart deliberately. A **reachable** endpoint that
+rejects the session (or a request carrying no credential) resolves to *no
+subject and no deny*, so `require(authenticated)` can bounce a browser to login
+through a route's `response:` rather than the host answering a fixed 401. An
+**unreachable** endpoint fails closed with a deny, because an identity resolver
+runs `on_error: fail`. A success status that carries no mappable identity denies
+as a misconfiguration rather than looping a signed-in user back to login. It
+declares `capabilities: [perform_http]`.
+
 ## What lands in the bag
 
 A resolved identity populates a flat attribute namespace that predicates read
