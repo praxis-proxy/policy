@@ -846,6 +846,16 @@ impl ConfigVisitor for AplConfigVisitor {
         let mut compiled = compile_policy_block_value("global", &policy_only)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
         self.validate_pdp_steps("global", &compiled)?;
+        // The global policy also runs as an entity-less HTTP catch-all.
+        // Validate that path here; visit_route only covers named routes.
+        self.validate_pdp_input(
+            "global",
+            &compiled,
+            praxis_policy_apl_core::step::StructuredInputAvailability {
+                llm_request: true,
+                args: false,
+            },
+        )?;
         // A `response:` block at the global scope is the catch-all denyWith.
         compiled.response = response_subblock(yaml, "global");
 
@@ -1101,7 +1111,9 @@ impl ConfigVisitor for AplConfigVisitor {
                 &format!("routes.{route_key}"),
                 &effective,
                 praxis_policy_apl_core::step::StructuredInputAvailability {
-                    llm_request: entity_type == ENTITY_LLM,
+                    // The host can attach a request document to any route;
+                    // the handler forwards it whenever this phase has a PDP.
+                    llm_request: true,
                     args: entity_type == ENTITY_TOOL,
                 },
             )?;

@@ -150,7 +150,7 @@ impl PdpResolver for PdpRouter {
     ) -> Result<(), String> {
         call.validate_input_options()?;
         if call.requires_llm_request() && !input.llm_request {
-            return Err("`require_llm_request: true` is valid only on an `llm:` route".to_owned());
+            return Err("`require_llm_request: true` requires a route that can carry a host request document".to_owned());
         }
         self.resolvers
             .get(&call.dialect)

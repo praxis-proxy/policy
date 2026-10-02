@@ -575,32 +575,59 @@ async fn required_request_document_fails_closed_before_opa_runs() {
 }
 
 #[tokio::test]
-async fn request_requirement_is_validated_at_load() {
+async fn required_request_document_on_tool_route_uses_host_document() {
     let base = route_yaml(
         "tool: classify",
         "package authz\nallow := true",
         "data.authz.allow",
     );
-    for value in ["true", "required"] {
-        let yaml = base.replace(
-            "            query: data.authz.allow\n",
-            &format!(
-                "            query: data.authz.allow\n            require_llm_request: {value}\n"
-            ),
-        );
-        let Err(error) = build_manager_with_yaml(&yaml).await else {
-            panic!("invalid request requirement must fail load");
-        };
-        let message = error.to_string();
-        if value == "true" {
-            assert!(
-                message.contains("valid only on an `llm:` route"),
-                "{message}"
-            );
-        } else {
-            assert!(message.contains("must be a bool"), "{message}");
-        }
-    }
+    let yaml = base.replace(
+        "            query: data.authz.allow\n",
+        "            query: data.authz.allow\n            require_llm_request: true\n",
+    );
+    let mgr = build_manager_with_yaml(&yaml)
+        .await
+        .expect("a tool route can carry a host document");
+
+    let extensions = |document: Option<serde_json::Value>| Extensions {
+        meta: Some(Arc::new(meta_for_tool("classify"))),
+        llm_request: document.map(LlmRequestDocument::new),
+        ..Default::default()
+    };
+    let (missing, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), extensions(None), None)
+        .await;
+    assert_eq!(
+        missing.violation.expect("missing document must deny").code,
+        "pdp.llm_request_missing"
+    );
+
+    let (present, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            payload(),
+            extensions(Some(serde_json::json!({"model": "gpt-4o"}))),
+            None,
+        )
+        .await;
+    assert_allowed(&present);
+}
+
+#[tokio::test]
+async fn request_requirement_must_be_bool_at_load() {
+    let yaml = route_yaml(
+        "tool: classify",
+        "package authz\nallow := true",
+        "data.authz.allow",
+    )
+    .replace(
+        "            query: data.authz.allow\n",
+        "            query: data.authz.allow\n            require_llm_request: required\n",
+    );
+    let Err(error) = build_manager_with_yaml(&yaml).await else {
+        panic!("a non-boolean request requirement must fail load");
+    };
+    assert!(error.to_string().contains("must be a bool"), "{error}");
 }
 
 /// A query that hands back the request document itself carries no decision,

@@ -69,13 +69,19 @@ fn policy_name(policy_set: &PolicySet, pid: &cedar_policy::PolicyId) -> String {
 }
 
 /// A value-free line for one evaluation error: the policy and a category.
+#[allow(
+    unreachable_patterns,
+    reason = "Cedar 4.x may add authorization error variants"
+)]
 fn error_line(error: &AuthorizationError, policy_set: &PolicySet) -> String {
-    let AuthorizationError::PolicyEvaluationError(inner) = error;
-    format!(
-        "policy `{}`: {}",
-        policy_name(policy_set, inner.policy_id()),
-        error_category(inner.inner())
-    )
+    match error {
+        AuthorizationError::PolicyEvaluationError(inner) => format!(
+            "policy `{}`: {}",
+            policy_name(policy_set, inner.policy_id()),
+            error_category(inner.inner())
+        ),
+        _ => "policy evaluation failed".to_owned(),
+    }
 }
 
 /// A fixed category for an evaluation error, never Cedar's message text.

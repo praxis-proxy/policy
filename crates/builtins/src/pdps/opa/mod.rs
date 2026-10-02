@@ -28,7 +28,7 @@
 //
 // APL's flat, dotted `AttributeBag` (`subject.id`, `delegation.depth`,
 // `session.labels`) is rebuilt into a nested Rego `input` document so authors
-// write `input.subject.id`. See `input::build_input`. The mapping mirrors
+// write `input.subject.id`. See `input::build_rego_input`. The mapping mirrors
 // the CEL resolver's so the vocabulary is identical across backends. Structured
 // input from `evaluate_structured` is overlaid as native JSON: `input.args`
 // (replacing the flattened args) and `input.llm.request`.

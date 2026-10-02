@@ -1161,6 +1161,7 @@ mod tests {
         let mut bag = bag_with(&[("subject.id", "alice")]);
         bag.set("args.hidden_key", MARKER);
         bag.set("custom.llm.client_value", MARKER);
+        bag.set("custom.anything_else", MARKER);
         bag.set("http.request_headers.authorization", MARKER);
         bag.set("http.response_headers.server", MARKER);
         let structured = StructuredInput::new(
@@ -1218,6 +1219,7 @@ mod tests {
             .evaluate_structured(
                 &cel_call(
                     "custom.llm.client_value == 'other' && \
+                     custom.anything_else == 'other' && \
                      http.request_headers.authorization == 'other' && \
                      http.response_headers.server == 'other'",
                 ),
@@ -1227,7 +1229,7 @@ mod tests {
             .await
             .unwrap();
         assert_no_leak(&out);
-        assert!(out.diagnostics.contains(&"custom.llm=map".to_owned()));
+        assert!(out.diagnostics.contains(&"custom=map".to_owned()));
         assert!(
             out.diagnostics
                 .contains(&"http.request_headers=map".to_owned())

@@ -3,7 +3,7 @@
 
 //! Keeps payload values out of PDP-generated reasons and diagnostics.
 //!
-//! Values under a payload namespace come from the client, so a PDP must not
+//! Values under a payload namespace may contain client data, so a PDP must not
 //! echo them. Engines render such values as a [`TypeLabel`] and name payload
 //! paths only down to their [`payload_namespace`].
 
@@ -16,7 +16,7 @@ const PAYLOAD_NAMESPACES: &[&str] = &[
     "args",
     "result",
     "llm.request",
-    "custom.llm",
+    "custom",
     "http.request_headers",
     "http.response_headers",
 ];
@@ -106,10 +106,8 @@ mod tests {
         assert_eq!(payload_namespace("result.rows"), Some("result"));
         assert_eq!(payload_namespace("llm.request"), Some("llm.request"));
         assert_eq!(payload_namespace("llm.request.tools"), Some("llm.request"));
-        assert_eq!(
-            payload_namespace("custom.llm.temperature"),
-            Some("custom.llm")
-        );
+        assert_eq!(payload_namespace("custom.llm.temperature"), Some("custom"));
+        assert_eq!(payload_namespace("custom.anything_else"), Some("custom"));
         assert_eq!(
             payload_namespace("http.request_headers.authorization"),
             Some("http.request_headers")

@@ -262,7 +262,7 @@ impl PdpResolver for CedarDirectResolver {
         self.validate_call(call)?;
         if self.schema.is_some() && !self.structured_context && (input.llm_request || input.args) {
             return Err(
-                "schema-backed Cedar on an `llm:` or `tool:` route requires \
+                "schema-backed Cedar on a route that can carry structured input requires \
                  `structured_context: true` and matching optional context fields"
                     .to_owned(),
             );

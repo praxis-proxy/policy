@@ -34,14 +34,17 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, ToolCall};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::executor::PipelineResult;
 use praxis_policy_core::extensions::{
-    LlmRequestDocument, MetaExtension, SecurityExtension, SubjectExtension, SubjectType,
+    HttpExtension, LlmRequestDocument, MetaExtension, SecurityExtension, SubjectExtension,
+    SubjectType,
 };
 use praxis_policy_core::hooks::payload::Extensions;
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload};
 
 use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, register_apl};
 use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
@@ -254,6 +257,9 @@ global:
           context: {{
             args?: {{}},
             llm?: {{ request: {{}} }},
+            meta?: {{ entity_type?: String, entity_name?: String, scope?: String, tags?: Set<String> }},
+            security?: {{ labels?: Set<String>, classification?: String }},
+            authenticated?: Bool,
           }},
         }};
 routes:
@@ -271,7 +277,12 @@ routes:
 
 #[tokio::test]
 async fn schema_backed_structured_routes_require_the_opt_in() {
-    for selector in ["llm: gpt-4o", "tool: classify"] {
+    for selector in [
+        "llm: gpt-4o",
+        "tool: classify",
+        "http: /v1/chat/completions",
+        "resource: hr://employees/*",
+    ] {
         let Err(error) = build_manager_with_yaml(&schema_route_yaml(selector, false)).await else {
             panic!("structured route must reject an omitted Cedar context");
         };
@@ -285,6 +296,93 @@ async fn schema_backed_structured_routes_require_the_opt_in() {
             .await
             .expect("declared structured context must load");
     }
+}
+
+#[tokio::test]
+async fn schema_backed_http_route_reads_host_document() {
+    let yaml = schema_route_yaml("http: /v1/chat/completions", true).replace(
+        "policy_text: permit(principal, action, resource);",
+        "policy_text: permit(principal, action, resource) when { context has llm && context.llm has request };",
+    )
+    .replace("entity User =", "entity user =")
+    .replace("principal: User,", "principal: user,");
+    let mgr = build_manager_with_yaml(&yaml)
+        .await
+        .expect("HTTP route with declared structured context must load");
+    let extensions = |document: Option<serde_json::Value>| Extensions {
+        meta: Some(Arc::new(MetaExtension {
+            entity_type: Some(ENTITY_HTTP.to_owned()),
+            entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+            ..Default::default()
+        })),
+        http: Some(Arc::new(HttpExtension {
+            method: Some("POST".to_owned()),
+            path: Some("/v1/chat/completions".to_owned()),
+            ..Default::default()
+        })),
+        security: Some(Arc::new(security_with_roles("alice", &[]))),
+        llm_request: document.map(LlmRequestDocument::new),
+        ..Default::default()
+    };
+
+    let (present, _bg) = mgr
+        .invoke_named::<HttpHook>(
+            HOOK_HTTP_REQUEST,
+            HttpPayload,
+            extensions(Some(serde_json::json!({}))),
+            None,
+        )
+        .await;
+    assert_allowed(&present);
+
+    let (missing, _bg) = mgr
+        .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, extensions(None), None)
+        .await;
+    assert!(!missing.continue_processing, "missing document must deny");
+}
+
+#[tokio::test]
+async fn schema_backed_global_catch_all_requires_the_opt_in() {
+    let yaml = r#"
+engine_settings:
+  dispatch: policy
+global:
+  pdp:
+    - kind: cedar-direct
+      structured_context: false
+      policy_text: permit(principal, action, resource);
+      schema_text: |
+        entity User = {
+          "id": String,
+          "type": String,
+          "roles": Set<String>,
+          "permissions": Set<String>,
+          "teams": Set<String>,
+          "claims": {},
+        };
+        entity Document;
+        action read appliesTo {
+          principal: User,
+          resource: Document,
+          context: { llm?: { request: {} } },
+        };
+  authorization:
+    pre_invocation:
+      - cedar:
+          action: 'Action::"read"'
+          resource:
+            type: Document
+            id: doc-42
+"#;
+    let Err(error) = build_manager_with_yaml(yaml).await else {
+        panic!("the global HTTP catch-all must validate structured input");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("requires `structured_context: true`"),
+        "{error}"
+    );
 }
 
 async fn run_llm(policy: &str, document: Option<serde_json::Value>) -> PipelineResult {

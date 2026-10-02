@@ -38,6 +38,11 @@ use praxis_policy_apl_core::redact::payload_namespace;
 use praxis_policy_apl_core::route::StructuredInput;
 use serde_json::{Map, Number, Value};
 
+/// Build the bag-only JSON input used by callers of the original OPA mapping.
+pub fn bag_to_input(bag: &AttributeBag) -> Value {
+    build_input(bag, &StructuredInput::default())
+}
+
 /// Build the Rego `input` document from the policy bag and structured input.
 ///
 /// Every dotted bag key becomes a nested field: `subject.id` → `{"subject":
@@ -296,21 +301,17 @@ mod tests {
             .unwrap_or(false)
     }
 
-    fn bag_to_input(bag: &AttributeBag) -> Value {
-        build_input(bag, &StructuredInput::default())
-    }
-
     fn with_args(args: Value) -> StructuredInput {
         StructuredInput::new(None, Some(Arc::new(args)))
     }
 
     /// Read `input` back out of regorus as JSON after the engine has parsed it.
-    fn rego_input_roundtrip(structured: &StructuredInput) -> Value {
+    fn rego_input_roundtrip(bag: &AttributeBag, structured: &StructuredInput) -> Value {
         let mut engine = Engine::new();
         engine
             .add_policy("t.rego".to_owned(), "package t\nv := input\n".to_owned())
             .unwrap();
-        engine.set_input(build_rego_input(&AttributeBag::new(), structured));
+        engine.set_input(build_rego_input(bag, structured));
         let v = engine.eval_rule("data.t.v".to_owned()).unwrap();
         serde_json::from_str(&v.to_json_str().unwrap()).unwrap()
     }
@@ -392,7 +393,7 @@ mod tests {
         bag.set("args.stale", "flattened-only");
         bag.set("subject.id", "alice");
         let structured = with_args(json!({"region": "eu", "items": [{"k": 1}]}));
-        let input = build_input(&bag, &structured);
+        let input = rego_input_roundtrip(&bag, &structured);
         assert_eq!(input["args"], json!({"region": "eu", "items": [{"k": 1}]}));
         assert_eq!(input["subject"]["id"], "alice");
         assert!(rego_eval_structured(
@@ -407,7 +408,7 @@ mod tests {
     fn flattened_args_kept_when_structured_args_absent() {
         let mut bag = AttributeBag::new();
         bag.set("args", "prompt text");
-        let input = build_input(&bag, &StructuredInput::default());
+        let input = rego_input_roundtrip(&bag, &StructuredInput::default());
         assert_eq!(input["args"], "prompt text");
     }
 
@@ -419,7 +420,7 @@ mod tests {
             Some(Arc::new(json!({"model": "gpt-4o", "tools": []}))),
             None,
         );
-        let input = build_input(&bag, &structured);
+        let input = rego_input_roundtrip(&bag, &structured);
         assert_eq!(input["llm"]["model_id"], "gpt-4o");
         assert_eq!(
             input["llm"]["request"],
@@ -432,7 +433,7 @@ mod tests {
         let mut bag = AttributeBag::new();
         bag.set("llm", "scalar");
         let structured = StructuredInput::new(Some(Arc::new(json!({"model": "m"}))), None);
-        let input = build_input(&bag, &structured);
+        let input = rego_input_roundtrip(&bag, &structured);
         assert_eq!(input["llm"], json!({"request": {"model": "m"}}));
     }
 
@@ -440,7 +441,7 @@ mod tests {
     fn absent_document_stays_undefined() {
         let mut bag = AttributeBag::new();
         bag.set("llm.model_id", "gpt-4o");
-        let input = build_input(&bag, &StructuredInput::default());
+        let input = rego_input_roundtrip(&bag, &StructuredInput::default());
         assert!(input["llm"].get("request").is_none());
         assert!(rego_eval("not input.llm.request", &bag));
     }
@@ -460,7 +461,7 @@ mod tests {
             Some(Arc::new(json!({"tools": [{"type": "function"}]}))),
             Some(Arc::new(args.clone())),
         );
-        let back = rego_input_roundtrip(&structured);
+        let back = rego_input_roundtrip(&AttributeBag::new(), &structured);
         assert_eq!(back["args"], args);
         assert_eq!(
             back["llm"]["request"],

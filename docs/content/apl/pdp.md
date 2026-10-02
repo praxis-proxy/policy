@@ -93,7 +93,7 @@ before.
 
 | Name | Where it is set | What it holds |
 |---|---|---|
-| `llm.request` | any route whose host supplied it. Hosts supply it for inference requests, so in practice `llm:` routes. | The request body as the host parsed it, from `Extensions.llm_request`. The slot is immutable, so plugins cannot replace it, and a PDP always sees the original body. |
+| `llm.request` | Any route whose host supplied it, including an `http:` route that proxies inference. | The request body as the host parsed it, from `Extensions.llm_request`. The slot is immutable, so plugins cannot replace it, and a PDP always sees the original body. |
 | `args` | `tool:` routes | The first tool call's arguments, taken before any `args:` pipeline runs. Only an object counts. |
 
 Each engine names them as follows:
@@ -142,8 +142,7 @@ A document the host did not supply is absent, never an empty object.
 
 Set `require_llm_request: true` on a PDP step when its decision depends on the
 document. The evaluator then denies an absent document with
-`pdp.llm_request_missing` before invoking the engine. The option is accepted
-only on `llm:` routes.
+`pdp.llm_request_missing` before invoking the engine on any route.
 
 Structured `args` is the received value. An `args:` pipeline can change the
 value forwarded to the tool after this snapshot is taken.
@@ -274,10 +273,11 @@ a reaction.
 **With a schema.** A Cedar schema gives each action a closed context type, so
 an undeclared `args` or `llm` key fails request validation and the step denies.
 A `cedar-direct` resolver with `schema_text` or `schema_file` therefore
-requires `structured_context: true` when a Cedar step reaches an `llm:` or
-`tool:` route. Config load rejects that combination without the flag. Declare
-both keys as optional in the context type of every action a structured route
-calls:
+requires `structured_context: true` when a Cedar step reaches any route,
+because the host can attach an LLM request document to each route. Config
+load rejects a schema-backed Cedar step without the flag. Declare `llm` as
+optional in the context type of every action such a step calls, and also
+declare `args` for `tool:` routes:
 
 ```yaml
 global:

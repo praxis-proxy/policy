@@ -444,7 +444,7 @@ pub trait PdpResolver: Send + Sync {
     ) -> Result<(), String> {
         self.validate_call(call)?;
         if call.requires_llm_request() && !input.llm_request {
-            return Err("`require_llm_request: true` is valid only on an `llm:` route".to_owned());
+            return Err("`require_llm_request: true` requires a route that can carry a host request document".to_owned());
         }
         Ok(())
     }
