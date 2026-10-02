@@ -38,6 +38,8 @@ pub enum SlotName {
     Provenance,
     /// The model identity slot.
     Llm,
+    /// The host-parsed LLM request document slot.
+    LlmRequest,
     /// The framework context slot.
     Framework,
     // Security sub-slots
@@ -132,6 +134,12 @@ pub fn slot_policy(slot: SlotName) -> SlotPolicy {
             tier: MutabilityTier::Immutable,
             access: AccessPolicy::CapabilityGated,
             read_cap: Some(Capability::ReadAgent),
+            write_cap: None,
+        },
+        SlotName::LlmRequest => SlotPolicy {
+            tier: MutabilityTier::Immutable,
+            access: AccessPolicy::CapabilityGated,
+            read_cap: Some(Capability::ReadLlmRequest),
             write_cap: None,
         },
         SlotName::Http => SlotPolicy {
@@ -351,6 +359,14 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         }
     }
 
+    // Capability-gated: the parsed LLM request document
+    if extensions.llm_request.is_some() {
+        let policy = slot_policy(SlotName::LlmRequest);
+        if has_read_access(&policy, capabilities) {
+            filtered.llm_request = extensions.llm_request.clone();
+        }
+    }
+
     // Capability-gated: http
     if extensions.http.is_some() {
         let policy = slot_policy(SlotName::Http);
@@ -541,6 +557,7 @@ fn build_filtered_subject(
 )]
 mod tests {
     use super::*;
+    use crate::extensions::llm::LlmRequestDocument;
     use crate::extensions::meta::MetaExtension;
 
     // ---- host services: the outbound-HTTP gate -------------------------
@@ -794,6 +811,50 @@ mod tests {
         assert!(filtered.agent.is_some());
         assert_eq!(filtered.agent.unwrap().agent_id, Some("agent-1".into()));
         assert!(filtered.http.is_none());
+    }
+
+    fn extensions_with_llm_request() -> Extensions {
+        Extensions {
+            llm_request: Some(LlmRequestDocument::new(serde_json::json!({
+                "model": "gpt-4o",
+                "tools": [{"type": "function", "name": "search"}],
+            }))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_read_llm_request_capability_shares_host_arc() {
+        let ext = extensions_with_llm_request();
+        let caps: HashSet<String> = ["read_llm_request".to_owned()].into();
+        let filtered = filter_extensions(&ext, &caps);
+
+        assert!(Arc::ptr_eq(
+            filtered.llm_request.as_ref().unwrap().shared(),
+            ext.llm_request.as_ref().unwrap().shared()
+        ));
+    }
+
+    #[test]
+    fn test_llm_request_hidden_without_capability() {
+        let ext = extensions_with_llm_request();
+        let caps: HashSet<String> = [
+            "read_agent",
+            "read_headers",
+            "read_subject",
+            "read_labels",
+            "read_delegation",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let filtered = filter_extensions(&ext, &caps);
+        assert!(filtered.llm_request.is_none());
+        assert!(
+            filter_extensions(&ext, &HashSet::new())
+                .llm_request
+                .is_none()
+        );
     }
 
     #[test]
@@ -1085,6 +1146,7 @@ mod tests {
         SlotName::Completion,
         SlotName::Provenance,
         SlotName::Llm,
+        SlotName::LlmRequest,
         SlotName::Framework,
         SlotName::SecurityLabels,
         SlotName::SecuritySubject,

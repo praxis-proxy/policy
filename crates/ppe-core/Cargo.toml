@@ -33,7 +33,7 @@ rust-version.workspace = true
 # or injecting plugin faults enable it as a dev-dependency:
 #
 #     [dev-dependencies]
-#     praxis-policy-core = { version = "0.1", features = ["test-util"] }
+#     praxis-policy-core = { version = "0.4", features = ["test-util"] }
 test-util = []
 
 [dependencies]

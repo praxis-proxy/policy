@@ -34,10 +34,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use praxis_policy_core::cmf::enums::Role;
-use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
+use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, ToolCall};
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::executor::PipelineResult;
 use praxis_policy_core::extensions::{
-    MetaExtension, SecurityExtension, SubjectExtension, SubjectType,
+    LlmRequestDocument, MetaExtension, SecurityExtension, SubjectExtension, SubjectType,
 };
 use praxis_policy_core::hooks::payload::Extensions;
 
@@ -368,4 +369,271 @@ routes:
         "meta.entity_name == \"get_document\" must reach CEL and allow; got violation = {:?}",
         allow.violation,
     );
+}
+
+// Structured input: the request document on `llm:` routes and native `args` on
+// `tool:` routes.
+
+/// A unique string that must never reach a deny reason or diagnostic.
+const MARKER: &str = "SECRET-MARKER";
+
+/// One route whose policy is `steps`, each already indented as a list item.
+fn route_yaml(selector: &str, steps: &str) -> String {
+    format!(
+        "
+engine_settings:
+  dispatch: policy
+global:
+  pdp:
+    - kind: cel
+routes:
+  - {selector}
+    authorization:
+      pre_invocation:
+{steps}
+"
+    )
+}
+
+/// A single `cel:` step with `expr` and optional extra args.
+fn cel_step(expr: &str, extra: &str) -> String {
+    format!("        - cel:\n            expr: '{expr}'\n{extra}")
+}
+
+fn llm_ext(document: Option<serde_json::Value>) -> Extensions {
+    Extensions {
+        meta: Some(Arc::new(MetaExtension {
+            entity_type: Some("llm".to_owned()),
+            entity_name: Some("gpt-4o".to_owned()),
+            ..Default::default()
+        })),
+        security: Some(Arc::new(security_with_roles("alice", &[]))),
+        llm_request: document.map(LlmRequestDocument::new),
+        ..Default::default()
+    }
+}
+
+async fn run_llm(steps: &str, document: Option<serde_json::Value>) -> PipelineResult {
+    let mgr = build_manager_with_yaml(&route_yaml("llm: gpt-4o", steps))
+        .await
+        .expect("load_config_yaml");
+    let payload = MessagePayload {
+        message: Message::text(Role::User, format!("prompt {MARKER}")),
+    };
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.llm_input", payload, llm_ext(document), None)
+        .await;
+    result
+}
+
+async fn run_tool(steps: &str, arguments: serde_json::Value) -> PipelineResult {
+    let mgr = build_manager_with_yaml(&route_yaml("tool: classify", steps))
+        .await
+        .expect("load_config_yaml");
+    let serde_json::Value::Object(arguments) = arguments else {
+        panic!("tool-call arguments must be an object");
+    };
+    let payload = MessagePayload {
+        message: Message::with_content(
+            Role::User,
+            vec![ContentPart::ToolCall {
+                content: ToolCall {
+                    tool_call_id: "tc_001".to_owned(),
+                    name: "classify".to_owned(),
+                    arguments: arguments.into_iter().collect(),
+                    namespace: None,
+                },
+            }],
+        ),
+    };
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("classify"))),
+        security: Some(Arc::new(security_with_roles("alice", &[]))),
+        ..Default::default()
+    };
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload, ext, None)
+        .await;
+    result
+}
+
+fn assert_allowed(result: &PipelineResult) {
+    assert!(
+        result.continue_processing,
+        "expected allow; got violation = {:?}",
+        result.violation
+    );
+}
+
+/// Asserts a deny and returns its violation rendered for leak checks.
+fn denied_violation(result: &PipelineResult) -> String {
+    assert!(!result.continue_processing, "expected deny");
+    let violation = result
+        .violation
+        .as_ref()
+        .expect("deny must carry a violation");
+    format!("{violation:?}")
+}
+
+fn tool(name: &str) -> serde_json::Value {
+    serde_json::json!({"type": "function", "function": {"name": name}})
+}
+
+const FORBIDDEN_TOOL: &str =
+    r#"!llm.request.tools.exists(t, has(t.function) && t.function.name == "transfer_funds")"#;
+
+#[tokio::test]
+async fn llm_request_forbidden_tool_in_second_position_denies() {
+    let document = serde_json::json!({
+        "model": "gpt-4o",
+        "tools": [tool("search"), tool("transfer_funds")],
+    });
+    let result = run_llm(&cel_step(FORBIDDEN_TOOL, ""), Some(document)).await;
+    let violation = denied_violation(&result);
+    assert!(
+        violation.contains("CEL expression evaluated to false"),
+        "{violation}"
+    );
+}
+
+#[tokio::test]
+async fn llm_request_with_only_permitted_tools_allows() {
+    let document = serde_json::json!({
+        "model": "gpt-4o",
+        "tools": [tool("search"), {"type": "web_search_20250305"}],
+    });
+    let result = run_llm(&cel_step(FORBIDDEN_TOOL, ""), Some(document)).await;
+    assert_allowed(&result);
+}
+
+/// An allowlist of tool types, passed as an extra `cel:` argument.
+#[tokio::test]
+async fn llm_request_tool_type_allowlist() {
+    let expr = "llm.request.tools.all(t, allowed.exists(p, t.type.matches(p)))";
+    let document = serde_json::json!({
+        "tools": [{"type": "web_search_20250305"}, {"type": "function", "function": {}}],
+    });
+    let without = cel_step(expr, "            allowed: ['^function$']\n");
+    let violation = denied_violation(&run_llm(&without, Some(document.clone())).await);
+    assert!(
+        violation.contains("CEL expression evaluated to false"),
+        "{violation}"
+    );
+
+    let with = cel_step(
+        expr,
+        "            allowed: ['^function$', '^web_search_[0-9]+$']\n",
+    );
+    assert_allowed(&run_llm(&with, Some(document)).await);
+}
+
+/// With no document, a rule over `llm.request` denies under the default
+/// `on_error`. A `has()` guard handles a field missing from a document.
+#[tokio::test]
+async fn absent_document_denies_and_absent_field_is_guarded() {
+    let expr = "size(llm.request.tools) == 0";
+    denied_violation(&run_llm(&cel_step(expr, ""), None).await);
+
+    let guarded = "!has(llm.request.tools) || size(llm.request.tools) == 0";
+    let document = serde_json::json!({"model": "gpt-4o"});
+    assert_allowed(&run_llm(&cel_step(guarded, ""), Some(document)).await);
+}
+
+/// Items are native maps, and an APL predicate on the flattened bag still
+/// runs on the same route.
+#[tokio::test]
+async fn tool_args_list_of_objects_with_apl_predicate() {
+    let steps = format!(
+        "        - 'require(args.region == \"eu\")'\n{}",
+        cel_step(
+            r#"!args.items.exists(i, has(i.classification) && i.classification == "secret")"#,
+            ""
+        )
+    );
+    let items = serde_json::json!([{"name": "a"}, {"classification": "secret"}]);
+    let violation = denied_violation(
+        &run_tool(&steps, serde_json::json!({"region": "eu", "items": items})).await,
+    );
+    assert!(
+        violation.contains("CEL expression evaluated to false"),
+        "{violation}"
+    );
+
+    let public = serde_json::json!([{"name": "a"}, {"classification": "public"}]);
+    assert_allowed(
+        &run_tool(
+            &steps,
+            serde_json::json!({"region": "eu", "items": public.clone()}),
+        )
+        .await,
+    );
+    let violation = denied_violation(
+        &run_tool(&steps, serde_json::json!({"region": "us", "items": public})).await,
+    );
+    assert!(
+        !violation.contains("CEL expression"),
+        "the APL predicate must deny before the CEL step: {violation}"
+    );
+}
+
+/// Structured `args` keeps JSON types, order, duplicates, and explicit nulls.
+#[tokio::test]
+async fn tool_args_arrive_as_native_values() {
+    let expr = "size(args.dupes) == 2 && args.nothing == null && args.empty == {} \
+                && args.one == 1 && 13 in args.ids && !(\"13\" in args.ids) \
+                && has(args.note)";
+    let result = run_tool(
+        &cel_step(expr, ""),
+        serde_json::json!({
+            "dupes": [1, 1],
+            "nothing": null,
+            "empty": {},
+            "one": 1,
+            "ids": [13],
+            "note": null,
+        }),
+    )
+    .await;
+    assert_allowed(&result);
+}
+
+/// Reasons and diagnostics name no payload value or client-chosen key, for a
+/// false result, a non-bool result, and a type error.
+#[tokio::test]
+async fn deny_paths_omit_payload_values() {
+    const CAUSES: [&str; 3] = [
+        "CEL expression evaluated to false",
+        "CEL expression must return bool, got list(1)",
+        "CEL eval error: unsupported binary operator `add` on string and int",
+    ];
+    let document = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": MARKER}],
+        "hidden_key": MARKER,
+    });
+    let llm_exprs = [
+        "llm.request.model == \"other\"",
+        "llm.request.messages",
+        "llm.request.messages[0].content + 1 == 2",
+    ];
+    for (expr, cause) in llm_exprs.into_iter().zip(CAUSES) {
+        let violation =
+            denied_violation(&run_llm(&cel_step(expr, ""), Some(document.clone())).await);
+        assert!(violation.contains(cause), "{expr}: {violation}");
+        assert!(!violation.contains(MARKER), "{expr}: {violation}");
+        assert!(!violation.contains("hidden_key"), "{expr}: {violation}");
+    }
+
+    let args = serde_json::json!({"hidden_key": MARKER, "items": [MARKER]});
+    let tool_exprs = [
+        "size(args.items) == 0",
+        "args.items",
+        "args.items[0] + 1 == 2",
+    ];
+    for (expr, cause) in tool_exprs.into_iter().zip(CAUSES) {
+        let violation = denied_violation(&run_tool(&cel_step(expr, ""), args.clone()).await);
+        assert!(violation.contains(cause), "{expr}: {violation}");
+        assert!(!violation.contains(MARKER), "{expr}: {violation}");
+        assert!(!violation.contains("hidden_key"), "{expr}: {violation}");
+    }
 }

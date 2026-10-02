@@ -34,7 +34,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
-use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
+use praxis_policy_apl_core::route::StructuredInput;
+use praxis_policy_apl_core::step::{
+    PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver, StructuredInputAvailability,
+};
 
 /// Dispatches PDP calls to the right resolver based on
 /// `Step::Pdp.call.dialect`. Construct with `new()`, add resolvers via
@@ -117,6 +120,44 @@ impl PdpResolver for PdpRouter {
             .ok_or_else(|| PdpError::NoResolver(call.dialect.clone()))?;
         resolver.evaluate(call, bag).await
     }
+
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
+        let resolver = self
+            .resolvers
+            .get(&call.dialect)
+            .ok_or_else(|| PdpError::NoResolver(call.dialect.clone()))?;
+        resolver.evaluate_structured(call, bag, structured).await
+    }
+
+    /// Forwards to the resolver for the call's dialect. A dialect with no
+    /// resolver passes, so it still fails per request as `NoResolver`.
+    fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+        call.validate_input_options()?;
+        self.resolvers
+            .get(&call.dialect)
+            .map_or_else(|| Ok(()), |resolver| resolver.validate_call(call))
+    }
+
+    fn validate_call_with_input(
+        &self,
+        call: &PdpCall,
+        input: StructuredInputAvailability,
+    ) -> Result<(), String> {
+        call.validate_input_options()?;
+        if call.requires_llm_request() && !input.llm_request {
+            return Err("`require_llm_request: true` requires a route that can carry a host request document".to_owned());
+        }
+        self.resolvers
+            .get(&call.dialect)
+            .map_or(Ok(()), |resolver| {
+                resolver.validate_call_with_input(call, input)
+            })
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +239,50 @@ mod tests {
         };
         let err = router.evaluate(&call, &bag).await.unwrap_err();
         assert!(matches!(err, PdpError::NoResolver(_)));
+    }
+
+    struct StrictPdp;
+
+    #[async_trait]
+    impl PdpResolver for StrictPdp {
+        fn dialect(&self) -> PdpDialect {
+            PdpDialect::Cedar
+        }
+
+        async fn evaluate(
+            &self,
+            _call: &PdpCall,
+            _bag: &AttributeBag,
+        ) -> Result<PdpDecision, PdpError> {
+            Ok(PdpDecision {
+                decision: Decision::Allow,
+                diagnostics: Vec::new(),
+            })
+        }
+
+        fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+            if call.args.is_null() {
+                Err("args required".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn validate_call_forwards_by_dialect() {
+        let mut router = PdpRouter::new();
+        router.register(Arc::new(StrictPdp));
+        let call = |dialect| PdpCall {
+            dialect,
+            args: serde_yaml::Value::Null,
+        };
+        assert_eq!(
+            router.validate_call(&call(PdpDialect::Cedar)),
+            Err("args required".to_owned())
+        );
+        // No resolver for the dialect: load passes, as it did before.
+        assert_eq!(router.validate_call(&call(PdpDialect::Opa)), Ok(()));
     }
 
     #[tokio::test]

@@ -91,10 +91,10 @@ use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
 use praxis_policy_apl_core::attribute_source::{AttributeSource as _, AttributeTree};
 use praxis_policy_apl_core::parser::compile_policy_block_value;
 use praxis_policy_apl_core::plugin_decl::{PluginDeclaration, PluginRegistry};
-use praxis_policy_apl_core::rules::{CompiledRoute, DenyResponse};
+use praxis_policy_apl_core::rules::{CompiledRoute, DenyResponse, Effect};
 use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
-use crate::dispatch_plan::DispatchCache;
+use crate::dispatch_plan::{DispatchCache, walk_effects};
 use crate::pdp_router::PdpRouter;
 use crate::route_handler::{AplRouteHandler, HookFamily, Phase};
 use crate::session_store::{SessionStore, SessionStoreFactory};
@@ -430,6 +430,77 @@ impl AplConfigVisitor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         (plugin_registry, pdp_router_arc, session_store)
+    }
+
+    /// Run each PDP step's load-time check against the registered resolvers.
+    ///
+    /// Covers steps nested in `when`, `sequential`, `parallel`, and reaction
+    /// lists. The error names the scope, phase, and dialect, never argument
+    /// values.
+    fn validate_pdp_steps(
+        &self,
+        scope: &str,
+        compiled: &CompiledRoute,
+    ) -> Result<(), VisitorError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (phase, effects) in [
+            ("pre_invocation", &compiled.pre_invocation),
+            ("post_invocation", &compiled.post_invocation),
+        ] {
+            let mut failure: Option<String> = None;
+            walk_effects(effects, &mut |effect| {
+                if failure.is_none()
+                    && let Effect::Pdp { call, .. } = effect
+                    && let Err(msg) = state.pdp_router.validate_call(call)
+                {
+                    failure = Some(format!(
+                        "{scope}: {phase}: invalid {:?} step: {msg}",
+                        call.dialect
+                    ));
+                }
+            });
+            if let Some(msg) = failure {
+                return Err(msg.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the effective route against the structured values it carries.
+    fn validate_pdp_input(
+        &self,
+        scope: &str,
+        compiled: &CompiledRoute,
+        input: praxis_policy_apl_core::step::StructuredInputAvailability,
+    ) -> Result<(), VisitorError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (phase, effects) in [
+            ("pre_invocation", &compiled.pre_invocation),
+            ("post_invocation", &compiled.post_invocation),
+        ] {
+            let mut failure = None;
+            walk_effects(effects, &mut |effect| {
+                if failure.is_none()
+                    && let Effect::Pdp { call, .. } = effect
+                    && let Err(msg) = state.pdp_router.validate_call_with_input(call, input)
+                {
+                    failure = Some(format!(
+                        "{scope}: {phase}: invalid {:?} step: {msg}",
+                        call.dialect
+                    ));
+                }
+            });
+            if let Some(msg) = failure {
+                return Err(msg.into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -774,6 +845,17 @@ impl ConfigVisitor for AplConfigVisitor {
         let policy_only = strip_wiring_keys(&apl_block);
         let mut compiled = compile_policy_block_value("global", &policy_only)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
+        self.validate_pdp_steps("global", &compiled)?;
+        // The global policy also runs as an entity-less HTTP catch-all.
+        // Validate that path here; visit_route only covers named routes.
+        self.validate_pdp_input(
+            "global",
+            &compiled,
+            praxis_policy_apl_core::step::StructuredInputAvailability {
+                llm_request: true,
+                args: false,
+            },
+        )?;
         // A `response:` block at the global scope is the catch-all denyWith.
         compiled.response = response_subblock(yaml, "global");
 
@@ -877,6 +959,7 @@ impl ConfigVisitor for AplConfigVisitor {
         };
         let compiled = compile_policy_block_value(&source, &apl_block)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
+        self.validate_pdp_steps(&source, &compiled)?;
         // A default layer reaches only its own entity type, so a field stage
         // declared here for `http` is as unreadable as one on the route.
         reject_field_stages_without_fields(entity_type, &source, &compiled)?;
@@ -906,6 +989,7 @@ impl ConfigVisitor for AplConfigVisitor {
         };
         let compiled = compile_policy_block_value(&source, &apl_block)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
+        self.validate_pdp_steps(&source, &compiled)?;
         // No reachability tally here, for the reason in `visit_default`. A group
         // installs no handler and matches no request on its own: a route has to
         // carry its name. Recording at compile time meant an orphan group nothing
@@ -1007,6 +1091,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 let source = format!("routes.{route_key}");
                 let route_layer = compile_policy_block_value(&source, block)
                     .map_err(|e| -> VisitorError { Box::new(e) })?;
+                self.validate_pdp_steps(&source, &route_layer)?;
                 reject_field_stages_without_fields(
                     entity_type,
                     &format!("route '{route_key}'"),
@@ -1021,6 +1106,17 @@ impl ConfigVisitor for AplConfigVisitor {
             // entity route — a malformed or absent block leaves it `None`
             // (host default denial), never a leaked `global` response.
             effective.response = route_response.clone();
+
+            self.validate_pdp_input(
+                &format!("routes.{route_key}"),
+                &effective,
+                praxis_policy_apl_core::step::StructuredInputAvailability {
+                    // The host can attach a request document to any route;
+                    // the handler forwards it whenever this phase has a PDP.
+                    llm_request: true,
+                    args: entity_type == ENTITY_TOOL,
+                },
+            )?;
 
             // Load-time lint, once per route: flag any APL `plugins:`
             // override declared for a plugin that no policy / delegate step
@@ -1296,6 +1392,10 @@ fn install_handler(
     // entity/`args.*` predicates in one evaluation. It is a no-op for hosts that
     // never populate the HTTP extension (nothing to read).
     capabilities.insert("read_headers".to_owned());
+    // The built-in PDPs read the parsed LLM request through this handler's
+    // filtered view, so the grant is intrinsic rather than left to the
+    // replaceable baseline. The slot is never flattened into the bag.
+    capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_LLM_REQUEST.to_owned());
     // The APL engine emits the backend candidate constraint (the `restrict`
     // effect's output) into `Extensions.candidate_constraint`. That slot is
     // write-gated in the executor, so the synthetic handler holds the write
@@ -1317,6 +1417,15 @@ fn install_handler(
         capabilities,
         ..Default::default()
     };
+    let effects = match phase {
+        Phase::Pre => &route.pre_invocation,
+        Phase::Post => &route.post_invocation,
+    };
+    let mut has_pdp = false;
+    walk_effects(effects, &mut |effect| {
+        has_pdp |= matches!(effect, Effect::Pdp { .. });
+    });
+
     let mut handler = AplRouteHandler::new(
         plugin_config.clone(),
         route,
@@ -1327,7 +1436,9 @@ fn install_handler(
         Arc::clone(session_store),
         engine.clone(),
     )
-    .with_attribute_tree(attribute_tree);
+    .with_attribute_tree(attribute_tree)
+    .with_structured_args(entity_type == ENTITY_TOOL)
+    .with_structured_input(has_pdp);
     if let Some(pdp) = pdp {
         handler = handler.with_pdp(pdp);
     }
@@ -1553,8 +1664,11 @@ mod tests {
         declares_pre_phase, displaced_plugin_chain, response_subblock,
     };
     use crate::session_store::MemorySessionStore;
+    use praxis_policy_apl_core::attributes::AttributeBag;
+    use praxis_policy_apl_core::evaluator::Decision;
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage, TypeCheck};
     use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
+    use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
     use praxis_policy_core::cmf::enums::Role;
     use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
     use praxis_policy_core::config::{HttpSelector, Pattern, StringOrList};
@@ -2380,5 +2494,91 @@ routes:
             "the route's rule is the route's alone; violation = {:?}",
             allowed.violation
         );
+    }
+
+    /// A CEL stand-in whose load-time check rejects any `forbidden` key.
+    struct StrictPdp;
+
+    #[async_trait::async_trait]
+    impl PdpResolver for StrictPdp {
+        fn dialect(&self) -> PdpDialect {
+            PdpDialect::Cel
+        }
+
+        async fn evaluate(
+            &self,
+            _call: &PdpCall,
+            _bag: &AttributeBag,
+        ) -> Result<PdpDecision, PdpError> {
+            Ok(PdpDecision {
+                decision: Decision::Allow,
+                diagnostics: Vec::new(),
+            })
+        }
+
+        fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+            if call.args.get("forbidden").is_some() {
+                Err("`forbidden` is not allowed".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn load_with_strict_pdp(yaml: &str) -> Result<(), String> {
+        let mgr = Arc::new(PolicyEngine::default());
+        let mut options = crate::AplOptions::in_process();
+        options.pdps.push(Arc::new(StrictPdp));
+        crate::register_apl(&mgr, options);
+        mgr.load_config_yaml(yaml).map_err(|e| e.to_string())
+    }
+
+    fn route_with_steps(steps: &str) -> String {
+        format!(
+            "engine_settings:\n  dispatch: policy\nroutes:\n  - tool: t\n    authorization:\n      \
+             pre_invocation:\n{steps}"
+        )
+    }
+
+    #[test]
+    fn a_valid_pdp_step_loads() {
+        let yaml = route_with_steps("        - cel: { expr: 'true' }\n");
+        assert_eq!(load_with_strict_pdp(&yaml), Ok(()));
+    }
+
+    #[test]
+    fn a_rejected_pdp_step_fails_load_in_a_reaction_too() {
+        let cases = [
+            "        - cel: { expr: 'true', forbidden: 1 }\n",
+            "        - cel:\n            expr: 'true'\n            on_allow:\n              \
+             - cel: { expr: 'true', forbidden: 1 }\n",
+            "        - cel:\n            expr: 'true'\n            on_deny:\n              \
+             - cel: { expr: 'true', forbidden: 1 }\n",
+        ];
+        for steps in cases {
+            let err = load_with_strict_pdp(&route_with_steps(steps))
+                .expect_err("a rejected step must fail load");
+            assert!(err.contains("routes.tool:t"), "{err}");
+            assert!(err.contains("pre_invocation"), "{err}");
+            assert!(err.contains("`forbidden` is not allowed"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_rejected_pdp_step_fails_load_in_every_layer() {
+        let step = "      - cel: { expr: 'true', forbidden: 1 }\n";
+        let global = format!(
+            "engine_settings:\n  dispatch: policy\nglobal:\n  authorization:\n    \
+             pre_invocation:\n  {step}"
+        );
+        let err = load_with_strict_pdp(&global).expect_err("global");
+        assert!(err.contains("global: pre_invocation"), "{err}");
+
+        let group = format!(
+            "engine_settings:\n  dispatch: policy\ngroups:\n  g:\n    authorization:\n      \
+             post_invocation:\n  {step}"
+        );
+        let err = load_with_strict_pdp(&group).expect_err("group");
+        assert!(err.contains("groups.g: post_invocation"), "{err}");
     }
 }

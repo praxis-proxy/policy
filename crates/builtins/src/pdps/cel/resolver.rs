@@ -16,19 +16,28 @@
 //
 // The cause of any Deny / error is recorded in `PdpDecision.diagnostics`
 // for audit, and is the `rule_source` on the resulting Deny.
+//
+// Payload values never reach a reason, diagnostic, or log line. A non-bool
+// result names only its type, an eval error becomes a fixed category that
+// keeps only names the expression itself spells, and the deny snapshot shows
+// payload namespaces as type labels.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use cel::{Context, Program, Value};
+use cel::parser::ExpressionReferences;
+use cel::{Context, ExecutionError, Program, Value};
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
+use praxis_policy_apl_core::redact::{TypeLabel, payload_namespace};
+use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
 use crate::pdps::cel::activation::bag_to_context;
 use crate::pdps::cel::error::BuildError;
+use crate::pdps::stack;
 
 /// What to do when an expression errors at runtime (an undeclared
 /// variable, a type error, a custom-function panic) or returns a
@@ -393,6 +402,16 @@ impl PdpResolver for CelResolver {
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
+        self.evaluate_structured(call, bag, &StructuredInput::default())
+            .await
+    }
+
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
         // 1. Pull the expression text from the step args. A `cel:` step
         //    with no `expr` string is an author/config bug — hard error.
         let expr = call
@@ -417,80 +436,103 @@ impl PdpResolver for CelResolver {
             },
         };
 
-        // 3. Build the activation from the bag + author-supplied extra
-        //    args. Then layer any host-supplied custom-function bundles
-        //    on top so expressions can call into them. Setups run in
-        //    registration order; later setups can shadow earlier ones,
-        //    which is the documented contract.
-        let mut ctx = bag_to_context(bag, &call.args);
+        // 3. Build the activation from the bag, the structured input the
+        //    expression references, and author-supplied extra args. Then layer
+        //    any host-supplied custom-function bundles on top so expressions
+        //    can call into them. Setups run in registration order; later
+        //    setups can shadow earlier ones, which is the documented contract.
+        //
+        //    Converting, evaluating and dropping nested client JSON recurses,
+        //    so the whole synchronous block runs with stack headroom.
+        let structured = referenced_structured(&program, structured);
+        Ok(stack::guarded(|| {
+            self.decide(expr, &program, bag, call, &structured)
+        }))
+    }
+}
+
+impl CelResolver {
+    /// Evaluate a compiled program and map the result to a decision.
+    fn decide(
+        &self,
+        expr: &str,
+        program: &Program,
+        bag: &AttributeBag,
+        call: &PdpCall,
+        structured: &StructuredInput,
+    ) -> PdpDecision {
+        let mut ctx = bag_to_context(bag, &call.args, structured);
         for setup in &self.function_setups {
             setup(&mut ctx);
         }
 
         // 4. Evaluate and map the result to a decision.
         match program.execute(&ctx) {
-            Ok(Value::Bool(true)) => Ok(PdpDecision {
+            Ok(Value::Bool(true)) => PdpDecision {
                 decision: Decision::Allow,
                 diagnostics: vec![],
-            }),
+            },
             Ok(Value::Bool(false)) => {
                 // Enrich the deny diagnostics with a snapshot of the
-                // bag values the expression actually references, so an
+                // values the expression actually references, so an
                 // auditor can see WHY without re-running with debug
                 // logging. Bounded — a typical predicate touches 2-5
                 // namespaces.
                 let mut diagnostics = vec![format!("cel: {expr}")];
-                diagnostics.extend(snapshot_referenced_bag_values(&program, bag));
-                Ok(PdpDecision {
+                diagnostics.extend(snapshot_referenced_values(program, bag, structured));
+                PdpDecision {
                     decision: Decision::Deny {
                         reason: Some("CEL expression evaluated to false".to_owned()),
                         rule_source: "cel".to_owned(),
                     },
                     diagnostics,
-                })
+                }
             },
-            Ok(other) => {
-                Ok(self
-                    .on_error_decision(format!("CEL expression must return bool, got {other:?}")))
-            },
+            Ok(other) => self.on_error_decision(format!(
+                "CEL expression must return bool, got {}",
+                value_type(&other)
+            )),
             Err(e) => {
                 // Eval errors are usually undeclared-variable typos.
                 // Enumerate the variables the expression references AND
-                // which ones the bag actually has, so the operator can
+                // which ones the input actually has, so the operator can
                 // see which name they meant.
-                let mut cause = format!("CEL eval error: {e}");
                 let refs = program.references();
-                let referenced: Vec<&str> = refs.variables();
+                let mut cause = format!("CEL eval error: {}", eval_error_category(&e, &refs));
+                let mut referenced: Vec<&str> = refs.variables();
+                referenced.sort_unstable();
                 if !referenced.is_empty() {
-                    let mut found = referenced
+                    let (found, missing): (Vec<&str>, Vec<&str>) = referenced
                         .iter()
-                        .filter(|n| bag_namespace_present(bag, n))
-                        .copied()
-                        .collect::<Vec<_>>();
-                    found.sort_unstable();
-                    let mut missing = referenced
-                        .iter()
-                        .filter(|n| !bag_namespace_present(bag, n))
-                        .copied()
-                        .collect::<Vec<_>>();
-                    missing.sort_unstable();
+                        .partition(|n| variable_present(bag, structured, n));
                     cause.push_str(&format!(
                         " (expr references variables: {referenced:?}; \
-                         present in bag: {found:?}; missing: {missing:?})"
+                         present: {found:?}; missing: {missing:?})"
                     ));
                 }
-                Ok(self.on_error_decision(cause))
+                self.on_error_decision(cause)
             },
         }
     }
 }
 
-/// Snapshot all bag entries whose dotted-key first segment matches any
-/// of the top-level names the CEL expression references. Emits one
-/// diagnostic string per matched key in `key=value` form. Used to
-/// enrich Deny diagnostics so auditors can see what made the predicate
-/// false without re-running with debug logging.
-fn snapshot_referenced_bag_values(program: &Program, bag: &AttributeBag) -> Vec<String> {
+/// The structured entries the program reads: `llm.request` only when it
+/// references `llm`, and `args` only when it references `args`. An entry it
+/// never reads is not converted.
+fn referenced_structured(program: &Program, structured: &StructuredInput) -> StructuredInput {
+    let refs = program.references();
+    structured.retain(refs.has_variable("llm"), refs.has_variable("args"))
+}
+
+/// Snapshot the values under every top-level name the expression references,
+/// one `path=value` line each, sorted. Identity and other framework values
+/// print in full. A payload namespace prints only its type, and child keys
+/// below it are client-chosen, so they collapse to the namespace itself.
+fn snapshot_referenced_values(
+    program: &Program,
+    bag: &AttributeBag,
+    structured: &StructuredInput,
+) -> Vec<String> {
     let refs = program.references();
     let referenced = refs.variables();
     if referenced.is_empty() {
@@ -498,26 +540,126 @@ fn snapshot_referenced_bag_values(program: &Program, bag: &AttributeBag) -> Vec<
     }
     let referenced_set: std::collections::HashSet<&str> = referenced.iter().copied().collect();
 
-    let mut snapshot: Vec<String> = bag
-        .iter()
-        .filter(|(key, _)| {
-            let head = key.split('.').next().unwrap_or(key);
-            referenced_set.contains(head)
-        })
-        .map(|(key, value)| format!("{key}={value:?}"))
-        .collect();
-    snapshot.sort_unstable();
-    snapshot
+    let mut snapshot: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (key, value) in bag.iter() {
+        let head = key.split('.').next().unwrap_or(key);
+        if !referenced_set.contains(head) {
+            continue;
+        }
+        match payload_namespace(key) {
+            None => {
+                snapshot.insert(format!("{key}={value:?}"));
+            },
+            Some("args") if structured.args().is_some() => {},
+            Some(ns) if ns == key => {
+                snapshot.insert(format!("{key}={}", TypeLabel::from(value)));
+            },
+            Some(ns) => {
+                snapshot.insert(format!("{ns}={}", TypeLabel::Map));
+            },
+        }
+    }
+    if let Some(args) = structured.args()
+        && referenced_set.contains("args")
+    {
+        snapshot.insert(format!("args={}", TypeLabel::of_json(args)));
+    }
+    if let Some(document) = structured.llm_request()
+        && referenced_set.contains("llm")
+    {
+        snapshot.insert(format!("llm.request={}", TypeLabel::of_json(document)));
+    }
+    snapshot.into_iter().collect()
 }
 
-/// Does the bag have any key whose dotted-prefix first segment matches
-/// `name`? Used to classify referenced variables as present-or-missing
-/// in eval-error diagnostics.
-fn bag_namespace_present(bag: &AttributeBag, name: &str) -> bool {
+/// Is `name` a top-level variable in the activation, from the bag or from
+/// structured input? Classifies referenced variables in eval-error causes.
+fn variable_present(bag: &AttributeBag, structured: &StructuredInput, name: &str) -> bool {
+    match name {
+        "args" if structured.args().is_some() => return true,
+        "llm" if structured.llm_request().is_some() => return true,
+        _ => {},
+    }
     bag.iter().any(|(key, _)| {
         let head: &str = key.split('.').next().unwrap_or(key);
         head == name
     })
+}
+
+/// The type of a CEL value, never its contents.
+fn value_type(value: &Value) -> String {
+    let label = match value {
+        Value::Null => TypeLabel::Null,
+        Value::Bool(_) => TypeLabel::Bool,
+        Value::Int(_) => TypeLabel::Int,
+        Value::Float(_) => TypeLabel::Float,
+        Value::String(_) => TypeLabel::String,
+        Value::List(items) => TypeLabel::List(items.len()),
+        Value::Map(_) => TypeLabel::Map,
+        other => return other.type_of().to_string(),
+    };
+    label.to_string()
+}
+
+/// A value-free cause for a CEL eval error. Values in the error render as
+/// types, and a name is kept only when the expression spells it, so a key or
+/// message derived from the data never appears. `NoSuchKey` drops its key,
+/// since a map index can compute it from the data.
+fn eval_error_category(error: &ExecutionError, refs: &ExpressionReferences<'_>) -> String {
+    let named = |kind: &str, name: &str, known: bool| {
+        if known {
+            format!("{kind} `{name}`")
+        } else {
+            kind.to_owned()
+        }
+    };
+    match error {
+        ExecutionError::InvalidArgumentCount { expected, actual } => {
+            format!("invalid argument count: expected {expected}, got {actual}")
+        },
+        ExecutionError::UnsupportedTargetType { target } => {
+            format!("unsupported target type {}", value_type(target))
+        },
+        ExecutionError::NotSupportedAsMethod { method, target } => format!(
+            "{} not supported on {}",
+            named("method", method, refs.has_function(method)),
+            value_type(target)
+        ),
+        ExecutionError::UnsupportedKeyType(key) => {
+            format!("unsupported map key type {}", value_type(key))
+        },
+        ExecutionError::UnexpectedType { .. } => "unexpected type".to_owned(),
+        ExecutionError::NoSuchKey(_) => "no such key".to_owned(),
+        ExecutionError::NoSuchOverload => "no such overload".to_owned(),
+        ExecutionError::UndeclaredReference(name) => named(
+            "undeclared reference to",
+            name,
+            refs.has_variable(name.as_str()) || refs.has_function(name.as_str()),
+        ),
+        ExecutionError::MissingArgumentOrTarget => "missing argument or target".to_owned(),
+        ExecutionError::ValuesNotComparable(a, b) => {
+            format!("{} can not be compared to {}", value_type(a), value_type(b))
+        },
+        ExecutionError::UnsupportedBinaryOperator(op, a, b) => format!(
+            "unsupported binary operator `{op}` on {} and {}",
+            value_type(a),
+            value_type(b)
+        ),
+        ExecutionError::UnsupportedIndex(index, target) => format!(
+            "cannot use {} to index {}",
+            value_type(index),
+            value_type(target)
+        ),
+        ExecutionError::FunctionError { function, .. } => {
+            named("error in function", function, refs.has_function(function))
+        },
+        ExecutionError::DivisionByZero(_) => "division by zero".to_owned(),
+        ExecutionError::RemainderByZero(_) => "remainder by zero".to_owned(),
+        ExecutionError::Overflow(op, ..) => format!("overflow in `{op}`"),
+        ExecutionError::IndexOutOfBounds(_) => "index out of bounds".to_owned(),
+        ExecutionError::InternalError(_) => "internal error".to_owned(),
+        _ => "evaluation error".to_owned(),
+    }
 }
 
 /// Read a string field from a YAML mapping (mirrors the cedar-direct helper).
@@ -528,7 +670,12 @@ fn read_yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, reason = "tests")]
+#[expect(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -1006,5 +1153,393 @@ mod tests {
             "concurrent compiles must converge to one entry"
         );
         assert!(cache.contains_key(expr));
+    }
+
+    const MARKER: &str = "SECRET-MARKER";
+
+    fn leaky_input() -> (AttributeBag, StructuredInput) {
+        let mut bag = bag_with(&[("subject.id", "alice")]);
+        bag.set("args.hidden_key", MARKER);
+        bag.set("custom.llm.client_value", MARKER);
+        bag.set("custom.anything_else", MARKER);
+        bag.set("http.request_headers.authorization", MARKER);
+        bag.set("http.response_headers.server", MARKER);
+        let structured = StructuredInput::new(
+            Some(Arc::new(serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": MARKER}],
+                "hidden_key": MARKER,
+            }))),
+            None,
+        );
+        (bag, structured)
+    }
+
+    /// Renders the whole decision, reason and diagnostics included.
+    fn assert_no_leak(out: &PdpDecision) {
+        let rendered = format!("{out:?}");
+        assert!(!rendered.contains(MARKER), "{rendered}");
+        assert!(!rendered.contains("hidden_key"), "{rendered}");
+    }
+
+    fn reason_of(out: &PdpDecision) -> &str {
+        match &out.decision {
+            Decision::Deny { reason, .. } => reason.as_deref().unwrap_or_default(),
+            other => panic!("expected Deny; got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn false_result_snapshot_redacts_payload_values() {
+        let r = CelResolver::new();
+        let (bag, structured) = leaky_input();
+        let out = r
+            .evaluate_structured(
+                &cel_call("subject.id == 'alice' && llm.request.model == 'other' && has(args.x)"),
+                &bag,
+                &structured,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reason_of(&out), "CEL expression evaluated to false");
+        assert_no_leak(&out);
+        assert!(
+            out.diagnostics
+                .contains(&"subject.id=String(\"alice\")".to_owned())
+        );
+        assert!(out.diagnostics.contains(&"llm.request=map".to_owned()));
+        assert!(out.diagnostics.contains(&"args=map".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn false_result_snapshot_redacts_projected_values_and_headers() {
+        let r = CelResolver::new();
+        let (bag, structured) = leaky_input();
+        let out = r
+            .evaluate_structured(
+                &cel_call(
+                    "custom.llm.client_value == 'other' && \
+                     custom.anything_else == 'other' && \
+                     http.request_headers.authorization == 'other' && \
+                     http.response_headers.server == 'other'",
+                ),
+                &bag,
+                &structured,
+            )
+            .await
+            .unwrap();
+        assert_no_leak(&out);
+        assert!(out.diagnostics.contains(&"custom=map".to_owned()));
+        assert!(
+            out.diagnostics
+                .contains(&"http.request_headers=map".to_owned())
+        );
+        assert!(
+            out.diagnostics
+                .contains(&"http.response_headers=map".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn false_result_snapshot_labels_structured_args() {
+        let r = CelResolver::new();
+        let mut bag = AttributeBag::new();
+        bag.set("args.hidden_key", MARKER);
+        let structured = StructuredInput::new(
+            None,
+            Some(Arc::new(
+                serde_json::json!({"hidden_key": [MARKER, MARKER]}),
+            )),
+        );
+        let out = r
+            .evaluate_structured(&cel_call("size(args) == 0"), &bag, &structured)
+            .await
+            .unwrap();
+        assert_no_leak(&out);
+        assert_eq!(out.diagnostics, ["cel: size(args) == 0", "args=map"]);
+    }
+
+    #[tokio::test]
+    async fn non_bool_result_names_only_its_type() {
+        let r = CelResolver::new();
+        let (bag, structured) = leaky_input();
+        let out = r
+            .evaluate_structured(&cel_call("llm.request.messages"), &bag, &structured)
+            .await
+            .unwrap();
+        assert_eq!(
+            reason_of(&out),
+            "CEL expression must return bool, got list(1)"
+        );
+        assert_no_leak(&out);
+    }
+
+    #[tokio::test]
+    async fn type_mismatch_error_omits_payload_values() {
+        let r = CelResolver::new();
+        let (bag, structured) = leaky_input();
+        let out = r
+            .evaluate_structured(
+                &cel_call("llm.request.messages[0].content + 1 == 2"),
+                &bag,
+                &structured,
+            )
+            .await
+            .unwrap();
+        let reason = reason_of(&out);
+        assert!(
+            reason
+                .starts_with("CEL eval error: unsupported binary operator `add` on string and int"),
+            "{reason}"
+        );
+        assert_no_leak(&out);
+    }
+
+    #[tokio::test]
+    async fn comparison_error_on_bag_args_omits_values() {
+        let r = CelResolver::new();
+        let (bag, structured) = leaky_input();
+        let out = r
+            .evaluate_structured(&cel_call("args.hidden_key < 3"), &bag, &structured)
+            .await
+            .unwrap();
+        // The key is spelled by this expression, so only the value is checked.
+        let rendered = format!("{out:?}");
+        assert!(!rendered.contains(MARKER), "{rendered}");
+        assert!(reason_of(&out).starts_with("CEL eval error: "));
+    }
+
+    /// A map index computed from the data names no key.
+    #[tokio::test]
+    async fn data_derived_missing_key_is_not_named() {
+        let r = CelResolver::new();
+        let structured = StructuredInput::new(
+            None,
+            Some(Arc::new(serde_json::json!({"m": {}, "k": MARKER}))),
+        );
+        let out = r
+            .evaluate_structured(
+                &cel_call("args.m[args.k] == 1"),
+                &AttributeBag::new(),
+                &structured,
+            )
+            .await
+            .unwrap();
+        assert!(
+            reason_of(&out).starts_with("CEL eval error: no such key ("),
+            "{out:?}"
+        );
+        assert_no_leak(&out);
+    }
+
+    #[tokio::test]
+    async fn on_error_allow_diagnostics_omit_payload_values() {
+        let r = CelResolver::new().with_on_error(OnError::Allow);
+        let (bag, structured) = leaky_input();
+        let out = r
+            .evaluate_structured(&cel_call("llm.request.messages"), &bag, &structured)
+            .await
+            .unwrap();
+        assert_eq!(out.decision, Decision::Allow);
+        assert_eq!(
+            out.diagnostics,
+            ["CEL expression must return bool, got list(1)"]
+        );
+        assert_no_leak(&out);
+    }
+
+    #[tokio::test]
+    async fn missing_request_document_denies_and_is_classified_missing() {
+        let r = CelResolver::new();
+        let out = r
+            .evaluate_structured(
+                &cel_call("size(llm.request.tools) == 0"),
+                &bag_with(&[("llm.model_id", "gpt-4o")]),
+                &StructuredInput::default(),
+            )
+            .await
+            .unwrap();
+        let reason = reason_of(&out);
+        assert!(
+            reason.starts_with("CEL eval error: no such key ("),
+            "{reason}"
+        );
+
+        let out = r
+            .evaluate_structured(
+                &cel_call("llm.request.model == 'm'"),
+                &AttributeBag::new(),
+                &StructuredInput::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            reason_of(&out).contains("undeclared reference to `llm`"),
+            "{out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_variables_count_as_present() {
+        let r = CelResolver::new();
+        let structured = StructuredInput::new(
+            Some(Arc::new(serde_json::json!({}))),
+            Some(Arc::new(serde_json::json!({}))),
+        );
+        let out = r
+            .evaluate_structured(
+                &cel_call("args.a == llm.request.b"),
+                &AttributeBag::new(),
+                &structured,
+            )
+            .await
+            .unwrap();
+        assert!(
+            reason_of(&out).contains("present: [\"args\", \"llm\"]; missing: []"),
+            "{out:?}"
+        );
+    }
+
+    /// Nesting that overflows a 256 `KiB` stack without headroom, yet fits the
+    /// grown segment. CEL's own variable conversion recurses at several `KiB`
+    /// per level in unoptimized builds, so a much deeper document overflows
+    /// even the grown segment.
+    const DEEP: usize = 1_000;
+
+    /// Evaluate `expr` against `DEEP`-nested args on a 256 `KiB` thread. The
+    /// program is compiled first on a large stack, and the document is built
+    /// and dropped there, since `serde_json::Value` drop recurses too.
+    fn deep_args_on_a_small_stack(expr: &'static str) -> PdpDecision {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let resolver = CelResolver::new();
+                let bag = AttributeBag::new();
+                let call = cel_call(expr);
+                futures::executor::block_on(resolver.evaluate(&call, &bag)).unwrap();
+                let mut doc = serde_json::json!(true);
+                for _ in 0..DEEP {
+                    let mut level = serde_json::Map::new();
+                    level.insert("a".to_owned(), doc);
+                    doc = serde_json::Value::Object(level);
+                }
+                let structured = StructuredInput::new(None, Some(Arc::new(doc)));
+                std::thread::scope(|scope| {
+                    std::thread::Builder::new()
+                        .stack_size(256 * 1024)
+                        .spawn_scoped(scope, || {
+                            futures::executor::block_on(resolver.evaluate_structured(
+                                &call,
+                                &bag,
+                                &structured,
+                            ))
+                        })
+                        .unwrap()
+                        .join()
+                        .expect("evaluation must not overflow the small stack")
+                        .unwrap()
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deeply_nested_args_evaluate_on_a_small_stack() {
+        let out = deep_args_on_a_small_stack("has(args.a)");
+        assert_eq!(out.decision, Decision::Allow, "{out:?}");
+    }
+
+    #[test]
+    fn only_referenced_structured_entries_are_kept() {
+        let structured = StructuredInput::new(
+            Some(Arc::new(serde_json::json!({"model": "m"}))),
+            Some(Arc::new(serde_json::json!({"a": 1}))),
+        );
+        let kept = |expr: &str| {
+            let program = Program::compile(expr).unwrap();
+            let out = referenced_structured(&program, &structured);
+            (out.llm_request().is_some(), out.args().is_some())
+        };
+        assert_eq!(kept("subject.id == 'alice'"), (false, false));
+        assert_eq!(kept("args.a == 1"), (false, true));
+        assert_eq!(kept("has(llm.request.model)"), (true, false));
+        assert_eq!(
+            kept("[1].all(x, x == args.a) && llm.request.model == 'm'"),
+            (true, true)
+        );
+    }
+
+    /// An expression that never reads `args` evaluates as before when
+    /// structured args are present.
+    #[tokio::test]
+    async fn unreferenced_structured_args_do_not_change_the_decision() {
+        let structured =
+            StructuredInput::new(None, Some(Arc::new(serde_json::json!({"subject": "x"}))));
+        let out = CelResolver::new()
+            .evaluate_structured(
+                &cel_call("subject.id == 'alice'"),
+                &bag_with(&[("subject.id", "alice")]),
+                &structured,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.decision, Decision::Allow, "{out:?}");
+    }
+
+    #[test]
+    fn error_categories_keep_only_policy_names() {
+        let program = Program::compile("f(x) && y.method()").unwrap();
+        let refs = program.references();
+        let secret = || Value::from(MARKER.to_owned());
+        let cases = [
+            (
+                ExecutionError::undeclared_reference("x"),
+                "undeclared reference to `x`",
+            ),
+            (
+                ExecutionError::undeclared_reference(MARKER),
+                "undeclared reference to",
+            ),
+            (
+                ExecutionError::function_error("f", MARKER),
+                "error in function `f`",
+            ),
+            (
+                ExecutionError::function_error(MARKER, MARKER),
+                "error in function",
+            ),
+            (ExecutionError::no_such_key(MARKER), "no such key"),
+            (
+                ExecutionError::NotSupportedAsMethod {
+                    method: "method".to_owned(),
+                    target: secret(),
+                },
+                "method `method` not supported on string",
+            ),
+            (
+                ExecutionError::ValuesNotComparable(secret(), Value::from(1_i64)),
+                "string can not be compared to int",
+            ),
+            (
+                ExecutionError::UnsupportedIndex(secret(), Value::from(vec![secret()])),
+                "cannot use string to index list(1)",
+            ),
+            (
+                ExecutionError::UnexpectedType {
+                    got: MARKER.to_owned(),
+                    want: MARKER.to_owned(),
+                },
+                "unexpected type",
+            ),
+            (
+                ExecutionError::InternalError(MARKER.to_owned()),
+                "internal error",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(eval_error_category(&error, &refs), expected);
+        }
     }
 }

@@ -298,6 +298,37 @@ pub struct PdpCall {
     pub args: serde_yaml::Value,
 }
 
+impl PdpCall {
+    /// Whether the step requires a host-supplied LLM request document.
+    pub fn requires_llm_request(&self) -> bool {
+        self.args
+            .as_mapping()
+            .and_then(|map| map.get(serde_yaml::Value::String("require_llm_request".to_owned())))
+            .and_then(serde_yaml::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Validate generic structured-input options on this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an option has the wrong type.
+    pub fn validate_input_options(&self) -> Result<(), String> {
+        let Some(value) = self
+            .args
+            .as_mapping()
+            .and_then(|map| map.get(serde_yaml::Value::String("require_llm_request".to_owned())))
+        else {
+            return Ok(());
+        };
+        if value.is_bool() {
+            Ok(())
+        } else {
+            Err("`require_llm_request` must be a bool".to_owned())
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -366,6 +397,66 @@ pub trait PdpResolver: Send + Sync {
         call: &PdpCall,
         bag: &crate::attributes::AttributeBag,
     ) -> Result<PdpDecision, PdpError>;
+
+    /// Evaluate a call against the bag plus structured request JSON.
+    ///
+    /// The evaluator always calls this method. The default ignores
+    /// `structured` and calls [`Self::evaluate`], so only a resolver that
+    /// overrides it sees the structured input.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::evaluate`].
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &crate::attributes::AttributeBag,
+        structured: &crate::route::StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
+        let _ = structured;
+        self.evaluate(call, bag).await
+    }
+
+    /// Check a compiled call at config load, before any request reaches it.
+    ///
+    /// The default accepts every call. A resolver overrides this to reject
+    /// arguments it can never evaluate, so the fault fails the load instead
+    /// of denying each request.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the call is invalid. The caller names the step.
+    fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+        call.validate_input_options()
+    }
+
+    /// Check a call with the structured input its route can supply.
+    ///
+    /// The default retains the route-independent validation contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the call is invalid for the route.
+    fn validate_call_with_input(
+        &self,
+        call: &PdpCall,
+        input: StructuredInputAvailability,
+    ) -> Result<(), String> {
+        self.validate_call(call)?;
+        if call.requires_llm_request() && !input.llm_request {
+            return Err("`require_llm_request: true` requires a route that can carry a host request document".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// Structured values an APL route can supply to a PDP step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StructuredInputAvailability {
+    /// The route can carry the host-parsed inference request.
+    pub llm_request: bool,
+    /// The route carries native tool arguments.
+    pub args: bool,
 }
 
 /// Build a [`PdpResolver`] from a unified-config block. Implemented per
@@ -1086,5 +1177,59 @@ mod tests {
         assert_eq!(json, "\"cel\"");
         let back: PdpDialect = serde_json::from_str(&json).unwrap();
         assert_eq!(back, PdpDialect::Cel);
+    }
+
+    /// Records the bag it was handed and overrides nothing but `evaluate`.
+    #[derive(Default)]
+    struct BagOnly {
+        seen: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl PdpResolver for BagOnly {
+        fn dialect(&self) -> PdpDialect {
+            PdpDialect::Custom("bag-only".to_owned())
+        }
+
+        async fn evaluate(
+            &self,
+            _call: &PdpCall,
+            bag: &crate::attributes::AttributeBag,
+        ) -> Result<PdpDecision, PdpError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(bag.get_string("subject.id").map(str::to_owned));
+            Ok(PdpDecision {
+                decision: Decision::Allow,
+                diagnostics: Vec::new(),
+            })
+        }
+    }
+
+    /// The default `evaluate_structured` hands the resolver the bag alone, so a
+    /// resolver that never opted in cannot see structured input.
+    #[tokio::test]
+    async fn default_evaluate_structured_forwards_only_the_bag() {
+        let resolver = BagOnly::default();
+        let mut bag = crate::attributes::AttributeBag::new();
+        bag.set("subject.id", "alice");
+        let structured = crate::route::StructuredInput::new(
+            Some(std::sync::Arc::new(serde_json::json!({"model": "m"}))),
+            Some(std::sync::Arc::new(serde_json::json!({"a": 1}))),
+        );
+        let call = PdpCall {
+            dialect: resolver.dialect(),
+            args: serde_yaml::Value::Null,
+        };
+        let out = resolver
+            .evaluate_structured(&call, &bag, &structured)
+            .await
+            .unwrap();
+        assert_eq!(out.decision, Decision::Allow);
+        assert_eq!(
+            *resolver.seen.lock().unwrap(),
+            vec![Some("alice".to_owned())]
+        );
     }
 }

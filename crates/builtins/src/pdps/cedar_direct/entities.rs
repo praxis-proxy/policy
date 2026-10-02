@@ -22,10 +22,17 @@
 // translation (string → String, JSON array of strings → Set<String>,
 // nested object → Record, etc.). Avoids fighting with
 // `RestrictedExpression` directly.
+//
+// # Errors name no values
+//
+// A resource id or attribute can be filled from `${args.X}`, and Cedar's
+// error text can quote the entity or value it rejected. Errors therefore name
+// the entity type, when it is a valid type name, and a fixed category.
 
 use std::collections::HashSet;
 
-use cedar_policy::{Entities, Entity, Schema};
+use cedar_policy::entities_errors::EntitiesError;
+use cedar_policy::{Entities, Entity, EntityTypeName, Schema};
 use praxis_policy_apl_core::attributes::{AttributeBag, AttributeValue};
 use praxis_policy_apl_core::step::PdpError;
 use serde_json::{Map, Value, json};
@@ -49,8 +56,38 @@ pub fn build(
 ) -> Result<Entities, PdpError> {
     let principal = build_principal(bag, schema, entity_namespace)?;
     let resource = build_resource(resource_args, schema)?;
-    Entities::from_entities([principal, resource], schema)
-        .map_err(|e| PdpError::Dispatch(format!("failed to assemble Cedar entity set: {e}")))
+    Entities::from_entities([principal, resource], schema).map_err(|e| {
+        PdpError::Dispatch(format!(
+            "failed to assemble Cedar entity set: {}",
+            entity_error_category(&e)
+        ))
+    })
+}
+
+/// A value-free description of an entity construction error.
+fn entity_error_category(error: &EntitiesError) -> &'static str {
+    match error {
+        EntitiesError::InvalidEntity(_) => "entity does not conform to the schema",
+        EntitiesError::Deserialization(_) => "an attribute or uid could not be read",
+        EntitiesError::Duplicate(_) => "principal and resource share a uid",
+        _ => "entity could not be built",
+    }
+}
+
+/// Why `role` entity failed to build. `named_type` is named only when it comes
+/// from identity and is a valid Cedar type name; a resource type can be filled
+/// from call arguments, so it is never named.
+fn entity_error(role: &str, named_type: Option<&str>, error: &EntitiesError) -> PdpError {
+    let category = entity_error_category(error);
+    match named_type {
+        Some(entity_type) if entity_type.parse::<EntityTypeName>().is_ok() => PdpError::Dispatch(
+            format!("failed to construct {role} entity of type `{entity_type}`: {category}"),
+        ),
+        Some(_) => PdpError::Dispatch(format!(
+            "failed to construct {role} entity: type is not a valid Cedar entity type name"
+        )),
+        None => PdpError::Dispatch(format!("failed to construct {role} entity: {category}")),
+    }
 }
 
 /// Build the principal `Entity` from the bag. Reads:
@@ -148,11 +185,8 @@ pub fn build_principal(
     entity_obj.insert(KEY_PARENTS.to_owned(), Value::Array(vec![]));
     let entity_json = Value::Object(entity_obj);
 
-    Entity::from_json_value(entity_json, schema).map_err(|e| {
-        PdpError::Dispatch(format!(
-            "failed to construct principal entity '{entity_type}::\"{id}\"': {e}"
-        ))
-    })
+    Entity::from_json_value(entity_json, schema)
+        .map_err(|e| entity_error("principal", Some(&entity_type), &e))
 }
 
 /// Build the resource `Entity` from the policy author's `args.resource`
@@ -169,7 +203,8 @@ pub fn build_principal(
 /// # Errors
 ///
 /// Returns `PdpError::Dispatch` when the argument is not a map, when `type` or
-/// `id` is missing, or when an attribute value has no Cedar equivalent.
+/// `id` is missing, or when an attribute value has no Cedar equivalent. The
+/// error names the entity type and a category, never the id or a value.
 pub fn build_resource(
     resource_args: &serde_yaml::Value,
     schema: Option<&Schema>,
@@ -218,11 +253,7 @@ pub fn build_resource(
     entity_obj.insert(KEY_PARENTS.to_owned(), Value::Array(vec![]));
     let entity_json = Value::Object(entity_obj);
 
-    Entity::from_json_value(entity_json, schema).map_err(|e| {
-        PdpError::Dispatch(format!(
-            "failed to construct resource entity '{entity_type}::\"{id}\"': {e}"
-        ))
-    })
+    Entity::from_json_value(entity_json, schema).map_err(|e| entity_error("resource", None, &e))
 }
 
 /// Apply the optional namespace to a bare entity type. `Some("Acme")` +

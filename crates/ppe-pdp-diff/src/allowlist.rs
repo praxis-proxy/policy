@@ -21,8 +21,9 @@ pub(crate) struct AllowlistEntry {
 }
 
 /// Seed entries from issue #25 (floats, missing collections) plus a
-/// missing principal. Present-empty `StringSet` and omitted claim
-/// scalars are not splits: they live in the subset as `AgreeDeny`.
+/// missing principal, then the structured-input splits Cedar's value
+/// model forces. Present-empty `StringSet` and omitted claim scalars are
+/// not splits: they live in the subset as `AgreeDeny`.
 pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
     vec![
         AllowlistEntry {
@@ -122,6 +123,56 @@ pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
             cel: Outcome::deny(CauseKind::EvalError),
             opa: Outcome::allow(),
             apl_allows: Some(true),
+        },
+        AllowlistEntry {
+            id: "tool-deny-list-evaded",
+            reason: "Cedar cannot express \"deny if any tool's field equals X\". \
+                     Record-set `contains` matches only a whole record, so a \
+                     forbidden tool with any extra field, here a description, \
+                     slips past and Cedar Allows. CEL `exists` and OPA `some` \
+                     test the one field and Deny. Pinned so the documented \
+                     rule holds: do not use Cedar for deny-lists over \
+                     `llm.request.tools`; use OPA or CEL.",
+            cedar: Outcome::allow(),
+            cel: Outcome::deny(CauseKind::PolicyFalse),
+            opa: Outcome::deny(CauseKind::PolicyFalse),
+            apl_allows: None,
+        },
+        AllowlistEntry {
+            id: "tool-deny-list-unexpressible",
+            reason: "All three Allow, but Cedar only by coincidence: its \
+                     exact-match `contains` also Allows the forbidden tool \
+                     (see `tool-deny-list-evaded`). Listed so Cedar never \
+                     counts as agreeing on a deny-list over \
+                     `llm.request.tools`.",
+            cedar: Outcome::allow(),
+            cel: Outcome::allow(),
+            opa: Outcome::allow(),
+            apl_allows: None,
+        },
+        AllowlistEntry {
+            id: "null-absent",
+            reason: "Cedar has no null, so the sanitizer drops a `null` \
+                     field and `has` is false: a clean default deny. CEL \
+                     `has` and OPA `object.keys` see the key with a null \
+                     value and Allow. Policies that must treat null as \
+                     missing test the value, not the key.",
+            cedar: Outcome::deny(CauseKind::DefaultDeny),
+            cel: Outcome::allow(),
+            opa: Outcome::allow(),
+            apl_allows: None,
+        },
+        AllowlistEntry {
+            id: "duplicates-collapse",
+            reason: "JSON arrays become Cedar sets, which are unordered and \
+                     collapse duplicates, so `[7, 7, 9] == [7, 9]` holds and \
+                     Cedar Allows. CEL lists and OPA arrays keep every \
+                     element, so the compare is false. Cedar cannot count or \
+                     order array elements.",
+            cedar: Outcome::allow(),
+            cel: Outcome::deny(CauseKind::PolicyFalse),
+            opa: Outcome::deny(CauseKind::PolicyFalse),
+            apl_allows: None,
         },
     ]
 }

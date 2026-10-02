@@ -31,17 +31,18 @@ go next.
 
 ## Using it
 
-Add one dependency to get the engine and all bundled extensions:
+Add one dependency to get the engine and all stable bundled extensions:
 
 ```toml
-praxis-policy = { version = "0.3", features = ["builtins"] }
+praxis-policy = { version = "0.4", features = ["builtins"] }
 ```
 
 Without `builtins`, you get the engine alone and no extensions compiled in.
-Declare individual features instead: `jwt`, `oauth`, `elicitation-ciba`,
-`cedar`, `cel`, `opa`, `valkey`.
+Declare individual features instead: `jwt`, `api-key`, `oauth`,
+`elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`.
+The token quota plugin is available separately through `experimental-quota`.
 
-The crates are versioned together and released together, so a single `0.3`
+The crates are versioned together and released together, so a single `0.4`
 requirement covers the set. Requires Rust 1.92 or newer.
 
 ## Documentation

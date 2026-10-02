@@ -140,6 +140,8 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
 };
 #[cfg(feature = "jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
+#[cfg(feature = "experimental-quota")]
+pub use praxis_policy_builtins::plugins::quota::{KIND as QUOTA_KIND, QuotaFactory};
 #[cfg(feature = "secrets-vault")]
 pub use praxis_policy_builtins::secrets::vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
@@ -206,13 +208,17 @@ use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
 #[cfg(feature = "jwt")]
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
+#[cfg(feature = "experimental-quota")]
+use praxis_policy_builtins::plugins::quota as quota_builtin;
 
 #[cfg(feature = "_builtin")]
 register_builtins! {
-    feature "jwt"              => jwt_builtin::JwtIdentityFactory,
-    feature "api-key"          => api_key_builtin::ApiKeyIdentityFactory,
-    feature "oauth"            => oauth_builtin::OAuthDelegatorFactory,
-    feature "elicitation-ciba" => ciba_builtin::CibaApproverFactory,
+    feature "jwt"                => jwt_builtin::JwtIdentityFactory,
+    feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
+    feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
+    feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
+    // Experimental: registers only when `experimental-quota` is named, never via `builtins`.
+    feature "experimental-quota" => quota_builtin::QuotaFactory,
 }
 
 /// The enabled PDP factories, ready to drop into
@@ -270,6 +276,13 @@ pub fn install_builtins(mgr: &std::sync::Arc<PolicyEngine>) {
     let _visitor = register_apl(mgr, opts);
 }
 
+/// Warn that experimental extensions are compiled in. Gated on `experimental`,
+/// which every `experimental-*` feature sets; call at host startup.
+#[cfg(feature = "experimental")]
+pub fn warn_experimental_features() {
+    tracing::warn!("experimental features are enabled that should not be used in production");
+}
+
 /// A default `HttpTransport` on hyper, for hosts that inject none.
 ///
 /// Available with the `http-hyper` feature.
@@ -312,6 +325,21 @@ pub fn install_default_http_transport(mgr: &std::sync::Arc<PolicyEngine>) -> boo
     mgr.set_http_transport(std::sync::Arc::new(http_hyper::HyperTransport::new()))
 }
 
+/// Register the enabled builtins and use hyper when the host has not already
+/// installed an HTTP transport.
+///
+/// Call [`PolicyEngine::set_http_transport`] first when the host has its own
+/// transport. This helper keeps that transport and returns `false`; otherwise
+/// it installs the bundled hyper transport and returns `true`. The bundled
+/// transport refuses private destinations by default, so an in-cluster
+/// Limitador needs a host transport configured to permit that destination.
+#[cfg(all(feature = "_builtin", feature = "http-hyper"))]
+pub fn install_builtins_with_default_http_transport(mgr: &std::sync::Arc<PolicyEngine>) -> bool {
+    let installed = install_default_http_transport(mgr);
+    install_builtins(mgr);
+    installed
+}
+
 #[cfg(all(test, feature = "_builtin"))]
 mod tests {
     use super::*;
@@ -321,6 +349,19 @@ mod tests {
     fn install_builtins_runs_without_panic() {
         let mgr = Arc::new(PolicyEngine::default());
         install_builtins(&mgr);
+    }
+
+    #[cfg(feature = "http-hyper")]
+    #[test]
+    fn combined_bootstrap_installs_hyper_only_without_an_injected_transport() {
+        let standalone = Arc::new(PolicyEngine::default());
+        assert!(install_builtins_with_default_http_transport(&standalone));
+
+        let embedded = Arc::new(PolicyEngine::default());
+        assert!(embedded.set_http_transport(Arc::new(
+            HyperTransport::new().with_allow_private_destinations()
+        )));
+        assert!(!install_builtins_with_default_http_transport(&embedded));
     }
 
     #[test]
@@ -427,5 +468,28 @@ mod tests {
                 "the error must name the unresolved kind: {err}"
             );
         }
+    }
+
+    /// quota is experimental: `builtins` alone must not register it.
+    #[cfg(not(feature = "experimental-quota"))]
+    #[test]
+    fn quota_is_not_registered_without_the_experimental_feature() {
+        let err = load_error_for_kind("quota/limitador");
+        assert!(
+            err.contains("no factory registered"),
+            "quota must not register without experimental-quota; got: {err}"
+        );
+    }
+
+    /// With `experimental-quota` named, `install_builtins` registers quota (it
+    /// then fails on config, not on a missing factory).
+    #[cfg(feature = "experimental-quota")]
+    #[test]
+    fn quota_registers_with_the_experimental_feature() {
+        let err = load_error_for_kind("quota/limitador");
+        assert!(
+            !err.contains("no factory registered"),
+            "experimental-quota is on, so quota must register; got: {err}"
+        );
     }
 }

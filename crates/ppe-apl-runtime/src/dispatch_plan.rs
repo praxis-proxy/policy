@@ -320,7 +320,7 @@ fn parse_on_error(s: &str) -> Option<OnError> {
 /// lists. Previously these were flat — `Step::Plugin` lived directly under
 /// policy: — so a simple `iter()` was enough; now the IR is tree-
 /// shaped and the same scan needs recursion.
-fn walk_effects<F: FnMut(&Effect)>(effects: &[Effect], visit: &mut F) {
+pub(crate) fn walk_effects<F: FnMut(&Effect)>(effects: &[Effect], visit: &mut F) {
     for e in effects {
         visit(e);
         match e {

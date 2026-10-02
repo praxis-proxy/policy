@@ -29,12 +29,89 @@
 // during runtime evaluation (e.g. type errors in a `when` clause that
 // only manifest with certain entity data). If ANY policy errored, we
 // return Deny regardless of what `decision()` says — an untrusted
-// decision is worse than a closed gate. The error messages flow into
-// the Deny reason so operators see why.
+// decision is worse than a closed gate. Each error flows into the Deny
+// reason as its policy id and a fixed category. Cedar's own text is dropped,
+// because it can quote context values such as extension function arguments
+// or overflowing operands, and those can come from the client's payload.
+//
+// # Withheld structured input
+//
+// When the structured input holds a Cedar escape key, the step denies with
+// `WITHHELD_CODE` before Cedar runs.
 
-use cedar_policy::{Decision as CedarDecision, PolicySet};
+use cedar_policy::{AuthorizationError, Decision as CedarDecision, EvaluationError, PolicySet};
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::PdpDecision;
+
+/// Violation code for a step whose structured input was withheld.
+pub const WITHHELD_CODE: &str = "cedar.input_withheld";
+
+/// Deny a step whose structured input holds a Cedar escape key. The reason
+/// names no value or key from the input.
+pub fn withheld() -> PdpDecision {
+    PdpDecision {
+        decision: Decision::Deny {
+            reason: Some(
+                "Cedar step denied: structured input holds a reserved Cedar escape key".to_owned(),
+            ),
+            rule_source: WITHHELD_CODE.to_owned(),
+        },
+        diagnostics: Vec::new(),
+    }
+}
+
+/// The policy's `@id` annotation, or Cedar's auto-generated id.
+fn policy_name(policy_set: &PolicySet, pid: &cedar_policy::PolicyId) -> String {
+    policy_set
+        .policy(pid)
+        .and_then(|p| p.annotation("id"))
+        .map_or_else(|| pid.to_string(), std::borrow::ToOwned::to_owned)
+}
+
+/// A value-free line for one evaluation error: the policy and a category.
+#[expect(
+    unreachable_patterns,
+    reason = "Cedar 4.x may add authorization error variants"
+)]
+fn error_line(error: &AuthorizationError, policy_set: &PolicySet) -> String {
+    match error {
+        AuthorizationError::PolicyEvaluationError(inner) => format!(
+            "policy `{}`: {}",
+            policy_name(policy_set, inner.policy_id()),
+            error_category(inner.inner())
+        ),
+        _ => "policy evaluation failed".to_owned(),
+    }
+}
+
+/// A fixed category for an evaluation error, never Cedar's message text.
+fn error_category(error: &EvaluationError) -> &'static str {
+    if matches!(error, EvaluationError::EntityDoesNotExist(_)) {
+        "entity does not exist"
+    } else if matches!(error, EvaluationError::EntityAttrDoesNotExist(_)) {
+        "entity attribute or tag does not exist"
+    } else if matches!(error, EvaluationError::RecordAttrDoesNotExist(_)) {
+        "record attribute does not exist"
+    } else if matches!(error, EvaluationError::FailedExtensionFunctionLookup(_)) {
+        "extension function lookup failed"
+    } else if matches!(error, EvaluationError::TypeError(_)) {
+        "type error"
+    } else if matches!(error, EvaluationError::WrongNumArguments(_)) {
+        "wrong number of arguments"
+    } else if matches!(error, EvaluationError::IntegerOverflow(_)) {
+        "integer overflow"
+    } else if matches!(error, EvaluationError::UnlinkedSlot(_)) {
+        "unlinked template slot"
+    } else if matches!(error, EvaluationError::FailedExtensionFunctionExecution(_)) {
+        "extension function failed"
+    } else if matches!(error, EvaluationError::NonValue(_)) {
+        "expression contains unknowns"
+    } else if matches!(error, EvaluationError::RecursionLimit(_)) {
+        "recursion limit reached"
+    } else {
+        "evaluation error"
+    }
+}
 
 /// Translate a `cedar_policy::Response` into the APL-side `PdpDecision`.
 /// Captures policy-ID attribution into `diagnostics` and, on Deny,
@@ -51,27 +128,20 @@ use praxis_policy_apl_core::step::PdpDecision;
 pub fn translate(response: &cedar_policy::Response, policy_set: &PolicySet) -> PdpDecision {
     let diagnostics = response.diagnostics();
 
+    // Prefer the operator-supplied `@id("...")` annotation; fall back to
+    // Cedar's auto-generated id when the policy is unannotated.
     let firing_policies: Vec<String> = diagnostics
         .reason()
-        .map(|pid| {
-            // Prefer the operator-supplied `@id("...")` annotation;
-            // fall back to Cedar's auto-generated id when the policy
-            // is unannotated.
-            policy_set
-                .policy(pid)
-                .and_then(|p| p.annotation("id"))
-                .map(std::borrow::ToOwned::to_owned)
-                .unwrap_or_else(|| pid.to_string())
-        })
+        .map(|pid| policy_name(policy_set, pid))
         .collect();
 
     let errors: Vec<String> = diagnostics
         .errors()
-        .map(std::string::ToString::to_string)
+        .map(|e| error_line(e, policy_set))
         .collect();
 
-    // Fail-closed: any runtime evaluation error → Deny with the error
-    // text so the operator sees what went wrong. Cedar's own
+    // Fail-closed: any runtime evaluation error → Deny naming the policy
+    // and error category so the operator sees what went wrong. Cedar's own
     // `decision()` may still say Allow when errors occurred; we override
     // because an Allow on a partially-failed evaluation isn't
     // trustworthy.

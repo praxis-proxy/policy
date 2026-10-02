@@ -10,7 +10,7 @@
 //        │  `opa: { query: "data.authz.allow" }` step
 //        ▼
 //   PdpRouter (praxis-policy-apl-runtime)        — dispatches by dialect (PdpDialect::Opa)
-//        │  resolver.evaluate(call, bag)
+//        │  resolver.evaluate_structured(call, bag, structured)
 //        ▼
 //   OpaResolver                 — THIS CRATE
 //        │  bag → Rego input, clone base engine, eval query
@@ -28,8 +28,10 @@
 //
 // APL's flat, dotted `AttributeBag` (`subject.id`, `delegation.depth`,
 // `session.labels`) is rebuilt into a nested Rego `input` document so authors
-// write `input.subject.id`. See `input::bag_to_input` — the mapping mirrors
-// the CEL resolver's so the vocabulary is identical across backends.
+// write `input.subject.id`. See `input::build_rego_input`. The mapping mirrors
+// the CEL resolver's so the vocabulary is identical across backends. Structured
+// input from `evaluate_structured` is overlaid as native JSON: `input.args`
+// (replacing the flattened args) and `input.llm.request`.
 //
 // # Decision contract
 //
@@ -62,7 +64,7 @@ pub mod decision;
 pub mod error;
 /// Constructs the resolver from configuration.
 pub mod factory;
-/// Maps the attribute bag to the Rego `input` document.
+/// Maps the attribute bag and structured input to the Rego `input` document.
 pub mod input;
 /// The `PdpResolver` implementation, including the prepared-engine cache.
 pub mod resolver;

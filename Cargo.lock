@@ -2662,7 +2662,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppe-benches"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "criterion",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2705,13 +2705,14 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-service",
+ "tracing",
  "webpki-roots",
  "yaml_serde",
 ]
 
 [[package]]
 name = "praxis-policy-apl-cmf"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "praxis-policy-apl-core",
@@ -2722,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2739,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-runtime"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2757,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-builtins"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2766,6 +2767,7 @@ dependencies = [
  "cedar-policy",
  "cel",
  "chrono",
+ "criterion",
  "deadpool-redis",
  "futures",
  "getrandom 0.4.3",
@@ -2796,7 +2798,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2824,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-orchestration"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "futures",
  "tokio",
@@ -2832,19 +2834,20 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-pdp-diff"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
  "praxis-policy-builtins",
  "praxis-policy-core",
+ "serde_json",
  "tokio",
  "yaml_serde",
 ]
 
 [[package]]
 name = "praxis-policy-plugin-audit-logger"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2857,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-pii-scanner"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "praxis-policy-core",

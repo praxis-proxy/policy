@@ -57,6 +57,11 @@
 //   - `session.labels`       → list(string)   `"PII" in session.labels`
 //   - `intent.confidence`    → double         `intent.confidence > 0.9`
 //
+// Structured input adds native JSON values. `llm.request` holds the parsed
+// request document when the host supplies one, and structured `args` on a
+// tool route replaces the flattened `args` namespace. Lists keep their order,
+// duplicates, and number types, and an explicit `null` is a present field.
+//
 // See `activation::bag_to_context` for the exact mapping and the
 // leaf-vs-namespace collision rule.
 //

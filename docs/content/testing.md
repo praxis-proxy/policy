@@ -25,7 +25,7 @@ To assert on what a policy block compiles to, without an engine, use the
 
 ```toml
 [dev-dependencies]
-praxis-policy-apl-core = { version = "0.3", features = ["test-util"] }
+praxis-policy-apl-core = { version = "0.4", features = ["test-util"] }
 ```
 
 `compile_test_policy(source, yaml)` compiles a document with a `route:`
@@ -84,6 +84,49 @@ here: they are `#[ignore]`-gated and need `VALKEY_TEST_URL` pointing at a
 real server, because a session store is not meaningfully covered by a
 fake. That component makes Session Taint survive a reload or
 span a replica, so it is worth running them for real.
+
+### Vault KV v2 live test
+
+The Vault provider's normal suite uses `FakeTransport` for deterministic
+HTTP-contract coverage. A live check is available with the `secrets-vault`
+and `http-hyper` features and is `#[ignore]`-gated because it needs a
+provisioned Vault instance. It uses AppRole, reads a normal KV v2 field, and
+then reads a version soft-deleted with Vault's real HTTP 404 and
+`data.data: null` response.
+
+Start a disposable Vault 1.19 dev server, which already mounts `secret/` as
+KV v2, and provision the policy, AppRole, and two test values (the root token
+is development-only; the commands below use a local Vault CLI):
+
+```console
+docker run -d --rm --name ppe-vault -p 127.0.0.1:8200:8200 \
+  -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault:1.19 server \
+  -dev -dev-root-token-id=root
+export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root
+until vault status >/dev/null 2>&1; do sleep 1; done
+vault policy write ppe-live-read - <<'EOF'
+path "secret/data/live" { capabilities = ["read"] }
+path "secret/data/live-deleted" { capabilities = ["read"] }
+EOF
+vault auth enable approle
+vault write auth/approle/role/ppe-live token_policies=ppe-live-read
+vault kv put secret/live password=live-value
+vault kv put secret/live-deleted password=deleted-value
+vault kv delete -versions=1 secret/live-deleted
+export VAULT_ROLE_ID=$(vault read -field=role_id auth/approle/role/ppe-live/role-id)
+export VAULT_SECRET_ID=$(vault write -field=secret_id -f auth/approle/role/ppe-live/secret-id)
+```
+
+Run the ignored test, then stop the container:
+
+```console
+cargo test -p praxis-policy --all-features --test vault_live -- --ignored --nocapture
+docker stop ppe-vault
+```
+
+The test fails if the ordinary read is not `live-value`, or if the
+soft-deleted response is not HTTP 404 with `data.data: null`, a deletion
+timestamp, and a `SecretError::NotFound` mapping.
 
 ## Running
 

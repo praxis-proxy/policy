@@ -161,6 +161,12 @@ const TABLE: &[CapabilityEntry] = &[
         prefixes: &[BAG_LLM_PREFIX],
     },
     CapabilityEntry {
+        // Gates `Extensions.llm_request`, which reaches PDPs through a
+        // structured side channel and is never flattened into the bag.
+        name: CAP_READ_LLM_REQUEST,
+        prefixes: &[],
+    },
+    CapabilityEntry {
         name: CAP_READ_MCP,
         prefixes: &[BAG_MCP_PREFIX],
     },
@@ -306,6 +312,12 @@ mod tests {
         // payloads, not bag attributes.
         assert!(capability_namespaces(CAP_READ_INBOUND_CREDENTIALS).is_empty());
         assert!(capability_namespaces(CAP_READ_DELEGATED_TOKENS).is_empty());
+    }
+
+    #[test]
+    fn read_llm_request_is_known_but_unlocks_no_bag_keys() {
+        assert!(capability_namespaces(CAP_READ_LLM_REQUEST).is_empty());
+        assert!(known_read_capabilities().any(|c| c == CAP_READ_LLM_REQUEST));
     }
 
     #[test]

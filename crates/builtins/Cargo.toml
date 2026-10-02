@@ -38,6 +38,9 @@ oauth = [
   "dep:moka",
 ]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
+# Experimental per-consumer token quota against a standalone Limitador. Calls go
+# through the host transport, so no HTTP dep beyond core, the shared serde, and
+experimental-quota = ["_engine-core", "_plugins"]
 cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
@@ -65,7 +68,7 @@ _engine-apl-runtime = ["dep:praxis-policy-apl-runtime"]
 # silent, since `unexpected_cfgs` catches a stale feature *name* but not a
 # missing alternative.
 _plugins = []
-_pdps = []
+_pdps = ["dep:stacker"]
 _session = []
 _secrets = []
 
@@ -175,12 +178,13 @@ moka = { version = "0.12", optional = true, features = ["future"] }
 # pre-4.x or post-5.x.
 cedar-policy = { version = "4", optional = true }
 
-# Stack-growth guard for the cedar evaluation path. cedar-policy-core aborts
+# Stack-growth guard for the PDP evaluation paths. cedar-policy-core aborts
 # with "recursion limit reached" when `stacker::remaining_stack()` is below
 # ~100 KiB; hosts that hand the FFI a small thread stack (musl defaults to
-# 128 KiB) trip that on inputs glibc's 8 MiB stack handles fine. We use the
-# same crate cedar does — 0.1.x dedups with cedar's transitive pin — to grow
-# onto a fresh segment before calling in.
+# 128 KiB) trip that on inputs glibc's 8 MiB stack handles fine. CEL and OPA
+# convert and evaluate nested client JSON recursively, so they grow the same
+# way. We use the same crate cedar does (0.1.x dedups with cedar's transitive
+# pin) to grow onto a fresh segment before calling in.
 stacker = { version = "0.1", optional = true }
 
 # --- cel ---------------------------------------------------------------------
@@ -305,6 +309,11 @@ rand = "0.8"
 testcontainers-modules = { version = "0.15", features = ["valkey"] }
 testcontainers = "0.27"
 
+# Criterion drives the quota plugin's added-latency benchmark, matching the
+# workspace standard (ppe-benches). `async_tokio` (set in the workspace dep)
+# lets it await the async hook handlers.
+criterion = { workspace = true }
+
 # One harness per extension, each gated on its own single feature.
 # `required-features` is all-or-nothing, so a harness covering several
 # extensions would be skipped entirely under a single-feature build and its
@@ -349,6 +358,17 @@ required-features = ["opa"]
 name = "valkey"
 path = "tests/valkey/main.rs"
 required-features = ["valkey"]
+
+[[test]]
+name = "quota"
+path = "tests/quota/main.rs"
+required-features = ["experimental-quota"]
+
+[[bench]]
+name = "quota_hot_path"
+path = "benches/quota_hot_path.rs"
+harness = false
+required-features = ["experimental-quota"]
 
 [lints]
 workspace = true

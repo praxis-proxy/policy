@@ -59,7 +59,7 @@ use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::plugin_decl::PluginRegistry;
 
 use crate::candidate_constraint::fold_candidate_constraints;
-use praxis_policy_apl_core::route::{RoutePayload, evaluate_post, evaluate_pre};
+use praxis_policy_apl_core::route::{RoutePayload, StructuredInput, evaluate_post, evaluate_pre};
 use praxis_policy_apl_core::rules::{CompiledRoute, DenyResponse};
 use praxis_policy_apl_core::step::PdpResolver;
 
@@ -185,6 +185,12 @@ pub struct AplRouteHandler {
     /// bag. Shared `Arc` (the visitor hands the same tree to every
     /// handler); empty by default when no source was configured.
     attribute_tree: Arc<AttributeTree>,
+    /// Whether PDPs receive the tool-call arguments as structured JSON.
+    /// Set for `tool:` routes only, so a tool call replayed inside an LLM
+    /// message never fills it.
+    structured_args: bool,
+    /// Whether this phase contains a PDP effect that can read structured input.
+    structured_input: bool,
 }
 
 impl AplRouteHandler {
@@ -217,7 +223,22 @@ impl AplRouteHandler {
             engine,
             pdp: Arc::new(PdpRouter::new()),
             attribute_tree: Arc::new(praxis_policy_apl_core::AttributeTree::empty()),
+            structured_args: false,
+            structured_input: false,
         }
+    }
+
+    /// Hand PDPs the pre-pipeline call arguments as structured JSON. The
+    /// visitor enables it on `tool:` routes. Off by default.
+    pub fn with_structured_args(mut self, enabled: bool) -> Self {
+        self.structured_args = enabled;
+        self
+    }
+
+    /// Build structured input only for a phase that contains a PDP effect.
+    pub fn with_structured_input(mut self, enabled: bool) -> Self {
+        self.structured_input = enabled;
+        self
     }
 
     /// Install the static `data.*` attribute tree flattened into every
@@ -417,6 +438,24 @@ impl AplRouteHandler {
         // stage on such a route is refused at load rather than left to read
         // it.
         let args_value = message.map_or(Value::Null, extract_args_from_message);
+        // Structured input for PDPs, captured before any pipeline runs so it
+        // matches the bag. The request body comes from this handler's
+        // filtered view and shares the host's `Arc`. Arguments count only
+        // on tool routes and only as an object, the shape a tool call has.
+        // A phase without a PDP skips the clone and depth walk. Otherwise,
+        // depth is measured once and shared by every PDP step in the phase.
+        let structured = if self.structured_input {
+            StructuredInput::new(
+                post_extensions
+                    .llm_request
+                    .as_ref()
+                    .map(|doc| Arc::clone(doc.shared())),
+                (self.structured_args && args_value.is_object())
+                    .then(|| Arc::new(args_value.clone())),
+            )
+        } else {
+            StructuredInput::default()
+        };
         let mut route_payload = match self.phase {
             Phase::Pre => RoutePayload::new(args_value),
             Phase::Post => {
@@ -429,7 +468,8 @@ impl AplRouteHandler {
                 let result_value = message.map_or(Value::Null, extract_result_from_message);
                 RoutePayload::with_result(args_value, result_value)
             },
-        };
+        }
+        .with_structured(structured);
 
         // Flatten the call args into the bag under `args.<path>`. APL's
         // own args pipelines read from `route_payload.args` directly,
