@@ -138,17 +138,12 @@ pub fn reserved_context_key(call: &PdpCall) -> Option<&'static str> {
 }
 
 /// A value-free description of a context construction error.
-#[allow(
-    unreachable_patterns,
-    reason = "Cedar 4.x may add context error variants"
-)]
 fn context_error_category(error: &ContextJsonError) -> &'static str {
     match error {
         ContextJsonError::JsonDeserialization(_) => "a value has no Cedar representation",
         ContextJsonError::ContextCreation(ContextCreationError::NotARecord(_)) => {
             "context is not a record"
         },
-        ContextJsonError::ContextCreation(_) => "context could not be built",
         ContextJsonError::MissingAction(_) => "action is not in the schema",
         _ => "context could not be built",
     }

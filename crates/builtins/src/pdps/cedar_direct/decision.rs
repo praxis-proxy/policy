@@ -69,7 +69,7 @@ fn policy_name(policy_set: &PolicySet, pid: &cedar_policy::PolicyId) -> String {
 }
 
 /// A value-free line for one evaluation error: the policy and a category.
-#[allow(
+#[expect(
     unreachable_patterns,
     reason = "Cedar 4.x may add authorization error variants"
 )]
