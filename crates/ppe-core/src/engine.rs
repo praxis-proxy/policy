@@ -2676,6 +2676,10 @@ impl PolicyEngine {
                 .emit_decision(payload, &extensions, &mut result.decision_log, verdict)
                 .await;
             result.modified_extensions = Some(extensions);
+        } else {
+            // The result's decision log is part of the caller-visible answer,
+            // even when no sink receives a record or no payload is available.
+            result.decision_log.finalize(verdict);
         }
         result.modified_payload = carried;
         result

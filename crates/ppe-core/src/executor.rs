@@ -673,10 +673,10 @@ impl Executor {
         decisions: &mut DecisionLog,
         verdict: Verdict,
     ) {
+        decisions.finalize(verdict);
         if self.audit_handlers.is_empty() {
             return;
         }
-        decisions.finalize(verdict);
         // Taken here rather than by a sink, so the key stays with the executor.
         if let Some(key) = self.provenance_key() {
             decisions.set_output_hash(payload.audit_bytes().and_then(|b| key.digest(&b)));

@@ -364,6 +364,27 @@ async fn an_assertion_denial_is_what_the_sink_is_told() {
     assert_eq!(seen[0].code.as_deref(), Some("auth.assertion_missing"));
 }
 
+#[tokio::test]
+async fn an_assertion_denial_updates_the_log_without_a_sink() {
+    let engine = engine_with(DENYING_CONTRACT).await;
+    attach_actor(&engine, "unused");
+
+    let (result, _bg) = engine
+        .invoke_named::<CmfHook>(
+            HOOK_CMF_TOOL_PRE_INVOKE,
+            message(),
+            tenantless(tool_meta("search")),
+            None,
+        )
+        .await;
+
+    assert!(result.is_denied());
+    assert!(matches!(
+        result.decision_log.verdict(),
+        Some(Verdict::Deny(v)) if v.code == "auth.assertion_missing"
+    ));
+}
+
 /// The decision log a late denial carries is the pipeline's, not an empty one.
 ///
 /// `deny_missing_assertion` builds a fresh result, and rebuilding used to drop
@@ -452,6 +473,26 @@ async fn a_zero_plugin_invocation_emits_one_allow() {
         seen[0].had_span,
         "no plugin ran, but the record still says where in the trace it belongs"
     );
+}
+
+#[tokio::test]
+async fn a_zero_plugin_invocation_has_a_verdict_without_a_sink() {
+    let engine = engine_with(PLAIN).await;
+
+    let (result, _bg) = engine
+        .invoke_named::<CmfHook>(
+            "cmf.nothing.is.registered.here",
+            message(),
+            tool_meta("search"),
+            None,
+        )
+        .await;
+
+    assert!(!result.is_denied());
+    assert!(matches!(
+        result.decision_log.verdict(),
+        Some(Verdict::Allow)
+    ));
 }
 
 // =====================================================================
