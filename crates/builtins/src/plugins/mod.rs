@@ -8,6 +8,7 @@
 //!
 //! - `identity_jwt` (`jwt`) — kind `identity/jwt`
 //! - `identity_api_key` (`api-key`) — kind `identity/api-key`
+//! - `identity_forward_auth` (`forward-auth`) — kind `identity/forward_auth`
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
 //! - `quota` (`experimental-quota`) — kind `quota/limitador`
@@ -17,6 +18,9 @@ pub mod identity_jwt;
 
 #[cfg(feature = "api-key")]
 pub mod identity_api_key;
+
+#[cfg(feature = "forward-auth")]
+pub mod identity_forward_auth;
 
 #[cfg(feature = "oauth")]
 pub mod delegator_oauth;
