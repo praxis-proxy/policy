@@ -32,7 +32,7 @@
 // reason))`:
 //   * `delegation.idp_unreachable` — network failure
 //   * `delegation.idp_timeout` — exceeded `timeout_seconds`
-//   * `delegation.idp_rejected` — IdP returned 4xx/5xx (status in
+//   * `delegation.idp_rejected` — token endpoint returned 4xx/5xx (status in
 //                                  `details.http_status`)
 //   * `delegation.bad_response` — response not valid JSON or
 //                                 missing required fields
@@ -398,19 +398,14 @@ impl OAuthDelegator {
     /// Bracket a mint with write-ahead effect recording.
     ///
     /// The intent is durably recorded before `mint` runs and fails closed: no
-    /// record, no mint. The outcome is then recorded from what the `IdP`
-    /// actually said, which is finer than the default the core bracket would
-    /// infer, because this plugin can tell a refusal from a lost answer:
+    /// record, no mint. The outcome is recorded from what the plugin can
+    /// establish:
     ///
     /// - `Confirmed` on success.
-    /// - `Rejected` on a 4xx, the RFC 6749 section 5.2 error response, where
-    ///   the `IdP` said no and provably issued nothing.
-    /// - `Unknown` on a 5xx, a timeout, an unreachable `IdP`, or a 2xx whose
-    ///   body is not a token response. None of these says whether a token
-    ///   was issued: a 503 or 504 can come from a proxy in front of an `IdP`
-    ///   that minted anyway, and a 200 that will not parse can come from a
-    ///   proxy that never reached it. Recovery reconciles by key rather than
-    ///   assuming either way.
+    /// - `Unknown` on any failure, including a 4xx OAuth error response. The
+    ///   transport cannot establish that the authorization server generated
+    ///   the response: an intermediary may answer after a mint succeeded.
+    ///   Recovery reconciles by key rather than assuming no token was issued.
     ///
     /// With no effect log configured this just runs `mint`.
     async fn audit_mint<F, Fut, T>(
@@ -456,10 +451,7 @@ impl OAuthDelegator {
 
         let state = match &outcome {
             Ok(_) => EffectState::Confirmed,
-            Err(v) => match v.code.as_str() {
-                "delegation.idp_rejected" if refused_by_idp(v) => EffectState::Rejected,
-                _ => EffectState::Unknown,
-            },
+            Err(_) => EffectState::Unknown,
         };
         // Best effort: the mint already happened, so a failure here cannot
         // un-happen it and must not fail the delegation. It is logged rather
@@ -482,8 +474,8 @@ impl OAuthDelegator {
 /// The reason carries only the OAuth `error` code (a fixed vocabulary:
 /// `invalid_client`, `invalid_grant`, and so on), never `error_description`
 /// or the raw body, because both legs submit a credential and an `IdP` may
-/// echo it back in either. The status goes in `details` so `audit_mint` can
-/// tell a refusal from a server error without parsing the reason.
+/// echo it back in either. The status goes in `details` for diagnostics; it
+/// cannot establish whether the authorization server minted a token.
 fn idp_rejection(leg: &str, response: &HttpResponse) -> PluginViolation {
     let status = response.status;
     let reason = match serde_json::from_slice::<TokenErrorResponse>(&response.body) {
@@ -494,18 +486,6 @@ fn idp_rejection(leg: &str, response: &HttpResponse) -> PluginViolation {
         IDP_STATUS_DETAIL.to_owned(),
         serde_json::Value::from(status),
     )]))
-}
-
-/// Whether an `idp_rejected` violation is a refusal the `IdP` itself made.
-///
-/// Only a 4xx is: RFC 6749 section 5.2 puts its error responses there. A 5xx
-/// proves nothing about the mint, since a proxy or gateway in front of the
-/// `IdP` can answer 503 or 504 after the token was already issued.
-fn refused_by_idp(v: &PluginViolation) -> bool {
-    v.details
-        .get(IDP_STATUS_DETAIL)
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|s| (400..500).contains(&s))
 }
 
 /// The `details` key `idp_rejection` puts the HTTP status under.

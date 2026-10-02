@@ -16,11 +16,10 @@
 // grant, and it cannot act — least of all under the name of a plugin it is
 // watching.
 
-#![allow(
+#![expect(
     missing_docs,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::panic,
     clippy::unwrap_used,
     reason = "test code"
 )]

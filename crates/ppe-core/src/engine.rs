@@ -2653,10 +2653,11 @@ impl PolicyEngine {
             Some(v) => crate::decision::Verdict::Deny(v.clone()),
             None => crate::decision::Verdict::Allow,
         };
-        if let Some(payload) = carried
-            .as_deref()
-            .or(refused.as_deref())
-            .or(fallback_payload.as_deref())
+        if snapshot.executor.has_audit_handlers()
+            && let Some(payload) = carried
+                .as_deref()
+                .or(refused.as_deref())
+                .or(fallback_payload.as_deref())
         {
             // The extensions the pipeline finished with. Sinks are filtered
             // from these per sink, inside the emit.

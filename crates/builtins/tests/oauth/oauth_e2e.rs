@@ -1360,30 +1360,37 @@ async fn a_successful_mint_records_intent_then_confirmation() {
     assert_eq!(records[0].key, records[1].key);
 }
 
-/// The `IdP` said no, so provably nothing was issued. Recording this as
-/// unknown would leave an operator chasing a token that never existed.
+/// A 4xx alone cannot prove that the authorization server issued no token.
+/// Even an OAuth-shaped body may come from an intermediary after the mint.
 #[tokio::test]
-async fn a_refused_mint_is_recorded_rejected() {
+async fn client_errors_leave_the_mint_open_for_reconciliation() {
     use praxis_policy_core::effect::EffectState;
 
-    let log = Arc::new(SpyLog::default());
-    let mgr = manager_with_log(&idp(400, r#"{"error":"invalid_grant"}"#), log.clone()).await;
+    for (status, body) in [
+        (400, r#"{"error":"invalid_grant"}"#),
+        (403, "<html>proxy denied</html>"),
+        (429, r#"{"error":"temporarily_unavailable"}"#),
+    ] {
+        let log = Arc::new(SpyLog::default());
+        let mgr = manager_with_log(&idp(status, body), log.clone()).await;
 
-    let result = invoke(
-        &mgr,
-        build_payload(
-            "tool",
-            "https://downstream.example.com",
-            &["read:compensation"],
-        ),
-    )
-    .await;
+        let result = invoke(
+            &mgr,
+            build_payload(
+                "tool",
+                "https://downstream.example.com",
+                &["read:compensation"],
+            ),
+        )
+        .await;
 
-    assert!(!result.continue_processing);
-    assert_eq!(
-        log.states(),
-        vec![EffectState::Prepared, EffectState::Rejected]
-    );
+        assert!(!result.continue_processing);
+        assert_eq!(
+            log.states(),
+            vec![EffectState::Prepared, EffectState::Unknown],
+            "HTTP {status} cannot settle the mint"
+        );
+    }
 }
 
 /// A 5xx is not the `IdP` refusing. A gateway in front of it can answer 503 or

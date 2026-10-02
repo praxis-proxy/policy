@@ -1040,7 +1040,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod audit_handler_tests {
     //! `audit_handlers` is the projection the engine attaches to the
     //! executor. A plugin that forgot to opt in must not appear in it, and

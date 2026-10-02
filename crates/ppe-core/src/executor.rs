@@ -628,6 +628,11 @@ impl Executor {
         self.rebuild_effect_sink(log);
     }
 
+    /// Whether any sink will receive a decision record.
+    pub(crate) fn has_audit_handlers(&self) -> bool {
+        !self.audit_handlers.is_empty()
+    }
+
     /// Seed a decision log for an invocation that resolved to zero plugins, so
     /// the audit stream carries one record per invocation rather than falling
     /// silent where nothing was configured.
@@ -2485,7 +2490,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
@@ -2514,7 +2519,7 @@ mod audit_seam_tests {
     use crate::registry::PluginRef;
 
     #[derive(Debug, Clone)]
-    #[allow(dead_code, reason = "test payload: the typed shape is the point")]
+    #[expect(dead_code, reason = "test payload: the typed shape is the point")]
     struct P(String);
     crate::impl_plugin_payload!(P);
 

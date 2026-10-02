@@ -1247,10 +1247,9 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::panic,
     clippy::unwrap_used,
     reason = "tests"
 )]

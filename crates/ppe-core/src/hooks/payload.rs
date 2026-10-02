@@ -299,7 +299,7 @@ macro_rules! impl_plugin_payload {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::unwrap_used,

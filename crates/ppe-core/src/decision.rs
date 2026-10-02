@@ -306,12 +306,7 @@ impl DecisionLog {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    reason = "tests"
-)]
+#[expect(clippy::indexing_slicing, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
 

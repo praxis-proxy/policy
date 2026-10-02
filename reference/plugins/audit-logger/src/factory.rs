@@ -65,7 +65,7 @@ impl PluginFactory for AuditLoggerFactory {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,

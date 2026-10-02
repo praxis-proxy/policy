@@ -389,11 +389,11 @@ An effect moves through four states.
 `unknown` is the one that matters. A call that timed out may still have landed
 at the participant with the answer lost coming back, so recording it as
 `rejected` asserts no token was minted when nothing checked. The OAuth
-delegator maps precisely: a 4xx is `rejected`, since that is where RFC 6749
-puts the IdP's error responses, and everything else that fails is `unknown`. A
-5xx can come from a proxy after the token was minted, and a 2xx whose body is
-not a token response can come from a proxy that never reached the IdP, so
-neither says whether a token exists.
+delegator records every failed mint as `unknown`, including a 4xx with an OAuth
+error body. The transport cannot verify that the authorization server sent the
+response: a proxy may answer after the token was minted. A 2xx whose body is
+not a token response is uncertain too. A reconciler can record `rejected` only
+after checking the effect key against an authoritative participant.
 
 ### Which phases may act
 
