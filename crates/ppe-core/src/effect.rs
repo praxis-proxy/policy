@@ -834,9 +834,9 @@ impl EffectSink {
                 },
                 Err(_elapsed) => {
                     tracing::error!(
-                        "audit sink '{}' exceeded {}s observing an effect, skipped",
+                        "audit sink '{}' exceeded {}ms observing an effect, skipped",
                         observer.name(),
-                        self.handler_timeout.as_secs()
+                        self.handler_timeout.as_millis()
                     );
                 },
             }

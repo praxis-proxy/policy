@@ -50,11 +50,16 @@ use crate::hooks::payload::{Extensions, PluginPayload, WriteToken};
 use crate::plugin::OnError;
 use crate::registry::{AnyHookHandler, HookEntry, group_by_mode};
 
+pub(crate) const DEFAULT_AUDIT_TIMEOUT_MILLISECONDS: u64 = 100;
+
 /// Configuration for the executor.
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
     /// Maximum execution time per plugin in seconds.
     pub timeout_seconds: u64,
+
+    /// Maximum time per audit sink callback in milliseconds.
+    pub audit_timeout_milliseconds: u64,
 
     /// Whether to halt on the first deny in concurrent mode.
     pub short_circuit_on_deny: bool,
@@ -90,6 +95,7 @@ impl Default for ExecutorConfig {
     fn default() -> Self {
         Self {
             timeout_seconds: 30,
+            audit_timeout_milliseconds: DEFAULT_AUDIT_TIMEOUT_MILLISECONDS,
             short_circuit_on_deny: true,
             capture_content_provenance: false,
             audit_stream_namespace: None,
@@ -409,9 +415,9 @@ impl fmt::Debug for BackgroundTasks {
 /// SEQUENTIAL → TRANSFORM → AUDIT → CONCURRENT → FIRE_AND_FORGET
 /// ```
 ///
-/// The executor's only state is its config and the attached audit sinks;
-/// all per-request state comes from the arguments. One executor instance
-/// can serve multiple concurrent hook invocations.
+/// Per-request state comes from the arguments. Stream counters and in-flight
+/// effect keys are shared across clones, so records stay in the same stream
+/// across snapshot mutations. One instance serves concurrent invocations.
 #[derive(Clone)]
 pub struct Executor {
     config: ExecutorConfig,
@@ -599,7 +605,7 @@ impl Executor {
                 stream_id: compose_stream_id(self.stream_namespace.as_deref(), "effect"),
                 stream_seq: Arc::clone(&self.effect_seq),
                 emission_seq: Arc::clone(&self.emission_seq),
-                handler_timeout: Duration::from_secs(self.config.timeout_seconds),
+                handler_timeout: Duration::from_millis(self.config.audit_timeout_milliseconds),
             },
         )
         .with_in_flight(Arc::clone(&self.in_flight));
@@ -659,13 +665,11 @@ impl Executor {
     /// Finalize a decision log with the verdict the caller is actually
     /// returning, stamp it into the audit stream, and hand it to every sink.
     ///
-    /// This is the single emit point, and it belongs to the engine rather than
-    /// to `execute`, because the verdict is not final until the engine's
-    /// assertion contract has run. Emitting from inside `execute` recorded an
-    /// allow that `apply_assertions` could still turn into a deny, and said
-    /// nothing at all about a request denied before the pipeline started.
+    /// The engine calls this after its assertion contract establishes the
+    /// final verdict. Route-resolution denials must also reach this point,
+    /// even though no pipeline ran.
     ///
-    /// A no-op when no sink is attached.
+    /// Without a sink, this still finalizes the caller-visible decision log.
     pub(crate) async fn emit_decision(
         &self,
         payload: &dyn PluginPayload,
@@ -739,10 +743,10 @@ impl Executor {
 
         // The verdict is already decided, so a sink must not be able to crash
         // or hang the request it is only observing. Each call is bounded by
-        // the plugin timeout and its panics contained; a sink that fails is
+        // the audit timeout and its panics contained; a sink that fails is
         // logged and skipped. A lost audit record is a problem in itself, but
         // not one that justifies failing the request.
-        let timeout_dur = Duration::from_secs(self.config.timeout_seconds);
+        let timeout_dur = Duration::from_millis(self.config.audit_timeout_milliseconds);
         for sink in &self.audit_handlers {
             // `extensions` here is the executor's working copy: the host's
             // transport is installed on it and the credential slots are
@@ -764,9 +768,9 @@ impl Executor {
                 },
                 Err(_elapsed) => {
                     error!(
-                        "audit sink '{}' exceeded {}s during emit, skipped",
+                        "audit sink '{}' exceeded {}ms during emit, skipped",
                         sink.name(),
-                        timeout_dur.as_secs()
+                        timeout_dur.as_millis()
                     );
                 },
             }
@@ -3062,6 +3066,7 @@ mod audit_seam_tests {
         // outcome), each inside the sink's own one-second allowance.
         let executor = Executor::new(ExecutorConfig {
             timeout_seconds: 1,
+            audit_timeout_milliseconds: 1_000,
             short_circuit_on_deny: true,
             ..Default::default()
         })
@@ -3084,6 +3089,52 @@ mod audit_seam_tests {
             result.violation
         );
         assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn audit_timeout_bounds_effect_and_decision_callbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct SlowSink {
+            started: AtomicUsize,
+            completed: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl AuditHandler for SlowSink {
+            async fn handle(&self, _p: &dyn PluginPayload, _e: &Extensions, _d: &DecisionLog) {
+                self.started.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+
+            async fn on_effect(&self, _effect: &crate::effect::EffectRecord, _e: &Extensions) {
+                self.started.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let slow = Arc::new(SlowSink::default());
+        let executor = Executor::new(ExecutorConfig {
+            audit_timeout_milliseconds: 25,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(slow.clone())]);
+        let started = tokio::time::Instant::now();
+        let result = execute_and_emit(
+            &executor,
+            &[pausing_entry(Duration::ZERO, false)],
+            Box::new(P("in".into())),
+            Extensions::default(),
+        )
+        .await;
+
+        assert!(result.continue_processing, "{:?}", result.violation);
+        assert_eq!(slow.started.load(Ordering::Relaxed), 3);
+        assert_eq!(slow.completed.load(Ordering::Relaxed), 0);
+        assert_eq!(started.elapsed(), Duration::from_millis(75));
     }
 
     /// Works for `before`, records an intent, then either acts at once or
@@ -3176,6 +3227,7 @@ mod audit_seam_tests {
         // running when the one-second budget runs out.
         let executor = Executor::new(ExecutorConfig {
             timeout_seconds: 1,
+            audit_timeout_milliseconds: 1_000,
             ..Default::default()
         })
         .with_audit_handlers(vec![sink(Arc::new(SlowSink))]);

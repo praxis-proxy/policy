@@ -38,14 +38,12 @@ use crate::hooks::payload::{Extensions, PluginPayload};
 pub trait AuditHandler: Send + Sync {
     /// Observe one finished pipeline invocation.
     ///
-    /// The executor awaits this before returning the pipeline result, so a
-    /// verdict that was emitted cannot be lost to a crash and a consumer
-    /// needs no drop-detection for the steady state. Changing this to
-    /// fire-and-forget would weaken that guarantee without any signal at the
-    /// call sites that rely on it.
+    /// The executor awaits this before returning the pipeline result. A sink
+    /// that needs durability must commit the record before returning; a timed
+    /// out callback is cancelled and its record may be missing.
     ///
     /// The cost is that sink latency sits on the request path, bounded per
-    /// sink by the plugin timeout and run sequentially. Keep `handle` cheap:
+    /// sink by the audit timeout and run sequentially. Keep `handle` cheap:
     /// serialize, hash, append. A sink writing to a network destination
     /// should hand off to its own queue rather than block here.
     ///

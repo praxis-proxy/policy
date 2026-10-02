@@ -588,6 +588,7 @@ fn the_engine_settings_table_is_the_accept_set() {
         vec![
             "dispatch",
             "plugin_timeout",
+            "audit_timeout_milliseconds",
             "short_circuit_on_deny",
             "route_cache_max_entries",
             "effect_log_path",

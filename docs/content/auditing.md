@@ -514,8 +514,9 @@ sink has returned before the caller gets its answer. That is not durability: a
 sink that buffers, or writes to a stream nobody fsyncs, can still lose a record
 to a crash, and only the effect log promises otherwise. The cost is that sink
 latency is request latency. A sink writing to a network destination should hand
-off to its own queue rather than block. Each call is bounded by the plugin
-timeout and its panics are contained; a sink that fails is logged and skipped,
+off to its own queue rather than block. Each call is bounded by the audit
+timeout (100 ms by default, set with `engine_settings.audit_timeout_milliseconds`),
+and its panics are contained; a sink that fails is logged and skipped,
 because the verdict is already decided and a lost record does not justify
 failing the request.
 

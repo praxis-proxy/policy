@@ -160,6 +160,10 @@ pub struct EngineSettings {
     #[serde(default = "default_timeout")]
     pub plugin_timeout: u64,
 
+    /// Maximum time per audit sink callback in milliseconds.
+    #[serde(default = "default_audit_timeout_milliseconds")]
+    pub audit_timeout_milliseconds: u64,
+
     /// Whether to halt on first deny in concurrent mode.
     #[serde(default = "default_true")]
     pub short_circuit_on_deny: bool,
@@ -277,6 +281,7 @@ impl Default for EngineSettings {
         Self {
             dispatch: DispatchMode::Policy,
             plugin_timeout: 30,
+            audit_timeout_milliseconds: default_audit_timeout_milliseconds(),
             short_circuit_on_deny: true,
             route_cache_max_entries: default_route_cache_max_entries(),
             effect_log_path: None,
@@ -295,6 +300,10 @@ fn default_route_cache_max_entries() -> usize {
 
 fn default_timeout() -> u64 {
     30
+}
+
+fn default_audit_timeout_milliseconds() -> u64 {
+    crate::executor::DEFAULT_AUDIT_TIMEOUT_MILLISECONDS
 }
 
 fn default_true() -> bool {
@@ -1391,6 +1400,7 @@ const ROUTE_STRUCTURAL_KEYS: &[ConfigKey] = &[
 const ENGINE_SETTINGS_KEYS: &[ConfigKey] = &[
     structural_key("dispatch", KeyOwner::Core),
     structural_key("plugin_timeout", KeyOwner::Core),
+    structural_key("audit_timeout_milliseconds", KeyOwner::Core),
     structural_key("short_circuit_on_deny", KeyOwner::Core),
     structural_key("route_cache_max_entries", KeyOwner::Core),
     structural_key("effect_log_path", KeyOwner::Core),
@@ -9352,6 +9362,7 @@ plugins:
       source: gateway-eu-1
 ";
         let config = parse_config(yaml).expect("the documented config must load");
+        assert_eq!(config.engine_settings.audit_timeout_milliseconds, 100);
         assert_eq!(
             config.engine_settings.effect_log_path.as_deref(),
             Some("/var/lib/praxis/effects.ndjson")
@@ -9366,6 +9377,13 @@ plugins:
             Some("gw-1")
         );
         assert_eq!(config.plugins[0].kind, "audit/logger");
+    }
+
+    #[test]
+    fn audit_timeout_milliseconds_loads() {
+        let config = parse_config("engine_settings:\n  audit_timeout_milliseconds: 25\n")
+            .expect("audit timeout must load");
+        assert_eq!(config.engine_settings.audit_timeout_milliseconds, 25);
     }
 
     /// An empty namespace would compose stream ids like ":decision", which is

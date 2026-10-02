@@ -231,10 +231,8 @@ fn deny_missing_assertion(
     let mut denied = PipelineResult::denied(violation, extensions, context_table);
     denied.errors = std::mem::take(&mut result.errors);
     denied.metadata = result.metadata.take();
-    // The pipeline ran, so its steps are what explain this denial as much as
-    // the assertion that caused it. Building a fresh result here used to drop
-    // them, leaving the caller an empty log on the one denial that has a full
-    // pipeline behind it. The verdict is corrected at the emit.
+    // Preserve the pipeline steps that explain this denial. `finish` sets the
+    // verdict after assertions, so the log must carry those steps through.
     denied.decision_log = std::mem::take(&mut result.decision_log);
     denied
 }
@@ -928,6 +926,7 @@ fn snapshot_from_config(
 ) -> RuntimeSnapshot {
     let mut executor = Executor::new(ExecutorConfig {
         timeout_seconds: policy_config.engine_settings.plugin_timeout,
+        audit_timeout_milliseconds: policy_config.engine_settings.audit_timeout_milliseconds,
         short_circuit_on_deny: policy_config.engine_settings.short_circuit_on_deny,
         capture_content_provenance: policy_config.engine_settings.capture_content_provenance,
         audit_stream_namespace: policy_config.engine_settings.audit_stream_namespace.clone(),
@@ -2624,13 +2623,9 @@ impl PolicyEngine {
     /// Settle an invocation: run the assertion contract, then emit one audit
     /// record carrying the verdict the caller is actually about to receive.
     ///
-    /// Every return path of every invoke path goes through here, which is what
-    /// makes the audit stream one record per invocation with no exceptions.
-    /// Two things used to go wrong without it. The executor emitted before
-    /// `apply_assertions` ran, so an `on_missing: deny` assertion could refuse
-    /// a request a sink had already recorded as allowed. And a route that
-    /// failed to resolve denied without emitting at all, so the requests most
-    /// worth auditing were the ones missing from the stream.
+    /// Every return path of every invoke path must pass through here, so each
+    /// invocation emits one record. Emission follows `apply_assertions`, which
+    /// can change an allow to a deny. Route-resolution denials must emit too.
     ///
     /// `fallback_payload` is the message for the emit when the result does not
     /// carry one — a pipeline denial, or a route-resolution denial that never
