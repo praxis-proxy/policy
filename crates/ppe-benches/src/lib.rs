@@ -28,6 +28,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, register_apl};
+use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::context::PluginContext;
@@ -42,7 +43,6 @@ use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::plugin::{Plugin, PluginConfig, PluginMode};
 use praxis_policy_core::registry::AnyHookHandler;
-use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
 
 /// Hook name used by every engine-level bench. Matches the CMF tool
 /// pre-invocation phase Praxis hits on the request path.

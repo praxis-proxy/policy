@@ -65,6 +65,15 @@ pub struct PolicyConfig {
     #[serde(default)]
     pub routes: Vec<RouteEntry>,
 
+    /// Secret material: the providers that read a backend and the values bound
+    /// to them.
+    ///
+    /// Top level rather than under `global:` because nothing here is policy. It
+    /// is read before any policy is resolved, and the values it declares are
+    /// named from places that are not routes.
+    #[serde(default)]
+    pub secrets: crate::secrets::SecretsConfig,
+
     /// Engine-wide settings (timeout, error behavior, dispatch mode).
     #[serde(default)]
     pub engine_settings: EngineSettings,
@@ -151,6 +160,10 @@ pub struct EngineSettings {
     #[serde(default = "default_timeout")]
     pub plugin_timeout: u64,
 
+    /// Maximum time per audit sink callback in milliseconds.
+    #[serde(default = "default_audit_timeout_milliseconds")]
+    pub audit_timeout_milliseconds: u64,
+
     /// Whether to halt on first deny in concurrent mode.
     #[serde(default = "default_true")]
     pub short_circuit_on_deny: bool,
@@ -168,6 +181,99 @@ pub struct EngineSettings {
     /// investigate the entity-name growth.
     #[serde(default = "default_route_cache_max_entries")]
     pub route_cache_max_entries: usize,
+
+    /// Path to a durable write-ahead log for irreversible effects: token
+    /// mints, approval grants.
+    ///
+    /// With a path set, a plugin's intent is recorded and `fsync`'d before it
+    /// acts, so a process that dies mid-act leaves a record to reconcile
+    /// against the participant. Unset (the default) leaves effects
+    /// unrecorded: they still run, and a plugin behaves identically either
+    /// way. Auditing is a choice the operator makes, not one a plugin
+    /// depends on.
+    #[serde(default)]
+    pub effect_log_path: Option<String>,
+
+    /// Appends between automatic compactions of the effect log.
+    ///
+    /// Only meaningful with `effect_log_path` set. `0` disables automatic
+    /// compaction, leaving it to the recovery run at startup. Unset uses the
+    /// built-in default.
+    #[serde(default)]
+    pub effect_log_compaction_threshold: Option<usize>,
+
+    /// Record a content hash of the payload for audit provenance.
+    ///
+    /// The executor hashes the payload at pipeline entry and an audit sink
+    /// hashes the output, so a reader can tell whether a stage changed the
+    /// content without the trail holding either version. Only the digest is
+    /// kept, never the bytes.
+    ///
+    /// Off by default: hashing sits on the request path, so it is a cost an
+    /// operator opts into.
+    #[serde(default)]
+    pub capture_content_provenance: bool,
+
+    /// What content provenance digests under: the name of a value in
+    /// `secrets.values`, for HMAC-SHA256 under that secret, or `unkeyed` for
+    /// plain SHA-256.
+    ///
+    /// Required when `capture_content_provenance` is on. An unkeyed digest
+    /// lets anyone holding a record test guesses at the payload, which puts a
+    /// redacted value in a short or templated message back within reach, so
+    /// it has to be chosen by name rather than fallen into by omission.
+    #[serde(default)]
+    pub content_provenance_key: Option<String>,
+
+    /// Prefix for the audit stream ids, so records from one process are
+    /// attributable to it rather than to the bare per-type labels.
+    ///
+    /// `gw-1` gives stream ids `gw-1:decision` and `gw-1:effect`. The type
+    /// suffix always survives, so each stream stays independently gap-free.
+    /// A consumer recovering the type splits on the last colon, since a
+    /// namespace may itself contain one. Empty or whitespace is refused at
+    /// load rather than producing a stream id starting with a colon.
+    #[serde(default)]
+    pub audit_stream_namespace: Option<String>,
+
+    /// Override the audit epoch, the executor's generation identifier.
+    ///
+    /// Deliberately not part of the YAML surface. The epoch has to strictly
+    /// increase per generation so a new one is distinguishable from records
+    /// going missing, and a value fixed in a file cannot do that: it would pin
+    /// the epoch across every restart and silently break the guarantee. A host
+    /// that sets this in code owns the invariant, and must supply a larger
+    /// value on every load, not once per boot, because a reload builds a fresh
+    /// executor with the counters back at zero.
+    #[serde(skip)]
+    pub audit_epoch: Option<u64>,
+}
+
+/// The `content_provenance_key` value that selects plain SHA-256.
+pub const UNKEYED_CONTENT_PROVENANCE: &str = "unkeyed";
+
+/// Where content provenance gets its key, as `content_provenance_key` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentKeySource<'a> {
+    /// Plain SHA-256.
+    Unkeyed,
+    /// HMAC-SHA256 under the named value in `secrets.values`.
+    Secret(&'a str),
+}
+
+impl EngineSettings {
+    /// The key source in force, or `None` when provenance is off or no key is
+    /// named.
+    pub fn content_key_source(&self) -> Option<ContentKeySource<'_>> {
+        if !self.capture_content_provenance {
+            return None;
+        }
+        match self.content_provenance_key.as_deref() {
+            None => None,
+            Some(UNKEYED_CONTENT_PROVENANCE) => Some(ContentKeySource::Unkeyed),
+            Some(name) => Some(ContentKeySource::Secret(name)),
+        }
+    }
 }
 
 impl Default for EngineSettings {
@@ -175,8 +281,15 @@ impl Default for EngineSettings {
         Self {
             dispatch: DispatchMode::Policy,
             plugin_timeout: 30,
+            audit_timeout_milliseconds: default_audit_timeout_milliseconds(),
             short_circuit_on_deny: true,
             route_cache_max_entries: default_route_cache_max_entries(),
+            effect_log_path: None,
+            effect_log_compaction_threshold: None,
+            capture_content_provenance: false,
+            content_provenance_key: None,
+            audit_stream_namespace: None,
+            audit_epoch: None,
         }
     }
 }
@@ -187,6 +300,10 @@ fn default_route_cache_max_entries() -> usize {
 
 fn default_timeout() -> u64 {
     30
+}
+
+fn default_audit_timeout_milliseconds() -> u64 {
+    crate::executor::DEFAULT_AUDIT_TIMEOUT_MILLISECONDS
 }
 
 fn default_true() -> bool {
@@ -1219,6 +1336,7 @@ const DOCUMENT_KEYS: &[ConfigKey] = &[
     structural_key("plugins", KeyOwner::Core),
     structural_key("groups", KeyOwner::Core),
     structural_key("routes", KeyOwner::Core),
+    structural_key("secrets", KeyOwner::Core),
     structural_key("engine_settings", KeyOwner::Core),
 ];
 
@@ -1267,16 +1385,29 @@ const ROUTE_STRUCTURAL_KEYS: &[ConfigKey] = &[
     structural_key("response", KeyOwner::Apl),
 ];
 
-/// The keys the `engine_settings:` block carries, the [`EngineSettings`] fields.
+/// The keys the `engine_settings:` block carries, the [`EngineSettings`] fields
+/// that have a YAML spelling.
 ///
 /// [`EngineSettings`] drops an unknown field, so a setting the runtime never
 /// honored used to load clean and warn. The table is what makes it a load error
 /// naming its per-plugin replacement.
+///
+/// The table is the whole accept set, so a field this list omits is refused at
+/// load however well [`EngineSettings`] reads it. `audit_epoch` is the one
+/// field deliberately absent: it is `#[serde(skip)]` and settable only by a
+/// host in code, so a line here would accept a YAML key that pins the epoch
+/// across restarts, which is the guarantee the epoch exists to give.
 const ENGINE_SETTINGS_KEYS: &[ConfigKey] = &[
     structural_key("dispatch", KeyOwner::Core),
     structural_key("plugin_timeout", KeyOwner::Core),
+    structural_key("audit_timeout_milliseconds", KeyOwner::Core),
     structural_key("short_circuit_on_deny", KeyOwner::Core),
     structural_key("route_cache_max_entries", KeyOwner::Core),
+    structural_key("effect_log_path", KeyOwner::Core),
+    structural_key("effect_log_compaction_threshold", KeyOwner::Core),
+    structural_key("capture_content_provenance", KeyOwner::Core),
+    structural_key("content_provenance_key", KeyOwner::Core),
+    structural_key("audit_stream_namespace", KeyOwner::Core),
 ];
 
 /// The keys one map-form step of an `authentication:` block carries.
@@ -2229,6 +2360,51 @@ fn reject_reserved_route_names(config: &PolicyConfig) -> Result<(), Box<PluginEr
     Ok(())
 }
 
+/// Check `content_provenance_key` names something this document can supply.
+///
+/// Shape only, like the `secrets:` check: whether the value resolves, and
+/// whether it is long enough, is decided when secrets are read.
+fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
+    let settings = &config.engine_settings;
+    let refuse = |message: String| Err(Box::new(PluginError::Config { message }));
+    let Some(key) = settings.content_provenance_key.as_deref() else {
+        if settings.capture_content_provenance {
+            return refuse(format!(
+                "engine_settings.capture_content_provenance is on but no \
+                 content_provenance_key is set. Name a value from secrets.values to digest \
+                 under an HMAC key, or set it to `{UNKEYED_CONTENT_PROVENANCE}` for plain \
+                 SHA-256, which anyone holding a record can test guesses at the payload against"
+            ));
+        }
+        return Ok(());
+    };
+    if key.trim().is_empty() {
+        return refuse(
+            "engine_settings.content_provenance_key is empty; name a value from \
+             secrets.values, or remove the key"
+                .to_owned(),
+        );
+    }
+    let declared = config.secrets.values.contains_key(key);
+    if key == UNKEYED_CONTENT_PROVENANCE {
+        if declared {
+            return refuse(format!(
+                "engine_settings.content_provenance_key is `{UNKEYED_CONTENT_PROVENANCE}`, which \
+                 selects plain SHA-256, and secrets.values also declares a value by that name. \
+                 Rename the value so the setting says one thing"
+            ));
+        }
+        return Ok(());
+    }
+    if !declared {
+        return refuse(format!(
+            "engine_settings.content_provenance_key names `{key}`, which secrets.values does \
+             not declare"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a parsed config for structural correctness.
 ///
 /// This checks declared hook names plus the *references* in the structural plugin
@@ -2248,6 +2424,31 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     validate_declared_hooks(config)?;
     reject_reserved_route_names(config)?;
     validate_assertions(config)?;
+
+    // An empty namespace would compose stream ids like ":decision", which is
+    // neither the bare label nor a usable namespace, so refuse it rather than
+    // emit records nobody can attribute.
+    if let Some(ns) = &config.engine_settings.audit_stream_namespace
+        && ns.trim().is_empty()
+    {
+        return Err(Box::new(PluginError::Config {
+            message: "engine_settings.audit_stream_namespace is empty; remove the key to use the \
+                      bare stream labels, or give it a value naming this process"
+                .to_owned(),
+        }));
+    }
+
+    validate_content_provenance_key(config)?;
+
+    // Shape only. Nothing is read from a backend here: a document that names a
+    // provider it never declared is wrong whether or not the backend is
+    // reachable, and an operator should hear about it without waiting for a
+    // network timeout.
+    config.secrets.validate().map_err(|e| {
+        Box::new(PluginError::Config {
+            message: format!("{e}"),
+        })
+    })?;
 
     let mut seen_names = HashSet::new();
     for plugin in &config.plugins {
@@ -9129,5 +9330,171 @@ routes:
     fn a_config_with_no_flag_above_a_route_reports_nothing() {
         let config = load(FOUR_LEVELS);
         assert!(dropped_inherited_assertions(&config).is_empty());
+    }
+    /// The configuration in `docs/content/auditing.md` has to load. A doc whose
+    /// examples do not parse is worse than no doc: it sends an operator
+    /// debugging their YAML instead of their policy.
+    ///
+    /// Through `parse_config` rather than `serde_yaml`, because the allowlist
+    /// is the half that rejects: a typed parse drops a key the table omits and
+    /// succeeds, so only the loader catches the doc and `ENGINE_SETTINGS_KEYS`
+    /// disagreeing.
+    #[test]
+    fn the_documented_auditing_config_loads() {
+        let yaml = "
+engine_settings:
+  effect_log_path: /var/lib/praxis/effects.ndjson
+  effect_log_compaction_threshold: 1024
+  capture_content_provenance: true
+  content_provenance_key: provenance_key
+  audit_stream_namespace: gw-1
+secrets:
+  providers:
+    local: { kind: file, base_dir: /etc/ppe }
+  values:
+    provenance_key: { provider: local, ref: provenance.key }
+plugins:
+  - name: audit
+    kind: audit/logger
+    mode: audit
+    config:
+      destination: stderr
+      source: gateway-eu-1
+";
+        let config = parse_config(yaml).expect("the documented config must load");
+        assert_eq!(config.engine_settings.audit_timeout_milliseconds, 100);
+        assert_eq!(
+            config.engine_settings.effect_log_path.as_deref(),
+            Some("/var/lib/praxis/effects.ndjson")
+        );
+        assert_eq!(
+            config.engine_settings.effect_log_compaction_threshold,
+            Some(1024)
+        );
+        assert!(config.engine_settings.capture_content_provenance);
+        assert_eq!(
+            config.engine_settings.audit_stream_namespace.as_deref(),
+            Some("gw-1")
+        );
+        assert_eq!(config.plugins[0].kind, "audit/logger");
+    }
+
+    #[test]
+    fn audit_timeout_milliseconds_loads() {
+        let config = parse_config("engine_settings:\n  audit_timeout_milliseconds: 25\n")
+            .expect("audit timeout must load");
+        assert_eq!(config.engine_settings.audit_timeout_milliseconds, 25);
+    }
+
+    /// An empty namespace would compose stream ids like ":decision", which is
+    /// neither the bare label nor an attributable one, so it is refused rather
+    /// than emitting records nobody can place.
+    #[test]
+    fn an_empty_audit_stream_namespace_is_rejected() {
+        let mut config = PolicyConfig::default();
+        config.engine_settings.audit_stream_namespace = Some("   ".to_owned());
+
+        let err = validate_config(&config).expect_err("an empty namespace must not load");
+
+        assert!(
+            err.to_string().contains("audit_stream_namespace"),
+            "the message must name the key to fix: {err}"
+        );
+    }
+
+    fn provenance_config(key: Option<&str>, declared: &[&str]) -> PolicyConfig {
+        let mut config = PolicyConfig::default();
+        config.engine_settings.capture_content_provenance = true;
+        config.engine_settings.content_provenance_key = key.map(str::to_owned);
+        let values = declared
+            .iter()
+            .map(|name| format!("    {name}: {{ provider: local, ref: {name} }}\n"))
+            .collect::<String>();
+        config.secrets = serde_yaml::from_str(&format!(
+            "providers:\n  local: {{ kind: file, base_dir: /etc/ppe }}\nvalues:\n{values}"
+        ))
+        .unwrap();
+        config
+    }
+
+    /// Plain SHA-256 is a choice an operator makes by name. Leaving the key
+    /// out says nothing, so it is refused rather than read as that choice.
+    #[test]
+    fn provenance_without_a_key_is_refused_and_names_both_options() {
+        let err = validate_config(&provenance_config(None, &[])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("content_provenance_key"), "{msg}");
+        assert!(msg.contains("unkeyed"), "{msg}");
+    }
+
+    #[test]
+    fn an_unkeyed_choice_loads() {
+        validate_config(&provenance_config(Some("unkeyed"), &[])).unwrap();
+    }
+
+    #[test]
+    fn a_key_naming_a_declared_value_loads() {
+        validate_config(&provenance_config(Some("pk"), &["pk"])).unwrap();
+    }
+
+    #[test]
+    fn a_key_naming_an_undeclared_value_is_refused() {
+        let err = validate_config(&provenance_config(Some("pk"), &["other"])).unwrap_err();
+        assert!(err.to_string().contains("`pk`"), "{err}");
+    }
+
+    /// A value named `unkeyed` would make the setting mean two things.
+    #[test]
+    fn a_value_named_unkeyed_is_refused_when_the_key_says_unkeyed() {
+        let err = validate_config(&provenance_config(Some("unkeyed"), &["unkeyed"])).unwrap_err();
+        assert!(err.to_string().contains("Rename"), "{err}");
+    }
+
+    #[test]
+    fn a_named_audit_stream_namespace_loads() {
+        let mut config = PolicyConfig::default();
+        config.engine_settings.audit_stream_namespace = Some("gw-1".to_owned());
+
+        validate_config(&config).expect("a named namespace is fine");
+    }
+
+    /// [`ENGINE_SETTINGS_KEYS`] is synced by hand with [`EngineSettings`], so
+    /// a field can be added to the struct, read by the runtime, and refused by
+    /// the loader for every config that sets it. This holds the two together
+    /// across every field rather than the ones a test names.
+    ///
+    /// `audit_epoch` is `#[serde(skip)]`, so it is absent from both sides and
+    /// the comparison stays honest about it having no YAML spelling.
+    #[test]
+    fn every_engine_setting_field_is_an_accepted_key() {
+        let serialized = serde_yaml::to_value(EngineSettings::default())
+            .expect("engine settings must serialize");
+        let fields = serialized
+            .as_mapping()
+            .expect("engine settings serialize as a mapping");
+
+        for key in fields.keys() {
+            let name = key.as_str().expect("field names are strings");
+            assert!(
+                ENGINE_SETTINGS_KEYS.iter().any(|k| k.name == name),
+                "`{name}` is an EngineSettings field but not an accepted key, \
+                 so a config setting it is refused at load"
+            );
+        }
+    }
+
+    /// The epoch strictly increases per generation, which a value fixed in a
+    /// file cannot do: pinned across restarts, it makes records going missing
+    /// indistinguishable from a new generation. The loader refuses the key so
+    /// the only way to set it stays the host code that owns the invariant.
+    #[test]
+    fn the_audit_epoch_has_no_yaml_key() {
+        let err = parse_config("engine_settings:\n  audit_epoch: 7\n")
+            .expect_err("audit_epoch must not be settable from YAML");
+
+        assert!(
+            err.to_string().contains("audit_epoch"),
+            "the message must name the refused key: {err}"
+        );
     }
 }

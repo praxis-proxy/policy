@@ -21,7 +21,7 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 
 | Extension | Carries | Bag namespace | Read capability |
 |-----------|---------|---------------|-----------------|
-| Security (subject) | subject id and type, roles, permissions, teams, claims, authentication status | `subject.id`, `subject.type`, `authenticated`, `role.*`, `perm.*`, `subject.teams`, `team.*`, `claim.*` | `read_subject`, `read_roles`, `read_permissions`, `read_teams`, `read_claims` |
+| Security (subject) | subject id and type, roles, permissions, teams, claims, authentication status | `subject.id`, `subject.type`, `authenticated`, `subject.roles`, `subject.permissions`, `subject.teams`, `role.*`, `perm.*`, `team.*`, `claim.*` | `read_subject`, `read_roles`, `read_permissions`, `read_teams`, `read_claims` |
 | Security (client) | OAuth application identity: client id, trust level, roles, permissions, scopes, audiences, teams, claims | `client.*` | `read_client` |
 | Security (workload) | attested workload identity (SPIFFE / mTLS) for the inbound caller and for this instance | `caller_workload.*`, `this_workload.*` | `read_workload` |
 | Security (labels) | taint / classification labels for information-flow control | `security.labels`, `security.classification` | `read_labels`, `append_labels` |
@@ -31,6 +31,7 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | `read_request` |
 | HTTP | request line (method, path, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
 | LLM | model id, provider, capabilities | `llm.*` | `read_llm` |
+| LLM request | the host-parsed inference request body | not flattened; OPA, CEL, and Cedar read it as `llm.request` | `read_llm_request` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | `read_mcp` |
 | Completion | stop reason, token counts, model, latency | `completion.*` | `read_completion` |
 | Provenance | source, message id, parent id | `provenance.*` | `read_provenance` |
@@ -77,9 +78,9 @@ plugins:
 | Capability | Unlocks |
 |-----------|---------|
 | `read_subject` | `subject.id`, `subject.type`, `authenticated` |
-| `read_roles` | `role.*` (plus the `read_subject` baseline) |
-| `read_permissions` | `perm.*` (plus baseline) |
-| `read_teams` | `subject.teams` (plus baseline; `team.*` mirrors teams) |
+| `read_roles` | `subject.roles` and `role.*` aliases for undotted members (plus the `read_subject` baseline) |
+| `read_permissions` | `subject.permissions` and `perm.*` aliases for undotted members (plus baseline) |
+| `read_teams` | `subject.teams` and `team.*` aliases for undotted members (plus baseline) |
 | `read_claims` | `claim.*` (plus baseline) |
 | `read_client` | `client.*` |
 | `read_workload` | `caller_workload.*`, `this_workload.*` |
@@ -89,6 +90,7 @@ plugins:
 | `read_request` | `request.*` |
 | `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` |
 | `read_llm` | `llm.*` |
+| `read_llm_request` | no bag keys; gates the parsed request body on `Extensions.llm_request` |
 | `read_mcp` | `mcp.*` |
 | `read_completion` | `completion.*` |
 | `read_provenance` | `provenance.*` |
@@ -105,6 +107,22 @@ typed extension, and credential material flows through plugin payloads rather
 than the bag. APL predicates read `security.labels` from the bag directly, which
 is how `security.labels contains "secret"` works (see [Session
 Taint](apl/tainting.md)).
+
+`read_llm_request` also widens no bag view. The host sets
+`Extensions.llm_request` to the request body it parsed. The body carries
+prompt text and client-supplied JSON, so it is never flattened into the bag,
+and a plugin without the capability sees the slot as absent. APL's route
+handler is always granted it, which is how OPA, CEL, and Cedar steps receive
+the body as `llm.request` (see [Structured request
+input](apl/pdp.md#structured-request-input)). The capability gates plugins,
+not PDP resolvers: a host resolver opts in by overriding
+`PdpResolver::evaluate_structured`.
+
+Membership names containing `.` remain atomic values in the canonical sets and
+do not receive flattened aliases. For example, test a dotted role with
+`subject.roles contains "admin.readonly"`; there is no
+`role.admin.readonly` key. The same rule applies to subject permissions and
+teams, and to client roles and permissions.
 
 ### Write capabilities
 
@@ -147,8 +165,9 @@ Extensions differ in how they may change during a request, and the runtime
 enforces the tier:
 
 - Immutable: fixed once resolved. The verified subject identity, client,
-  workload, agent, meta, request, LLM, MCP, completion, provenance, and
-  framework extensions.
+  workload, agent, meta, request, LLM, LLM request, MCP, completion,
+  provenance, and framework extensions. The LLM request is also never
+  serialized, so it stays out of extension dumps and session stores.
 - Monotonic: may only grow. Security labels (added via `append_labels`,
   never removed) and the delegation chain (extended via `append_delegation`).
 - Mutable: may be rewritten. HTTP headers (via `write_headers`) and the

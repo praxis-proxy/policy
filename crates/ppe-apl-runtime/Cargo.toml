@@ -42,7 +42,7 @@ tracing = { workspace = true }
 # is explicitly documented as not-stable-across-Rust-versions; session
 # keys persist across process restarts (SessionStore), so we need an
 # algorithmically fixed hash.
-sha2 = "0.11"
+sha2 = { workspace = true }
 
 [features]
 # Shared PDP decision-cache contract runner used by this crate's tests
@@ -62,7 +62,7 @@ serde = { workspace = true }
 # See praxis-policy-apl-cmf's note: the feature unifies into the non-test build,
 # which costs one module and no behavior.
 praxis-policy-apl-core = { workspace = true, features = ["test-util"] }
-praxis-policy-pdp-cel = { workspace = true }
+praxis-policy-builtins = { workspace = true, features = ["cel"] }
 # Path-only rather than `workspace = true`: a versioned workspace
 # self-dep cannot be packaged (`make publish-dry`). Cargo drops a
 # path-only self-dev-dep from the published manifest.

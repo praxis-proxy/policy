@@ -34,7 +34,7 @@
 // # Caching
 //
 // Not done here. A handler may reuse a token it already minted, and
-// `praxis-policy-plugin-delegator-oauth` does, but the key deciding when two
+// the OAuth delegator does, but the key deciding when two
 // delegations are the same belongs to the handler: only it knows what
 // went into its own mint, so a generic wrapper that dropped a field the
 // handler used would serve a token minted under different terms.

@@ -21,12 +21,14 @@
 //   * `destination: tracing` — emit as a structured `tracing::info!`
 //     so it lands in whatever the host's subscriber routes to.
 //
-// Capabilities the plugin declares (operator wires them in YAML
-// under `capabilities:`):
+// Capabilities the operator wires in YAML under `capabilities:`. The
+// extensions a sink is handed are filtered against them exactly as a
+// hook plugin's are, so a grant left out is a field this logger
+// silently omits rather than an error it reports:
 //
 //   * `read_subject`           — for sub / roles / teams / claims
 //   * `read_client`            — for client_id / client_name
-//   * `read_meta`              — for entity_type / entity_name
+//   * `read_labels`            — for the taint diff
 //   * `read_delegated_tokens`  — to surface what got minted
 
 //! Emits one structured JSON audit record per dispatched request.

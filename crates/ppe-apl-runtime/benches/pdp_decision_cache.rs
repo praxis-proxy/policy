@@ -29,8 +29,8 @@ use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpResolver};
 use praxis_policy_apl_runtime::{CachedPdpResolver, DecisionCacheConfig};
+use praxis_policy_builtins::pdps::cel::CelResolver;
 use praxis_policy_core::engine::PolicyEngine;
-use praxis_policy_pdp_cel::CelResolver;
 use tokio::runtime::Runtime;
 
 /// Fail loud in setup if a fixture times a deny path (same idea as PR 35).

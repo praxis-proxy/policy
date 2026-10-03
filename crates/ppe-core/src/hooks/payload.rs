@@ -82,6 +82,163 @@ pub trait PluginPayload: Send + Sync + 'static {
 
     /// Downcast to a concrete type via `&mut dyn Any`.
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// Canonical bytes of this payload for content-addressed audit
+    /// provenance, or `None` for a payload that cannot or should not be
+    /// serialized, which is the default.
+    ///
+    /// The bytes feed a content hash and only the digest is kept, never the
+    /// bytes, so a node's provenance is recorded without re-spilling content
+    /// a redaction plugin exists to remove. Computed only when content
+    /// provenance is enabled, so the default costs nothing.
+    ///
+    /// What a consumer may assume: `impl_plugin_payload!(_, audit_serialize)`
+    /// derives this through [`canonical_audit_bytes`], which sorts object keys
+    /// at every level, so identical content gives identical bytes across runs
+    /// and processes and two equal digests mean the same content within a
+    /// deployment.
+    ///
+    /// The sorting is explicit rather than inherited from `serde_json::Map`.
+    /// This workspace resolves `serde_json` with `preserve_order`, so its
+    /// `Map` keeps insertion order, and a payload holding a `HashMap` would
+    /// otherwise serialize differently run to run and read as changed content
+    /// when nothing changed.
+    ///
+    /// This is sorted-key JSON, not RFC 8785. Number formatting follows
+    /// `serde_json` and is stable within a version but is not guaranteed
+    /// across toolchains, so do not treat a digest as a cross-toolchain
+    /// canonical form. A hand-written `audit_bytes` must preserve the same
+    /// property or its hashes will not compare.
+    fn audit_bytes(&self) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// Canonical bytes for a serializable payload: JSON with object keys sorted
+/// at every level.
+///
+/// Sorting cannot be left to `serde_json::Map`. This workspace resolves
+/// `serde_json` with `preserve_order`, so a `Map` keeps insertion order and a
+/// payload holding a `HashMap` would encode differently on each run. Two
+/// digests of identical content would then differ, and a consumer would read
+/// a change that never happened.
+///
+/// Returns `None` when the value does not serialize.
+#[must_use]
+pub fn canonical_audit_bytes<T: serde::Serialize>(value: &T) -> Option<Vec<u8>> {
+    fn sort_keys(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k, sort_keys(v)))
+                        .collect(),
+                )
+            },
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.into_iter().map(sort_keys).collect())
+            },
+            other => other,
+        }
+    }
+
+    let value = serde_json::to_value(value).ok()?;
+    serde_json::to_vec(&sort_keys(value)).ok()
+}
+
+/// The key audit content provenance digests a payload under.
+///
+/// Two digests are comparable only when taken under the same key, so every
+/// digest names its key: `hmac-sha256:<key_id>:<hex>` for a keyed digest and
+/// `sha256:<hex>` for an unkeyed one. A reader comparing digests across a key
+/// rotation sees two key ids and knows not to compare them, rather than
+/// reading the rotation as the content changing.
+///
+/// The key is deployment-scoped rather than per record so that equal content
+/// gives equal digests across requests, which is what lets a reader spot the
+/// same payload replayed. A per-record salt would keep the within-record
+/// comparison and lose that.
+#[derive(Debug, Clone)]
+pub enum ContentKey {
+    /// Plain SHA-256, chosen explicitly with `content_provenance_key: unkeyed`.
+    ///
+    /// Anyone holding a record can test a guess at the payload against it, so
+    /// a short or templated message carrying a redacted value can be
+    /// enumerated back out of the digest.
+    Unkeyed,
+    /// HMAC-SHA256 under an operator secret. Read on every digest, so a
+    /// refresh that rotates the secret takes effect without a reload.
+    Keyed(crate::secrets::SecretRef),
+}
+
+/// The shortest secret accepted as a content provenance key: the HMAC-SHA256
+/// block of strength. A shorter key is the weak point an attacker brute-forces
+/// instead of the content.
+pub const MIN_CONTENT_KEY_BYTES: usize = 32;
+
+/// What the key id is the MAC of. Fixed, so the id is stable across restarts
+/// and changes only when the key does.
+const KEY_ID_LABEL: &[u8] = b"praxis-policy/content-provenance/key-id";
+
+impl ContentKey {
+    /// A keyed digest under `secret`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the minimum when the secret is shorter than
+    /// [`MIN_CONTENT_KEY_BYTES`].
+    pub fn keyed(secret: crate::secrets::SecretRef) -> Result<Self, String> {
+        let len = secret.get().len();
+        if len < MIN_CONTENT_KEY_BYTES {
+            return Err(format!(
+                "the content provenance key is {len} bytes; it needs at least \
+                 {MIN_CONTENT_KEY_BYTES}"
+            ));
+        }
+        Ok(Self::Keyed(secret))
+    }
+
+    /// Digest `bytes`, prefixed with the scheme and, for a keyed digest, the
+    /// key id.
+    ///
+    /// `None` only if the HMAC cannot be initialized, which it accepts any key
+    /// length for. Handled rather than asserted, since a panic here would take
+    /// the request down over an audit field.
+    #[must_use]
+    pub fn digest(&self, bytes: &[u8]) -> Option<String> {
+        use hmac::{Hmac, KeyInit as _, Mac as _};
+        use sha2::{Digest as _, Sha256};
+
+        match self {
+            Self::Unkeyed => Some(format!("sha256:{}", hex(&Sha256::digest(bytes)))),
+            Self::Keyed(secret) => {
+                let key = secret.get();
+                let mac = |data: &[u8]| {
+                    let mut m = <Hmac<Sha256>>::new_from_slice(key.as_bytes()).ok()?;
+                    m.update(data);
+                    Some(m.finalize().into_bytes())
+                };
+                let id = mac(KEY_ID_LABEL)?;
+                Some(format!(
+                    "hmac-sha256:{}:{}",
+                    hex(id.get(..8).unwrap_or_default()),
+                    hex(&mac(bytes)?)
+                ))
+            },
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 impl fmt::Debug for dyn PluginPayload {
@@ -118,4 +275,200 @@ macro_rules! impl_plugin_payload {
             }
         }
     };
+    // `audit_serialize` opts a `Serialize` payload into content-provenance
+    // hashing. `canonical_audit_bytes` sorts object keys, so the bytes are
+    // stable across processes even when the payload holds a `HashMap`.
+    // Without that, two identical payloads could hash differently and a
+    // consumer comparing digests would read them as different content.
+    ($ty:ty, audit_serialize) => {
+        impl $crate::hooks::payload::PluginPayload for $ty {
+            fn clone_boxed(&self) -> Box<dyn $crate::hooks::payload::PluginPayload> {
+                Box::new(self.clone())
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+            fn audit_bytes(&self) -> Option<Vec<u8>> {
+                $crate::hooks::payload::canonical_audit_bytes(self)
+            }
+        }
+    };
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, serde::Serialize)]
+    struct Hashable {
+        keys: std::collections::HashMap<String, u32>,
+        name: String,
+    }
+    crate::impl_plugin_payload!(Hashable, audit_serialize);
+
+    #[derive(Debug, Clone)]
+    struct Plain;
+    crate::impl_plugin_payload!(Plain);
+
+    fn unkeyed(bytes: &[u8]) -> String {
+        ContentKey::Unkeyed.digest(bytes).unwrap()
+    }
+
+    fn keyed(secret: &str) -> ContentKey {
+        ContentKey::keyed(crate::secrets::SecretRef::fixed(secret)).unwrap()
+    }
+
+    const KEY_A: &str = "a-provenance-key-of-thirty-two-bytes-or-more";
+    const KEY_B: &str = "another-provenance-key-of-thirty-two-bytes";
+
+    #[test]
+    fn an_unkeyed_digest_is_prefixed_deterministic_and_content_dependent() {
+        let h = unkeyed(b"hello");
+
+        assert!(h.starts_with("sha256:"));
+        assert_eq!(h.len(), "sha256:".len() + 64);
+        assert_eq!(unkeyed(b"hello"), h, "the same bytes hash the same");
+        assert_ne!(unkeyed(b"world"), h);
+    }
+
+    #[test]
+    fn a_keyed_digest_names_its_scheme_and_key() {
+        let h = keyed(KEY_A).digest(b"hello").unwrap();
+        let parts: Vec<&str> = h.split(':').collect();
+
+        assert_eq!(parts.len(), 3, "scheme, key id, digest: {h}");
+        assert_eq!(parts[0], "hmac-sha256");
+        assert_eq!(parts[1].len(), 16);
+        assert_eq!(parts[2].len(), 64);
+    }
+
+    /// Equal content under one key gives equal digests, which is what lets a
+    /// reader spot a payload replayed across requests.
+    #[test]
+    fn the_same_key_and_content_digest_the_same() {
+        assert_eq!(keyed(KEY_A).digest(b"hello"), keyed(KEY_A).digest(b"hello"));
+        assert_ne!(keyed(KEY_A).digest(b"hello"), keyed(KEY_A).digest(b"world"));
+    }
+
+    /// A rotated key shows up as a different key id, so a reader does not
+    /// compare digests across it and read the rotation as the content changing.
+    #[test]
+    fn a_different_key_has_a_different_id() {
+        let id = |key: &str| {
+            keyed(key)
+                .digest(b"hello")
+                .unwrap()
+                .split(':')
+                .nth(1)
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(id(KEY_A), id(KEY_A), "the id is stable for one key");
+        assert_ne!(id(KEY_A), id(KEY_B));
+    }
+
+    /// The keyed digest is not the plain hash of the content, which is the
+    /// whole point: a guess cannot be checked without the key.
+    #[test]
+    fn a_keyed_digest_is_not_the_plain_hash() {
+        let plain = unkeyed(b"hello");
+        let keyed = keyed(KEY_A).digest(b"hello").unwrap();
+        assert!(!keyed.ends_with(plain.trim_start_matches("sha256:")));
+    }
+
+    #[test]
+    fn a_short_key_is_refused() {
+        let err = ContentKey::keyed(crate::secrets::SecretRef::fixed("too-short")).unwrap_err();
+        assert!(err.contains("at least 32"), "{err}");
+    }
+
+    /// A payload that did not opt in produces no bytes, so provenance costs it
+    /// nothing even when an operator turns hashing on.
+    #[test]
+    fn a_payload_that_did_not_opt_in_has_no_audit_bytes() {
+        assert!(Plain.audit_bytes().is_none());
+    }
+
+    /// The reason `audit_serialize` round-trips through `Value`: a `HashMap`
+    /// iterates in an arbitrary order, so serializing the payload directly
+    /// would hash the same content differently from run to run and a consumer
+    /// comparing digests would see changes that never happened.
+    #[test]
+    fn the_same_content_hashes_the_same_despite_map_ordering() {
+        let mut a = std::collections::HashMap::new();
+        a.insert("zebra".to_owned(), 1);
+        a.insert("apple".to_owned(), 2);
+        a.insert("mango".to_owned(), 3);
+        let mut b = std::collections::HashMap::new();
+        b.insert("mango".to_owned(), 3);
+        b.insert("apple".to_owned(), 2);
+        b.insert("zebra".to_owned(), 1);
+
+        let first = Hashable {
+            keys: a,
+            name: "x".to_owned(),
+        };
+        let second = Hashable {
+            keys: b,
+            name: "x".to_owned(),
+        };
+
+        let fh = unkeyed(&first.audit_bytes().expect("opted in"));
+        let sh = unkeyed(&second.audit_bytes().expect("opted in"));
+        assert_eq!(fh, sh, "insertion order must not change the digest");
+    }
+
+    /// Sorting has to reach nested objects too. A `HashMap` one level down
+    /// would otherwise reintroduce exactly the instability the top-level sort
+    /// removes.
+    #[test]
+    fn nested_objects_are_sorted_too() {
+        let a = serde_json::json!({ "outer": { "z": 1, "a": 2 } });
+        let b = serde_json::json!({ "outer": { "a": 2, "z": 1 } });
+
+        assert_eq!(
+            canonical_audit_bytes(&a).unwrap(),
+            canonical_audit_bytes(&b).unwrap()
+        );
+    }
+
+    /// Arrays are ordered data, so their order is content and must survive
+    /// canonicalization.
+    #[test]
+    fn array_order_is_content_and_is_preserved() {
+        let a = serde_json::json!({ "items": [1, 2, 3] });
+        let b = serde_json::json!({ "items": [3, 2, 1] });
+
+        assert_ne!(
+            canonical_audit_bytes(&a).unwrap(),
+            canonical_audit_bytes(&b).unwrap(),
+            "reordering an array changes the content"
+        );
+    }
+
+    #[test]
+    fn different_content_hashes_differently() {
+        let one = Hashable {
+            keys: std::collections::HashMap::new(),
+            name: "one".to_owned(),
+        };
+        let two = Hashable {
+            keys: std::collections::HashMap::new(),
+            name: "two".to_owned(),
+        };
+
+        assert_ne!(
+            unkeyed(&one.audit_bytes().unwrap()),
+            unkeyed(&two.audit_bytes().unwrap())
+        );
+    }
 }

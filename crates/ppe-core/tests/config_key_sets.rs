@@ -422,7 +422,14 @@ fn a_misspelled_key_is_offered_no_replacement() {
 fn the_document_table_is_the_accept_set() {
     assert_eq!(
         names(ConfigScope::Document),
-        vec!["global", "plugins", "groups", "routes", "engine_settings"],
+        vec![
+            "global",
+            "plugins",
+            "groups",
+            "routes",
+            "secrets",
+            "engine_settings"
+        ],
         "the document's accept set changed"
     );
 }
@@ -569,6 +576,11 @@ fn the_apl_wrapper_is_rejected_at_every_scope_that_accepted_it() {
 
 /// The `engine_settings:` accept set, in full. The block dropped an unknown
 /// field, so a setting the runtime never honored loaded clean and warned.
+///
+/// This pins the table against an accidental edit. It cannot catch the table
+/// falling behind `EngineSettings`, since a snapshot edited alongside the table
+/// agrees with it either way; `every_engine_setting_field_is_an_accepted_key`
+/// is the check that compares the two.
 #[test]
 fn the_engine_settings_table_is_the_accept_set() {
     assert_eq!(
@@ -576,8 +588,14 @@ fn the_engine_settings_table_is_the_accept_set() {
         vec![
             "dispatch",
             "plugin_timeout",
+            "audit_timeout_milliseconds",
             "short_circuit_on_deny",
             "route_cache_max_entries",
+            "effect_log_path",
+            "effect_log_compaction_threshold",
+            "capture_content_provenance",
+            "content_provenance_key",
+            "audit_stream_namespace",
         ],
         "the engine settings accept set changed"
     );

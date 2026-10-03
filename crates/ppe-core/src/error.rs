@@ -211,7 +211,7 @@ impl From<&PluginError> for PluginErrorRecord {
 /// assert_eq!(v.code, "missing_permission");
 /// assert_eq!(v.reason, "User lacks pii_access");
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginViolation {
     /// Machine-readable violation identifier (e.g., `"missing_permission"`).
     pub code: String,

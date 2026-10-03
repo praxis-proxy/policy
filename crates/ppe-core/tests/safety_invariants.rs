@@ -60,6 +60,7 @@ async fn plugin_fault_catalog_asserts_the_safe_verdict() {
             let executor = Executor::new(ExecutorConfig {
                 timeout_seconds: 1,
                 short_circuit_on_deny: true,
+                ..ExecutorConfig::default()
             });
             let entry = fault_entry("fault", mode, OnError::Fail, failure);
             let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
@@ -154,6 +155,7 @@ fn catalog_executor() -> Executor {
     Executor::new(ExecutorConfig {
         timeout_seconds: 1,
         short_circuit_on_deny: true,
+        ..ExecutorConfig::default()
     })
 }
 

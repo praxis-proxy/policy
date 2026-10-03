@@ -516,6 +516,30 @@ impl PluginRegistry {
         self.plugins.keys().cloned().collect()
     }
 
+    /// The audit sinks among the registered plugins. A plugin opts in by
+    /// overriding `Plugin::as_audit_handler`; most return `None`. The engine
+    /// attaches these to the executor's verdict emit.
+    ///
+    /// Each is paired with the capabilities its own `plugins:` entry declared,
+    /// because a sink reaches every invocation and is filtered on the same
+    /// terms as any other plugin. The capabilities come from `trusted_config`,
+    /// the engine's copy, not from anything the plugin reports about itself.
+    ///
+    /// A plugin configured `mode: disabled` is left out. Sinks are called
+    /// beside the phases rather than from one, so the phase dispatch that
+    /// skips a disabled plugin never sees them.
+    pub fn audit_handlers(&self) -> Vec<crate::audit::AttachedSink> {
+        self.plugins
+            .values()
+            .filter(|r| r.trusted_config().mode != crate::plugin::PluginMode::Disabled)
+            .filter_map(|r| {
+                let handler = r.plugin().clone().as_audit_handler()?;
+                let capabilities = r.trusted_config().capabilities.clone();
+                Some(crate::audit::AttachedSink::new(handler, capabilities))
+            })
+            .collect()
+    }
+
     /// Returns every (`hook_name`, `HookEntry`) pair where the entry's plugin
     /// matches the given name. Used by external orchestrators that need
     /// to build pre-resolved dispatch lineups for a single plugin across
@@ -1012,5 +1036,93 @@ mod tests {
             .unwrap();
         let fields = crate::executor::extract_erased(result).unwrap();
         assert!(fields.continue_processing);
+    }
+}
+
+#[cfg(test)]
+mod audit_handler_tests {
+    //! `audit_handlers` is the projection the engine attaches to the
+    //! executor. A plugin that forgot to opt in must not appear in it, and
+    //! one that did must, or a configured sink silently sees no verdicts.
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::audit::AuditHandler;
+    use crate::decision::DecisionLog;
+
+    struct Sink(PluginConfig);
+
+    #[async_trait]
+    impl Plugin for Sink {
+        fn config(&self) -> &PluginConfig {
+            &self.0
+        }
+
+        fn as_audit_handler(self: Arc<Self>) -> Option<Arc<dyn AuditHandler>> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl AuditHandler for Sink {
+        async fn handle(&self, _p: &dyn PluginPayload, _e: &Extensions, _d: &DecisionLog) {}
+    }
+
+    struct NotASink(PluginConfig);
+
+    #[async_trait]
+    impl Plugin for NotASink {
+        fn config(&self) -> &PluginConfig {
+            &self.0
+        }
+    }
+
+    fn cfg(name: &str) -> PluginConfig {
+        PluginConfig {
+            name: name.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_plugins_that_opt_in_are_collected_as_sinks() {
+        let mut reg = PluginRegistry::new();
+        let sink_cfg = cfg("sink");
+        let plain_cfg = cfg("plain");
+        reg.plugins.insert(
+            "sink".to_owned(),
+            Arc::new(PluginRef::new(Arc::new(Sink(sink_cfg.clone())), sink_cfg)),
+        );
+        reg.plugins.insert(
+            "plain".to_owned(),
+            Arc::new(PluginRef::new(
+                Arc::new(NotASink(plain_cfg.clone())),
+                plain_cfg,
+            )),
+        );
+
+        assert_eq!(reg.audit_handlers().len(), 1);
+    }
+
+    /// `mode: disabled` turns a sink off like any other plugin.
+    #[test]
+    fn a_disabled_sink_is_not_collected() {
+        let mut reg = PluginRegistry::new();
+        let sink_cfg = PluginConfig {
+            mode: crate::plugin::PluginMode::Disabled,
+            ..cfg("sink")
+        };
+        reg.plugins.insert(
+            "sink".to_owned(),
+            Arc::new(PluginRef::new(Arc::new(Sink(sink_cfg.clone())), sink_cfg)),
+        );
+
+        assert!(reg.audit_handlers().is_empty());
+    }
+
+    #[test]
+    fn a_registry_with_no_sinks_yields_none() {
+        assert!(PluginRegistry::new().audit_handlers().is_empty());
     }
 }

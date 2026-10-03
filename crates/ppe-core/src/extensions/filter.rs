@@ -38,6 +38,8 @@ pub enum SlotName {
     Provenance,
     /// The model identity slot.
     Llm,
+    /// The host-parsed LLM request document slot.
+    LlmRequest,
     /// The framework context slot.
     Framework,
     // Security sub-slots
@@ -132,6 +134,12 @@ pub fn slot_policy(slot: SlotName) -> SlotPolicy {
             tier: MutabilityTier::Immutable,
             access: AccessPolicy::CapabilityGated,
             read_cap: Some(Capability::ReadAgent),
+            write_cap: None,
+        },
+        SlotName::LlmRequest => SlotPolicy {
+            tier: MutabilityTier::Immutable,
+            access: AccessPolicy::CapabilityGated,
+            read_cap: Some(Capability::ReadLlmRequest),
             write_cap: None,
         },
         SlotName::Http => SlotPolicy {
@@ -329,7 +337,7 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
     // is the whole reason this is a `ServiceSlot` and not an `Option`.
     if extensions.http_transport.is_available() {
         filtered.http_transport = if capabilities.contains(&cap_str(Capability::PerformHttp)) {
-            extensions.http_transport.clone()
+            extensions.http_transport.rebuilt()
         } else {
             HttpTransportSlot::withheld()
         };
@@ -348,6 +356,14 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         let policy = slot_policy(SlotName::Agent);
         if has_read_access(&policy, capabilities) {
             filtered.agent = extensions.agent.clone();
+        }
+    }
+
+    // Capability-gated: the parsed LLM request document
+    if extensions.llm_request.is_some() {
+        let policy = slot_policy(SlotName::LlmRequest);
+        if has_read_access(&policy, capabilities) {
+            filtered.llm_request = extensions.llm_request.clone();
         }
     }
 
@@ -541,6 +557,7 @@ fn build_filtered_subject(
 )]
 mod tests {
     use super::*;
+    use crate::extensions::llm::LlmRequestDocument;
     use crate::extensions::meta::MetaExtension;
 
     // ---- host services: the outbound-HTTP gate -------------------------
@@ -658,13 +675,12 @@ mod tests {
         };
         let caps: HashSet<String> = ["perform_http".to_owned()].into();
 
-        // The real chain: engine seeds the request, the executor filters
-        // per plugin, the plugin's view gets cloned onward.
+        // The real chain: the engine seeds the request and the executor
+        // filters per plugin.
         let a = filter_extensions(&ext, &caps);
         let b = filter_extensions(&ext, &caps);
-        let c = a.clone();
 
-        for (name, view) in [("plugin a", &a), ("plugin b", &b), ("a clone", &c)] {
+        for (name, view) in [("plugin a", &a), ("plugin b", &b)] {
             assert!(
                 reachable(view).await.is_ok(),
                 "{name} could not reach the transport"
@@ -672,22 +688,32 @@ mod tests {
         }
 
         // Handles outstanding, one object: the original plus the slot on
-        // `ext` plus three filtered/cloned views.
-        assert_eq!(Arc::strong_count(&transport), 5);
+        // `ext` plus the two filtered views.
+        assert_eq!(Arc::strong_count(&transport), 4);
     }
 
+    /// A copy of a plugin's extensions carries no host services.
+    ///
+    /// The slot records the verdict `filter_extensions` reached at the moment
+    /// it was built, so a copy that kept it would answer with that verdict
+    /// forever: a plugin could stash its extensions and keep making requests
+    /// after an operator revoked `perform_http` on a reload. Every dispatch
+    /// entry point re-seeds the transport through `with_host_services` before
+    /// the executor runs, so nothing legitimate depends on a copy carrying it.
     #[tokio::test]
-    async fn the_transport_survives_a_clone_but_write_tokens_do_not() {
-        // A write token is a one-shot authorization checked at the merge
-        // boundary, so cloning must not widen it. A transport handle is
-        // a borrowed service whose gate already ran; dropping it on
-        // clone would only break a plugin that legitimately holds it.
+    async fn neither_the_transport_nor_a_write_token_survives_a_clone() {
         let mut ext = extensions_with_transport();
         ext.http_write_token = Some(super::super::guarded::WriteToken::new());
+
         let cloned = ext.clone();
+
         assert!(
-            reachable(&cloned).await.is_ok(),
-            "the transport must survive a clone"
+            reachable(&cloned).await.is_err(),
+            "a stashed copy must not keep reaching the transport"
+        );
+        assert!(
+            reachable(&ext).await.is_ok(),
+            "the extensions the plugin was handed still work"
         );
         assert!(
             cloned.http_write_token.is_none(),
@@ -785,6 +811,50 @@ mod tests {
         assert!(filtered.agent.is_some());
         assert_eq!(filtered.agent.unwrap().agent_id, Some("agent-1".into()));
         assert!(filtered.http.is_none());
+    }
+
+    fn extensions_with_llm_request() -> Extensions {
+        Extensions {
+            llm_request: Some(LlmRequestDocument::new(serde_json::json!({
+                "model": "gpt-4o",
+                "tools": [{"type": "function", "name": "search"}],
+            }))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_read_llm_request_capability_shares_host_arc() {
+        let ext = extensions_with_llm_request();
+        let caps: HashSet<String> = ["read_llm_request".to_owned()].into();
+        let filtered = filter_extensions(&ext, &caps);
+
+        assert!(Arc::ptr_eq(
+            filtered.llm_request.as_ref().unwrap().shared(),
+            ext.llm_request.as_ref().unwrap().shared()
+        ));
+    }
+
+    #[test]
+    fn test_llm_request_hidden_without_capability() {
+        let ext = extensions_with_llm_request();
+        let caps: HashSet<String> = [
+            "read_agent",
+            "read_headers",
+            "read_subject",
+            "read_labels",
+            "read_delegation",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let filtered = filter_extensions(&ext, &caps);
+        assert!(filtered.llm_request.is_none());
+        assert!(
+            filter_extensions(&ext, &HashSet::new())
+                .llm_request
+                .is_none()
+        );
     }
 
     #[test]
@@ -1076,6 +1146,7 @@ mod tests {
         SlotName::Completion,
         SlotName::Provenance,
         SlotName::Llm,
+        SlotName::LlmRequest,
         SlotName::Framework,
         SlotName::SecurityLabels,
         SlotName::SecuritySubject,

@@ -17,6 +17,9 @@
 // - [`config`] — Unified YAML configuration parsing
 // - [`factory`] — Plugin factory registry for config-driven instantiation
 // - [`context`] — PluginContext (local_state + global_state)
+// - [`audit`] — AuditHandler, the observation-only verdict sink
+// - [`decision`] — DecisionLog, the executor's record of a pipeline run
+// - [`effect`] — irreversible external acts, recorded write-ahead
 // - [`cmf`] — Common Message Format (Message, ContentPart, enums)
 // - [`identity`] — IdentityResolve hook family (subject / client /
 //                   workload resolution from raw credentials)
@@ -34,14 +37,20 @@
 
 /// What the engine asserts on a request and a response, as headers.
 pub mod assertions;
+/// Observation-only sinks that see each pipeline verdict.
+pub mod audit;
 /// The Common Message Format: messages, content parts, and read-only views.
 pub mod cmf;
 /// YAML configuration parsing for plugins, routes, and policies.
 pub mod config;
 /// Per-plugin state carried across hook invocations.
 pub mod context;
+/// What each plugin did to a request, and how the pipeline ruled on it.
+pub mod decision;
 /// The token delegation hook and its payload.
 pub mod delegation;
+/// Irreversible external effects and the write-ahead log that records them.
+pub mod effect;
 /// The elicitation hook, for out-of-band human approval.
 pub mod elicitation;
 /// Plugin lifecycle and hook dispatch.
@@ -85,5 +94,11 @@ pub mod plugin;
 pub mod prelude;
 /// Plugin instance and hook registries.
 pub mod registry;
+/// Secret material: providers, the declared values bound to them, and the
+/// handles consumers read through.
+pub mod secrets;
+/// Captures emitted diagnostics for tests that assert on them.
+#[cfg(test)]
+mod trace_capture;
 /// Config visitors, which let a dialect compile its own route blocks at load time.
 pub mod visitor;

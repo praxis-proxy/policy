@@ -32,6 +32,110 @@ use crate::step::{
     DelegationInvoker, DispatchPhase, ElicitationInvoker, PdpResolver, PluginInvoker,
 };
 
+/// Deepest structured input a PDP step accepts, the default recursion limit
+/// `serde_json` applies when parsing. See [`StructuredInput::too_deep`].
+pub const MAX_STRUCTURED_DEPTH: usize = 128;
+
+/// Violation code for a PDP step refused because its structured input
+/// nests deeper than [`MAX_STRUCTURED_DEPTH`].
+pub const INPUT_TOO_DEEP_CODE: &str = "pdp.input_too_deep";
+
+/// Violation code for a PDP step that requires an absent request document.
+pub const LLM_REQUEST_MISSING_CODE: &str = "pdp.llm_request_missing";
+
+/// Structured JSON handed to PDPs beside the flat bag.
+///
+/// Entries are shared, so cloning only bumps reference counts. An absent
+/// entry stays `None` and is never defaulted to an empty object. `Debug`
+/// prints presence only, so logging a payload never dumps request JSON.
+///
+/// Depth is measured once, in [`StructuredInput::new`]. The fields are
+/// private so the recorded result cannot go stale.
+#[derive(Clone, Default)]
+pub struct StructuredInput {
+    llm_request: Option<Arc<serde_json::Value>>,
+    args: Option<Arc<serde_json::Value>>,
+    too_deep: bool,
+}
+
+impl StructuredInput {
+    /// Build the input and record whether either entry nests deeper than
+    /// [`MAX_STRUCTURED_DEPTH`].
+    pub fn new(
+        llm_request: Option<Arc<serde_json::Value>>,
+        args: Option<Arc<serde_json::Value>>,
+    ) -> Self {
+        let too_deep = [&llm_request, &args]
+            .into_iter()
+            .flatten()
+            .any(|value| exceeds_depth(value, MAX_STRUCTURED_DEPTH));
+        Self {
+            llm_request,
+            args,
+            too_deep,
+        }
+    }
+
+    /// The host-parsed LLM request body, when the route handler can read it.
+    pub fn llm_request(&self) -> Option<&Arc<serde_json::Value>> {
+        self.llm_request.as_ref()
+    }
+
+    /// Tool-call arguments as they were before any `args:` pipeline ran.
+    pub fn args(&self) -> Option<&Arc<serde_json::Value>> {
+        self.args.as_ref()
+    }
+
+    /// A copy holding only the chosen entries. The depth result carries over
+    /// unchanged, so dropping an entry never clears a refusal.
+    #[must_use]
+    pub fn retain(&self, keep_llm_request: bool, keep_args: bool) -> Self {
+        Self {
+            llm_request: self.llm_request.clone().filter(|_| keep_llm_request),
+            args: self.args.clone().filter(|_| keep_args),
+            too_deep: self.too_deep,
+        }
+    }
+
+    /// Whether either entry is deeper than [`MAX_STRUCTURED_DEPTH`].
+    ///
+    /// Depth is one more than the number of arrays and objects on the
+    /// deepest path: a scalar is depth 1, and `[]`, `{}`, `[1]` and
+    /// `{"a": 1}` are all depth 2. A PDP step on such input denies with
+    /// [`INPUT_TOO_DEEP_CODE`] and its engine never runs.
+    pub fn too_deep(&self) -> bool {
+        self.too_deep
+    }
+}
+
+/// Whether `value` is deeper than `limit`, per [`StructuredInput::too_deep`].
+/// Walks with an explicit stack and stops at the first level past `limit`.
+fn exceeds_depth(value: &serde_json::Value, limit: usize) -> bool {
+    use serde_json::Value;
+    // Each entry is a value and the depth of its children.
+    let mut stack = vec![(value, 2_usize)];
+    while let Some((node, child_depth)) = stack.pop() {
+        let next = child_depth + 1;
+        match node {
+            Value::Array(_) | Value::Object(_) if child_depth > limit => return true,
+            Value::Array(items) => stack.extend(items.iter().map(|child| (child, next))),
+            Value::Object(map) => stack.extend(map.values().map(|child| (child, next))),
+            _ => {},
+        }
+    }
+    false
+}
+
+impl std::fmt::Debug for StructuredInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StructuredInput")
+            .field("llm_request", &self.llm_request.as_ref().map(|_| "<set>"))
+            .field("args", &self.args.as_ref().map(|_| "<set>"))
+            .field("too_deep", &self.too_deep)
+            .finish()
+    }
+}
+
 /// Mutable payload for a route invocation. `args` is the request arguments
 /// object; `result` is the response object (`None` on the inbound path,
 /// `Some` once the tool/resource has produced a value).
@@ -41,12 +145,19 @@ pub struct RoutePayload {
     pub args: serde_json::Value,
     /// The response, once the call has been made.
     pub result: Option<serde_json::Value>,
+    /// Structured JSON passed to PDPs through
+    /// [`PdpResolver::evaluate_structured`]. Pipelines never rewrite it.
+    pub structured: StructuredInput,
 }
 
 impl RoutePayload {
     /// A pre-call payload carrying only arguments.
     pub fn new(args: serde_json::Value) -> Self {
-        Self { args, result: None }
+        Self {
+            args,
+            result: None,
+            structured: StructuredInput::default(),
+        }
     }
 
     /// A post-call payload carrying both arguments and response.
@@ -54,7 +165,15 @@ impl RoutePayload {
         Self {
             args,
             result: Some(result),
+            structured: StructuredInput::default(),
         }
+    }
+
+    /// Attach the structured input PDPs receive.
+    #[must_use]
+    pub fn with_structured(mut self, structured: StructuredInput) -> Self {
+        self.structured = structured;
+        self
     }
 }
 
@@ -543,6 +662,82 @@ mod tests {
     };
     use async_trait::async_trait;
     use serde_json::json;
+
+    #[test]
+    fn structured_input_clone_shares_and_debug_hides_values() {
+        let doc = Arc::new(json!({"input": "secret prompt"}));
+        let payload = RoutePayload::new(json!({}))
+            .with_structured(StructuredInput::new(Some(Arc::clone(&doc)), None));
+        let cloned = payload.clone();
+        assert!(Arc::ptr_eq(
+            cloned.structured.llm_request.as_ref().unwrap(),
+            &doc
+        ));
+        assert!(cloned.structured.args.is_none());
+        let rendered = format!("{:?}", payload.structured);
+        assert!(!rendered.contains("secret"), "{rendered}");
+        assert!(rendered.contains("<set>"), "{rendered}");
+    }
+
+    /// `depth` levels of `wrap` around a scalar, built without recursion.
+    fn nested(depth: usize, wrap: fn(serde_json::Value) -> serde_json::Value) -> serde_json::Value {
+        (1..depth).fold(json!(1), |inner, _| wrap(inner))
+    }
+
+    fn in_array(inner: serde_json::Value) -> serde_json::Value {
+        json!([inner])
+    }
+
+    fn in_object(inner: serde_json::Value) -> serde_json::Value {
+        json!({"k": inner})
+    }
+
+    #[test]
+    fn depth_counts_arrays_and_objects_alike() {
+        assert!(!exceeds_depth(&json!(1), 1));
+        for empty in [json!([]), json!({})] {
+            assert!(exceeds_depth(&empty, 1));
+            assert!(!exceeds_depth(&empty, 2));
+        }
+        for wrap in [in_array, in_object] {
+            assert!(!exceeds_depth(&nested(3, wrap), 3));
+            assert!(exceeds_depth(&nested(4, wrap), 3));
+        }
+        let mixed = json!({"a": [1, {"b": [2]}], "c": 3});
+        assert!(!exceeds_depth(&mixed, 5));
+        assert!(exceeds_depth(&mixed, 4));
+    }
+
+    #[test]
+    fn too_deep_is_recorded_for_either_entry() {
+        let limit = nested(MAX_STRUCTURED_DEPTH, in_array);
+        let over = Arc::new(nested(MAX_STRUCTURED_DEPTH + 1, in_object));
+        assert!(!StructuredInput::new(Some(Arc::new(limit)), None).too_deep());
+        assert!(StructuredInput::new(Some(Arc::clone(&over)), None).too_deep());
+        assert!(StructuredInput::new(None, Some(Arc::clone(&over))).too_deep());
+        assert!(!StructuredInput::default().too_deep());
+    }
+
+    #[test]
+    fn depth_limit_matches_serde_json_parsing() {
+        let text = |levels: usize| format!("{}{}", "[".repeat(levels), "]".repeat(levels));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text(MAX_STRUCTURED_DEPTH - 1)).unwrap();
+        assert!(!StructuredInput::new(None, Some(Arc::new(parsed))).too_deep());
+        serde_json::from_str::<serde_json::Value>(&text(MAX_STRUCTURED_DEPTH)).unwrap_err();
+        let built = (1..MAX_STRUCTURED_DEPTH).fold(json!([]), |inner, _| json!([inner]));
+        assert!(StructuredInput::new(None, Some(Arc::new(built))).too_deep());
+    }
+
+    #[test]
+    fn retain_drops_entries_and_keeps_the_depth_result() {
+        let over = Arc::new(nested(MAX_STRUCTURED_DEPTH + 1, in_array));
+        let input = StructuredInput::new(Some(Arc::new(json!({}))), Some(over));
+        let kept = input.retain(true, false);
+        assert!(kept.llm_request().is_some());
+        assert!(kept.args().is_none());
+        assert!(kept.too_deep());
+    }
 
     struct AllowPdp;
     #[async_trait]

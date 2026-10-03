@@ -33,18 +33,24 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::time::timeout;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, warn};
 
+use crate::audit::AttachedSink;
 use crate::context::{PluginContext, PluginContextTable};
+use crate::decision::{DecisionLog, PluginAction, Verdict};
+use crate::effect::{DurableEffectLog, EffectLogSlot, EffectSink, EffectStream, SinkWait};
 use crate::error::PluginError;
 use crate::extensions::filter_extensions;
 use crate::hooks::payload::{Extensions, PluginPayload, WriteToken};
 use crate::plugin::OnError;
 use crate::registry::{AnyHookHandler, HookEntry, group_by_mode};
+
+pub(crate) const DEFAULT_AUDIT_TIMEOUT_MILLISECONDS: u64 = 100;
 
 /// Configuration for the executor.
 #[derive(Debug, Clone)]
@@ -52,15 +58,48 @@ pub struct ExecutorConfig {
     /// Maximum execution time per plugin in seconds.
     pub timeout_seconds: u64,
 
+    /// Maximum time per audit sink callback in milliseconds.
+    pub audit_timeout_milliseconds: u64,
+
     /// Whether to halt on the first deny in concurrent mode.
     pub short_circuit_on_deny: bool,
+
+    /// Digest the payload at pipeline entry and at emission for audit content
+    /// provenance. Off by default, since hashing sits on the request path.
+    ///
+    /// Takes effect only once a key is installed with
+    /// [`Executor::set_content_key`]; until then nothing is digested.
+    pub capture_content_provenance: bool,
+
+    /// Prefix for the audit stream ids, so records from one process are
+    /// attributable to it. `Some("gw-1")` gives `"gw-1:decision"` and
+    /// `"gw-1:effect"`; `None` leaves the bare labels.
+    ///
+    /// The type suffix always survives, so each stream stays independently
+    /// gap-free and its completeness claim holds. A consumer recovering the
+    /// type must split on the last colon, since a namespace may contain one.
+    pub audit_stream_namespace: Option<String>,
+
+    /// Override the audit epoch, the executor's generation identifier.
+    ///
+    /// `None` uses boot time, which advances on its own and is correct with no
+    /// configuration. A host that overrides it owns the invariant that the
+    /// value strictly increases on every load, including reloads: the stream
+    /// counters restart with each executor, so a repeated epoch collides with
+    /// the previous generation's records and a verifier can no longer tell a
+    /// reset from a loss.
+    pub audit_epoch: Option<u64>,
 }
 
 impl Default for ExecutorConfig {
     fn default() -> Self {
         Self {
             timeout_seconds: 30,
+            audit_timeout_milliseconds: DEFAULT_AUDIT_TIMEOUT_MILLISECONDS,
             short_circuit_on_deny: true,
+            capture_content_provenance: false,
+            audit_stream_namespace: None,
+            audit_epoch: None,
         }
     }
 }
@@ -91,16 +130,22 @@ enum ContainedOutcome {
 /// The join handle aborts on drop. If the request is cancelled (timeout,
 /// disconnect, shutdown) the plugin task is cancelled instead of running
 /// detached until its inner timeout fires.
+///
+/// `sink_wait` is the time the plugin spent blocked on audit sinks while
+/// recording an effect. It is added to the deadline, so the budget covers only
+/// the plugin's own work.
 async fn invoke_contained(
     handler: Arc<dyn AnyHookHandler>,
     payload: Box<dyn PluginPayload>,
     extensions: Extensions,
     mut ctx: PluginContext,
     timeout_dur: Duration,
+    sink_wait: SinkWait,
 ) -> ContainedOutcome {
     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-        let result = timeout(
+        let result = timeout_excluding(
             timeout_dur,
+            &sink_wait,
             handler.invoke(&*payload, &extensions, &mut ctx),
         )
         .await;
@@ -117,6 +162,27 @@ async fn invoke_contained(
                 ContainedOutcome::Lost
             }
         },
+    }
+}
+
+/// Run `fut` for `budget`, not counting time added to `excluded` meanwhile.
+///
+/// The deadline is re-read each time it passes, so time reported while the
+/// future runs pushes it out.
+async fn timeout_excluding<F: std::future::Future>(
+    budget: Duration,
+    excluded: &SinkWait,
+    fut: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    let start = tokio::time::Instant::now();
+    let mut fut = std::pin::pin!(fut);
+    loop {
+        let deadline = start + budget + excluded.total();
+        match tokio::time::timeout_at(deadline, &mut fut).await {
+            Ok(out) => return Ok(out),
+            Err(elapsed) if start + budget + excluded.total() <= deadline => return Err(elapsed),
+            Err(_) => {},
+        }
     }
 }
 
@@ -199,6 +265,11 @@ pub struct PipelineResult {
     /// Plugin contexts indexed by plugin ID. Thread this into the
     /// next hook invocation to preserve per-plugin `local_state`.
     pub context_table: PluginContextTable,
+
+    /// What each plugin did and how the pipeline ruled. Built by the
+    /// executor and handed to audit sinks; never reaches plugins through
+    /// `PluginContext`.
+    pub decision_log: DecisionLog,
 }
 
 impl PipelineResult {
@@ -217,6 +288,7 @@ impl PipelineResult {
             errors: Vec::new(),
             metadata: None,
             context_table,
+            decision_log: DecisionLog::new(),
         }
     }
 
@@ -243,7 +315,14 @@ impl PipelineResult {
             errors: Vec::new(),
             metadata: None,
             context_table,
+            decision_log: DecisionLog::new(),
         }
+    }
+
+    /// Attach the executor's decision log to a constructed result.
+    pub fn with_decision_log(mut self, decision_log: DecisionLog) -> Self {
+        self.decision_log = decision_log;
+        self
     }
 
     /// Replace the errors vec on a constructed `PipelineResult`. Used by
@@ -336,17 +415,366 @@ impl fmt::Debug for BackgroundTasks {
 /// SEQUENTIAL → TRANSFORM → AUDIT → CONCURRENT → FIRE_AND_FORGET
 /// ```
 ///
-/// The executor is stateless — all state comes from the arguments.
-/// One executor instance can serve multiple concurrent hook invocations.
+/// Per-request state comes from the arguments. Stream counters and in-flight
+/// effect keys are shared across clones, so records stay in the same stream
+/// across snapshot mutations. One instance serves concurrent invocations.
 #[derive(Clone)]
 pub struct Executor {
     config: ExecutorConfig,
+
+    /// Observation-only sinks invoked at the verdict of every pipeline run.
+    /// Set when the engine builds the runtime snapshot, empty otherwise.
+    /// They receive the decision log but cannot influence the outcome.
+    audit_handlers: Vec<AttachedSink>,
+
+    /// Where an irreversible effect gets recorded. `None` when the operator
+    /// configured neither a log nor a sink, in which case a plugin's effects
+    /// run unrecorded and the slot costs no allocation per invocation.
+    effect_sink: Option<Arc<EffectSink>>,
+
+    /// Audit stream identity. `epoch` scopes the counters so a restart is
+    /// distinguishable from records going missing. The counters are `Arc` so a
+    /// copy-on-write snapshot mutation keeps writing to the same stream rather
+    /// than restarting it.
+    epoch: u64,
+    decision_seq: Arc<AtomicU64>,
+    effect_seq: Arc<AtomicU64>,
+    emission_seq: Arc<AtomicU64>,
+    stream_namespace: Option<String>,
+
+    /// What content provenance digests under. `None` digests nothing, even
+    /// with `capture_content_provenance` on, so a missing key never degrades
+    /// to an unkeyed digest nobody chose.
+    content_key: Option<crate::hooks::payload::ContentKey>,
+
+    /// Effect keys open in this process, which a recovery sweep leaves alone.
+    /// Belongs with the log rather than the executor, so the engine carries it
+    /// across a reload that keeps the log; requests still running on the old
+    /// executor are acting on that same file.
+    in_flight: Arc<crate::effect::InFlightEffects>,
+}
+
+/// Compose a stream id from an optional namespace and the per-type label.
+fn compose_stream_id(namespace: Option<&str>, kind: &str) -> String {
+    match namespace {
+        Some(ns) => format!("{ns}:{kind}"),
+        None => kind.to_owned(),
+    }
 }
 
 impl Executor {
     /// Create a new executor with the given configuration.
     pub fn new(config: ExecutorConfig) -> Self {
-        Self { config }
+        // Boot time in Unix nanoseconds unless a host supplies one. It needs
+        // no persistence and a new executor always gets a larger value, which
+        // is what lets a verifier tell a counter reset from a loss.
+        let epoch = config.audit_epoch.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        });
+        let stream_namespace = config.audit_stream_namespace.clone();
+        Self {
+            config,
+            audit_handlers: Vec::new(),
+            effect_sink: None,
+            epoch,
+            decision_seq: Arc::new(AtomicU64::new(0)),
+            effect_seq: Arc::new(AtomicU64::new(0)),
+            emission_seq: Arc::new(AtomicU64::new(0)),
+            stream_namespace,
+            content_key: None,
+            in_flight: Arc::default(),
+        }
+    }
+
+    /// The open effect keys, for a recovery sweep to skip and for a reload
+    /// that keeps the log to carry over.
+    pub fn in_flight(&self) -> Arc<crate::effect::InFlightEffects> {
+        Arc::clone(&self.in_flight)
+    }
+
+    /// Track open effect keys in `in_flight`, shared with the executor this
+    /// one replaces.
+    #[must_use]
+    pub fn with_in_flight(mut self, in_flight: Arc<crate::effect::InFlightEffects>) -> Self {
+        self.in_flight = in_flight;
+        let log = self.effect_log();
+        self.rebuild_effect_sink(log);
+        self
+    }
+
+    /// Install the key content provenance digests under.
+    #[must_use]
+    pub fn with_content_key(mut self, key: crate::hooks::payload::ContentKey) -> Self {
+        self.content_key = Some(key);
+        self
+    }
+
+    /// Install the content provenance key through a snapshot mutation, the
+    /// engine's path once secrets are resolved.
+    pub fn set_content_key(&mut self, key: crate::hooks::payload::ContentKey) {
+        self.content_key = Some(key);
+    }
+
+    /// The key to digest under, when provenance is on and a key is installed.
+    pub(crate) fn provenance_key(&self) -> Option<&crate::hooks::payload::ContentKey> {
+        self.content_key
+            .as_ref()
+            .filter(|_| self.config.capture_content_provenance)
+    }
+
+    /// This generation's audit epoch. The engine reads it across a reload to
+    /// check the epoch actually increased.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Stamp this decision's stream identity and sequence numbers.
+    ///
+    /// A no-op when no sink is attached. The counters have to be dense over
+    /// the records that were actually emitted, so burning one on a record
+    /// nobody receives would show up downstream as a record that went missing.
+    fn stamp_decision_stream(&self, decisions: &mut DecisionLog) {
+        if self.audit_handlers.is_empty() {
+            return;
+        }
+        decisions.set_stream(
+            self.epoch,
+            compose_stream_id(self.stream_namespace.as_deref(), "decision"),
+            self.decision_seq.fetch_add(1, Ordering::Relaxed),
+            self.emission_seq.fetch_add(1, Ordering::Relaxed),
+        );
+    }
+
+    /// Install the durable log that irreversible effects are written to.
+    ///
+    /// Without one, effects still reach any audit sink but are not crash-safe:
+    /// nothing survives a restart, so recovery has nothing to reconcile.
+    #[must_use]
+    pub fn with_effect_log(mut self, effect_log: Arc<dyn DurableEffectLog>) -> Self {
+        self.rebuild_effect_sink(Some(effect_log));
+        self
+    }
+
+    /// Install the durable effect log through a snapshot mutation, the
+    /// engine's programmatic path. Mirrors [`Self::set_audit_handlers`].
+    pub fn set_effect_log(&mut self, effect_log: Arc<dyn DurableEffectLog>) {
+        self.rebuild_effect_sink(Some(effect_log));
+    }
+
+    /// The installed effect log, for the engine to run recovery at startup.
+    pub fn effect_log(&self) -> Option<Arc<dyn DurableEffectLog>> {
+        self.effect_sink.as_ref().and_then(|s| s.log())
+    }
+
+    /// Tell the audit sinks what a recovery sweep settled.
+    ///
+    /// Reconciliation is the only place an effect's terminal state is decided
+    /// by something other than the plugin that caused it, and the record
+    /// saying so is compacted away as soon as it is written. Emitting here is
+    /// what makes the answer reach anyone: a mint that spent a restart
+    /// unaccounted for becomes a mint someone can see was confirmed.
+    ///
+    /// Stamped from the live sink, so these carry this process's epoch and
+    /// take their place in the current stream rather than reappearing under
+    /// the sequence numbers of the run that crashed.
+    ///
+    /// There is no request behind a recovery sweep, so sinks see default
+    /// extensions. The record is self-describing, which is what a reconciler
+    /// works from too.
+    pub(crate) async fn emit_reconciled(&self, resolved: Vec<crate::effect::EffectRecord>) {
+        let Some(sink) = self.effect_sink.as_ref() else {
+            return;
+        };
+        for record in resolved {
+            sink.notify(record, &Extensions::default()).await;
+        }
+    }
+
+    /// Rebuild the shared sink from the current log and audit handlers.
+    ///
+    /// The sink is a projection of both, so anything that changes either has
+    /// to re-run this or plugins keep being handed the previous pairing.
+    fn rebuild_effect_sink(&mut self, log: Option<Arc<dyn DurableEffectLog>>) {
+        let sink = EffectSink::new(
+            log,
+            self.audit_handlers.clone(),
+            EffectStream {
+                epoch: self.epoch,
+                stream_id: compose_stream_id(self.stream_namespace.as_deref(), "effect"),
+                stream_seq: Arc::clone(&self.effect_seq),
+                emission_seq: Arc::clone(&self.emission_seq),
+                handler_timeout: Duration::from_millis(self.config.audit_timeout_milliseconds),
+            },
+        )
+        .with_in_flight(Arc::clone(&self.in_flight));
+        self.effect_sink = if sink.is_empty() {
+            None
+        } else {
+            Some(Arc::new(sink))
+        };
+    }
+
+    /// Attach observation-only audit sinks, invoked at the verdict of every
+    /// pipeline run. Used by the engine when it builds the runtime snapshot.
+    pub fn with_audit_handlers(mut self, audit_handlers: Vec<AttachedSink>) -> Self {
+        self.audit_handlers = audit_handlers;
+        let log = self.effect_log();
+        self.rebuild_effect_sink(log);
+        self
+    }
+
+    /// Replace the attached audit sinks. The engine calls this after a
+    /// registry mutation so a sink registered programmatically is attached
+    /// on the same terms as one that arrived through config.
+    pub fn set_audit_handlers(&mut self, audit_handlers: Vec<AttachedSink>) {
+        self.audit_handlers = audit_handlers;
+        let log = self.effect_log();
+        self.rebuild_effect_sink(log);
+    }
+
+    /// Whether any sink will receive a decision record.
+    pub(crate) fn has_audit_handlers(&self) -> bool {
+        !self.audit_handlers.is_empty()
+    }
+
+    /// Seed a decision log for an invocation that resolved to zero plugins, so
+    /// the audit stream carries one record per invocation rather than falling
+    /// silent where nothing was configured.
+    ///
+    /// Returns an empty log when no sink is attached, so an unaudited host
+    /// pays only a length check. The engine calls this at its zero-plugin
+    /// short-circuits, which return before reaching `execute`, and at the
+    /// route-resolution denial, which has no pipeline to build one.
+    ///
+    /// The verdict is not set here. Nothing between this and the emit can
+    /// change what a zero-plugin invocation rules, but the contract is that
+    /// only [`Self::emit_decision`] finalizes, so there is one place where a
+    /// record's verdict is decided rather than two that have to agree.
+    pub(crate) fn entry_decisions(
+        &self,
+        payload: &dyn PluginPayload,
+        extensions: &Extensions,
+    ) -> DecisionLog {
+        let mut decisions = DecisionLog::new();
+        self.capture_entry_provenance(&mut decisions, payload, extensions);
+        decisions
+    }
+
+    /// Finalize a decision log with the verdict the caller is actually
+    /// returning, stamp it into the audit stream, and hand it to every sink.
+    ///
+    /// The engine calls this after its assertion contract establishes the
+    /// final verdict. Route-resolution denials must also reach this point,
+    /// even though no pipeline ran.
+    ///
+    /// Without a sink, this still finalizes the caller-visible decision log.
+    pub(crate) async fn emit_decision(
+        &self,
+        payload: &dyn PluginPayload,
+        extensions: &Extensions,
+        decisions: &mut DecisionLog,
+        verdict: Verdict,
+    ) {
+        decisions.finalize(verdict);
+        if self.audit_handlers.is_empty() {
+            return;
+        }
+        // Taken here rather than by a sink, so the key stays with the executor.
+        if let Some(key) = self.provenance_key() {
+            decisions.set_output_hash(payload.audit_bytes().and_then(|b| key.digest(&b)));
+        }
+        self.stamp_decision_stream(decisions);
+        self.emit_audit(payload, extensions, decisions).await;
+    }
+
+    /// Record what this invocation started from: its place in the trace, the
+    /// taint it arrived with, and optionally a hash of its content.
+    ///
+    /// The input side of a node's provenance has to be captured before any
+    /// plugin runs, because a sink comparing it against the final state is
+    /// what shows the pipeline's effect on the request.
+    ///
+    /// A no-op when no sink is attached, so provenance costs an unaudited host
+    /// nothing.
+    fn capture_entry_provenance(
+        &self,
+        decisions: &mut DecisionLog,
+        payload: &dyn PluginPayload,
+        extensions: &Extensions,
+    ) {
+        // Nothing will read it, so do not build it. Deriving a span means two
+        // fresh UUIDs and two allocations, which is not a price an unaudited
+        // host should pay on every request. The steps and the verdict are
+        // recorded either way, because the phases record them as they run.
+        if self.audit_handlers.is_empty() {
+            return;
+        }
+        let request = extensions.request.as_ref();
+        decisions.set_span(crate::decision::Span::for_request(
+            request.and_then(|r| r.trace_id.as_deref()),
+            request.and_then(|r| r.span_id.as_deref()),
+        ));
+        if let Some(sec) = extensions.security.as_ref() {
+            let mut labels: Vec<String> = sec.labels.iter().cloned().collect();
+            // Sorted so two records of the same labels compare equal.
+            labels.sort_unstable();
+            decisions.set_input_labels(labels);
+        }
+        if let Some(key) = self.provenance_key() {
+            decisions.set_input_hash(payload.audit_bytes().and_then(|b| key.digest(&b)));
+        }
+    }
+
+    /// Hand the finalized decision to every audit sink, once per pipeline run.
+    async fn emit_audit(
+        &self,
+        payload: &dyn PluginPayload,
+        extensions: &Extensions,
+        decisions: &DecisionLog,
+    ) {
+        use futures::FutureExt as _;
+        use std::panic::AssertUnwindSafe;
+
+        if self.audit_handlers.is_empty() {
+            return;
+        }
+
+        // The verdict is already decided, so a sink must not be able to crash
+        // or hang the request it is only observing. Each call is bounded by
+        // the audit timeout and its panics contained; a sink that fails is
+        // logged and skipped. A lost audit record is a problem in itself, but
+        // not one that justifies failing the request.
+        let timeout_dur = Duration::from_millis(self.config.audit_timeout_milliseconds);
+        for sink in &self.audit_handlers {
+            // `extensions` here is the executor's working copy: the host's
+            // transport is installed on it and the credential slots are
+            // unfiltered, because each plugin that ran was filtered on the way
+            // in and this is what they were filtered from. A sink is filtered
+            // on the same terms, against its own declared capabilities, and
+            // the filtered view's effect slot is detached so a sink cannot act
+            // under the name of a plugin it is watching.
+            let view = sink.view(extensions);
+            let call =
+                AssertUnwindSafe(sink.handler().handle(payload, &view, decisions)).catch_unwind();
+            match timeout(timeout_dur, call).await {
+                Ok(Ok(())) => {},
+                Ok(Err(_panic)) => {
+                    error!(
+                        "audit sink '{}' panicked during emit, contained",
+                        sink.name()
+                    );
+                },
+                Err(_elapsed) => {
+                    error!(
+                        "audit sink '{}' exceeded {}ms during emit, skipped",
+                        sink.name(),
+                        timeout_dur.as_millis()
+                    );
+                },
+            }
+        }
     }
 
     /// Execute a hook invocation through the 5-phase pipeline.
@@ -363,10 +791,18 @@ impl Executor {
     ///
     /// A tuple of:
     /// - `PipelineResult` — immutable policy result with payload,
-    ///   extensions, violation, and context table.
+    ///   extensions, violation, and context table. Its `decision_log` carries
+    ///   what every phase recorded, finalized with the verdict the pipeline
+    ///   reached.
     /// - `BackgroundTasks` — handles to fire-and-forget tasks. Call
     ///   `wait_for_background_tasks()` to await them, or drop to let
     ///   them complete in the background.
+    ///
+    /// Nothing is emitted to audit sinks here. The pipeline's verdict is not
+    /// the caller's verdict yet — the engine's assertion contract runs after
+    /// this returns and can still deny — so the log is built here and emitted
+    /// by the engine once the verdict is settled. A host driving this directly
+    /// rather than through `PolicyEngine` owns that emit.
     pub async fn execute(
         &self,
         entries: &[HookEntry],
@@ -375,12 +811,46 @@ impl Executor {
         context_table: Option<PluginContextTable>,
         task_tracker: &tokio_util::task::TaskTracker,
     ) -> (PipelineResult, BackgroundTasks) {
+        let (result, tasks, _refused) = self
+            .execute_audited(entries, payload, extensions, context_table, task_tracker)
+            .await;
+        (result, tasks)
+    }
+
+    /// [`Self::execute`], plus the payload as it stood at the verdict when the
+    /// pipeline denied.
+    ///
+    /// A denial carries no payload out — that is the contract, and a caller
+    /// must not act on a message the pipeline refused. The audit emit is the
+    /// exception that still needs it: a record of a denial that cannot say
+    /// what was denied is most of the way to useless. So the payload comes
+    /// back beside the result rather than inside it, and only the engine's
+    /// emit sees it. `None` on an allow, where the result carries it already.
+    pub(crate) async fn execute_audited(
+        &self,
+        entries: &[HookEntry],
+        payload: Box<dyn PluginPayload>,
+        extensions: Extensions,
+        context_table: Option<PluginContextTable>,
+        task_tracker: &tokio_util::task::TaskTracker,
+    ) -> (
+        PipelineResult,
+        BackgroundTasks,
+        Option<Box<dyn PluginPayload>>,
+    ) {
         let mut ctx_table = context_table.unwrap_or_default();
 
         if entries.is_empty() {
+            // A hook resolving to zero plugins is normal (nothing configured
+            // for this entity). The engine short-circuits these before
+            // reaching here; this covers a direct `execute(&[], ..)`.
+            let mut decisions = self.entry_decisions(&*payload, &extensions);
+            decisions.finalize(Verdict::Allow);
             return (
-                PipelineResult::allowed_with(payload, extensions, ctx_table),
+                PipelineResult::allowed_with(payload, extensions, ctx_table)
+                    .with_decision_log(decisions),
                 BackgroundTasks::empty(),
+                None,
             );
         }
 
@@ -399,6 +869,17 @@ impl Executor {
         // payload has been accepted. Reported on the result so callers
         // read an exact signal instead of comparing payload contents.
         let mut payload_modified = false;
+        // A later resolver may construct a fresh payload rather than clone the
+        // previous one. Keep declines sticky independently of that payload.
+        let mut credential_declined = current_payload
+            .as_any()
+            .downcast_ref::<crate::identity::IdentityPayload>()
+            .is_some_and(crate::identity::IdentityPayload::credential_declined);
+
+        // What each plugin did and how the pipeline ruled. Threaded through
+        // the phases, finalized at each return point, and attached to the
+        // result for audit sinks.
+        let mut decisions = self.entry_decisions(&*current_payload, &current_extensions);
 
         if let Some(v) = self
             .run_serial_phase(
@@ -410,13 +891,19 @@ impl Executor {
                 true, // can_modify
                 "SEQUENTIAL",
                 &mut errors,
+                &mut decisions,
                 &mut payload_modified,
+                &mut credential_declined,
             )
             .await
         {
+            decisions.finalize(Verdict::Deny(v.clone()));
             return (
-                PipelineResult::denied(v, current_extensions, ctx_table).with_errors(errors),
+                PipelineResult::denied(v, current_extensions, ctx_table)
+                    .with_errors(errors)
+                    .with_decision_log(decisions),
                 BackgroundTasks::empty(),
+                Some(current_payload),
             );
         }
 
@@ -431,7 +918,9 @@ impl Executor {
             true,  // can_modify
             "TRANSFORM",
             &mut errors,
+            &mut decisions,
             &mut payload_modified,
+            &mut credential_declined,
         )
         .await;
 
@@ -442,6 +931,7 @@ impl Executor {
             &ctx_table,
             "AUDIT",
             &mut errors,
+            &mut decisions,
         )
         .await;
 
@@ -452,13 +942,42 @@ impl Executor {
                 &current_extensions,
                 &ctx_table,
                 &mut errors,
+                &mut decisions,
             )
             .await
         {
+            decisions.finalize(Verdict::Deny(violation.clone()));
             return (
                 PipelineResult::denied(violation, current_extensions, ctx_table)
-                    .with_errors(errors),
+                    .with_errors(errors)
+                    .with_decision_log(decisions),
                 BackgroundTasks::empty(),
+                Some(current_payload),
+            );
+        }
+
+        // A credential resolver may decline a value so that another
+        // population's resolver can inspect it. Once all resolvers have run,
+        // an unmatched value cannot be treated as an authenticated request.
+        if let Some(identity) = current_payload
+            .as_any()
+            .downcast_ref::<crate::identity::IdentityPayload>()
+            && credential_declined
+            && identity.subject.is_none()
+            && identity.client.is_none()
+            && identity.caller_workload.is_none()
+        {
+            let violation = crate::error::PluginViolation::new(
+                "auth.unrecognized_credential",
+                "no identity resolver recognized the presented credential",
+            );
+            decisions.finalize(Verdict::Deny(violation.clone()));
+            return (
+                PipelineResult::denied(violation, current_extensions, ctx_table)
+                    .with_errors(errors)
+                    .with_decision_log(decisions),
+                BackgroundTasks::empty(),
+                Some(current_payload),
             );
         }
 
@@ -473,11 +992,14 @@ impl Executor {
             task_tracker,
         );
 
+        decisions.finalize(Verdict::Allow);
         (
             PipelineResult::allowed_with(current_payload, current_extensions, ctx_table)
                 .with_errors(errors)
+                .with_decision_log(decisions)
                 .with_payload_modified(payload_modified),
             BackgroundTasks::from_handles(bg_handles),
+            None,
         )
     }
 
@@ -509,7 +1031,9 @@ impl Executor {
         can_modify: bool,
         phase_label: &str,
         errors: &mut Vec<crate::error::PluginErrorRecord>,
+        decisions: &mut DecisionLog,
         payload_modified: &mut bool,
+        credential_declined: &mut bool,
     ) -> Option<crate::error::PluginViolation> {
         for entry in entries {
             // Borrow names/ids on the happy path — allocate only when
@@ -519,6 +1043,10 @@ impl Executor {
             let plugin_name = entry.plugin_ref.name();
             let plugin_id = entry.plugin_ref.id();
             let on_error = entry.plugin_ref.trusted_config().on_error;
+            let phase = entry.plugin_ref.trusted_config().mode;
+            // What this plugin did, recorded once after it runs, or inline
+            // on the paths that return before the end of the loop body.
+            let mut action = PluginAction::Allowed;
 
             // Snapshot this plugin's context — clones its stored
             // local_state and seeds global_state from the canonical store.
@@ -549,11 +1077,29 @@ impl Executor {
             if capabilities.contains("append_delegation") {
                 filtered.delegation_write_token = Some(WriteToken::new());
             }
+            // Effects are permitted here because a serial plugin runs to
+            // completion and its result is honored. The slot is only built
+            // when something would record the effect; otherwise the default
+            // already permits it and records nothing.
+            let sink_wait = SinkWait::default();
+            filtered.effect_log = if !phase.permits_effects() {
+                EffectLogSlot::not_permitted(phase, plugin_name)
+            } else if let Some(sink) = &self.effect_sink {
+                EffectLogSlot::recorded(Arc::clone(sink), plugin_name, sink_wait.clone())
+            } else {
+                EffectLogSlot::unrecorded()
+            };
 
             // Spawn + timeout so a panic is `ContainedOutcome::Panic`
             // rather than unwinding `execute`. The payload is cloned into
             // the task (`'static`); modifications still return through
             // `ErasedResultFields.modified_payload`.
+            //
+            // A panic between recording an effect's intent and recording its
+            // outcome must not unwind the request future: containment lets
+            // `on_error` decide, keeps the pipeline's bookkeeping intact, and
+            // leaves the orphaned intent for recovery instead of losing the
+            // request.
             let timeout_dur = Duration::from_secs(self.config.timeout_seconds);
             let contained = invoke_contained(
                 Arc::clone(&entry.handler),
@@ -561,6 +1107,7 @@ impl Executor {
                 filtered,
                 ctx,
                 timeout_dur,
+                sink_wait,
             )
             .await;
 
@@ -568,24 +1115,53 @@ impl Executor {
             match contained {
                 ContainedOutcome::Success(result_box, ctx) => {
                     ctx_after = Some(ctx);
-                    if let Some(erased) = extract_erased(result_box) {
+                    if let Some(mut erased) = extract_erased(result_box) {
                         if !erased.continue_processing && can_block {
                             // A blocking result always halts; synthesize a violation
                             // when the plugin did not provide one.
-                            let mut v = erased.violation.unwrap_or_else(|| {
+                            let mut v = erased.violation.take().unwrap_or_else(|| {
                                 crate::error::PluginViolation::new(
                                     "plugin_deny",
                                     format!("Plugin '{plugin_name}' denied"),
                                 )
                             });
                             v.plugin_name = Some(plugin_name.to_owned());
+                            decisions.record(
+                                plugin_name,
+                                phase,
+                                PluginAction::Denied(Box::new(v.clone())),
+                            );
                             return Some(v);
                         }
 
+                        // A stop signalled from a phase that cannot block
+                        // (Transform) is suppressed: the pipeline proceeds.
+                        // It is recorded as the plugin's actual intent rather
+                        // than as an allow, and its modifications are skipped,
+                        // since it asked to halt rather than to shape.
+                        let deny_ignored = !erased.continue_processing && !can_block;
+                        if deny_ignored {
+                            let mut v = erased.violation.take().unwrap_or_else(|| {
+                                crate::error::PluginViolation::new(
+                                    "plugin_deny",
+                                    format!("Plugin '{plugin_name}' denied"),
+                                )
+                            });
+                            v.plugin_name = Some(plugin_name.to_owned());
+                            action = PluginAction::DenyIgnored(Box::new(v));
+                        }
+
                         // Accept modifications
-                        if can_modify {
+                        if can_modify && !deny_ignored {
                             if let Some(mp) = erased.modified_payload {
+                                if let Some(identity) = mp
+                                    .as_any()
+                                    .downcast_ref::<crate::identity::IdentityPayload>()
+                                {
+                                    *credential_declined |= identity.credential_declined();
+                                }
                                 *payload = mp;
+                                action = PluginAction::ModifiedPayload;
                                 *payload_modified = true;
                             }
                             if let Some(mut owned) = erased.modified_extensions {
@@ -676,6 +1252,9 @@ impl Executor {
                                     );
                                 } else {
                                     extensions.merge_owned(owned);
+                                    if action == PluginAction::Allowed {
+                                        action = PluginAction::ModifiedExtensions;
+                                    }
                                 }
                             }
                         }
@@ -699,6 +1278,7 @@ impl Executor {
                             details: std::collections::HashMap::new(),
                             proto_error_code: None,
                         };
+                        action = PluginAction::Error(e.to_string());
                         match on_error {
                             OnError::Fail if can_block => {
                                 let mut v = crate::error::PluginViolation::new(
@@ -706,6 +1286,7 @@ impl Executor {
                                     format!("Plugin '{plugin_name}' failed: {e}"),
                                 );
                                 v.plugin_name = Some(plugin_name.to_owned());
+                                decisions.record(plugin_name, phase, action.clone());
                                 return Some(v);
                             },
                             OnError::Fail => {
@@ -724,6 +1305,7 @@ impl Executor {
                 },
                 ContainedOutcome::Error(e, ctx) => {
                     error!("{} plugin '{}' failed: {}", phase_label, plugin_name, e);
+                    action = PluginAction::Error(e.to_string());
                     match on_error {
                         OnError::Fail if can_block => {
                             let mut v = crate::error::PluginViolation::new(
@@ -731,6 +1313,7 @@ impl Executor {
                                 format!("Plugin '{plugin_name}' failed: {e}"),
                             );
                             v.plugin_name = Some(plugin_name.to_owned());
+                            decisions.record(plugin_name, phase, action.clone());
                             return Some(v);
                         },
                         // Any non-halt outcome (Fail-in-non-blocking-phase,
@@ -765,6 +1348,7 @@ impl Executor {
                         timeout_ms: u64::try_from(timeout_dur.as_millis()).unwrap_or(u64::MAX),
                         proto_error_code: None,
                     };
+                    action = PluginAction::Error("timed out".to_owned());
                     match on_error {
                         OnError::Fail if can_block => {
                             let mut v = crate::error::PluginViolation::new(
@@ -772,6 +1356,7 @@ impl Executor {
                                 format!("Plugin '{plugin_name}' timed out"),
                             );
                             v.plugin_name = Some(plugin_name.to_owned());
+                            decisions.record(plugin_name, phase, action.clone());
                             return Some(v);
                         },
                         OnError::Fail => {
@@ -808,6 +1393,7 @@ impl Executor {
                         details: std::collections::HashMap::new(),
                         proto_error_code: None,
                     };
+                    action = PluginAction::Error(format!("task panicked: {s}"));
                     match on_error {
                         OnError::Fail if can_block => {
                             let mut v = crate::error::PluginViolation::new(
@@ -815,6 +1401,7 @@ impl Executor {
                                 format!("Plugin '{plugin_name}' task panicked: {s}"),
                             );
                             v.plugin_name = Some(plugin_name.to_owned());
+                            decisions.record(plugin_name, phase, action.clone());
                             return Some(v);
                         },
                         OnError::Fail => {
@@ -838,6 +1425,7 @@ impl Executor {
                     }
                 },
                 ContainedOutcome::Lost => {
+                    action = PluginAction::Error("task ended without a result".to_owned());
                     if can_block {
                         let mut v = crate::error::PluginViolation::new(
                             "executor_invariant",
@@ -846,6 +1434,7 @@ impl Executor {
                             ),
                         );
                         v.plugin_name = Some(plugin_name.to_owned());
+                        decisions.record(plugin_name, phase, action.clone());
                         return Some(v);
                     }
                     warn!(
@@ -870,6 +1459,10 @@ impl Executor {
                     }
                 },
             }
+
+            // Record what this plugin did. The halting paths above record
+            // inline and return before reaching here.
+            decisions.record(plugin_name, phase, action);
 
             // Commit this plugin's context back to the table — replaces the
             // canonical global_state with its (possibly modified) copy and
@@ -898,6 +1491,7 @@ impl Executor {
         ctx_table: &PluginContextTable,
         phase_label: &str,
         errors: &mut Vec<crate::error::PluginErrorRecord>,
+        decisions: &mut DecisionLog,
     ) {
         for entry in entries {
             let plugin_name = entry.plugin_ref.name().to_owned();
@@ -914,7 +1508,13 @@ impl Executor {
                 .iter()
                 .cloned()
                 .collect();
-            let filtered = filter_extensions(extensions, &capabilities);
+            let mut filtered = filter_extensions(extensions, &capabilities);
+            // Refused here: this phase's work is cancelled or discarded
+            // when the pipeline short-circuits, and an external act is not.
+            filtered.effect_log = EffectLogSlot::not_permitted(
+                entry.plugin_ref.trusted_config().mode,
+                entry.plugin_ref.name(),
+            );
             let timeout_dur = Duration::from_secs(self.config.timeout_seconds);
 
             let contained = invoke_contained(
@@ -923,8 +1523,25 @@ impl Executor {
                 filtered,
                 ctx,
                 timeout_dur,
+                SinkWait::default(),
             )
             .await;
+
+            // Recorded as the serial phases record it. Without a step, a plugin
+            // that failed here shows up in `PipelineResult.errors` but the
+            // sink's decision record cannot tell it from one that never ran.
+            let action = match &contained {
+                ContainedOutcome::Success(result_box, _) => {
+                    audit_success_action(result_box.as_ref(), &plugin_name)
+                },
+                ContainedOutcome::Error(e, _) => PluginAction::Error(e.to_string()),
+                ContainedOutcome::Timeout(_) => PluginAction::Error("timed out".to_owned()),
+                ContainedOutcome::Panic(s) => PluginAction::Error(format!("task panicked: {s}")),
+                ContainedOutcome::Lost => {
+                    PluginAction::Error("task ended without a result".to_owned())
+                },
+            };
+            decisions.record(&plugin_name, entry.plugin_ref.trusted_config().mode, action);
 
             // Audit cannot block, so OnError::Fail can't halt — but
             // OnError::Disable must still take a repeatedly-failing plugin
@@ -1035,6 +1652,7 @@ impl Executor {
         extensions: &Extensions,
         ctx_table: &PluginContextTable,
         errors: &mut Vec<crate::error::PluginErrorRecord>,
+        decisions: &mut DecisionLog,
     ) -> Option<crate::error::PluginViolation> {
         use praxis_policy_orchestration::{
             BranchConfig, BranchOutcome, ErasedBranch, run_branches,
@@ -1090,7 +1708,16 @@ impl Executor {
                 .iter()
                 .cloned()
                 .collect();
-            let filtered = Arc::new(filter_extensions(extensions, &capabilities));
+            let filtered = Arc::new({
+                let mut f = filter_extensions(extensions, &capabilities);
+                // Refused here: this phase's work is cancelled or discarded
+                // when the pipeline short-circuits, and an external act is not.
+                f.effect_log = EffectLogSlot::not_permitted(
+                    entry.plugin_ref.trusted_config().mode,
+                    entry.plugin_ref.name(),
+                );
+                f
+            });
 
             branches.push(Box::pin(async move {
                 match handler.invoke(&**payload_clone, &filtered, &mut ctx).await {
@@ -1173,19 +1800,45 @@ impl Executor {
         {
             let plugin_name = entry.plugin_ref.name();
 
+            // Record what this branch did, in input order. Done before the
+            // policy match below, which may return on the first halting
+            // outcome and would otherwise drop the record.
+            // A concurrent branch may deny without supplying a violation, and
+            // only the first denial becomes the verdict. Both the record and
+            // the verdict resolve it the same way so a plugin's objection
+            // reads identically wherever it is consumed from.
+            let deny_violation = |opt_v: Option<crate::error::PluginViolation>| {
+                let mut v = opt_v.unwrap_or_else(|| {
+                    crate::error::PluginViolation::new(
+                        "concurrent_deny",
+                        format!("Plugin '{plugin_name}' denied"),
+                    )
+                });
+                v.plugin_name = Some(plugin_name.to_owned());
+                v
+            };
+
+            let action = match &outcome {
+                BranchOutcome::Completed(BranchData::Allow) => PluginAction::Allowed,
+                BranchOutcome::Completed(BranchData::Deny(opt_v)) => {
+                    PluginAction::Denied(Box::new(deny_violation(opt_v.clone())))
+                },
+                BranchOutcome::Completed(BranchData::Error(e)) => {
+                    PluginAction::Error(e.to_string())
+                },
+                BranchOutcome::TimedOut => PluginAction::Error("timed out".to_owned()),
+                BranchOutcome::Panicked(s) => PluginAction::Error(format!("panicked: {s}")),
+                // Cancelled because another branch short-circuited the phase:
+                // an intentional abort, not a crash.
+                BranchOutcome::Aborted => PluginAction::Aborted,
+            };
+            decisions.record(plugin_name, entry.plugin_ref.trusted_config().mode, action);
+
             match outcome {
                 BranchOutcome::Completed(BranchData::Allow) => {},
                 BranchOutcome::Completed(BranchData::Deny(opt_v)) => {
-                    let violation = opt_v.unwrap_or_else(|| {
-                        let mut v = crate::error::PluginViolation::new(
-                            "concurrent_deny",
-                            format!("Plugin '{plugin_name}' denied"),
-                        );
-                        v.plugin_name = Some(plugin_name.to_owned());
-                        v
-                    });
                     if first_violation.is_none() {
-                        first_violation = Some(violation);
+                        first_violation = Some(deny_violation(opt_v));
                     }
                 },
                 BranchOutcome::Completed(BranchData::Error(e)) => match on_error {
@@ -1323,7 +1976,16 @@ impl Executor {
                 .iter()
                 .cloned()
                 .collect();
-            let filtered = Arc::new(filter_extensions(extensions, &capabilities));
+            let filtered = Arc::new({
+                let mut f = filter_extensions(extensions, &capabilities);
+                // Refused here: this phase's work is cancelled or discarded
+                // when the pipeline short-circuits, and an external act is not.
+                f.effect_log = EffectLogSlot::not_permitted(
+                    entry.plugin_ref.trusted_config().mode,
+                    entry.plugin_ref.name(),
+                );
+                f
+            });
 
             // Spawn through TaskTracker so `PolicyEngine::shutdown()`
             // can drain in-flight fire-and-forget tasks before tearing
@@ -1380,6 +2042,26 @@ pub struct ErasedResultFields {
     pub modified_extensions: Option<crate::hooks::payload::OwnedExtensions>,
     /// The violation, when the handler denied.
     pub violation: Option<crate::error::PluginViolation>,
+}
+
+/// What an audit-phase plugin that returned normally did.
+///
+/// Its result is discarded, but a deny it returned is still an objection, and
+/// reading that as `Allowed` is the mistake `DenyIgnored` exists to prevent.
+fn audit_success_action(result: &(dyn Any + Send + Sync), plugin_name: &str) -> PluginAction {
+    match result.downcast_ref::<ErasedResultFields>() {
+        Some(r) if !r.continue_processing => {
+            let mut v = r.violation.clone().unwrap_or_else(|| {
+                crate::error::PluginViolation::new(
+                    "plugin_deny",
+                    format!("Plugin '{plugin_name}' denied"),
+                )
+            });
+            v.plugin_name = Some(plugin_name.to_owned());
+            PluginAction::DenyIgnored(Box::new(v))
+        },
+        _ => PluginAction::Allowed,
+    }
 }
 
 /// Extract erased result fields from a type-erased handler result.
@@ -1570,6 +2252,7 @@ mod tests {
         let executor = Executor::new(ExecutorConfig {
             timeout_seconds: 1,
             short_circuit_on_deny: true,
+            ..Default::default()
         });
         let entry = concurrent_entry("mock", on_error, failure);
         let tracker = tokio_util::task::TaskTracker::new();
@@ -1625,6 +2308,7 @@ mod tests {
         let executor = Executor::new(ExecutorConfig {
             timeout_seconds: 1,
             short_circuit_on_deny: true,
+            ..Default::default()
         });
         let entry = fault_entry(
             "mock",
@@ -1764,6 +2448,7 @@ mod tests {
         let executor = Executor::new(ExecutorConfig {
             timeout_seconds: 1,
             short_circuit_on_deny: true,
+            ..Default::default()
         });
         let entries = vec![
             concurrent_entry("lenient", OnError::Ignore, InjectedFailure::Error),
@@ -1805,5 +2490,1486 @@ mod tests {
             "Debug is what a failing assertion prints"
         );
         assert!(bg.wait_for_background_tasks().await.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
+mod audit_seam_tests {
+    //! The audit seam: every verdict reaches the sinks.
+    //!
+    //! The gap these cover is that an observation-only plugin runs as a
+    //! post-hook and so only ever sees traffic that was allowed through. A
+    //! blocked call produced no record at all. The load-bearing cases here are
+    //! the deny ones; the allow cases exist so a passing deny test cannot be
+    //! passing for an unrelated reason.
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::audit::AuditHandler;
+    use crate::decision::DecisionStep;
+    use crate::error::PluginViolation;
+    use crate::hooks::PluginResult;
+    use crate::plugin::{Plugin, PluginConfig, PluginMode};
+    use crate::registry::PluginRef;
+
+    #[derive(Debug, Clone)]
+    #[expect(dead_code, reason = "test payload: the typed shape is the point")]
+    struct P(String);
+    crate::impl_plugin_payload!(P);
+
+    /// What a sink was handed, kept so a test can assert on it after the
+    /// pipeline has returned.
+    #[derive(Default)]
+    struct Recorder {
+        seen: Mutex<Vec<(bool, Vec<DecisionStep>)>>,
+    }
+
+    impl Recorder {
+        fn calls(&self) -> Vec<(bool, Vec<DecisionStep>)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AuditHandler for Recorder {
+        async fn handle(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            decisions: &DecisionLog,
+        ) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((decisions.is_denied(), decisions.steps().to_vec()));
+        }
+    }
+
+    /// A sink that panics. The verdict is already decided when it runs, so it
+    /// must not be able to take the request down with it.
+    struct PanickingSink;
+
+    #[async_trait]
+    impl AuditHandler for PanickingSink {
+        async fn handle(&self, _p: &dyn PluginPayload, _e: &Extensions, _d: &DecisionLog) {
+            panic!("sink blew up");
+        }
+    }
+
+    /// What a mock plugin does when invoked.
+    #[derive(Clone, Copy)]
+    enum Act {
+        Allow,
+        Deny,
+        ModifyPayload,
+        Error,
+    }
+
+    struct MockPlugin(PluginConfig);
+
+    #[async_trait]
+    impl Plugin for MockPlugin {
+        fn config(&self) -> &PluginConfig {
+            &self.0
+        }
+    }
+
+    struct MockHandler(Act);
+
+    #[async_trait]
+    impl AnyHookHandler for MockHandler {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            Ok(match self.0 {
+                Act::Allow => erase_result(PluginResult::<P>::allow()),
+                Act::Deny => erase_result(PluginResult::<P>::deny(PluginViolation::new(
+                    "blocked", "nope",
+                ))),
+                Act::ModifyPayload => {
+                    erase_result(PluginResult::modify_payload(P("changed".into())))
+                },
+                Act::Error => {
+                    return Err(Box::new(PluginError::Execution {
+                        plugin_name: "mock".into(),
+                        message: "boom".into(),
+                        source: None,
+                        code: None,
+                        details: std::collections::HashMap::new(),
+                        proto_error_code: None,
+                    }));
+                },
+            })
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            "test_hook"
+        }
+    }
+
+    fn entry(name: &str, mode: PluginMode, act: Act) -> HookEntry {
+        let cfg = PluginConfig {
+            name: name.into(),
+            mode,
+            on_error: OnError::Ignore,
+            ..Default::default()
+        };
+        HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(Arc::new(MockPlugin(cfg.clone())), cfg)),
+            handler: Arc::new(MockHandler(act)),
+        }
+    }
+
+    /// A sink declaring no capabilities, which is what an audit plugin that
+    /// only records verdicts needs.
+    fn sink(handler: Arc<dyn AuditHandler>) -> AttachedSink {
+        AttachedSink::new(handler, std::collections::HashSet::new())
+    }
+
+    /// Run the pipeline and emit the way `PolicyEngine::finish` does.
+    ///
+    /// `execute` builds the decision log and stops there, because the verdict
+    /// is not final until the engine's assertion contract has run. Tests that
+    /// assert on what a sink saw have to drive the emit themselves.
+    async fn execute_and_emit(
+        executor: &Executor,
+        entries: &[HookEntry],
+        payload: Box<dyn PluginPayload>,
+        extensions: Extensions,
+    ) -> PipelineResult {
+        let tracker = tokio_util::task::TaskTracker::new();
+        let (mut result, _bg, refused) = executor
+            .execute_audited(entries, payload, extensions, None, &tracker)
+            .await;
+        let verdict = match result.violation.as_ref() {
+            Some(v) => Verdict::Deny(v.clone()),
+            None => Verdict::Allow,
+        };
+        let carried = result.modified_payload.take();
+        let ext = result.modified_extensions.take().unwrap_or_default();
+        if let Some(p) = carried.as_deref().or(refused.as_deref()) {
+            executor
+                .emit_decision(p, &ext, &mut result.decision_log, verdict)
+                .await;
+        }
+        result.modified_extensions = Some(ext);
+        result.modified_payload = carried;
+        result
+    }
+
+    async fn run(entries: &[HookEntry], sinks: Vec<AttachedSink>) -> (PipelineResult, DecisionLog) {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            short_circuit_on_deny: true,
+            ..Default::default()
+        })
+        .with_audit_handlers(sinks);
+        let payload: Box<dyn PluginPayload> = Box::new(P("in".into()));
+        let result = execute_and_emit(&executor, entries, payload, Extensions::default()).await;
+        let log = result.decision_log.clone();
+        (result, log)
+    }
+
+    #[tokio::test]
+    async fn an_allowed_run_emits_one_record_with_a_step_per_plugin() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [
+            entry("a", PluginMode::Sequential, Act::Allow),
+            entry("b", PluginMode::Sequential, Act::Allow),
+        ];
+        let (result, _) = run(&entries, vec![sink(rec.clone())]).await;
+
+        assert!(result.continue_processing);
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1, "exactly one record per invocation");
+        let (denied, steps) = &calls[0];
+        assert!(!denied);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|s| s.plugin_name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"],
+            "steps are in execution order"
+        );
+    }
+
+    /// The reason the seam exists. A post-hook observer never runs on this
+    /// path, so before the verdict emit a blocked call produced no record.
+    #[tokio::test]
+    async fn a_denied_run_still_emits_a_record_naming_the_denying_plugin() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [
+            entry("first", PluginMode::Sequential, Act::Allow),
+            entry("blocker", PluginMode::Sequential, Act::Deny),
+            entry("never", PluginMode::Sequential, Act::Allow),
+        ];
+        let (result, log) = run(&entries, vec![sink(rec.clone())]).await;
+
+        assert!(result.is_denied());
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1);
+        let (denied, steps) = &calls[0];
+        assert!(
+            denied,
+            "the sink sees the deny, not just the allowed traffic"
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .map(|s| s.plugin_name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "blocker"],
+            "the plugin after the short-circuit never ran, so it has no step"
+        );
+        match &steps[1].action {
+            PluginAction::Denied(v) => assert_eq!(v.code, "blocked"),
+            other => panic!("expected a deny step, got {other:?}"),
+        }
+        assert!(matches!(log.verdict(), Some(Verdict::Deny(v)) if v.code == "blocked"));
+    }
+
+    #[tokio::test]
+    async fn a_concurrent_deny_emits_a_record() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [entry("gate", PluginMode::Concurrent, Act::Deny)];
+        let (result, _) = run(&entries, vec![sink(rec.clone())]).await;
+
+        assert!(result.is_denied());
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0);
+        assert!(matches!(calls[0].1[0].action, PluginAction::Denied(_)));
+    }
+
+    /// Transform cannot block, so the deny is suppressed and the pipeline
+    /// proceeds. Recording it as `Allowed` would tell a consumer the plugin
+    /// permitted the request when it asked to stop it.
+    #[tokio::test]
+    async fn a_block_from_transform_is_recorded_as_deny_ignored() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [entry("shaper", PluginMode::Transform, Act::Deny)];
+        let (result, _) = run(&entries, vec![sink(rec.clone())]).await;
+
+        assert!(result.continue_processing, "transform cannot block");
+        let calls = rec.calls();
+        // The verdict is an allow and names nothing, so this step is the only
+        // place the objection survives. A bare marker would record that a
+        // plugin objected without recording what it objected to.
+        match &calls[0].1[0].action {
+            PluginAction::DenyIgnored(v) => {
+                assert_eq!(v.code, "blocked");
+                assert_eq!(v.reason, "nope");
+                assert_eq!(v.plugin_name.as_deref(), Some("shaper"));
+            },
+            other => panic!("expected a suppressed deny, got {other:?}"),
+        }
+    }
+
+    /// Only the first concurrent denial becomes the verdict. The others are
+    /// still real objections, and each step carries its own reason rather than
+    /// every branch pointing at whichever one happened to land first.
+    #[tokio::test]
+    async fn every_concurrent_denial_keeps_its_own_reason() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [
+            entry("gate_a", PluginMode::Concurrent, Act::Deny),
+            entry("gate_b", PluginMode::Concurrent, Act::Deny),
+        ];
+        let (result, _) = run(&entries, vec![sink(rec.clone())]).await;
+
+        assert!(result.is_denied());
+        let calls = rec.calls();
+        let denials: Vec<&str> = calls[0]
+            .1
+            .iter()
+            .filter_map(|s| match &s.action {
+                PluginAction::Denied(v) => v.plugin_name.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            denials,
+            ["gate_a", "gate_b"],
+            "each denying branch is attributed to itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_payload_modification_is_recorded_as_such() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [entry("shaper", PluginMode::Transform, Act::ModifyPayload)];
+        let (_, _) = run(&entries, vec![sink(rec.clone())]).await;
+
+        assert_eq!(rec.calls()[0].1[0].action, PluginAction::ModifiedPayload);
+    }
+
+    #[tokio::test]
+    async fn a_plugin_error_is_recorded_as_an_error_step() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [entry("flaky", PluginMode::Sequential, Act::Error)];
+        let (result, _) = run(&entries, vec![sink(rec.clone())]).await;
+
+        assert!(result.continue_processing, "on_error: ignore continues");
+        assert!(matches!(rec.calls()[0].1[0].action, PluginAction::Error(_)));
+    }
+
+    /// A hook that resolves to no plugins still produces a record, so a
+    /// consumer counting records per invocation does not read "nothing
+    /// configured" as a dropped record.
+    #[tokio::test]
+    async fn a_zero_plugin_run_emits_one_allow_record() {
+        let rec = Arc::new(Recorder::default());
+        let (_, _) = run(&[], vec![sink(rec.clone())]).await;
+
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].0);
+        assert!(calls[0].1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_sink_does_not_disturb_the_verdict() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let (result, _) = run(
+            &entries,
+            vec![sink(Arc::new(PanickingSink)), sink(rec.clone())],
+        )
+        .await;
+
+        assert!(result.continue_processing, "the request survives the sink");
+        assert_eq!(
+            rec.calls().len(),
+            1,
+            "a later sink still runs after an earlier one panics"
+        );
+    }
+
+    /// Audit results are discarded, but what the plugin did still belongs in
+    /// the record. Without a step, a failure here reached
+    /// `PipelineResult.errors` while the sink's record could not tell the
+    /// plugin from one that never ran.
+    #[tokio::test]
+    async fn audit_phase_plugins_are_recorded_like_any_other() {
+        let rec = Arc::new(Recorder::default());
+        let entries = [
+            entry("watcher", PluginMode::Audit, Act::Allow),
+            entry("flaky", PluginMode::Audit, Act::Error),
+            entry("objector", PluginMode::Audit, Act::Deny),
+        ];
+        let (result, _) = run(&entries, vec![sink(rec.clone())]).await;
+
+        assert!(result.continue_processing, "audit cannot block");
+        assert_eq!(result.errors.len(), 1);
+        let steps = &rec.calls()[0].1;
+        assert_eq!(
+            steps
+                .iter()
+                .map(|s| (s.plugin_name.as_str(), s.phase))
+                .collect::<Vec<_>>(),
+            [
+                ("watcher", PluginMode::Audit),
+                ("flaky", PluginMode::Audit),
+                ("objector", PluginMode::Audit),
+            ]
+        );
+        assert_eq!(steps[0].action, PluginAction::Allowed);
+        assert!(matches!(steps[1].action, PluginAction::Error(_)));
+        // Not `Allowed`: the plugin asked to stop the request, and this step is
+        // the only place that survives.
+        match &steps[2].action {
+            PluginAction::DenyIgnored(v) => {
+                assert_eq!(v.code, "blocked");
+                assert_eq!(v.plugin_name.as_deref(), Some("objector"));
+            },
+            other => panic!("expected a suppressed deny, got {other:?}"),
+        }
+    }
+
+    /// No sink attached is the default, and it must cost nothing beyond the
+    /// verdict itself still being recorded on the result.
+    #[tokio::test]
+    async fn with_no_sink_the_pipeline_still_carries_its_decision_log() {
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let (_, log) = run(&entries, Vec::new()).await;
+
+        assert!(matches!(log.verdict(), Some(Verdict::Allow)));
+        assert_eq!(log.steps().len(), 1);
+    }
+
+    // =====================================================================
+    // Effects, as the executor wires them
+    // =====================================================================
+    //
+    // The slot tests in `effect` cover the bracket itself. These cover the
+    // part only the executor decides: which phase gets which slot.
+
+    /// Performs an effect and reports whether it was allowed to act.
+    struct EffectPlugin {
+        cfg: PluginConfig,
+        acted: Arc<std::sync::atomic::AtomicBool>,
+        refused: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Plugin for EffectPlugin {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+    }
+
+    #[async_trait]
+    impl AnyHookHandler for EffectPlugin {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            let effect = crate::effect::EffectRecord::prepared("token_mint", "d", "k-1");
+            let acted = Arc::clone(&self.acted);
+            let outcome: Result<(), Box<PluginError>> = extensions
+                .perform_effect(&effect, || async move {
+                    acted.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                })
+                .await;
+            if outcome.is_err() {
+                self.refused
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(erase_result(PluginResult::<P>::allow()))
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            "test_hook"
+        }
+    }
+
+    /// Runs one effect-performing plugin in `mode`, returning
+    /// (acted, refused, records written).
+    async fn run_effect_in(mode: PluginMode) -> (bool, bool, Vec<crate::effect::EffectRecord>) {
+        #[derive(Debug, Default)]
+        struct SpyLog(Mutex<Vec<crate::effect::EffectRecord>>);
+
+        #[async_trait]
+        impl crate::effect::DurableEffectLog for SpyLog {
+            async fn append(
+                &self,
+                effect: &crate::effect::EffectRecord,
+            ) -> Result<(), Box<PluginError>> {
+                self.0.lock().unwrap().push(effect.clone());
+                Ok(())
+            }
+        }
+
+        let log = Arc::new(SpyLog::default());
+        let acted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cfg = PluginConfig {
+            name: "minter".into(),
+            mode,
+            on_error: OnError::Ignore,
+            ..Default::default()
+        };
+        let entry = HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(
+                Arc::new(EffectPlugin {
+                    cfg: cfg.clone(),
+                    acted: Arc::clone(&acted),
+                    refused: Arc::clone(&refused),
+                }),
+                cfg,
+            )),
+            handler: Arc::new(EffectPlugin {
+                cfg: PluginConfig::default(),
+                acted: Arc::clone(&acted),
+                refused: Arc::clone(&refused),
+            }),
+        };
+
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            short_circuit_on_deny: true,
+            ..Default::default()
+        })
+        .with_effect_log(log.clone());
+        let tracker = tokio_util::task::TaskTracker::new();
+        let payload: Box<dyn PluginPayload> = Box::new(P("in".into()));
+        let (_r, bg) = executor
+            .execute(
+                std::slice::from_ref(&entry),
+                payload,
+                Extensions::default(),
+                None,
+                &tracker,
+            )
+            .await;
+        bg.wait_for_background_tasks().await;
+
+        let seen = log.0.lock().unwrap().clone();
+        (
+            acted.load(std::sync::atomic::Ordering::SeqCst),
+            refused.load(std::sync::atomic::Ordering::SeqCst),
+            seen,
+        )
+    }
+
+    /// A sink slow enough to eat the plugin's whole budget between them must
+    /// not turn an act that succeeded into a timeout. The sinks only observe
+    /// the act, so their latency cannot be what decides its outcome.
+    #[tokio::test(start_paused = true)]
+    async fn time_spent_in_effect_sinks_is_not_charged_to_the_plugin() {
+        struct SlowSink;
+
+        #[async_trait]
+        impl AuditHandler for SlowSink {
+            async fn handle(&self, _p: &dyn PluginPayload, _e: &Extensions, _d: &DecisionLog) {}
+
+            async fn on_effect(&self, _effect: &crate::effect::EffectRecord, _e: &Extensions) {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+            }
+        }
+
+        let acted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cfg = PluginConfig {
+            name: "minter".into(),
+            mode: PluginMode::Sequential,
+            on_error: OnError::Fail,
+            ..Default::default()
+        };
+        let plugin = || EffectPlugin {
+            cfg: cfg.clone(),
+            acted: Arc::clone(&acted),
+            refused: Arc::clone(&refused),
+        };
+        let entry = HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(Arc::new(plugin()), cfg.clone())),
+            handler: Arc::new(plugin()),
+        };
+        // One second for the plugin, and two 600 ms sink callbacks (intent and
+        // outcome), each inside the sink's own one-second allowance.
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 1,
+            audit_timeout_milliseconds: 1_000,
+            short_circuit_on_deny: true,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(SlowSink))]);
+        let tracker = tokio_util::task::TaskTracker::new();
+        let (result, _bg) = executor
+            .execute(
+                std::slice::from_ref(&entry),
+                Box::new(P("in".into())),
+                Extensions::default(),
+                None,
+                &tracker,
+            )
+            .await;
+
+        assert!(acted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            result.continue_processing,
+            "the act succeeded, so the request must too: {:?}",
+            result.violation
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn audit_timeout_bounds_effect_and_decision_callbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct SlowSink {
+            started: AtomicUsize,
+            completed: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl AuditHandler for SlowSink {
+            async fn handle(&self, _p: &dyn PluginPayload, _e: &Extensions, _d: &DecisionLog) {
+                self.started.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+
+            async fn on_effect(&self, _effect: &crate::effect::EffectRecord, _e: &Extensions) {
+                self.started.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let slow = Arc::new(SlowSink::default());
+        let executor = Executor::new(ExecutorConfig {
+            audit_timeout_milliseconds: 25,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(slow.clone())]);
+        let started = tokio::time::Instant::now();
+        let result = execute_and_emit(
+            &executor,
+            &[pausing_entry(Duration::ZERO, false)],
+            Box::new(P("in".into())),
+            Extensions::default(),
+        )
+        .await;
+
+        assert!(result.continue_processing, "{:?}", result.violation);
+        assert_eq!(slow.started.load(Ordering::Relaxed), 3);
+        assert_eq!(slow.completed.load(Ordering::Relaxed), 0);
+        assert_eq!(started.elapsed(), Duration::from_millis(75));
+    }
+
+    /// Works for `before`, records an intent, then either acts at once or
+    /// never finishes.
+    struct PausingActor {
+        cfg: PluginConfig,
+        before: Duration,
+        hang: bool,
+    }
+
+    #[async_trait]
+    impl Plugin for PausingActor {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+    }
+
+    #[async_trait]
+    impl AnyHookHandler for PausingActor {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            tokio::time::sleep(self.before).await;
+            let effect = crate::effect::EffectRecord::prepared("token_mint", "d", "k-1");
+            let hang = self.hang;
+            extensions
+                .perform_effect(&effect, || async move {
+                    if hang {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(())
+                })
+                .await?;
+            Ok(erase_result(PluginResult::<P>::allow()))
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            "test_hook"
+        }
+    }
+
+    fn pausing_entry(before: Duration, hang: bool) -> HookEntry {
+        let cfg = PluginConfig {
+            name: "minter".into(),
+            mode: PluginMode::Sequential,
+            on_error: OnError::Fail,
+            ..Default::default()
+        };
+        let actor = || PausingActor {
+            cfg: cfg.clone(),
+            before,
+            hang,
+        };
+        HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(Arc::new(actor()), cfg.clone())),
+            handler: Arc::new(actor()),
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct NullLog;
+
+    #[async_trait]
+    impl crate::effect::DurableEffectLog for NullLog {
+        async fn append(&self, _e: &crate::effect::EffectRecord) -> Result<(), Box<PluginError>> {
+            Ok(())
+        }
+    }
+
+    /// The deadline passes while a sink is still running. That time is the
+    /// sink's, so it is credited as it accrues rather than once the sink
+    /// returns, which would be after the plugin was already cancelled.
+    #[tokio::test(start_paused = true)]
+    async fn a_deadline_inside_a_slow_sink_is_pushed_out() {
+        struct SlowSink;
+
+        #[async_trait]
+        impl AuditHandler for SlowSink {
+            async fn handle(&self, _p: &dyn PluginPayload, _e: &Extensions, _d: &DecisionLog) {}
+
+            async fn on_effect(&self, _effect: &crate::effect::EffectRecord, _e: &Extensions) {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+            }
+        }
+
+        // 500 ms of the plugin's own work, then a 600 ms sink that is still
+        // running when the one-second budget runs out.
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 1,
+            audit_timeout_milliseconds: 1_000,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(SlowSink))]);
+        let (result, _bg) = executor
+            .execute(
+                &[pausing_entry(Duration::from_millis(500), false)],
+                Box::new(P("in".into())),
+                Extensions::default(),
+                None,
+                &tokio_util::task::TaskTracker::new(),
+            )
+            .await;
+
+        assert!(result.continue_processing, "{:?}", result.violation);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    /// A plugin cancelled between intent and outcome leaves an orphaned
+    /// intent, and recovery has to be free to reconcile it. Its key closes
+    /// when the invocation ends rather than staying open until a restart.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_act_releases_its_key() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 1,
+            ..Default::default()
+        })
+        .with_effect_log(Arc::new(NullLog));
+        let (result, _bg) = executor
+            .execute(
+                &[pausing_entry(Duration::ZERO, true)],
+                Box::new(P("in".into())),
+                Extensions::default(),
+                None,
+                &tokio_util::task::TaskTracker::new(),
+            )
+            .await;
+
+        assert!(result.is_denied(), "on_error: fail halts on the timeout");
+        assert!(!executor.in_flight().is_busy("k-1"));
+    }
+
+    /// The credit covers sink time only. A plugin that is itself too slow
+    /// still times out.
+    #[tokio::test(start_paused = true)]
+    async fn a_plugin_that_is_itself_slow_still_times_out() {
+        let excluded = SinkWait::default();
+        let out = timeout_excluding(
+            Duration::from_secs(1),
+            &excluded,
+            tokio::time::sleep(Duration::from_secs(2)),
+        )
+        .await;
+        assert!(out.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_sequential_plugin_may_act_and_the_act_is_recorded() {
+        let (acted, refused, seen) = run_effect_in(PluginMode::Sequential).await;
+
+        assert!(acted, "a serial plugin runs to completion, so it may act");
+        assert!(!refused);
+        assert_eq!(seen.len(), 2, "intent then outcome");
+        assert_eq!(seen[0].plugin_name.as_deref(), Some("minter"));
+    }
+
+    /// The phase rule is not part of auditing and does not switch off with it.
+    ///
+    /// An operator who wants no auditing installs no sink and configures no
+    /// log. That silences the records. It does not make it sound for a
+    /// concurrent branch to mint a credential the pipeline will discard, so
+    /// the refusal stands either way.
+    #[tokio::test]
+    async fn the_phase_rule_holds_with_auditing_switched_off() {
+        let acted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cfg = PluginConfig {
+            name: "minter".into(),
+            mode: PluginMode::Concurrent,
+            on_error: OnError::Ignore,
+            ..Default::default()
+        };
+        let entry = HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(
+                Arc::new(EffectPlugin {
+                    cfg: cfg.clone(),
+                    acted: Arc::clone(&acted),
+                    refused: Arc::clone(&refused),
+                }),
+                cfg,
+            )),
+            handler: Arc::new(EffectPlugin {
+                cfg: PluginConfig::default(),
+                acted: Arc::clone(&acted),
+                refused: Arc::clone(&refused),
+            }),
+        };
+
+        // No sink, no effect log: auditing is entirely off.
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        });
+        let tracker = tokio_util::task::TaskTracker::new();
+        let payload: Box<dyn PluginPayload> = Box::new(P("in".into()));
+        let (_r, bg) = executor
+            .execute(
+                std::slice::from_ref(&entry),
+                payload,
+                Extensions::default(),
+                None,
+                &tracker,
+            )
+            .await;
+        bg.wait_for_background_tasks().await;
+
+        assert!(
+            !acted.load(std::sync::atomic::Ordering::SeqCst),
+            "the act must not run just because nobody is recording"
+        );
+        assert!(refused.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A concurrent branch is cancelled when another branch short-circuits the
+    /// phase, so an act there could happen for work the pipeline threw away.
+    #[tokio::test]
+    async fn a_concurrent_plugin_is_refused_and_does_not_act() {
+        let (acted, refused, seen) = run_effect_in(PluginMode::Concurrent).await;
+
+        assert!(!acted, "the act must not run");
+        assert!(
+            refused,
+            "and the plugin is told why, rather than silently no-oping"
+        );
+        assert!(seen.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_audit_phase_plugin_is_refused() {
+        let (acted, refused, _) = run_effect_in(PluginMode::Audit).await;
+
+        assert!(!acted);
+        assert!(refused);
+    }
+
+    #[tokio::test]
+    async fn a_fire_and_forget_plugin_is_refused() {
+        let (acted, refused, _) = run_effect_in(PluginMode::FireAndForget).await;
+
+        assert!(
+            !acted,
+            "this phase runs after the verdict is already returned"
+        );
+        assert!(refused);
+    }
+
+    /// Without panic containment a panicking serial plugin unwinds the request
+    /// future, which loses the verdict and, once effects exist, strands an
+    /// intent with nothing to reconcile it against.
+    #[tokio::test]
+    async fn a_panicking_serial_plugin_is_contained_and_named() {
+        struct Panicker(PluginConfig);
+
+        #[async_trait]
+        impl Plugin for Panicker {
+            fn config(&self) -> &PluginConfig {
+                &self.0
+            }
+        }
+
+        #[async_trait]
+        impl AnyHookHandler for Panicker {
+            async fn invoke(
+                &self,
+                _p: &dyn PluginPayload,
+                _e: &Extensions,
+                _c: &mut PluginContext,
+            ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+                panic!("simulated panic in a serial plugin");
+            }
+
+            fn hook_type_name(&self) -> &'static str {
+                "test_hook"
+            }
+        }
+
+        let cfg = PluginConfig {
+            name: "boom".into(),
+            mode: PluginMode::Sequential,
+            on_error: OnError::Fail,
+            ..Default::default()
+        };
+        let entry = HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(Arc::new(Panicker(cfg.clone())), cfg.clone())),
+            handler: Arc::new(Panicker(cfg)),
+        };
+        let rec = Arc::new(Recorder::default());
+        let (result, _) = run(std::slice::from_ref(&entry), vec![sink(rec.clone())]).await;
+
+        let violation = result
+            .violation
+            .expect("a panic under on_error: fail denies");
+        assert_eq!(
+            violation.code, "plugin_panic",
+            "a crash is distinguishable from an ordinary plugin error"
+        );
+        assert_eq!(
+            rec.calls().len(),
+            1,
+            "and the verdict still reaches the audit sinks"
+        );
+    }
+
+    // =====================================================================
+    // Provenance captured at entry
+    // =====================================================================
+
+    /// Both are captured before any plugin runs, because a sink comparing
+    /// entry against exit is what shows the pipeline's effect. Capture them
+    /// afterwards and the two sides are identical and say nothing.
+    #[tokio::test]
+    async fn entry_provenance_records_the_span_and_the_taint_it_arrived_with() {
+        use crate::extensions::{RequestExtension, SecurityExtension};
+
+        let rec = Arc::new(Recorder::default());
+        let mut security = SecurityExtension::default();
+        security.add_label("PII");
+        let extensions = Extensions {
+            request: Some(Arc::new(RequestExtension {
+                trace_id: Some("trace-abc".to_owned()),
+                span_id: Some("upstream".to_owned()),
+                ..Default::default()
+            })),
+            security: Some(Arc::new(security)),
+            ..Default::default()
+        };
+
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(rec.clone())]);
+        let payload: Box<dyn PluginPayload> = Box::new(P("in".into()));
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let result = execute_and_emit(&executor, &entries, payload, extensions).await;
+
+        let log = result.decision_log;
+        let span = log.span().expect("the executor stamps a span");
+        assert_eq!(span.trace_id, "trace-abc");
+        assert_eq!(span.parent_span_id.as_deref(), Some("upstream"));
+        assert_eq!(log.input_labels(), ["PII"]);
+        assert_eq!(rec.calls().len(), 1);
+    }
+
+    /// An unaudited host builds no provenance at all. Deriving a span costs
+    /// two fresh UUIDs and two allocations per request, which nobody should
+    /// pay for a record no sink will read.
+    #[tokio::test]
+    async fn with_no_sink_no_provenance_is_built() {
+        use crate::extensions::{RequestExtension, SecurityExtension};
+
+        let mut security = SecurityExtension::default();
+        security.add_label("PII");
+        let extensions = Extensions {
+            request: Some(Arc::new(RequestExtension {
+                trace_id: Some("trace-abc".to_owned()),
+                ..Default::default()
+            })),
+            security: Some(Arc::new(security)),
+            ..Default::default()
+        };
+
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            capture_content_provenance: true,
+            ..Default::default()
+        });
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let tracker = tokio_util::task::TaskTracker::new();
+        let payload: Box<dyn PluginPayload> = Box::new(P("in".into()));
+        let (result, _bg) = executor
+            .execute(&entries, payload, extensions, None, &tracker)
+            .await;
+
+        let log = result.decision_log;
+        assert!(log.span().is_none(), "no span is derived");
+        assert!(log.input_labels().is_empty(), "no taint is captured");
+        assert!(log.input_hash().is_none(), "and nothing is hashed");
+        // What the phases record as they run is still there, because it costs
+        // nothing extra.
+        assert_eq!(log.steps().len(), 1);
+        assert!(log.verdict().is_some());
+    }
+
+    /// Hashing sits on the request path, so an operator who did not ask for it
+    /// pays nothing and the record carries no content reference at all.
+    #[tokio::test]
+    async fn content_is_not_hashed_unless_it_was_asked_for() {
+        // A sink is attached, so provenance is built. What this asserts is
+        // that the content knob alone decides whether a hash is part of it.
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let tracker = tokio_util::task::TaskTracker::new();
+        let payload: Box<dyn PluginPayload> = Box::new(P("in".into()));
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let (result, _bg) = executor
+            .execute(&entries, payload, Extensions::default(), None, &tracker)
+            .await;
+
+        assert!(result.decision_log.input_hash().is_none());
+        assert!(
+            result.decision_log.span().is_some(),
+            "the rest of the provenance was still built, so this is the knob"
+        );
+    }
+
+    /// The payload here does not opt into hashing, so even with provenance on
+    /// there is nothing to hash. Enabling the knob must not invent a digest.
+    #[tokio::test]
+    async fn a_payload_that_cannot_be_hashed_records_no_digest() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            capture_content_provenance: true,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let tracker = tokio_util::task::TaskTracker::new();
+        let payload: Box<dyn PluginPayload> = Box::new(P("in".into()));
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let (result, _bg) = executor
+            .execute(&entries, payload, Extensions::default(), None, &tracker)
+            .await;
+
+        assert!(result.decision_log.input_hash().is_none());
+    }
+
+    fn message_payload() -> Box<dyn PluginPayload> {
+        use crate::cmf::{Message, MessagePayload, Role};
+        Box::new(MessagePayload {
+            message: Message::with_content(Role::User, Vec::new()),
+        })
+    }
+
+    /// Both digests come from the executor, under the one key, so a sink
+    /// compares them without ever holding the key.
+    #[tokio::test]
+    async fn an_opted_in_payload_is_digested_at_entry_and_emission() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            capture_content_provenance: true,
+            ..Default::default()
+        })
+        .with_content_key(
+            crate::hooks::payload::ContentKey::keyed(crate::secrets::SecretRef::fixed(
+                "a-provenance-key-of-thirty-two-bytes-or-more",
+            ))
+            .unwrap(),
+        )
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let result = execute_and_emit(
+            &executor,
+            &entries,
+            message_payload(),
+            Extensions::default(),
+        )
+        .await;
+
+        let log = &result.decision_log;
+        let input = log.input_hash().expect("an opted-in payload is digested");
+        assert!(input.starts_with("hmac-sha256:"), "got {input}");
+        assert_eq!(
+            log.output_hash(),
+            Some(input),
+            "nothing changed the payload, so the digests match"
+        );
+    }
+
+    /// Provenance on with no key installed digests nothing. It never falls back
+    /// to a plain hash the operator did not choose.
+    #[tokio::test]
+    async fn with_no_key_installed_nothing_is_digested() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            capture_content_provenance: true,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let result = execute_and_emit(
+            &executor,
+            &entries,
+            message_payload(),
+            Extensions::default(),
+        )
+        .await;
+
+        assert!(result.decision_log.input_hash().is_none());
+        assert!(result.decision_log.output_hash().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unkeyed_digest_says_so() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            capture_content_provenance: true,
+            ..Default::default()
+        })
+        .with_content_key(crate::hooks::payload::ContentKey::Unkeyed)
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let result = execute_and_emit(
+            &executor,
+            &entries,
+            message_payload(),
+            Extensions::default(),
+        )
+        .await;
+
+        let input = result.decision_log.input_hash().expect("digested");
+        assert!(input.starts_with("sha256:"), "got {input}");
+    }
+
+    // =====================================================================
+    // Audit stream sequencing
+    // =====================================================================
+    //
+    // The counters make two different claims. `stream_seq` is gap-free within
+    // its stream, so a gap is a lost record. `emission_seq` is shared with the
+    // effect stream, so the two can be merged back into the order they
+    // happened. A consumer that cannot rely on either has no way to tell a
+    // dropped record from a quiet period, which is the whole point.
+
+    async fn run_with(executor: &Executor, entries: &[HookEntry]) -> PipelineResult {
+        let payload: Box<dyn PluginPayload> = Box::new(P("in".into()));
+        execute_and_emit(executor, entries, payload, Extensions::default()).await
+    }
+
+    #[tokio::test]
+    async fn decision_sequence_numbers_are_dense_and_ordered() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+
+        let mut seqs = Vec::new();
+        for _ in 0..5 {
+            let log = run_with(&executor, &entries).await.decision_log;
+            seqs.push(log.stream_seq().expect("a stamped record"));
+        }
+
+        assert_eq!(seqs, [0, 1, 2, 3, 4], "no gaps, so no record looks lost");
+    }
+
+    #[tokio::test]
+    async fn every_stamped_record_carries_the_stream_it_belongs_to() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+
+        let log = run_with(&executor, &entries).await.decision_log;
+
+        assert_eq!(log.stream_id(), Some("decision"));
+        assert_eq!(log.epoch(), Some(executor.epoch()));
+        assert_eq!(log.emission_seq(), Some(0));
+    }
+
+    /// A namespace attributes records to one process, and the type suffix has
+    /// to survive it, or the two streams merge and neither stays gap-free.
+    #[tokio::test]
+    async fn a_namespace_prefixes_the_stream_but_keeps_the_type() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            audit_stream_namespace: Some("gw-1".to_owned()),
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+
+        let log = run_with(&executor, &entries).await.decision_log;
+
+        assert_eq!(log.stream_id(), Some("gw-1:decision"));
+    }
+
+    /// Counting a record nobody received would look downstream exactly like a
+    /// record that went missing.
+    #[tokio::test]
+    async fn nothing_is_counted_when_no_sink_will_receive_it() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        });
+        let entries = [entry("a", PluginMode::Sequential, Act::Allow)];
+
+        run_with(&executor, &entries).await;
+        run_with(&executor, &entries).await;
+
+        // Attaching a sink now starts the stream at zero, because the earlier
+        // invocations emitted nothing and so consumed no sequence number.
+        let mut executor = executor;
+        executor.set_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+        let log = run_with(&executor, &entries).await.decision_log;
+
+        assert_eq!(log.stream_seq(), Some(0));
+    }
+
+    /// A denied run is a record like any other, so it takes its place in the
+    /// stream rather than leaving a hole where a block happened.
+    #[tokio::test]
+    async fn a_deny_consumes_a_sequence_number_like_an_allow() {
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(Arc::new(Recorder::default()))]);
+
+        let allowed = [entry("a", PluginMode::Sequential, Act::Allow)];
+        let denied = [entry("b", PluginMode::Sequential, Act::Deny)];
+
+        let first = run_with(&executor, &allowed).await.decision_log;
+        let second = run_with(&executor, &denied).await.decision_log;
+        let third = run_with(&executor, &allowed).await.decision_log;
+
+        assert_eq!(
+            [
+                first.stream_seq().unwrap(),
+                second.stream_seq().unwrap(),
+                third.stream_seq().unwrap()
+            ],
+            [0, 1, 2]
+        );
+    }
+
+    /// The shared counter is what lets a reader interleave the two streams.
+    /// If effects had their own, a merged view could not be ordered.
+    #[tokio::test]
+    async fn decisions_and_effects_share_one_ordering_counter() {
+        #[derive(Debug, Default)]
+        struct SpyLog(Mutex<Vec<crate::effect::EffectRecord>>);
+
+        #[async_trait]
+        impl crate::effect::DurableEffectLog for SpyLog {
+            async fn append(
+                &self,
+                effect: &crate::effect::EffectRecord,
+            ) -> Result<(), Box<PluginError>> {
+                self.0.lock().unwrap().push(effect.clone());
+                Ok(())
+            }
+        }
+
+        /// A sink that keeps the effect records it was handed. The stream
+        /// position lives on what a sink sees, so that is where it is read.
+        #[derive(Default)]
+        struct EffectSpy(Mutex<Vec<crate::effect::EffectRecord>>);
+
+        #[async_trait]
+        impl AuditHandler for EffectSpy {
+            async fn handle(
+                &self,
+                _payload: &dyn PluginPayload,
+                _extensions: &Extensions,
+                _decisions: &DecisionLog,
+            ) {
+            }
+
+            async fn on_effect(
+                &self,
+                effect: &crate::effect::EffectRecord,
+                _extensions: &Extensions,
+            ) {
+                self.0.lock().unwrap().push(effect.clone());
+            }
+        }
+
+        let log = Arc::new(SpyLog::default());
+        let spy = Arc::new(EffectSpy::default());
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(spy.clone())])
+        .with_effect_log(log.clone());
+
+        let acted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cfg = PluginConfig {
+            name: "minter".into(),
+            mode: PluginMode::Sequential,
+            on_error: OnError::Ignore,
+            ..Default::default()
+        };
+        let entry = HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(
+                Arc::new(EffectPlugin {
+                    cfg: cfg.clone(),
+                    acted: Arc::clone(&acted),
+                    refused: Arc::clone(&refused),
+                }),
+                cfg,
+            )),
+            handler: Arc::new(EffectPlugin {
+                cfg: PluginConfig::default(),
+                acted,
+                refused,
+            }),
+        };
+
+        let decision = run_with(&executor, std::slice::from_ref(&entry))
+            .await
+            .decision_log;
+        let effects = spy.0.lock().unwrap().clone();
+
+        // The mint recorded an intent and an outcome, taking emission 0 and 1,
+        // and the decision that contained them was emitted after, taking 2.
+        assert_eq!(effects.len(), 2);
+        assert_eq!(effects[0].emission_seq, Some(0));
+        assert_eq!(effects[1].emission_seq, Some(1));
+        assert_eq!(decision.emission_seq(), Some(2));
+
+        // Each stream still counts from zero in its own right.
+        assert_eq!(effects[0].stream_seq, Some(0));
+        assert_eq!(effects[1].stream_seq, Some(1));
+        assert_eq!(decision.stream_seq(), Some(0));
+        assert_eq!(effects[0].stream_id.as_deref(), Some("effect"));
+
+        // The durable record carries no position, because the position is a
+        // property of the stream a sink reconstructs and not of the write-ahead
+        // record of what was attempted.
+        let written = log.0.lock().unwrap().clone();
+        assert_eq!(written.len(), 2);
+        assert!(written.iter().all(|r| r.stream_seq.is_none()));
+    }
+
+    /// A refused write must not leave a hole in the stream.
+    ///
+    /// `begin_effect` is fail-closed, so a log that cannot take the intent
+    /// correctly stops the act. Stamping before the append still spent a
+    /// sequence number on it, and nothing was ever emitted under that number —
+    /// so an ordinary disk error produced a gap, which a consumer holding the
+    /// history is required to surface as a crashed emitter, a dropped record,
+    /// or tampering.
+    #[tokio::test]
+    async fn a_refused_append_does_not_consume_a_sequence_number() {
+        #[derive(Debug)]
+        struct FlakyLog(std::sync::atomic::AtomicUsize);
+
+        #[async_trait]
+        impl crate::effect::DurableEffectLog for FlakyLog {
+            async fn append(
+                &self,
+                _effect: &crate::effect::EffectRecord,
+            ) -> Result<(), Box<PluginError>> {
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    return Err(Box::new(PluginError::Config {
+                        message: "the disk said no".into(),
+                    }));
+                }
+                Ok(())
+            }
+        }
+
+        #[derive(Default)]
+        struct EffectSpy(Mutex<Vec<crate::effect::EffectRecord>>);
+
+        #[async_trait]
+        impl AuditHandler for EffectSpy {
+            async fn handle(
+                &self,
+                _payload: &dyn PluginPayload,
+                _extensions: &Extensions,
+                _decisions: &DecisionLog,
+            ) {
+            }
+
+            async fn on_effect(
+                &self,
+                effect: &crate::effect::EffectRecord,
+                _extensions: &Extensions,
+            ) {
+                self.0.lock().unwrap().push(effect.clone());
+            }
+        }
+
+        let spy = Arc::new(EffectSpy::default());
+        let executor = Executor::new(ExecutorConfig {
+            timeout_seconds: 5,
+            ..Default::default()
+        })
+        .with_audit_handlers(vec![sink(spy.clone())])
+        .with_effect_log(Arc::new(FlakyLog(std::sync::atomic::AtomicUsize::new(0))));
+
+        let acted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cfg = PluginConfig {
+            name: "minter".into(),
+            mode: PluginMode::Sequential,
+            on_error: OnError::Ignore,
+            ..Default::default()
+        };
+        let entry = HookEntry {
+            plugin_ref: Arc::new(PluginRef::new(
+                Arc::new(EffectPlugin {
+                    cfg: cfg.clone(),
+                    acted: Arc::clone(&acted),
+                    refused: Arc::clone(&refused),
+                }),
+                cfg,
+            )),
+            handler: Arc::new(EffectPlugin {
+                cfg: PluginConfig::default(),
+                acted,
+                refused,
+            }),
+        };
+
+        // The first append is refused, so the intent is never recorded and the
+        // act never runs. The second invocation's intent lands.
+        run_with(&executor, std::slice::from_ref(&entry)).await;
+        run_with(&executor, std::slice::from_ref(&entry)).await;
+
+        let effects = spy.0.lock().unwrap().clone();
+        assert!(
+            !effects.is_empty(),
+            "the second invocation reached the sink"
+        );
+        assert_eq!(
+            effects[0].stream_seq,
+            Some(0),
+            "the stream opens at 0: the refused write took no number with it"
+        );
+        let seqs: Vec<u64> = effects.iter().filter_map(|r| r.stream_seq).collect();
+        assert!(
+            seqs.windows(2).all(|w| w[1] == w[0] + 1),
+            "and stays dense: {seqs:?}"
+        );
     }
 }

@@ -43,3 +43,7 @@ jobs:
           key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-msrv-
       - run: cargo check --workspace --all-targets
+      # Without this the MSRV claim is unproven against cedar-policy,
+      # regorus, redis and jsonwebtoken: they sit behind features that a
+      # default-feature check does not enable.
+      - run: cargo check --workspace --all-targets --all-features

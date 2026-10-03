@@ -24,7 +24,8 @@ maximum-db-staleness = "P30D"
 ignore = [
     # --- Dev-only: container test harness for the session store ---
     # tar and PAX extraction flaws in the tokio tar crate pulled by
-    # testcontainers. Reached only by the ignore-gated session-store
+    # testcontainers, an unconditional dev-dependency of
+    # praxis-policy-builtins. Still reached only by the ignore-gated session-store
     # integration tests.
     "RUSTSEC-2026-0066",
     "RUSTSEC-2026-0112",
@@ -32,7 +33,7 @@ ignore = [
     "RUSTSEC-2026-0145",
     # rustls-pemfile unmaintained, via the docker client behind testcontainers.
     "RUSTSEC-2025-0134",
-    # --- Dev-only: RSA keypair generation in the JWT identity plugin's tests ---
+    # --- Dev-only: RSA keypair generation in the JWT extension's tests ---
     # Marvin timing sidechannel in `rsa`, with no fixed release. `rsa` is a
     # dev-dependency only, for fixture key generation. The runtime uses the
     # aws-lc backend, not the pure-Rust backend that would pull `rsa` into the
@@ -45,7 +46,7 @@ ignore = [
 # license obligation.
 #
 # MPL-2.0 is the one addition over Praxis's list. It arrives through the HTTP
-# mocking crate used by three plugin test suites, on a dev-only path.
+# mocking crate used by several extension test suites, on a dev-only path.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

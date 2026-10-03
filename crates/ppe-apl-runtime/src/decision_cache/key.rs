@@ -4,13 +4,15 @@
 // Cache key for a PDP decision.
 //
 // The stored key is a SHA-256 digest. The preimage is the dialect, the
-// call arguments, and every attribute in the bag. Nothing readable from
-// the request is retained in the map, and mapping iteration order cannot
-// change the digest: YAML maps and the bag are hashed in sorted-key order.
+// call arguments, every attribute in the bag, and the structured request
+// input. Nothing readable from the request is retained in the map, and
+// mapping iteration order cannot change the digest: YAML maps, JSON
+// objects, and the bag are hashed in sorted-key order.
 
 use sha2::{Digest as _, Sha256};
 
 use praxis_policy_apl_core::attributes::{AttributeBag, AttributeValue};
+use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect};
 
 /// 32-byte digest used as the map key. Copyable, comparable, and opaque.
@@ -19,11 +21,27 @@ pub(crate) struct CacheKey(pub(crate) [u8; 32]);
 
 impl CacheKey {
     /// Digest of one evaluate inputs. Independent of HashMap/YAML map order.
+    ///
+    /// Structured input is the empty default, matching `evaluate` when the
+    /// caller has no request JSON. Test-only: production code goes through
+    /// [`Self::for_evaluation`].
+    #[cfg(test)]
     pub(crate) fn for_call(call: &PdpCall, bag: &AttributeBag) -> Self {
+        Self::for_evaluation(call, bag, &StructuredInput::default())
+    }
+
+    /// Digest of one `evaluate_structured` inputs. Request JSON is part of
+    /// the preimage, so two calls that differ only there cannot share an entry.
+    pub(crate) fn for_evaluation(
+        call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Self {
         let mut hasher = Sha256::new();
         hash_dialect(&mut hasher, &call.dialect);
         hash_yaml(&mut hasher, &call.args);
         hash_bag(&mut hasher, bag);
+        hash_structured(&mut hasher, structured);
         Self(hasher.finalize().into())
     }
 }
@@ -150,6 +168,68 @@ fn canonical_yaml_bytes(value: &serde_yaml::Value) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+fn hash_structured(hasher: &mut Sha256, structured: &StructuredInput) {
+    hasher.update([u8::from(structured.too_deep())]);
+    hash_optional_json(hasher, structured.llm_request().map(|value| value.as_ref()));
+    hash_optional_json(hasher, structured.args().map(|value| value.as_ref()));
+}
+
+fn hash_optional_json(hasher: &mut Sha256, value: Option<&serde_json::Value>) {
+    match value {
+        None => hasher.update([0_u8]),
+        Some(value) => {
+            hasher.update([1_u8]);
+            hash_json(hasher, value);
+        },
+    }
+}
+
+fn hash_json(hasher: &mut Sha256, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => hasher.update([0_u8]),
+        serde_json::Value::Bool(v) => {
+            hasher.update([1_u8]);
+            hasher.update([u8::from(*v)]);
+        },
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                hasher.update([2_u8]);
+                hasher.update(i.to_be_bytes());
+            } else if let Some(u) = n.as_u64() {
+                hasher.update([3_u8]);
+                hasher.update(u.to_be_bytes());
+            } else if let Some(f) = n.as_f64() {
+                hasher.update([4_u8]);
+                hasher.update(f.to_bits().to_be_bytes());
+            } else {
+                hasher.update([5_u8]);
+            }
+        },
+        serde_json::Value::String(s) => {
+            hasher.update([6_u8]);
+            hash_bytes(hasher, s.as_bytes());
+        },
+        serde_json::Value::Array(items) => {
+            hasher.update([7_u8]);
+            hash_len(hasher, items.len());
+            for item in items {
+                hash_json(hasher, item);
+            }
+        },
+        serde_json::Value::Object(map) => {
+            hasher.update([8_u8]);
+            let mut pairs: Vec<(&str, &serde_json::Value)> =
+                map.iter().map(|(key, val)| (key.as_str(), val)).collect();
+            pairs.sort_by(|left, right| left.0.cmp(right.0));
+            hash_len(hasher, pairs.len());
+            for (key, val) in pairs {
+                hash_bytes(hasher, key.as_bytes());
+                hash_json(hasher, val);
+            }
+        },
+    }
+}
+
 fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
     hash_len(hasher, bytes.len());
     hasher.update(bytes);
@@ -162,8 +242,10 @@ fn hash_len(hasher: &mut Sha256, len: usize) {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::*;
     use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use super::*;
 
     fn call_with_map(alpha_first: bool) -> PdpCall {
         let yaml = if alpha_first {
@@ -280,5 +362,27 @@ mod tests {
             args: plain,
         };
         assert_ne!(CacheKey::for_call(&a, &bag), CacheKey::for_call(&b, &bag));
+    }
+
+    #[test]
+    fn structured_json_changes_the_digest_and_object_key_order_does_not() {
+        let call = PdpCall {
+            dialect: PdpDialect::Cedar,
+            args: serde_yaml::Value::Null,
+        };
+        let bag = AttributeBag::new();
+        let empty = CacheKey::for_call(&call, &bag);
+        let with_args = CacheKey::for_evaluation(
+            &call,
+            &bag,
+            &StructuredInput::new(None, Some(Arc::new(serde_json::json!({"z": 1, "a": 2})))),
+        );
+        let reordered = CacheKey::for_evaluation(
+            &call,
+            &bag,
+            &StructuredInput::new(None, Some(Arc::new(serde_json::json!({"a": 2, "z": 1})))),
+        );
+        assert_ne!(empty, with_args);
+        assert_eq!(with_args, reordered);
     }
 }

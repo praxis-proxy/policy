@@ -160,6 +160,11 @@ pub struct IdentityPayload {
     /// field.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub raw_claims: HashMap<String, serde_json::Value>,
+
+    /// At least one credential resolver declined this value as belonging to
+    /// another population. Kept inside the hook pipeline, never serialized.
+    #[serde(skip)]
+    credential_declined: bool,
 }
 
 impl IdentityPayload {
@@ -184,7 +189,19 @@ impl IdentityPayload {
             raw_credentials: None,
             resolved_at: None,
             raw_claims: HashMap::new(),
+            credential_declined: false,
         }
+    }
+
+    /// Record that a resolver did not recognize this credential's population.
+    /// The next resolver may still resolve it; the executor rejects only when
+    /// the complete chain finishes without an identity.
+    pub fn mark_credential_declined(&mut self) {
+        self.credential_declined = true;
+    }
+
+    pub(crate) fn credential_declined(&self) -> bool {
+        self.credential_declined
     }
 
     /// Set the header the token came from.
@@ -253,6 +270,7 @@ impl IdentityPayload {
     /// level rather than being expressed as payload state. See the
     /// module docs for the rationale.
     pub fn merge(&mut self, other: IdentityPayload) {
+        self.credential_declined |= other.credential_declined;
         if other.subject.is_some() {
             self.subject = other.subject;
         }

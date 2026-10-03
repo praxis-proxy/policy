@@ -15,7 +15,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
-use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
+use praxis_policy_apl_core::route::StructuredInput;
+use praxis_policy_apl_core::step::{
+    PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver, StructuredInputAvailability,
+};
 use praxis_policy_core::engine::PolicyEngine;
 
 use super::config::DecisionCacheConfig;
@@ -154,8 +157,30 @@ impl PdpResolver for CachedPdpResolver {
         self.inner.dialect()
     }
 
+    fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
+        self.inner.validate_call(call)
+    }
+
+    fn validate_call_with_input(
+        &self,
+        call: &PdpCall,
+        input: StructuredInputAvailability,
+    ) -> Result<(), String> {
+        self.inner.validate_call_with_input(call, input)
+    }
+
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
-        let key = CacheKey::for_call(call, bag);
+        self.evaluate_structured(call, bag, &StructuredInput::default())
+            .await
+    }
+
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
+        let key = CacheKey::for_evaluation(call, bag, structured);
         match self.lookup(&key) {
             Lookup::Hit(decision) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -188,7 +213,7 @@ impl PdpResolver for CachedPdpResolver {
         // under the cache lock and drops the decision if a reload landed
         // during `evaluate`.
         let generation = self.generation.load(Ordering::Acquire);
-        let result = self.inner.evaluate(call, bag).await;
+        let result = self.inner.evaluate_structured(call, bag, structured).await;
         if let Ok(decision) = &result {
             self.insert_if_generation(key, decision.clone(), generation);
         }

@@ -49,6 +49,10 @@ The map key is a SHA-256 digest of:
 2. the call arguments, with YAML mappings hashed in sorted-key order
 3. the complete attribute bag, with keys sorted and `StringSet` members
    sorted
+4. the structured request input (`llm_request` and `args`), with JSON
+   objects hashed in sorted-key order. An `evaluate` call with no request
+   JSON uses the empty input, so it does not collide with a call that
+   carried a document
 
 The digest is what is stored. Request attributes are not retained in
 the cache.

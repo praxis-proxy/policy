@@ -485,7 +485,7 @@ const SPOOFED: &[(&str, &str)] = &[
 ];
 
 // =====================================================================
-// U7: one test per return site
+// One test per return site
 // =====================================================================
 
 mod return_sites {
@@ -903,7 +903,7 @@ mod return_sites {
 }
 
 // =====================================================================
-// U7: phases, denials, and the absent-config case
+// Phases, denials, and the absent-config case
 // =====================================================================
 
 mod behavior {
@@ -1153,7 +1153,7 @@ mod behavior {
 }
 
 // =====================================================================
-// U9: the properties an operator is promised
+// The properties an operator is promised
 // =====================================================================
 
 mod promises {

@@ -33,7 +33,7 @@ rust-version.workspace = true
 # or injecting plugin faults enable it as a dev-dependency:
 #
 #     [dev-dependencies]
-#     praxis-policy-core = { version = "0.1", features = ["test-util"] }
+#     praxis-policy-core = { version = "0.4", features = ["test-util"] }
 test-util = []
 
 [dependencies]
@@ -52,6 +52,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 hashbrown = { workspace = true }
+# `catch_unwind` on the audit-sink future, so a panicking sink cannot unwind
+# the request whose verdict it is only observing.
+futures = { workspace = true }
+# Audit content provenance: only a keyed digest of a payload is ever recorded,
+# never the payload.
+sha2 = { workspace = true }
+hmac = { workspace = true }
 arc-swap = { workspace = true }
 wildmatch = { workspace = true }
 chrono = { workspace = true }
@@ -59,7 +66,7 @@ chrono = { workspace = true }
 # `derive` feature pulls the proc-macro so we can `#[derive(Zeroize)]` on
 # token-bearing structs in a future slice; for now only the
 # `Zeroizing<String>` wrapper is used directly.
-zeroize = { version = "1.9", features = ["zeroize_derive"] }
+zeroize = { workspace = true }
 # Shared concurrency primitive used by `executor::run_concurrent_phase`
 # (and praxis-policy-apl-core's `Effect::Parallel`). Leaf crate, no cycles back here.
 praxis-policy-orchestration = { workspace = true }
