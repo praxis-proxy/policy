@@ -19,6 +19,7 @@
 //! their fixtures.
 
 mod basic_allow_deny;
+mod decision_cache;
 mod entities_unit;
 mod request_context;
 mod resolver_config;

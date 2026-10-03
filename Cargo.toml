@@ -137,7 +137,8 @@ praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.4.0" }
 praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.4.0" }
 praxis-policy-builtins = { path = "crates/builtins", version = "0.4.0" }
 
-# Criterion is only consumed by the unpublished `ppe-benches` crate (issue #19).
+# Criterion is consumed by the unpublished `ppe-benches` crate (issue #19)
+# and by `praxis-policy-apl-runtime`'s `pdp_decision_cache` bench.
 # Kept in the workspace table so version bumps stay one-line.
 criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
 

@@ -18,10 +18,11 @@
 //     the route YAML (`cel: { expr: "..." }`); smallest dep tree, no
 //     external policy store.
 //
-// Routing is by dialect equality. The first registered resolver for a
-// given dialect wins on duplicate registration — registering Cedar twice
-// keeps the original and logs a warning. Unknown-dialect calls return
-// `PdpError::NoResolver(dialect)`.
+// Routing is by dialect equality. Host registrations (`register`) keep
+// the first resolver per dialect. Config-supplied resolvers are a
+// separate set, replaced wholesale on each load; a host registration
+// wins when both layers name the same dialect. Unknown-dialect calls
+// return `PdpError::NoResolver(dialect)`.
 //
 // `PdpRouter` is itself a `PdpResolver`, so it slots straight into
 // `AplRouteHandler::with_pdp`. Its own `dialect()` method returns
@@ -40,8 +41,13 @@ use praxis_policy_apl_core::step::{
 };
 
 /// Dispatches PDP calls to the right resolver based on
-/// `Step::Pdp.call.dialect`. Construct with `new()`, add resolvers via
-/// `register`, then hand the router to a route handler.
+/// `Step::Pdp.call.dialect`. Construct with `new()`, add host resolvers
+/// via `register`, then hand the router to a route handler.
+///
+/// Host registrations survive a config reload. Resolvers built from
+/// `global.pdp[]` live in a separate set that is replaced on each load.
+/// When both layers have a dialect, the host registration is the one
+/// `evaluate` calls.
 ///
 /// Cloning is cheap (refcount bumps on each resolver `Arc`) — the
 /// `AplConfigVisitor` snapshots its accumulated router into an `Arc`
@@ -49,51 +55,84 @@ use praxis_policy_apl_core::step::{
 /// the visitor state doesn't tear in-flight handlers.
 #[derive(Clone)]
 pub struct PdpRouter {
-    resolvers: HashMap<PdpDialect, Arc<dyn PdpResolver>>,
+    /// Host registrations. The first `register` per dialect wins.
+    code: HashMap<PdpDialect, Arc<dyn PdpResolver>>,
+    /// Rebuilt from `global.pdp[]` on every config load. Never contains
+    /// a dialect that `code` already owns.
+    config: HashMap<PdpDialect, Arc<dyn PdpResolver>>,
 }
 
 impl PdpRouter {
     /// A new instance with nothing registered or stored yet.
     pub fn new() -> Self {
         Self {
-            resolvers: HashMap::new(),
+            code: HashMap::new(),
+            config: HashMap::new(),
         }
     }
 
-    /// Register a resolver for its declared dialect. If a resolver is
-    /// already registered for that dialect the new one is dropped and a
-    /// warning is logged — explicit replacement should go through
-    /// `replace` instead so the intent is visible at call sites.
+    /// Register a code-supplied resolver for its declared dialect.
+    ///
+    /// The first registration per dialect wins. A later one is dropped
+    /// and a warning is logged — an intentional swap goes through
+    /// [`Self::replace`]. A config-supplied resolver for the same dialect
+    /// is removed, so this registration is the one `evaluate` uses, including
+    /// across later config reloads.
     pub fn register(&mut self, resolver: Arc<dyn PdpResolver>) -> &mut Self {
         let dialect = resolver.dialect();
-        if self.resolvers.contains_key(&dialect) {
+        if self.code.contains_key(&dialect) {
             tracing::warn!(
                 dialect = ?dialect,
-                "PdpRouter: resolver for dialect already registered — keeping existing",
+                "PdpRouter: code-supplied resolver for dialect already registered — keeping existing",
             );
             return self;
         }
-        self.resolvers.insert(dialect, resolver);
+        self.config.remove(&dialect);
+        self.code.insert(dialect, resolver);
         self
     }
 
-    /// Replace any existing resolver for the new resolver's dialect.
-    /// Use this when the host genuinely wants to swap in a different
-    /// implementation (testing, A/B rollout).
+    /// Swap the code-supplied resolver for this dialect.
+    ///
+    /// Drops a config-supplied resolver for the same dialect so the swap
+    /// is what `evaluate` calls. Config reload does not use this: it
+    /// replaces only the config-owned set.
     pub fn replace(&mut self, resolver: Arc<dyn PdpResolver>) -> &mut Self {
         let dialect = resolver.dialect();
-        self.resolvers.insert(dialect, resolver);
+        self.config.remove(&dialect);
+        self.code.insert(dialect, resolver);
         self
     }
 
-    /// Number of registered resolvers. Useful for tests.
+    /// Whether a host registration already owns `dialect`.
+    pub(crate) fn has_code_resolver(&self, dialect: &PdpDialect) -> bool {
+        self.code.contains_key(dialect)
+    }
+
+    /// Replace the config-owned set. Host registrations are left in place.
+    ///
+    /// Entries whose dialect is already code-supplied are dropped. A dialect
+    /// absent from `resolvers` is removed, including when `resolvers` is empty.
+    pub(crate) fn set_config_resolvers(
+        &mut self,
+        mut resolvers: HashMap<PdpDialect, Arc<dyn PdpResolver>>,
+    ) {
+        resolvers.retain(|dialect, _| !self.code.contains_key(dialect));
+        self.config = resolvers;
+    }
+
+    /// Number of dialects `evaluate` can dispatch. Useful for tests.
     pub fn len(&self) -> usize {
-        self.resolvers.len()
+        self.code.len() + self.config.len()
     }
 
     /// Whether no resolver is registered.
     pub fn is_empty(&self) -> bool {
-        self.resolvers.is_empty()
+        self.code.is_empty() && self.config.is_empty()
+    }
+
+    fn resolver(&self, dialect: &PdpDialect) -> Option<&Arc<dyn PdpResolver>> {
+        self.code.get(dialect).or_else(|| self.config.get(dialect))
     }
 }
 
@@ -115,8 +154,7 @@ impl PdpResolver for PdpRouter {
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
         let resolver = self
-            .resolvers
-            .get(&call.dialect)
+            .resolver(&call.dialect)
             .ok_or_else(|| PdpError::NoResolver(call.dialect.clone()))?;
         resolver.evaluate(call, bag).await
     }
@@ -128,8 +166,7 @@ impl PdpResolver for PdpRouter {
         structured: &StructuredInput,
     ) -> Result<PdpDecision, PdpError> {
         let resolver = self
-            .resolvers
-            .get(&call.dialect)
+            .resolver(&call.dialect)
             .ok_or_else(|| PdpError::NoResolver(call.dialect.clone()))?;
         resolver.evaluate_structured(call, bag, structured).await
     }
@@ -138,8 +175,7 @@ impl PdpResolver for PdpRouter {
     /// resolver passes, so it still fails per request as `NoResolver`.
     fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
         call.validate_input_options()?;
-        self.resolvers
-            .get(&call.dialect)
+        self.resolver(&call.dialect)
             .map_or_else(|| Ok(()), |resolver| resolver.validate_call(call))
     }
 
@@ -152,11 +188,9 @@ impl PdpResolver for PdpRouter {
         if call.requires_llm_request() && !input.llm_request {
             return Err("`require_llm_request: true` requires a route that can carry a host request document".to_owned());
         }
-        self.resolvers
-            .get(&call.dialect)
-            .map_or(Ok(()), |resolver| {
-                resolver.validate_call_with_input(call, input)
-            })
+        self.resolver(&call.dialect).map_or(Ok(()), |resolver| {
+            resolver.validate_call_with_input(call, input)
+        })
     }
 }
 
@@ -283,6 +317,13 @@ mod tests {
         );
         // No resolver for the dialect: load passes, as it did before.
         assert_eq!(router.validate_call(&call(PdpDialect::Opa)), Ok(()));
+
+        let mut config_only = PdpRouter::new();
+        config_only.set_config_resolvers(config_of(vec![Arc::new(StrictPdp)]));
+        assert_eq!(
+            config_only.validate_call(&call(PdpDialect::Cedar)),
+            Err("args required".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -308,5 +349,137 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(res.decision, Decision::Allow));
+    }
+
+    fn allow(dialect: PdpDialect) -> Arc<dyn PdpResolver> {
+        Arc::new(FakePdp {
+            dialect,
+            decision: Decision::Allow,
+        })
+    }
+
+    fn deny(dialect: PdpDialect, reason: &str) -> Arc<dyn PdpResolver> {
+        Arc::new(FakePdp {
+            dialect,
+            decision: Decision::Deny {
+                reason: Some(reason.to_owned()),
+                rule_source: "test".to_owned(),
+            },
+        })
+    }
+
+    fn config_of(
+        resolvers: Vec<Arc<dyn PdpResolver>>,
+    ) -> HashMap<PdpDialect, Arc<dyn PdpResolver>> {
+        resolvers
+            .into_iter()
+            .map(|resolver| {
+                let dialect = resolver.dialect();
+                (dialect, resolver)
+            })
+            .collect()
+    }
+
+    async fn decision(router: &PdpRouter, dialect: PdpDialect) -> Decision {
+        router
+            .evaluate(
+                &PdpCall {
+                    dialect,
+                    args: serde_yaml::Value::Null,
+                },
+                &AttributeBag::default(),
+            )
+            .await
+            .expect("dialect is registered")
+            .decision
+    }
+
+    #[tokio::test]
+    async fn config_resolvers_are_replaced_as_a_set() {
+        let mut router = PdpRouter::new();
+        router.set_config_resolvers(config_of(vec![
+            allow(PdpDialect::Cedar),
+            deny(PdpDialect::Opa, "opa"),
+        ]));
+        assert!(matches!(
+            decision(&router, PdpDialect::Cedar).await,
+            Decision::Allow
+        ));
+        assert!(matches!(
+            decision(&router, PdpDialect::Opa).await,
+            Decision::Deny { .. }
+        ));
+
+        router.set_config_resolvers(config_of(vec![deny(PdpDialect::Cedar, "reloaded")]));
+        match decision(&router, PdpDialect::Cedar).await {
+            Decision::Deny { reason, .. } => assert_eq!(reason.as_deref(), Some("reloaded")),
+            Decision::Allow => panic!("reload must replace the cedar resolver"),
+        }
+        let err = router
+            .evaluate(
+                &PdpCall {
+                    dialect: PdpDialect::Opa,
+                    args: serde_yaml::Value::Null,
+                },
+                &AttributeBag::default(),
+            )
+            .await
+            .expect_err("a dialect the reload removed must be gone");
+        assert!(matches!(err, PdpError::NoResolver(_)));
+        assert_eq!(router.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn code_registration_wins_over_config_and_survives_a_reload() {
+        let mut router = PdpRouter::new();
+        router.register(allow(PdpDialect::Cedar));
+        router.set_config_resolvers(config_of(vec![
+            deny(PdpDialect::Cedar, "from-config"),
+            deny(PdpDialect::Opa, "opa"),
+        ]));
+        assert!(
+            matches!(decision(&router, PdpDialect::Cedar).await, Decision::Allow),
+            "a code-supplied resolver stays ahead of global.pdp"
+        );
+        assert!(matches!(
+            decision(&router, PdpDialect::Opa).await,
+            Decision::Deny { .. }
+        ));
+        assert_eq!(
+            router.len(),
+            2,
+            "the shadowed config cedar resolver is not kept"
+        );
+
+        router.set_config_resolvers(HashMap::new());
+        assert!(matches!(
+            decision(&router, PdpDialect::Cedar).await,
+            Decision::Allow
+        ));
+        let err = router
+            .evaluate(
+                &PdpCall {
+                    dialect: PdpDialect::Opa,
+                    args: serde_yaml::Value::Null,
+                },
+                &AttributeBag::default(),
+            )
+            .await
+            .expect_err("clearing the config set removes config-owned dialects");
+        assert!(matches!(err, PdpError::NoResolver(_)));
+        assert_eq!(router.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn replace_swaps_the_code_resolver_and_drops_the_config_one() {
+        let mut router = PdpRouter::new();
+        router.set_config_resolvers(config_of(vec![deny(PdpDialect::Opa, "config")]));
+        router.replace(allow(PdpDialect::Opa));
+        assert!(matches!(
+            decision(&router, PdpDialect::Opa).await,
+            Decision::Allow
+        ));
+        assert_eq!(router.len(), 1);
+        assert!(router.has_code_resolver(&PdpDialect::Opa));
     }
 }

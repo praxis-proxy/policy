@@ -18,4 +18,5 @@
 //! extension: cargo links one executable per test target, and these cases share
 //! their fixtures.
 
+mod decision_cache;
 mod visitor_opa_config;
