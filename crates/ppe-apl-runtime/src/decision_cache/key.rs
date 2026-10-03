@@ -170,8 +170,11 @@ fn canonical_yaml_bytes(value: &serde_yaml::Value) -> Vec<u8> {
 
 fn hash_structured(hasher: &mut Sha256, structured: &StructuredInput) {
     hasher.update([u8::from(structured.too_deep())]);
-    hash_optional_json(hasher, structured.llm_request().map(|value| value.as_ref()));
-    hash_optional_json(hasher, structured.args().map(|value| value.as_ref()));
+    hash_optional_json(
+        hasher,
+        structured.llm_request().map(std::convert::AsRef::as_ref),
+    );
+    hash_optional_json(hasher, structured.args().map(std::convert::AsRef::as_ref));
 }
 
 fn hash_optional_json(hasher: &mut Sha256, value: Option<&serde_json::Value>) {
