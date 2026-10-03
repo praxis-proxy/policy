@@ -17,6 +17,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use praxis_policy_apl_core::step::PdpDecision;
@@ -49,11 +50,11 @@ pub(crate) enum Insert {
 }
 
 impl Store {
-    pub(crate) fn new(max_entries: usize) -> Self {
+    pub(crate) fn new(max_entries: NonZeroUsize) -> Self {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
-            max_entries,
+            max_entries: max_entries.get(),
         }
     }
 
@@ -162,6 +163,10 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn cap(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).expect("test caps are positive")
+    }
+
     use praxis_policy_apl_core::evaluator::Decision;
 
     fn key(tag: u8) -> CacheKey {
@@ -189,7 +194,7 @@ mod tests {
 
     #[test]
     fn expired_lookup_is_not_a_hit() {
-        let mut store = Store::new(4);
+        let mut store = Store::new(cap(4));
         let now = Instant::now();
         store.insert(key(1), allow(), now, now);
         match store.lookup(&key(1), now + Duration::from_millis(1)) {
@@ -201,7 +206,7 @@ mod tests {
 
     #[test]
     fn fifo_evicts_the_oldest_live_entry() {
-        let mut store = Store::new(2);
+        let mut store = Store::new(cap(2));
         let now = Instant::now();
         let later = now + Duration::from_secs(60);
         assert!(matches!(
@@ -223,7 +228,7 @@ mod tests {
 
     #[test]
     fn expired_middle_entry_does_not_evict_a_live_front() {
-        let mut store = Store::new(3);
+        let mut store = Store::new(cap(3));
         let t0 = Instant::now();
         let long = t0 + Duration::from_secs(60);
         let short = t0 + Duration::from_secs(2);
@@ -243,7 +248,7 @@ mod tests {
 
     #[test]
     fn replacing_an_existing_key_does_not_grow_the_map() {
-        let mut store = Store::new(1);
+        let mut store = Store::new(cap(1));
         let now = Instant::now();
         let later = now + Duration::from_secs(60);
         store.insert(key(1), allow(), later, now);

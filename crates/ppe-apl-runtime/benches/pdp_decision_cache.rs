@@ -19,6 +19,7 @@
 )]
 
 use std::hint::black_box;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -84,10 +85,11 @@ fn bench_cache(c: &mut Criterion) {
     // CEL evaluate + insert, not FIFO eviction (see review of #101).
     let miss_cache = CachedPdpResolver::wrap(
         Arc::clone(&inner),
-        DecisionCacheConfig {
-            ttl: Duration::from_secs(60),
-            max_entries: 1_000_000,
-        },
+        DecisionCacheConfig::new(
+            Duration::from_secs(60),
+            NonZeroUsize::new(1_000_000).expect("cap"),
+        )
+        .expect("ttl"),
         Arc::downgrade(&mgr),
     );
     let nonce = AtomicU64::new(0);
@@ -105,10 +107,11 @@ fn bench_cache(c: &mut Criterion) {
 
     let hit_cache = CachedPdpResolver::wrap(
         inner,
-        DecisionCacheConfig {
-            ttl: Duration::from_secs(60),
-            max_entries: 1024,
-        },
+        DecisionCacheConfig::new(
+            Duration::from_secs(60),
+            NonZeroUsize::new(1024).expect("cap"),
+        )
+        .expect("ttl"),
         Arc::downgrade(&mgr),
     );
     {

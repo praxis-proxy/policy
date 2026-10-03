@@ -7,6 +7,7 @@
 // every evaluate reaches the backend. Presence of `cache:` requires both a
 // positive TTL and a positive entry bound; there is no half-enabled state.
 
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -31,17 +32,47 @@ pub enum DecisionCacheConfigError {
     InvalidMaxEntries,
 }
 
-/// Bounds for one PDP's decision cache. Constructed only from a valid
-/// `cache:` block, so both fields are positive.
+/// Bounds for one PDP's decision cache.
+///
+/// Both knobs are positive. [`Self::new`] and [`Self::from_yaml`] reject a
+/// zero TTL, and the cap is a [`NonZeroUsize`], so a caller cannot ask the
+/// store for a bound of zero and then have `insert` keep one entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecisionCacheConfig {
-    /// How long a stored Allow or Deny may be reused.
-    pub ttl: Duration,
-    /// Hard cap on live entries. Insertions past this evict deterministically.
-    pub max_entries: usize,
+    ttl: Duration,
+    max_entries: NonZeroUsize,
 }
 
 impl DecisionCacheConfig {
+    /// Build a bound from an already-validated TTL and cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecisionCacheConfigError::InvalidTtl`] when `ttl` is zero.
+    /// A zero cap cannot be passed: `max_entries` is a [`NonZeroUsize`].
+    pub fn new(ttl: Duration, max_entries: NonZeroUsize) -> Result<Self, DecisionCacheConfigError> {
+        if ttl.is_zero() {
+            return Err(DecisionCacheConfigError::InvalidTtl);
+        }
+        Ok(Self { ttl, max_entries })
+    }
+
+    /// How long a stored Allow or Deny may be reused.
+    #[must_use]
+    pub fn ttl(self) -> Duration {
+        self.ttl
+    }
+
+    /// Hard cap on live entries. Insertions past this evict deterministically.
+    #[must_use]
+    pub fn max_entries(self) -> usize {
+        self.max_entries.get()
+    }
+
+    pub(crate) fn entry_bound(self) -> NonZeroUsize {
+        self.max_entries
+    }
+
     /// Parse a `cache:` mapping. Omission is handled by the caller: this
     /// function is only reached when the key is present.
     ///
@@ -55,7 +86,7 @@ impl DecisionCacheConfig {
             .ok_or(DecisionCacheConfigError::NotAMapping)?;
 
         let mut ttl_seconds: Option<u64> = None;
-        let mut max_entries: Option<usize> = None;
+        let mut max_entries: Option<NonZeroUsize> = None;
         for (key, val) in map {
             let Some(name) = key.as_str() else {
                 return Err(DecisionCacheConfigError::NonStringKey);
@@ -67,7 +98,7 @@ impl DecisionCacheConfig {
                 },
                 "max_entries" => {
                     max_entries = Some(
-                        positive_usize(val).ok_or(DecisionCacheConfigError::InvalidMaxEntries)?,
+                        positive_nonzero(val).ok_or(DecisionCacheConfigError::InvalidMaxEntries)?,
                     );
                 },
                 other => return Err(DecisionCacheConfigError::UnknownKey(other.to_owned())),
@@ -76,10 +107,7 @@ impl DecisionCacheConfig {
 
         let ttl_seconds = ttl_seconds.ok_or(DecisionCacheConfigError::InvalidTtl)?;
         let max_entries = max_entries.ok_or(DecisionCacheConfigError::InvalidMaxEntries)?;
-        Ok(Self {
-            ttl: Duration::from_secs(ttl_seconds),
-            max_entries,
-        })
+        Self::new(Duration::from_secs(ttl_seconds), max_entries)
     }
 }
 
@@ -88,9 +116,10 @@ fn positive_u64(value: &serde_yaml::Value) -> Option<u64> {
     (n > 0).then_some(n)
 }
 
-fn positive_usize(value: &serde_yaml::Value) -> Option<usize> {
+fn positive_nonzero(value: &serde_yaml::Value) -> Option<NonZeroUsize> {
     let n = positive_u64(value)?;
-    usize::try_from(n).ok()
+    let n = usize::try_from(n).ok()?;
+    NonZeroUsize::new(n)
 }
 
 /// Pull `cache:` off a `global.pdp[]` entry so backend factories never see
@@ -127,8 +156,24 @@ mod tests {
     #[test]
     fn valid_block_parses() {
         let cfg = parse("ttl_seconds: 30\nmax_entries: 64\n").unwrap();
-        assert_eq!(cfg.ttl, Duration::from_secs(30));
-        assert_eq!(cfg.max_entries, 64);
+        assert_eq!(cfg.ttl(), Duration::from_secs(30));
+        assert_eq!(cfg.max_entries(), 64);
+    }
+
+    #[test]
+    fn constructor_rejects_a_zero_ttl() {
+        assert_eq!(
+            DecisionCacheConfig::new(Duration::ZERO, NonZeroUsize::MIN),
+            Err(DecisionCacheConfigError::InvalidTtl)
+        );
+    }
+
+    #[test]
+    fn zero_cap_is_refused() {
+        assert_eq!(
+            parse("ttl_seconds: 1\nmax_entries: 0\n"),
+            Err(DecisionCacheConfigError::InvalidMaxEntries)
+        );
     }
 
     #[test]
@@ -167,7 +212,7 @@ mod tests {
             serde_yaml::from_str("kind: cel\ncache:\n  ttl_seconds: 5\n  max_entries: 2\n")
                 .unwrap();
         let (stripped, cfg) = split_cache_block(&entry).unwrap();
-        assert_eq!(cfg.unwrap().max_entries, 2);
+        assert_eq!(cfg.unwrap().max_entries(), 2);
         assert!(stripped.as_mapping().unwrap().get("cache").is_none());
         assert_eq!(
             stripped.as_mapping().unwrap().get("kind").unwrap().as_str(),

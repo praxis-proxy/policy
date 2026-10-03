@@ -15,6 +15,7 @@
     reason = "test contract runner called from builtin PDP crates"
 )]
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +40,14 @@ pub struct CacheContractSamples {
     pub extra_bags: [AttributeBag; 2],
 }
 
+fn cache_config(ttl: Duration, max_entries: usize) -> DecisionCacheConfig {
+    DecisionCacheConfig::new(
+        ttl,
+        NonZeroUsize::new(max_entries).expect("contract caps are positive"),
+    )
+    .expect("contract ttls are positive")
+}
+
 /// TTL, cap, reload, Allow, Deny, errors, and concurrent access.
 ///
 /// # Panics
@@ -48,10 +57,7 @@ pub struct CacheContractSamples {
 #[doc(hidden)]
 pub async fn run_cache_contract(inner: Arc<dyn PdpResolver>, samples: CacheContractSamples) {
     let mgr = Arc::new(PolicyEngine::default());
-    let config = DecisionCacheConfig {
-        ttl: Duration::from_secs(60),
-        max_entries: 32,
-    };
+    let config = cache_config(Duration::from_secs(60), 32);
     let cache = CachedPdpResolver::wrap(Arc::clone(&inner), config, Arc::downgrade(&mgr));
 
     let (ref allow_call, ref allow_bag) = samples.allow;
@@ -151,10 +157,7 @@ pub async fn run_cache_contract(inner: Arc<dyn PdpResolver>, samples: CacheContr
 
     let cap = CachedPdpResolver::wrap(
         Arc::clone(&inner),
-        DecisionCacheConfig {
-            ttl: Duration::from_secs(60),
-            max_entries: 2,
-        },
+        cache_config(Duration::from_secs(60), 2),
         Arc::downgrade(&mgr),
     );
     let [extra0, extra1] = samples.extra_bags;
@@ -175,10 +178,7 @@ pub async fn run_cache_contract(inner: Arc<dyn PdpResolver>, samples: CacheContr
 
     let ttl = CachedPdpResolver::wrap(
         inner,
-        DecisionCacheConfig {
-            ttl: Duration::from_millis(40),
-            max_entries: 8,
-        },
+        cache_config(Duration::from_millis(40), 8),
         Arc::downgrade(&mgr),
     );
     ttl.evaluate(deny_call, deny_bag).await.expect("ttl seed");
