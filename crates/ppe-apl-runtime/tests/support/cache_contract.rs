@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// Shared cache-contract runner used by this crate's tests and by each
-// builtin PDP crate, so Cedar, CEL, and OPA cannot drift off the issue's
-// acceptance list.
-//
-// Behind `test-util` (and `cfg(test)`): it panics on unexpected input
-// and must not compile into a production library build.
+// Shared cache-contract runner for this crate's integration test and for
+// the Cedar, CEL, and OPA tests. It lives under `tests/` so the library
+// does not export it and `cargo package` does not request a feature from
+// the already-published runtime.
 
 #![allow(
     clippy::expect_used,
     clippy::panic,
     clippy::unwrap_used,
-    reason = "test contract runner called from builtin PDP crates"
+    reason = "test contract runner"
 )]
 
 use std::num::NonZeroUsize;
@@ -22,22 +20,19 @@ use std::time::Duration;
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::{PdpCall, PdpResolver};
+use praxis_policy_apl_runtime::{CachedPdpResolver, DecisionCacheConfig};
 use praxis_policy_core::engine::PolicyEngine;
 
-use super::config::DecisionCacheConfig;
-use super::wrapper::CachedPdpResolver;
-
 /// One Allow, one Deny, one dispatch error, and two extra bags for capacity.
-#[doc(hidden)]
-pub struct CacheContractSamples {
+pub(crate) struct CacheContractSamples {
     /// Inputs that must yield [`Decision::Allow`].
-    pub allow: (PdpCall, AttributeBag),
+    pub(crate) allow: (PdpCall, AttributeBag),
     /// Inputs that must yield [`Decision::Deny`].
-    pub deny: (PdpCall, AttributeBag),
+    pub(crate) deny: (PdpCall, AttributeBag),
     /// Inputs that must yield [`praxis_policy_apl_core::step::PdpError`].
-    pub error: (PdpCall, AttributeBag),
+    pub(crate) error: (PdpCall, AttributeBag),
     /// Distinct bags used with `allow.0` to fill the cap without colliding.
-    pub extra_bags: [AttributeBag; 2],
+    pub(crate) extra_bags: [AttributeBag; 2],
 }
 
 fn cache_config(ttl: Duration, max_entries: usize) -> DecisionCacheConfig {
@@ -54,8 +49,7 @@ fn cache_config(ttl: Duration, max_entries: usize) -> DecisionCacheConfig {
 ///
 /// Panics when a sample does not match the expected decision, when an
 /// error is cached, or when counters do not move as the contract requires.
-#[doc(hidden)]
-pub async fn run_cache_contract(inner: Arc<dyn PdpResolver>, samples: CacheContractSamples) {
+pub(crate) async fn run_cache_contract(inner: Arc<dyn PdpResolver>, samples: CacheContractSamples) {
     let mgr = Arc::new(PolicyEngine::default());
     let config = cache_config(Duration::from_secs(60), 32);
     let cache = CachedPdpResolver::wrap(Arc::clone(&inner), config, Arc::downgrade(&mgr));

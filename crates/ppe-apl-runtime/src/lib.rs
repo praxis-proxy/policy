@@ -73,8 +73,6 @@ pub mod visitor;
 pub use attribute_source::{FileAttributeSource, merge_attribute_docs};
 pub use candidate_constraint::{ConstraintConflict, fold_candidate_constraints};
 pub use cmf_invoker::{CmfPluginInvoker, HookPluginInvoker, HttpPluginInvoker};
-#[cfg(any(test, feature = "test-util"))]
-pub use decision_cache::{CacheContractSamples, run_cache_contract};
 pub use decision_cache::{
     CachedPdpResolver, DecisionCacheConfig, DecisionCacheConfigError, DecisionCacheStats,
     split_cache_block,

@@ -25,10 +25,11 @@ use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::step::{
     PdpCall, PdpDecision, PdpDialect, PdpError, PdpFactory, PdpResolver,
 };
-use praxis_policy_apl_runtime::{
-    AplOptions, CacheContractSamples, DispatchCache, MemorySessionStore, register_apl,
-    run_cache_contract,
-};
+use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, register_apl};
+
+#[path = "support/cache_contract.rs"]
+mod cache_contract;
+use cache_contract::{CacheContractSamples, run_cache_contract};
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::engine::PolicyEngine;

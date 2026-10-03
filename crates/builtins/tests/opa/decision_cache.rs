@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect, PdpResolver};
-use praxis_policy_apl_runtime::{CacheContractSamples, run_cache_contract};
+#[path = "../../../ppe-apl-runtime/tests/support/cache_contract.rs"]
+mod cache_contract;
+use cache_contract::{CacheContractSamples, run_cache_contract};
 use praxis_policy_builtins::pdps::opa::OpaResolver;
 
 fn query_call() -> PdpCall {
