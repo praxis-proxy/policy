@@ -284,7 +284,10 @@ deadpool-redis = { version = "0.23", optional = true, default-features = false, 
 # (so assertions about the apl-core-only property must use `--edges normal`),
 # and the testcontainers stack compiles whenever this crate's tests are built.
 praxis-policy-core = { workspace = true, features = ["test-util"] }
-praxis-policy-apl-runtime = { workspace = true, features = ["test-util"] }
+# Path-only: `test-util` is not on the published runtime yet, and
+# `cargo package` resolves a versioned dev-dep against crates.io.
+# A path with no version is left out of the published manifest.
+praxis-policy-apl-runtime = { path = "../ppe-apl-runtime", features = ["test-util"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 bytes = { workspace = true }
 futures = { workspace = true }
