@@ -868,12 +868,15 @@ impl ConfigVisitor for AplConfigVisitor {
         // layer — route handlers that reference PDPs need them
         // resolvable by the time `visit_route` runs. Absence of the key
         // clears config-owned resolvers. A value that is not a list is
-        // left untouched, matching the previous skip.
+        // an error, same as `global.attribute_files`: skipping it would
+        // leave the previous load's resolvers, including cache wrappers,
+        // answering requests under the new config.
         match apl_block.get("pdp") {
             Some(value) => {
-                if let Some(entries) = value.as_sequence() {
-                    self.install_config_pdps(entries)?;
-                }
+                let entries = value
+                    .as_sequence()
+                    .ok_or_else(|| "global.pdp must be a list".to_owned())?;
+                self.install_config_pdps(entries)?;
             },
             None => self.install_config_pdps(&[])?,
         }

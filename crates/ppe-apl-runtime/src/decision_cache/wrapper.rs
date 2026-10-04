@@ -222,12 +222,7 @@ impl PdpResolver for CachedPdpResolver {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "tests"
-)]
+#[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use std::num::NonZeroUsize;
     use std::sync::Arc;

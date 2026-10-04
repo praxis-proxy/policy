@@ -60,6 +60,18 @@ fn a_config_with_no_wiring_block_loads() {
 
 // ---- global.pdp ----------------------------------------------------
 
+/// A mapping where a list was required used to be skipped, which left the
+/// previous load's resolvers in place. A typo then keeps answering.
+#[test]
+fn a_pdp_value_that_is_not_a_list_is_rejected() {
+    let e = load_err("global:\n  pdp:\n    kind: opa\n");
+    assert!(
+        e.contains("global.pdp"),
+        "the message must name the field: {e}"
+    );
+    assert!(e.contains("list"), "and say it wanted a list: {e}");
+}
+
 #[test]
 fn a_pdp_entry_that_is_not_a_mapping_is_rejected_with_its_index() {
     let e = load_err("global:\n  pdp:\n    - just-a-string\n");

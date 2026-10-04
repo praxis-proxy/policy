@@ -13,14 +13,10 @@
 // --workspace` record the published runtime checksum and then replace
 // the crate with this branch's tarball.
 
-#![allow(
+#![expect(
     missing_docs,
     clippy::expect_used,
-    clippy::panic,
-    clippy::print_stderr,
-    clippy::print_stdout,
-    clippy::unwrap_used,
-    reason = "benchmark harness — Criterion macros + fixture expects"
+    reason = "benchmark harness — Criterion entry point and fixture expects"
 )]
 
 use std::hint::black_box;

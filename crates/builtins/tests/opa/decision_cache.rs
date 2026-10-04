@@ -3,11 +3,8 @@
 
 // Decision-cache contract against a real OPA resolver.
 
-#![allow(
-    missing_docs,
+#![expect(
     clippy::expect_used,
-    clippy::needless_raw_string_hashes,
-    clippy::needless_raw_strings,
     clippy::unwrap_used,
     reason = "test and example code"
 )]

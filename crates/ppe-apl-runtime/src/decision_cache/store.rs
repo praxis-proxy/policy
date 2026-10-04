@@ -153,12 +153,7 @@ impl Store {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "tests"
-)]
+#[expect(clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
     use std::time::Duration;

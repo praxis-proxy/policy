@@ -6,12 +6,7 @@
 // does not export it and `cargo package` does not request a feature from
 // the already-published runtime.
 
-#![allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "test contract runner"
-)]
+#![expect(clippy::expect_used, reason = "test contract runner")]
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;

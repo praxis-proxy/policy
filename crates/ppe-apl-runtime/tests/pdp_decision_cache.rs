@@ -4,13 +4,10 @@
 // Decision-cache wiring: YAML opt-in, factory wrap, and the shared contract
 // against a counting fake so hit/miss/error behaviour is observable.
 
-#![allow(
+#![expect(
     missing_docs,
     clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::needless_raw_string_hashes,
     clippy::needless_raw_strings,
-    clippy::panic,
     clippy::unwrap_used,
     reason = "test and example code"
 )]
