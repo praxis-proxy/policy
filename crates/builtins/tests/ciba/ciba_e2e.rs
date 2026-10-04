@@ -310,7 +310,11 @@ async fn full_flow_dispatch_check_validate_approves() {
 async fn validate_rejects_approver_mismatch() {
     let http = Arc::new(
         FakeTransport::new()
-            .json(AUTH_PATH, 200, &json!({ "auth_req_id": "REQ-x", "expires_in": 300 }).to_string())
+            .json(
+                AUTH_PATH,
+                200,
+                &json!({ "auth_req_id": "REQ-x", "expires_in": 300 }).to_string(),
+            )
             // The token comes back naming a DIFFERENT user than the
             // login_hint — the impersonation case `validate` exists to catch.
             .json(
