@@ -373,5 +373,14 @@ path = "benches/quota_hot_path.rs"
 harness = false
 required-features = ["experimental-quota"]
 
+# Cache hit/miss against a real CEL resolver. Kept here so
+# apl-runtime does not depend back on this crate: that cycle makes
+# `cargo package` reject the published runtime checksum.
+[[bench]]
+name = "pdp_decision_cache"
+path = "benches/pdp_decision_cache.rs"
+harness = false
+required-features = ["cel"]
+
 [lints]
 workspace = true

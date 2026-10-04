@@ -7,6 +7,11 @@
 // `SamplingMode::Flat`, setup (including CEL compile) outside the timed
 // loop. When that crate is on main, copy these two functions next to
 // `cel_evaluate` as `pdp_cost/cache_hit` and `pdp_cost/cache_miss`.
+//
+// Lives here, not in `praxis-policy-apl-runtime`: that crate must not
+// depend on `praxis-policy-builtins`. A cycle makes `cargo package
+// --workspace` record the published runtime checksum and then replace
+// the crate with this branch's tarball.
 
 #![allow(
     missing_docs,
