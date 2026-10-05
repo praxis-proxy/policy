@@ -302,8 +302,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_miss_keeps_its_generation_when_another_lookup_observes_a_reload() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_miss_keeps_its_generation_when_another_lookup_observes_a_reload() {
         let mgr = Arc::new(PolicyEngine::default());
         let cache = CachedPdpResolver::wrap(
             Arc::new(CountingResolver {
