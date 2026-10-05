@@ -21,6 +21,39 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Optional bounded PDP decision cache.** A `cache:` block on a `global.pdp[]` entry stores Allow and Deny for a positive TTL and a positive entry cap. Omission leaves evaluation unchanged. Keys are a digest of dialect, call arguments, the full attribute bag, and structured request input, so request data is not retained. Dispatch errors are never stored, expired entries are never returned, FIFO eviction stays inside the cap, and a PPE configuration generation change drops the map. External PDP policy can still go stale until the TTL expires; `docs/pdp-decision-cache.md` states that. ([#67](https://github.com/praxis-proxy/policy/issues/67))
 
+## [0.4.1] - 2026-10-05
+
+### Added
+
+- PDPs can evaluate host-supplied LLM request JSON and native tool arguments.
+  ([#144](https://github.com/praxis-proxy/policy/pull/144))
+- Added verdict audit sinks, durable effect logs, and keyed content provenance.
+  ([#84](https://github.com/praxis-proxy/policy/pull/84))
+
+### Changed
+
+- **Breaking:** OPA and CEL now use native JSON for `tool:` route `args`;
+  `RoutePayload` struct literals require `structured`.
+  See [migration guidance](docs/content/apl/pdp.md#migrating-args-policies).
+  ([#144](https://github.com/praxis-proxy/policy/pull/144))
+- **Breaking:** cloned extensions drop HTTP transport, and effects are limited
+  to `sequential` and `transform` modes.
+  ([#84](https://github.com/praxis-proxy/policy/pull/84))
+- Missing required LLM requests and overly deep structured input now deny.
+  ([#144](https://github.com/praxis-proxy/policy/pull/144))
+- PDP-generated errors hide input values; Cedar schemas require
+  `structured_context: true` for structured input.
+  ([#144](https://github.com/praxis-proxy/policy/pull/144))
+- The reference audit logger uses sink mode when `hooks:` is absent.
+  ([#84](https://github.com/praxis-proxy/policy/pull/84))
+- Serial and transform plugin panics are contained and report `plugin_panic`.
+  ([#84](https://github.com/praxis-proxy/policy/pull/84))
+
+### Documentation
+
+- Documented Kuadrant/PPE attribute mapping and policy parity.
+  ([#131](https://github.com/praxis-proxy/policy/pull/131))
+
 ## [0.4.0] - 2026-09-29
 
 ### Added
@@ -47,69 +80,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   [#136](https://github.com/praxis-proxy/policy/pull/136))
 - Documented how to add and test provider-specific JWT claim mapper presets.
   ([#128](https://github.com/praxis-proxy/policy/pull/128))
-- Added structured request input for OPA, CEL, and Cedar. A host sets
-  `Extensions.llm_request` to the parsed LLM request body, and PDPs read it as
-  `llm.request`. On `tool:` routes they read the first tool call's arguments
-  as native JSON under `args`. Plugins see the body only with the new
-  `read_llm_request` capability. Host PDP resolvers opt in by overriding
-  `PdpResolver::evaluate_structured`, and may reject a step at config load
-  through `PdpResolver::validate_call`. `RoutePayload` gains a public
-  `structured` field, so code that builds it with a struct literal must set
-  it, and `StructuredInput::new` builds that value. See
-  [Structured request input](docs/content/apl/pdp.md#structured-request-input).
-  ([#142](https://github.com/praxis-proxy/policy/issues/142))
-
-- **Every verdict now reaches an audit sink, denials included.** An observation-only plugin runs as a post-hook, so it only ever saw traffic that was allowed through: a blocked call, an approval rejection, or a delegation failure produced no audit record at all. The executor now builds a `DecisionLog` recording what each plugin did and how the pipeline ruled, and hands it to any registered sink at the verdict itself rather than in a pipeline phase, so allow, deny, and modify all produce exactly one record. A hook resolving to zero plugins emits one allow record too, so a consumer counting records per invocation does not read "nothing configured" as a dropped record.
-
-  A plugin becomes a sink by overriding `Plugin::as_audit_handler`. Sinks return `()`, so a sink can see a verdict but cannot influence it, and the decision log never reaches `PluginContext`, so an ordinary plugin cannot read what the sink reads. Sink calls are bounded by the plugin timeout with panics contained: a sink that fails is logged and skipped rather than taking down the request whose verdict is already decided.
-
-  Opt-in and off by default. With no sink registered the executor builds the log but emits nothing, and the cost is a length check.
-
-- **Irreversible effects are recorded write-ahead.** A decision record says what the engine ruled, not what a plugin did to the outside world on the way. A token mint or an approval grant outlives the request and cannot be taken back, so a process that died between deciding to act and acting left no trace either way. A plugin now acts through `Extensions::perform_effect`, which brackets the act between a fail-closed durable append and a best-effort outcome: no durable record, no act. A failed call is recorded `unknown` rather than `rejected`, because it may still have landed at the participant, and `PolicyEngine::initialize` reconciles whatever a previous run left mid-flight.
-
-  Opt-in and off by default. `engine_settings.effect_log_path` selects a durable log and `effect_log_compaction_threshold` tunes it; with neither set, a plugin's effects run exactly as before and nothing is recorded. Auditing is a choice an operator makes, never something a plugin depends on. There is deliberately no `emit_effect` capability: gating the record rather than the act would point the control at the evidence instead of the authority.
-
-  Effects are refused outside `sequential` and `transform`. A concurrent branch is cancelled when another branch denies, `audit` is read-only by contract, and `fire_and_forget` runs after the verdict, so an act in any of them could happen for work the pipeline discarded. The refusal names the fix rather than silently doing nothing. An audit sink observes effects through `AuditHandler::on_effect`, and `audit-logger` renders them as their own event.
-
-- **Content provenance is keyed.** With `capture_content_provenance` on, the engine records an HMAC-SHA256 of the payload at entry and at emission on the decision log, under the secret `engine_settings.content_provenance_key` names, so a sink compares digests without holding the key and a redacted value cannot be recovered by hashing guesses. Each digest names its scheme and a key id (`hmac-sha256:<key_id>:<hex>`), so a rotation reads as a new key rather than changed content. Plain SHA-256 is available only as an explicit `content_provenance_key: unkeyed`, which warns at load; provenance on with no key is a load error.
 
 ### Changed
 
-- Structured PDP input nested more than 128 levels deep is refused before any
-  engine runs: each PDP step on the request denies with the code
-  `pdp.input_too_deep`. APL-only steps are unaffected.
-- A PDP step may set `require_llm_request: true` to reject a missing host
-  request document before engine evaluation on any route. It denies with
-  `pdp.llm_request_missing` at runtime when the host does not supply one.
-- **Breaking:** on `tool:` routes, `args` in OPA and CEL input is the tool
-  call's native JSON, replacing the flattened `args.*` view. Their arrays keep
-  numbers, bools, client order, and duplicates, and an explicit `null` is
-  present rather than absent. Cedar converts arrays to unordered sets,
-  collapses duplicates, drops nulls, and converts floats and out-of-range
-  integers to strings. APL predicates and `${args.X}` substitution are
-  unchanged. Review OPA and CEL rules that read `args` before upgrading; see
-  [Migrating `args` policies](docs/content/apl/pdp.md#migrating-args-policies).
-  ([#142](https://github.com/praxis-proxy/policy/issues/142))
-- Deny reasons and diagnostics generated by the CEL, OPA, and Cedar PDPs name
-  value types instead of values under `args`, `result`, `llm.request`,
-  `custom`, and HTTP request or response headers. Engine error text is
-  replaced by a fixed category. Author-written reasons pass through unchanged.
-  Operators matching on the old reason text need to update the pattern.
-- A `cedar-direct` resolver with a schema adds structured input to the context
-  only when its config sets `structured_context: true`, since the schema must
-  declare `llm` in each action's context type and `args` for tool routes. A
-  schema-backed Cedar step on any route now fails config load without the flag,
-  since every route can carry a host-supplied LLM request document. See
-  [Cedar limits](docs/content/apl/pdp.md#cedar-limits).
-- OPA now converts structured JSON directly into its input value instead of
-  cloning the request into an intermediate JSON tree first. Route phases with
-  no PDP effect skip structured-input construction entirely.
-- Cedar entity, action, and request validation errors name the entity type and
-  a fixed category instead of the id, value, or Cedar's own text.
-- Cedar steps may not define `llm` or `args` in their `context:`, which now
-  carry structured input; such a step fails config load. A Cedar step whose
-  structured input holds an `__entity`, `__extn`, or `__expr` key denies with
-  the code `cedar.input_withheld`. ([#142](https://github.com/praxis-proxy/policy/issues/142))
 - Consolidated the nine bundled extensions into one published crate,
   `praxis-policy-builtins`, each behind its own Cargo feature. The facade's
   features, `install_builtins`, its re-exports, and every policy `kind` string
@@ -144,12 +117,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   updated `regorus` from 0.11.0 to 0.12.0.
   ([#121](https://github.com/praxis-proxy/policy/pull/121),
   [#114](https://github.com/praxis-proxy/policy/pull/114))
-
-- **A copy of `Extensions` no longer carries host services.** `HttpTransportSlot`, `InitExtensions`, and the new `EffectLogSlot` are no longer `Clone`, and `Extensions::clone` drops the HTTP transport the way it already dropped the write tokens. A slot records the verdict reached when the per-plugin view was built, so a copy answered with that verdict for as long as it lived, letting a plugin stash its extensions and keep making requests after an operator revoked `perform_http` on a reload. That is the property the slot's own documentation already claimed. Every dispatch entry point re-seeds host services before the executor runs, so nothing legitimate depended on a copy carrying them.
-
-- **A contained plugin failure is recorded rather than lost.** A panic, a timeout, or a task that ends without a result is recorded in the decision log as that plugin's action and the verdict still reaches the audit sinks, so a crash is visible to a consumer instead of appearing as a gap. Under `on_error: fail` the violation carries `plugin_panic`, `plugin_timeout`, or `executor_invariant`, so a sink can tell them apart by code.
-
-- **The reference `audit-logger` runs as a decision sink.** Listing no `hooks:` is no longer a configuration error: it selects sink mode, where the logger attaches to the verdict path and records the verdict and the ordered plugin actions alongside the fields it already emitted. Listing hooks keeps the previous per-hook observer, which continues to see only allowed traffic, so one instance never emits two records for one request.
 
 ### Fixed
 
@@ -568,7 +535,8 @@ First release. The engine was extracted from another project rather than written
 
 - **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/praxis-proxy/policy/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/praxis-proxy/policy/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/praxis-proxy/policy/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/praxis-proxy/policy/compare/v0.2.0...v0.3.0

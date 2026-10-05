@@ -8,9 +8,7 @@ SHELL := /bin/bash
 
 CARGO ?= cargo
 
-# rustfmt runs on nightly to match the rest of the org and the tree's committed
-# formatting (see the `style: apply nightly rustfmt formatting` commit). Stable
-# rustfmt would reformat it. Override to pin a specific nightly.
+# Nightly is needed only for the optional ThreadSanitizer target below.
 NIGHTLY ?= nightly
 
 # `make release LEVEL=patch` or `make release VERSION=0.1.1`. VERSION wins.
@@ -32,7 +30,7 @@ help:
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
-	@echo "  fmt               Format Rust code (nightly rustfmt)"
+	@echo "  fmt               Format Rust code (pinned stable rustfmt)"
 	@echo "  lint              CI lint gate: fmt --check + clippy -D warnings"
 	@echo "  lint-extra        Extra lint checks: typos + taplo fmt --check"
 	@echo "  clippy            Run clippy on the workspace (-D warnings)"
@@ -110,7 +108,7 @@ clean:
 
 .PHONY: fmt
 fmt:
-	@$(CARGO) +$(NIGHTLY) fmt --all
+	@$(CARGO) fmt --all
 
 .PHONY: clippy
 clippy:
@@ -122,7 +120,7 @@ clippy:
 .PHONY: lint
 lint:
 	@echo "fmt --check + clippy -D warnings ..."
-	@$(CARGO) +$(NIGHTLY) fmt --all -- --check
+	@$(CARGO) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
 # The all-features pass is not redundant. `praxis-policy-builtins` is
 # `default = []`, and a default-feature workspace run only reaches cedar, cel
@@ -134,7 +132,7 @@ lint:
 
 .PHONY: lint-fix
 lint-fix:
-	@$(CARGO) +$(NIGHTLY) fmt --all
+	@$(CARGO) fmt --all
 	@$(CARGO) clippy --workspace --all-targets --fix --allow-dirty --allow-staged -- -D warnings
 
 # Advisory, not part of the blocking gate: machete is wrong in both directions. It

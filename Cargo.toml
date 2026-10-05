@@ -54,7 +54,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 # MSRV. Keep in sync with rust-toolchain.toml `channel` and clippy.toml `msrv`.
 rust-version = "1.92"
@@ -130,12 +130,12 @@ hmac = "0.13"
 # The keys are package names, which still carry the engine's previous naming.
 # Renaming them is a manifest change across every crate and lands separately, so
 # that the import stays a move and the rename stays a rename.
-praxis-policy-core = { path = "crates/ppe-core", version = "0.4.0" }
-praxis-policy-orchestration = { path = "crates/ppe-orchestration", version = "0.4.0" }
-praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.4.0" }
-praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.4.0" }
-praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.4.0" }
-praxis-policy-builtins = { path = "crates/builtins", version = "0.4.0" }
+praxis-policy-core = { path = "crates/ppe-core", version = "0.4.1" }
+praxis-policy-orchestration = { path = "crates/ppe-orchestration", version = "0.4.1" }
+praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.4.1" }
+praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.4.1" }
+praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.4.1" }
+praxis-policy-builtins = { path = "crates/builtins", version = "0.4.1" }
 
 # Criterion is consumed by the unpublished `ppe-benches` crate (issue #19)
 # and by `praxis-policy-builtins`' `pdp_decision_cache` bench.
