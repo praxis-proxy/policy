@@ -192,7 +192,7 @@ test-tsan:
 # Wall-clock numbers are recorded in docs/pdp-decision-cache.md.
 .PHONY: bench-pdp-cache
 bench-pdp-cache:
-	@$(CARGO) bench -p praxis-policy-builtins --bench pdp_decision_cache
+	@$(CARGO) bench -p praxis-policy-builtins --bench pdp_decision_cache --features cel
 
 # =============================================================================
 # Benchmarks (issue #19) — on demand, never part of `make ci`
