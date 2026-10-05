@@ -113,7 +113,7 @@ impl CachedPdpResolver {
         );
     }
 
-    fn lookup(&self, key: &CacheKey) -> Lookup {
+    fn lookup(&self, key: &CacheKey) -> (Lookup, u64) {
         // `engine` is declared first so the mutex drops before the `Arc`
         // refcount: upgrade stays outside the lock, the generation read stays inside.
         let engine = self.engine.upgrade();
@@ -121,7 +121,8 @@ impl CachedPdpResolver {
         if let Some(engine) = engine.as_ref() {
             self.maybe_clear_for_generation(&mut store, engine.config_generation());
         }
-        store.lookup(key, Instant::now())
+        let generation = self.generation.load(Ordering::Acquire);
+        (store.lookup(key, Instant::now()), generation)
     }
 
     fn insert_if_generation(&self, key: CacheKey, decision: PdpDecision, expected_gen: u64) {
@@ -181,7 +182,8 @@ impl PdpResolver for CachedPdpResolver {
         structured: &StructuredInput,
     ) -> Result<PdpDecision, PdpError> {
         let key = CacheKey::for_evaluation(call, bag, structured);
-        match self.lookup(&key) {
+        let (lookup, generation) = self.lookup(&key);
+        match lookup {
             Lookup::Hit(decision) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(
@@ -209,10 +211,8 @@ impl PdpResolver for CachedPdpResolver {
             "PDP decision cache miss"
         );
 
-        // Generation of this miss. `insert_if_generation` re-reads the engine
-        // under the cache lock and drops the decision if a reload landed
-        // during `evaluate`.
-        let generation = self.generation.load(Ordering::Acquire);
+        // Use the generation observed with the miss under the cache lock.
+        // `insert_if_generation` drops the decision if a reload landed since.
         let result = self.inner.evaluate_structured(call, bag, structured).await;
         if let Ok(decision) = &result {
             self.insert_if_generation(key, decision.clone(), generation);
@@ -236,7 +236,8 @@ mod tests {
     use praxis_policy_core::engine::PolicyEngine;
 
     use super::super::config::DecisionCacheConfig;
-    use super::CachedPdpResolver;
+    use super::super::key::CacheKey;
+    use super::{CachedPdpResolver, Lookup};
 
     fn config() -> DecisionCacheConfig {
         DecisionCacheConfig::new(Duration::from_secs(60), NonZeroUsize::MIN).expect("positive ttl")
@@ -299,6 +300,39 @@ mod tests {
                 diagnostics: Vec::new(),
             })
         }
+    }
+
+    #[test]
+    fn a_miss_keeps_its_generation_when_another_lookup_observes_a_reload() {
+        let mgr = Arc::new(PolicyEngine::default());
+        let cache = CachedPdpResolver::wrap(
+            Arc::new(CountingResolver {
+                calls: Arc::new(AtomicU64::new(0)),
+            }),
+            config(),
+            Arc::downgrade(&mgr),
+        );
+        let key = CacheKey::for_call(&call(), &AttributeBag::default());
+        let (lookup, old_generation) = cache.lookup(&key);
+        assert!(matches!(lookup, Lookup::Miss));
+
+        mgr.load_config_yaml("engine_settings:\n  dispatch: hooks\n")
+            .expect("reload bumps generation");
+        let (lookup, new_generation) = cache.lookup(&key);
+        assert!(matches!(lookup, Lookup::Miss));
+        assert_ne!(old_generation, new_generation);
+
+        let decision = PdpDecision {
+            decision: Decision::Allow,
+            diagnostics: Vec::new(),
+        };
+        cache.insert_if_generation(key, decision.clone(), old_generation);
+        assert!(
+            matches!(cache.lookup(&key).0, Lookup::Miss),
+            "the old evaluation must not be cached under the new generation"
+        );
+        cache.insert_if_generation(key, decision, new_generation);
+        assert!(matches!(cache.lookup(&key).0, Lookup::Hit(_)));
     }
 
     #[tokio::test]
