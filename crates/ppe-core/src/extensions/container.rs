@@ -383,7 +383,27 @@ impl Extensions {
             // the returned headers stand on their own.
             None => HttpExtension::default(),
         };
-        merged.request_headers = owned.request_headers;
+        let mut request_headers = owned.request_headers;
+        // A filtered copy carries markers; header writes cannot replace or remove
+        // an engine-asserted credential. Provenance always comes from canonical state.
+        if !merged.secret_headers.markers.is_empty() {
+            request_headers.retain(|name, _| {
+                !merged
+                    .secret_headers
+                    .markers
+                    .contains_key(&name.to_ascii_lowercase())
+            });
+            for (name, value) in &merged.request_headers {
+                if merged
+                    .secret_headers
+                    .markers
+                    .contains_key(&name.to_ascii_lowercase())
+                {
+                    request_headers.insert(name.clone(), value.clone());
+                }
+            }
+        }
+        merged.request_headers = request_headers;
         merged.response_headers = owned.response_headers;
         self.http = Some(Arc::new(merged));
     }
@@ -1580,5 +1600,67 @@ mod tests {
         assert_eq!(entity, Some("tool"));
 
         // No cow_copy called — zero allocations for read-only access
+    }
+
+    #[test]
+    fn header_writes_preserve_secret_values_and_canonical_provenance() {
+        for edit in ["roundtrip", "remove", "replace", "case"] {
+            let mut http = HttpExtension::default();
+            http.set_request_header("X-Key", "credential");
+            http.set_request_header("x-client", "original");
+            http.secret_headers
+                .markers
+                .insert("x-key".into(), "<redacted secret.key>".into());
+            let mut canonical = Extensions {
+                http: Some(Arc::new(http)),
+                ..Default::default()
+            };
+            let caps = ["read_headers".to_owned(), "write_headers".to_owned()]
+                .into_iter()
+                .collect();
+            let mut filtered = crate::extensions::filter_extensions(&canonical, &caps);
+            assert_eq!(
+                filtered.http.as_ref().unwrap().get_request_header("x-key"),
+                Some("<redacted secret.key>")
+            );
+            filtered.http_write_token = Some(WriteToken::new());
+            let mut owned = filtered.cow_copy();
+            let token = owned.http_write_token.as_ref().unwrap();
+            let http = owned.http.as_mut().unwrap().write(token);
+            if edit != "roundtrip" {
+                http.request_headers.remove("X-Key");
+            }
+            if edit == "replace" {
+                http.set_request_header("X-Key", "forged");
+            }
+            if edit == "case" {
+                http.set_request_header("x-KEY", "forged");
+            }
+            http.secret_headers = Default::default();
+            http.secret_headers
+                .markers
+                .insert("x-client".into(), "forged provenance".into());
+            http.set_request_header("x-client", "updated");
+            http.set_response_header("x-checked", "yes");
+            canonical.merge_owned(owned);
+            let http = canonical.http.as_ref().unwrap();
+            assert_eq!(
+                http.get_request_header("x-key"),
+                Some("credential"),
+                "{edit}"
+            );
+            assert_eq!(http.request_headers.len(), 2, "no case alias: {edit}");
+            assert_eq!(http.get_request_header("x-client"), Some("updated"));
+            assert_eq!(http.get_response_header("x-checked"), Some("yes"));
+            let safe = crate::extensions::filter_extensions(&canonical, &caps);
+            assert_eq!(
+                safe.http.as_ref().unwrap().get_request_header("x-key"),
+                Some("<redacted secret.key>")
+            );
+            assert_eq!(
+                safe.http.as_ref().unwrap().get_request_header("x-client"),
+                Some("updated")
+            );
+        }
     }
 }

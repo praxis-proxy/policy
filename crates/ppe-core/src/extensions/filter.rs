@@ -371,7 +371,14 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
     if extensions.http.is_some() {
         let policy = slot_policy(SlotName::Http);
         if has_read_access(&policy, capabilities) {
-            filtered.http = extensions.http.clone();
+            filtered.http = extensions.http.as_ref().map(|http| {
+                if http.secret_headers.markers.is_empty() {
+                    return Arc::clone(http);
+                }
+                let mut safe = (**http).clone();
+                safe.request_headers = http.redacted_request_headers().into_owned();
+                Arc::new(safe)
+            });
         }
     }
 

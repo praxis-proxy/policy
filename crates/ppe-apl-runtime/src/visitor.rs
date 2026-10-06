@@ -2496,6 +2496,109 @@ routes:
         );
     }
 
+    #[derive(Default)]
+    struct SecretHeaderPdp {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl PdpResolver for SecretHeaderPdp {
+        fn dialect(&self) -> PdpDialect {
+            PdpDialect::Cel
+        }
+
+        async fn evaluate(
+            &self,
+            _call: &PdpCall,
+            bag: &AttributeBag,
+        ) -> Result<PdpDecision, PdpError> {
+            assert_eq!(
+                bag.get_string("http.request_headers.x-api-key"),
+                Some("<redacted secret.key>")
+            );
+            assert_eq!(
+                bag.get_string("http.request_headers.x-client"),
+                Some("visible")
+            );
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(PdpDecision {
+                decision: Decision::Allow,
+                diagnostics: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn response_pdp_cannot_read_an_asserted_secret() {
+        use praxis_policy_core::secrets::SecretProviderRegistry;
+        let file = std::env::temp_dir().join(format!(
+            "ppe-apl-secret-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&file, "test-credential").unwrap();
+        let mgr = Arc::new(PolicyEngine::default());
+        mgr.set_secret_providers(SecretProviderRegistry::with_builtin_backends());
+        let pdp = Arc::new(SecretHeaderPdp::default());
+        let mut options = crate::AplOptions::in_process();
+        options.pdps.push(pdp.clone());
+        crate::register_apl(&mgr, options);
+        mgr.load_config_yaml(&format!(
+            "
+engine_settings:
+  dispatch: policy
+secrets:
+  providers:
+    local: {{ kind: file }}
+  values:
+    key: {{ provider: local, ref: {} }}
+routes:
+  - http: /tool
+    assertions:
+      request:
+        headers:
+          - name: X-API-Key
+            from: secret.key
+    authorization:
+      post_invocation:
+        - cel: {{ expr: 'true' }}
+",
+            file.display()
+        ))
+        .unwrap();
+        mgr.initialize().await.unwrap();
+        std::fs::remove_file(file).unwrap();
+        let mut ext = http_request("POST", Some("/tool"));
+        Arc::make_mut(ext.http.as_mut().unwrap()).set_request_header("x-client", "visible");
+        let (request, _) = mgr
+            .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, ext, None)
+            .await;
+        assert!(request.continue_processing);
+        let (response, _) = mgr
+            .invoke_named::<HttpHook>(
+                HOOK_HTTP_RESPONSE,
+                HttpPayload,
+                request.modified_extensions.unwrap(),
+                None,
+            )
+            .await;
+        assert!(response.continue_processing, "{:?}", response.violation);
+        assert_eq!(pdp.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            response
+                .modified_extensions
+                .unwrap()
+                .http
+                .unwrap()
+                .get_request_header("x-api-key"),
+            Some("test-credential")
+        );
+    }
+
     /// A CEL stand-in whose load-time check rejects any `forbidden` key.
     struct StrictPdp;
 

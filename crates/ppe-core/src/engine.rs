@@ -160,47 +160,6 @@ fn declares_assertions(config: &PolicyConfig) -> bool {
         || config.routes.iter().any(|route| route.assertions.is_some())
 }
 
-/// Whether any level sources a request header from a declared secret.
-///
-/// The guard on resolving a contract purely to find out what a record may not
-/// show. A document that asserts no secret pays one bool per invocation.
-///
-/// Over-approximate on purpose: it reads the authored string rather than a
-/// parsed source, so the cost of a false positive is one contract resolve and
-/// the cost of a false negative would be a credential in a record.
-fn declares_secret_assertions(config: &PolicyConfig) -> bool {
-    fn in_block(assertions: &crate::assertions::AssertionsConfig) -> bool {
-        use crate::assertions::AuthoredSource;
-        assertions.request.as_ref().is_some_and(|block| {
-            block.headers.iter().any(|entry| match &entry.source {
-                AuthoredSource::From(path) => path.starts_with("secret."),
-                AuthoredSource::Members(members) => {
-                    members.values().any(|path| path.starts_with("secret."))
-                },
-            })
-        })
-    }
-
-    config.global.assertions.as_ref().is_some_and(in_block)
-        || config
-            .global
-            .defaults
-            .values()
-            .filter_map(|default| default.assertions.as_ref())
-            .any(in_block)
-        || config
-            .global
-            .bundles
-            .values()
-            .filter_map(|bundle| bundle.assertions.as_ref())
-            .any(in_block)
-        || config
-            .routes
-            .iter()
-            .filter_map(|route| route.assertions.as_ref())
-            .any(in_block)
-}
-
 /// Whether any named route uses a glob selector.
 ///
 /// This avoids resolving routes before annotation lookup in exact/list-only configs.
@@ -229,33 +188,6 @@ fn is_glob_selector(selector: &config::StringOrList) -> bool {
         config::StringOrList::Single(pattern) => pattern.as_str().contains(['*', '?']),
         config::StringOrList::List(_) => false,
     }
-}
-
-/// Swap the values a contract rendered from a declared secret for their
-/// markers, returning the slot to put back afterward.
-///
-/// The emit is the only step that runs after injection, so it is the only
-/// place a credential the engine put on the wire can reach a record. A sink
-/// holding `read_headers` is entitled to the header map and not to what is in
-/// this particular entry.
-///
-/// The `http` slot is swapped rather than the container cloned, because
-/// [`Extensions::clone`] carries neither the host transport nor the effect
-/// slot: a sink declaring those would silently stop seeing them.
-fn redact_rendered_secrets(
-    ext: &mut Extensions,
-    redactions: &[(String, String)],
-) -> Option<Arc<crate::extensions::HttpExtension>> {
-    if redactions.is_empty() {
-        return None;
-    }
-    let mut updated = ext.http.as_deref()?.clone();
-    for (name, marker) in redactions {
-        if let Some(value) = updated.request_headers.get_mut(name) {
-            *value = marker.clone();
-        }
-    }
-    ext.http.replace(Arc::new(updated))
 }
 
 /// Turn a refused assertion into a denial, keeping what the pipeline recorded.
@@ -589,10 +521,6 @@ struct RuntimeSnapshot {
     /// config that does not use the feature, which is what keeps the extra
     /// route resolution the contract needs out of those deployments.
     declares_assertions: bool,
-
-    /// Whether any level sources a request header from a declared secret, the
-    /// guard on resolving a contract to find what a record may not show.
-    declares_secret_assertions: bool,
 
     /// The `http:` routes that declare `assertions:`, by the name each resolves
     /// under. Read on the generic-HTTP path when a request carries no readable
@@ -1067,7 +995,6 @@ fn snapshot_from_config(
     let route_cache_max_entries = policy_config.engine_settings.route_cache_max_entries;
     let http_routes_declaring_authentication = http_routes_declaring_authentication(&policy_config);
     let declares_assertions = declares_assertions(&policy_config);
-    let declares_secret_assertions = declares_secret_assertions(&policy_config);
     let http_routes_declaring_assertions = http_routes_declaring_assertions(&policy_config);
     let declares_glob_named_routes = declares_glob_named_routes(&policy_config);
     RuntimeSnapshot {
@@ -1078,7 +1005,6 @@ fn snapshot_from_config(
         route_annotations: HashMap::new(),
         http_routes_declaring_authentication,
         declares_assertions,
-        declares_secret_assertions,
         http_routes_declaring_assertions,
         declares_glob_named_routes,
     }
@@ -1107,7 +1033,6 @@ impl PolicyEngine {
             route_annotations: HashMap::new(),
             http_routes_declaring_authentication: Arc::from(Vec::new()),
             declares_assertions: false,
-            declares_secret_assertions: false,
             http_routes_declaring_assertions: Arc::from(Vec::new()),
             declares_glob_named_routes: false,
         };
@@ -2731,11 +2656,7 @@ impl PolicyEngine {
         {
             // The extensions the pipeline finished with. Sinks are filtered
             // from these per sink, inside the emit.
-            let mut extensions = result.modified_extensions.take().unwrap_or_default();
-            // The caller's own copy is restored below, so what the upstream
-            // receives is unchanged by having been audited.
-            let redactions = self.secret_redactions(snapshot, matched, &extensions);
-            let wire_http = redact_rendered_secrets(&mut extensions, &redactions);
+            let extensions = result.modified_extensions.take().unwrap_or_default();
             // Every pipeline the executor ran comes back with a verdict, so a
             // log without one is a result the engine built itself: a hook with
             // no plugins, or a route that denied before the pipeline started.
@@ -2749,9 +2670,6 @@ impl PolicyEngine {
                 .executor
                 .emit_decision(payload, &extensions, &mut result.decision_log, verdict)
                 .await;
-            if let Some(http) = wire_http {
-                extensions.http = Some(http);
-            }
             result.modified_extensions = Some(extensions);
         } else {
             // The result's decision log is part of the caller-visible answer,
@@ -2777,47 +2695,6 @@ impl PolicyEngine {
     /// `matched` is the route the caller already resolved, or `None` where no
     /// route matched, which resolves the global layer alone.
     ///
-    /// The headers a record must not show, for the exchange this invocation
-    /// belongs to.
-    ///
-    /// Always the **request** contract, whichever direction this pass is.
-    /// `request_headers` travels with the exchange, so the value the request
-    /// pass injected is still in the map when the response pass emits, and a
-    /// response contract cannot name a secret to rediscover it from. Taking the
-    /// direction's own contract would withhold it on the request pass and show
-    /// it on the response one.
-    ///
-    /// Resolved per route rather than from a document-wide name list, so a
-    /// route that asserts no secret does not have a client's header of the same
-    /// name withheld from its record.
-    fn secret_redactions(
-        &self,
-        snapshot: &RuntimeSnapshot,
-        matched: Option<&config::MatchedRoute<'_>>,
-        extensions: &Extensions,
-    ) -> Vec<(String, String)> {
-        // Nothing in the document sources a header from a secret, so no pass
-        // resolves a contract for this.
-        if !snapshot.declares_secret_assertions {
-            return Vec::new();
-        }
-        let Some(policy_config) = snapshot.policy_config.as_ref() else {
-            return Vec::new();
-        };
-        let entity_type = extensions
-            .meta
-            .as_deref()
-            .and_then(|meta| meta.entity_type.clone());
-        config::resolve_assertions_for_route(
-            policy_config,
-            matched,
-            entity_type.as_deref(),
-            crate::assertions::Direction::Request,
-        )
-        .map(|contract| contract.redactions())
-        .unwrap_or_default()
-    }
-
     /// Returns the result alongside the payload a late denial stripped from
     /// it, if any. A denial carries no payload, but the audit emit still has
     /// to report the message that was refused, and this is the only path where

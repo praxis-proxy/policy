@@ -40,6 +40,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** `HttpExtension` adds `secret_headers`; exhaustive struct
+  literals must initialize it (or use `..Default::default()`). Hosts must
+  preserve this provenance when carrying HTTP state between hooks. `Debug`
+  and generic serialization redact marked request headers; forwarding uses
+  the canonical in-memory header map.
 - **Breaking for Rust callers of `praxis_policy_core::assertions`:** the secret
   source widened four signatures and the `SourcePath` enum. A host reaching
   these through the `praxis-policy` facade is unaffected, since the facade does
@@ -60,16 +65,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- An audit sink declaring `read_headers` no longer receives the value an
-  assertion rendered from a declared secret. The emit is the one step that runs
-  after injection, so the request header map it is handed now carries
-  `<redacted secret.<name>>` in place of a secret-sourced entry, naming which
-  secret was asserted without its value. This holds on the response pass as
-  well, because the request header map travels with the exchange. Only
-  secret-sourced request entries are affected: the set comes from the resolved
-  contract rather than from header names, so an asserted identity value, the
-  client's own headers and every response header reach a sink unchanged, and
-  the upstream still receives the credential.
+- Secret assertion headers are redacted in plugin and audit views across
+  subsequent hooks, config reloads, and header case normalization. Provenance
+  travels with the HTTP extension. Plugin header writes preserve the original
+  credential while allowing unrelated header changes.
   ([#93](https://github.com/praxis-proxy/policy/issues/93))
 
 ## [0.4.1] - 2026-10-05

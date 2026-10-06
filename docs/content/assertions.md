@@ -150,6 +150,19 @@ request after a refresh.
 There is no capability that grants a plugin a read of this slot, and the
 artifact says so rather than naming one.
 
+Secret-sourced headers appear as `<redacted secret.<name>>` in plugin and
+audit views, including later hooks. Matching is case-insensitive, and a
+config reload does not remove protection from an existing exchange. A plugin
+with `write_headers` can change ordinary headers; protected request entries
+remain engine-owned until an assertion replaces or removes them.
+
+Hosts must carry `HttpExtension.secret_headers` with the request headers into
+later hooks, including when normalizing header names or adding response
+headers. Cloning the HTTP extension preserves it. Rebuilding only a plain
+header map loses that provenance. Forward using the canonical in-memory
+`request_headers`; `Debug` and generic serialization redact marked values
+and are not a lossless forwarding format for credentials.
+
 Fixed in code, never usable as a source, in either direction, with no config
 surface to widen:
 

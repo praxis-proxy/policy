@@ -1717,14 +1717,7 @@ routes:
         );
     }
 
-    // An audit sink is the only plugin position that runs after
-    // `apply_assertions`, so it is the only one from which an injected value is
-    // observable at all. A pipeline plugin has already returned by then, which
-    // is what `the_value_reaches_the_asserted_header_and_nothing_else` asserts.
-    //
-    // The injected value lands in `ext.http.request_headers`, and the `http`
-    // slot is gated on `read_headers`. So whether a secret reaches an audit
-    // record is decided by the sink's filtered view, not by the ordering.
+    // Audit handlers use the same filtered HTTP view as pipeline plugins.
 
     /// The request header map each of a sink's filtered views carried, one
     /// entry per emit, in call order.
@@ -1989,13 +1982,7 @@ routes:
         );
     }
 
-    /// Redaction is scoped to the record. The emit is handed a separate
-    /// `http` slot and the original is restored afterward, so the upstream
-    /// receives the credential it is supposed to receive.
-    ///
-    /// Without the restore the marker would be what reaches the target, which
-    /// fails every request to it rather than leaking anything, but is no less
-    /// broken.
+    /// Audit filtering preserves the canonical headers forwarded upstream.
     #[tokio::test]
     async fn the_upstream_still_receives_the_value_after_the_emit() {
         let audited = audited_invocation(ASSERTS_A_KEY_AND_AN_ID, &["read_headers"]).await;
@@ -2084,15 +2071,7 @@ routes:
         );
     }
 
-    /// `on_effect` is the sink's other entry point, and it is handed extensions
-    /// too.
-    ///
-    /// It is clean for a different reason than the decision emit: an effect
-    /// dispatches from inside `perform_effect`, so it fires while the pipeline
-    /// is still running and the contract has not injected yet. That makes it an
-    /// ordering property rather than something the redaction enforces, which is
-    /// what this pins. A change that moved effect dispatch after the pipeline
-    /// would leak without it.
+    /// Effects on the first request pass see only the client headers.
     #[tokio::test]
     async fn an_effect_view_never_carries_the_secret() {
         let fixture = Fixture::new("sk-live-abc123\n");
@@ -2131,5 +2110,248 @@ routes:
                 "an effect view must not carry the asserted credential: {seen:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn response_plugin_must_not_read_request_secret() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let engine = engine_reading_secrets(&fixture.config(ASSERTS_BOTH_DIRECTIONS)).await;
+        let probe = Arc::new(Probe::default());
+        annotate(
+            &engine,
+            "tool",
+            "search",
+            &[HOOK_CMF_TOOL_POST_INVOKE],
+            &probe,
+        );
+        let ext = Wire::request(&[]).onto(tool_meta("search"), alice());
+        let (first, _) = engine
+            .invoke_by_name(HOOK_CMF_TOOL_PRE_INVOKE, Box::new(message()), ext, None)
+            .await;
+        let carried = first.modified_extensions.unwrap();
+        let _ = engine
+            .invoke_named::<CmfHook>(HOOK_CMF_TOOL_POST_INVOKE, message(), carried, None)
+            .await;
+        let seen = probe
+            .seen_request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("response plugin ran");
+        assert!(
+            !seen.values().any(|v| v.contains("sk-live")),
+            "response plugin received secret: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_effect_must_not_read_request_secret() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let engine = engine_reading_secrets(&fixture.config(ASSERTS_BOTH_DIRECTIONS)).await;
+        let rec = attach_sink(&engine, &["read_headers"], &[HOOK_CMF_TOOL_POST_INVOKE]);
+        let cfg = PluginConfig {
+            name: "actor".to_owned(),
+            kind: "builtin".to_owned(),
+            hooks: vec![HOOK_CMF_TOOL_POST_INVOKE.to_owned()],
+            mode: PluginMode::Sequential,
+            capabilities: ["read_headers".to_owned()].into_iter().collect(),
+            ..Default::default()
+        };
+        engine.annotate_route(
+            "tool",
+            "search",
+            None,
+            HOOK_CMF_TOOL_POST_INVOKE,
+            Arc::new(Actor { cfg: cfg.clone() }),
+            cfg,
+        );
+        let ext = Wire::request(&[]).onto(tool_meta("search"), alice());
+        let (first, _) = engine
+            .invoke_by_name(HOOK_CMF_TOOL_PRE_INVOKE, Box::new(message()), ext, None)
+            .await;
+        let carried = first.modified_extensions.unwrap();
+        let (_, bg) = engine
+            .invoke_named::<CmfHook>(HOOK_CMF_TOOL_POST_INVOKE, message(), carried, None)
+            .await;
+        bg.wait_for_background_tasks().await;
+        let views = rec.effect_views.lock().unwrap();
+        assert!(!views.is_empty(), "effect sink ran");
+        for view in views.iter() {
+            let seen = view.as_ref().expect("read_headers view");
+            assert!(
+                !seen.values().any(|v| v.contains("sk-live")),
+                "response effect sink received secret: {seen:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_must_not_unredact_inflight_secret() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let engine = engine_reading_secrets(&fixture.config(ASSERTS_BOTH_DIRECTIONS)).await;
+        let rec = attach_sink(
+            &engine,
+            &["read_headers"],
+            &[HOOK_CMF_TOOL_PRE_INVOKE, HOOK_CMF_TOOL_POST_INVOKE],
+        );
+        let ext = Wire::request(&[]).onto(tool_meta("search"), alice());
+        let (first, _) = engine
+            .invoke_by_name(HOOK_CMF_TOOL_PRE_INVOKE, Box::new(message()), ext, None)
+            .await;
+        let carried = first.modified_extensions.unwrap();
+        let new_config = fixture.config(ASSERTS_BOTH_DIRECTIONS).replace(
+            "          from: secret.legacy_api_key",
+            "          from: subject.id",
+        );
+        engine
+            .load_config(config::parse_config(&new_config).unwrap())
+            .unwrap();
+        let _ = engine
+            .invoke_named::<CmfHook>(HOOK_CMF_TOOL_POST_INVOKE, message(), carried, None)
+            .await;
+        assert_eq!(rec.calls(), 2);
+        let seen = rec.view(1).expect("response audit view");
+        assert!(
+            !seen.values().any(|v| v.contains("sk-live")),
+            "audit leaked after reload: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn normalized_headers_must_stay_redacted() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let engine = engine_reading_secrets(&fixture.config(ASSERTS_BOTH_DIRECTIONS)).await;
+        let rec = attach_sink(
+            &engine,
+            &["read_headers"],
+            &[HOOK_CMF_TOOL_PRE_INVOKE, HOOK_CMF_TOOL_POST_INVOKE],
+        );
+        let ext = Wire::request(&[]).onto(tool_meta("search"), alice());
+        let (first, _) = engine
+            .invoke_by_name(HOOK_CMF_TOOL_PRE_INVOKE, Box::new(message()), ext, None)
+            .await;
+        let mut carried = first.modified_extensions.unwrap();
+        let http = Arc::make_mut(carried.http.as_mut().unwrap());
+        http.request_headers = http
+            .request_headers
+            .drain()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect();
+        http.request_headers
+            .insert("X-API-Key".into(), "sk-live-abc123".into());
+        let _ = engine
+            .invoke_named::<CmfHook>(HOOK_CMF_TOOL_POST_INVOKE, message(), carried, None)
+            .await;
+        let seen = rec.view(1).expect("response audit view");
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen.values()
+                .all(|v| v == "<redacted secret.legacy_api_key>"),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_pre_hooks_filter_the_previous_injection() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let engine = engine_reading_secrets(&fixture.config(ASSERTS_THE_KEY)).await;
+        let probe = Arc::new(Probe::default());
+        annotate(
+            &engine,
+            "tool",
+            "search",
+            &[HOOK_CMF_TOOL_PRE_INVOKE],
+            &probe,
+        );
+        let (first, _) = engine
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_TOOL_PRE_INVOKE,
+                message(),
+                Wire::request(&[]).onto(tool_meta("search"), alice()),
+                None,
+            )
+            .await;
+        fixture.write("rotated-key\n");
+        assert!(engine.refresh_secrets().await.is_ok());
+        let (second, _) = engine
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_TOOL_PRE_INVOKE,
+                message(),
+                first.modified_extensions.unwrap(),
+                None,
+            )
+            .await;
+        let seen = probe.seen_request.lock().unwrap();
+        assert_eq!(
+            seen.as_ref().unwrap()["X-API-Key"],
+            "<redacted secret.legacy_api_key>"
+        );
+        assert_eq!(request_headers(&second)["X-API-Key"], "rotated-key");
+    }
+
+    #[tokio::test]
+    async fn nested_dispatch_keeps_route_secret_provenance() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let mut config: serde_yaml::Value =
+            serde_yaml::from_str(&fixture.config(ASSERTS_THE_KEY)).unwrap();
+        config["routes"][0]["assertions"] = std::mem::take(&mut config["global"]["assertions"]);
+        let engine = engine_reading_secrets(&serde_yaml::to_string(&config).unwrap()).await;
+        let rec = attach_sink(&engine, &["read_headers"], &[HOOK_CMF_TOOL_PRE_INVOKE]);
+        let (first, _) = engine
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_TOOL_PRE_INVOKE,
+                message(),
+                Wire::request(&[]).onto(tool_meta("search"), alice()),
+                None,
+            )
+            .await;
+        let (nested, _) = engine
+            .invoke_entries::<CmfHook>(&[], message(), first.modified_extensions.unwrap(), None)
+            .await;
+        assert_eq!(
+            rec.view(1).unwrap()["X-API-Key"],
+            "<redacted secret.legacy_api_key>"
+        );
+        assert_eq!(request_headers(&nested)["X-API-Key"], "sk-live-abc123");
+    }
+
+    #[tokio::test]
+    async fn members_redaction_is_idempotent_and_leaves_other_headers_visible() {
+        let fixture = Fixture::new("sk-live-abc123\n");
+        let assertions = "    request:\n      headers:\n        - name: x-context\n          members:\n            key: secret.legacy_api_key\n            user: subject.id\n";
+        let engine = engine_reading_secrets(&fixture.config(assertions)).await;
+        let (result, _) = engine
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_TOOL_PRE_INVOKE,
+                message(),
+                Wire::request(&[("X-API-Key", "client-owned")]).onto(tool_meta("search"), alice()),
+                None,
+            )
+            .await;
+        let canonical = result.modified_extensions.unwrap();
+        let caps = ["read_headers".to_owned()].into_iter().collect();
+        let once = praxis_policy_core::extensions::filter_extensions(&canonical, &caps);
+        let twice = praxis_policy_core::extensions::filter_extensions(&once, &caps);
+        assert_eq!(
+            once.http.as_ref().unwrap().request_headers,
+            twice.http.as_ref().unwrap().request_headers
+        );
+        assert_eq!(
+            twice.http.as_ref().unwrap().get_request_header("x-context"),
+            Some("<redacted secret.legacy_api_key>")
+        );
+        assert_eq!(
+            twice.http.as_ref().unwrap().get_request_header("x-api-key"),
+            Some("client-owned")
+        );
+        assert!(
+            canonical
+                .http
+                .as_ref()
+                .unwrap()
+                .get_request_header("x-context")
+                .unwrap()
+                .contains("sk-live")
+        );
     }
 }

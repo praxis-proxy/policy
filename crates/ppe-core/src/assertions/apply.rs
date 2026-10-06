@@ -52,6 +52,23 @@ pub fn apply(
     for (name, value) in rendered {
         map.insert(name.clone(), value.clone());
     }
+    if direction == Direction::Request {
+        updated
+            .secret_headers
+            .markers
+            .retain(|name, _| !contract.removes(name));
+        for (name, marker) in contract.redactions() {
+            if rendered
+                .iter()
+                .any(|(rendered_name, _)| rendered_name.eq_ignore_ascii_case(&name))
+            {
+                updated
+                    .secret_headers
+                    .markers
+                    .insert(name.to_ascii_lowercase(), marker);
+            }
+        }
+    }
     // One assignment. The request line and the status ride along untouched:
     // nothing here reads or writes them.
     ext.http = Some(Arc::new(updated));
@@ -252,6 +269,7 @@ mod tests {
                 path: Some("/v1/files".to_owned()),
                 host: Some("api.example.com".to_owned()),
                 scheme: Some("https".to_owned()),
+                ..Default::default()
             })),
             ..Default::default()
         };
@@ -387,5 +405,70 @@ mod tests {
             Direction::Request,
         );
         assert_eq!(request_headers(&before), request_headers(&after));
+    }
+
+    #[test]
+    fn request_assertions_update_provenance_without_changing_prior_copies() {
+        let mut secret = contract(&["X-Key"], &[]);
+        secret.headers[0].source = ResolvedSource::From(SourcePath::Secret("key".into()));
+        let mut ext = request(&[("x-key", "client-value")]);
+        apply(
+            &secret,
+            &[("X-Key".into(), "credential".into())],
+            &mut ext,
+            Direction::Request,
+        );
+        let before = ext.clone();
+        let safe = |ext: &Extensions| {
+            crate::extensions::filter_extensions(
+                ext,
+                &["read_headers".to_owned()].into_iter().collect(),
+            )
+        };
+        assert_eq!(
+            request_headers(&safe(&ext))["X-Key"],
+            "<redacted secret.key>"
+        );
+
+        apply(
+            &contract(&["x-key"], &[]),
+            &[("x-key".into(), "alice".into())],
+            &mut ext,
+            Direction::Request,
+        );
+        assert_eq!(request_headers(&safe(&ext))["x-key"], "alice");
+        assert_eq!(
+            request_headers(&safe(&before))["X-Key"],
+            "<redacted secret.key>"
+        );
+        assert_eq!(request_headers(&before)["X-Key"], "credential");
+
+        let mut removed = before;
+        apply(
+            &contract(&[], &["x-*"]),
+            &[],
+            &mut removed,
+            Direction::Request,
+        );
+        assert!(request_headers(&removed).is_empty());
+        assert!(
+            removed
+                .http
+                .as_ref()
+                .unwrap()
+                .secret_headers
+                .markers
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_omitted_secret_has_no_provenance() {
+        let mut secret = contract(&["X-Key"], &[]);
+        secret.headers[0].source = ResolvedSource::From(SourcePath::Secret("key".into()));
+        let mut ext = request(&[("x-key", "client-value")]);
+        apply(&secret, &[], &mut ext, Direction::Request);
+        assert!(request_headers(&ext).is_empty());
+        assert!(ext.http.as_ref().unwrap().secret_headers.markers.is_empty());
     }
 }
