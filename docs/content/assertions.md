@@ -129,8 +129,12 @@ Four rules follow from that:
   unknown name is a config error naming the level, the header, and what is
   declared, not a header that silently renders nothing.
 - **Request direction only.** A response entry naming a secret is a config
-  error: a response passes through what the upstream sent, and a secret is not
-  something an upstream told us.
+  error. The direction here is about the audience, not about where a value comes
+  from: a request entry asserts toward the upstream, which is the party the
+  credential authenticates to, while a response entry asserts toward the client.
+  A secret there would hand the caller the credential the engine holds on its
+  behalf. This is why `claim.tenant` is a legitimate response source and
+  `secret.<name>` is not, even though the engine originates both.
 - The read is synchronous, from the value resolved at startup. Nothing fetches
   from a backend on the request path.
 - `on_missing` applies as it does to any other source, and a denial names

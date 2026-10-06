@@ -440,11 +440,15 @@ impl AssertionsConfig {
 /// Check that a parsed source is usable in this direction and, for a secret,
 /// that the document declares it.
 ///
-/// Both refusals are about the same property. A request entry asserts something
-/// the engine originates, and a declared secret is exactly that: an operator
-/// put it in the document. A response entry passes through what an upstream
-/// sent, and a secret is not something an upstream told us, so naming one there
-/// describes a projection that could not mean anything.
+/// Both refusals keep a declared secret pointed at the party it authenticates
+/// to. A request entry asserts toward the upstream, which is who the credential
+/// is for, and the name has to resolve to something an operator declared. A
+/// response entry asserts toward the client, so a secret there would hand the
+/// caller the credential the engine exists to hold on its behalf.
+///
+/// The direction is about the audience rather than about where a value comes
+/// from: a response entry injects engine-originated state too, which is why
+/// `claim.tenant` is a legitimate response source and a secret is not.
 fn validate_source(
     parsed: &SourcePath,
     direction: Direction,
@@ -457,8 +461,8 @@ fn validate_source(
     if direction == Direction::Response {
         return Err(format!(
             "{where_}: `secret.{name}` is a request-direction source only; a response entry \
-             passes through what the upstream sent, and a secret is not something an upstream \
-             told us"
+             asserts toward the client, and a declared secret is a credential for the upstream, \
+             so asserting one there would hand it to the caller"
         ));
     }
     if !secrets.values.contains_key(name) {
@@ -1123,8 +1127,8 @@ routes:
         assert!(err.contains("no `secrets.values`"), "{err}");
     }
 
-    /// A secret is not something an upstream told us, so a response entry
-    /// naming one describes a projection that could not mean anything.
+    /// A response entry asserts toward the client, so a secret named in one
+    /// would hand the caller the credential meant for the upstream.
     #[test]
     fn a_response_entry_naming_a_secret_is_refused() {
         let err = refuse(&with_secret(

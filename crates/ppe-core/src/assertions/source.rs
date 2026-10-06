@@ -128,7 +128,13 @@ pub const EXCLUDED_SOURCES: &[(&str, &str)] = &[
 ///
 /// A claim name is captured whole, so a provider spelling a claim with dots in
 /// it needs no escaping here.
+///
+/// `#[non_exhaustive]`, so the grammar can take a new source without that being
+/// a breaking change for an out-of-crate caller. Matches inside this crate stay
+/// exhaustive, which is what makes an added variant declare where it reads
+/// from and which capability covers it rather than falling into a wildcard.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SourcePath {
     /// `subject.id`.
     SubjectId,
