@@ -46,9 +46,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   and generic serialization redact marked request headers; forwarding uses
   the canonical in-memory header map.
 - **Breaking for Rust callers of `praxis_policy_core::assertions`:** the secret
-  source widened four signatures and the `SourcePath` enum. A host reaching
-  these through the `praxis-policy` facade is unaffected, since the facade does
-  not re-export `assertions`.
+  source widened four signatures and the `SourcePath` enum. This also affects
+  callers using `praxis-policy`, which re-exports `praxis_policy_core`, including
+  `assertions`.
   - `SourcePath::capability` returns `Option<Capability>` instead of
     `Capability`. A secret answers `None`, because no plugin-facing read of a
     declared secret exists for a capability to gate, and naming one would tell
