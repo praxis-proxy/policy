@@ -21,10 +21,11 @@ fn default_forward_headers() -> Vec<String> {
 }
 
 fn default_identity_headers() -> Vec<String> {
-    // The headers oauth2-proxy sets on `/oauth2/auth` under
-    // `--set-xauthrequest`. An operator fronting a different BFF overrides the
-    // list; these are the defaults that make the common deployment work with no
-    // extra config, and the claim map decides which of them become a subject.
+    // The common `X-Auth-Request-*` convention a forward-auth endpoint sets on
+    // its validation response. An operator fronting an endpoint that emits a
+    // different set overrides the list; these are the defaults that make the
+    // common deployment work with no extra config, and the claim map decides
+    // which of them become a subject.
     vec![
         "x-auth-request-user".to_owned(),
         "x-auth-request-preferred-username".to_owned(),
@@ -35,6 +36,15 @@ fn default_identity_headers() -> Vec<String> {
 
 fn default_success_status() -> Vec<u16> {
     vec![200, 202]
+}
+
+fn default_unauthenticated_status() -> Vec<u16> {
+    // The status a reachable endpoint uses to say the session is absent or no
+    // longer valid. A validation endpoint typically answers `401`; an endpoint
+    // that bounces with a `302` to login instead lists that status here. Only
+    // these resolve *unauthenticated* — every other unexpected status fails
+    // closed, so an endpoint fault is never mistaken for a signed-out caller.
+    vec![401]
 }
 
 fn default_timeout_secs() -> u64 {
@@ -48,7 +58,7 @@ fn default_max_response_bytes() -> usize {
     64 * 1024
 }
 
-/// The `config:` block under a `kind: identity/forward_auth` plugin.
+/// The `config:` block under a `kind: identity/forward-auth` plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardAuthConfig {
@@ -88,11 +98,23 @@ pub struct ForwardAuthConfig {
 
     /// Statuses that mean the credential is valid.
     ///
-    /// `[200, 202]` by default — oauth2-proxy answers `202 Accepted` on a valid
-    /// session. Any other *reachable* status means the credential is not valid,
-    /// which resolves unauthenticated rather than denying (see the resolver).
+    /// `[200, 202]` by default — a validation endpoint commonly answers `200` or
+    /// `202 Accepted` on a valid session. These project the identity headers onto
+    /// the subject.
     #[serde(default = "default_success_status")]
     pub success_status: Vec<u16>,
+
+    /// Statuses that mean the credential is absent or not valid.
+    ///
+    /// `[401]` by default — a reachable endpoint saying the session is not
+    /// valid. These resolve *unauthenticated* (no subject, no `deny`) so the
+    /// authorization layer can bounce a browser to login; an endpoint that
+    /// answers `302` instead of `401` lists that status here. A reachable status
+    /// that is neither a success nor listed here is not a credential verdict and
+    /// fails closed (see the resolver), so an endpoint fault is never mistaken
+    /// for a signed-out caller.
+    #[serde(default = "default_unauthenticated_status")]
+    pub unauthenticated_status: Vec<u16>,
 
     /// The identity headers onto the subject slots.
     #[serde(default)]
@@ -140,9 +162,12 @@ impl ForwardAuthConfig {
     /// # Errors
     ///
     /// An endpoint that is not absolute HTTP(S), an unparseable method, an empty
-    /// header list or header name, an empty success-status list, a zero timeout
-    /// or body ceiling, a `claim_map` the shared compiler refuses, or a map with
-    /// no subject section, which would decline every valid session.
+    /// header list or header name, an empty success-status or
+    /// unauthenticated-status list, a status that is both, a zero timeout or body
+    /// ceiling, a `claim_map` the shared compiler refuses, a map with no subject
+    /// section (which would decline every valid session), or a subject path that
+    /// names no configured identity header (which would compile and then fail
+    /// every session with `auth.mapping_failed`).
     pub fn validate(&self) -> Result<ConfiguredClaimMap, String> {
         if !(self.endpoint.starts_with("http://") || self.endpoint.starts_with("https://")) {
             return Err(format!(
@@ -170,9 +195,26 @@ impl ForwardAuthConfig {
         }
         if self.success_status.is_empty() {
             return Err(
-                "`success_status` is empty, so every answer would resolve unauthenticated"
+                "`success_status` is empty, so no answer could ever authenticate a session"
                     .to_owned(),
             );
+        }
+        if self.unauthenticated_status.is_empty() {
+            return Err(
+                "`unauthenticated_status` is empty, so a rejected session could never resolve \
+                 unauthenticated to bounce to login"
+                    .to_owned(),
+            );
+        }
+        if let Some(status) = self
+            .success_status
+            .iter()
+            .find(|status| self.unauthenticated_status.contains(status))
+        {
+            return Err(format!(
+                "status {status} is in both `success_status` and `unauthenticated_status`; a \
+                 status cannot mean both a valid and an invalid session"
+            ));
         }
         if self.timeout_secs == 0 {
             return Err("`timeout_secs` is zero, so every sub-request would time out".to_owned());
@@ -187,9 +229,35 @@ impl ForwardAuthConfig {
         // A map that declares no subject section maps nothing, every time, and
         // the resulting `auth.mapping_failed` names a record rather than the
         // config that cannot project one.
-        mapper.compiled().role(&TokenRole::User).map_err(|e| {
+        let subject = mapper.compiled().role(&TokenRole::User).map_err(|e| {
             format!("`claim_map` has no `subject` section, so no session could authenticate: {e}")
         })?;
+        // The record the map reads is keyed by the identity headers, lowercased
+        // (see the resolver). A single-segment subject path names one such key
+        // directly, so a path pointing at a header that is not in
+        // `identity_headers` would compile and then miss every record, failing
+        // each session with `auth.mapping_failed`. Catch it at load, matching
+        // case-insensitively because the record keys are lowercased.
+        for (field, compiled) in subject.fields() {
+            for candidate in compiled.candidates() {
+                let Some(segment) = candidate.path().single_segment() else {
+                    // A traversing path cannot name a flat record key; leave it
+                    // to the shared compiler rather than second-guessing it here.
+                    continue;
+                };
+                if !self
+                    .identity_headers
+                    .iter()
+                    .any(|header| header.eq_ignore_ascii_case(segment))
+                {
+                    return Err(format!(
+                        "`claim_map` subject field `{field}` reads `{segment}`, which names no \
+                         configured identity header; `identity_headers` = {:?}",
+                        self.identity_headers
+                    ));
+                }
+            }
+        }
         Ok(mapper)
     }
 }

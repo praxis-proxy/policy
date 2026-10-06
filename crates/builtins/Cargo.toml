@@ -3,7 +3,7 @@
 
 [package]
 name = "praxis-policy-builtins"
-description = "PPE bundled extensions — Cedar, CEL and OPA decision points, JWT and API-key identity, OAuth delegation, CIBA elicitation, Valkey sessions, Vault secrets."
+description = "PPE bundled extensions — Cedar, CEL and OPA decision points, JWT, API-key and forward-auth identity, OAuth delegation, CIBA elicitation, Valkey sessions, Vault secrets."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

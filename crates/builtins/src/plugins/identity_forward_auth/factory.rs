@@ -8,7 +8,7 @@
 //
 //     plugins:
 //       - name: dashboard-session
-//         kind: identity/forward_auth
+//         kind: identity/forward-auth
 //         hooks: [identity.resolve]
 //         on_error: fail
 //         capabilities: [perform_http]
@@ -22,7 +22,7 @@
 //           claims:
 //             include: [x-auth-request-email]
 //
-// The `kind: identity/forward_auth` string is part of this crate's public API.
+// The `kind: identity/forward-auth` string is part of this crate's public API.
 
 use std::sync::Arc;
 
@@ -37,9 +37,9 @@ use praxis_policy_core::{
 use crate::plugins::identity_forward_auth::ForwardAuthResolver;
 
 /// The plugin `kind:` string operators write in PPE YAML.
-pub const KIND: &str = "identity/forward_auth";
+pub const KIND: &str = "identity/forward-auth";
 
-/// Factory for `kind: identity/forward_auth` plugins.
+/// Factory for `kind: identity/forward-auth` plugins.
 pub struct ForwardAuthFactory;
 
 impl PluginFactory for ForwardAuthFactory {

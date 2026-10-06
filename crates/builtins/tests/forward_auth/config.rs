@@ -107,7 +107,10 @@ fn an_empty_success_status_list_is_rejected() {
     let mut block = support::config();
     block["success_status"] = serde_json::json!([]);
     let error = support::resolver(block).expect_err("an empty list must not build");
-    assert!(error.contains("resolve unauthenticated"), "got: {error}");
+    assert!(
+        error.contains("could ever authenticate a session"),
+        "got: {error}"
+    );
 }
 
 #[test]
@@ -137,6 +140,48 @@ fn a_map_with_no_subject_section_is_rejected() {
     });
     let error = support::resolver(block).expect_err("no subject section must not build");
     assert!(error.contains("no `subject` section"), "got: {error}");
+}
+
+#[test]
+fn a_subject_path_outside_identity_headers_is_rejected() {
+    // `teams` reads a header that is not in the configured `identity_headers`, so
+    // the map would compile and then miss every record. Caught at load.
+    let block = serde_json::json!({
+        "endpoint": support::ENDPOINT,
+        "identity_headers": ["x-auth-request-user"],
+        "claim_map": {
+            "subject": {
+                "id": "x-auth-request-user",
+                "teams": "x-auth-request-groups",
+            },
+        },
+    });
+    let error =
+        support::resolver(block).expect_err("a path outside identity_headers must not build");
+    assert!(
+        error.contains("x-auth-request-groups") && error.contains("identity header"),
+        "the error must name the path and the problem: {error}"
+    );
+}
+
+#[test]
+fn an_empty_unauthenticated_status_list_is_rejected() {
+    let mut block = support::config();
+    block["unauthenticated_status"] = serde_json::json!([]);
+    let error = support::resolver(block).expect_err("an empty list must not build");
+    assert!(error.contains("unauthenticated_status"), "got: {error}");
+}
+
+#[test]
+fn a_status_in_both_success_and_unauthenticated_is_rejected() {
+    let mut block = support::config();
+    block["success_status"] = serde_json::json!([200]);
+    block["unauthenticated_status"] = serde_json::json!([200]);
+    let error = support::resolver(block).expect_err("an overlapping status must not build");
+    assert!(
+        error.contains("both") && error.contains("200"),
+        "got: {error}"
+    );
 }
 
 #[test]

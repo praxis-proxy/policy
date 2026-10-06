@@ -351,7 +351,7 @@ docs-lint:
 # omits its own `dep:` edge or its module-group marker: under --all-features
 # another feature supplies the dependency, and under default features nothing
 # compiles at all. This is the only gate that builds a partial feature set.
-BUILTIN_FEATURES := jwt api-key oauth elicitation-ciba cedar cel opa valkey secrets-vault
+BUILTIN_FEATURES := jwt api-key forward-auth oauth elicitation-ciba cedar cel opa valkey secrets-vault
 
 .PHONY: check-features
 check-features:

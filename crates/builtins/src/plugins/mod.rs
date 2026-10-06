@@ -8,7 +8,7 @@
 //!
 //! - `identity_jwt` (`jwt`) — kind `identity/jwt`
 //! - `identity_api_key` (`api-key`) — kind `identity/api-key`
-//! - `identity_forward_auth` (`forward-auth`) — kind `identity/forward_auth`
+//! - `identity_forward_auth` (`forward-auth`) — kind `identity/forward-auth`
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
 //! - `quota` (`experimental-quota`) — kind `quota/limitador`

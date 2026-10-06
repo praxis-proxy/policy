@@ -39,16 +39,27 @@ use crate::plugins::identity_forward_auth::config::ForwardAuthConfig;
 
 /// Denial codes, which a host maps to a status.
 ///
-/// Both denote a deployment fault rather than a rejected caller — a rejected
-/// caller resolves unauthenticated and never reaches here. They stay apart so an
-/// operator watching a spike knows whether the endpoint is unreachable or
-/// answering without the identity headers the map needs.
+/// They stay apart so an operator watching a spike can tell a refused caller
+/// from a broken deployment. `FORBIDDEN` is the endpoint reaching a verdict and
+/// refusing the session; `ENDPOINT_UNAVAILABLE` and `MAPPING_FAILED` are
+/// deployment faults — an endpoint that cannot be reached or answered with a
+/// status that is no verdict at all, or one that accepted the session without
+/// returning the identity headers the map needs. A merely *rejected* session
+/// (an `unauthenticated_status`) resolves unauthenticated and never reaches here.
 pub mod codes {
-    /// The sub-request could not be built or completed.
+    /// The sub-request could not be built or completed, or the endpoint answered
+    /// with a status that is neither a success nor a configured unauthenticated
+    /// verdict (a `503`, say) — no credential verdict to act on, so fail closed.
     pub const ENDPOINT_UNAVAILABLE: &str = "auth.endpoint_unavailable";
     /// The endpoint accepted the session but returned no mappable identity.
     pub const MAPPING_FAILED: &str = "auth.mapping_failed";
+    /// The endpoint reached a verdict and forbade the session (HTTP 403).
+    pub const FORBIDDEN: &str = "auth.forbidden";
 }
+
+/// HTTP 403: the endpoint refusing a session it did reach a verdict on. RFC 9110
+/// §15.5.4 — understood but refused, distinct from the unauthenticated statuses.
+const FORBIDDEN_STATUS: u16 = 403;
 
 /// Resolves an opaque session to an identity by delegating to an endpoint.
 #[derive(Debug)]
@@ -115,15 +126,19 @@ impl ForwardAuthResolver {
     /// claim map projects.
     ///
     /// A header present more than once becomes a JSON array, which the map reads
-    /// natively — so oauth2-proxy's repeated `X-Auth-Request-Groups` maps to
-    /// `teams` with no splitting. A single value stays a string.
+    /// natively — so a repeated `X-Auth-Request-Groups` maps to `teams` with no
+    /// splitting. A single value stays a string.
+    ///
+    /// Values are decoded as UTF-8 rather than restricted to visible ASCII, so a
+    /// claim such as `zoë` maps intact instead of being silently dropped. A value
+    /// that is not valid UTF-8 is skipped.
     fn record_from_headers(&self, headers: &HeaderMap) -> HashMap<String, Value> {
         let mut record = HashMap::new();
         for name in &self.settings.identity_headers {
             let mut values = headers
                 .get_all(name.as_str())
                 .iter()
-                .filter_map(|value| value.to_str().ok())
+                .filter_map(|value| std::str::from_utf8(value.as_bytes()).ok())
                 .map(|text| Value::String(text.to_owned()));
             match (values.next(), values.next()) {
                 (None, _) => {},
@@ -194,9 +209,15 @@ impl HookHandler<IdentityHook> for ForwardAuthResolver {
 
         // `Extensions` is the request's carrier of host services, already
         // capability filtered by the executor, so egress is reached through the
-        // same value every hook receives. The sub-request is side-effect free,
-        // so retrying an undelivered attempt is safe.
-        let response = match ext.http_request(request, RetryPolicy::idempotent()).await {
+        // same value every hook receives. Retry only an *undelivered* attempt:
+        // the sub-request is a side-effect-free read, but `idempotent()` also
+        // retries a delivered attempt that timed out, which would let a stalled
+        // endpoint hold a caller for up to `max_attempts × timeout_secs` despite
+        // the per-request `timeout_secs` ceiling.
+        let response = match ext
+            .http_request(request, RetryPolicy::undelivered_only())
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 // A transport fault is a deployment fault, not a rejected
@@ -216,7 +237,11 @@ impl HookHandler<IdentityHook> for ForwardAuthResolver {
             },
         };
 
-        if self.settings.success_status.contains(&response.status) {
+        // Classify the status explicitly rather than treating "not a success" as
+        // "unauthenticated": an endpoint fault (a `503`) is not a credential
+        // verdict, and signing a caller out on one would be wrong.
+        let status = response.status;
+        if self.settings.success_status.contains(&status) {
             let record = self.record_from_headers(&response.headers);
             match self.mapper.map_subject(&record) {
                 Some(subject) => {
@@ -224,7 +249,10 @@ impl HookHandler<IdentityHook> for ForwardAuthResolver {
                     updated.subject = Some(subject);
                     updated.resolved_at = Some(Utc::now());
                     // `raw_credentials` is deliberately not populated: the
-                    // session stops here, so nothing downstream can forward it.
+                    // session stops here, so no PPE step such as `delegate`
+                    // forwards it. The inbound `Cookie` header itself still
+                    // reaches the upstream unless `assertions.request.strip`
+                    // lists `cookie` — strip it before a less-trusted upstream.
                     PluginResult::modify_payload(updated)
                 },
                 // The session is valid but the endpoint returned no identity the
@@ -238,12 +266,34 @@ impl HookHandler<IdentityHook> for ForwardAuthResolver {
                      identity: check that it sets the configured identity headers",
                 )),
             }
-        } else {
-            // Reachable, and the endpoint says the session is not valid. Resolve
-            // unauthenticated — no subject, no deny — so the authorization layer
-            // can emit the configured bounce to login rather than the host's
-            // fixed 401. See the module header.
+        } else if self.settings.unauthenticated_status.contains(&status) {
+            // Reachable, and the endpoint says the session is absent or not
+            // valid. Resolve unauthenticated — no subject, no deny — so the
+            // authorization layer can emit the configured bounce to login rather
+            // than the host's fixed 401. See the module header.
             PluginResult::modify_payload(payload.clone())
+        } else if status == FORBIDDEN_STATUS {
+            // The endpoint reached a verdict and refused the session outright.
+            // That is a denied caller, not "sign in again" and not an outage, so
+            // it carries its own code to keep the three spikes apart.
+            tracing::warn!(status, "forward_auth endpoint forbade the session");
+            PluginResult::deny(PluginViolation::new(
+                codes::FORBIDDEN,
+                "the authentication endpoint forbade the session",
+            ))
+        } else {
+            // Neither a success, a configured unauthenticated status, nor a
+            // forbidden verdict: the endpoint answered something that is no
+            // credential verdict at all (a `503`, say). Fail closed rather than
+            // signing the caller out on an endpoint fault.
+            tracing::warn!(
+                status,
+                "forward_auth endpoint returned an unexpected status"
+            );
+            PluginResult::deny(PluginViolation::new(
+                codes::ENDPOINT_UNAVAILABLE,
+                "the authentication endpoint returned an unexpected status",
+            ))
         }
     }
 }

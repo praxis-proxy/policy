@@ -31,8 +31,21 @@
 //!     subject.
 //!
 //! The session never leaves this plugin. It is not written to `raw_credentials`,
-//! so no downstream step can forward a caller's own cookie to an upstream that
-//! never authenticated it.
+//! so no PPE step such as `delegate` can forward a caller's own cookie to an
+//! upstream that never authenticated it. The inbound `Cookie` header itself,
+//! however, still reaches the upstream unless `assertions.request.strip` lists
+//! `cookie`; strip it before sending requests to a less-trusted upstream.
+//!
+//! # Response-side `Set-Cookie` is not propagated
+//!
+//! The resolver reads only the configured identity headers off the validation
+//! response; it does not forward the endpoint's own response headers — a
+//! `Set-Cookie` in particular — back to the client. Delegation happens on the
+//! request path, and an identity resolver does not sit on the response the
+//! client receives. So an endpoint that refreshes the caller's session *through
+//! its validation response* has that refresh dropped. Front such an endpoint
+//! with a server-side session store, where the refresh is applied server-side
+//! and does not depend on a new cookie reaching the browser.
 
 /// Plugin configuration and its validation.
 pub mod config;

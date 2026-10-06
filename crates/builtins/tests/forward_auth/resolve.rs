@@ -25,12 +25,7 @@ async fn a_valid_session_becomes_a_subject() {
         ],
     );
 
-    let result = support::resolve(
-        &resolver,
-        support::with_cookie("_oauth2_proxy=abc"),
-        transport,
-    )
-    .await;
+    let result = support::resolve(&resolver, support::with_cookie("_session=abc"), transport).await;
 
     let subject = support::subject_of(&result).expect("a valid session fills the subject");
     assert_eq!(subject.id.as_deref(), Some("alice"));
@@ -44,6 +39,13 @@ async fn a_valid_session_becomes_a_subject() {
         "email is kept in the claims bag"
     );
     assert!(result.violation.is_none(), "a valid session is not a deny");
+    assert!(
+        result
+            .modified_payload
+            .as_ref()
+            .is_some_and(|payload| payload.raw_credentials.is_none()),
+        "the session must not be stashed for forwarding"
+    );
 }
 
 /// 200 is a success too, not only 202.
@@ -91,6 +93,94 @@ async fn a_rejected_session_is_unauthenticated_not_a_deny() {
         transport.call_count_for(support::FRAGMENT),
         1,
         "the endpoint was asked before the session was rejected"
+    );
+}
+
+/// Header names are matched case-insensitively: a config written in HTTP
+/// title-case still forwards the lowercase host `cookie` and maps the subject,
+/// matching the casing coverage in `api_key/extraction.rs`.
+#[tokio::test]
+async fn header_names_are_matched_case_insensitively() {
+    let block = serde_json::json!({
+        "endpoint": support::ENDPOINT,
+        "forward_headers": ["Cookie"],
+        "identity_headers": ["X-Auth-Request-User"],
+        "claim_map": { "subject": { "id": "x-auth-request-user" } },
+    });
+    let resolver = support::resolver(block).expect("the config builds");
+    let transport = support::response(202, &[("x-auth-request-user", "alice")]);
+
+    let result = support::resolve(
+        &resolver,
+        support::with_cookie("_session=abc"),
+        Arc::clone(&transport),
+    )
+    .await;
+
+    assert_eq!(
+        support::subject_of(&result).and_then(|s| s.id),
+        Some("alice".to_owned()),
+        "a title-case identity header still maps"
+    );
+    let request = transport.last_request().expect("a request was made");
+    assert_eq!(
+        request.headers.get("cookie").and_then(|v| v.to_str().ok()),
+        Some("_session=abc"),
+        "the lowercase host `cookie` is forwarded despite the title-case config"
+    );
+}
+
+/// A `403` is the endpoint reaching a verdict and refusing the session: a denied
+/// caller under its own code, kept apart from an outage or a sign-out.
+#[tokio::test]
+async fn a_forbidden_session_denies_as_forbidden() {
+    let resolver = support::resolver(support::config()).expect("the config builds");
+    let transport = support::response(403, &[]);
+
+    let result = support::resolve(&resolver, support::with_cookie("session=1"), transport).await;
+
+    assert_eq!(
+        support::denial_code(&result).as_deref(),
+        Some("auth.forbidden")
+    );
+}
+
+/// A `503` is no credential verdict. It fails closed rather than signing the
+/// caller out on an endpoint fault. RFC 9110 §15.6.4 defines 503 as the service
+/// being unable to handle the request, not a statement about the session.
+#[tokio::test]
+async fn a_server_error_denies_fail_closed() {
+    let resolver = support::resolver(support::config()).expect("the config builds");
+    let transport = support::response(503, &[]);
+
+    let result = support::resolve(&resolver, support::with_cookie("session=1"), transport).await;
+
+    assert_eq!(
+        support::denial_code(&result).as_deref(),
+        Some("auth.endpoint_unavailable"),
+        "an endpoint 5xx is a fault, not a rejected session"
+    );
+}
+
+/// An endpoint that bounces with `302` instead of `401` resolves unauthenticated
+/// once that status is configured, leaving the login redirect to the
+/// authorization layer.
+#[tokio::test]
+async fn a_configured_redirect_status_is_unauthenticated() {
+    let mut block = support::config();
+    block["unauthenticated_status"] = serde_json::json!([302]);
+    let resolver = support::resolver(block).expect("the config builds");
+    let transport = support::response(302, &[]);
+
+    let result = support::resolve(&resolver, support::with_cookie("stale=1"), transport).await;
+
+    assert!(
+        result.violation.is_none(),
+        "a configured redirect is not a deny"
+    );
+    assert!(
+        support::subject_of(&result).is_none(),
+        "a redirect fills no subject"
     );
 }
 
@@ -173,7 +263,7 @@ async fn the_credential_is_forwarded_verbatim() {
     let resolver = support::resolver(support::config()).expect("the config builds");
     let transport = support::response(202, &[("x-auth-request-user", "alice")]);
 
-    let mut headers = support::with_cookie("_oauth2_proxy=opaque-value");
+    let mut headers = support::with_cookie("_session=opaque-value");
     headers.insert(
         "authorization".to_owned(),
         "Bearer should-not-leak".to_owned(),
@@ -183,7 +273,7 @@ async fn the_credential_is_forwarded_verbatim() {
     let request = transport.last_request().expect("a request was made");
     assert_eq!(
         request.headers.get("cookie").and_then(|v| v.to_str().ok()),
-        Some("_oauth2_proxy=opaque-value"),
+        Some("_session=opaque-value"),
         "the cookie rides the sub-request unchanged"
     );
     assert!(
@@ -232,8 +322,8 @@ async fn a_configured_method_reaches_the_request() {
     );
 }
 
-/// A repeated identity header becomes a multi-valued record, so oauth2-proxy's
-/// repeated `X-Auth-Request-Groups` maps to several teams with no splitting.
+/// A repeated identity header becomes a multi-valued record, so a repeated
+/// `X-Auth-Request-Groups` maps to several teams with no splitting.
 #[tokio::test]
 async fn repeated_identity_headers_map_to_several_values() {
     let resolver = support::resolver(support::config()).expect("the config builds");
