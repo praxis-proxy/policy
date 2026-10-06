@@ -186,6 +186,18 @@ Keys listed **always** are written whenever the slot (and, where noted, the
 sub-record) is present. The rest are omitted when the field is `None` or the
 map has no entry.
 
+These tables are checked, not maintained by hand.
+`crates/ppe-apl-cmf/tests/key_catalog/` declares the key universe and asserts
+three things against it: that flattening a fully populated `Extensions` emits
+exactly those keys with those types, that the tables below list exactly those
+keys with the same Type cell and under the slot each key comes from, and that
+`capability_namespaces` unlocks each one through the capability it is gated on
+while leaving the ungated ones alone. A key cannot be added to a table here
+without being added to the catalog, and a key the bridge starts writing fails
+the test until both list it. A field added to an extension stops that test's
+fixture compiling, which is what turns leaving it unbridged into a decision
+someone makes rather than one nobody notices.
+
 ### 1. `security` — `SecurityExtension`
 
 **Subject** (`sec.subject` present):
@@ -252,7 +264,15 @@ The static `data:` payload tree (`data.*` keys) is a different source; see
 
 `capability_namespaces` maps `read_*` capabilities to bag prefixes. `read_labels`
 unlocks `security.labels`; `read_workload` unlocks `caller_workload.*` and
-`this_workload.*`. Nothing writes a `workload.*` prefix.
+`this_workload.*`. Nothing writes a `workload.*` prefix. `read_teams` unlocks
+`team.*` alongside `subject.teams`, the way `read_roles` and `read_permissions`
+unlock their flattened aliases.
+
+`auth_method` and `security.classification` are the two keys no capability
+gates. `filter_extensions` treats them as unrestricted sub-fields and includes
+them whatever a plugin declared, so they reach every plugin and every PDP. No
+capability names them, because naming one would describe a grant an operator
+could withhold and they cannot.
 
 ### 2. `delegation` — `DelegationExtension`
 
@@ -290,7 +310,7 @@ Per-hop scopes, audience, and strategy stay on the typed chain.
 | `meta.entity_name` | String | `Some` |
 | `meta.tags` | StringSet | always |
 | `meta.scope` | String | `Some` |
-| `meta.properties.<k>` | String | each map entry |
+| `meta.properties.<name>` | String | each map entry |
 
 ### 5. `request` — `RequestExtension`
 

@@ -17,6 +17,29 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- The per-slot key tables in `docs/content/cmf-extensions.md` are now checked
+  against the bridge rather than maintained by hand.
+  `crates/ppe-apl-cmf/tests/key_catalog/` declares every key the bridge emits
+  with its type, its slot and the capability that gates it, and asserts that
+  flattening a fully populated `Extensions` emits exactly those keys, that the
+  tables list exactly those keys under the right slot, and that
+  `capability_namespaces` agrees. The page also now records that `auth_method`
+  and `security.classification` are the two keys no capability gates, since
+  `filter_extensions` includes them whatever a plugin declared.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+
+### Fixed
+
+- `read_teams` now unlocks the flattened `team.*` prefix alongside
+  `subject.teams`. The bridge has always written `team.<name>` for each team,
+  the way `read_roles` and `read_permissions` cover their own flattened
+  aliases, but `capability_namespaces` named only the set. An operator reading
+  the table to answer what a plugin can see was told less than the plugin
+  actually receives.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+
 ## [0.4.1] - 2026-10-05
 
 ### Added

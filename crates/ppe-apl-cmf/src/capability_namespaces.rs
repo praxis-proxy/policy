@@ -81,7 +81,11 @@ const TABLE: &[CapabilityEntry] = &[
     },
     CapabilityEntry {
         name: CAP_READ_TEAMS,
+        // `team.` belongs here for the same reason `role.` belongs under
+        // `read_roles`: `security.rs` writes a flattened alias per member, so
+        // omitting the prefix understates what the capability already shows.
         prefixes: &[
+            BAG_TEAM_PREFIX,
             BAG_SUBJECT_TEAMS,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
