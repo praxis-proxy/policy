@@ -29,12 +29,47 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   which is what keeps the addressable set finite and readable from the
   document instead of being whatever a provider's credentials can reach. An
   unknown name is a config error naming what is declared, and so is a response
-  entry naming a secret, since a secret is not something an upstream told us.
+  entry naming a secret, since a response asserts toward the client and the
+  credential is the upstream's.
   The read is synchronous from the value resolved at startup, so nothing
   fetches on the request path, and it goes through the store at the point of
   use, so a rotation reaches the wire on the next request after a refresh. The
   effective-policy artifact prints the name and never the value, and says that
   no plugin capability reads the slot rather than naming one.
+  ([#93](https://github.com/praxis-proxy/policy/issues/93))
+
+### Changed
+
+- **Breaking for Rust callers of `praxis_policy_core::assertions`:** the secret
+  source widened four signatures and the `SourcePath` enum. A host reaching
+  these through the `praxis-policy` facade is unaffected, since the facade does
+  not re-export `assertions`.
+  - `SourcePath::capability` returns `Option<Capability>` instead of
+    `Capability`. A secret answers `None`, because no plugin-facing read of a
+    declared secret exists for a capability to gate, and naming one would tell
+    an operator that some grant reaches the value.
+  - `SourcePath::resolve` and `assertions::render` each take the resolved
+    `SecretStore` as a further argument, where `None` is a host that resolved
+    none. `AssertionsConfig::validate` takes the document's `SecretsConfig`,
+    which is what makes an undeclared name a load error.
+  - `SourcePath` gains a `Secret(String)` variant and is now
+    `#[non_exhaustive]`, so an out-of-crate `match` on it needs a `_` arm.
+    Marking it in the same release that already changes the enum means the next
+    source added is not a breaking change.
+  ([#93](https://github.com/praxis-proxy/policy/issues/93))
+
+### Fixed
+
+- An audit sink declaring `read_headers` no longer receives the value an
+  assertion rendered from a declared secret. The emit is the one step that runs
+  after injection, so the request header map it is handed now carries
+  `<redacted secret.<name>>` in place of a secret-sourced entry, naming which
+  secret was asserted without its value. This holds on the response pass as
+  well, because the request header map travels with the exchange. Only
+  secret-sourced request entries are affected: the set comes from the resolved
+  contract rather than from header names, so an asserted identity value, the
+  client's own headers and every response header reach a sink unchanged, and
+  the upstream still receives the credential.
   ([#93](https://github.com/praxis-proxy/policy/issues/93))
 
 ## [0.4.1] - 2026-10-05
