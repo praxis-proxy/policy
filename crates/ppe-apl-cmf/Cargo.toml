@@ -21,6 +21,9 @@ rust-version.workspace = true
 praxis-policy-apl-core = { workspace = true }
 praxis-policy-core = { workspace = true }
 serde_json = { workspace = true }
+# Only to render `WorkloadIdentity.attested_at` in a canonical, orderable form.
+# The typed value is core's; the formatting choice is the bridge's.
+chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

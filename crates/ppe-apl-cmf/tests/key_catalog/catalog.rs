@@ -366,6 +366,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Slot::Security,
     ),
     exact(
+        "caller_workload.attested_at",
+        KeyType::String,
+        Gating::Capability(CAP_READ_WORKLOAD),
+        Slot::Security,
+    ),
+    exact(
         "caller_workload.selectors",
         KeyType::StringSet,
         Gating::Capability(CAP_READ_WORKLOAD),
@@ -391,6 +397,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
     ),
     exact(
         "this_workload.attestor",
+        KeyType::String,
+        Gating::Capability(CAP_READ_WORKLOAD),
+        Slot::Security,
+    ),
+    exact(
+        "this_workload.attested_at",
         KeyType::String,
         Gating::Capability(CAP_READ_WORKLOAD),
         Slot::Security,
@@ -667,6 +679,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Capability(CAP_READ_MCP),
         Slot::Mcp,
     ),
+    family(
+        "mcp.tool.annotations.<name>",
+        KeyType::Flattened,
+        Gating::Capability(CAP_READ_MCP),
+        Slot::Mcp,
+    ),
     exact(
         "mcp.resource.uri",
         KeyType::String,
@@ -697,6 +715,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Capability(CAP_READ_MCP),
         Slot::Mcp,
     ),
+    family(
+        "mcp.resource.annotations.<name>",
+        KeyType::Flattened,
+        Gating::Capability(CAP_READ_MCP),
+        Slot::Mcp,
+    ),
     exact(
         "mcp.prompt.name",
         KeyType::String,
@@ -712,6 +736,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
     exact(
         "mcp.prompt.server_id",
         KeyType::String,
+        Gating::Capability(CAP_READ_MCP),
+        Slot::Mcp,
+    ),
+    family(
+        "mcp.prompt.annotations.<name>",
+        KeyType::Flattened,
         Gating::Capability(CAP_READ_MCP),
         Slot::Mcp,
     ),

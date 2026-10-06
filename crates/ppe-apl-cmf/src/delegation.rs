@@ -11,9 +11,12 @@
 //   del.actor_subject_id       → delegation.actor_subject_id     : String
 //   del.age_seconds            → delegation.age_seconds          : Float
 //
-// Per-hop fields (scopes, audience, strategy) are not flattened into the
-// bag. Policies that need that depth call out to a plugin or PDP; the
-// bag stays scalar.
+// `chain` is not flattened, which makes `delegation.depth <= 2` expressible
+// and "deny if any hop granted write:payroll" not. That is an open gap rather
+// than a settled decision: closing it means union sets over the chain plus an
+// any-flag for `from_cache`, which is new policy surface and is tracked
+// separately from this bridge. Until then a plugin that needs per-hop grants
+// reads the typed chain.
 
 use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::DelegationExtension;

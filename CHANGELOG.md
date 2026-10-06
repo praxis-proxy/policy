@@ -17,6 +17,27 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- MCP `annotations` now reach policy as `mcp.tool.annotations.<name>` and the
+  same under `mcp.resource` and `mcp.prompt`, flattened through the JSON walker
+  that already carries `custom.*`, `framework.metadata.*` and `claim.*`. This
+  is where `readOnlyHint` and `destructiveHint` live, so a rule can refuse a
+  destructive tool. They had been withheld for being free-form JSON, which does
+  not distinguish them from the four maps already on the bag. The tool and
+  output schemas and the prompt's argument list stay off, now with the reason
+  recorded: they describe the shape of a call rather than a fact about this
+  one, and the argument values already reach policy as `args.*`.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- `caller_workload.attested_at` and `this_workload.attested_at` now reach
+  policy, rendered as RFC3339 with second precision and a literal `Z`. The
+  fixed precision is what makes the string orderable, so
+  `caller_workload.attested_at < "2026-10-01T00:00:00Z"` is a staleness check.
+  These are the only instants the engine formats; `request.timestamp` and
+  `completion.created_at` are host-supplied strings with no ordering guarantee,
+  which the page now says. The bag still has no date type.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+
 ### Documentation
 
 - The per-slot key tables in `docs/content/cmf-extensions.md` are now checked
@@ -28,6 +49,15 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `capability_namespaces` agrees. The page also now records that `auth_method`
   and `security.classification` are the two keys no capability gates, since
   `filter_extensions` includes them whatever a plugin declared.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- Recorded why `client.teams` is set-only where `subject.teams` also carries
+  the flattened `team.<name>` boolean. The flattened form cannot hold a dotted
+  name, so it is lossy wherever one occurs while the set always holds every
+  member; the five collections that carry it predate the sets and the list is
+  closed. Both namespaces already have the complete form, so what `subject.*`
+  has in addition is sugar rather than a capability `client.*` lacks. A test
+  pins it, because the two loops beside it in `extract_client` do flatten and
+  completing the pattern is the obvious wrong edit.
   ([#78](https://github.com/praxis-proxy/policy/issues/78))
 
 ### Fixed

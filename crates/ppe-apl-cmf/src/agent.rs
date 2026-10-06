@@ -45,8 +45,11 @@ pub fn extract_agent(agent: &AgentExtension, bag: &mut AttributeBag) {
         // `security.rs`, which documents the rule for the whole bridge.
         let topics: HashSet<String> = conv.topics.iter().cloned().collect();
         bag.set("agent.conversation.topics", topics);
-        // `history: Vec<Value>` is deliberately not flattened — too unstructured.
-        // Policies wanting conversation history should call a plugin.
+        // `history: Vec<Value>` is deliberately not flattened, and gets no
+        // length key either. Flattening a transcript would put message text on
+        // the bag under indexed keys, which is what `read_llm_request` and the
+        // structured side channel exist for instead. Turn-count gating already
+        // works through `agent.turn`.
     }
 }
 

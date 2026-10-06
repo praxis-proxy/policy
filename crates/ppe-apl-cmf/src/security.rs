@@ -63,6 +63,7 @@
 //   sec.caller_workload.spiffe_id    → caller_workload.spiffe_id    : String
 //   sec.caller_workload.trust_domain → caller_workload.trust_domain : String
 //   sec.caller_workload.attestor     → caller_workload.attestor     : String
+//   sec.caller_workload.attested_at  → caller_workload.attested_at  : String (RFC3339, seconds, Z)
 //   sec.caller_workload.selectors    → caller_workload.selectors    : StringSet (always)
 //   sec.caller_workload.client_id    → caller_workload.client_id    : String
 //   sec.this_workload.*              → this_workload.*  (same shape, our identity)
@@ -203,6 +204,12 @@ pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
     bag.set("client.authorized_scopes", scopes);
     let auds: HashSet<String> = client.authorized_audiences.iter().cloned().collect();
     bag.set("client.authorized_audiences", auds);
+    // Set only, unlike the two loops above and unlike `subject.teams`. The
+    // flattened form cannot hold a dotted name, so it is lossy wherever one
+    // occurs; the five that have it predate the sets and the list is closed.
+    // Adding a sixth would spread an incomplete projection, not complete the
+    // vocabulary. `client.teams contains "platform"` is the form that always
+    // works.
     let teams: HashSet<String> = client.teams.iter().cloned().collect();
     bag.set("client.teams", teams);
     for (k, v) in &client.claims {
@@ -230,10 +237,18 @@ pub fn extract_workload(prefix: &str, w: &WorkloadIdentity, bag: &mut AttributeB
     if let Some(id) = &w.client_id {
         bag.set(format!("{prefix}.client_id"), id.clone());
     }
-    // `attested_at` is not in the bag. `request.timestamp` and
-    // `completion.created_at` are carried as plain strings, so the bag
-    // does not refuse timestamps; unifying the three is out of scope.
-    let _ = &w.attested_at;
+    if let Some(at) = &w.attested_at {
+        // Fixed second precision and a literal `Z`, which is what makes the
+        // string orderable: `<` on these compares lexicographically, so
+        // `caller_workload.attested_at < "2026-10-01T00:00:00Z"` is a staleness
+        // check. `SecondsFormat::AutoSi` would emit `00.5Z` beside `00Z`, and
+        // `.` sorts before `Z`, so a sub-second reading would compare as
+        // earlier than a whole-second one in the same second.
+        bag.set(
+            format!("{prefix}.attested_at"),
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+    }
 }
 
 /// Render the `ClientTrustLevel` enum as the bag string. Matches
@@ -618,6 +633,31 @@ mod tests {
         assert!(bag.set_contains("client.authorized_scopes", "write"));
         assert!(bag.set_contains("client.authorized_audiences", "https://api.example.com",));
         assert!(bag.set_contains("client.teams", "acme"));
+    }
+
+    /// `client.teams` is set-only on purpose, where `subject.teams` carries the
+    /// flattened boolean too. Guarding it because the asymmetry reads as an
+    /// oversight: the two loops immediately above this one in `extract_client`
+    /// do flatten, so completing the pattern is the obvious wrong edit.
+    #[test]
+    fn client_teams_stays_set_only() {
+        let mut bag = AttributeBag::new();
+        extract_client(&agent_client(), &mut bag);
+        assert!(bag.set_contains("client.teams", "acme"));
+        assert_eq!(bag.get_bool("client.team.acme"), None);
+        // The pair it is asymmetric with, so a reader sees both halves.
+        let mut subject_bag = AttributeBag::new();
+        extract_security(
+            &SecurityExtension {
+                subject: Some(SubjectExtension {
+                    teams: HashSet::from(["acme".to_owned()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &mut subject_bag,
+        );
+        assert_eq!(subject_bag.get_bool("team.acme"), Some(true));
     }
 
     #[test]
