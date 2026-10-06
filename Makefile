@@ -41,6 +41,7 @@ help:
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
 	@echo "  test-tsan         Engine concurrency stress under ThreadSanitizer (nightly)"
+	@echo "  bench-pdp-cache   PDP decision-cache hit vs miss (on demand, not CI)"
 	@echo ""
 	@echo "Benchmarks (on demand — not part of make ci; see docs/dev/benchmarks.md):"
 	@echo "  bench             Criterion suite (ppe-benches / issue #19)"
@@ -186,6 +187,12 @@ test-tsan:
 		-p praxis-policy-core --test engine_concurrency \
 		--target x86_64-unknown-linux-gnu -- --test-threads=1
 	@echo "test-tsan passed"
+
+# Hit vs miss for the PDP decision cache. On demand; not part of `make ci`.
+# Wall-clock numbers are recorded in docs/pdp-decision-cache.md.
+.PHONY: bench-pdp-cache
+bench-pdp-cache:
+	@$(CARGO) bench -p praxis-policy-builtins --bench pdp_decision_cache --features cel
 
 # =============================================================================
 # Benchmarks (issue #19) — on demand, never part of `make ci`

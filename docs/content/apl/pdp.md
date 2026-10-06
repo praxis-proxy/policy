@@ -56,6 +56,12 @@ global:
         when { principal.roles.contains("security") };
 ```
 
+A `pdp:` entry may carry an optional `cache:` block with positive
+`ttl_seconds` and `max_entries`. Omission leaves evaluation uncached.
+The cache stores Allow and Deny only; dispatch errors are never stored.
+External PDP policy can still go stale until the TTL expires. See
+[PDP decision cache](../../pdp-decision-cache.md).
+
 ## Supported dialects
 
 APL recognizes a fixed set of PDP dialects. Three ship as builtin resolvers; the

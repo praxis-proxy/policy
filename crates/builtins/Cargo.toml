@@ -284,6 +284,9 @@ deadpool-redis = { version = "0.23", optional = true, default-features = false, 
 # (so assertions about the apl-core-only property must use `--edges normal`),
 # and the testcontainers stack compiles whenever this crate's tests are built.
 praxis-policy-core = { workspace = true, features = ["test-util"] }
+# No extra features. `cargo package` resolves this against the published
+# runtime, and that crate does not have `test-util`. The cache contract
+# lives in the runtime's `tests/` tree and is included from here by path.
 praxis-policy-apl-runtime = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 bytes = { workspace = true }
@@ -369,6 +372,15 @@ name = "quota_hot_path"
 path = "benches/quota_hot_path.rs"
 harness = false
 required-features = ["experimental-quota"]
+
+# Cache hit/miss against a real CEL resolver. Kept here so
+# apl-runtime does not depend back on this crate: that cycle makes
+# `cargo package` reject the published runtime checksum.
+[[bench]]
+name = "pdp_decision_cache"
+path = "benches/pdp_decision_cache.rs"
+harness = false
+required-features = ["cel"]
 
 [lints]
 workspace = true
