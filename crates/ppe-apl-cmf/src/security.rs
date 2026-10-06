@@ -635,6 +635,59 @@ mod tests {
         assert!(bag.set_contains("client.teams", "acme"));
     }
 
+    /// The rendering is the whole basis for treating this key as orderable, so
+    /// it is pinned rather than left to the formatter's defaults. Second
+    /// precision and a literal `Z` are what make a string compare the way the
+    /// instant does; at variable precision `.` sorts before `Z` and a
+    /// sub-second reading would compare as earlier than a whole-second one in
+    /// the same second.
+    #[test]
+    fn attested_at_renders_orderable_rfc3339() {
+        use praxis_policy_core::extensions::WorkloadIdentity;
+        let at = |s: &str| WorkloadIdentity {
+            attested_at: Some(s.parse().expect("a literal RFC3339 instant")),
+            ..Default::default()
+        };
+
+        let mut bag = AttributeBag::new();
+        extract_workload("caller_workload", &at("2026-10-01T12:00:00Z"), &mut bag);
+        assert_eq!(
+            bag.get_string("caller_workload.attested_at"),
+            Some("2026-10-01T12:00:00Z")
+        );
+
+        // A sub-second input truncates rather than widening the format, which
+        // is what keeps every value the same width.
+        let mut sub = AttributeBag::new();
+        extract_workload("caller_workload", &at("2026-10-01T12:00:00.5Z"), &mut sub);
+        assert_eq!(
+            sub.get_string("caller_workload.attested_at"),
+            Some("2026-10-01T12:00:00Z")
+        );
+
+        // A non-UTC input renders as the same instant in UTC, so two hosts in
+        // different zones produce comparable strings.
+        let mut offset = AttributeBag::new();
+        extract_workload(
+            "caller_workload",
+            &at("2026-10-01T13:00:00+01:00"),
+            &mut offset,
+        );
+        assert_eq!(
+            offset.get_string("caller_workload.attested_at"),
+            Some("2026-10-01T12:00:00Z")
+        );
+
+        // The property a staleness check depends on.
+        let mut later = AttributeBag::new();
+        extract_workload("caller_workload", &at("2026-10-02T00:00:00Z"), &mut later);
+        assert!(
+            bag.get_string("caller_workload.attested_at")
+                < later.get_string("caller_workload.attested_at"),
+            "the string must order the way the instant does"
+        );
+    }
+
     /// `client.teams` is set-only on purpose, where `subject.teams` carries the
     /// flattened boolean too. Guarding it because the asymmetry reads as an
     /// oversight: the two loops immediately above this one in `extract_client`

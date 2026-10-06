@@ -24,13 +24,7 @@
 // because this fixture populates everything and never exercises an absent one.
 // And the "When" column, which is prose rather than a closed vocabulary.
 
-#![allow(
-    missing_docs,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "test code"
-)]
+#![allow(missing_docs, clippy::expect_used, reason = "test code")]
 
 mod catalog;
 
@@ -65,8 +59,14 @@ fn fully_populated() -> Extensions {
     let workload = |id: &str| WorkloadIdentity {
         spiffe_id: Some(format!("spiffe://td/{id}")),
         trust_domain: Some("td".to_owned()),
-        // Deliberately off the bag; see the catalog's note.
-        attested_at: Some(Default::default()),
+        // Emitted as `<ns>.attested_at`, RFC3339 at second precision with a
+        // literal `Z`. The rendering is asserted in `security.rs`; here it only
+        // has to be `Some` for the key to appear.
+        attested_at: Some(
+            "2026-10-01T12:00:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("a literal RFC3339 instant"),
+        ),
         attestor: Some("spire".to_owned()),
         selectors: vec![format!("k8s:ns:{id}")],
         client_id: Some(id.to_owned()),
@@ -167,7 +167,7 @@ fn fully_populated() -> Extensions {
             name: "search".to_owned(),
             title: Some("Search".to_owned()),
             description: Some("d".to_owned()),
-            // Schemas and annotations are deliberately off the bag.
+            // The schemas stay off the bag; the annotations below flatten.
             input_schema: Some(serde_json::json!({"type": "object"})),
             output_schema: Some(serde_json::json!({"type": "object"})),
             server_id: Some("srv".to_owned()),

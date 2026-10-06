@@ -214,9 +214,8 @@ const fn family(key: &'static str, ty: KeyType, gating: Gating, slot: Slot) -> K
 ///
 /// Fields deliberately left off the bag are absent from here too, and
 /// `docs/content/cmf-extensions.md` records the reason for each: the
-/// conversation transcript, both workloads' `attested_at`, the per-hop
-/// delegation chain, MCP `annotations`, the tool schemas, the prompt
-/// arguments, and `security.objects` / `security.data`.
+/// conversation transcript, the per-hop delegation chain, the tool schemas,
+/// the prompt arguments, and `security.objects` / `security.data`.
 pub(crate) const CATALOG: &[KeyEntry] = &[
     // 1. security — subject
     exact(
@@ -872,7 +871,6 @@ pub(crate) fn entry_for(key: &str) -> Option<&'static KeyEntry> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
     use std::collections::HashSet;

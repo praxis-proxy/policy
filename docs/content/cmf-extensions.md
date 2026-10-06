@@ -310,14 +310,16 @@ could withhold and they cannot.
 
 `chain` is a `Vec<DelegationHop>` and nothing from it is bridged, so
 `delegation.depth <= 2` is expressible and "deny if any hop granted
-`write:payroll`" is not. That is a gap rather than a decision. Closing it means
-union sets over the chain (`delegation.scopes`, `delegation.audiences`) plus an
-any-flag for `from_cache`, which is new policy surface and is tracked on its
-own rather than inside a bridge audit. Until then a plugin that needs per-hop
-grants reads the typed chain.
+`write:payroll`" is not. A plugin that needs per-hop grants reads the typed
+chain.
 
-Per-hop `strategy` and `ttl_seconds` have no obvious union and may stay off
-permanently; that is part of the same open decision.
+Putting any of it on the bag first requires deciding what aggregation means. A
+union over `scopes_granted` reports a scope one hop granted and a later hop
+narrowed, so the key would claim more authority than the chain conveys, and an
+author reading it would not be able to tell. Per-hop `strategy` and
+`ttl_seconds` have no meaningful union at all. Indexing by position
+(`delegation.hop.2.scopes`) is not an answer either, since chain position is
+not stable across requests.
 
 ### 3. `agent` — `AgentExtension`
 
@@ -335,10 +337,8 @@ permanently; that is part of the same open decision.
 `conversation.history` is not flattened, and there is no length key either.
 The transcript is a `Vec<Value>` of turns, so flattening it would put message
 text on the bag under indexed keys, which is the opposite of what the bag is
-for: a policy reading prompt content wants
-[`read_llm_request`](extensions.md) and the structured side channel, not
-`agent.conversation.history.3.content`. A plugin that needs the transcript
-reads the typed slot.
+for. A plugin that needs the transcript reads the typed slot through
+`read_agent`.
 
 Turn-count gating needs no new key: `agent.turn` is an Int, so
 `agent.turn > 10` works today.

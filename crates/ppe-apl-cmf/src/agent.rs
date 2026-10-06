@@ -47,9 +47,9 @@ pub fn extract_agent(agent: &AgentExtension, bag: &mut AttributeBag) {
         bag.set("agent.conversation.topics", topics);
         // `history: Vec<Value>` is deliberately not flattened, and gets no
         // length key either. Flattening a transcript would put message text on
-        // the bag under indexed keys, which is what `read_llm_request` and the
-        // structured side channel exist for instead. Turn-count gating already
-        // works through `agent.turn`.
+        // the bag under indexed keys; a plugin that needs it reads the typed
+        // slot through `read_agent`. Turn-count gating already works through
+        // `agent.turn`.
     }
 }
 

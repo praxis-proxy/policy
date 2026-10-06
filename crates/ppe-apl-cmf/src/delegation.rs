@@ -12,11 +12,11 @@
 //   del.age_seconds            → delegation.age_seconds          : Float
 //
 // `chain` is not flattened, which makes `delegation.depth <= 2` expressible
-// and "deny if any hop granted write:payroll" not. That is an open gap rather
-// than a settled decision: closing it means union sets over the chain plus an
-// any-flag for `from_cache`, which is new policy surface and is tracked
-// separately from this bridge. Until then a plugin that needs per-hop grants
-// reads the typed chain.
+// and "deny if any hop granted write:payroll" not. A plugin that needs per-hop
+// grants reads the typed chain. Putting any of it on the bag first requires
+// deciding aggregation semantics across hops: a union over `scopes_granted`
+// reports a scope that one hop granted and a later hop narrowed, so the key
+// would claim more authority than the chain conveys.
 
 use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::DelegationExtension;
