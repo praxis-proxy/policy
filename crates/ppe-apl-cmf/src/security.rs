@@ -678,13 +678,37 @@ mod tests {
             Some("2026-10-01T12:00:00Z")
         );
 
-        // The property a staleness check depends on.
-        let mut later = AttributeBag::new();
-        extract_workload("caller_workload", &at("2026-10-02T00:00:00Z"), &mut later);
+        // An offset that moves the instant across midnight, so the date and
+        // not only the clock has to be converted.
+        let mut crossing = AttributeBag::new();
+        extract_workload(
+            "caller_workload",
+            &at("2026-10-01T00:30:00+05:30"),
+            &mut crossing,
+        );
+        assert_eq!(
+            crossing.get_string("caller_workload.attested_at"),
+            Some("2026-09-30T19:00:00Z")
+        );
+
+        // The property a staleness check depends on. Both sides are taken out
+        // of the bag before comparing: comparing the `Option`s would let a
+        // missing key pass, because `None` orders below `Some`.
+        let mut later_bag = AttributeBag::new();
+        extract_workload(
+            "caller_workload",
+            &at("2026-10-02T00:00:00Z"),
+            &mut later_bag,
+        );
+        let earlier = bag
+            .get_string("caller_workload.attested_at")
+            .expect("the earlier instant rendered");
+        let later = later_bag
+            .get_string("caller_workload.attested_at")
+            .expect("the later instant rendered");
         assert!(
-            bag.get_string("caller_workload.attested_at")
-                < later.get_string("caller_workload.attested_at"),
-            "the string must order the way the instant does"
+            earlier < later,
+            "the string must order the way the instant does: {earlier} then {later}"
         );
     }
 
