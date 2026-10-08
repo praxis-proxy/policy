@@ -1,0 +1,20 @@
+# Ingress Gateway (istio class). The `kuadrant.io/gateway: "true"` label is
+# what lets Kuadrant attach policies to routes on this gateway.
+# Programmed address (kind): 172.18.0.17 — verify with:
+#   kubectl get gateway external -n api-gateway
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: external
+  namespace: api-gateway
+  labels:
+    kuadrant.io/gateway: "true"
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All

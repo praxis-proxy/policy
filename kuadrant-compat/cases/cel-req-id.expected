@@ -1,0 +1,6 @@
+# Expected smoke-test decisions when the host supplies an independent request ID.
+# The key is the client x-request-id header sent on a GET, not request.id.
+# The predicate rejects empty IDs and either supplied header value.
+# Format: <client-header> <allow|deny>. These are expectations, not captured results.
+req-abc allow
+other allow

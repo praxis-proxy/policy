@@ -43,6 +43,17 @@ pub fn bag_to_input(bag: &AttributeBag) -> Value {
     build_input(bag, &StructuredInput::default())
 }
 
+/// Build bag-only input with extra dotted scalar paths and literal-keyed maps.
+/// The source bag is unchanged. Kuadrant compatibility uses this path in tests;
+/// production uses [`build_rego_input_with_aliases`] to preserve structured JSON.
+pub fn bag_to_input_with_aliases(
+    bag: &AttributeBag,
+    scalar_aliases: &[(String, AttributeValue)],
+    header_maps: &[(&str, &[(String, AttributeValue)])],
+) -> Value {
+    Value::Object(bag_to_map_with_aliases(bag, scalar_aliases, header_maps))
+}
+
 /// Build the Rego `input` document from the policy bag and structured input.
 ///
 /// Every dotted bag key becomes a nested field: `subject.id` → `{"subject":
@@ -76,7 +87,17 @@ pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
 
 /// Build Regorus input without cloning structured JSON into an intermediate tree.
 pub fn build_rego_input(bag: &AttributeBag, structured: &StructuredInput) -> regorus::Value {
-    let mut root = bag_to_map(bag);
+    build_rego_input_with_aliases(bag, structured, &[], &[])
+}
+
+/// Build Regorus input with Kuadrant aliases while retaining structured input.
+pub fn build_rego_input_with_aliases(
+    bag: &AttributeBag,
+    structured: &StructuredInput,
+    scalar_aliases: &[(String, AttributeValue)],
+    header_maps: &[(&str, &[(String, AttributeValue)])],
+) -> regorus::Value {
+    let mut root = bag_to_map_with_aliases(bag, scalar_aliases, header_maps);
     let bag_args = root.remove("args");
     let bag_llm = root.remove("llm");
     let mut output = root
@@ -142,10 +163,29 @@ fn json_to_rego(value: &Value) -> regorus::Value {
 
 /// Rebuild the flat bag into a nested JSON object.
 fn bag_to_map(bag: &AttributeBag) -> Map<String, Value> {
+    bag_to_map_with_aliases(bag, &[], &[])
+}
+
+fn bag_to_map_with_aliases(
+    bag: &AttributeBag,
+    scalar_aliases: &[(String, AttributeValue)],
+    header_maps: &[(&str, &[(String, AttributeValue)])],
+) -> Map<String, Value> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
         let segments: Vec<&str> = key.split('.').collect();
         insert(&mut root, key, &segments, attr_to_value(value));
+    }
+    for (key, value) in scalar_aliases {
+        let segments: Vec<&str> = key.split('.').collect();
+        insert(&mut root, key, &segments, attr_to_value(value));
+    }
+    for &(parent, entries) in header_maps {
+        for (name, value) in entries {
+            let mut segments: Vec<&str> = parent.split('.').collect();
+            segments.push(name);
+            insert(&mut root, name, &segments, attr_to_value(value));
+        }
     }
     node_map_to_map(root)
 }
@@ -314,6 +354,37 @@ mod tests {
         engine.set_input(build_rego_input(bag, structured));
         let v = engine.eval_rule("data.t.v".to_owned()).unwrap();
         serde_json::from_str(&v.to_json_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn request_id_alias_merges_with_native_input_and_structured_args() {
+        let mut bag = AttributeBag::new();
+        bag.set("request.request_id", "req-abc");
+        let structured = with_args(json!({"items": [1, 2]}));
+        let aliases = vec![(
+            "request.id".to_owned(),
+            AttributeValue::String("req-abc".into()),
+        )];
+        let mut engine = Engine::new();
+        engine
+            .add_policy("t.rego".to_owned(), "package t\nv := input\n".to_owned())
+            .unwrap();
+        engine.set_input(build_rego_input_with_aliases(
+            &bag,
+            &structured,
+            &aliases,
+            &[],
+        ));
+        let value = engine.eval_rule("data.t.v".to_owned()).unwrap();
+        let input: Value = serde_json::from_str(&value.to_json_str().unwrap()).unwrap();
+        assert_eq!(input["request"]["request_id"], json!("req-abc"));
+        assert_eq!(input["request"]["id"], json!("req-abc"));
+        assert_eq!(input["args"]["items"], json!([1, 2]));
+        assert_eq!(bag.get_string("request.request_id"), Some("req-abc"));
+
+        let native = rego_input_roundtrip(&bag, &structured);
+        assert!(native["request"].get("id").is_none());
+        assert_eq!(native["args"]["items"], json!([1, 2]));
     }
 
     #[test]

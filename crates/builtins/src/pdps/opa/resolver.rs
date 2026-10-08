@@ -58,9 +58,11 @@ use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
+use crate::pdps::kuadrant::request_aliases;
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
-use crate::pdps::opa::input::build_rego_input;
+
+use crate::pdps::opa::input::{build_rego_input, build_rego_input_with_aliases};
 use crate::pdps::stack;
 
 /// What to do when a query errors at runtime or yields a value that carries no
@@ -118,6 +120,10 @@ pub struct OpaResolver {
     /// Upper bound on `inline_cache`. New entries past this are rejected (never
     /// evicted), per the workspace cache convention.
     max_cache_entries: usize,
+    /// Kuadrant compatibility (issue #156). When set, the Rego `input` gains the
+    /// Kuadrant WKA `request.*` aliases derived from the bag; the shared bag is
+    /// not mutated.
+    kuadrant_compat: bool,
 }
 
 impl OpaResolver {
@@ -264,6 +270,7 @@ impl OpaResolver {
             inline_cache: RwLock::new(HashMap::new()),
             max_cache_entries: read_usize(map, "max_cache_entries")?
                 .unwrap_or(DEFAULT_MAX_CACHE_ENTRIES),
+            kuadrant_compat: false,
         })
     }
 
@@ -271,6 +278,18 @@ impl OpaResolver {
     /// under a custom name so two OPA resolvers can coexist on one router.
     pub fn with_dialect(mut self, dialect: PdpDialect) -> Self {
         self.dialect = dialect;
+        self
+    }
+
+    /// Enable Kuadrant compatibility (issue #156). When set, the Rego `input` is
+    /// augmented with `request.id` from host-supplied `request.request_id`.
+    /// Other Kuadrant request attributes are not mapped yet. Missing sources
+    /// remain undefined, so negation can allow even with `on_error: deny`.
+    /// Policies must check required values explicitly. The shared bag is not
+    /// mutated. Default off.
+    #[must_use]
+    pub fn with_kuadrant_compat(mut self, enabled: bool) -> Self {
+        self.kuadrant_compat = enabled;
         self
     }
 
@@ -490,7 +509,13 @@ impl PdpResolver for OpaResolver {
         //
         //    Building, converting, evaluating and dropping nested client JSON
         //    recurses, so each synchronous part runs with stack headroom.
-        let input = stack::guarded(|| build_rego_input(bag, structured));
+        let input = stack::guarded(|| {
+            if self.kuadrant_compat {
+                build_rego_input_with_aliases(bag, structured, &request_aliases(bag), &[])
+            } else {
+                build_rego_input(bag, structured)
+            }
+        });
         let query = query.to_owned();
         let decision_field = self.decision_field.clone();
         let policy_sources = Arc::clone(&self.policy_sources);
@@ -882,6 +907,44 @@ mod eval_tests {
         let mut b = AttributeBag::new();
         b.set("subject.id", subject_id);
         b
+    }
+
+    #[tokio::test]
+    async fn kuadrant_compat_resolves_verbatim_request_id() {
+        let r = OpaResolver::from_config(&serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+            .unwrap()
+            .with_kuadrant_compat(true);
+        let mut b = AttributeBag::new();
+        b.set("request.request_id", "req-abc");
+        // Verbatim Kuadrant OPA v1: reads WKA `input.request.id`.
+        let module = "package t\nallow if { input.request.id == \"req-abc\" }\n";
+        let allow = r
+            .evaluate(&call("data.t.allow", Some(module)), &b)
+            .await
+            .unwrap();
+        assert_eq!(allow.decision, Decision::Allow);
+
+        let module_deny = "package t\nallow if { input.request.id == \"other\" }\n";
+        let deny = r
+            .evaluate(&call("data.t.allow", Some(module_deny)), &b)
+            .await
+            .unwrap();
+        assert!(matches!(deny.decision, Decision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn without_compat_verbatim_request_id_is_undefined() {
+        let r = OpaResolver::from_config(&serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+            .unwrap(); // compat off
+        let mut b = AttributeBag::new();
+        b.set("request.request_id", "req-abc");
+        // `input.request.id` is absent → rule undefined → Deny (the naive arm).
+        let module = "package t\nallow if { input.request.id == \"req-abc\" }\n";
+        let out = r
+            .evaluate(&call("data.t.allow", Some(module)), &b)
+            .await
+            .unwrap();
+        assert!(matches!(out.decision, Decision::Deny { .. }));
     }
 
     const ALLOW_WITH_DEFAULT: &str = r#"package authz

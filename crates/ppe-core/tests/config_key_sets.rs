@@ -596,6 +596,7 @@ fn the_engine_settings_table_is_the_accept_set() {
             "capture_content_provenance",
             "content_provenance_key",
             "audit_stream_namespace",
+            "kuadrant_compat",
         ],
         "the engine settings accept set changed"
     );

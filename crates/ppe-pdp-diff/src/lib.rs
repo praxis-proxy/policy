@@ -26,6 +26,8 @@ pub const HARNESS_PDP_KINDS: &[&str] = &["cedar-direct", "cel", "opa"];
 #[cfg(test)]
 mod allowlist;
 #[cfg(test)]
+mod authorino;
+#[cfg(test)]
 mod cases;
 #[cfg(test)]
 mod classify;

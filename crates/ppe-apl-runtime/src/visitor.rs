@@ -379,6 +379,7 @@ impl AplConfigVisitor {
         &self,
         entry: &serde_yaml::Value,
         index: usize,
+        kuadrant_compat: bool,
     ) -> Result<Arc<dyn PdpResolver>, VisitorError> {
         let map = entry
             .as_mapping()
@@ -396,7 +397,10 @@ impl AplConfigVisitor {
         let (backend_entry, cache_config) = split_cache_block(entry)
             .map_err(|e| format!("global.pdp[{index}] (kind='{kind}') {e}"))?;
         let resolver = factory
-            .build(&backend_entry)
+            .build_with_context(
+                &backend_entry,
+                &praxis_policy_apl_core::step::PdpBuildContext { kuadrant_compat },
+            )
             .map_err(|e| format!("global.pdp[{index}] (kind='{kind}') failed to build: {e}"))?;
         let resolver = match cache_config {
             Some(config) => CachedPdpResolver::wrap(resolver, config, self.engine.clone()),
@@ -411,10 +415,14 @@ impl AplConfigVisitor {
     /// dialects keep the first entry. A dialect already registered from
     /// code is not installed. An empty `entries` drops every config-owned
     /// resolver and leaves code-supplied ones in place.
-    fn install_config_pdps(&self, entries: &[serde_yaml::Value]) -> Result<(), VisitorError> {
+    fn install_config_pdps(
+        &self,
+        entries: &[serde_yaml::Value],
+        kuadrant_compat: bool,
+    ) -> Result<(), VisitorError> {
         let mut built = HashMap::new();
         for (i, entry) in entries.iter().enumerate() {
-            let resolver = self.build_pdp_from_config(entry, i)?;
+            let resolver = self.build_pdp_from_config(entry, i, kuadrant_compat)?;
             let dialect = resolver.dialect();
             if built.contains_key(&dialect) {
                 tracing::warn!(
@@ -847,7 +855,7 @@ impl ConfigVisitor for AplConfigVisitor {
         let Some(apl_block) = apl_subblock(yaml) else {
             // No policy term, so this load declares no PDPs. Drop config-owned
             // resolvers from the previous load; code-supplied ones stay.
-            self.install_config_pdps(&[])?;
+            self.install_config_pdps(&[], mgr.kuadrant_compat())?;
             // No policy term on the section — there is nothing to compile or
             // install. But a bare `global: { response: {...} }` (a denyWith
             // with no accompanying policy) would otherwise be dropped here
@@ -871,14 +879,15 @@ impl ConfigVisitor for AplConfigVisitor {
         // an error, same as `global.attribute_files`: skipping it would
         // leave the previous load's resolvers, including cache wrappers,
         // answering requests under the new config.
+        let kuadrant_compat = mgr.kuadrant_compat();
         match apl_block.get("pdp") {
             Some(value) => {
                 let entries = value
                     .as_sequence()
                     .ok_or_else(|| "global.pdp must be a list".to_owned())?;
-                self.install_config_pdps(entries)?;
+                self.install_config_pdps(entries, kuadrant_compat)?;
             },
-            None => self.install_config_pdps(&[])?,
+            None => self.install_config_pdps(&[], kuadrant_compat)?,
         }
 
         // Process an optional `global.session_store` block: swap the

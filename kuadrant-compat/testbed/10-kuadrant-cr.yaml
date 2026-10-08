@@ -1,0 +1,9 @@
+# Kuadrant control-plane CR. `make local-setup` installs the operator but does
+# NOT create this — applying it activates Authorino + Limitador.
+# Wait for readiness after apply:
+#   kubectl -n kuadrant-system wait kuadrant/kuadrant --for=condition=Ready --timeout=300s
+apiVersion: kuadrant.io/v1beta1
+kind: Kuadrant
+metadata:
+  name: kuadrant
+  namespace: kuadrant-system

@@ -23,5 +23,8 @@ pub mod cel;
 #[cfg(feature = "opa")]
 pub mod opa;
 
+#[cfg(any(feature = "cel", feature = "opa"))]
+mod kuadrant;
+
 #[cfg(any(feature = "cedar", feature = "cel", feature = "opa"))]
 mod stack;

@@ -33,14 +33,17 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, ToolCall};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::executor::PipelineResult;
 use praxis_policy_core::extensions::{
-    LlmRequestDocument, MetaExtension, SecurityExtension, SubjectExtension, SubjectType,
+    HttpExtension, LlmRequestDocument, MetaExtension, RequestExtension, SecurityExtension,
+    SubjectExtension, SubjectType,
 };
 use praxis_policy_core::hooks::payload::Extensions;
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload};
 
 use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, register_apl};
 use praxis_policy_builtins::pdps::cel::CelPdpFactory;
@@ -635,5 +638,157 @@ async fn deny_paths_omit_payload_values() {
         assert!(violation.contains(cause), "{expr}: {violation}");
         assert!(!violation.contains(MARKER), "{expr}: {violation}");
         assert!(!violation.contains("hidden_key"), "{expr}: {violation}");
+    }
+}
+
+// Kuadrant request.id through the real CEL factory and APL visitor.
+// This belongs in the builtins harness: runtime must not depend back on
+// builtins, because that cycle breaks cargo package verification.
+
+const REQUEST_ID_COMPAT: &str = r#"
+engine_settings:
+  dispatch: policy
+  kuadrant_compat: true
+global:
+  pdp:
+    - kind: cel
+routes:
+  - http:
+      path_prefix: /
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "request.id == 'req-abc'"
+"#;
+
+async fn http_request_id_allows(
+    mgr: &PolicyEngine,
+    host_id: Option<&str>,
+    header_id: Option<&str>,
+) -> bool {
+    let ext = Extensions {
+        meta: Some(Arc::new(MetaExtension {
+            entity_type: Some(ENTITY_HTTP.to_owned()),
+            entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+            ..Default::default()
+        })),
+        http: Some(Arc::new(HttpExtension {
+            method: Some("GET".to_owned()),
+            path: Some("/x".to_owned()),
+            request_headers: header_id
+                .into_iter()
+                .map(|id| ("x-request-id".to_owned(), id.to_owned()))
+                .collect(),
+            ..Default::default()
+        })),
+        request: host_id.map(|id| {
+            Arc::new(RequestExtension {
+                request_id: Some(id.to_owned()),
+                ..Default::default()
+            })
+        }),
+        ..Default::default()
+    };
+    let (result, _bg) = mgr
+        .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, ext, None)
+        .await;
+    result.continue_processing
+}
+
+#[tokio::test]
+async fn kuadrant_request_id_uses_host_metadata() {
+    let mgr = build_manager_with_yaml(REQUEST_ID_COMPAT)
+        .await
+        .expect("load compat policy");
+
+    for (host_id, header_id, expected) in [
+        (Some("req-abc"), None, true),
+        (Some("other"), None, false),
+        (None, None, false),
+        (None, Some("req-abc"), false),
+        (Some("other"), Some("req-abc"), false),
+        (Some("req-abc"), Some("other"), true),
+    ] {
+        assert_eq!(
+            http_request_id_allows(&mgr, host_id, header_id).await,
+            expected,
+            "authorization must follow host ID {host_id:?}, not header {header_id:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn kuadrant_request_id_without_compat_fails_closed() {
+    let yaml = REQUEST_ID_COMPAT.replace("kuadrant_compat: true", "kuadrant_compat: false");
+    let mgr = build_manager_with_yaml(&yaml)
+        .await
+        .expect("load native policy");
+
+    assert!(
+        !http_request_id_allows(&mgr, Some("req-abc"), None).await,
+        "without compat, request.id is absent and authorization must deny"
+    );
+}
+
+#[tokio::test]
+async fn kuadrant_request_attributes_require_explicit_presence_checks() {
+    // A missing namespace is an error under on_error=deny; a missing field in
+    // an existing namespace can still grant permission through !has().
+    for (expr, expected) in [
+        (
+            "!(request.id == 'blocked')",
+            [false, false, true, false, true],
+        ),
+        (
+            "has(request.id) && request.id != '' && request.id != 'blocked'",
+            [false, false, false, false, true],
+        ),
+        ("!has(request.protocol)", [false, false, true, true, true]),
+        (
+            "has(request.protocol) && request.protocol != ''",
+            [false, false, false, false, false],
+        ),
+    ] {
+        let yaml = REQUEST_ID_COMPAT.replace("request.id == 'req-abc'", expr);
+        let mgr = build_manager_with_yaml(&yaml)
+            .await
+            .expect("load policy with explicit attribute requirements");
+        for ((host_id, header_id), expected) in [
+            (None, None),
+            (None, Some("req-abc")),
+            (Some(""), None),
+            (Some("blocked"), None),
+            (Some("req-abc"), None),
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            assert_eq!(
+                http_request_id_allows(&mgr, host_id, header_id).await,
+                expected,
+                "{expr}: host ID {host_id:?}, header ID {header_id:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn kuadrant_request_id_toggle_takes_effect_on_reload() {
+    let mgr = build_manager_with_yaml(REQUEST_ID_COMPAT)
+        .await
+        .expect("load compat policy");
+    assert!(mgr.kuadrant_compat());
+    assert!(http_request_id_allows(&mgr, Some("req-abc"), None).await);
+
+    let native_yaml = REQUEST_ID_COMPAT.replace("kuadrant_compat: true", "kuadrant_compat: false");
+    for (yaml, expected) in [(native_yaml.as_str(), false), (REQUEST_ID_COMPAT, true)] {
+        mgr.load_config_yaml(yaml).expect("reload policy");
+        mgr.initialize().await.expect("initialize reloaded policy");
+        assert_eq!(mgr.kuadrant_compat(), expected);
+        assert_eq!(
+            http_request_id_allows(&mgr, Some("req-abc"), None).await,
+            expected,
+            "reload must replace the config resolver and apply kuadrant_compat={expected}"
+        );
     }
 }

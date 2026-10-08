@@ -74,8 +74,10 @@ _secrets = []
 
 [dependencies]
 # Engine crates, optional so a consumer resolves only the layer it asked for.
-# The three PDPs must stay apl-core-only on their normal edges: a non-optional
-# `apl-runtime` here would silently hand a Cedar-only consumer the runtime.
+# The PDPs must stay apl-core-only on their normal edges w.r.t. the runtime: a
+# non-optional `apl-runtime` here would silently hand a standalone PDP consumer
+# the runtime. Bag-only compatibility projections live in the shared PDP module
+# so CEL and OPA do not need the core/CMF bridge on their normal edges either.
 praxis-policy-core = { workspace = true, optional = true }
 praxis-policy-apl-core = { workspace = true, optional = true }
 praxis-policy-apl-runtime = { workspace = true, optional = true }

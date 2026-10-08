@@ -45,6 +45,7 @@ warns when a plugin is reached on fewer hooks than it declares.
 | `audit_timeout_milliseconds` | `100` | maximum time per audit sink callback, in milliseconds |
 | `short_circuit_on_deny` | `true` | stop a hook's remaining plugins once one denies |
 | `route_cache_max_entries` | `10000` | dispatch-plan cache size |
+| `kuadrant_compat` | `false` | present Kuadrant `request.id` to CEL/OPA PDPs from the host-supplied `request.request_id` — see [PDP integration](apl/pdp.md#kuadrant-authpolicy-compatibility) |
 
 ## What each scope accepts
 
@@ -58,7 +59,7 @@ its scope's set is a load error naming the scope and the set.
 | `global.defaults.<entity>:` | `description`, `metadata`, `plugins`, `authentication`, `assertions`, `response`, `authorization`, `args`, `result` |
 | `groups.<name>:` | the same set as `global.defaults.<entity>:` |
 | `routes[]` | `tool`, `resource`, `prompt`, `llm`, `http`, `meta`, `groups`, `plugins`, `authentication`, `assertions`, `response`, `authorization`, `args`, `result` |
-| `engine_settings:` | `dispatch`, `plugin_timeout`, `audit_timeout_milliseconds`, `short_circuit_on_deny`, `route_cache_max_entries`, `effect_log_path`, `effect_log_compaction_threshold`, `capture_content_provenance`, `content_provenance_key`, `audit_stream_namespace` |
+| `engine_settings:` | `dispatch`, `plugin_timeout`, `audit_timeout_milliseconds`, `short_circuit_on_deny`, `route_cache_max_entries`, `effect_log_path`, `effect_log_compaction_threshold`, `capture_content_provenance`, `content_provenance_key`, `audit_stream_namespace`, `kuadrant_compat` |
 | an `authentication:` block | `steps`, `replace_inherited` |
 | an `authentication:` step | `name`, `config` |
 | an `assertions:` block | `request`, `response` |

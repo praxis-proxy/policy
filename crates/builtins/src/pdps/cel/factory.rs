@@ -46,4 +46,13 @@ impl PdpFactory for CelPdpFactory {
         let resolver = CelResolver::from_config(config)?;
         Ok(Arc::new(resolver))
     }
+
+    fn build_with_context(
+        &self,
+        config: &serde_yaml::Value,
+        ctx: &praxis_policy_apl_core::step::PdpBuildContext,
+    ) -> Result<Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
+        let resolver = CelResolver::from_config(config)?.with_kuadrant_compat(ctx.kuadrant_compat);
+        Ok(Arc::new(resolver))
+    }
 }

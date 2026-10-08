@@ -85,6 +85,13 @@ impl PolicyConfig {
     pub fn dispatch_mode(&self) -> DispatchMode {
         self.engine_settings.dispatch
     }
+
+    /// Whether Kuadrant compatibility mode is enabled
+    /// (`engine_settings.kuadrant_compat`).
+    #[must_use]
+    pub fn kuadrant_compat(&self) -> bool {
+        self.engine_settings.kuadrant_compat
+    }
 }
 
 /// What decides which plugins fire on a request.
@@ -247,6 +254,11 @@ pub struct EngineSettings {
     /// executor with the counters back at zero.
     #[serde(skip)]
     pub audit_epoch: Option<u64>,
+
+    /// Present Kuadrant `request.id` to CEL and OPA from the host request ID.
+    /// The projected value exists only in each PDP input; the bag is unchanged.
+    #[serde(default)]
+    pub kuadrant_compat: bool,
 }
 
 /// The `content_provenance_key` value that selects plain SHA-256.
@@ -290,6 +302,7 @@ impl Default for EngineSettings {
             content_provenance_key: None,
             audit_stream_namespace: None,
             audit_epoch: None,
+            kuadrant_compat: false,
         }
     }
 }
@@ -1408,6 +1421,7 @@ const ENGINE_SETTINGS_KEYS: &[ConfigKey] = &[
     structural_key("capture_content_provenance", KeyOwner::Core),
     structural_key("content_provenance_key", KeyOwner::Core),
     structural_key("audit_stream_namespace", KeyOwner::Core),
+    structural_key("kuadrant_compat", KeyOwner::Core),
 ];
 
 /// The keys one map-form step of an `authentication:` block carries.
@@ -3905,6 +3919,23 @@ fn score_route_match(route: &RouteEntry, query: RouteQuery<'_>) -> Option<(usize
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kuadrant_compat_defaults_off() {
+        let config = parse_config("plugins: []\nroutes:\n  - tool: t\n")
+            .expect("loads under defaulted mode");
+        assert!(!config.kuadrant_compat());
+        assert!(!EngineSettings::default().kuadrant_compat);
+    }
+
+    #[test]
+    fn kuadrant_compat_parses_when_set() {
+        let config = parse_config(
+            "engine_settings:\n  kuadrant_compat: true\nplugins: []\nroutes:\n  - tool: t\n",
+        )
+        .expect("kuadrant_compat is an accepted engine setting");
+        assert!(config.kuadrant_compat());
+    }
 
     /// The name the route table resolves for a request, or `None` when nothing
     /// matched. Route matching outlived the activation lists it used to feed.

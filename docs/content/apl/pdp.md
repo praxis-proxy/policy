@@ -423,6 +423,93 @@ after:  !has(args.note) || args.note == null
 A rule that relied on an array of objects being dropped, such as
 `not input.args.items`, now sees the array.
 
+## Kuadrant AuthPolicy compatibility
+
+`engine_settings.kuadrant_compat: true` projects Kuadrant's `request.id` from
+the host-supplied `request.request_id` into CEL and OPA PDP inputs. The host
+must populate `RequestExtension.request_id` before invoking PPE. An inbound
+`x-request-id` header cannot supply or override this alias; if the host ID is
+absent, the alias is omitted. The flag is off by default. Other Kuadrant
+`request.*` attributes are not mapped yet.
+
+Before importing a policy, check every attribute it requires against this
+mapping. A policy requiring `request.protocol`, `request.size`, or another
+unmapped request attribute is unsupported in this slice. Configuration loading
+does not validate those attribute dependencies; successfully loading a policy
+does not establish compatibility.
+
+Authorino copies `HttpRequest.Id` from the ext_authz request, which Envoy
+populates from its stream ID ([Authorino source](https://github.com/Kuadrant/authorino/blob/main/pkg/service/well_known_attributes.go),
+[Envoy source](https://github.com/envoyproxy/envoy/blob/main/source/extensions/filters/common/ext_authz/check_request_utils.cc)).
+A compatible host must supply equivalent proxy request metadata rather than
+copying a client header. Live value parity remains unverified.
+
+```yaml
+engine_settings:
+  dispatch: policy
+  kuadrant_compat: true
+global:
+  pdp:
+    - kind: cel
+      on_error: deny
+routes:
+  - http: { path_prefix: / }
+    authorization:
+      pre_invocation:
+        - "require(exists(request.request_id) & request.request_id != '')"
+        - cel: { expr: "request.id != ''" }
+```
+
+The projection is built for each PDP input and leaves the shared attribute bag
+untouched. Existing native leaves keep their values. With the flag off, CEL and
+OPA inputs retain their native shape; Cedar is unaffected in either mode. The
+[Kuadrant mapping proposal](../../proposals/00133_kuadrant-authpolicy-attribute-mapping.md)
+tracks the remaining attributes and known gaps.
+
+### Required attributes and missing values
+
+The flag adds aliases; it does not impose a presence requirement or change
+CEL/Rego evaluation rules. A missing source stays absent; a supplied empty
+string stays present and empty. For a policy that requires an ID, the host must
+supply a nonempty `RequestExtension.request_id` on each request. The APL
+`require` step above checks that native source before the PDP runs, so missing
+or empty metadata denies even when the PDP policy uses negation. It uses
+`request.request_id` because the `request.id` alias exists only in PDP inputs.
+
+Checks inside the PDP can also require the projected ID:
+
+```cel
+has(request.id) && request.id != '' && request.id != 'blocked'
+```
+
+Keep CEL's default `on_error: deny`: `has(request.id)` can itself error when
+the entire `request` namespace is absent. When the namespace exists, an
+absence-as-permission expression such as `!has(request.protocol)` can evaluate
+to true for an unmapped field. Alias omission alone therefore does not guarantee
+denial in CEL.
+
+In Rego, require the value before applying a negated condition:
+
+```rego
+package authz
+
+default allow := false
+
+allow if {
+    is_string(input.request.id)
+    input.request.id != ""
+    not input.request.id == "blocked"
+}
+```
+
+Without the first two checks, `not input.request.id == "blocked"` succeeds
+when the ID is undefined. This is a successful policy result, so neither
+`default allow := false` nor `on_error: deny` prevents the allow. See
+[Rego negation](https://www.openpolicyagent.org/docs/policy-language#negation).
+The same behavior applies to unmapped fields such as `input.request.protocol`.
+Presence checks make a rule deny when its data is missing; they do not make an
+unsupported attribute compatible with Authorino.
+
 ## Pipeline integration
 
 A PDP resolver is registered with the manager like any other capability. When

@@ -1,0 +1,11 @@
+# Namespaces for the Kuadrant differential-test testbed.
+# kuadrant-system is created by `make local-setup`; these two are ours.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: api-gateway
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: toystore

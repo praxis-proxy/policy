@@ -19,6 +19,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `engine_settings.kuadrant_compat` (default off) projects Kuadrant
+  `request.id` from the host-supplied `request.request_id` into CEL and OPA
+  inputs. Client headers do not supply this alias. The shared attribute bag
+  and Cedar input are unchanged. (#156)
+
 - Added `secret.<name>`, an assertion source for a static upstream credential.
   A target sitting behind a shared API key had no path short of a token
   delegator, which is per-request exchange machinery that a static credential
@@ -104,7 +109,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - Documented Kuadrant/PPE attribute mapping and policy parity.
   ([#131](https://github.com/praxis-proxy/policy/pull/131))
-
 ## [0.4.0] - 2026-09-29
 
 ### Added

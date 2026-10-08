@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# Enforcement control: even an x-request-id header equal to req-abc must deny,
+# because request.id comes from Envoy's stream metadata. Reuses the positive
+# case's resource so suite.sh can verify the transition from deny to allow.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: cel-req-id
+  namespace: toystore
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: toystore
+  defaults:
+    rules:
+      authorization:
+        request-id-deny-control:
+          patternMatching:
+            patterns:
+              - predicate: "request.id == 'req-abc'"
+      response:
+        unauthorized:
+          headers:
+            x-kuadrant-compat-probe:
+              value: authorino-deny-control

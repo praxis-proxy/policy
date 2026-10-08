@@ -490,6 +490,31 @@ pub trait PdpFactory: Send + Sync {
         &self,
         config: &serde_yaml::Value,
     ) -> Result<std::sync::Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Build a resolver with engine-level context. The default ignores the
+    /// context and delegates to [`Self::build`], so existing factories need no
+    /// change; factories that honor an engine setting (CEL/OPA Kuadrant compat,
+    /// issue #156) override this.
+    /// # Errors
+    ///
+    /// Same as [`Self::build`].
+    fn build_with_context(
+        &self,
+        config: &serde_yaml::Value,
+        ctx: &PdpBuildContext,
+    ) -> Result<std::sync::Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
+        let _ = ctx;
+        self.build(config)
+    }
+}
+
+/// Engine-level context handed to a [`PdpFactory`] at construction time, for
+/// settings that live outside the per-PDP config block (issue #156).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PdpBuildContext {
+    /// `engine_settings.kuadrant_compat`. CEL/OPA factories build a
+    /// compat-enabled resolver when set; others ignore it.
+    pub kuadrant_compat: bool,
 }
 
 /// Where in the request lifecycle a plugin dispatch is happening.
@@ -1100,6 +1125,32 @@ pub mod elicitation_bag_keys {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_with_context_defaults_to_build() {
+        struct F;
+        impl PdpFactory for F {
+            fn kind(&self) -> &str {
+                "f"
+            }
+            fn build(
+                &self,
+                _c: &serde_yaml::Value,
+            ) -> Result<std::sync::Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>>
+            {
+                Err("built via build()".into())
+            }
+        }
+        let ctx = PdpBuildContext {
+            kuadrant_compat: true,
+        };
+        // Default build_with_context must route to build(). `Arc<dyn PdpResolver>`
+        // is not Debug, so match rather than `unwrap_err()` (which needs Ok: Debug).
+        match F.build_with_context(&serde_yaml::Value::Null, &ctx) {
+            Err(e) => assert!(e.to_string().contains("built via build()")),
+            Ok(_) => panic!("default build_with_context must delegate to build()"),
+        }
+    }
 
     #[test]
     fn from_builtin_key_maps_known_dialects() {

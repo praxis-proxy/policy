@@ -1,0 +1,28 @@
+# Test: CEL-REQ-ID — request.id (CEL patternMatching)
+# Attribute: request.id (Authorino: ext_authz HttpRequest.Id, from Envoy stream metadata)
+# The host metadata must be nonempty and differ from both client header values.
+# This checks presence and rejects the supplied header values; it does not
+# establish value parity between the gateways.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: cel-req-id
+  namespace: toystore
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: toystore
+  defaults:
+    rules:
+      authorization:
+        nonempty-request-id-cel:
+          patternMatching:
+            patterns:
+              - predicate: "request.id != '' && request.id != 'req-abc' && request.id != 'other'"
+      response:
+        success:
+          headers:
+            x-kuadrant-compat-probe:
+              plain:
+                value: authorino-allow-request-id

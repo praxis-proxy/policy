@@ -54,6 +54,24 @@ pub fn bag_to_context(
     extra_args: &serde_yaml::Value,
     structured: &StructuredInput,
 ) -> Context<'static> {
+    bag_to_context_with_aliases(bag, extra_args, structured, &[], &[])
+}
+
+/// As [`bag_to_context`], plus Kuadrant compat injections (issue #156), none of
+/// which touch the shared bag:
+/// - `scalar_aliases`: dotted `(key, value)` pairs inserted via the normal path
+///   splitter (safe — these leaf names contain no dots).
+/// - `header_maps`: `(parent_path, entries)` where each `entries` pair is a
+///   `(literal_name, value)` dropped directly under `parent_path` as a literal
+///   key, so a header name containing a dot (`x-tenant.id`) stays one key and
+///   cannot collide with a sibling. Matches Authorino's flat header map.
+pub fn bag_to_context_with_aliases(
+    bag: &AttributeBag,
+    extra_args: &serde_yaml::Value,
+    structured: &StructuredInput,
+    scalar_aliases: &[(String, AttributeValue)],
+    header_maps: &[(&str, &[(String, AttributeValue)])],
+) -> Context<'static> {
     let mut ctx = Context::default();
 
     // 1. Author-supplied extra args first (so the bag overrides on
@@ -78,6 +96,25 @@ pub fn bag_to_context(
     //    author's args block.
     let mut root = build_tree(bag);
     overlay_structured(&mut root, structured);
+
+    // 3. Kuadrant compat aliases (empty unless compat is on). Scalars go
+    //    through the dotted splitter; header maps are inserted as literal keys.
+    for (key, value) in scalar_aliases {
+        let segments: Vec<&str> = key.split('.').collect();
+        insert(&mut root, key, &segments, attr_to_value(value));
+    }
+    for &(parent, entries) in header_maps {
+        for (name, value) in entries {
+            // The header name is a single literal segment (it may contain dots),
+            // appended under the already-split parent path, so e.g. `x-tenant.id`
+            // stays one key rather than nesting. Reuses `insert`, which creates
+            // the parent branches and applies namespace-wins.
+            let mut segments: Vec<&str> = parent.split('.').collect();
+            segments.push(name);
+            insert(&mut root, name, &segments, attr_to_value(value));
+        }
+    }
+
     for (name, node) in root {
         if extra_names.contains(&name) {
             tracing::debug!(
@@ -325,6 +362,49 @@ mod tests {
     fn insert_key(root: &mut BTreeMap<String, Node>, key: &str, leaf: Value) {
         let segments: Vec<&str> = key.split('.').collect();
         insert(root, key, &segments, leaf);
+    }
+
+    #[test]
+    fn scalar_alias_merges_into_request_namespace() {
+        // request.id alias merges alongside the native trace leaf in the same
+        // `request` object; the shared bag is untouched.
+        let mut bag = AttributeBag::new();
+        bag.set("request.request_id", "req-1");
+        let aliases = vec![(
+            "request.id".to_owned(),
+            AttributeValue::String("req-1".into()),
+        )];
+        let ctx = bag_to_context_with_aliases(
+            &bag,
+            &serde_yaml::Value::Null,
+            &StructuredInput::default(),
+            &aliases,
+            &[],
+        );
+        assert!(matches!(
+            run_cel("request.request_id == 'req-1'", &ctx),
+            Ok(Value::Bool(true))
+        ));
+        assert!(matches!(
+            run_cel("request.id == 'req-1'", &ctx),
+            Ok(Value::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn compat_off_resolves_native_request_unchanged() {
+        // Flag-off (no aliases): native trace leaf intact, no injected alias.
+        let mut bag = AttributeBag::new();
+        bag.set("request.request_id", "req-1");
+        let ctx = bag_to_context(&bag, &serde_yaml::Value::Null, &StructuredInput::default());
+        assert!(matches!(
+            run_cel("request.request_id == 'req-1'", &ctx),
+            Ok(Value::Bool(true))
+        ));
+        assert!(matches!(
+            run_cel("has(request.id)", &ctx),
+            Ok(Value::Bool(false))
+        ));
     }
 
     #[test]

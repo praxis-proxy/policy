@@ -27,6 +27,7 @@ help:
 	@echo "  build-release     Build the workspace (release)"
 	@echo "  check             cargo check the workspace"
 	@echo "  check-features    cargo check praxis-policy-builtins per feature"
+	@echo "  check-pdp-deps    Check standalone PDP dependency boundaries"
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
@@ -358,8 +359,22 @@ docs-lint:
 # compiles at all. This is the only gate that builds a partial feature set.
 BUILTIN_FEATURES := jwt api-key oauth elicitation-ciba cedar cel opa valkey secrets-vault
 
+# Check normal edges separately: test builds deliberately pull in the runtime
+# through dev-dependencies, which must not mask a standalone PDP regression.
+.PHONY: check-pdp-deps
+check-pdp-deps:
+	@for f in cedar cel opa; do \
+		pdp_deps=$$($(CARGO) tree -p praxis-policy-builtins --no-default-features \
+			--features "$$f" --edges normal --prefix none --format '{p}' --color never) || exit 1; \
+		if printf '%s\n' "$$pdp_deps" | grep -Eq '^praxis-policy-(core|apl-cmf|apl-runtime) '; then \
+			echo "PDP $$f must not depend on PPE core, CMF, or the runtime on normal edges" >&2; \
+			exit 1; \
+		fi; \
+	done
+	@echo "check-pdp-deps passed"
+
 .PHONY: check-features
-check-features:
+check-features: check-pdp-deps
 	@echo "per-feature check: praxis-policy-builtins ..."
 	@$(CARGO) check -p praxis-policy-builtins --all-targets --no-default-features
 	@for f in $(BUILTIN_FEATURES); do \

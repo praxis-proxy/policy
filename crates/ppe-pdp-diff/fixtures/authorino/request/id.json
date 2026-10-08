@@ -1,0 +1,12 @@
+{
+  "attribute": "request.id",
+  "status": "Mapped",
+  "request": { "method": "POST", "path": "/toys", "id": "req-abc", "headers": { "x-request-id": "other" } },
+  "predicate_cel": "request.id == \"req-abc\"",
+  "predicate_opa": "package t\nallow if { input.request.id == \"req-abc\" }\n",
+  "authorino": {
+    "decision": "allow",
+    "reference": "Synthetic expectation, not captured evidence: Authorino copies ext_authz HttpRequest.Id (Envoy stream metadata). With host ID req-abc and header other, request.id == req-abc should allow. Live values and decisions remain uncaptured."
+  },
+  "expected": "allow"
+}

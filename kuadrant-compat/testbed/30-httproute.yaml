@@ -1,0 +1,38 @@
+# Route for the toystore app. Host api.toystore.com, GET/POST/DELETE on /toys.
+# backendRef resolves to Service `toystore` in THIS namespace (toystore), so the
+# app must be deployed here (see SETUP.md step 4 — apply with `-n toystore`).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: toystore
+  namespace: toystore
+  labels:
+    app: toystore
+spec:
+  hostnames:
+    - api.toystore.com
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: external
+      namespace: api-gateway
+  rules:
+    - name: toys-rw
+      matches:
+        - method: GET
+          path:
+            type: PathPrefix
+            value: /toys
+        - method: POST
+          path:
+            type: PathPrefix
+            value: /toys
+        - method: DELETE
+          path:
+            type: PathPrefix
+            value: /toys
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: toystore
+          port: 80

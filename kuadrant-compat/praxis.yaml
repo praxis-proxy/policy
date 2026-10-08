@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# Local PPE listener for suite.sh. The suite writes policy-active.yaml.
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8095"
+    protocol: http
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: policy
+        config_path: ./policy-active.yaml
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: echo-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: echo-backend
+            endpoints:
+              - "127.0.0.1:9200"
+
+insecure_options:
+  allow_private_endpoints: true

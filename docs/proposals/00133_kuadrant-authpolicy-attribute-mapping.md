@@ -48,8 +48,11 @@ a tiered testing strategy to avoid regression and validate the solution.
 Of RFC 0002's **49 attributes** (verified against the 1.0.x RFC — see
 [References](#references)), **3 map cleanly** to PPE and **14 need adapter
 aliasing to run unchanged** — of those, **6 differ only in path** (value
-preserved) and **8 differ in shape or model** (lossy). **31 have no PPE value
-today**, and **1 is N/A** (Envoy-specific). The policy text is never rewritten;
+preserved) and **8 differ in shape or model** (lossy). **28 have no PPE value
+today**, and **4 are N/A / removed** (`filter_state` is Envoy-specific;
+`request.body`, `request.raw_body`, and `request.context_extensions` are removed
+from the compat surface — not consumed by AuthPolicy, nothing to be compatible
+with). The policy text is never rewritten;
 the adapter aliases the Kuadrant vocabulary at runtime. Counts are
 over the 49 canonical attributes. The matrix also lists illustrative
 `auth.identity.*` JWT sub-claims (`sub`, `iss`, `roles`, …) to show the
@@ -149,41 +152,48 @@ unmappable.
 **Concept.** The HTTP request as Envoy sees it (`CheckRequest` / `HttpRequest`):
 request line, headers, and body. PPE splits this across two roots — the request
 line and headers live under `http.*` (`http.method/path/host/scheme`,
-`http.request_headers.*`), while PPE's own `request.*` is unrelated trace
-metadata (`request.request_id`, `request.timestamp`).
+`http.request_headers.*`), while PPE's own `request.*` is host metadata
+(`request.request_id`, `request.timestamp`, `request.trace_id`).
 
-| Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
-|---|---|---|---|---|
-| `request.id` | String | `request.request_id` | Mapped (path) | `x-request-id` header value |
-| `request.time` | Timestamp | `request.timestamp` | Mapped (path) | Time of first byte; check type compat (string vs protobuf Timestamp) |
-| `request.protocol` | String | — | Gap | HTTP version (1.0/1.1/2/3) |
-| `request.scheme` | String | `http.scheme` | Mapped | |
-| `request.host` | String | `http.host` | Mapped | |
-| `request.method` | String | `http.method` | Mapped | |
-| `request.path` | String | `http.path` | Mapped (path) | *Clean only if the proxy carries the query.* RFC `path` is the raw path **including** the query string. PPE's `http.path` is a single opaque string set by the proxy (`crates/ppe-apl-cmf/src/http.rs`) and read verbatim (`crates/ppe-core/src/http_path.rs`); whether it carries the query is proxy-dependent (external, unverified). If it does not, the query is lost — the same limitation as `url_path` |
-| `request.url_path` | String | `http.path` | Mapped (path) | *Lossy:* RFC `url_path` is URL-**decoded** and **excludes** the query string, i.e. deliberately different from `path`. PPE has only one `http.path` value, so it cannot represent both forms; mapping `url_path` to it is approximate |
-| `request.query` | String | (`http.path`) | Gap | Query string, not populated today. Derivable by splitting `http.path` on `?` **if** the proxy carries the query (proxy-dependent, unverified — see `request.path`); otherwise passed explicitly as `custom.request.query`. A transform, not a re-key — done only in the AuthPolicy input builder so it never alters `http.path` or native rules |
-| `request.headers` | Map\<String,String\> | `http.request_headers.*` | Mapped (shape) | PPE has flat `http.request_headers.<name>`; Kuadrant uses map access `request.headers["name"]` |
-| `request.referer` | String | `http.request_headers.referer` | Mapped (path) | Via headers |
-| `request.useragent` | String | `http.request_headers.user-agent` | Mapped (path) | Via headers |
-| `request.size` | Number | — | Gap | Request size in bytes |
-| `request.body` | JSONString | — | Gap | Body; buffered by Praxis for entity routes (MCP/LLM) only, not pure L7 |
-| `request.raw_body` | Bytes | — | Gap | Raw body bytes |
-| `request.context_extensions` | Map\<String,String\> | `data.*` / `custom.*` | Gap | Operator-configured static key/values from the Envoy `ext_authz` filter config (not client or upstream data). PPE equivalent is operator-authored static data (`data.*`) or host-injected `custom.*`; alias `request.context_extensions.*` to it |
+`Impl` ticks the attributes the compat builder resolves today (issue #156,
+`engine_settings.kuadrant_compat: true`).
+
+| Kuadrant Attribute | Type | PPE Equivalent | Status | Impl | Notes |
+|---|---|---|---|---|---|
+| `request.id` | String | `request.request_id` | Mapped (path) | ✅ | Host must supply proxy request metadata |
+| `request.time` | Timestamp | `request.timestamp` | Mapped (path) | | Time of first byte; check type compat (string vs protobuf Timestamp) |
+| `request.protocol` | String | — | Gap | | HTTP version (1.0/1.1/2/3) |
+| `request.scheme` | String | `http.scheme` | Mapped | | |
+| `request.host` | String | `http.host` | Mapped | | |
+| `request.method` | String | `http.method` | Mapped | | |
+| `request.path` | String | `http.path` | Mapped (path) | | *Clean only if the proxy carries the query.* RFC `path` is the raw path **including** the query string. PPE's `http.path` is a single opaque string set by the proxy (`crates/ppe-apl-cmf/src/http.rs`) and read verbatim (`crates/ppe-core/src/http_path.rs`); whether it carries the query is proxy-dependent (external, unverified). If it does not, the query is lost — the same limitation as `url_path` |
+| `request.url_path` | String | `http.path` | Mapped (path) | | *Lossy:* RFC `url_path` is URL-**decoded** and **excludes** the query string, i.e. deliberately different from `path`. PPE has only one `http.path` value, so it cannot represent both forms; mapping `url_path` to it is approximate |
+| `request.query` | String | (`http.path`) | Gap | | Query string, not populated today. Derivable by splitting `http.path` on `?` **if** the proxy carries the query (proxy-dependent, unverified — see `request.path`); otherwise passed explicitly as `custom.request.query`. A transform, not a re-key — done only in the AuthPolicy input builder so it never alters `http.path` or native rules |
+| `request.headers` | Map\<String,String\> | `http.request_headers.*` | Mapped (shape) | | PPE has flat `http.request_headers.<name>`; Kuadrant uses map access `request.headers["name"]` |
+| `request.referer` | String | `http.request_headers.referer` | Mapped (path) | | Via headers |
+| `request.useragent` | String | `http.request_headers.user-agent` | Mapped (path) | | Via headers |
+| `request.size` | Number | — | Gap | | **Host-measured, not `content-length`.** Envoy sets `request.size` from `stream_info.bytesReceived()` (actual received bytes), *not* the `content-length` header — verified in `CheckRequestUtils::setHttpRequest` (`source/extensions/filters/common/ext_authz/check_request_utils.cc`). So a faithful PPE value must come from praxis surfacing the measured size (Praxis → PPE); deriving from `content-length` would diverge and is not done |
+| `request.body` | JSONString | — | N/A (removed) | | Removed from the compat surface: AuthPolicy does not consume `request.body` (Authorino does not send the body to the authorizer), so there is nothing to be compatible with |
+| `request.raw_body` | Bytes | — | N/A (removed) | | Removed from the compat surface: as `request.body`, not consumed by AuthPolicy |
+| `request.context_extensions` | Map\<String,String\> | — | N/A (removed) | | Removed from the compat surface: operator-configured static `ext_authz` filter values, not carried over. An operator who needs the same values can author them as `data.*` directly |
 
 **Problems.**
 
 - **Namespace split.** Kuadrant `request.*` is the HTTP request; PPE `request.*`
-  is trace metadata and the HTTP data lives under `http.*`. A verbatim
+  is host-supplied metadata and the HTTP data lives under `http.*`. A verbatim
   `request.method` is absent, not wrong — see
   [The `request.*` namespace](#the-request-namespace-hygiene-not-a-value-collision).
 - **`path` vs `url_path`.** PPE has a single `http.path`; it cannot represent
   both the raw (query-bearing) `path` and the decoded, query-stripped `url_path`.
 - **Headers shape.** PPE exposes flat `http.request_headers.<name>`, not the
   map access `request.headers["name"]`.
-- **Body, size, protocol, raw_body are not surfaced** to the L7 filter context
-  today (all Gap). **Query** is not surfaced as its own attribute either, but
-  unlike the others it is derivable from `http.path` — see Mitigation.
+- **Protocol and size are not surfaced** to the L7 filter context today (Gap),
+  both needing Praxis to provide them (size is Envoy's measured
+  `bytesReceived()`, **not** `content-length` — see the `request.size` row).
+  **`body` / `raw_body` / `context_extensions` are removed** from the compat
+  surface (not consumed / not carried over). **Query** is not surfaced as its own
+  attribute either, but unlike the others it is derivable from `http.path` — see
+  Mitigation.
 
 **Mitigation / solutions.**
 
@@ -195,8 +205,11 @@ metadata (`request.request_id`, `request.timestamp`).
   the query — an isolated transform in the AuthPolicy input builder that leaves
   `http.path` and native rules untouched — or passed explicitly as
   `custom.request.query`.
-- **`size` / `protocol` / `body`** require Praxis to surface the data (and PPE to
-  model some) — see the [Unsupported list](#unsupported-no-ppe-value-today).
+- **`size` / `protocol`** require Praxis to surface the data — see the
+  [Unsupported list](#unsupported-no-ppe-value-today). `size` must be Envoy's
+  measured `bytesReceived()`, **not** `content-length` (which would diverge).
+  `body` / `raw_body` / `context_extensions` need nothing: removed from the
+  compat surface.
 
 ### Source attributes (downstream client)
 
@@ -465,8 +478,8 @@ aliasing to run unchanged = path + shape + model = 14; of those, shape + model =
 | Mapped (path) | 6 | Same value, different path — **aliased** (no value lost) |
 | Mapped (shape) | 2 | Same concept, different representation (`request.headers`, `auth.identity` JWT) — **lossy**, aliased |
 | Different model | 6 | Architecturally different (SPIFFE ×2, mTLS, metadata, ratelimit ×2) — **lossy**, aliased |
-| Gap | 31 | No PPE equivalent |
-| N/A | 1 | Envoy-specific (`filter_state`) |
+| Gap | 28 | No PPE equivalent |
+| N/A | 4 | `filter_state` (Envoy-specific); `request.body` / `request.raw_body` / `request.context_extensions` (removed — not consumed by AuthPolicy) |
 
 ## Consolidated unsupported / lossy list
 
@@ -487,7 +500,7 @@ not alter other attributes; or transpiler rewrite ahead-of-time); `N/A`.
 
 | Attribute | Kind | Why it differs | Solution |
 |---|---|---|---|
-| `request.id` | path | → `request.request_id` | Alias |
+| `request.id` | path | → host-supplied `request.request_id` | Alias; host metadata equivalence requires verification |
 | `request.time` | path | → `request.timestamp`; string vs protobuf Timestamp type | Alias |
 | `request.path` | path | RFC `path` includes the query string; PPE `http.path` preserves the full value only if the proxy carries the query (unverified), else the query is lost | Alias |
 | `request.url_path` | path | PPE has only `http.path`; cannot represent `url_path`'s decoded, query-stripped form distinctly from raw `path` | Alias |
@@ -504,16 +517,14 @@ not alter other attributes; or transpiler rewrite ahead-of-time); `N/A`.
 | Attribute | Why unsupported | Solution |
 |---|---|---|
 | `request.query` | Not populated today; the proxy has it (`req.uri.query()`) but doesn't pass it as an attribute | Alias (transform: split `http.path` on `?`) when the proxy carries the query; else Praxis → PPE (`custom.request.query`) |
-| `request.context_extensions` | Operator-configured static key/values from the Envoy `ext_authz` filter config; no automatic equivalent, but the operator can author the same static values as `data.*` (or inject `custom.*`) | Alias (operator authors `data.*`, alias `request.context_extensions.*`) |
+| `request.size` | Not surfaced. Must match Envoy's measured `bytesReceived()` — **not** `content-length`, which would diverge | Praxis → PPE (host surfaces the measured size) |
 | `source.address` | Client IP known only to proxy | Praxis → PPE |
 | `connection.mtls` state (raw) | mTLS state at listener (`downstream_tls` + verified peer cert) not passed; plain TLS alone does not satisfy it | Praxis → PPE |
 | `source.principal` (mTLS) | `peer_identity` available but `WorkloadIdentity` not populated | Praxis → PPE |
 | `request.protocol` | HTTP version not surfaced to filter context | Praxis + PPE |
-| `request.size` | Not surfaced | Praxis + PPE |
 | `source.port` / `destination.*` | Not surfaced to filter context | Praxis + PPE |
 | `source.service` / `source.labels` | Mesh data; may not exist off-Envoy | Praxis + PPE |
 | `source.certificate` / `connection.*` certs, SNI, tls_version, id | Not surfaced | Praxis + PPE |
-| `request.body` / `request.raw_body` | Buffered for entity routes (MCP/LLM) only, not pure L7 | Praxis (enable buffering) + PPE (surface for L7) |
 | `auth.metadata` | No metadata pipeline phase — biggest functional gap | PPE: plugin (callout) *or* Praxis fetch+inject |
 | `auth.authorization` / `auth.response` / `auth.callbacks` | No incremental auth-JSON model | PPE: plugin (pipeline phases) |
 | `auth.identity` (API key) Secret shape, `.metadata.annotations.*`, `.data.*` | Plugin exists (`identity_api_key`) but projects fields onto typed slots; raw `k8s.Secret` shape not exposed | Alias (`record_map` projection) |
@@ -532,6 +543,7 @@ them without PPE changes:
 | TLS state | `ctx.downstream_tls` | `custom.connection.tls` (TLS presence only; mTLS additionally needs a verified peer cert — see `peer_identity`) |
 | mTLS peer identity | `ctx.peer_identity.spiffe_id` | populate `WorkloadIdentity` |
 | Query string | `req.uri.query()` | `custom.request.query` |
+| Measured request size | host `bytesReceived()`-equivalent | `request.size` (Envoy uses the measured size, not `content-length`) |
 
 ## Compatibility approach
 
@@ -576,19 +588,28 @@ unparser, and the engine only ingests Rego source (`add_policy`).
 
 ### The `request.*` namespace (hygiene, not a value collision)
 
-PPE's *own* `request.*` bag is environment/trace metadata
+PPE's *own* `request.*` bag is host-supplied metadata
 (`request.request_id`, `request.timestamp`, `request.trace_id`), **not**
-the HTTP request. Kuadrant's `request.*` is the HTTP request
+the HTTP request. Its request ID and distributed trace ID are distinct.
+Kuadrant's `request.*` is the HTTP request
 (`request.method`, `request.path`, …). So the Kuadrant `request.*`
 namespace splits across two PPE roots — `request.method` → `http.method`,
-`request.id` → `request.request_id`.
+`request.id` → host-supplied `request.request_id`.
+
+Authorino reads ext_authz `HttpRequest.Id`, which Envoy populates from its
+stream ID ([Authorino source](https://github.com/Kuadrant/authorino/blob/main/pkg/service/well_known_attributes.go),
+[Envoy source](https://github.com/envoyproxy/envoy/blob/main/source/extensions/filters/common/ext_authz/check_request_utils.cc)).
+The alias must not be sourced from an inbound `x-request-id` header. The host
+must provide equivalent proxy metadata, and actual Authorino values must be
+captured before claiming value parity. Current `request.id` fixtures are
+synthetic mapping tests rather than captured reference evidence.
 
 The 00130 spike checked whether this is a hard collision and found it is
 not: a verbatim `request.method` never overwrites or reads a trace value — it is simply
 absent until aliased, and a *positive* naive predicate on it fails **closed**
-(see the naive-arm evidence below), not to a wrong value. This fail-closed
-guarantee holds only for positive references; a *negated* reference to absent
-data fails **open** — see
+(see the naive-arm evidence below), not to a wrong value. That result does not
+establish a general fail-closed guarantee: Rego negation of an undefined value
+and CEL absence-as-permission checks can allow — see
 [Caveat: absent data fails open under negation](#caveat-absent-data-fails-open-under-negation).
 
 The residual concern is **object identity**, not just namespace hygiene. A shared
@@ -721,9 +742,11 @@ allow if {
 When PPE has no `auth.metadata`, the inner reference is *undefined*; in Rego
 `not <undefined>` evaluates to **true**, so `allow` fires. Authorino, which
 fetches the metadata, denies a suspended account; PPE **allows** it. The same
-pattern applies to any `not <absent>` / absence-as-permission idiom, in both
-Rego and CEL. `on_error: deny` does **not** catch this — there is no error, the
-predicate simply evaluates to allow.
+behavior applies to Rego negation of undefined expressions. In CEL, direct
+selection of a missing field errors and denies under the default error mode,
+but an absence-as-permission check such as `!has(request.protocol)` can allow
+when the containing `request` namespace exists. `on_error: deny` does **not**
+catch a successful allow result in either engine.
 
 So a missing mapping can turn an Authorino *deny* into a PPE *allow*. This makes
 mapping completeness security-critical for any imported policy that reasons over
@@ -734,6 +757,14 @@ policies requiring attributes PPE cannot supply, and host data that *can* be
 captured must be present (or the request denied before evaluation) rather than
 silently absent. Fixtures must prove a missing mapping cannot flip an Authorino
 deny into a PPE allow.
+
+The implemented request-ID slice adds only `request.id` and preserves these
+language semantics. It does not declare or validate imported policy attribute
+dependencies, or automatically require host metadata. Policies needing an ID
+must require its presence explicitly; policies needing unmapped request
+attributes remain unsupported in this slice. The
+[implemented contract and presence-check examples](../content/apl/pdp.md#required-attributes-and-missing-values)
+show the APL gate and CEL/Rego checks, tested with missing and empty host IDs.
 
 ## Open questions
 
@@ -751,8 +782,9 @@ deny into a PPE allow.
    If common, PPE needs a post-auth enrichment hook.
 4. **Metadata phase** — in scope for the compatibility layer or
    explicitly out?
-5. **`request.body` for pure L7** — enable body buffering for
-   body-inspecting policies, or out of scope?
+5. **`request.body` / `request.raw_body`** — *resolved:* **out of scope.**
+   AuthPolicy does not currently consume these attributes, so there is nothing to
+   be compatible with; marked N/A. Revisit only if AuthPolicy adds body support.
 6. **Ownership** — the quick-win `custom.*` injections are Praxis-side
    (proxy repo). Who owns them?
 
