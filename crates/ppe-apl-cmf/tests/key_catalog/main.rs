@@ -604,40 +604,82 @@ fn bag_visible_to(capabilities: &[&str]) -> AttributeBag {
     bag
 }
 
+/// Everything the bridge emits with no filtering, which is the ground truth a
+/// filtered view is compared against.
+///
+/// Comparing against this rather than against written-out expectations is what
+/// catches a value being emptied as well as a key being dropped. A gated
+/// `StringSet` is withheld by being emptied rather than removed, so "the key
+/// is present" is not evidence that anything survived.
+///
+/// The bound: this compares a filtered view against an unfiltered one, so it
+/// catches what filtering does and not what an extractor writes. An extractor
+/// that emitted an empty set everywhere would agree with itself and pass. The
+/// per-module tests cover that half, asserting the values a populated slot
+/// produces.
+fn bag_unfiltered() -> AttributeBag {
+    let mut bag = AttributeBag::new();
+    extract_extensions(&fully_populated(), &mut bag);
+    bag
+}
+
+/// The values a bag carries for one catalog entry, sorted by key.
+///
+/// A family contributes one pair per member, an exact entry at most one.
+fn values_for(entry: &KeyEntry, bag: &AttributeBag) -> Vec<(String, AttributeValue)> {
+    let mut found: Vec<(String, AttributeValue)> = bag
+        .iter()
+        .filter(|(key, _)| match entry.shape {
+            Shape::Exact => *key == entry.key,
+            Shape::Family => {
+                let prefix = entry.literal_prefix();
+                key.len() > prefix.len() && key.starts_with(prefix)
+            },
+        })
+        .map(|(key, value)| (key.to_owned(), value.clone()))
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
 #[test]
 fn a_plugin_holding_nothing_sees_exactly_the_ungated_keys() {
+    let unfiltered = bag_unfiltered();
     let bag = bag_visible_to(&[]);
 
     let mut leaked: Vec<&str> = Vec::new();
-    let mut withheld: Vec<&str> = Vec::new();
+    let mut withheld: Vec<String> = Vec::new();
     for entry in CATALOG {
-        let present = match entry.shape {
-            Shape::Exact => bag.contains(entry.key),
-            Shape::Family => bag.iter().any(|(key, _)| {
-                let prefix = entry.literal_prefix();
-                key.len() > prefix.len() && key.starts_with(prefix)
-            }),
-        };
-        // A gated key is withheld in one of two ways, and both count as
-        // withheld. A scalar disappears with its slot. A `StringSet` that
-        // follows the present-empty contract stays, emptied, because a strict
-        // PDP treats a missing key as an error rather than as an empty
-        // collection; `security.labels` is the case that does this. So the
-        // question is whether a value survived, not whether a key did.
-        let carries_data = match entry.shape {
-            Shape::Exact => bag.iter().any(|(key, value)| {
-                key == entry.key && !matches!(value, AttributeValue::StringSet(s) if s.is_empty())
-            }),
-            Shape::Family => present,
-        };
-        match (entry.gating, carries_data, present) {
-            (Gating::Capability(_), true, _) => leaked.push(entry.key),
-            (Gating::Ungated, _, false) => withheld.push(entry.key),
-            _ => {},
+        let truth = values_for(entry, &unfiltered);
+        let seen = values_for(entry, &bag);
+        match entry.gating {
+            // Nothing gates it, so every value survives untouched. Comparing
+            // the values and not just the keys is what catches a set arriving
+            // emptied, which key presence alone would read as success.
+            Gating::Ungated => {
+                if seen != truth {
+                    withheld.push(format!(
+                        "{}: unfiltered {truth:?}, with no capabilities {seen:?}",
+                        entry.key
+                    ));
+                }
+            },
+            // A capability gates it, so nothing of it may survive. A scalar
+            // disappears with its slot; a `StringSet` following the
+            // present-empty contract stays and is emptied, which is why this
+            // asks whether a value survived rather than whether a key did.
+            Gating::Capability(_) => {
+                let survived = seen.iter().any(
+                    |(_, value)| !matches!(value, AttributeValue::StringSet(set) if set.is_empty()),
+                );
+                if survived {
+                    leaked.push(entry.key);
+                }
+            },
         }
     }
     leaked.sort_unstable();
-    withheld.sort_unstable();
+    withheld.sort();
 
     assert!(
         leaked.is_empty(),
@@ -647,34 +689,35 @@ fn a_plugin_holding_nothing_sees_exactly_the_ungated_keys() {
     );
     assert!(
         withheld.is_empty(),
-        "the catalog says these need no capability, but filtering withheld \
-         them: {withheld:?}"
+        "the catalog says these need no capability, but filtering changed what \
+         they carry: {withheld:#?}"
     );
 }
 
 #[test]
-fn each_gated_key_appears_once_its_capability_is_held() {
-    let mut missing: Vec<(&str, &str)> = Vec::new();
+fn each_gated_key_arrives_intact_once_its_capability_is_held() {
+    let unfiltered = bag_unfiltered();
+    let mut wrong: Vec<String> = Vec::new();
     for entry in CATALOG {
         let Gating::Capability(cap) = entry.gating else {
             continue;
         };
-        let bag = bag_visible_to(&[cap]);
-        let present = match entry.shape {
-            Shape::Exact => bag.contains(entry.key),
-            Shape::Family => bag.iter().any(|(key, _)| {
-                let prefix = entry.literal_prefix();
-                key.len() > prefix.len() && key.starts_with(prefix)
-            }),
-        };
-        if !present {
-            missing.push((entry.key, cap));
+        let truth = values_for(entry, &unfiltered);
+        let seen = values_for(entry, &bag_visible_to(&[cap]));
+        // The whole value, not just the key: a regression that empties a set
+        // while keeping its key would otherwise look like success.
+        if seen != truth {
+            wrong.push(format!(
+                "{} under {cap}: unfiltered {truth:?}, filtered {seen:?}",
+                entry.key
+            ));
         }
     }
-    missing.sort_unstable();
+    wrong.sort();
     assert!(
-        missing.is_empty(),
-        "holding the declared capability still does not produce these keys, so \
-         the catalog names the wrong one: {missing:?}"
+        wrong.is_empty(),
+        "holding the declared capability does not reproduce what the bridge \
+         emits unfiltered, so the catalog names the wrong capability or the \
+         filter drops something it should not: {wrong:#?}"
     );
 }
