@@ -53,7 +53,7 @@ pub fn bag_to_context(
     bag: &AttributeBag,
     extra_args: &serde_yaml::Value,
     structured: &StructuredInput,
-) -> Context<'static> {
+) -> Context<'static, 'static> {
     let mut ctx = Context::default();
 
     // 1. Author-supplied extra args first (so the bag overrides on
@@ -296,7 +296,7 @@ mod tests {
 
     use serde_json::json;
 
-    fn run_cel(expr: &str, ctx: &Context<'static>) -> Result<Value, String> {
+    fn run_cel(expr: &str, ctx: &Context<'static, 'static>) -> Result<Value, String> {
         let program = cel::Program::compile(expr).map_err(|e| e.to_string())?;
         program.execute(ctx).map_err(|e| e.to_string())
     }
@@ -306,7 +306,10 @@ mod tests {
         matches!(run_cel(expr, &ctx), Ok(Value::Bool(true)))
     }
 
-    fn structured_ctx(bag: &AttributeBag, structured: &StructuredInput) -> Context<'static> {
+    fn structured_ctx(
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Context<'static, 'static> {
         bag_to_context(bag, &serde_yaml::Value::Null, structured)
     }
 
@@ -318,7 +321,7 @@ mod tests {
         StructuredInput::new(Some(Arc::new(document)), None)
     }
 
-    fn holds(expr: &str, ctx: &Context<'static>) -> bool {
+    fn holds(expr: &str, ctx: &Context<'static, 'static>) -> bool {
         matches!(run_cel(expr, ctx), Ok(Value::Bool(true)))
     }
 

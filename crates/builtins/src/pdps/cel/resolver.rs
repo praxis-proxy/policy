@@ -92,7 +92,7 @@ pub const DEFAULT_MAX_CACHE_ENTRIES: usize = 1024;
 /// The boxed callback is `Send + Sync + 'static` because the resolver
 /// is shared across worker threads via `Arc<dyn PdpResolver>` and lives
 /// for the process.
-pub type CelFunctionSetup = dyn Fn(&mut Context<'static>) + Send + Sync + 'static;
+pub type CelFunctionSetup = dyn Fn(&mut Context<'static, 'static>) + Send + Sync + 'static;
 
 /// Evaluates CEL expressions, caching compiled programs under a bounded cap.
 pub struct CelResolver {
@@ -168,13 +168,13 @@ impl CelResolver {
     ///     ctx.add_function("matches_prefix",
     ///         |s: Arc<String>, prefix: Arc<String>| -> bool {
     ///             s.starts_with(prefix.as_str())
-    ///         });
+    ///         }).expect("matches_prefix is not a stdlib name");
     ///     // Clock helper — authors can write `now() < session.expires_at`.
     ///     ctx.add_function("now", || -> i64 {
     ///         std::time::SystemTime::now()
     ///             .duration_since(std::time::UNIX_EPOCH)
     ///             .map(|d| d.as_secs() as i64).unwrap_or(0)
-    ///     });
+    ///     }).expect("now is not a stdlib name");
     /// });
     /// ```
     ///
@@ -190,7 +190,7 @@ impl CelResolver {
     /// renaming/removing functions that live policies depend on.
     pub fn with_functions<F>(mut self, setup: F) -> Self
     where
-        F: Fn(&mut Context<'static>) + Send + Sync + 'static,
+        F: Fn(&mut Context<'static, 'static>) + Send + Sync + 'static,
     {
         self.function_setups.push(Arc::new(setup));
         self
@@ -630,7 +630,7 @@ fn eval_error_category(error: &ExecutionError, refs: &ExpressionReferences<'_>) 
         },
         ExecutionError::UnexpectedType { .. } => "unexpected type".to_owned(),
         ExecutionError::NoSuchKey(_) => "no such key".to_owned(),
-        ExecutionError::NoSuchOverload => "no such overload".to_owned(),
+        ExecutionError::NoSuchOverload(_) => "no such overload".to_owned(),
         ExecutionError::UndeclaredReference(name) => named(
             "undeclared reference to",
             name,
@@ -790,10 +790,12 @@ mod tests {
     async fn custom_function_registration_round_trips() {
         let r = CelResolver::new()
             .with_functions(|ctx| {
-                ctx.add_function("twice", |n: i64| -> i64 { n * 2 });
+                ctx.add_function("twice", |n: i64| -> i64 { n * 2 })
+                    .expect("twice is not a stdlib name");
             })
             .with_functions(|ctx| {
-                ctx.add_function("shout", |s: Arc<String>| -> String { s.to_uppercase() });
+                ctx.add_function("shout", |s: Arc<String>| -> String { s.to_uppercase() })
+                    .expect("shout is not a stdlib name");
             });
         let bag = bag_with(&[("subject.id", "alice")]);
 
@@ -820,34 +822,55 @@ mod tests {
         );
     }
 
+    /// In v0.15, `Context::add_function` returns `Err` when the name
+    /// conflicts with any existing overload in the environment (including stdlib).
+    /// `size` has stdlib overloads, so an i64 overload cannot be added via
+    /// `add_function` on a default context — use `Env::add_overload!` instead.
+    /// The stdlib string overload still works; `size(int)` is not registered.
     #[tokio::test]
-    async fn custom_size_stdlib_overload_then_int_fallback() {
+    async fn custom_size_stdlib_overload_conflicts_and_stdlib_still_works() {
         let r = CelResolver::new().with_functions(|ctx| {
-            ctx.add_function("size", |_n: i64| -> i64 { 777 });
+            // Returns Err — `size` conflicts with stdlib overloads; the int
+            // overload is NOT registered. Use Env::add_overload! to extend stdlib.
+            let _ = ctx.add_function("size", |_n: i64| -> i64 { 777 });
         });
         let bag = bag_with(&[("subject.id", "alice")]);
 
+        // Stdlib size(string) is unaffected.
         let stdlib = r
             .evaluate(&cel_call("size('hello') == 5"), &bag)
             .await
             .unwrap();
         assert_eq!(stdlib.decision, Decision::Allow);
 
-        let fallback = r
+        // size(int) was never registered (conflict prevented it), so the
+        // expression errors at eval time → fail-closed Deny.
+        let no_overload = r
             .evaluate(&cel_call("size(42) == 777"), &bag)
             .await
             .unwrap();
-        assert_eq!(fallback.decision, Decision::Allow);
+        assert!(
+            matches!(no_overload.decision, Decision::Deny { .. }),
+            "size(int) has no overload in default context; must fail-closed",
+        );
     }
 
+    /// For non-stdlib names, a later `with_functions` callback can overwrite
+    /// an earlier registration of the same name (no conflict in the env).
+    /// Stdlib names (`size`, etc.) return `Err` from `add_function` and are
+    /// not overwritten.
     #[tokio::test]
     async fn later_custom_function_overwrites_earlier_one() {
         let r = CelResolver::new()
             .with_functions(|ctx| {
-                ctx.add_function("magic", |n: i64| -> i64 { n + 100 });
+                ctx.add_function("magic", |n: i64| -> i64 { n + 100 })
+                    .expect("magic is not a stdlib name");
             })
             .with_functions(|ctx| {
-                ctx.add_function("magic", |n: i64| -> i64 { n + 999 });
+                // A second registration of the same non-stdlib name overwrites the
+                // first (no env-level conflict, so add_function succeeds again).
+                ctx.add_function("magic", |n: i64| -> i64 { n + 999 })
+                    .expect("magic overwrite is allowed for non-stdlib names");
             });
         let bag = bag_with(&[("subject.id", "alice")]);
 
