@@ -11,9 +11,12 @@
 //
 // # Source-of-truth invariants
 //
-// * `CAP_*` names match `praxis_policy_core::extensions::filter::filter_extensions`
-//   verbatim. praxis-policy-core is authoritative — if it changes a cap name,
-//   bump here and update the mapping table.
+// * Every `CAP_*` name is a capability praxis-policy-core recognises, which
+//   `every_capability_name_is_one_core_recognises` holds by deserializing each
+//   through core's own serde impl. core is authoritative: a rename there fails
+//   that test rather than drifting. There is deliberately no constant for a
+//   slot core leaves `Unrestricted`, because no capability gates one and
+//   naming it would offer a config validator a name that grants nothing.
 // * A `BAG_*` prefix exists where a key is composed with a variable, as
 //   `format!("{BAG_ROLE_PREFIX}{role}")`. A key that is a fixed string is
 //   written as a literal in its extractor, deliberately: a prefix constant
@@ -50,26 +53,10 @@ pub const CAP_READ_DELEGATED_TOKENS: &str = "read_delegated_tokens";
 pub const CAP_READ_DELEGATION: &str = "read_delegation";
 /// Capability permitting a plugin to read agent session and lineage.
 pub const CAP_READ_AGENT: &str = "read_agent";
-/// Capability permitting a plugin to read host operational metadata.
-pub const CAP_READ_META: &str = "read_meta";
-/// Capability permitting a plugin to read request environment.
-pub const CAP_READ_REQUEST: &str = "read_request";
 /// Capability permitting a plugin to read HTTP headers.
 pub const CAP_READ_HEADERS: &str = "read_headers";
-/// Capability permitting a plugin to read model identity.
-pub const CAP_READ_LLM: &str = "read_llm";
 /// Capability permitting a plugin to read the host-parsed LLM request document.
 pub const CAP_READ_LLM_REQUEST: &str = "read_llm_request";
-/// Capability permitting a plugin to read tool and resource metadata.
-pub const CAP_READ_MCP: &str = "read_mcp";
-/// Capability permitting a plugin to read completion metadata.
-pub const CAP_READ_COMPLETION: &str = "read_completion";
-/// Capability permitting a plugin to read message origin.
-pub const CAP_READ_PROVENANCE: &str = "read_provenance";
-/// Capability permitting a plugin to read framework context.
-pub const CAP_READ_FRAMEWORK: &str = "read_framework";
-/// Capability permitting a plugin to read host-supplied custom values.
-pub const CAP_READ_CUSTOM: &str = "read_custom";
 
 /// Capability permitting a plugin to append to session security labels.
 pub const CAP_APPEND_LABELS: &str = "append_labels";

@@ -721,3 +721,54 @@ fn each_gated_key_arrives_intact_once_its_capability_is_held() {
          filter drops something it should not: {wrong:#?}"
     );
 }
+
+/// Every capability against every gated key, not just the declared pair.
+///
+/// The two tests above cover holding nothing and holding the one capability a
+/// key declares. Neither says what a *different* capability reveals, which is
+/// where an over-permissive gate would hide: a filter that leaked
+/// `security.labels` to `read_meta` would pass both.
+///
+/// What this cannot assert is that a gated value is withheld from every other
+/// capability, because that is false here by design. `build_filtered_subject`
+/// includes `id` and `subject_type` with any subject sub-capability, so
+/// `read_roles` reveals `subject.id`, and `capability_namespaces` already
+/// records that implication. So the claim is the weaker and truer one: the
+/// filter reveals a value exactly when the table says the capability unlocks
+/// it. That binds the table's implications to the filter for all pairs rather
+/// than only the declared one.
+#[test]
+fn a_capability_reveals_exactly_what_the_table_claims() {
+    let mut wrong: Vec<String> = Vec::new();
+    for cap in known_read_capabilities() {
+        let bag = bag_visible_to(&[cap]);
+        for entry in CATALOG {
+            if entry.gating == Gating::Ungated {
+                // Covered by the no-capability test, which asserts these
+                // survive whatever is held.
+                continue;
+            }
+            let claimed = capability_namespaces(cap)
+                .iter()
+                .any(|p| prefix_covers(p, &probe_key(entry)));
+            let survived = values_for(entry, &bag).iter().any(
+                |(_, value)| !matches!(value, AttributeValue::StringSet(set) if set.is_empty()),
+            );
+            if claimed != survived {
+                wrong.push(format!(
+                    "{} under {cap}: table says unlocked={claimed}, filtering \
+                     left a value={survived}",
+                    entry.key
+                ));
+            }
+        }
+    }
+    wrong.sort();
+    assert!(
+        wrong.is_empty(),
+        "`capability_namespaces` and `filter_extensions` disagree about what a \
+         capability reveals. A table that claims more than the filter gives \
+         understates a plugin's reach; a filter that gives more than the table \
+         claims is a gate that does not hold: {wrong:#?}"
+    );
+}
