@@ -354,11 +354,13 @@ declaring less actually shows a plugin less.
 `write:payroll`" is not. A plugin that needs per-hop grants reads the typed
 chain.
 
-Putting any of it on the bag first requires deciding what aggregation means. A
-union over `scopes_granted` reports a scope one hop granted and a later hop
-narrowed, so the key would claim more authority than the chain conveys, and an
-author reading it would not be able to tell. Per-hop `strategy` and
-`ttl_seconds` have no meaningful union at all. Indexing by position
+Putting any of it on the bag first requires deciding what aggregation means,
+and the answer differs per field. A union over `scopes_granted` reports a scope
+one hop granted and a later hop narrowed, so the key would claim more authority
+than the chain conveys, and an author reading it could not tell. `from_cache`
+wants an any-hop flag rather than a union, and whether one cached hop taints
+the whole chain is an operator's decision. Per-hop `strategy` and `ttl_seconds`
+have no meaningful union at all. Indexing by position
 (`delegation.hop.2.scopes`) is not an answer either, since chain position is
 not stable across requests.
 

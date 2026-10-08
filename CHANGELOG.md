@@ -74,6 +74,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 ### Removed
 
 - **Breaking for Rust callers of `praxis_policy_apl_cmf::constants`:** removed
+  `CAP_READ_META`, `CAP_READ_REQUEST`, `CAP_READ_LLM`, `CAP_READ_MCP`,
+  `CAP_READ_COMPLETION`, `CAP_READ_PROVENANCE`, `CAP_READ_FRAMEWORK` and
+  `CAP_READ_CUSTOM`, along with their `capability_namespaces` entries. None is
+  a `Capability` in `praxis-policy-core`: these are the eight slots core leaves
+  unrestricted, so no capability gates them and there is nothing to name.
+  Declaring one in a plugin's `capabilities:` granted nothing, and
+  `known_read_capabilities` offered it to a config validator as recognised.
+  `capability_namespaces` still answers with no prefixes for these names, now
+  through its unknown-capability path. A test deserializes every remaining
+  `CAP_*` through core's own serde impl, so a rename in core fails here instead
+  of drifting.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- **Breaking for Rust callers of `praxis_policy_apl_cmf::constants`:** removed
   `BAG_META_PREFIX`, `BAG_REQUEST_PREFIX`, `BAG_LLM_PREFIX`, `BAG_MCP_PREFIX`,
   `BAG_COMPLETION_PREFIX`, `BAG_PROVENANCE_PREFIX` and
   `BAG_FRAMEWORK_PREFIX`. Their only consumer was the capability table, which
