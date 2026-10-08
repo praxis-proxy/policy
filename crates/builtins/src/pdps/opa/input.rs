@@ -144,6 +144,9 @@ fn json_to_rego(value: &Value) -> regorus::Value {
 fn bag_to_map(bag: &AttributeBag) -> Map<String, Value> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
+        if matches!(value, AttributeValue::NonScalar) {
+            continue;
+        }
         let segments: Vec<&str> = key.split('.').collect();
         insert(&mut root, key, &segments, attr_to_value(value));
     }
@@ -223,6 +226,7 @@ fn node_to_value(node: Node) -> Value {
 /// Convert one `AttributeValue` to a JSON value.
 fn attr_to_value(attr: &AttributeValue) -> Value {
     match attr {
+        AttributeValue::NonScalar => Value::Null,
         AttributeValue::Bool(b) => Value::Bool(*b),
         AttributeValue::Int(i) => Value::Number((*i).into()),
         AttributeValue::Float(f) => float_to_value(*f),

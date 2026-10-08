@@ -78,9 +78,7 @@ async fn a_dependency_on_loopback_is_refused_with_the_egress_code() {
             "https://[::1]:9/ciba",
             "adjust_compensation",
             json!({ "employee_id": "EMP-001234", "amount": 25_000 }),
-            // A failed elicitation denies under its step; the plugin's code
-            // is in the reason. See `ciba.rs`.
-            "routes.tool:adjust_compensation.pre_invocation[1]",
+            "elicitation.egress_denied",
         ),
     ];
     for (row, from, to, tool, args, code) in rows {

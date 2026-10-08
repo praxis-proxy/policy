@@ -59,6 +59,9 @@ pub struct ElicitationPluginInvoker {
     extensions: Arc<Mutex<Extensions>>,
     /// Pre-resolved per-route elicitation lineup (`name → entry`).
     plan: Arc<RouteDispatchPlan>,
+    tool: String,
+    requester: String,
+    peek: bool,
 }
 
 impl ElicitationPluginInvoker {
@@ -75,7 +78,18 @@ impl ElicitationPluginInvoker {
             engine,
             extensions,
             plan,
+            tool: String::new(),
+            requester: String::new(),
+            peek: false,
         }
+    }
+
+    /// Attach the live route and requester for approval binding.
+    pub fn with_context(mut self, tool: String, requester: String, peek: bool) -> Self {
+        self.tool = tool;
+        self.requester = requester;
+        self.peek = peek;
+        self
     }
 
     /// Resolve the route's `elicit` entry for `plugin_name`, or
@@ -117,13 +131,15 @@ impl ElicitationPluginInvoker {
             .await;
 
         if !result.continue_processing {
-            let detail = result
-                .violation
-                .map(|v| format!("{}: {}", v.code, v.reason))
-                .unwrap_or_else(|| "denied without violation detail".to_owned());
-            return Err(ElicitationError::Handler(format!(
-                "{op}: plugin `{plugin_name}` halted: {detail}"
-            )));
+            return Err(match result.violation {
+                Some(v) => ElicitationError::HandlerViolation {
+                    code: v.code,
+                    reason: format!("{op}: plugin `{plugin_name}` halted: {}", v.reason),
+                },
+                None => ElicitationError::Handler(format!(
+                    "{op}: plugin `{plugin_name}` halted without violation detail"
+                )),
+            });
         }
 
         ElicitationPayload::from_pipeline_result(&result).ok_or_else(|| {
@@ -162,7 +178,8 @@ impl ElicitationInvoker for ElicitationPluginInvoker {
         let payload = apply_step_inputs(
             ElicitationPayload::new(ElicitationOp::Dispatch, step.kind.as_str(), resolved_from),
             step,
-        );
+        )
+        .with_binding(&self.tool, &self.requester);
         let out = self.invoke("dispatch", &step.plugin_name, payload).await?;
 
         // The handler must mint an id on dispatch.
@@ -189,7 +206,8 @@ impl ElicitationInvoker for ElicitationPluginInvoker {
             ElicitationPayload::new(ElicitationOp::Check, step.kind.as_str(), "")
                 .with_elicitation_id(id),
             step,
-        );
+        )
+        .with_binding(&self.tool, &self.requester);
         let out = self.invoke("check", &step.plugin_name, payload).await?;
 
         match out.status {
@@ -216,7 +234,9 @@ impl ElicitationInvoker for ElicitationPluginInvoker {
             ElicitationPayload::new(ElicitationOp::Validate, step.kind.as_str(), "")
                 .with_elicitation_id(id),
             step,
-        );
+        )
+        .with_binding(&self.tool, &self.requester)
+        .with_peek(self.peek);
         let out = self.invoke("validate", &step.plugin_name, payload).await?;
 
         Ok(ElicitationValidation {

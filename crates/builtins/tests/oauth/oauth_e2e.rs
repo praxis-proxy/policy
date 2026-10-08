@@ -32,6 +32,7 @@
 )]
 use std::sync::Arc;
 
+use base64::Engine as _;
 use praxis_policy_core::http::{HttpTransport, HttpTransportError};
 use praxis_policy_core::http_testing::FakeTransport;
 
@@ -974,7 +975,8 @@ async fn a_leg2_success_with_no_access_token_denies() {
 async fn mint_with(body: String, attenuation: Option<AttenuationConfig>) -> DelegationPayload {
     let http = idp(200, &body);
 
-    let mut payload = DelegationPayload::new("caller-bearer-token-bytes", "get_compensation")
+    let caller = test_jwt(json!({ "sub": "alice" }));
+    let mut payload = DelegationPayload::new(caller, "get_compensation")
         .with_target_type(TargetType::Tool)
         .with_target_audience("https://hr.example.com")
         .with_auth_enforced_by(AuthEnforcedBy::Target);
@@ -990,6 +992,11 @@ async fn mint_with(body: String, attenuation: Option<AttenuationConfig>) -> Dele
         result.violation
     );
     DelegationPayload::from_pipeline_result(&result).expect("a minted payload")
+}
+
+fn test_jwt(claims: serde_json::Value) -> String {
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
+    format!("header.{encoded}.signature")
 }
 
 fn attenuation_with_ttl(ttl: Option<u64>) -> AttenuationConfig {
@@ -1068,7 +1075,7 @@ async fn a_token_response_with_no_expiry_gets_a_short_default() {
 async fn the_issued_token_type_is_recorded_whether_or_not_the_idp_sends_one() {
     let echoed = mint_with(
         json!({
-            "access_token": "t",
+            "access_token": test_jwt(json!({ "sub": "alice", "aud": "https://hr.example.com" })),
             "expires_in": 300,
             "issued_token_type": "urn:ietf:params:oauth:token-type:jwt",
         })

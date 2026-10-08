@@ -24,12 +24,6 @@ use super::{Fault, assert_fail_closed};
 /// The protocol code a pending elicitation carries.
 const PENDING: i64 = -32_120;
 
-/// The `require_approval` step. A failed elicitation halts as a deny whose
-/// code is the step's rule source; the plugin's code is in the reason.
-/// `docs/content/apl/elicitation.md` documents channel errors as failing
-/// closed and names no code.
-const APPROVAL_STEP: &str = "routes.tool:adjust_compensation.pre_invocation[1]";
-
 /// Assert the deny names the plugin's code in its reason.
 fn assert_attributed(out: &Outcome, plugin_code: &str, row: &str) {
     let reason = out.violation.as_ref().map_or("", |v| v.reason.as_str());
@@ -96,7 +90,7 @@ async fn a_failing_backchannel_denies_rather_than_reporting_pending() {
         let call = large_adjustment();
         let planted = planted(&call);
         let out = host.call(call).await;
-        assert_fail_closed(&host, &out, Stage::Request, APPROVAL_STEP, &planted, row);
+        assert_fail_closed(&host, &out, Stage::Request, code, &planted, row);
         assert_attributed(&out, code, row);
         assert!(
             host.transport().call_count_for(CIBA_BACKCHANNEL_URL) >= 1,
@@ -167,7 +161,7 @@ async fn a_failing_token_poll_on_retry_denies_without_inventing_an_outcome() {
         let retry = large_adjustment().elicitation_id(&id);
         let planted = planted(&retry);
         let out = host.call(retry).await;
-        assert_fail_closed(&host, &out, Stage::Request, APPROVAL_STEP, &planted, row);
+        assert_fail_closed(&host, &out, Stage::Request, code, &planted, row);
         assert_attributed(&out, code, row);
         assert!(
             host.transport().call_count_for(CIBA_TOKEN_URL) > polls,

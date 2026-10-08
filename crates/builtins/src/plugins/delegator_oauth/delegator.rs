@@ -76,10 +76,9 @@ const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-
 /// authenticates with.
 const GRANT_TYPE_CLIENT_CREDENTIALS: &str = "client_credentials";
 
-/// Default issued-token-type RFC 8693 returns. We don't rely on it
-/// for behavior — it's reported back to operators in audit logs
-/// only.
+/// Default issued-token-type RFC 8693 returns.
 const DEFAULT_ISSUED_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+const JWT_ISSUED_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
 
 /// Ceiling on a token-endpoint response body.
 ///
@@ -727,6 +726,37 @@ impl OAuthDelegator {
             }
         }
 
+        if self.typed.strict_response_validation {
+            let caller_identity = match payload.subject() {
+                DelegationSubject::User => ext
+                    .security
+                    .as_ref()
+                    .and_then(|security| security.subject.as_ref())
+                    .and_then(|subject| subject.id.as_deref()),
+                DelegationSubject::Client => ext
+                    .security
+                    .as_ref()
+                    .and_then(|security| security.client.as_ref())
+                    .map(|client| client.client_id.as_str()),
+                DelegationSubject::CallerWorkload => ext
+                    .security
+                    .as_ref()
+                    .and_then(|security| security.caller_workload.as_ref())
+                    .and_then(|workload| workload.spiffe_id.as_deref()),
+                DelegationSubject::ThisWorkload => None,
+                _ => None,
+            };
+            validate_exchange_response(
+                &parsed,
+                &scope,
+                audience,
+                subject_token.as_ref(),
+                caller_identity,
+                !as_this_workload,
+            )
+            .map_err(|violation| *violation)?;
+        }
+
         // Compute expiry. Most IdPs send `expires_in` (seconds);
         // if missing, default to 5 minutes — short enough that a
         // misconfigured-but-no-expiry IdP doesn't mint long-lived
@@ -929,6 +959,198 @@ fn jwt_payload_omits_act(access_token: &str) -> bool {
     // Treat both a missing `act` and an explicit `"act": null` as absent —
     // a null claim records no actor.
     claims.is_object() && claims.get("act").is_none_or(serde_json::Value::is_null)
+}
+
+/// Inspect JWT claims supplied by the token endpoint. Opaque tokens have no
+/// local claim shape; a three-segment token with an unreadable payload fails
+/// closed instead of being treated as opaque.
+fn jwt_claims(token: &str) -> Result<Option<serde_json::Value>, Box<PluginViolation>> {
+    use base64::Engine as _;
+    let mut parts = token.split('.');
+    let (Some(_header), Some(payload), Some(_signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|err| {
+            Box::new(PluginViolation::new(
+                "delegation.bad_response",
+                format!("JWT payload is not base64url: {err}"),
+            ))
+        })?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| {
+        Box::new(PluginViolation::new(
+            "delegation.bad_response",
+            format!("JWT payload is not JSON: {err}"),
+        ))
+    })?;
+    if !claims.is_object() {
+        return Err(Box::new(PluginViolation::new(
+            "delegation.bad_response",
+            "JWT claims are not an object",
+        )));
+    }
+    Ok(Some(claims))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod response_validation_tests {
+    use super::*;
+    use base64::Engine as _;
+    use serde_json::json;
+
+    fn jwt(sub: &str, aud: serde_json::Value) -> String {
+        let payload = json!({ "sub": sub, "aud": aud });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        format!("header.{encoded}.signature")
+    }
+
+    fn response(token: String) -> TokenExchangeResponse {
+        TokenExchangeResponse {
+            access_token: token,
+            issued_token_type: Some(DEFAULT_ISSUED_TOKEN_TYPE.into()),
+            expires_in: None,
+            scope: Some("read".into()),
+        }
+    }
+
+    #[test]
+    fn strict_response_checks_subject_audience_scope_and_type() {
+        let caller = jwt("alice", json!("gateway"));
+        let mut issued = response(jwt("alice", json!(["api", "other"])));
+        validate_exchange_response(&issued, "read write", "api", &caller, None, true).unwrap();
+
+        issued.access_token = jwt("bob", json!("api"));
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", &caller, None, true)
+                .unwrap_err()
+                .code,
+            "delegation.subject_mismatch"
+        );
+        issued.access_token = jwt("alice", json!("other"));
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", &caller, None, true)
+                .unwrap_err()
+                .code,
+            "delegation.audience_mismatch"
+        );
+        issued.access_token = jwt("alice", json!("api"));
+        issued.scope = Some("read admin".into());
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", &caller, None, true)
+                .unwrap_err()
+                .code,
+            "delegation.scope_overgrant"
+        );
+        issued.scope = Some("read".into());
+        issued.issued_token_type = Some("urn:ietf:params:oauth:token-type:id_token".into());
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", &caller, None, true)
+                .unwrap_err()
+                .code,
+            "delegation.issued_token_type_mismatch"
+        );
+
+        issued.issued_token_type = Some(JWT_ISSUED_TOKEN_TYPE.into());
+        issued.access_token = "opaque-token".into();
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", &caller, None, true)
+                .unwrap_err()
+                .code,
+            "delegation.bad_response"
+        );
+
+        issued.issued_token_type = Some(DEFAULT_ISSUED_TOKEN_TYPE.into());
+        issued.access_token = jwt("alice", json!("api"));
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", "opaque", None, true)
+                .unwrap_err()
+                .code,
+            "delegation.subject_unverifiable"
+        );
+        validate_exchange_response(&issued, "read", "api", "opaque", Some("alice"), true).unwrap();
+    }
+}
+
+fn validate_exchange_response(
+    response: &TokenExchangeResponse,
+    requested_scope: &str,
+    audience: &str,
+    subject_token: &str,
+    caller_identity: Option<&str>,
+    require_subject: bool,
+) -> Result<(), Box<PluginViolation>> {
+    let issued_type = response
+        .issued_token_type
+        .as_deref()
+        .unwrap_or(DEFAULT_ISSUED_TOKEN_TYPE);
+    if issued_type != DEFAULT_ISSUED_TOKEN_TYPE && issued_type != JWT_ISSUED_TOKEN_TYPE {
+        return Err(Box::new(PluginViolation::new(
+            "delegation.issued_token_type_mismatch",
+            "IdP issued a token type other than an access token or JWT",
+        )));
+    }
+    if let Some(scope) = &response.scope {
+        let requested: std::collections::HashSet<&str> =
+            requested_scope.split_whitespace().collect();
+        if scope
+            .split_whitespace()
+            .any(|granted| !requested.contains(granted))
+        {
+            return Err(Box::new(PluginViolation::new(
+                "delegation.scope_overgrant",
+                "IdP granted a scope that was not requested",
+            )));
+        }
+    }
+    let minted_claims = jwt_claims(&response.access_token)?;
+    if issued_type == JWT_ISSUED_TOKEN_TYPE && minted_claims.is_none() {
+        return Err(Box::new(PluginViolation::new(
+            "delegation.bad_response",
+            "IdP labeled an opaque token as a JWT",
+        )));
+    }
+    if let Some(claims) = minted_claims {
+        let aud_matches = match claims.get("aud") {
+            Some(serde_json::Value::String(aud)) => aud == audience,
+            Some(serde_json::Value::Array(auds)) => {
+                auds.iter().any(|aud| aud.as_str() == Some(audience))
+            },
+            _ => false,
+        };
+        if !aud_matches {
+            return Err(Box::new(PluginViolation::new(
+                "delegation.audience_mismatch",
+                "IdP issued a JWT for a different audience",
+            )));
+        }
+        if require_subject {
+            let caller_sub = jwt_claims(subject_token)?
+                .and_then(|caller| {
+                    caller
+                        .get("sub")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .or_else(|| caller_identity.map(str::to_owned));
+            let Some(caller_sub) = caller_sub else {
+                return Err(Box::new(PluginViolation::new(
+                    "delegation.subject_unverifiable",
+                    "cannot determine the caller subject for the issued JWT",
+                )));
+            };
+            if claims.get("sub").and_then(serde_json::Value::as_str) != Some(caller_sub.as_str()) {
+                return Err(Box::new(PluginViolation::new(
+                    "delegation.subject_mismatch",
+                    "IdP issued a JWT for a different subject",
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reject `http://` for endpoints that carry credentials. Allows

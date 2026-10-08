@@ -327,6 +327,7 @@ fn collect_claims(bag: &AttributeBag) -> Map<String, Value> {
                 AttributeValue::Float(f) => json!(f.to_string()),
                 AttributeValue::String(s) => json!(s),
                 AttributeValue::StringSet(set) => json!(set.iter().collect::<Vec<_>>()),
+                AttributeValue::NonScalar => continue,
             };
             out.insert(name.to_owned(), v);
         }

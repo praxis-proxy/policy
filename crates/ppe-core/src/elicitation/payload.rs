@@ -137,6 +137,15 @@ pub struct ElicitationPayload {
     /// selected by name).
     channel: Option<String>,
 
+    /// The exact tool and authenticated requester for this attempt.
+    #[serde(default)]
+    tool: String,
+    #[serde(default)]
+    requester: String,
+    /// A status-only request must leave an approved id available to apply.
+    #[serde(default)]
+    peek: bool,
+
     /// Correlation id minted on `Dispatch`. The agent echoes it on retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -196,6 +205,9 @@ impl ElicitationPayload {
             scope: None,
             timeout: None,
             channel: None,
+            tool: String::new(),
+            requester: String::new(),
+            peek: false,
             id: None,
             status: None,
             outcome: None,
@@ -236,6 +248,34 @@ impl ElicitationPayload {
     pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
         self.channel = Some(channel.into());
         self
+    }
+
+    /// Bind the approval to the live tool and requester identity.
+    pub fn with_binding(mut self, tool: impl Into<String>, requester: impl Into<String>) -> Self {
+        self.tool = tool.into();
+        self.requester = requester.into();
+        self
+    }
+
+    /// Mark a validation as status-only, preserving the id for a later apply.
+    pub fn with_peek(mut self, peek: bool) -> Self {
+        self.peek = peek;
+        self
+    }
+
+    /// Exact tool name for this request.
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    /// Authenticated subject id for this request.
+    pub fn requester(&self) -> &str {
+        &self.requester
+    }
+
+    /// Whether this validation is status-only.
+    pub fn peek(&self) -> bool {
+        self.peek
     }
 
     /// Which operation this payload requests.

@@ -127,28 +127,27 @@ async fn an_invented_id_is_denied_even_while_the_op_approves() {
     let planted = planted_for(&call);
     let out = host.call(call).await;
     assert_not_applied(&out);
-    assert_eq!(out.violation_code(), Some(APPROVAL_STEP));
+    assert_eq!(out.violation_code(), Some("elicitation.unknown_id"));
     let reason = &out.violation.as_ref().expect("a violation").reason;
     assert!(reason.contains("unknown elicitation id"), "{reason}");
     out.assert_no_leaks(&planted);
 }
 
-/// The CIBA correlation store keeps only the expected and resolved
-/// approver (`crates/builtins/src/plugins/elicitation_ciba/store.rs`), and
-/// nothing consumes an id once it validates.
+/// A successful validation spends the approval id.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 elicitation-replay")]
-async fn known_gap_an_approved_id_applies_once() {
+async fn an_approved_id_applies_once() {
     let host = RefHost::hermetic(Fixture::Cedar).await;
     let id = approved_once(&host).await;
     let call = adjust(25_000).elicitation_id(&id);
     let planted = planted_for(&call);
     let out = host.call(call).await;
     out.assert_no_leaks(&planted);
+    assert_not_applied(&out);
+    assert_eq!(out.violation_code(), Some("elicitation.unknown_id"));
     assert_eq!(
         applied(&host, "adjust_compensation"),
         1,
-        "known gap #181 elicitation-replay: one approval applied twice"
+        "one approval must apply once"
     );
 }
 
@@ -169,10 +168,9 @@ async fn two_approval_routes() -> RefHost {
         .expect("the two-route fixture starts")
 }
 
-/// Nothing ties an id to the route that dispatched it.
+/// An id is bound to the tool that dispatched it.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 elicitation-tool-binding")]
-async fn known_gap_an_approved_id_is_bound_to_its_tool() {
+async fn an_approved_id_is_bound_to_its_tool() {
     let host = two_approval_routes().await;
     let id = approved_unused(&host).await;
     let call = Call::new(Persona::Bob, "approve_bonus")
@@ -181,20 +179,23 @@ async fn known_gap_an_approved_id_is_bound_to_its_tool() {
     let planted = planted_for(&call);
     let out = host.call(call).await;
     out.assert_no_leaks(&planted);
+    assert_not_applied(&out);
+    assert_eq!(out.violation_code(), Some("elicitation.binding_mismatch"));
     assert_eq!(
         applied(&host, "approve_bonus"),
         0,
-        "known gap #181 elicitation-tool-binding: an adjust_compensation approval \
-         applied approve_bonus"
+        "an adjust_compensation approval must not apply approve_bonus"
     );
+    let owner_call = adjust(25_000).elicitation_id(&id);
+    let owner_planted = planted_for(&owner_call);
+    let owner = host.call(owner_call).await;
+    assert!(owner.allowed(), "{:?}", owner.violation);
+    owner.assert_no_leaks(&owner_planted);
 }
 
-/// Nothing ties an id to the subject that asked. Eve, given a manager
-/// claim of her own so `from` resolves, redeems the approval alice gave
-/// Bob: validate compares the stored approvers only, not the live `from`.
+/// Eve's own manager claim cannot let her redeem Bob's approval.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 elicitation-subject-binding")]
-async fn known_gap_an_approved_id_is_bound_to_its_subject() {
+async fn an_approved_id_is_bound_to_its_subject() {
     let host = RefHost::hermetic(Fixture::Cedar).await;
     let id = approved_unused(&host).await;
     let mut eve = Persona::Eve.claims();
@@ -205,15 +206,16 @@ async fn known_gap_an_approved_id_is_bound_to_its_subject() {
     let planted = planted_for(&call);
     let out = host.call(call).await;
     out.assert_no_leaks(&planted);
-    if let Some(seen) = &out.upstream {
-        assert_eq!(
-            seen.headers.get("x-auth-user-id").map(String::as_str),
-            Some(Persona::Eve.sub())
-        );
-    }
+    assert_not_applied(&out);
+    assert_eq!(out.violation_code(), Some("elicitation.binding_mismatch"));
     assert_eq!(
         applied(&host, "adjust_compensation"),
         0,
-        "known gap #181 elicitation-subject-binding: Bob's approval applied Eve's call"
+        "Bob's approval must not apply Eve's call"
     );
+    let owner_call = adjust(25_000).elicitation_id(&id);
+    let owner_planted = planted_for(&owner_call);
+    let owner = host.call(owner_call).await;
+    assert!(owner.allowed(), "{:?}", owner.violation);
+    owner.assert_no_leaks(&owner_planted);
 }

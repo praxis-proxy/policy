@@ -111,122 +111,88 @@ async fn through(mode: Exchange) -> (RefHost, Outcome, Planted) {
     (host, out, planted)
 }
 
-/// One claim of the bearer the upstream received. A gap test checks it
-/// first, so the gap assertion fails only on the engine, not the harness.
-fn forwarded_claim(out: &Outcome, claim: &str) -> serde_json::Value {
-    out.upstream
-        .as_ref()
-        .and_then(|u| u.jwt_claims("authorization"))
-        .map(|c| c[claim].clone())
-        .unwrap_or_default()
-}
-
-/// The delegator never inspects the minted token, so an `aud` other than
-/// the one requested reaches the upstream.
+/// A JWT minted for another audience must stop at delegation.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 exchange-audience-unchecked")]
-async fn known_gap_a_token_for_the_wrong_audience_is_forwarded() {
+async fn a_token_for_the_wrong_audience_is_rejected() {
     let (host, out, planted) = through(Exchange::WrongAudience).await;
-    if out.upstream.is_some() {
-        assert_eq!(forwarded_claim(&out, "aud"), "not-workday-api");
-        panic!(
-            "known gap #181 exchange-audience-unchecked: wrong audience token reached the upstream"
-        );
-    }
-    assert!(
-        out.violation_code()
-            .is_some_and(|c| c.starts_with("delegation.")),
-        "the denial must be attributable to delegation: {:?}",
-        out.violation
-    );
     assert_fail_closed(
         &host,
         &out,
         Stage::Request,
-        out.violation_code().expect("delegation violation"),
+        "delegation.audience_mismatch",
         &planted,
         "wrong audience",
     );
 }
 
-/// Requested scopes must be a subset of the grant, and nothing bounds the
-/// grant from above, so an over-scoped token reaches the upstream.
+/// A grant containing an unrequested scope must stop at delegation.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 exchange-scope-overgrant")]
-async fn known_gap_a_token_broader_than_requested_is_forwarded() {
+async fn a_token_broader_than_requested_is_rejected() {
     let (host, out, planted) = through(Exchange::BroaderScope).await;
-    if out.upstream.is_some() {
-        assert_eq!(forwarded_claim(&out, "scope"), "read_compensation admin");
-        panic!("known gap #181 exchange-scope-overgrant: broader scope token reached the upstream");
-    }
-    assert!(
-        out.violation_code()
-            .is_some_and(|c| c.starts_with("delegation.")),
-        "the denial must be attributable to delegation: {:?}",
-        out.violation
-    );
     assert_fail_closed(
         &host,
         &out,
         Stage::Request,
-        out.violation_code().expect("delegation violation"),
+        "delegation.scope_overgrant",
         &planted,
         "broader scope",
     );
 }
 
-/// The minted token's `sub` is not compared with the caller's.
+/// A JWT minted for another subject must stop at delegation.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 exchange-subject-unchecked")]
-async fn known_gap_a_token_for_another_subject_is_forwarded() {
+async fn a_token_for_another_subject_is_rejected() {
     let (host, out, planted) = through(Exchange::DifferentSubject).await;
-    if out.upstream.is_some() {
-        assert_eq!(forwarded_claim(&out, "sub"), Persona::Eve.sub());
-        panic!(
-            "known gap #181 exchange-subject-unchecked: different subject token reached the upstream"
-        );
-    }
-    assert!(
-        out.violation_code()
-            .is_some_and(|c| c.starts_with("delegation.")),
-        "the denial must be attributable to delegation: {:?}",
-        out.violation
-    );
     assert_fail_closed(
         &host,
         &out,
         Stage::Request,
-        out.violation_code().expect("delegation violation"),
+        "delegation.subject_mismatch",
         &planted,
         "different subject",
     );
 }
 
-/// `issued_token_type` is recorded, not checked, so an ID token is attached
-/// as the outbound bearer.
+/// An ID token must not be attached as the outbound bearer.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 exchange-token-type-unchecked")]
-async fn known_gap_an_unexpected_issued_token_type_is_forwarded() {
+async fn an_unexpected_issued_token_type_is_rejected() {
     let (host, out, planted) = through(Exchange::UnexpectedTokenType).await;
-    if out.upstream.is_some() {
-        assert_eq!(forwarded_claim(&out, "aud"), "workday-api");
-        assert_eq!(forwarded_claim(&out, "typ"), "ID");
-        panic!(
-            "known gap #181 exchange-token-type-unchecked: unexpected token type token reached the upstream"
-        );
-    }
-    assert!(
-        out.violation_code()
-            .is_some_and(|c| c.starts_with("delegation.")),
-        "the denial must be attributable to delegation: {:?}",
-        out.violation
-    );
     assert_fail_closed(
         &host,
         &out,
         Stage::Request,
-        out.violation_code().expect("delegation violation"),
+        "delegation.issued_token_type_mismatch",
         &planted,
         "unexpected token type",
     );
+}
+
+#[tokio::test]
+async fn an_explicit_opt_out_accepts_an_unchecked_exchange_response() {
+    let anchor = "      client_id: \"praxis-gateway\"\n";
+    let yaml = Fixture::Cedar.hermetic().replacen(
+        anchor,
+        &format!("{anchor}      strict_response_validation: false\n"),
+        1,
+    );
+    assert_ne!(
+        yaml,
+        Fixture::Cedar.hermetic(),
+        "the workday delegator matched"
+    );
+    let host = RefHost::builder()
+        .transport(Exchange::WrongAudience.install(FakeTransport::new()))
+        .start(&yaml)
+        .await
+        .expect("opt-out fixture starts");
+    let (call, planted) = bob_reads_compensation();
+    let out = host.call(call).await;
+    assert!(out.allowed(), "{:?}", out.violation);
+    let claims = out
+        .upstream
+        .as_ref()
+        .and_then(|upstream| upstream.jwt_claims("authorization"))
+        .expect("the unchecked JWT reached the upstream");
+    assert_eq!(claims["aud"], "not-workday-api");
+    out.assert_no_leaks(&planted);
 }

@@ -180,6 +180,9 @@ the grammar rather than as credentials. They are host-populated, so admitting
 them later is a grammar addition and not the reversal of a security decision.
 The two refusals carry different messages.
 
+The embedding host's response-phase HTTP view is tracked separately in
+`praxis-proxy/praxis#1367`; it does not change these assertion source rules.
+
 ## The two removal mechanisms
 
 Only one removal mechanism is configurable.

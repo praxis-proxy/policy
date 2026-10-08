@@ -49,7 +49,7 @@ use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use crate::plugins::elicitation_ciba::KIND;
 use crate::plugins::elicitation_ciba::config::{CibaConfig, require_https};
 use crate::plugins::elicitation_ciba::store::{
-    Correlation, CorrelationStore, InMemoryCorrelationStore,
+    Correlation, CorrelationStore, InMemoryCorrelationStore, TakeResult,
 };
 
 /// OIDC CIBA grant type for the token-endpoint poll.
@@ -306,23 +306,29 @@ impl CibaApprover {
         // The `auth_req_id` IS the elicitation id the agent echoes on
         // retry — opaque and unique, no separate id to generate.
         let id = parsed.auth_req_id;
+        let ttl = parsed
+            .expires_in
+            .unwrap_or_else(|| requested_expiry.parse::<i64>().unwrap_or(0));
+        let now = Utc::now();
+        let expires_at = now
+            .checked_add_signed(chrono::Duration::seconds(ttl))
+            .unwrap_or(now);
         self.store.put(
             &id,
             Correlation {
                 expected_approver: login_hint.to_owned(),
                 resolved_approver: None,
+                tool: payload.tool().to_owned(),
+                requester: payload.requester().to_owned(),
+                expires_at,
             },
         );
-
-        let expires_at = parsed
-            .expires_in
-            .map(|secs| (Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339());
 
         let mut out = payload.clone();
         out.id = Some(id);
         out.status = Some(ElicitationStatusKind::Pending);
         out.approver = Some(login_hint.to_owned());
-        out.expires_at = expires_at;
+        out.expires_at = Some(expires_at.to_rfc3339());
         PluginResult::modify_payload(out)
     }
 
@@ -341,15 +347,23 @@ impl CibaApprover {
             },
         };
 
+        let Some(correlation) = self.store.get(id) else {
+            return deny("elicitation.unknown_id", "unknown elicitation id");
+        };
+        if correlation.tool != payload.tool() || correlation.requester != payload.requester() {
+            return deny(
+                "elicitation.binding_mismatch",
+                "approval belongs to another tool or requester",
+            );
+        }
+
         // Cache short-circuit. The OP's `auth_req_id` is single-use: once a
         // poll succeeds we exchange it for tokens (consuming it) and cache
         // just the approver. A later check — e.g. the confirm-then-apply
         // retry after a `peek` already resolved approval — must NOT re-poll
         // (the spent id would come back `invalid_grant`). Replay the cached
         // approved result instead; `validate` re-compares the approver.
-        if let Some(corr) = self.store.get(id)
-            && corr.resolved_approver.is_some()
-        {
+        if correlation.resolved_approver.is_some() {
             let mut out = payload.clone();
             out.status = Some(ElicitationStatusKind::Resolved);
             out.outcome = Some(ElicitationOutcomeKind::Approved);
@@ -447,9 +461,28 @@ impl CibaApprover {
             },
         };
 
-        let correlation = match self.store.get(id) {
-            Some(c) => c,
-            None => return invalid(payload, "unknown elicitation id"),
+        let correlation = if payload.peek() {
+            match self.store.get(id) {
+                Some(c) if c.tool == payload.tool() && c.requester == payload.requester() => c,
+                Some(_) => {
+                    return invalid(payload, "approval belongs to another tool or requester");
+                },
+                None => return invalid(payload, "unknown elicitation id"),
+            }
+        } else {
+            match self
+                .store
+                .take_if_ready(id, payload.tool(), payload.requester())
+            {
+                TakeResult::Ready(c) => c,
+                TakeResult::Missing => return invalid(payload, "unknown elicitation id"),
+                TakeResult::BindingMismatch => {
+                    return invalid(payload, "approval belongs to another tool or requester");
+                },
+                TakeResult::Pending => {
+                    return invalid(payload, "elicitation has no resolved approver");
+                },
+            }
         };
         // Both sides of this comparison are values already stored from the
         // OP's authenticated TLS response, not a token read at rest — this
@@ -693,6 +726,9 @@ mod tests {
                 Correlation {
                     expected_approver: (*expected).to_owned(),
                     resolved_approver: resolved.map(str::to_owned),
+                    tool: String::new(),
+                    requester: String::new(),
+                    expires_at: Utc::now() + chrono::Duration::hours(1),
                 },
             );
         }

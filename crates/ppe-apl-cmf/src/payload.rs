@@ -4,9 +4,10 @@
 // JSON args/result payload → AttributeBag.
 //
 // Leaf scalars at any nesting depth land in the bag under their dotted
-// path. Nested objects recurse; scalar arrays flatten into a StringSet,
+// path. For args/result, nested objects also mark their own path and recurse;
+// scalar arrays flatten into a StringSet,
 // numbers and bools rendered as strings (empty array → empty set); arrays
-// holding a nested array or object are skipped (no list scalar in the bag).
+// holding a nested array or object receive a non-scalar marker.
 //
 // The prefix itself is the key when the JSON root is not an object:
 //   `"hello"`           → `args` : String("hello")
@@ -16,9 +17,11 @@
 //                         `args.user.id`     : String("alice")
 //                         `args.user.roles`  : StringSet({"hr"})
 //
-// Null values are skipped (consistent with bag's missing-key semantics).
+// In args/result, null values receive a non-scalar marker, distinct from a
+// missing key. Claim, data, framework, and custom paths retain their existing
+// flattening semantics.
 
-use praxis_policy_apl_core::AttributeBag;
+use praxis_policy_apl_core::{AttributeBag, AttributeValue};
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -30,13 +33,13 @@ use crate::constants::{BAG_ARGS_PREFIX, BAG_RESULT_PREFIX};
 pub fn extract_args(args: &Value, bag: &mut AttributeBag) {
     // `walk` builds dotted paths itself; strip the trailing `.` from
     // the canonical prefix to match its signature.
-    walk(args, BAG_ARGS_PREFIX.trim_end_matches('.'), bag);
+    walk_inner(args, BAG_ARGS_PREFIX.trim_end_matches('.'), bag, true);
 }
 
 /// Flatten a result JSON value into bag keys. Same shapes as
 /// [`extract_args`], under `result` / `result.<dotted>`.
 pub fn extract_result(result: &Value, bag: &mut AttributeBag) {
-    walk(result, BAG_RESULT_PREFIX.trim_end_matches('.'), bag);
+    walk_inner(result, BAG_RESULT_PREFIX.trim_end_matches('.'), bag, true);
 }
 
 /// Flatten a static attribute tree into `data.*` keys. Same walk as
@@ -48,15 +51,22 @@ pub fn extract_data(tree: &praxis_policy_apl_core::AttributeTree, bag: &mut Attr
 }
 
 pub(crate) fn walk(value: &Value, prefix: &str, bag: &mut AttributeBag) {
+    walk_inner(value, prefix, bag, false);
+}
+
+fn walk_inner(value: &Value, prefix: &str, bag: &mut AttributeBag, mark_non_scalar: bool) {
     match value {
         Value::Object(map) => {
+            if mark_non_scalar && !prefix.is_empty() {
+                bag.set(prefix, AttributeValue::NonScalar);
+            }
             for (key, sub) in map {
                 let dotted = if prefix.is_empty() {
                     key.clone()
                 } else {
                     format!("{prefix}.{key}")
                 };
-                walk(sub, &dotted, bag);
+                walk_inner(sub, &dotted, bag, mark_non_scalar);
             }
         },
         Value::Array(items) => {
@@ -91,6 +101,8 @@ pub(crate) fn walk(value: &Value, prefix: &str, bag: &mut AttributeBag) {
             // but evaluates an empty set fine. See `security.rs`.
             if ok {
                 bag.set(prefix, set);
+            } else if mark_non_scalar {
+                bag.set(prefix, AttributeValue::NonScalar);
             }
         },
         Value::String(s) => bag.set(prefix, s.clone()),
@@ -102,7 +114,8 @@ pub(crate) fn walk(value: &Value, prefix: &str, bag: &mut AttributeBag) {
                 bag.set(prefix, f);
             }
         },
-        Value::Null => {}, // Skip — equivalent to "key not present."
+        Value::Null if mark_non_scalar => bag.set(prefix, AttributeValue::NonScalar),
+        Value::Null => {},
     }
 }
 
@@ -119,6 +132,24 @@ pub(crate) fn walk(value: &Value, prefix: &str, bag: &mut AttributeBag) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn present_non_scalars_are_distinct_from_missing_keys() {
+        let mut bag = AttributeBag::new();
+        extract_args(
+            &json!({
+                "object": { "nested": 1 },
+                "null": null,
+                "nested_array": [[1]],
+            }),
+            &mut bag,
+        );
+        for key in ["args.object", "args.null", "args.nested_array"] {
+            assert_eq!(bag.get(key), Some(&AttributeValue::NonScalar), "{key}");
+        }
+        assert!(bag.get("args.missing").is_none());
+        assert_eq!(bag.get_int("args.object.nested"), Some(1));
+    }
 
     #[test]
     fn args_scalars_at_top_level() {
@@ -218,23 +249,22 @@ mod tests {
         assert!(!bag.set_contains("args.n", "null"));
     }
 
-    /// A nested array or object has no bag representation, so the key is
-    /// still skipped — the one remaining case that sets nothing.
+    /// A nested array or object has no scalar bag value, but is present.
     #[test]
-    fn array_holding_a_nested_container_is_skipped() {
+    fn array_holding_a_nested_container_is_marked_non_scalar() {
         let args = json!({ "deep": ["a", [1]], "objs": [{ "k": "v" }] });
         let mut bag = AttributeBag::new();
         extract_args(&args, &mut bag);
-        assert!(!bag.contains("args.deep"));
-        assert!(!bag.contains("args.objs"));
+        assert_eq!(bag.get("args.deep"), Some(&AttributeValue::NonScalar));
+        assert_eq!(bag.get("args.objs"), Some(&AttributeValue::NonScalar));
     }
 
     #[test]
-    fn args_null_is_treated_as_missing() {
+    fn args_null_is_distinct_from_missing() {
         let args = json!({ "maybe": null, "yes": true });
         let mut bag = AttributeBag::new();
         extract_args(&args, &mut bag);
-        assert!(!bag.contains("args.maybe"));
+        assert_eq!(bag.get("args.maybe"), Some(&AttributeValue::NonScalar));
         assert_eq!(bag.get_bool("args.yes"), Some(true));
     }
 

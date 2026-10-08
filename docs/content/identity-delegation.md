@@ -638,6 +638,22 @@ no claims bag and says so at load rather than ignoring the setting.
 
 ## Caching a delegated token
 
+The OAuth delegator checks each token-exchange response by default. It accepts
+only an access-token or JWT `issued_token_type`, rejects scopes outside the
+requested set, and checks a JWT access token's `aud` against the requested
+audience and `sub` against the caller token's subject or the authenticated
+identity when the caller token is opaque. If neither supplies a subject, a JWT
+response is rejected. Opaque issued access tokens have no claims to inspect
+locally. These claim reads do not verify the returned
+token's signature; the configured token endpoint and TLS connection are the
+trust boundary. Set `strict_response_validation: false` under the delegator's
+`config:` only for an IdP whose response cannot satisfy these checks. The
+default is `true`.
+
+The JWT identity resolver rejects non-empty `crit` headers with
+`auth.unsupported_critical_header`; it implements no critical header
+extensions.
+
 A token exchange is a network call on the request path. The optional
 `cache:` block holds a minted token until it expires:
 

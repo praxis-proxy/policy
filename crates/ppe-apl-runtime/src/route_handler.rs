@@ -518,11 +518,24 @@ impl AplRouteHandler {
         // reads the same identity. Routes with no elicitation steps have
         // an empty `elicitation_entries` map; an accidental `Effect::Elicit`
         // then returns `NotFound`, handled by the step's `on_error`.
-        let elicitations = Arc::new(ElicitationPluginInvoker::new(
-            Arc::clone(&engine),
-            invoker.extensions_arc(),
-            invoker.plan_arc(),
-        ));
+        let tool = message
+            .and_then(|msg| msg.get_tool_calls().first().map(|call| call.name.clone()))
+            .unwrap_or_else(|| self.route.route_key.clone());
+        let requester = post_extensions
+            .security
+            .as_ref()
+            .and_then(|security| security.subject.as_ref())
+            .and_then(|subject| subject.id.clone())
+            .unwrap_or_default();
+        let peek = elicitation_peek_from_headers(&post_extensions);
+        let elicitations = Arc::new(
+            ElicitationPluginInvoker::new(
+                Arc::clone(&engine),
+                invoker.extensions_arc(),
+                invoker.plan_arc(),
+            )
+            .with_context(tool, requester, peek),
+        );
 
         let invoker_dyn: Arc<dyn praxis_policy_apl_core::step::PluginInvoker> = invoker.clone();
         let delegations_dyn: Arc<dyn praxis_policy_apl_core::step::DelegationInvoker> =

@@ -48,6 +48,12 @@ There is no `apl:` wrapper. An `authorization:` block must contain at least one
 entry in `pre_invocation:` or `post_invocation:`. A declared `args:` or
 `result:` field must contain at least one stage.
 
+Redaction matches object keys without case sensitivity. A `**` segment is
+available in a path containing a `redact` stage: `result: { "**.ssn":
+"redact(!perm.view_ssn)" }` covers `ssn` under any nested object or array.
+Other field operations retain exact path matching. String values containing
+JSON are treated as strings; redact the `text` field or use a PII scanner.
+
 ---
 
 ## Lexical rules

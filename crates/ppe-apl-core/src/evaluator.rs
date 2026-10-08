@@ -1028,16 +1028,17 @@ async fn dispatch_elicitation(
         .as_deref()
         .unwrap_or("deny")
         .eq_ignore_ascii_case("continue");
-    let fail = |reason: String| -> EffectOutcome {
+    let fail_with_code = |reason: String, code: Option<&str>| -> EffectOutcome {
         if on_error_continue {
             EffectOutcome::Continue
         } else {
             EffectOutcome::Halt(Decision::Deny {
                 reason: Some(reason),
-                rule_source: step.source.clone(),
+                rule_source: code.unwrap_or(&step.source).to_owned(),
             })
         }
     };
+    let fail = |reason: String| fail_with_code(reason, None);
 
     // First arrival vs. retry: the agent echoes `elicitation.id` on
     // retry. Absent → first arrival: dispatch and record the pending
@@ -1083,14 +1084,14 @@ async fn dispatch_elicitation(
                 }
                 d.id
             },
-            Err(e) => return fail(format!("elicitation dispatch failed: {e}")),
+            Err(e) => return fail_with_code(format!("elicitation dispatch failed: {e}"), e.code()),
         },
     };
 
     // Status check — non-blocking read of the channel's current state.
     let status = match elicitations.check(step, &id).await {
         Ok(s) => s,
-        Err(e) => return fail(format!("elicitation check failed: {e}")),
+        Err(e) => return fail_with_code(format!("elicitation check failed: {e}"), e.code()),
     };
 
     match status {
@@ -1136,7 +1137,9 @@ async fn dispatch_elicitation(
             // responder identity.
             let validation = match elicitations.validate(step, &id).await {
                 Ok(v) => v,
-                Err(e) => return fail(format!("elicitation validation failed: {e}")),
+                Err(e) => {
+                    return fail_with_code(format!("elicitation validation failed: {e}"), e.code());
+                },
             };
             if !validation.valid {
                 let why = validation
@@ -1446,7 +1449,7 @@ async fn dispatch_field_op(
     };
 
     // Expand intermediate arrays; excessive fan-out fails closed.
-    let Some(paths) = crate::route::expand_field_paths(root, subpath) else {
+    let Some(paths) = crate::route::expand_for_pipeline(root, subpath, stages) else {
         return EffectOutcome::Halt(Decision::Deny {
             reason: Some(format!(
                 "FieldOp path `{path}` expands to too many elements to redact safely"

@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use crate::attributes::AttributeBag;
 use crate::evaluator::{Decision, FieldOutcome, evaluate_effects, evaluate_pipeline};
-use crate::pipeline::TaintEvent;
+use crate::pipeline::{Stage, TaintEvent};
 use crate::rules::CompiledRoute;
 use crate::step::{
     DelegationInvoker, DispatchPhase, ElicitationInvoker, PdpResolver, PluginInvoker,
@@ -231,7 +231,8 @@ pub async fn evaluate_pre(
 
     for rule in &route.args {
         // Expand intermediate arrays; excessive fan-out fails closed.
-        let Some(paths) = expand_field_paths(&payload.args, &rule.field) else {
+        let Some(paths) = expand_for_pipeline(&payload.args, &rule.field, &rule.pipeline.stages)
+        else {
             return RouteDecision {
                 decision: Decision::Deny {
                     reason: Some(format!(
@@ -339,7 +340,8 @@ pub async fn evaluate_post(
     if let Some(result) = payload.result.as_mut() {
         for rule in &route.result {
             // Expand intermediate arrays; excessive fan-out fails closed.
-            let Some(paths) = expand_field_paths(result, &rule.field) else {
+            let Some(paths) = expand_for_pipeline(result, &rule.field, &rule.pipeline.stages)
+            else {
                 return RouteDecision {
                     decision: Decision::Deny {
                         reason: Some(format!(
@@ -543,6 +545,114 @@ pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option
     walk(root, &segs, "", 0, &mut out).then_some(out)
 }
 
+/// Redaction matches JSON keys without case sensitivity. `**` is an optional
+/// recursive segment that visits descendants at any depth.
+pub(crate) fn expand_for_pipeline(
+    root: &serde_json::Value,
+    path: &str,
+    stages: &[Stage],
+) -> Option<Vec<String>> {
+    if !stages
+        .iter()
+        .any(|stage| matches!(stage, Stage::Redact { .. }))
+    {
+        return expand_field_paths(root, path);
+    }
+    fn join(prefix: &str, seg: &str) -> String {
+        if prefix.is_empty() {
+            seg.to_owned()
+        } else {
+            format!("{prefix}.{seg}")
+        }
+    }
+    fn walk(
+        value: &serde_json::Value,
+        segs: &[&str],
+        prefix: &str,
+        depth: usize,
+        out: &mut Vec<String>,
+    ) -> bool {
+        if depth > MAX_FANOUT_DEPTH || out.len() > MAX_EXPANDED_PATHS {
+            return false;
+        }
+        let Some((seg, rest)) = segs.split_first() else {
+            out.push(prefix.to_owned());
+            return true;
+        };
+        if *seg == "**" {
+            if !walk(value, rest, prefix, depth + 1, out) {
+                return false;
+            }
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if !walk(child, segs, &join(prefix, key), depth + 1, out) {
+                            return false;
+                        }
+                    }
+                },
+                serde_json::Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        if !walk(
+                            child,
+                            segs,
+                            &join(prefix, &index.to_string()),
+                            depth + 1,
+                            out,
+                        ) {
+                            return false;
+                        }
+                    }
+                },
+                _ => {},
+            }
+            return true;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    if key.to_lowercase() == seg.to_lowercase()
+                        && !walk(child, rest, &join(prefix, key), depth + 1, out)
+                    {
+                        return false;
+                    }
+                }
+            },
+            serde_json::Value::Array(items) => {
+                if let Ok(index) = seg.parse::<usize>() {
+                    if let Some(child) = items.get(index)
+                        && !walk(child, rest, &join(prefix, seg), depth + 1, out)
+                    {
+                        return false;
+                    }
+                } else {
+                    for (index, child) in items.iter().enumerate() {
+                        if !walk(
+                            child,
+                            segs,
+                            &join(prefix, &index.to_string()),
+                            depth + 1,
+                            out,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            },
+            _ => {},
+        }
+        true
+    }
+    let segs: Vec<&str> = path.split('.').collect();
+    let mut paths = Vec::new();
+    if !walk(root, &segs, "", 0, &mut paths) {
+        return None;
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
 /// Descend to the parent value of a dotted path, following object keys and
 /// numeric array indices. Returns `None` if any parent segment is missing or
 /// crosses a scalar. Shared by `set_dotted` / `remove_dotted` so both write
@@ -654,7 +764,7 @@ pub(crate) fn remove_dotted(root: &mut serde_json::Value, path: &str) -> bool {
 )]
 mod tests {
     use super::*;
-    use crate::pipeline::{FieldRule, Pipeline, Stage, TaintScope, TypeCheck};
+    use crate::pipeline::{FieldRule, Pipeline, TaintScope, TypeCheck};
     use crate::rules::{Effect, Expression, Rule};
     use crate::step::{
         NoopDelegationInvoker, NoopElicitationInvoker, PdpCall, PdpDecision, PdpDialect, PdpError,
@@ -1220,6 +1330,28 @@ mod tests {
         assert_eq!(
             expand_field_paths(&v, "rows.0.ssn"),
             Some(vec!["rows.0.ssn".to_owned()])
+        );
+    }
+
+    #[test]
+    fn redaction_paths_match_case_and_recurse() {
+        let root = json!({
+            "SSN": "a",
+            "employee": { "ssn": "b" },
+            "rows": [{ "Ssn": "c" }],
+        });
+        let stages = [Stage::Redact { condition: None }];
+        assert_eq!(
+            expand_for_pipeline(&root, "**.ssn", &stages),
+            Some(vec![
+                "SSN".to_owned(),
+                "employee.ssn".to_owned(),
+                "rows.0.Ssn".to_owned(),
+            ])
+        );
+        assert_eq!(
+            expand_for_pipeline(&root, "ssn", &stages),
+            Some(vec!["SSN".to_owned()])
         );
     }
 

@@ -106,6 +106,7 @@ fn hash_attr(hasher: &mut Sha256, value: &AttributeValue) {
                 hash_bytes(hasher, member.as_bytes());
             }
         },
+        AttributeValue::NonScalar => hasher.update([5_u8]),
     }
 }
 

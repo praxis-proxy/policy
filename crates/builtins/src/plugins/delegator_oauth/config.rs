@@ -39,6 +39,11 @@ pub struct OAuthDelegatorConfig {
     #[serde(default = "default_subject_token_type")]
     pub subject_token_type: String,
 
+    /// Check issued token type, granted scope, and JWT audience/subject.
+    /// Disable only for an `IdP` whose response cannot meet these checks.
+    #[serde(default = "default_strict_response_validation")]
+    pub strict_response_validation: bool,
+
     /// Request timeout. The exchange is on the request hot path —
     /// a 5s default keeps requests bounded if the `IdP` is slow.
     #[serde(default = "default_timeout_seconds")]
@@ -147,6 +152,10 @@ fn default_subject_token_type() -> String {
     "urn:ietf:params:oauth:token-type:access_token".to_owned()
 }
 
+fn default_strict_response_validation() -> bool {
+    true
+}
+
 fn default_actor_token_type() -> String {
     "urn:ietf:params:oauth:token-type:jwt".to_owned()
 }
@@ -196,6 +205,23 @@ impl ClientSecretSource {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn response_validation_defaults_strict_and_can_be_disabled() {
+        let mut config = json!({
+            "token_endpoint": "https://idp.example/token",
+            "client_id": "gateway",
+            "client_secret_source": { "kind": "literal", "secret": "test" },
+        });
+        let parsed: OAuthDelegatorConfig = serde_json::from_value(config.clone()).unwrap();
+        assert!(parsed.strict_response_validation);
+        config
+            .as_object_mut()
+            .unwrap()
+            .insert("strict_response_validation".into(), json!(false));
+        let parsed: OAuthDelegatorConfig = serde_json::from_value(config).unwrap();
+        assert!(!parsed.strict_response_validation);
+    }
 
     #[test]
     fn config_deserializes_from_json() {

@@ -102,7 +102,7 @@ fn adjust(amount: Value) -> Call {
 
 /// `args.amount > 10000` gates the approval. A numeric string is compared
 /// as a number, a float and an integer past f64 precision still compare,
-/// and an array fails the comparison closed.
+/// and arrays, objects, and null fail the comparison closed.
 #[tokio::test]
 async fn amount_shapes_elicit_or_deny_without_reaching_the_upstream() {
     let host = RefHost::hermetic(Fixture::Cedar).await;
@@ -112,6 +112,8 @@ async fn amount_shapes_elicit_or_deny_without_reaching_the_upstream() {
         (json!(2.5e4), "elicitation.pending"),
         (json!(9_007_199_254_740_993_u64), "elicitation.pending"),
         (json!([25_000]), fail_closed),
+        (json!({"value": 25_000}), fail_closed),
+        (Value::Null, fail_closed),
     ];
     for (amount, code) in cases {
         let call = adjust(amount.clone());
@@ -141,8 +143,7 @@ async fn a_negative_amount_is_outside_the_gate_as_written() {
     out.assert_no_leaks(&planted);
 }
 
-// Object/null parents are absent from the scalar bag. Validate the type
-// and presence explicitly before relying on a numeric approval predicate.
+// The schema can also reject malformed amounts before the approval gate.
 #[tokio::test]
 async fn an_amount_schema_rejects_objects_null_and_missing_values() {
     let anchor = "  - tool: adjust_compensation\n    authorization:\n      pre_invocation:\n";
