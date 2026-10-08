@@ -31,11 +31,22 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#78](https://github.com/praxis-proxy/policy/issues/78))
 - `caller_workload.attested_at` and `this_workload.attested_at` now reach
   policy, rendered as RFC3339 with second precision and a literal `Z`. The
-  fixed precision is what makes the string orderable, so
-  `caller_workload.attested_at < "2026-10-01T00:00:00Z"` is a staleness check.
-  These are the only instants the engine formats; `request.timestamp` and
-  `completion.created_at` are host-supplied strings with no ordering guarantee,
-  which the page now says. The bag still has no date type.
+  fixed width makes the string sort the way the instant does, which CEL and
+  Rego can use. **APL cannot**: its order comparison is numeric and fails
+  closed on an operand that will not coerce to a finite `f64`, so
+  `attested_at < "..."` denies every request there rather than testing
+  freshness. `caller_workload.attested_at_epoch` and
+  `this_workload.attested_at_epoch` carry the same instant as Unix seconds for
+  that reason, which APL orders on its exact integer path, so an event-pinned
+  floor such as `attested_at_epoch < 1790812800: deny` is writable: "reject
+  anything attested before the CA rotation" never goes stale. A rolling window
+  still is not writable, because APL compares an attribute against a literal
+  with no arithmetic and no `now()`; that is tracked separately. Both keys
+  truncate one value to seconds, so they cannot describe different instants,
+  and truncation is toward the past so a freshness rule errs toward stale.
+  Tests through the evaluator pin both what APL can and cannot do here. These
+  are the only instants the engine formats; `request.timestamp` and
+  `completion.created_at` are host-supplied strings with no format guarantee.
   ([#78](https://github.com/praxis-proxy/policy/issues/78))
 
 ### Documentation
@@ -60,8 +71,35 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   completing the pattern is the obvious wrong edit.
   ([#78](https://github.com/praxis-proxy/policy/issues/78))
 
+### Removed
+
+- **Breaking for Rust callers of `praxis_policy_apl_cmf::constants`:** removed
+  `BAG_META_PREFIX`, `BAG_REQUEST_PREFIX`, `BAG_LLM_PREFIX`, `BAG_MCP_PREFIX`,
+  `BAG_COMPLETION_PREFIX`, `BAG_PROVENANCE_PREFIX` and
+  `BAG_FRAMEWORK_PREFIX`. Their only consumer was the capability table, which
+  no longer names them because those slots are unrestricted, and they cannot
+  serve the drift prevention the module header promised: every key in those
+  namespaces is a fixed string, so a prefix constant would guard only the first
+  segment of `mcp.tool.name`. The bag keys themselves are unchanged and remain
+  readable from any policy; only the Rust constants are gone.
+  `BAG_CUSTOM_PREFIX` stays and is now used by its extractor, which composes
+  `custom.<name>` and so wants the prefix.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+
 ### Fixed
 
+- `capability_namespaces` no longer claims that `read_request`,
+  `read_provenance`, `read_completion`, `read_llm`, `read_framework`,
+  `read_mcp`, `read_meta` and `read_custom` unlock bag namespaces. Those eight
+  slots are `AccessPolicy::Unrestricted` in `filter_extensions`, so every
+  plugin receives them whatever it declared, and the table was telling an
+  operator that withholding a capability would withhold the data. All eight now
+  report no prefixes, and the page says which slots capabilities actually
+  withhold. A test filters a fully populated `Extensions` through
+  `filter_extensions` and asserts the gating each key declares, so the
+  description is checked against the behaviour rather than against another
+  hand-maintained list.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
 - `read_teams` now unlocks the flattened `team.*` prefix alongside
   `subject.teams`. The bridge has always written `team.<name>` for each team,
   the way `read_roles` and `read_permissions` cover their own flattened

@@ -14,12 +14,14 @@
 // * `CAP_*` names match `praxis_policy_core::extensions::filter::filter_extensions`
 //   verbatim. praxis-policy-core is authoritative — if it changes a cap name,
 //   bump here and update the mapping table.
-// * `BAG_*` prefixes match what the per-extension extractor modules
-//   (`security.rs`, `delegation.rs`, etc.) actually write into the
-//   bag. The extractor files still use string literals today; a
-//   future cleanup can refactor them to consume these constants to
-//   prevent drift. Tests in `capability_namespaces` flag the
-//   contract.
+// * A `BAG_*` prefix exists where a key is composed with a variable, as
+//   `format!("{BAG_ROLE_PREFIX}{role}")`. A key that is a fixed string is
+//   written as a literal in its extractor, deliberately: a prefix constant
+//   would guard only the first segment of `mcp.tool.name`, which nobody
+//   mistypes, while costing an allocation and a layer of indirection.
+//   Drift between a written key and the declared vocabulary is caught by
+//   `tests/key_catalog/`, which asserts the emitted key set against the
+//   catalog, the capability gating and the documented tables.
 
 /// Capability permitting a plugin to read subject identity.
 pub const CAP_READ_SUBJECT: &str = "read_subject";
@@ -142,10 +144,6 @@ pub const BAG_DELEGATED: &str = "delegated";
 
 /// Key prefix for agent session and lineage, as in `agent.<name>`.
 pub const BAG_AGENT_PREFIX: &str = "agent.";
-/// Key prefix for host operational metadata, as in `meta.<name>`.
-pub const BAG_META_PREFIX: &str = "meta.";
-/// Key prefix for request environment, as in `request.<name>`.
-pub const BAG_REQUEST_PREFIX: &str = "request.";
 /// Key prefix for http request headers, as in `http.request_headers.<name>`.
 pub const BAG_HTTP_REQUEST_HEADERS_PREFIX: &str = "http.request_headers.";
 /// Key prefix for http response headers, as in `http.response_headers.<name>`.
@@ -175,15 +173,5 @@ pub const DETAIL_HTTP_STATUS: &str = "http.status";
 pub const DETAIL_HTTP_BODY: &str = "http.body";
 /// Violation `details` key `http.headers`.
 pub const DETAIL_HTTP_HEADERS: &str = "http.headers";
-/// Key prefix for model identity, as in `llm.<name>`.
-pub const BAG_LLM_PREFIX: &str = "llm.";
-/// Key prefix for tool and resource metadata, as in `mcp.<name>`.
-pub const BAG_MCP_PREFIX: &str = "mcp.";
-/// Key prefix for completion metadata, as in `completion.<name>`.
-pub const BAG_COMPLETION_PREFIX: &str = "completion.";
-/// Key prefix for message origin, as in `provenance.<name>`.
-pub const BAG_PROVENANCE_PREFIX: &str = "provenance.";
-/// Key prefix for framework context, as in `framework.<name>`.
-pub const BAG_FRAMEWORK_PREFIX: &str = "framework.";
 /// Key prefix for host-supplied custom values, as in `custom.<name>`.
 pub const BAG_CUSTOM_PREFIX: &str = "custom.";

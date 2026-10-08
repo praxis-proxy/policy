@@ -64,6 +64,7 @@
 //   sec.caller_workload.trust_domain → caller_workload.trust_domain : String
 //   sec.caller_workload.attestor     → caller_workload.attestor     : String
 //   sec.caller_workload.attested_at  → caller_workload.attested_at  : String (RFC3339, seconds, Z)
+//                                    → caller_workload.attested_at_epoch : Int (Unix seconds)
 //   sec.caller_workload.selectors    → caller_workload.selectors    : StringSet (always)
 //   sec.caller_workload.client_id    → caller_workload.client_id    : String
 //   sec.this_workload.*              → this_workload.*  (same shape, our identity)
@@ -238,16 +239,30 @@ pub fn extract_workload(prefix: &str, w: &WorkloadIdentity, bag: &mut AttributeB
         bag.set(format!("{prefix}.client_id"), id.clone());
     }
     if let Some(at) = &w.attested_at {
-        // Fixed second precision and a literal `Z`, which is what makes the
-        // string orderable: `<` on these compares lexicographically, so
-        // `caller_workload.attested_at < "2026-10-01T00:00:00Z"` is a staleness
-        // check. `SecondsFormat::AutoSi` would emit `00.5Z` beside `00Z`, and
-        // `.` sorts before `Z`, so a sub-second reading would compare as
-        // earlier than a whole-second one in the same second.
+        // Fixed second precision and a literal `Z`, so the string sorts the
+        // way the instant does. `SecondsFormat::AutoSi` would emit `00.5Z`
+        // beside `00Z`, and `.` sorts before `Z`, so a sub-second reading
+        // would compare as earlier than a whole-second one in the same second.
+        //
+        // That buys lexicographic ordering in CEL and Rego only. APL's order
+        // comparison is numeric and fails closed on an operand that will not
+        // coerce to a finite f64, so `attested_at < "..."` denies every
+        // request there rather than testing freshness, so `attested_at_epoch`
+        // carries the same instant in a form APL can order.
         bag.set(
             format!("{prefix}.attested_at"),
             at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         );
+        // Unix seconds as `i64`, which `numeric_compare` orders on its exact
+        // integer path without going through `f64`. Seconds rather than
+        // nanoseconds: nanoseconds exhaust `i64` in 2262 and exceed 2^53, so a
+        // comparison against a float literal would be refused as unorderable.
+        //
+        // Both keys truncate the same value, so they describe one instant
+        // rather than two. Truncation loses up to a second and always toward
+        // the past, which reads an attestation as very slightly older than it
+        // is: a freshness rule errs toward stale and never toward fresh.
+        bag.set(format!("{prefix}.attested_at_epoch"), at.timestamp());
     }
 }
 
@@ -635,12 +650,16 @@ mod tests {
         assert!(bag.set_contains("client.teams", "acme"));
     }
 
-    /// The rendering is the whole basis for treating this key as orderable, so
-    /// it is pinned rather than left to the formatter's defaults. Second
-    /// precision and a literal `Z` are what make a string compare the way the
-    /// instant does; at variable precision `.` sorts before `Z` and a
+    /// The rendering is pinned rather than left to the formatter's defaults,
+    /// because the fixed width is what makes the string sort the way the
+    /// instant does: at variable precision `.` sorts before `Z` and a
     /// sub-second reading would compare as earlier than a whole-second one in
     /// the same second.
+    ///
+    /// This asserts the rendering and Rust's ordering of it, which is what CEL
+    /// and Rego see. It says nothing about APL, whose order comparison is
+    /// numeric and refuses this value; `apl_cannot_order_a_rendered_instant`
+    /// covers that.
     #[test]
     fn attested_at_renders_orderable_rfc3339() {
         use praxis_policy_core::extensions::WorkloadIdentity;
@@ -655,6 +674,12 @@ mod tests {
             bag.get_string("caller_workload.attested_at"),
             Some("2026-10-01T12:00:00Z")
         );
+        // The same instant, and the same truncation, so the two keys cannot
+        // describe different moments.
+        assert_eq!(
+            bag.get_int("caller_workload.attested_at_epoch"),
+            Some(1_790_856_000)
+        );
 
         // A sub-second input truncates rather than widening the format, which
         // is what keeps every value the same width.
@@ -663,6 +688,11 @@ mod tests {
         assert_eq!(
             sub.get_string("caller_workload.attested_at"),
             Some("2026-10-01T12:00:00Z")
+        );
+        assert_eq!(
+            sub.get_int("caller_workload.attested_at_epoch"),
+            Some(1_790_856_000),
+            "truncation has to lose the same half-second in both forms"
         );
 
         // A non-UTC input renders as the same instant in UTC, so two hosts in
@@ -710,6 +740,102 @@ mod tests {
             earlier < later,
             "the string must order the way the instant does: {earlier} then {later}"
         );
+    }
+
+    /// What the rendered instant is worth to an APL author, which is not what
+    /// the format suggests. Order comparison in APL is numeric and fails
+    /// closed on an operand that will not coerce to a finite `f64`, so a rule
+    /// written as a staleness check denies every request instead, including
+    /// one whose attestation is recent. Pinned through the evaluator, because
+    /// asserting Rust's `str` ordering says nothing about the language a
+    /// policy is written in.
+    #[test]
+    fn apl_cannot_order_a_rendered_instant() {
+        use praxis_policy_apl_core::{evaluate_rules, parse_rule};
+
+        let mut bag = AttributeBag::new();
+        extract_workload(
+            "caller_workload",
+            &WorkloadIdentity {
+                attested_at: Some(
+                    "2026-10-01T12:00:00Z"
+                        .parse()
+                        .expect("a literal RFC3339 instant"),
+                ),
+                ..Default::default()
+            },
+            &mut bag,
+        );
+
+        // Noon on the 1st is after the floor, so a working order comparison
+        // would not deny. This one denies, and says why.
+        let stale = parse_rule(
+            r#"caller_workload.attested_at < "2026-10-01T00:00:00Z": deny"#,
+            "test",
+        )
+        .expect("the rule parses");
+        let decision = evaluate_rules(std::slice::from_ref(&stale), &bag);
+        match decision {
+            praxis_policy_apl_core::Decision::Deny { reason, .. } => {
+                let reason = reason.unwrap_or_default();
+                assert!(
+                    reason.contains("not a finite number"),
+                    "the denial should be the unorderable-operand one: {reason}"
+                );
+            },
+            other => panic!("APL ordered a string instant: {other:?}"),
+        }
+
+        // Equality is what an APL rule can do with it today.
+        let exact = parse_rule(
+            r#"caller_workload.attested_at == "2026-10-01T12:00:00Z": deny"#,
+            "test",
+        )
+        .expect("the rule parses");
+        assert!(matches!(
+            evaluate_rules(std::slice::from_ref(&exact), &bag),
+            praxis_policy_apl_core::Decision::Deny { reason: None, .. }
+        ));
+    }
+
+    /// What `attested_at_epoch` is for. An event-pinned floor is the rule the
+    /// string form cannot express in APL: "reject anything attested before the
+    /// CA rotation" is a lasting control rather than a window that goes stale,
+    /// and it needs an operand APL can order.
+    #[test]
+    fn apl_orders_the_epoch_form() {
+        use praxis_policy_apl_core::{Decision, evaluate_rules, parse_rule};
+
+        let bag_at = |rfc: &str| {
+            let mut bag = AttributeBag::new();
+            extract_workload(
+                "caller_workload",
+                &WorkloadIdentity {
+                    attested_at: Some(rfc.parse().expect("a literal RFC3339 instant")),
+                    ..Default::default()
+                },
+                &mut bag,
+            );
+            bag
+        };
+        // 1790812800 is 2026-10-01T00:00:00Z, standing in for the rotation.
+        let floor = "caller_workload.attested_at_epoch < 1790812800: deny";
+        let rule = parse_rule(floor, "test").expect("the rule parses");
+
+        // Attested after the floor: allowed, and no fail-closed denial.
+        assert_eq!(
+            evaluate_rules(std::slice::from_ref(&rule), &bag_at("2026-10-01T12:00:00Z")),
+            Decision::Allow
+        );
+
+        // Attested before it: denied on the rule, not on unorderability.
+        match evaluate_rules(std::slice::from_ref(&rule), &bag_at("2026-09-30T12:00:00Z")) {
+            Decision::Deny { reason, .. } => assert!(
+                reason.is_none(),
+                "a rule denial carries no reason; a fail-closed one does: {reason:?}"
+            ),
+            other => panic!("the floor should have denied: {other:?}"),
+        }
     }
 
     /// `client.teams` is set-only on purpose, where `subject.teams` carries the

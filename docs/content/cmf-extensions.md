@@ -254,20 +254,50 @@ These are not `agent.*`. `agent.*` is session context.
 | `<ns>.trust_domain` | String | `Some` |
 | `<ns>.attestor` | String | `Some` |
 | `<ns>.attested_at` | String | `Some`. RFC3339, second precision, `Z`. |
+| `<ns>.attested_at_epoch` | Int | `Some`. The same instant as Unix seconds. |
 | `<ns>.selectors` | StringSet | always |
 | `<ns>.client_id` | String | `Some` |
 
-`attested_at` renders as RFC3339 with second precision and a literal `Z`, so
-`caller_workload.attested_at < "2026-10-01T00:00:00Z"` is a staleness check:
-at fixed precision the string orders the same way the instant does. Variable
-precision would break that, because `.` sorts before `Z` and `00.5Z` would
-compare as earlier than `00Z`.
+`attested_at` renders as RFC3339 with second precision and a literal `Z`. At
+fixed precision the string sorts the same way the instant does, which is why
+the format is pinned: variable precision would break it, because `.` sorts
+before `Z` and `00.5Z` would compare as earlier than `00Z`.
+
+**APL cannot order it.** APL's `<`, `<=`, `>` and `>=` are numeric: an operand
+that will not coerce to a finite `f64` is unorderable, and the phase fails
+closed. So `caller_workload.attested_at < "2026-10-01T00:00:00Z"` does not
+test freshness, it denies every request, including one whose attestation is
+recent:
+
+```text
+order comparison on `caller_workload.attested_at` failed (fail-closed):
+value is not a finite number
+```
+
+`attested_at_epoch` carries the same instant as Unix seconds, which APL does
+order, on `numeric_compare`'s exact integer path. That is what makes an
+event-pinned floor writable:
+
+<!-- validate: apl-rule -->
+```text
+caller_workload.attested_at_epoch < 1790812800: deny
+```
+
+"reject anything attested before the CA rotation" is a lasting control rather
+than a window that goes stale, so the literal never needs editing. What is
+*not* writable is a rolling window: APL compares an attribute against a
+literal, with no arithmetic and no `now()`, so "attested within the last hour"
+cannot be expressed against either form. That needs language support and is
+tracked separately.
+
+CEL and Rego order both forms, the string lexicographically and the epoch
+numerically.
 
 This is the one of three date keys the engine controls the format of.
 `request.timestamp` and `completion.created_at` are host-supplied strings and
-carry no such guarantee, so no ordering should be assumed of them. The bag has
-no date type; giving all three one means deciding comparison semantics that
-hold across Cedar, CEL and Rego, which is tracked separately.
+carry no format guarantee at all, so they are not ordered reliably anywhere.
+Giving the bag a date type, and APL the operators to compare one, is what makes
+a staleness rule writable in the native language.
 
 **Other**, written whenever the security slot itself is present:
 
@@ -291,11 +321,22 @@ unlocks `security.labels`; `read_workload` unlocks `caller_workload.*` and
 `team.*` alongside `subject.teams`, the way `read_roles` and `read_permissions`
 unlock their flattened aliases.
 
-`auth_method` and `security.classification` are the two keys no capability
-gates. `filter_extensions` treats them as unrestricted sub-fields and includes
-them whatever a plugin declared, so they reach every plugin and every PDP. No
-capability names them, because naming one would describe a grant an operator
-could withhold and they cannot.
+`auth_method` and `security.classification` are not gated. `filter_extensions`
+treats them as unrestricted sub-fields and includes them whatever a plugin
+declared, so no capability names them: naming one would describe a grant an
+operator could withhold, and these cannot be withheld.
+
+They are not alone. Eight whole slots are `AccessPolicy::Unrestricted` in
+`praxis_policy_core::extensions::filter` — `request`, `provenance`,
+`completion`, `llm`, `framework`, `mcp`, `meta` and `custom` — so **every key
+under them reaches every plugin and every PDP regardless of capabilities**. The
+`read_request`, `read_provenance`, `read_completion`, `read_llm`,
+`read_framework`, `read_mcp`, `read_meta` and `read_custom` capabilities gate
+nothing on the bag, and `capability_namespaces` returns no prefixes for them.
+
+Capabilities withhold the credential-bearing slots: `security.*` and its
+sub-records, `delegation.*`, `agent.*` and `http.*`. Those are the ones where
+declaring less actually shows a plugin less.
 
 ### 2. `delegation` — `DelegationExtension`
 

@@ -139,12 +139,22 @@ const TABLE: &[CapabilityEntry] = &[
         prefixes: &[BAG_AGENT_PREFIX],
     },
     CapabilityEntry {
+        // Its slot is `AccessPolicy::Unrestricted` in
+        // `praxis_policy_core::extensions::filter`, so every plugin receives it
+        // whatever it declared and holding this unlocks nothing further. Naming
+        // the prefix here would tell an operator that withholding the
+        // capability withholds the data.
         name: CAP_READ_META,
-        prefixes: &[BAG_META_PREFIX],
+        prefixes: &[],
     },
     CapabilityEntry {
+        // Its slot is `AccessPolicy::Unrestricted` in
+        // `praxis_policy_core::extensions::filter`, so every plugin receives it
+        // whatever it declared and holding this unlocks nothing further. Naming
+        // the prefix here would tell an operator that withholding the
+        // capability withholds the data.
         name: CAP_READ_REQUEST,
-        prefixes: &[BAG_REQUEST_PREFIX],
+        prefixes: &[],
     },
     CapabilityEntry {
         name: CAP_READ_HEADERS,
@@ -161,8 +171,13 @@ const TABLE: &[CapabilityEntry] = &[
         ],
     },
     CapabilityEntry {
+        // Its slot is `AccessPolicy::Unrestricted` in
+        // `praxis_policy_core::extensions::filter`, so every plugin receives it
+        // whatever it declared and holding this unlocks nothing further. Naming
+        // the prefix here would tell an operator that withholding the
+        // capability withholds the data.
         name: CAP_READ_LLM,
-        prefixes: &[BAG_LLM_PREFIX],
+        prefixes: &[],
     },
     CapabilityEntry {
         // Gates `Extensions.llm_request`, which reaches PDPs through a
@@ -171,24 +186,49 @@ const TABLE: &[CapabilityEntry] = &[
         prefixes: &[],
     },
     CapabilityEntry {
+        // Its slot is `AccessPolicy::Unrestricted` in
+        // `praxis_policy_core::extensions::filter`, so every plugin receives it
+        // whatever it declared and holding this unlocks nothing further. Naming
+        // the prefix here would tell an operator that withholding the
+        // capability withholds the data.
         name: CAP_READ_MCP,
-        prefixes: &[BAG_MCP_PREFIX],
+        prefixes: &[],
     },
     CapabilityEntry {
+        // Its slot is `AccessPolicy::Unrestricted` in
+        // `praxis_policy_core::extensions::filter`, so every plugin receives it
+        // whatever it declared and holding this unlocks nothing further. Naming
+        // the prefix here would tell an operator that withholding the
+        // capability withholds the data.
         name: CAP_READ_COMPLETION,
-        prefixes: &[BAG_COMPLETION_PREFIX],
+        prefixes: &[],
     },
     CapabilityEntry {
+        // Its slot is `AccessPolicy::Unrestricted` in
+        // `praxis_policy_core::extensions::filter`, so every plugin receives it
+        // whatever it declared and holding this unlocks nothing further. Naming
+        // the prefix here would tell an operator that withholding the
+        // capability withholds the data.
         name: CAP_READ_PROVENANCE,
-        prefixes: &[BAG_PROVENANCE_PREFIX],
+        prefixes: &[],
     },
     CapabilityEntry {
+        // Its slot is `AccessPolicy::Unrestricted` in
+        // `praxis_policy_core::extensions::filter`, so every plugin receives it
+        // whatever it declared and holding this unlocks nothing further. Naming
+        // the prefix here would tell an operator that withholding the
+        // capability withholds the data.
         name: CAP_READ_FRAMEWORK,
-        prefixes: &[BAG_FRAMEWORK_PREFIX],
+        prefixes: &[],
     },
     CapabilityEntry {
+        // Its slot is `AccessPolicy::Unrestricted` in
+        // `praxis_policy_core::extensions::filter`, so every plugin receives it
+        // whatever it declared and holding this unlocks nothing further. Naming
+        // the prefix here would tell an operator that withholding the
+        // capability withholds the data.
         name: CAP_READ_CUSTOM,
-        prefixes: &[BAG_CUSTOM_PREFIX],
+        prefixes: &[],
     },
 ];
 

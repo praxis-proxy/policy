@@ -585,3 +585,96 @@ fn each_key_is_documented_under_the_slot_it_comes_from() {
          have, and a reader looking under the right one does not find it:          {misplaced:#?}"
     );
 }
+
+// =====================================================================
+// The gating authority: `filter_extensions`, not the capability table
+// =====================================================================
+
+/// What a plugin holding `capabilities` can actually read out of the bag.
+///
+/// Filters the fully populated container the way the executor does before
+/// dispatch, then flattens the result. This is the only way to find out what a
+/// capability withholds: `capability_namespaces` is a hand-maintained
+/// description of that behaviour and can disagree with it.
+fn bag_visible_to(capabilities: &[&str]) -> AttributeBag {
+    let caps: HashSet<String> = capabilities.iter().map(|c| (*c).to_owned()).collect();
+    let filtered = praxis_policy_core::extensions::filter_extensions(&fully_populated(), &caps);
+    let mut bag = AttributeBag::new();
+    extract_extensions(&filtered, &mut bag);
+    bag
+}
+
+#[test]
+fn a_plugin_holding_nothing_sees_exactly_the_ungated_keys() {
+    let bag = bag_visible_to(&[]);
+
+    let mut leaked: Vec<&str> = Vec::new();
+    let mut withheld: Vec<&str> = Vec::new();
+    for entry in CATALOG {
+        let present = match entry.shape {
+            Shape::Exact => bag.contains(entry.key),
+            Shape::Family => bag.iter().any(|(key, _)| {
+                let prefix = entry.literal_prefix();
+                key.len() > prefix.len() && key.starts_with(prefix)
+            }),
+        };
+        // A gated key is withheld in one of two ways, and both count as
+        // withheld. A scalar disappears with its slot. A `StringSet` that
+        // follows the present-empty contract stays, emptied, because a strict
+        // PDP treats a missing key as an error rather than as an empty
+        // collection; `security.labels` is the case that does this. So the
+        // question is whether a value survived, not whether a key did.
+        let carries_data = match entry.shape {
+            Shape::Exact => bag.iter().any(|(key, value)| {
+                key == entry.key && !matches!(value, AttributeValue::StringSet(s) if s.is_empty())
+            }),
+            Shape::Family => present,
+        };
+        match (entry.gating, carries_data, present) {
+            (Gating::Capability(_), true, _) => leaked.push(entry.key),
+            (Gating::Ungated, _, false) => withheld.push(entry.key),
+            _ => {},
+        }
+    }
+    leaked.sort_unstable();
+    withheld.sort_unstable();
+
+    assert!(
+        leaked.is_empty(),
+        "the catalog says a capability gates these, but `filter_extensions` \
+         hands them to a plugin that declared none, so the gate does not \
+         exist and the catalog overstates it: {leaked:?}"
+    );
+    assert!(
+        withheld.is_empty(),
+        "the catalog says these need no capability, but filtering withheld \
+         them: {withheld:?}"
+    );
+}
+
+#[test]
+fn each_gated_key_appears_once_its_capability_is_held() {
+    let mut missing: Vec<(&str, &str)> = Vec::new();
+    for entry in CATALOG {
+        let Gating::Capability(cap) = entry.gating else {
+            continue;
+        };
+        let bag = bag_visible_to(&[cap]);
+        let present = match entry.shape {
+            Shape::Exact => bag.contains(entry.key),
+            Shape::Family => bag.iter().any(|(key, _)| {
+                let prefix = entry.literal_prefix();
+                key.len() > prefix.len() && key.starts_with(prefix)
+            }),
+        };
+        if !present {
+            missing.push((entry.key, cap));
+        }
+    }
+    missing.sort_unstable();
+    assert!(
+        missing.is_empty(),
+        "holding the declared capability still does not produce these keys, so \
+         the catalog names the wrong one: {missing:?}"
+    );
+}
