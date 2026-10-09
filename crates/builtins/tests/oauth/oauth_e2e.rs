@@ -120,7 +120,17 @@ fn token_endpoint() -> String {
 /// half a mock server cannot reach: a timeout on demand, so the
 /// non-idempotent retry rule is assertable without waiting on one.
 async fn build_manager(http: &Arc<FakeTransport>) -> Arc<PolicyEngine> {
-    let cfg = plugin_config(&token_endpoint());
+    build_manager_with_validation(http, true).await
+}
+
+/// Select strict response validation for focused compatibility tests.
+async fn build_manager_with_validation(
+    http: &Arc<FakeTransport>,
+    strict_response_validation: bool,
+) -> Arc<PolicyEngine> {
+    let mut cfg = plugin_config(&token_endpoint());
+    cfg.config.as_mut().expect("delegator config")["strict_response_validation"] =
+        json!(strict_response_validation);
     let delegator = OAuthDelegator::new(cfg.clone()).expect("delegator constructs");
     let mgr = Arc::new(PolicyEngine::default());
     mgr.register_handler_for_names::<TokenDelegateHook, _>(
@@ -568,7 +578,16 @@ async fn absent_actor_leaves_no_actor_fields_on_the_wire() {
 /// auth header it already sends.
 #[tokio::test]
 async fn this_workload_subject_uses_client_credentials_not_token_exchange() {
-    let http = idp(200, &ok_token_response());
+    // RFC 6749 client_credentials responses need no issued_token_type.
+    let http = idp(
+        200,
+        &json!({
+            "access_token": "minted-downstream-token",
+            "expires_in": 300,
+            "scope": "read:compensation",
+        })
+        .to_string(),
+    );
 
     let mgr = build_manager(&http).await;
     // Note the empty bearer token: for a this_workload subject that is the
@@ -587,6 +606,10 @@ async fn this_workload_subject_uses_client_credentials_not_token_exchange() {
 
     let final_payload = DelegationPayload::from_pipeline_result(&result)
         .expect("delegation payload should be present");
+    assert_eq!(
+        final_payload.metadata.get("issued_token_type"),
+        Some(&json!("urn:ietf:params:oauth:token-type:access_token")),
+    );
     assert!(
         matches!(
             final_payload.delegation_mode,
@@ -966,13 +989,31 @@ async fn a_leg2_success_with_no_access_token_denies() {
     assert_eq!(violation.code, "delegation.bad_response");
 }
 
+/// RFC 8693 requires the issued type even though compatibility mode can
+/// supply the old access-token default for an `IdP` that omits it.
+#[tokio::test]
+async fn a_strict_exchange_with_no_issued_token_type_denies() {
+    let http = idp(200, &json!({ "access_token": "opaque-token" }).to_string());
+
+    let violation = violation_for(
+        build_payload("get_compensation", "https://hr.example.com", &[]),
+        &http,
+    )
+    .await;
+    assert_eq!(violation.code, "delegation.bad_response");
+}
+
 // =====================================================================
 // Lifetime and metadata of the minted token
 // =====================================================================
 
 /// Run the happy path with a chosen token response and attenuation, and return
 /// the minted payload.
-async fn mint_with(body: String, attenuation: Option<AttenuationConfig>) -> DelegationPayload {
+async fn mint_with(
+    body: String,
+    attenuation: Option<AttenuationConfig>,
+    strict_response_validation: bool,
+) -> DelegationPayload {
     let http = idp(200, &body);
 
     let caller = test_jwt(json!({ "sub": "alice" }));
@@ -984,7 +1025,7 @@ async fn mint_with(body: String, attenuation: Option<AttenuationConfig>) -> Dele
         payload = payload.with_route_attenuation(att);
     }
 
-    let mgr = build_manager(&http).await;
+    let mgr = build_manager_with_validation(&http, strict_response_validation).await;
     let result = invoke(&mgr, payload).await;
     assert!(
         result.continue_processing,
@@ -1018,9 +1059,14 @@ fn attenuation_with_ttl(ttl: Option<u64>) -> AttenuationConfig {
 /// would notice if it stopped.
 #[tokio::test]
 async fn attenuation_only_ever_shortens_the_minted_token_lifetime() {
-    let body = json!({ "access_token": "t", "expires_in": 3600 }).to_string();
+    let body = json!({
+        "access_token": "t",
+        "expires_in": 3600,
+        "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+    })
+    .to_string();
 
-    let shortened = mint_with(body.clone(), Some(attenuation_with_ttl(Some(60)))).await;
+    let shortened = mint_with(body.clone(), Some(attenuation_with_ttl(Some(60))), true).await;
     let ttl = shortened
         .delegated_token
         .expect("a token")
@@ -1033,7 +1079,12 @@ async fn attenuation_only_ever_shortens_the_minted_token_lifetime() {
     );
 
     // A hint larger than any real duration means "no further shortening".
-    let absurd = mint_with(body.clone(), Some(attenuation_with_ttl(Some(u64::MAX)))).await;
+    let absurd = mint_with(
+        body.clone(),
+        Some(attenuation_with_ttl(Some(u64::MAX))),
+        true,
+    )
+    .await;
     let ttl = absurd
         .delegated_token
         .expect("a token")
@@ -1055,7 +1106,16 @@ async fn attenuation_only_ever_shortens_the_minted_token_lifetime() {
 /// unbounded lifetime, so a misconfigured `IdP` cannot cause long-lived tokens.
 #[tokio::test]
 async fn a_token_response_with_no_expiry_gets_a_short_default() {
-    let minted = mint_with(json!({ "access_token": "t" }).to_string(), None).await;
+    let minted = mint_with(
+        json!({
+            "access_token": "t",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        })
+        .to_string(),
+        None,
+        true,
+    )
+    .await;
     let ttl = minted
         .delegated_token
         .expect("a token")
@@ -1068,9 +1128,27 @@ async fn a_token_response_with_no_expiry_gets_a_short_default() {
     );
 }
 
-/// `issued_token_type` is recorded either way: echoed when the `IdP` sends one,
-/// defaulted when it does not. Downstream reads this from metadata, so an
-/// absent key and a defaulted key are different outcomes for it.
+/// Periods do not establish that an access token carries readable JWT claims.
+#[tokio::test]
+async fn a_three_segment_opaque_access_token_is_accepted() {
+    let minted = mint_with(
+        json!({
+            "access_token": "opaque.not-json.signature",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        })
+        .to_string(),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(
+        minted.delegated_token.expect("a token").token.as_str(),
+        "opaque.not-json.signature"
+    );
+}
+
+/// `issued_token_type` is echoed in strict mode. The compatibility opt-out
+/// retains the old metadata default for an `IdP` that omits the required field.
 #[tokio::test]
 async fn the_issued_token_type_is_recorded_whether_or_not_the_idp_sends_one() {
     let echoed = mint_with(
@@ -1081,6 +1159,7 @@ async fn the_issued_token_type_is_recorded_whether_or_not_the_idp_sends_one() {
         })
         .to_string(),
         None,
+        true,
     )
     .await;
     assert_eq!(
@@ -1092,6 +1171,7 @@ async fn the_issued_token_type_is_recorded_whether_or_not_the_idp_sends_one() {
     let defaulted = mint_with(
         json!({ "access_token": "t", "expires_in": 300 }).to_string(),
         None,
+        false,
     )
     .await;
     assert_eq!(

@@ -29,7 +29,7 @@ fn bob_reads_compensation() -> (Call, Planted) {
 
 #[tokio::test]
 async fn a_failing_token_endpoint_denies_the_call_before_the_upstream() {
-    let rows: [(&str, Fault, &str); 9] = [
+    let rows: [(&str, Fault, &str); 10] = [
         // oauth_e2e.rs: idp_unreachable_surfaces_violation.
         ("connect", Fault::Connect, "delegation.idp_unreachable"),
         // oauth_e2e.rs: a_timed_out_exchange_is_not_retried.
@@ -65,6 +65,11 @@ async fn a_failing_token_endpoint_denies_the_call_before_the_upstream() {
         (
             "no access_token",
             Fault::malformed(r#"{"token_type":"Bearer","expires_in":300}"#),
+            "delegation.bad_response",
+        ),
+        (
+            "no issued_token_type",
+            Fault::malformed(r#"{"access_token":"stray-minted-token-0c1d","expires_in":300}"#),
             "delegation.bad_response",
         ),
         // oauth_e2e.rs: idp_narrower_scope_surfaces_scope_too_broad.

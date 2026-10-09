@@ -504,7 +504,8 @@ fn new_effect_key() -> String {
 #[derive(Debug, Deserialize)]
 struct TokenExchangeResponse {
     access_token: String,
-    /// Optional per RFC — defaults to `access_token` issued type.
+    /// Required by RFC 8693. Keep absence distinct so strict validation can
+    /// reject it; the compatibility opt-out supplies the old default.
     #[serde(default)]
     issued_token_type: Option<String>,
     /// Optional in RFC; many `IdPs` send it.
@@ -961,38 +962,23 @@ fn jwt_payload_omits_act(access_token: &str) -> bool {
     claims.is_object() && claims.get("act").is_none_or(serde_json::Value::is_null)
 }
 
-/// Inspect JWT claims supplied by the token endpoint. Opaque tokens have no
-/// local claim shape; a three-segment token with an unreadable payload fails
-/// closed instead of being treated as opaque.
-fn jwt_claims(token: &str) -> Result<Option<serde_json::Value>, Box<PluginViolation>> {
+/// Read JWT claims when the token has a decodable object payload. An access
+/// token can be opaque even when it contains two periods; unreadable claims
+/// are therefore absent. The caller rejects absence for an explicitly labeled
+/// JWT and treats it as opaque for an access token.
+fn jwt_claims(token: &str) -> Option<serde_json::Value> {
     use base64::Engine as _;
     let mut parts = token.split('.');
     let (Some(_header), Some(payload), Some(_signature), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
-        return Ok(None);
+        return None;
     };
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
-        .map_err(|err| {
-            Box::new(PluginViolation::new(
-                "delegation.bad_response",
-                format!("JWT payload is not base64url: {err}"),
-            ))
-        })?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).map_err(|err| {
-        Box::new(PluginViolation::new(
-            "delegation.bad_response",
-            format!("JWT payload is not JSON: {err}"),
-        ))
-    })?;
-    if !claims.is_object() {
-        return Err(Box::new(PluginViolation::new(
-            "delegation.bad_response",
-            "JWT claims are not an object",
-        )));
-    }
-    Ok(Some(claims))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims.is_object().then_some(claims)
 }
 
 #[cfg(test)]
@@ -1073,6 +1059,46 @@ mod response_validation_tests {
         );
         validate_exchange_response(&issued, "read", "api", "opaque", Some("alice"), true).unwrap();
     }
+
+    #[test]
+    fn strict_response_requires_an_issued_token_type() {
+        let mut issued = response("opaque-token".into());
+        issued.issued_token_type = None;
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", "subject", None, true)
+                .unwrap_err()
+                .code,
+            "delegation.bad_response"
+        );
+        validate_exchange_response(&issued, "read", "api", "", None, false).unwrap();
+    }
+
+    #[test]
+    fn three_segment_opaque_tokens_do_not_fail_jwt_claim_checks() {
+        let caller = jwt("alice", json!("gateway"));
+        let mut issued = response("opaque.not-json.signature".into());
+        validate_exchange_response(&issued, "read", "api", &caller, None, true).unwrap();
+
+        issued.access_token = jwt("alice", json!("api"));
+        validate_exchange_response(
+            &issued,
+            "read",
+            "api",
+            "opaque.not-json.signature",
+            Some("alice"),
+            true,
+        )
+        .unwrap();
+
+        issued.issued_token_type = Some(JWT_ISSUED_TOKEN_TYPE.into());
+        issued.access_token = "opaque.not-json.signature".into();
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", &caller, None, true)
+                .unwrap_err()
+                .code,
+            "delegation.bad_response"
+        );
+    }
 }
 
 fn validate_exchange_response(
@@ -1081,12 +1107,19 @@ fn validate_exchange_response(
     audience: &str,
     subject_token: &str,
     caller_identity: Option<&str>,
-    require_subject: bool,
+    is_exchange_grant: bool,
 ) -> Result<(), Box<PluginViolation>> {
-    let issued_type = response
-        .issued_token_type
-        .as_deref()
-        .unwrap_or(DEFAULT_ISSUED_TOKEN_TYPE);
+    let issued_type = match response.issued_token_type.as_deref() {
+        Some(issued_type) => issued_type,
+        // RFC 6749 client_credentials has no issued_token_type field.
+        None if !is_exchange_grant => DEFAULT_ISSUED_TOKEN_TYPE,
+        None => {
+            return Err(Box::new(PluginViolation::new(
+                "delegation.bad_response",
+                "IdP omitted the required issued_token_type",
+            )));
+        },
+    };
     if issued_type != DEFAULT_ISSUED_TOKEN_TYPE && issued_type != JWT_ISSUED_TOKEN_TYPE {
         return Err(Box::new(PluginViolation::new(
             "delegation.issued_token_type_mismatch",
@@ -1106,11 +1139,11 @@ fn validate_exchange_response(
             )));
         }
     }
-    let minted_claims = jwt_claims(&response.access_token)?;
+    let minted_claims = jwt_claims(&response.access_token);
     if issued_type == JWT_ISSUED_TOKEN_TYPE && minted_claims.is_none() {
         return Err(Box::new(PluginViolation::new(
             "delegation.bad_response",
-            "IdP labeled an opaque token as a JWT",
+            "IdP labeled a token as JWT but its claims are unreadable",
         )));
     }
     if let Some(claims) = minted_claims {
@@ -1127,8 +1160,8 @@ fn validate_exchange_response(
                 "IdP issued a JWT for a different audience",
             )));
         }
-        if require_subject {
-            let caller_sub = jwt_claims(subject_token)?
+        if is_exchange_grant {
+            let caller_sub = jwt_claims(subject_token)
                 .and_then(|caller| {
                     caller
                         .get("sub")
