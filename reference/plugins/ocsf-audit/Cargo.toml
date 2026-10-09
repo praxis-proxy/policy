@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# praxis-policy-plugin-ocsf-audit — audit sink that serializes each decision
+# into an OCSF API Activity event: the verdict as security_control, the
+# per-plugin steps, span, taint, content digests and stream stamps under
+# `unmapped`, and optionally a hash-chained, DSSE-signed attestation that a
+# verifier checks offline with the public key. Always allows; never blocks.
+
+[package]
+name = "praxis-policy-plugin-ocsf-audit"
+# Reference implementation. Not published, and not in the `builtins` umbrella:
+# like `audit-logger` its sink is stderr or `tracing::info!`, and a real
+# deployment routes the records at a SIEM or an append-only store. It also
+# holds a signing key handle, and key custody (HSM, rotation, JWKS publication)
+# belongs to whoever operates the signing authority, not to a bundled plugin.
+#
+# Still a workspace member, so it is built, linted and tested here. A host
+# registers it with `PolicyEngine::register_factory` under `audit/ocsf`.
+publish = false
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+description = "PPE audit sink — OCSF API Activity events with a hash-chained, DSSE-signed attestation."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+praxis-policy-core = { workspace = true }
+
+async-trait = { workspace = true }
+# Same major the builtins declare. Only `Engine::{encode,decode}` on the
+# standard alphabet is used, for the DSSE signature bytes.
+base64      = { workspace = true }
+chrono      = { workspace = true }
+p256        = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+sha2        = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

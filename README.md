@@ -66,10 +66,11 @@ A host may replace any bundled plugin. Implement a Plugin Factory through
 unrecognized `kind` causes policy loading to fail, so missing registrations are
 detected at startup.
 
-`reference/plugins/` holds two worked examples: a PII scanner and an audit
-logger. These are not published, but are linted and tested here, and the
-reference [demo](https://github.com/praxis-proxy/demos) registers them as host
-plugins.
+`reference/plugins/` holds three worked examples: a PII scanner, an audit
+logger, and an OCSF audit sink that emits each decision as a signed,
+hash-chained OCSF event. These are not published, but are linted and tested
+here, and the reference [demo](https://github.com/praxis-proxy/demos)
+registers the first two as host plugins.
 
 ## Building
 

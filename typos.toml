@@ -1,6 +1,12 @@
 [files]
 extend-exclude = ["Cargo.lock", "target/"]
 
+[default]
+# W3C trace-context example ids. The OCSF audit sink's examples and vectors
+# stamp their spans with the span id from the trace-context specification,
+# `00f067aa0ba9...`, which the tokenizer splits into a two-letter "word".
+extend-ignore-re = ["00f067aa0ba9[0-9a-f]{4}"]
+
 [default.extend-words]
 # Deliberate misspellings. Each is a fixture for a test that a misspelled
 # configuration key is reported rather than silently dropped, so the wrong
@@ -30,3 +36,7 @@ writeable = "writeable"
 # `miss`. `pendings`: the plural noun, in "multiple concurrent pendings".
 mis = "mis"
 pendings = "pendings"
+
+# CBOR Object Signing and Encryption, one of the signing envelopes OCSF's
+# `digital_signature.serialization_id` enumerates.
+cose = "cose"

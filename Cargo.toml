@@ -25,6 +25,7 @@ members = [
   # why it is not a builtin.
   "reference/plugins/pii-scanner",
   "reference/plugins/audit-logger",
+  "reference/plugins/ocsf-audit",
   # Criterion suite for issue #19. Unpublished; excluded from default-members
   # so everyday `cargo build` stays lean. `cargo bench -p ppe-benches` /
   # `make bench` still pick it up, and `clippy --all-targets` compiles it.
@@ -58,6 +59,7 @@ default-members = [
   # why it is not a builtin.
   "reference/plugins/pii-scanner",
   "reference/plugins/audit-logger",
+  "reference/plugins/ocsf-audit",
 ]
 
 [workspace.package]
@@ -133,6 +135,11 @@ sha2 = "0.11"
 # Keyed digests: audit content provenance and the OAuth cache key. Moves with
 # `sha2` above, since both have to agree on `digest`.
 hmac = "0.13"
+# ECDSA P-256 for the OCSF audit sink's DSSE signatures. RustCrypto's `ecdsa`
+# signs per RFC 6979, so the same key and bytes always give the same
+# signature, which is what keeps the signed conformance vectors reproducible.
+base64 = "0.23.1"
+p256 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
 
 # Internal crates. Single source of truth for each one's path and version
 # requirement; members depend on these with `{ workspace = true }` so a version
