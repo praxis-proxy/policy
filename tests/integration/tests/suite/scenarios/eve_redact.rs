@@ -9,6 +9,7 @@ use praxis_policy_test_utils::idp::Persona;
 
 use super::{each_pdp, jane, plant_minted, planted, upstream_calls};
 
+/// The SSN must be hidden from both the returned record and diagnostics.
 #[tokio::test]
 async fn eve_gets_compensation_with_the_ssn_redacted_both_ways() {
     each_pdp(|fixture| async move {

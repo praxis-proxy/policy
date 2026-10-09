@@ -8,6 +8,7 @@ use praxis_policy_test_utils::idp::{CIBA_BACKCHANNEL_URL, Persona};
 
 use super::{adjust, audit_for, each_pdp, planted, upstream_calls};
 
+/// An amount below the gate must apply without contacting the CIBA OP.
 #[tokio::test]
 async fn a_small_adjustment_applies_without_approval() {
     each_pdp(|fixture| async move {

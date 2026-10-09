@@ -9,6 +9,7 @@ use praxis_policy_test_utils::idp::Persona;
 
 use super::{SSN_PROBE, each_pdp, jane, plant_minted, planted, upstream_calls};
 
+/// The permitted HR read uses a route-scoped delegated token.
 #[tokio::test]
 async fn bob_reads_compensation_with_a_delegated_token() {
     each_pdp(|fixture| async move {

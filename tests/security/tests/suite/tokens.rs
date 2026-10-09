@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use crate::support::{self, JANE_SSN, assert_identity_deny, planted_for, realm_kid};
 
+/// Hold the realm key id constant while varying hostile JOSE fields.
 fn header(extra: Value) -> Value {
     let mut h = json!({ "alg": "RS256", "typ": "JWT", "kid": realm_kid() });
     if let (Some(h), Value::Object(extra)) = (h.as_object_mut(), extra) {
@@ -24,6 +25,7 @@ fn header(extra: Value) -> Value {
     h
 }
 
+/// Hold the legitimate persona constant while varying one hostile claim.
 fn bob_with(extra: Value) -> Value {
     let mut c = Persona::Bob.claims();
     if let (Some(c), Value::Object(extra)) = (c.as_object_mut(), extra) {
@@ -32,12 +34,14 @@ fn bob_with(extra: Value) -> Value {
     c
 }
 
+/// Keep the route fixed so a denial is attributable to the supplied token.
 fn compensation_as(user_token: &str) -> Call {
     Call::new(Persona::Bob, "get_compensation")
         .args(json!({ "employee_id": "EMP-001234", "include_ssn": true }))
         .header("x-user-token", user_token)
 }
 
+/// Use the signed token issue time to avoid wall-clock drift in expiry cases.
 fn now() -> i64 {
     idp::claims_of(&Persona::Bob.token()).expect("a JWT")["iat"]
         .as_i64()

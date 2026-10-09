@@ -9,6 +9,7 @@ use praxis_policy_test_utils::idp::Persona;
 
 use super::{each_pdp, jane, plant_minted, planted, upstream_calls};
 
+/// Only asserted identity may reach upstream; the raw user token stays private.
 #[tokio::test]
 async fn the_upstream_sees_asserted_identity_and_no_user_token() {
     each_pdp(|fixture| async move {
@@ -32,6 +33,7 @@ async fn the_upstream_sees_asserted_identity_and_no_user_token() {
     .await;
 }
 
+/// A client-supplied asserted identity cannot override the verified subject.
 #[tokio::test]
 async fn a_spoofed_asserted_header_is_replaced_with_the_real_subject() {
     each_pdp(|fixture| async move {

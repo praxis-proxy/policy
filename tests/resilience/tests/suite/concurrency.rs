@@ -57,6 +57,7 @@ const PENDING: &str = "elicitation.pending";
 // Knobs
 // -----------------------------------------------------------------------------
 
+/// Reject malformed overrides so stress failures remain reproducible.
 fn env_u64(name: &str, default: u64) -> u64 {
     env::var(name).ok().map_or(default, |raw| {
         raw.parse()
@@ -64,6 +65,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
     })
 }
 
+/// Checked conversion prevents a configured task count from silently changing.
 fn env_usize(name: &str, default: usize) -> usize {
     let default = u64::try_from(default).expect("fits u64");
     usize::try_from(env_u64(name, default)).expect("fits usize")
@@ -100,10 +102,12 @@ fn knobs(test: &str) -> Knobs {
 struct SplitMix64(u64);
 
 impl SplitMix64 {
+    /// A separate random stream per task avoids schedule-dependent choices.
     fn new(seed: u64, stream: u64) -> Self {
         Self(seed ^ stream.wrapping_mul(0x9E37_79B9_7F4A_7C15))
     }
 
+    /// The deterministic sequence keeps randomized call plans reproducible.
     fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
@@ -112,6 +116,7 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
 
+    /// A task-local choice prevents scheduling from changing planned operations.
     fn coin(&mut self) -> bool {
         self.next_u64() & 1 == 1
     }
@@ -133,6 +138,7 @@ struct Caller {
 }
 
 impl Caller {
+    /// Real persona claims anchor the expected authorization outcomes.
     fn persona(p: Persona) -> Self {
         Self {
             label: p.username().to_owned(),
@@ -143,6 +149,7 @@ impl Caller {
         }
     }
 
+    /// Unique subjects expose cross-user leaks in shared sessions.
     fn hr_clone(k: usize) -> Self {
         let label = format!("hr{k}");
         let sub = format!("c1a5e000-0000-4000-8000-{k:012}");
@@ -186,10 +193,12 @@ fn callers(clones: usize) -> Vec<Caller> {
         .collect()
 }
 
+/// The trace marker ties reads to their audit and upstream records.
 fn compensation(marker: &str) -> Value {
     json!({ "employee_id": "EMP-001234", "include_ssn": false, "trace": marker })
 }
 
+/// The trace marker identifies which caller sent an email under concurrency.
 fn email(marker: &str) -> Value {
     json!({
         "to": "partner@example.com",
@@ -199,6 +208,7 @@ fn email(marker: &str) -> Value {
     })
 }
 
+/// The trace marker exposes cross-call approval or request mix-ups.
 fn adjust(amount: i64, marker: &str) -> Value {
     json!({ "employee_id": "EMP-001234", "amount": amount, "trace": marker })
 }
@@ -427,6 +437,7 @@ fn email_expect(caller: &Caller, tainted: bool) -> Expect {
     }
 }
 
+/// Expected read access follows claims, independent of engine output.
 fn read_expect(caller: &Caller) -> Expect {
     if caller.hr {
         Expect::Allowed

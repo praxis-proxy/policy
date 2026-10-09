@@ -206,8 +206,9 @@ fn assert_reflected_body_is_private(out: &Outcome, basic: &str, planted: &Plante
 #[should_panic(expected = "known gap #181 ciba-op-body-secret-leak")]
 async fn known_gap_a_backchannel_error_does_not_reflect_client_credentials() {
     let (body, basic) = reflected_body();
+    let body = Bytes::from(body);
     let transport = FakeTransport::new().respond_with(CIBA_BACKCHANNEL_URL, move |_| {
-        Ok(HttpResponse::new(503, Bytes::from(body.clone())))
+        Ok(HttpResponse::new(503, body.clone()))
     });
     let host = RefHost::builder()
         .transport(transport)
@@ -227,11 +228,12 @@ async fn known_gap_a_backchannel_error_does_not_reflect_client_credentials() {
 #[should_panic(expected = "known gap #181 ciba-op-body-secret-leak")]
 async fn known_gap_a_poll_error_does_not_reflect_client_credentials() {
     let (body, basic) = reflected_body();
+    let body = Bytes::from(body);
     let armed = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&armed);
     let transport = FakeTransport::new().respond_with(CIBA_TOKEN_URL, move |_| {
         if flag.load(Ordering::SeqCst) {
-            Ok(HttpResponse::new(503, Bytes::from(body.clone())))
+            Ok(HttpResponse::new(503, body.clone()))
         } else {
             Ok(HttpResponse::new(
                 400,

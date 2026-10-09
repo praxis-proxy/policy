@@ -10,6 +10,7 @@ use serde_json::json;
 
 use super::{audit_for, each_pdp, planted, upstream_calls};
 
+/// PII detection must stop delivery while preserving an audit record.
 #[tokio::test]
 async fn bob_is_denied_an_email_carrying_an_ssn() {
     each_pdp(|fixture| async move {

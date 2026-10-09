@@ -46,6 +46,7 @@ fn assert_pending(out: &Outcome, step: &str) {
     assert_eq!(out.proto_error_code(), Some(-32_120), "{step}");
 }
 
+/// An above-threshold adjustment applies only after the expected manager approves.
 #[tokio::test]
 async fn a_large_adjustment_applies_after_manager_approval() {
     each_pdp(|fixture| async move {
@@ -87,6 +88,7 @@ async fn a_large_adjustment_applies_after_manager_approval() {
     .await;
 }
 
+/// A terminal OP denial must never apply the adjustment.
 #[tokio::test]
 async fn a_denied_approval_denies_the_adjustment() {
     each_pdp(|fixture| async move {
@@ -108,6 +110,7 @@ async fn a_denied_approval_denies_the_adjustment() {
     .await;
 }
 
+/// An expired correlation id must never apply the adjustment.
 #[tokio::test]
 async fn an_expired_approval_denies_the_adjustment() {
     each_pdp(|fixture| async move {

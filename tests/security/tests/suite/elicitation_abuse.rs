@@ -19,20 +19,20 @@ use crate::support::{elicitation_id, planted_for};
 /// Where the approval step denies from.
 const APPROVAL_STEP: &str = "routes.tool:adjust_compensation.pre_invocation[1]";
 
-/// Build an adjustment call from Bob with the requested amount.
+/// Fix the caller and employee so each test isolates one approval constraint.
 fn adjust(amount: i64) -> Call {
     Call::new(Persona::Bob, "adjust_compensation")
         .args(json!({ "employee_id": "EMP-001234", "amount": amount }))
 }
 
-/// Make the scripted OP approve with the supplied manager identity.
+/// Control the OP identity so a mismatch tests engine validation, not a pending poll.
 fn approve(host: &RefHost, approver: &str) {
     host.ciba().set(CibaPoll::Approved {
         approver: approver.to_owned(),
     });
 }
 
-/// How many requests reached the upstream for `tool`.
+/// Count upstream mutations independently of the host's reported outcome.
 fn applied(host: &RefHost, tool: &str) -> usize {
     host.upstream()
         .requests()
@@ -41,7 +41,7 @@ fn applied(host: &RefHost, tool: &str) -> usize {
         .count()
 }
 
-/// Obtain an approved correlation id without applying it.
+/// An unused id keeps replay handling from masking scope and binding checks.
 async fn approved_unused(host: &RefHost) -> String {
     let call = adjust(25_000);
     let planted = planted_for(&call);
@@ -53,7 +53,7 @@ async fn approved_unused(host: &RefHost) -> String {
     id
 }
 
-/// Bob asks for 25000, alice approves, and the approved retry applies once.
+/// Establish a successful redemption baseline for the separate replay-gap test.
 async fn approved_once(host: &RefHost) -> String {
     let id = approved_unused(host).await;
     let call = adjust(25_000).elicitation_id(&id);
@@ -69,7 +69,7 @@ async fn approved_once(host: &RefHost) -> String {
     id
 }
 
-/// Require a failed approval to stop before the upstream.
+/// A deny alone is insufficient if the rejected change already reached upstream.
 fn assert_not_applied(out: &Outcome) {
     assert_eq!(out.denied_at, Some(Stage::Request), "{:?}", out.violation);
     assert!(out.upstream.is_none(), "the upstream was not called");

@@ -9,6 +9,7 @@ use praxis_policy_test_utils::idp::{Persona, TOKEN_EXCHANGE_URL};
 
 use super::{each_pdp, jane, planted, upstream_calls};
 
+/// A role denial must stop before token exchange or upstream dispatch.
 #[tokio::test]
 async fn alice_is_denied_compensation_at_the_role_gate() {
     each_pdp(|fixture| async move {
