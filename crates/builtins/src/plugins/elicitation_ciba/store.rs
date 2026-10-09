@@ -40,6 +40,8 @@ pub struct Correlation {
     /// poll resolves it. We keep the **extracted claim, not the token**, so
     /// no bearer credential sits in the store at rest.
     pub resolved_approver: Option<String>,
+    /// Policy route, including its scope, that opened this approval.
+    pub route_key: String,
     /// Exact tool that opened this approval.
     pub tool: String,
     /// Authenticated subject id that opened this approval.
@@ -53,7 +55,7 @@ pub struct Correlation {
 pub enum TakeResult {
     /// No live correlation exists for this id.
     Missing,
-    /// The live tool or requester differs from the stored binding.
+    /// The live route, tool, or requester differs from the stored binding.
     BindingMismatch,
     /// The OP has not supplied an approved identity yet.
     Pending,
@@ -70,8 +72,8 @@ pub trait CorrelationStore: Send + Sync {
     /// Record who approved (the extracted claim) against an existing
     /// correlation. No-op if the id is unknown.
     fn set_resolved_approver(&self, id: &str, approver: String);
-    /// Atomically remove a resolved approval only for its tool and requester.
-    fn take_if_ready(&self, id: &str, tool: &str, requester: &str) -> TakeResult;
+    /// Atomically remove a resolved approval only for its route, tool, and requester.
+    fn take_if_ready(&self, id: &str, route_key: &str, tool: &str, requester: &str) -> TakeResult;
 }
 
 /// In-process correlation store. Thread-safe; the plugin instance is
@@ -122,7 +124,7 @@ impl CorrelationStore for InMemoryCorrelationStore {
         }
     }
 
-    fn take_if_ready(&self, id: &str, tool: &str, requester: &str) -> TakeResult {
+    fn take_if_ready(&self, id: &str, route_key: &str, tool: &str, requester: &str) -> TakeResult {
         let mut entries = self
             .inner
             .lock()
@@ -132,7 +134,7 @@ impl CorrelationStore for InMemoryCorrelationStore {
         let Some(c) = entries.get(id) else {
             return TakeResult::Missing;
         };
-        if c.tool != tool || c.requester != requester {
+        if c.route_key != route_key || c.tool != tool || c.requester != requester {
             return TakeResult::BindingMismatch;
         }
         if c.resolved_approver.is_none() {
@@ -158,6 +160,7 @@ mod tests {
             Correlation {
                 expected_approver: "alice".into(),
                 resolved_approver: None,
+                route_key: "tool:adjust@sandbox".into(),
                 tool: "adjust".into(),
                 requester: "bob".into(),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
@@ -177,6 +180,7 @@ mod tests {
             Correlation {
                 expected_approver: "alice".into(),
                 resolved_approver: None,
+                route_key: "tool:adjust@sandbox".into(),
                 tool: "adjust".into(),
                 requester: "bob".into(),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
@@ -200,25 +204,30 @@ mod tests {
             Correlation {
                 expected_approver: "alice".into(),
                 resolved_approver: Some("alice".into()),
+                route_key: "tool:adjust@sandbox".into(),
                 tool: "adjust".into(),
                 requester: "bob".into(),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
             },
         );
         assert!(matches!(
-            store.take_if_ready("id", "bonus", "bob"),
+            store.take_if_ready("id", "tool:adjust@sandbox", "bonus", "bob"),
             TakeResult::BindingMismatch
         ));
         assert!(matches!(
-            store.take_if_ready("id", "adjust", "eve"),
+            store.take_if_ready("id", "tool:adjust@prod", "adjust", "bob"),
             TakeResult::BindingMismatch
         ));
         assert!(matches!(
-            store.take_if_ready("id", "adjust", "bob"),
+            store.take_if_ready("id", "tool:adjust@sandbox", "adjust", "eve"),
+            TakeResult::BindingMismatch
+        ));
+        assert!(matches!(
+            store.take_if_ready("id", "tool:adjust@sandbox", "adjust", "bob"),
             TakeResult::Ready(_)
         ));
         assert!(matches!(
-            store.take_if_ready("id", "adjust", "bob"),
+            store.take_if_ready("id", "tool:adjust@sandbox", "adjust", "bob"),
             TakeResult::Missing
         ));
 
@@ -227,6 +236,7 @@ mod tests {
             Correlation {
                 expected_approver: "alice".into(),
                 resolved_approver: Some("alice".into()),
+                route_key: "tool:adjust@sandbox".into(),
                 tool: "adjust".into(),
                 requester: "bob".into(),
                 expires_at: Utc::now() - chrono::Duration::seconds(1),
@@ -245,6 +255,7 @@ mod tests {
             Correlation {
                 expected_approver: "alice".into(),
                 resolved_approver: Some("alice".into()),
+                route_key: "tool:adjust@sandbox".into(),
                 tool: "adjust".into(),
                 requester: "bob".into(),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
@@ -257,7 +268,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
-                store.take_if_ready("id", "adjust", "bob")
+                store.take_if_ready("id", "tool:adjust@sandbox", "adjust", "bob")
             }));
         }
         barrier.wait();

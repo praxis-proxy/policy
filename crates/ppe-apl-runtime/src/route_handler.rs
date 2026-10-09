@@ -534,7 +534,7 @@ impl AplRouteHandler {
                 invoker.extensions_arc(),
                 invoker.plan_arc(),
             )
-            .with_context(tool, requester, peek),
+            .with_context(self.route.route_key.clone(), tool, requester, peek),
         );
 
         let invoker_dyn: Arc<dyn praxis_policy_apl_core::step::PluginInvoker> = invoker.clone();

@@ -157,7 +157,8 @@ Precedence, from loosest to tightest:
 | 5 | comparisons, `contains`, `in`, `not in` |
 
 A bare path is true when its value is truthy. `exists(path)` is true when the
-key is present, regardless of its value.
+key is present, regardless of its value. A JSON `null` or object under
+`args` or `result` counts as present.
 
 The attribute must be on the left of a comparison. The right operand is a
 literal, number, or Boolean. Use `in` or `not in` to test a value against an

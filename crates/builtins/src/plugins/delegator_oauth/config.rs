@@ -44,6 +44,11 @@ pub struct OAuthDelegatorConfig {
     #[serde(default = "default_strict_response_validation")]
     pub strict_response_validation: bool,
 
+    /// `IdP` default scopes accepted in addition to a non-empty requested
+    /// scope set. Empty requests accept the `IdP`'s grant as returned.
+    #[serde(default)]
+    pub allowed_extra_scopes: Vec<String>,
+
     /// Request timeout. The exchange is on the request hot path —
     /// a 5s default keeps requests bounded if the `IdP` is slow.
     #[serde(default = "default_timeout_seconds")]
@@ -215,12 +220,18 @@ mod tests {
         });
         let parsed: OAuthDelegatorConfig = serde_json::from_value(config.clone()).unwrap();
         assert!(parsed.strict_response_validation);
+        assert!(parsed.allowed_extra_scopes.is_empty());
         config
             .as_object_mut()
             .unwrap()
             .insert("strict_response_validation".into(), json!(false));
+        config
+            .as_object_mut()
+            .unwrap()
+            .insert("allowed_extra_scopes".into(), json!(["profile", "email"]));
         let parsed: OAuthDelegatorConfig = serde_json::from_value(config).unwrap();
         assert!(!parsed.strict_response_validation);
+        assert_eq!(parsed.allowed_extra_scopes, ["profile", "email"]);
     }
 
     #[test]

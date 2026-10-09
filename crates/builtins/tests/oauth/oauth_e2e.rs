@@ -128,9 +128,20 @@ async fn build_manager_with_validation(
     http: &Arc<FakeTransport>,
     strict_response_validation: bool,
 ) -> Arc<PolicyEngine> {
+    build_manager_with_rules(http, strict_response_validation, &[]).await
+}
+
+/// Permit named `IdP` default scopes alongside explicitly requested scopes.
+async fn build_manager_with_rules(
+    http: &Arc<FakeTransport>,
+    strict_response_validation: bool,
+    allowed_extra_scopes: &[&str],
+) -> Arc<PolicyEngine> {
     let mut cfg = plugin_config(&token_endpoint());
     cfg.config.as_mut().expect("delegator config")["strict_response_validation"] =
         json!(strict_response_validation);
+    cfg.config.as_mut().expect("delegator config")["allowed_extra_scopes"] =
+        json!(allowed_extra_scopes);
     let delegator = OAuthDelegator::new(cfg.clone()).expect("delegator constructs");
     let mgr = Arc::new(PolicyEngine::default());
     mgr.register_handler_for_names::<TokenDelegateHook, _>(
@@ -1144,6 +1155,62 @@ async fn a_three_segment_opaque_access_token_is_accepted() {
     assert_eq!(
         minted.delegated_token.expect("a token").token.as_str(),
         "opaque.not-json.signature"
+    );
+}
+
+#[tokio::test]
+async fn unrequested_idp_default_scopes_are_accepted_in_strict_mode() {
+    let minted = mint_with(
+        json!({
+            "access_token": "opaque-token",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "scope": "openid profile",
+        })
+        .to_string(),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(
+        minted.delegated_token.expect("a token").scopes,
+        ["openid", "profile"]
+    );
+}
+
+#[tokio::test]
+async fn configured_idp_default_scopes_can_accompany_a_requested_scope() {
+    let http = idp(
+        200,
+        &json!({
+            "access_token": "opaque-token",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "scope": "read profile",
+        })
+        .to_string(),
+    );
+    let mgr = build_manager_with_rules(&http, true, &["profile"]).await;
+    let payload = DelegationPayload::new(test_jwt(json!({ "sub": "alice" })), "get_compensation")
+        .with_target_audience("https://hr.example.com")
+        .with_required_permissions(vec!["read".into()])
+        .with_auth_enforced_by(AuthEnforcedBy::Target);
+    let result = invoke(&mgr, payload).await;
+    assert!(result.continue_processing, "{:?}", result.violation);
+    let minted = DelegationPayload::from_pipeline_result(&result).expect("a minted payload");
+    assert_eq!(
+        minted.delegated_token.expect("a token").scopes,
+        ["read", "profile"]
+    );
+}
+
+#[test]
+fn extra_scope_allowlist_rejects_whitespace_separated_entries() {
+    let mut cfg = plugin_config(&token_endpoint());
+    cfg.config.as_mut().expect("delegator config")["allowed_extra_scopes"] =
+        json!(["profile email"]);
+    let error = OAuthDelegator::new(cfg).expect_err("one entry must name one scope");
+    assert!(
+        error.to_string().contains("allowed_extra_scopes"),
+        "{error}"
     );
 }
 

@@ -136,10 +136,11 @@ Two independent checks stand between an approval and the tool call:
 The `purpose` is recorded verbatim as the source of truth for what was approved
 — it is never derived from model output.
 
-The CIBA correlation binds the id to the exact tool name and authenticated
-requester subject that opened it. A different tool or requester cannot poll or
-redeem the id; CIBA denies dispatch, check, and validation without a non-empty
-`subject.id`. OP rejection reasons report the status without reflecting the
+The CIBA correlation binds the id to the selected policy route (including its
+scope), exact tool name, and authenticated requester subject that opened it. A
+different route, tool, or requester cannot poll or redeem the id; CIBA denies
+dispatch, check, and validation without a non-empty route or `subject.id`.
+OP rejection reasons report the status without reflecting the
 response body, which may contain client credentials. A successful non-peek
 validation consumes it atomically, so a
 second application fails; an `X-Policy-Elicitation-Peek` request checks without

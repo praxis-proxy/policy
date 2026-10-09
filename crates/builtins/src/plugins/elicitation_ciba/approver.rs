@@ -329,6 +329,7 @@ impl CibaApprover {
             Correlation {
                 expected_approver: login_hint.to_owned(),
                 resolved_approver: None,
+                route_key: payload.route_key().to_owned(),
                 tool: payload.tool().to_owned(),
                 requester: payload.requester().to_owned(),
                 expires_at,
@@ -361,10 +362,13 @@ impl CibaApprover {
         let Some(correlation) = self.store.get(id) else {
             return deny("elicitation.unknown_id", "unknown elicitation id");
         };
-        if correlation.tool != payload.tool() || correlation.requester != payload.requester() {
+        if correlation.route_key != payload.route_key()
+            || correlation.tool != payload.tool()
+            || correlation.requester != payload.requester()
+        {
             return deny(
                 "elicitation.binding_mismatch",
-                "approval belongs to another tool or requester",
+                "approval belongs to another route, tool, or requester",
             );
         }
 
@@ -474,20 +478,28 @@ impl CibaApprover {
 
         let correlation = if payload.peek() {
             match self.store.get(id) {
-                Some(c) if c.tool == payload.tool() && c.requester == payload.requester() => c,
+                Some(c)
+                    if c.route_key == payload.route_key()
+                        && c.tool == payload.tool()
+                        && c.requester == payload.requester() =>
+                {
+                    c
+                },
                 Some(_) => {
                     return deny(
                         "elicitation.binding_mismatch",
-                        "approval belongs to another tool or requester",
+                        "approval belongs to another route, tool, or requester",
                     );
                 },
                 None => return deny("elicitation.unknown_id", "unknown elicitation id"),
             }
         } else {
-            match self
-                .store
-                .take_if_ready(id, payload.tool(), payload.requester())
-            {
+            match self.store.take_if_ready(
+                id,
+                payload.route_key(),
+                payload.tool(),
+                payload.requester(),
+            ) {
                 TakeResult::Ready(c) => c,
                 TakeResult::Missing => {
                     return deny("elicitation.unknown_id", "unknown elicitation id");
@@ -495,7 +507,7 @@ impl CibaApprover {
                 TakeResult::BindingMismatch => {
                     return deny(
                         "elicitation.binding_mismatch",
-                        "approval belongs to another tool or requester",
+                        "approval belongs to another route, tool, or requester",
                     );
                 },
                 TakeResult::Pending => {
@@ -550,6 +562,12 @@ impl HookHandler<ElicitationHook> for CibaApprover {
         ext: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<ElicitationPayload> {
+        if payload.route_key().trim().is_empty() {
+            return deny(
+                "elicitation.bad_request",
+                "CIBA approval requires a non-empty policy route",
+            );
+        }
         if payload.requester().trim().is_empty() {
             return deny(
                 "elicitation.bad_request",
@@ -751,6 +769,7 @@ mod tests {
                 Correlation {
                     expected_approver: (*expected).to_owned(),
                     resolved_approver: resolved.map(str::to_owned),
+                    route_key: "tool:adjust@sandbox".into(),
                     tool: "adjust".into(),
                     requester: "bob".into(),
                     expires_at: Utc::now() + chrono::Duration::hours(1),
@@ -773,8 +792,11 @@ mod tests {
     }
 
     fn validate_payload(id: Option<&str>) -> ElicitationPayload {
-        let p = ElicitationPayload::new(ElicitationOp::Validate, "approval", "")
-            .with_binding("adjust", "bob");
+        let p = ElicitationPayload::new(ElicitationOp::Validate, "approval", "").with_binding(
+            "tool:adjust@sandbox",
+            "adjust",
+            "bob",
+        );
         match id {
             Some(id) => p.with_elicitation_id(id),
             None => p,
@@ -888,8 +910,11 @@ mod tests {
     #[tokio::test]
     async fn check_without_an_elicitation_id_is_a_bad_request() {
         let a = approver_with(&[]);
-        let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
-            .with_binding("adjust", "bob");
+        let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "").with_binding(
+            "tool:adjust@sandbox",
+            "adjust",
+            "bob",
+        );
         let r = a
             .handle(&payload, &Extensions::default(), &mut PluginContext::new())
             .await;
@@ -906,7 +931,7 @@ mod tests {
     async fn dispatch_without_a_login_hint_is_a_bad_request() {
         let a = approver_with(&[]);
         let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "")
-            .with_binding("adjust", "bob");
+            .with_binding("tool:adjust@sandbox", "adjust", "bob");
         let r = a
             .handle(&payload, &Extensions::default(), &mut PluginContext::new())
             .await;

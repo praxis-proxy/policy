@@ -137,7 +137,9 @@ pub struct ElicitationPayload {
     /// selected by name).
     channel: Option<String>,
 
-    /// The exact tool and authenticated requester for this attempt.
+    /// The selected policy route, exact tool, and authenticated requester.
+    #[serde(default)]
+    route_key: String,
     #[serde(default)]
     tool: String,
     #[serde(default)]
@@ -205,6 +207,7 @@ impl ElicitationPayload {
             scope: None,
             timeout: None,
             channel: None,
+            route_key: String::new(),
             tool: String::new(),
             requester: String::new(),
             peek: false,
@@ -250,11 +253,22 @@ impl ElicitationPayload {
         self
     }
 
-    /// Bind the approval to the live tool and requester identity.
-    pub fn with_binding(mut self, tool: impl Into<String>, requester: impl Into<String>) -> Self {
+    /// Bind the approval to the selected route, tool, and requester identity.
+    pub fn with_binding(
+        mut self,
+        route_key: impl Into<String>,
+        tool: impl Into<String>,
+        requester: impl Into<String>,
+    ) -> Self {
+        self.route_key = route_key.into();
         self.tool = tool.into();
         self.requester = requester.into();
         self
+    }
+
+    /// Selected policy route, including its scope when one is configured.
+    pub fn route_key(&self) -> &str {
+        &self.route_key
     }
 
     /// Mark a validation as status-only, preserving the id for a later apply.

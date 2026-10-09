@@ -49,16 +49,23 @@ jobs:
       # Proves every publishable crate packages cleanly before anything is
       # uploaded. A failure here is recoverable; a half-published workspace is
       # not, because crates.io versions are immutable.
-      # The unpublished test crates are excluded, as in ci.yml. Package
-      # verification uses published sibling versions, which lag this tag;
-      # the all-features workspace check below compiles this source together.
+      # The unpublished test crates are excluded, as in ci.yml. Patch sibling
+      # dependencies to this checkout while Cargo verifies each package archive:
+      # the tag's new APIs are not on crates.io until publishing starts.
       - run: >-
           cargo package --workspace
           --exclude praxis-policy-test-utils
           --exclude praxis-policy-tests-integration
           --exclude praxis-policy-tests-resilience
           --exclude praxis-policy-tests-security
-          --locked --no-verify
+          --locked
+          --config 'patch.crates-io.praxis-policy-core.path="crates/ppe-core"'
+          --config 'patch.crates-io.praxis-policy-orchestration.path="crates/ppe-orchestration"'
+          --config 'patch.crates-io.praxis-policy-apl-core.path="crates/ppe-apl-core"'
+          --config 'patch.crates-io.praxis-policy-apl-cmf.path="crates/ppe-apl-cmf"'
+          --config 'patch.crates-io.praxis-policy-apl-runtime.path="crates/ppe-apl-runtime"'
+          --config 'patch.crates-io.praxis-policy-builtins.path="crates/builtins"'
+          --config 'patch.crates-io.praxis-policy.path="crates/ppe"'
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-package-target
       # Packaging alone does not compile bundled extensions, so check the

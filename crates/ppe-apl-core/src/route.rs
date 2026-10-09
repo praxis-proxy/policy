@@ -653,7 +653,11 @@ pub(crate) fn expand_for_pipeline(
     }
     let segs: Vec<&str> = path.split('.').collect();
     let mut paths = Vec::new();
-    let mut budget = MAX_REDACTION_WALK_STATES;
+    let mut budget = if segs.contains(&"**") {
+        MAX_REDACTION_WALK_STATES
+    } else {
+        usize::MAX
+    };
     if !walk(root, &segs, &mut Vec::new(), 0, &mut budget, &mut paths) {
         return None;
     }
@@ -718,7 +722,8 @@ pub(crate) fn set_concrete(
     value: serde_json::Value,
 ) -> bool {
     let Some((leaf, parents)) = path.split_last() else {
-        return false;
+        *root = value;
+        return true;
     };
     let Some(cur) = parent_mut(root, parents) else {
         return false;
@@ -1290,6 +1295,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bare_recursive_path_redacts_a_scalar_result() {
+        let mut route = CompiledRoute::new("ping");
+        route
+            .result
+            .push(field_rule("**", vec![Stage::Redact { condition: None }]));
+        let mut bag = AttributeBag::new();
+        let mut payload = RoutePayload::with_result(json!({}), json!("secret"));
+        let outcome = evaluate_route(
+            &route,
+            &mut bag,
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        assert_eq!(outcome.decision, Decision::Allow);
+        assert!(outcome.result_modified);
+        assert_eq!(payload.result, Some(json!("[REDACTED]")));
+    }
+
+    #[tokio::test]
     async fn taints_accumulate_across_phases() {
         let mut route = CompiledRoute::new("ping");
         // args emits a taint
@@ -1452,6 +1480,21 @@ mod tests {
         assert!(
             expand_for_pipeline(&root, "**.**.**.**.**.**.**.**.missing", &stages).is_none(),
             "no-match traversal must exhaust its bounded work budget"
+        );
+    }
+
+    #[test]
+    fn wide_non_recursive_redaction_keeps_the_emitted_path_limit() {
+        let stages = [Stage::Redact { condition: None }];
+        let matching = json!({ "rows": vec![json!({ "ssn": "secret" }); 50_001] });
+        let paths = expand_for_pipeline(&matching, "rows.ssn", &stages).expect("within path limit");
+        assert_eq!(paths.len(), 50_001);
+
+        let no_match = json!({ "rows": vec![json!({ "other": true }); 100_001] });
+        assert_eq!(
+            expand_for_pipeline(&no_match, "rows.ssn", &stages),
+            Some(Vec::new()),
+            "a wide no-match result should not spend a recursive-path budget"
         );
     }
 

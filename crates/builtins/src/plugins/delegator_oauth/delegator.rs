@@ -167,6 +167,18 @@ impl OAuthDelegator {
                 ),
             }));
         }
+        if typed
+            .allowed_extra_scopes
+            .iter()
+            .any(|scope| scope.is_empty() || scope.chars().any(char::is_whitespace))
+        {
+            return Err(Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' ({KIND}): allowed_extra_scopes entries must be single non-empty scope tokens",
+                    cfg.name
+                ),
+            }));
+        }
 
         let secret = typed.client_secret_source.resolve().map_err(|e| {
             Box::new(PluginError::Config {
@@ -754,6 +766,7 @@ impl OAuthDelegator {
                 subject_token.as_ref(),
                 caller_identity,
                 !as_this_workload,
+                &self.typed.allowed_extra_scopes,
             )
             .map_err(|violation| *violation)?;
         }
@@ -988,6 +1001,25 @@ mod response_validation_tests {
     use base64::Engine as _;
     use serde_json::json;
 
+    fn validate_exchange_response(
+        response: &TokenExchangeResponse,
+        requested_scope: &str,
+        audience: &str,
+        subject_token: &str,
+        caller_identity: Option<&str>,
+        is_exchange_grant: bool,
+    ) -> Result<(), Box<PluginViolation>> {
+        super::validate_exchange_response(
+            response,
+            requested_scope,
+            audience,
+            subject_token,
+            caller_identity,
+            is_exchange_grant,
+            &[],
+        )
+    }
+
     fn jwt(sub: &str, aud: serde_json::Value) -> String {
         let payload = json!({ "sub": sub, "aud": aud });
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
@@ -1074,6 +1106,29 @@ mod response_validation_tests {
     }
 
     #[test]
+    fn idp_default_scopes_need_an_allowlist_only_when_a_scope_was_requested() {
+        let mut issued = response("opaque-token".into());
+        issued.scope = Some("read profile".into());
+        assert_eq!(
+            validate_exchange_response(&issued, "read", "api", "subject", None, true)
+                .unwrap_err()
+                .code,
+            "delegation.scope_overgrant"
+        );
+        super::validate_exchange_response(
+            &issued,
+            "read",
+            "api",
+            "subject",
+            None,
+            true,
+            &["profile".into()],
+        )
+        .unwrap();
+        validate_exchange_response(&issued, "", "api", "subject", None, true).unwrap();
+    }
+
+    #[test]
     fn three_segment_opaque_tokens_do_not_fail_jwt_claim_checks() {
         let caller = jwt("alice", json!("gateway"));
         let mut issued = response("opaque.not-json.signature".into());
@@ -1108,6 +1163,7 @@ fn validate_exchange_response(
     subject_token: &str,
     caller_identity: Option<&str>,
     is_exchange_grant: bool,
+    allowed_extra_scopes: &[String],
 ) -> Result<(), Box<PluginViolation>> {
     let issued_type = match response.issued_token_type.as_deref() {
         Some(issued_type) => issued_type,
@@ -1126,13 +1182,17 @@ fn validate_exchange_response(
             "IdP issued a token type other than an access token or JWT",
         )));
     }
-    if let Some(scope) = &response.scope {
+    if !requested_scope.is_empty()
+        && let Some(scope) = &response.scope
+    {
         let requested: std::collections::HashSet<&str> =
             requested_scope.split_whitespace().collect();
-        if scope
-            .split_whitespace()
-            .any(|granted| !requested.contains(granted))
-        {
+        if scope.split_whitespace().any(|granted| {
+            !requested.contains(granted)
+                && !allowed_extra_scopes
+                    .iter()
+                    .any(|allowed| allowed == granted)
+        }) {
             return Err(Box::new(PluginViolation::new(
                 "delegation.scope_overgrant",
                 "IdP granted a scope that was not requested",

@@ -59,6 +59,7 @@ pub struct ElicitationPluginInvoker {
     extensions: Arc<Mutex<Extensions>>,
     /// Pre-resolved per-route elicitation lineup (`name → entry`).
     plan: Arc<RouteDispatchPlan>,
+    route_key: String,
     tool: String,
     requester: String,
     peek: bool,
@@ -78,14 +79,22 @@ impl ElicitationPluginInvoker {
             engine,
             extensions,
             plan,
+            route_key: String::new(),
             tool: String::new(),
             requester: String::new(),
             peek: false,
         }
     }
 
-    /// Attach the live route and requester for approval binding.
-    pub fn with_context(mut self, tool: String, requester: String, peek: bool) -> Self {
+    /// Attach the selected route, live tool, and requester for approval binding.
+    pub fn with_context(
+        mut self,
+        route_key: String,
+        tool: String,
+        requester: String,
+        peek: bool,
+    ) -> Self {
+        self.route_key = route_key;
         self.tool = tool;
         self.requester = requester;
         self.peek = peek;
@@ -179,7 +188,7 @@ impl ElicitationInvoker for ElicitationPluginInvoker {
             ElicitationPayload::new(ElicitationOp::Dispatch, step.kind.as_str(), resolved_from),
             step,
         )
-        .with_binding(&self.tool, &self.requester);
+        .with_binding(&self.route_key, &self.tool, &self.requester);
         let out = self.invoke("dispatch", &step.plugin_name, payload).await?;
 
         // The handler must mint an id on dispatch.
@@ -207,7 +216,7 @@ impl ElicitationInvoker for ElicitationPluginInvoker {
                 .with_elicitation_id(id),
             step,
         )
-        .with_binding(&self.tool, &self.requester);
+        .with_binding(&self.route_key, &self.tool, &self.requester);
         let out = self.invoke("check", &step.plugin_name, payload).await?;
 
         match out.status {
@@ -235,7 +244,7 @@ impl ElicitationInvoker for ElicitationPluginInvoker {
                 .with_elicitation_id(id),
             step,
         )
-        .with_binding(&self.tool, &self.requester)
+        .with_binding(&self.route_key, &self.tool, &self.requester)
         .with_peek(self.peek);
         let out = self.invoke("validate", &step.plugin_name, payload).await?;
 
