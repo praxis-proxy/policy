@@ -94,7 +94,8 @@ async fn an_oversized_args_string_is_decided_deterministically() {
         out.assert_no_leaks(&planted);
         let mut ssn = Planted::new();
         ssn.plant("ssn", JANE_SSN);
-        let violation = serde_json::to_value(&out.violation).unwrap_or_default();
+        let violation = serde_json::to_value(&out.violation)
+            .expect("serialize the violation for leak checking");
         ssn.assert_absent_json("the violation", &violation);
         ssn.assert_absent_json("the errors", &json!(out.errors));
         let diagnostics: Vec<String> = out

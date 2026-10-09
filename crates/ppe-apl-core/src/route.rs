@@ -249,7 +249,7 @@ pub async fn evaluate_pre(
             };
         };
         for path in paths {
-            let Some(current) = get_dotted(&payload.args, &path).cloned() else {
+            let Some(current) = get_concrete(&payload.args, &path).cloned() else {
                 continue; // missing field on this element → no pipeline to run
             };
             let eval = evaluate_pipeline(
@@ -265,12 +265,12 @@ pub async fn evaluate_pre(
             match eval.outcome {
                 FieldOutcome::Pass => {},
                 FieldOutcome::Replace(new_val) => {
-                    if set_dotted(&mut payload.args, &path, new_val) {
+                    if set_concrete(&mut payload.args, &path, new_val) {
                         args_modified = true;
                     }
                 },
                 FieldOutcome::Omit => {
-                    if remove_dotted(&mut payload.args, &path) {
+                    if remove_concrete(&mut payload.args, &path) {
                         args_modified = true;
                     }
                 },
@@ -358,7 +358,7 @@ pub async fn evaluate_post(
                 };
             };
             for path in paths {
-                let Some(current) = get_dotted(result, &path).cloned() else {
+                let Some(current) = get_concrete(result, &path).cloned() else {
                     continue;
                 };
                 let eval = evaluate_pipeline(
@@ -374,12 +374,12 @@ pub async fn evaluate_post(
                 match eval.outcome {
                     FieldOutcome::Pass => {},
                     FieldOutcome::Replace(new_val) => {
-                        if set_dotted(result, &path, new_val) {
+                        if set_concrete(result, &path, new_val) {
                             result_modified = true;
                         }
                     },
                     FieldOutcome::Omit => {
-                        if remove_dotted(result, &path) {
+                        if remove_concrete(result, &path) {
                             result_modified = true;
                         }
                     },
@@ -478,6 +478,9 @@ const MAX_FANOUT_DEPTH: usize = 128;
 /// before failing closed.
 const MAX_EXPANDED_PATHS: usize = 100_000;
 
+/// Bound recursive redaction even when no path matches and nothing is emitted.
+const MAX_REDACTION_WALK_STATES: usize = 100_000;
+
 /// Resolve one path segment against a value. Object segments index by key; a
 /// numeric segment indexes into an array, so a path produced by
 /// [`expand_field_paths`] resolves.
@@ -551,55 +554,66 @@ pub(crate) fn expand_for_pipeline(
     root: &serde_json::Value,
     path: &str,
     stages: &[Stage],
-) -> Option<Vec<String>> {
+) -> Option<Vec<Vec<String>>> {
     if !stages
         .iter()
         .any(|stage| matches!(stage, Stage::Redact { .. }))
     {
-        return expand_field_paths(root, path);
+        return expand_field_paths(root, path).map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.split('.').map(str::to_owned).collect())
+                .collect()
+        });
     }
-    fn join(prefix: &str, seg: &str) -> String {
-        if prefix.is_empty() {
-            seg.to_owned()
-        } else {
-            format!("{prefix}.{seg}")
-        }
+    fn descend(
+        value: &serde_json::Value,
+        segs: &[&str],
+        segment: &str,
+        prefix: &mut Vec<String>,
+        depth: usize,
+        budget: &mut usize,
+        out: &mut Vec<Vec<String>>,
+    ) -> bool {
+        prefix.push(segment.to_owned());
+        let ok = walk(value, segs, prefix, depth + 1, budget, out);
+        prefix.pop();
+        ok
     }
     fn walk(
         value: &serde_json::Value,
         segs: &[&str],
-        prefix: &str,
+        prefix: &mut Vec<String>,
         depth: usize,
-        out: &mut Vec<String>,
+        budget: &mut usize,
+        out: &mut Vec<Vec<String>>,
     ) -> bool {
-        if depth > MAX_FANOUT_DEPTH || out.len() > MAX_EXPANDED_PATHS {
+        if depth > MAX_FANOUT_DEPTH || *budget == 0 || out.len() > MAX_EXPANDED_PATHS {
             return false;
         }
+        *budget -= 1;
         let Some((seg, rest)) = segs.split_first() else {
-            out.push(prefix.to_owned());
+            if out.len() == MAX_EXPANDED_PATHS {
+                return false;
+            }
+            out.push(prefix.clone());
             return true;
         };
         if *seg == "**" {
-            if !walk(value, rest, prefix, depth + 1, out) {
+            if !walk(value, rest, prefix, depth + 1, budget, out) {
                 return false;
             }
             match value {
                 serde_json::Value::Object(map) => {
                     for (key, child) in map {
-                        if !walk(child, segs, &join(prefix, key), depth + 1, out) {
+                        if !descend(child, segs, key, prefix, depth, budget, out) {
                             return false;
                         }
                     }
                 },
                 serde_json::Value::Array(items) => {
                     for (index, child) in items.iter().enumerate() {
-                        if !walk(
-                            child,
-                            segs,
-                            &join(prefix, &index.to_string()),
-                            depth + 1,
-                            out,
-                        ) {
+                        if !descend(child, segs, &index.to_string(), prefix, depth, budget, out) {
                             return false;
                         }
                     }
@@ -612,7 +626,7 @@ pub(crate) fn expand_for_pipeline(
             serde_json::Value::Object(map) => {
                 for (key, child) in map {
                     if key.to_lowercase() == seg.to_lowercase()
-                        && !walk(child, rest, &join(prefix, key), depth + 1, out)
+                        && !descend(child, rest, key, prefix, depth, budget, out)
                     {
                         return false;
                     }
@@ -621,19 +635,13 @@ pub(crate) fn expand_for_pipeline(
             serde_json::Value::Array(items) => {
                 if let Ok(index) = seg.parse::<usize>() {
                     if let Some(child) = items.get(index)
-                        && !walk(child, rest, &join(prefix, seg), depth + 1, out)
+                        && !descend(child, rest, seg, prefix, depth, budget, out)
                     {
                         return false;
                     }
                 } else {
                     for (index, child) in items.iter().enumerate() {
-                        if !walk(
-                            child,
-                            segs,
-                            &join(prefix, &index.to_string()),
-                            depth + 1,
-                            out,
-                        ) {
+                        if !descend(child, segs, &index.to_string(), prefix, depth, budget, out) {
                             return false;
                         }
                     }
@@ -645,7 +653,8 @@ pub(crate) fn expand_for_pipeline(
     }
     let segs: Vec<&str> = path.split('.').collect();
     let mut paths = Vec::new();
-    if !walk(root, &segs, "", 0, &mut paths) {
+    let mut budget = MAX_REDACTION_WALK_STATES;
+    if !walk(root, &segs, &mut Vec::new(), 0, &mut budget, &mut paths) {
         return None;
     }
     paths.sort();
@@ -657,15 +666,16 @@ pub(crate) fn expand_for_pipeline(
 /// numeric array indices. Returns `None` if any parent segment is missing or
 /// crosses a scalar. Shared by `set_dotted` / `remove_dotted` so both write
 /// through arrays the same way `get_dotted` reads through them.
-fn parent_mut<'a>(
+fn parent_mut<'a, S: AsRef<str>>(
     root: &'a mut serde_json::Value,
-    parents: &[&str],
+    parents: &[S],
 ) -> Option<&'a mut serde_json::Value> {
     let mut cur = root;
     for seg in parents {
         cur = match cur {
-            serde_json::Value::Object(map) => map.get_mut(*seg)?,
+            serde_json::Value::Object(map) => map.get_mut(seg.as_ref())?,
             serde_json::Value::Array(items) => seg
+                .as_ref()
                 .parse::<usize>()
                 .ok()
                 .and_then(move |i| items.get_mut(i))?,
@@ -692,9 +702,71 @@ pub fn get_dotted<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a ser
     Some(cur)
 }
 
+/// Read a concrete path without splitting object keys that contain dots.
+pub(crate) fn get_concrete<'a>(
+    root: &'a serde_json::Value,
+    path: &[String],
+) -> Option<&'a serde_json::Value> {
+    path.iter()
+        .try_fold(root, |value, segment| segment_get(value, segment))
+}
+
+/// Write a concrete path whose object keys retain their original boundaries.
+pub(crate) fn set_concrete(
+    root: &mut serde_json::Value,
+    path: &[String],
+    value: serde_json::Value,
+) -> bool {
+    let Some((leaf, parents)) = path.split_last() else {
+        return false;
+    };
+    let Some(cur) = parent_mut(root, parents) else {
+        return false;
+    };
+    match cur {
+        serde_json::Value::Object(map) => {
+            map.insert(leaf.clone(), value);
+            true
+        },
+        serde_json::Value::Array(items) => match leaf.parse::<usize>().ok() {
+            Some(i) => match items.get_mut(i) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                },
+                None => false,
+            },
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Remove a concrete path whose object keys retain their original boundaries.
+pub(crate) fn remove_concrete(root: &mut serde_json::Value, path: &[String]) -> bool {
+    let Some((leaf, parents)) = path.split_last() else {
+        return false;
+    };
+    let Some(cur) = parent_mut(root, parents) else {
+        return false;
+    };
+    match cur {
+        serde_json::Value::Object(map) => map.remove(leaf).is_some(),
+        serde_json::Value::Array(items) => match leaf.parse::<usize>().ok() {
+            Some(i) if i < items.len() => {
+                items.remove(i);
+                true
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Write to `root.a.b.c` via dot-separated path. Returns true on success;
 /// false if the parent path doesn't exist or the leaf's parent is a scalar.
 /// Does not create missing parents. A numeric leaf overwrites an array element.
+#[cfg(test)]
 pub(crate) fn set_dotted(
     root: &mut serde_json::Value,
     path: &str,
@@ -729,6 +801,7 @@ pub(crate) fn set_dotted(
 
 /// Remove `root.a.b.c` from a JSON value. Returns true if removal happened. A
 /// numeric leaf segment removes that array element.
+#[cfg(test)]
 pub(crate) fn remove_dotted(root: &mut serde_json::Value, path: &str) -> bool {
     let parts: Vec<&str> = path.split('.').collect();
     let (leaf, parents) = match parts.split_last() {
@@ -1344,14 +1417,41 @@ mod tests {
         assert_eq!(
             expand_for_pipeline(&root, "**.ssn", &stages),
             Some(vec![
-                "SSN".to_owned(),
-                "employee.ssn".to_owned(),
-                "rows.0.Ssn".to_owned(),
+                vec!["SSN".to_owned()],
+                vec!["employee".to_owned(), "ssn".to_owned()],
+                vec!["rows".to_owned(), "0".to_owned(), "Ssn".to_owned()],
             ])
         );
         assert_eq!(
             expand_for_pipeline(&root, "ssn", &stages),
-            Some(vec!["SSN".to_owned()])
+            Some(vec![vec!["SSN".to_owned()]])
+        );
+    }
+
+    #[test]
+    fn recursive_redaction_keeps_dotted_object_keys_intact() {
+        let mut root = json!({ "employee.v2": { "ssn": "secret" } });
+        let stages = [Stage::Redact { condition: None }];
+        let paths = expand_for_pipeline(&root, "**.ssn", &stages).expect("within bounds");
+        assert_eq!(
+            paths,
+            vec![vec!["employee.v2".to_owned(), "ssn".to_owned()]]
+        );
+        assert_eq!(get_concrete(&root, &paths[0]), Some(&json!("secret")));
+        assert!(set_concrete(&mut root, &paths[0], json!("[REDACTED]")));
+        assert_eq!(root["employee.v2"]["ssn"], "[REDACTED]");
+    }
+
+    #[test]
+    fn repeated_recursive_segments_fail_closed_without_a_match() {
+        let mut root = json!({ "leaf": 1 });
+        for _ in 0..20 {
+            root = json!({ "next": root });
+        }
+        let stages = [Stage::Redact { condition: None }];
+        assert!(
+            expand_for_pipeline(&root, "**.**.**.**.**.**.**.**.missing", &stages).is_none(),
+            "no-match traversal must exhaust its bounded work budget"
         );
     }
 

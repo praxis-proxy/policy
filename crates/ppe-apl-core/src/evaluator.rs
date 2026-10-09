@@ -1416,7 +1416,7 @@ async fn dispatch_field_op(
     result_modified: &mut bool,
     payload: &mut crate::route::RoutePayload,
 ) -> EffectOutcome {
-    use crate::route::{get_dotted, remove_dotted, set_dotted};
+    use crate::route::{get_concrete, remove_concrete, set_concrete};
     use crate::step::DispatchPhase;
 
     // Pick the right side of the payload based on the path prefix.
@@ -1466,7 +1466,7 @@ async fn dispatch_field_op(
         Side::Result => *result = true,
     };
     for concrete in paths {
-        let Some(current) = get_dotted(root, &concrete).cloned() else {
+        let Some(current) = get_concrete(root, &concrete).cloned() else {
             continue; // missing field on this element → silent no-op
         };
         // Plugins receive a root-relative field name; deny messages use the
@@ -1476,12 +1476,12 @@ async fn dispatch_field_op(
         match eval.outcome {
             FieldOutcome::Pass => {},
             FieldOutcome::Replace(new_val) => {
-                if set_dotted(root, &concrete, new_val) {
+                if set_concrete(root, &concrete, new_val) {
                     mark_modified(side, args_modified, result_modified);
                 }
             },
             FieldOutcome::Omit => {
-                if remove_dotted(root, &concrete) {
+                if remove_concrete(root, &concrete) {
                     mark_modified(side, args_modified, result_modified);
                 }
             },

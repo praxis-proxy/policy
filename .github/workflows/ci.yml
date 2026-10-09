@@ -150,9 +150,16 @@ jobs:
       # Nothing outside a tagged release used to exercise either of these, which
       # is how the publish order drifted for a whole release cycle without
       # anyone noticing. Both are cheap and neither uploads anything.
-      # The unpublished test harness is excluded: it depends on the
-      # unpublished reference plugins, which no registry can resolve.
-      - run: cargo package --workspace --exclude praxis-policy-test-utils --locked --all-features
+      # The unpublished test crates depend on local-only reference plugins.
+      # Verification against crates.io happens only after sibling versions
+      # publish; the workspace checks above compile them together here.
+      - run: >-
+          cargo package --workspace
+          --exclude praxis-policy-test-utils
+          --exclude praxis-policy-tests-integration
+          --exclude praxis-policy-tests-resilience
+          --exclude praxis-policy-tests-security
+          --locked --no-verify
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-package-target
       - run: tools/publish.sh --dry-run

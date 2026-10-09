@@ -7,6 +7,8 @@
 //! caller by design (`docs/content/apl/elicitation.md`), so it is never
 //! planted.
 
+use std::sync::Arc;
+
 use praxis_policy_core::http::HttpResponse;
 use praxis_policy_core::http_testing::FakeTransport;
 use praxis_policy_test_utils::fixtures::Fixture;
@@ -149,6 +151,42 @@ async fn an_approved_id_applies_once() {
         1,
         "one approval must apply once"
     );
+}
+
+/// Concurrent retries must race on the same store entry, not each apply it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_retries_redeem_one_approved_id_once() {
+    let host = Arc::new(RefHost::hermetic(Fixture::Cedar).await);
+    let id = approved_unused(&host).await;
+    let call = adjust(25_000).elicitation_id(&id);
+    let planted = planted_for(&call);
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+
+    let retry = |host: Arc<RefHost>, barrier: Arc<tokio::sync::Barrier>, call: Call| {
+        tokio::spawn(async move {
+            barrier.wait().await;
+            host.call(call).await
+        })
+    };
+    let first = retry(Arc::clone(&host), Arc::clone(&barrier), call.clone());
+    let second = retry(Arc::clone(&host), Arc::clone(&barrier), call);
+    barrier.wait().await;
+    let (first, second) = tokio::join!(first, second);
+    let outcomes = [first.expect("first retry"), second.expect("second retry")];
+    assert_eq!(outcomes.iter().filter(|out| out.allowed()).count(), 1);
+    for out in &outcomes {
+        out.assert_no_leaks(&planted);
+        if !out.allowed() {
+            assert_not_applied(out);
+            assert_eq!(
+                out.violation_code(),
+                Some("elicitation.unknown_id"),
+                "{:?}",
+                out.violation
+            );
+        }
+    }
+    assert_eq!(applied(&host, "adjust_compensation"), 1);
 }
 
 /// The demo policy plus a second tool behind the same approver.

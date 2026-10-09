@@ -806,12 +806,15 @@ fn an_approval_is_bound_to_its_requester() {
         planted.plant("client secret", CLIENT_SECRET);
         let out = host.call(call).await;
         out.assert_no_leaks(&planted);
-        assert!(
-            !out.allowed(),
+        assert_eq!(
+            out.violation_code(),
+            Some("elicitation.binding_mismatch"),
             "{} applied {}'s approval",
             other.label,
             owner.label
         );
+        assert!(out.upstream.is_none(), "the upstream was not called");
+        assert!(host.upstream().requests().is_empty());
     });
 }
 

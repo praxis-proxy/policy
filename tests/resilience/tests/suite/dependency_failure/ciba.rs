@@ -183,22 +183,21 @@ fn assert_reflected_body_is_private(out: &Outcome, basic: &str, planted: &Plante
     assert_eq!(out.denied_at, Some(Stage::Request), "the OP failure denies");
     assert_eq!(
         out.violation_code(),
-        Some(APPROVAL_STEP),
-        "the approval step denies"
+        Some("elicitation.op_rejected"),
+        "the CIBA plugin code identifies the denial"
     );
     assert!(out.upstream.is_none(), "the upstream was not called");
     let reason = out.violation.as_ref().map_or("", |v| v.reason.as_str());
     assert!(
         !reason.contains(CLIENT_SECRET) && !reason.contains(basic),
-        "known gap #181 ciba-op-body-secret-leak: OP response body reached the deny reason"
+        "OP response body reached the deny reason"
     );
     out.assert_no_leaks(planted);
 }
 
 /// A rejected backchannel request must not reveal either credential encoding.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 ciba-op-body-secret-leak")]
-async fn known_gap_a_backchannel_error_does_not_reflect_client_credentials() {
+async fn a_backchannel_error_does_not_reflect_client_credentials() {
     let (body, basic) = reflected_body();
     let body = Bytes::from(body);
     let transport = FakeTransport::new().respond_with(CIBA_BACKCHANNEL_URL, move |_| {
@@ -219,8 +218,7 @@ async fn known_gap_a_backchannel_error_does_not_reflect_client_credentials() {
 
 /// A rejected token poll must not reveal either credential encoding.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 ciba-op-body-secret-leak")]
-async fn known_gap_a_poll_error_does_not_reflect_client_credentials() {
+async fn a_poll_error_does_not_reflect_client_credentials() {
     let (body, basic) = reflected_body();
     let body = Bytes::from(body);
     let armed = Arc::new(AtomicBool::new(false));

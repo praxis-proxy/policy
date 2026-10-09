@@ -996,7 +996,7 @@ fn jwt_claims(token: &str) -> Result<Option<serde_json::Value>, Box<PluginViolat
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::unwrap_used, reason = "tests")]
 mod response_validation_tests {
     use super::*;
     use base64::Engine as _;

@@ -51,6 +51,9 @@ entry in `pre_invocation:` or `post_invocation:`. A declared `args:` or
 Redaction matches object keys without case sensitivity. A `**` segment is
 available in a path containing a `redact` stage: `result: { "**.ssn":
 "redact(!perm.view_ssn)" }` covers `ssn` under any nested object or array.
+Matching keeps each JSON key intact, including keys containing `.`. If a
+recursive path exceeds the depth, match count, or traversal work limit, the
+request is denied instead of returning a partly redacted value.
 Other field operations retain exact path matching. String values containing
 JSON are treated as strings; redact the `text` field or use a PII scanner.
 

@@ -76,8 +76,8 @@ fn approver_with_pending() -> CibaApprover {
         Correlation {
             expected_approver: "alice@corp.com".into(),
             resolved_approver: None,
-            tool: String::new(),
-            requester: String::new(),
+            tool: "adjust".into(),
+            requester: "bob".into(),
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
         },
     );
@@ -109,7 +109,9 @@ async fn run(
 ) -> ElicitationPayload {
     let ext = ext_with(http);
     let mut ctx = PluginContext::new();
-    let result = approver.handle(&payload, &ext, &mut ctx).await;
+    let result = approver
+        .handle(&payload.with_binding("adjust", "bob"), &ext, &mut ctx)
+        .await;
     assert!(
         result.continue_processing,
         "handler denied: {:?}",
@@ -205,6 +207,46 @@ async fn dispatch_posts_backchannel_and_returns_auth_req_id() {
     assert_eq!(out.status, Some(ElicitationStatusKind::Pending));
     assert_eq!(out.approver.as_deref(), Some("alice@corp.com"));
     assert!(out.expires_at.is_some());
+}
+
+#[tokio::test]
+async fn non_positive_op_expiry_uses_the_requested_positive_ttl() {
+    for expires_in in [0, -5] {
+        let http = Arc::new(FakeTransport::new().json(
+            AUTH_PATH,
+            200,
+            &json!({ "auth_req_id": "REQ-123", "expires_in": expires_in }).to_string(),
+        ));
+        let out = run(
+            &approver(),
+            &http,
+            ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
+                .with_timeout("5m"),
+        )
+        .await;
+        assert_eq!(out.status, Some(ElicitationStatusKind::Pending));
+        let expiry = chrono::DateTime::parse_from_rfc3339(
+            out.expires_at.as_deref().expect("the dispatch expiry"),
+        )
+        .expect("a valid expiry");
+        assert!(expiry > chrono::Utc::now(), "expiry must remain usable");
+    }
+}
+
+#[tokio::test]
+async fn an_out_of_range_op_expiry_denies_before_returning_an_id() {
+    let http = Arc::new(FakeTransport::new().json(
+        AUTH_PATH,
+        200,
+        &json!({ "auth_req_id": "REQ-123", "expires_in": i64::MAX }).to_string(),
+    ));
+    let violation = deny_for(
+        &approver(),
+        &http,
+        ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+    )
+    .await;
+    assert_eq!(violation.code, "elicitation.bad_response");
 }
 
 #[tokio::test]
@@ -372,6 +414,28 @@ async fn validate_rejects_approver_mismatch() {
 // Failure paths
 // ---------------------------------------------------------------------
 
+#[tokio::test]
+async fn an_empty_requester_is_rejected_on_every_operation() {
+    let app = approver();
+    let http = Arc::new(FakeTransport::new());
+    let ext = ext_with(&http);
+    for operation in [
+        ElicitationOp::Dispatch,
+        ElicitationOp::Check,
+        ElicitationOp::Validate,
+    ] {
+        let payload = ElicitationPayload::new(operation, "approval", "alice@corp.com")
+            .with_elicitation_id("REQ-123");
+        let mut ctx = PluginContext::new();
+        let result = app.handle(&payload, &ext, &mut ctx).await;
+        assert!(!result.continue_processing, "{operation:?} must deny");
+        let violation = result.violation.expect("a requester denial");
+        assert_eq!(violation.code, "elicitation.bad_request");
+        assert!(violation.reason.contains("requester subject id"));
+    }
+    assert_eq!(http.call_count(), 0);
+}
+
 /// Run a payload and require a denial, returning the violation.
 async fn deny_for(
     app: &CibaApprover,
@@ -380,7 +444,9 @@ async fn deny_for(
 ) -> praxis_policy_core::error::PluginViolation {
     let ext = ext_with(http);
     let mut ctx = PluginContext::new();
-    let result = app.handle(&payload, &ext, &mut ctx).await;
+    let result = app
+        .handle(&payload.with_binding("adjust", "bob"), &ext, &mut ctx)
+        .await;
     assert!(
         !result.continue_processing,
         "this case must deny rather than report a lifecycle state"
@@ -517,8 +583,8 @@ async fn an_unrecognized_poll_error_denies_instead_of_becoming_a_lifecycle_state
     let violation = deny_for(&app, &http, payload).await;
     assert_eq!(violation.code, "elicitation.op_rejected");
     assert!(
-        violation.reason.contains("invalid_grant"),
-        "the unrecognized error must be quoted so it can be diagnosed: {}",
+        violation.reason.contains("(400)") && !violation.reason.contains("invalid_grant"),
+        "report the status without reflecting the OP body: {}",
         violation.reason
     );
 }
@@ -767,7 +833,8 @@ async fn without_a_transport_dispatch_denies_without_calling_out() {
     let mut ctx = PluginContext::new();
     let result = app
         .handle(
-            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
+                .with_binding("adjust", "bob"),
             &Extensions::default(),
             &mut ctx,
         )
@@ -798,7 +865,8 @@ async fn a_bad_request_is_reported_as_such_even_with_no_transport() {
     let result = app
         .handle(
             // Dispatch with an empty login hint.
-            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", ""),
+            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "")
+                .with_binding("adjust", "bob"),
             &Extensions::default(),
             &mut ctx,
         )

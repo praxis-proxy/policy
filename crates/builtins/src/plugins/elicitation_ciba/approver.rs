@@ -286,10 +286,9 @@ impl CibaApprover {
 
         if !response.is_success() {
             let status = response.status;
-            let body = String::from_utf8_lossy(&response.body).into_owned();
             return deny(
                 "elicitation.op_rejected",
-                format!("CIBA backchannel rejected ({status}): {body}"),
+                format!("CIBA backchannel rejected ({status})"),
             );
         }
 
@@ -308,11 +307,23 @@ impl CibaApprover {
         let id = parsed.auth_req_id;
         let ttl = parsed
             .expires_in
+            .filter(|seconds| *seconds > 0)
             .unwrap_or_else(|| requested_expiry.parse::<i64>().unwrap_or(0));
+        if ttl <= 0 {
+            return deny(
+                "elicitation.bad_response",
+                "CIBA backchannel expiry must be positive",
+            );
+        }
         let now = Utc::now();
-        let expires_at = now
-            .checked_add_signed(chrono::Duration::seconds(ttl))
-            .unwrap_or(now);
+        let Some(expires_at) = chrono::Duration::try_seconds(ttl)
+            .and_then(|duration| now.checked_add_signed(duration))
+        else {
+            return deny(
+                "elicitation.bad_response",
+                "CIBA backchannel expiry is out of range",
+            );
+        };
         self.store.put(
             &id,
             Correlation {
@@ -439,7 +450,7 @@ impl CibaApprover {
             _ => {
                 return deny(
                     "elicitation.op_rejected",
-                    format!("CIBA token poll failed ({status}): {body}"),
+                    format!("CIBA token poll failed ({status})"),
                 );
             },
         };
@@ -465,9 +476,12 @@ impl CibaApprover {
             match self.store.get(id) {
                 Some(c) if c.tool == payload.tool() && c.requester == payload.requester() => c,
                 Some(_) => {
-                    return invalid(payload, "approval belongs to another tool or requester");
+                    return deny(
+                        "elicitation.binding_mismatch",
+                        "approval belongs to another tool or requester",
+                    );
                 },
-                None => return invalid(payload, "unknown elicitation id"),
+                None => return deny("elicitation.unknown_id", "unknown elicitation id"),
             }
         } else {
             match self
@@ -475,9 +489,14 @@ impl CibaApprover {
                 .take_if_ready(id, payload.tool(), payload.requester())
             {
                 TakeResult::Ready(c) => c,
-                TakeResult::Missing => return invalid(payload, "unknown elicitation id"),
+                TakeResult::Missing => {
+                    return deny("elicitation.unknown_id", "unknown elicitation id");
+                },
                 TakeResult::BindingMismatch => {
-                    return invalid(payload, "approval belongs to another tool or requester");
+                    return deny(
+                        "elicitation.binding_mismatch",
+                        "approval belongs to another tool or requester",
+                    );
                 },
                 TakeResult::Pending => {
                     return invalid(payload, "elicitation has no resolved approver");
@@ -531,6 +550,12 @@ impl HookHandler<ElicitationHook> for CibaApprover {
         ext: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<ElicitationPayload> {
+        if payload.requester().trim().is_empty() {
+            return deny(
+                "elicitation.bad_request",
+                "CIBA approval requires a non-empty requester subject id",
+            );
+        }
         // Each operation resolves the transport itself, *after* checking
         // its own arguments, and `validate` never does — it compares a
         // stored approver and touches no network.
@@ -726,8 +751,8 @@ mod tests {
                 Correlation {
                     expected_approver: (*expected).to_owned(),
                     resolved_approver: resolved.map(str::to_owned),
-                    tool: String::new(),
-                    requester: String::new(),
+                    tool: "adjust".into(),
+                    requester: "bob".into(),
                     expires_at: Utc::now() + chrono::Duration::hours(1),
                 },
             );
@@ -748,7 +773,8 @@ mod tests {
     }
 
     fn validate_payload(id: Option<&str>) -> ElicitationPayload {
-        let p = ElicitationPayload::new(ElicitationOp::Validate, "approval", "");
+        let p = ElicitationPayload::new(ElicitationOp::Validate, "approval", "")
+            .with_binding("adjust", "bob");
         match id {
             Some(id) => p.with_elicitation_id(id),
             None => p,
@@ -801,25 +827,22 @@ mod tests {
         );
     }
 
-    /// An id the store has never seen must be invalid rather than accepted. This
-    /// is the replay and guess case: a fabricated correlation id must not pass.
+    /// An id the store has never seen must deny with the plugin code. This is
+    /// the replay and guess case: a fabricated correlation id must not pass.
     #[tokio::test]
     async fn validate_rejects_an_unknown_elicitation_id() {
         let a = approver_with(&[]);
-        let out = a
+        let result = a
             .handle(
                 &validate_payload(Some("REQ-does-not-exist")),
                 &Extensions::default(),
                 &mut PluginContext::new(),
             )
-            .await
-            .modified_payload
-            .expect("validate returns a payload");
-        assert_eq!(out.valid, Some(false));
-        assert!(
-            out.reason.unwrap_or_default().contains("unknown"),
-            "the reason must say the id is unknown"
-        );
+            .await;
+        assert!(!result.continue_processing);
+        let violation = result.violation.expect("unknown id violation");
+        assert_eq!(violation.code, "elicitation.unknown_id");
+        assert!(violation.reason.contains("unknown elicitation id"));
     }
 
     /// A correlation that exists but has not resolved must be invalid, not
@@ -865,7 +888,8 @@ mod tests {
     #[tokio::test]
     async fn check_without_an_elicitation_id_is_a_bad_request() {
         let a = approver_with(&[]);
-        let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "");
+        let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
+            .with_binding("adjust", "bob");
         let r = a
             .handle(&payload, &Extensions::default(), &mut PluginContext::new())
             .await;
@@ -881,7 +905,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_without_a_login_hint_is_a_bad_request() {
         let a = approver_with(&[]);
-        let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "");
+        let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "")
+            .with_binding("adjust", "bob");
         let r = a
             .handle(&payload, &Extensions::default(), &mut PluginContext::new())
             .await;

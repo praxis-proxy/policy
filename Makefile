@@ -422,15 +422,19 @@ release-version: release-tool
 release: release-tool
 	@$(CARGO) release $(RELEASE_ARG) --workspace --no-publish --no-push --execute
 
-# Build and verify a .crate for every publishable member without uploading, the
-# same check the release workflow's dry run performs. CI runs this on a clean
-# checkout; --allow-dirty lets it run locally with work in progress.
+# Build a .crate for every publishable member without uploading, then check
+# the changed workspace together with all features. Cargo's per-package verify
+# resolves sibling crate versions from crates.io, where this change is not yet
+# published. The test crates are unpublished and have local-only dependencies.
+# CI runs this on a clean checkout; --allow-dirty permits local work in progress.
 .PHONY: publish-dry
+PACKAGE_TEST_EXCLUDES = --exclude praxis-policy-test-utils \
+	--exclude praxis-policy-tests-integration \
+	--exclude praxis-policy-tests-resilience \
+	--exclude praxis-policy-tests-security
 publish-dry:
-	@$(CARGO) package --workspace --exclude praxis-policy-test-utils --locked --allow-dirty
-# Packaging with default features compiles none of the bundled extensions, so
-# the dry run would prove nothing about them.
-	@$(CARGO) package --workspace --exclude praxis-policy-test-utils --locked --allow-dirty --all-features
+	@$(CARGO) package --workspace $(PACKAGE_TEST_EXCLUDES) --locked --allow-dirty --no-verify
+	@$(CARGO) check --workspace --all-features --locked
 
 # Tag the current commit and push it. The tag is what the release workflow
 # triggers on. VERSION must be semver with no leading `v`.

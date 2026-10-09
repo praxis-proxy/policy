@@ -138,7 +138,10 @@ The `purpose` is recorded verbatim as the source of truth for what was approved
 
 The CIBA correlation binds the id to the exact tool name and authenticated
 requester subject that opened it. A different tool or requester cannot poll or
-redeem the id. A successful non-peek validation consumes it atomically, so a
+redeem the id; CIBA denies dispatch, check, and validation without a non-empty
+`subject.id`. OP rejection reasons report the status without reflecting the
+response body, which may contain client credentials. A successful non-peek
+validation consumes it atomically, so a
 second application fails; an `X-Policy-Elicitation-Peek` request checks without
 consuming and can be followed by one application. If a later step fails after
 validation, the id is still spent. Correlations expire and are held in this

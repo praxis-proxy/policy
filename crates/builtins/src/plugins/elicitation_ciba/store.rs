@@ -95,7 +95,8 @@ impl CorrelationStore for InMemoryCorrelationStore {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.retain(|_, c| c.expires_at > Utc::now());
+        let now = Utc::now();
+        entries.retain(|_, c| c.expires_at > now);
         entries.insert(id.to_owned(), correlation);
     }
 
@@ -104,7 +105,8 @@ impl CorrelationStore for InMemoryCorrelationStore {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.retain(|_, c| c.expires_at > Utc::now());
+        let now = Utc::now();
+        entries.retain(|_, c| c.expires_at > now);
         entries.get(id).cloned()
     }
 
@@ -113,7 +115,8 @@ impl CorrelationStore for InMemoryCorrelationStore {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.retain(|_, c| c.expires_at > Utc::now());
+        let now = Utc::now();
+        entries.retain(|_, c| c.expires_at > now);
         if let Some(c) = entries.get_mut(id) {
             c.resolved_approver = Some(approver);
         }
@@ -124,7 +127,8 @@ impl CorrelationStore for InMemoryCorrelationStore {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.retain(|_, c| c.expires_at > Utc::now());
+        let now = Utc::now();
+        entries.retain(|_, c| c.expires_at > now);
         let Some(c) = entries.get(id) else {
             return TakeResult::Missing;
         };

@@ -93,6 +93,17 @@ async fn a_recursive_path_redacts_nested_ssns_at_any_depth() {
     out.assert_no_leaks(&ssn);
 }
 
+#[tokio::test]
+async fn a_recursive_path_redacts_under_a_dotted_object_key() {
+    let result = json!({ "employee.v2": { "ssn": JANE_SSN } });
+    let (out, ssn) = eve_reads(as_text(&result), "**.ssn").await;
+    assert_eq!(
+        out.record().expect("a record")["employee.v2"]["ssn"],
+        "[REDACTED]"
+    );
+    out.assert_no_leaks(&ssn);
+}
+
 /// `ssn` addresses the top level (and array elements), not a nested record.
 #[tokio::test]
 async fn an_explicit_nested_ssn_path_is_redacted() {
