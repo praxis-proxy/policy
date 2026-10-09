@@ -1020,10 +1020,13 @@ mod response_validation_tests {
         )
     }
 
-    fn jwt(sub: &str, aud: serde_json::Value) -> String {
-        let payload = json!({ "sub": sub, "aud": aud });
+    fn jwt_with_claims(payload: serde_json::Value) -> String {
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
         format!("header.{encoded}.signature")
+    }
+
+    fn jwt(sub: &str, aud: serde_json::Value) -> String {
+        jwt_with_claims(json!({ "sub": sub, "aud": aud }))
     }
 
     fn response(token: String) -> TokenExchangeResponse {
@@ -1129,6 +1132,39 @@ mod response_validation_tests {
     }
 
     #[test]
+    fn readable_jwt_scope_uses_the_same_overgrant_rule_as_response_scope() {
+        let caller = jwt("alice", json!("gateway"));
+        let mut issued = response(jwt_with_claims(json!({
+            "sub": "alice", "aud": "api", "scope": "read admin"
+        })));
+
+        for response_scope in [None, Some("read".into())] {
+            issued.scope = response_scope;
+            assert_eq!(
+                validate_exchange_response(&issued, "read", "api", &caller, None, true)
+                    .unwrap_err()
+                    .code,
+                "delegation.scope_overgrant"
+            );
+        }
+
+        issued.access_token = jwt_with_claims(json!({
+            "sub": "alice", "aud": "api", "scope": "read profile"
+        }));
+        super::validate_exchange_response(
+            &issued,
+            "read",
+            "api",
+            &caller,
+            None,
+            true,
+            &["profile".into()],
+        )
+        .unwrap();
+        validate_exchange_response(&issued, "", "api", &caller, None, true).unwrap();
+    }
+
+    #[test]
     fn three_segment_opaque_tokens_do_not_fail_jwt_claim_checks() {
         let caller = jwt("alice", json!("gateway"));
         let mut issued = response("opaque.not-json.signature".into());
@@ -1182,22 +1218,21 @@ fn validate_exchange_response(
             "IdP issued a token type other than an access token or JWT",
         )));
     }
-    if !requested_scope.is_empty()
-        && let Some(scope) = &response.scope
-    {
-        let requested: std::collections::HashSet<&str> =
-            requested_scope.split_whitespace().collect();
-        if scope.split_whitespace().any(|granted| {
-            !requested.contains(granted)
-                && !allowed_extra_scopes
-                    .iter()
-                    .any(|allowed| allowed == granted)
-        }) {
-            return Err(Box::new(PluginViolation::new(
-                "delegation.scope_overgrant",
-                "IdP granted a scope that was not requested",
-            )));
-        }
+    let requested: std::collections::HashSet<&str> = requested_scope.split_whitespace().collect();
+    let has_unapproved_scope = |scope: &str| {
+        !requested_scope.is_empty()
+            && scope.split_whitespace().any(|granted| {
+                !requested.contains(granted)
+                    && !allowed_extra_scopes
+                        .iter()
+                        .any(|allowed| allowed == granted)
+            })
+    };
+    if response.scope.as_deref().is_some_and(&has_unapproved_scope) {
+        return Err(Box::new(PluginViolation::new(
+            "delegation.scope_overgrant",
+            "IdP granted a scope that was not requested",
+        )));
     }
     let minted_claims = jwt_claims(&response.access_token);
     if issued_type == JWT_ISSUED_TOKEN_TYPE && minted_claims.is_none() {
@@ -1207,6 +1242,16 @@ fn validate_exchange_response(
         )));
     }
     if let Some(claims) = minted_claims {
+        if claims
+            .get("scope")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(&has_unapproved_scope)
+        {
+            return Err(Box::new(PluginViolation::new(
+                "delegation.scope_overgrant",
+                "IdP JWT contains a scope that was not requested",
+            )));
+        }
         let aud_matches = match claims.get("aud") {
             Some(serde_json::Value::String(aud)) => aud == audience,
             Some(serde_json::Value::Array(auds)) => {

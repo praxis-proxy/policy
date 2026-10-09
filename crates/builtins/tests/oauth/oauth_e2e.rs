@@ -1202,6 +1202,26 @@ async fn configured_idp_default_scopes_can_accompany_a_requested_scope() {
     );
 }
 
+#[tokio::test]
+async fn jwt_scope_overgrant_denies_even_when_response_scope_is_absent() {
+    let http = idp(
+        200,
+        &json!({
+            "access_token": test_jwt(json!({
+                "sub": "alice", "aud": "https://hr.example.com", "scope": "read admin"
+            })),
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        })
+        .to_string(),
+    );
+    let payload = DelegationPayload::new(test_jwt(json!({ "sub": "alice" })), "get_compensation")
+        .with_target_audience("https://hr.example.com")
+        .with_required_permissions(vec!["read".into()])
+        .with_auth_enforced_by(AuthEnforcedBy::Target);
+    let violation = violation_for(payload, &http).await;
+    assert_eq!(violation.code, "delegation.scope_overgrant");
+}
+
 #[test]
 fn extra_scope_allowlist_rejects_whitespace_separated_entries() {
     let mut cfg = plugin_config(&token_endpoint());
