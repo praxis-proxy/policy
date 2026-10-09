@@ -694,52 +694,43 @@ impl OAuthDelegator {
             )
             .await?;
 
-        // Compute effective scopes. IdP's `scope` field wins (it
-        // reflects what was actually granted, possibly narrower
-        // than what we asked for); fall back to the requested set
-        // if the IdP didn't send one.
-        let effective_scopes: Vec<String> = if let Some(s) = &parsed.scope {
-            s.split_whitespace().map(String::from).collect()
-        } else if !scope.is_empty() {
-            scope.split_whitespace().map(String::from).collect()
-        } else {
-            Vec::new()
-        };
-
-        // Enforce requested ⊆ effective. Without this check, a route
-        // that asked for `read write` and got back `read` would
-        // proceed as if the broader grant had succeeded — downstream
-        // calls would fail in policy-author-unobservable ways. We
-        // compare only when the IdP explicitly sent a `scope` field
-        // (otherwise we just used the requested set above, so the
-        // subset relationship is trivially true). The required
-        // permissions come straight off the DelegationPayload; route
-        // attenuation capabilities are advisory extras and not
-        // checked here.
-        if parsed.scope.is_some() {
+        // Response metadata is the first explicit grant to check. Preserve
+        // its denial precedence when it is narrower than the route requires.
+        let mut effective_scopes: Vec<String> = parsed
+            .scope
+            .as_deref()
+            .unwrap_or(&scope)
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        let require_permissions = |granted_scopes: &[String]| -> Result<(), Box<PluginViolation>> {
             let granted: std::collections::HashSet<&str> =
-                effective_scopes.iter().map(String::as_str).collect();
+                granted_scopes.iter().map(String::as_str).collect();
             let missing: Vec<&str> = payload
                 .required_permissions()
                 .iter()
                 .filter(|req| !granted.contains(req.as_str()))
                 .map(String::as_str)
                 .collect();
-            if !missing.is_empty() {
-                return Err(PluginViolation::new(
-                    "delegation.scope_too_broad",
-                    format!(
-                        "IdP granted narrower scopes than requested. \
-                         requested=[{}] granted=[{}] missing=[{}]",
-                        payload.required_permissions().join(" "),
-                        effective_scopes.join(" "),
-                        missing.join(" "),
-                    ),
-                ));
+            if missing.is_empty() {
+                return Ok(());
             }
+            Err(Box::new(PluginViolation::new(
+                "delegation.scope_too_broad",
+                format!(
+                    "IdP granted narrower scopes than requested. \
+                     requested=[{}] granted=[{}] missing=[{}]",
+                    payload.required_permissions().join(" "),
+                    granted_scopes.join(" "),
+                    missing.join(" "),
+                ),
+            )))
+        };
+        if parsed.scope.is_some() {
+            require_permissions(&effective_scopes).map_err(|violation| *violation)?;
         }
 
-        if self.typed.strict_response_validation {
+        let jwt_scopes = if self.typed.strict_response_validation {
             let caller_identity = match payload.subject() {
                 DelegationSubject::User => ext
                     .security
@@ -768,7 +759,18 @@ impl OAuthDelegator {
                 !as_this_workload,
                 &self.typed.allowed_extra_scopes,
             )
-            .map_err(|violation| *violation)?;
+            .map_err(|violation| *violation)?
+        } else {
+            None
+        };
+
+        // A readable JWT claim describes the credential we will forward. It
+        // must also carry every required permission, and its actual grant is
+        // what the delegated-token metadata reports. Route attenuation
+        // capabilities are advisory extras and may be narrowed.
+        if let Some(scopes) = jwt_scopes {
+            require_permissions(&scopes).map_err(|violation| *violation)?;
+            effective_scopes = scopes;
         }
 
         // Compute expiry. Most IdPs send `expires_in` (seconds);
@@ -1008,7 +1010,7 @@ mod response_validation_tests {
         subject_token: &str,
         caller_identity: Option<&str>,
         is_exchange_grant: bool,
-    ) -> Result<(), Box<PluginViolation>> {
+    ) -> Result<Option<Vec<String>>, Box<PluginViolation>> {
         super::validate_exchange_response(
             response,
             requested_scope,
@@ -1200,7 +1202,7 @@ fn validate_exchange_response(
     caller_identity: Option<&str>,
     is_exchange_grant: bool,
     allowed_extra_scopes: &[String],
-) -> Result<(), Box<PluginViolation>> {
+) -> Result<Option<Vec<String>>, Box<PluginViolation>> {
     let issued_type = match response.issued_token_type.as_deref() {
         Some(issued_type) => issued_type,
         // RFC 6749 client_credentials has no issued_token_type field.
@@ -1241,6 +1243,7 @@ fn validate_exchange_response(
             "IdP labeled a token as JWT but its claims are unreadable",
         )));
     }
+    let mut jwt_scopes = None;
     if let Some(claims) = minted_claims {
         if claims
             .get("scope")
@@ -1252,6 +1255,10 @@ fn validate_exchange_response(
                 "IdP JWT contains a scope that was not requested",
             )));
         }
+        jwt_scopes = claims
+            .get("scope")
+            .and_then(serde_json::Value::as_str)
+            .map(|scope| scope.split_whitespace().map(String::from).collect());
         let aud_matches = match claims.get("aud") {
             Some(serde_json::Value::String(aud)) => aud == audience,
             Some(serde_json::Value::Array(auds)) => {
@@ -1288,7 +1295,7 @@ fn validate_exchange_response(
             }
         }
     }
-    Ok(())
+    Ok(jwt_scopes)
 }
 
 /// Reject `http://` for endpoints that carry credentials. Allows

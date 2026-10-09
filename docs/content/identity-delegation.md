@@ -655,7 +655,10 @@ An empty requested scope set accepts the scopes the IdP returns, as in Recipe
 3's `client_credentials` grant. When requesting scopes from an IdP that always
 adds defaults, configure the delegator with, for example,
 `allowed_extra_scopes: [profile, email]`. Only those named extras pass strict
-validation; the granted scopes remain visible on the delegated token.
+validation. For a readable JWT with a `scope` claim, required permissions must
+be present in that claim and the delegated token reports its scopes. Otherwise,
+the granted scopes come from the token response or the request when the IdP
+omits them.
 
 The JWT identity resolver rejects non-empty `crit` headers with
 `auth.unsupported_critical_header`; it implements no critical header

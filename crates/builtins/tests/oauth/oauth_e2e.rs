@@ -1222,6 +1222,59 @@ async fn jwt_scope_overgrant_denies_even_when_response_scope_is_absent() {
     assert_eq!(violation.code, "delegation.scope_overgrant");
 }
 
+#[tokio::test]
+async fn jwt_missing_required_scope_denies_even_when_response_claims_it() {
+    for response_scope in [None, Some("read write")] {
+        let mut body = json!({
+            "access_token": test_jwt(json!({
+                "sub": "alice", "aud": "https://hr.example.com", "scope": "read"
+            })),
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        });
+        if let Some(scope) = response_scope {
+            body["scope"] = json!(scope);
+        }
+        let http = idp(200, &body.to_string());
+        let payload =
+            DelegationPayload::new(test_jwt(json!({ "sub": "alice" })), "get_compensation")
+                .with_target_audience("https://hr.example.com")
+                .with_required_permissions(vec!["read".into(), "write".into()])
+                .with_auth_enforced_by(AuthEnforcedBy::Target);
+        let violation = violation_for(payload, &http).await;
+        assert_eq!(
+            violation.code, "delegation.scope_too_broad",
+            "response scope: {response_scope:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reported_grant_uses_readable_jwt_scope_in_strict_mode() {
+    let http = idp(
+        200,
+        &json!({
+            "access_token": test_jwt(json!({
+                "sub": "alice", "aud": "https://hr.example.com", "scope": "read profile"
+            })),
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "scope": "read",
+        })
+        .to_string(),
+    );
+    let mgr = build_manager_with_rules(&http, true, &["profile"]).await;
+    let payload = DelegationPayload::new(test_jwt(json!({ "sub": "alice" })), "get_compensation")
+        .with_target_audience("https://hr.example.com")
+        .with_required_permissions(vec!["read".into()])
+        .with_auth_enforced_by(AuthEnforcedBy::Target);
+    let result = invoke(&mgr, payload).await;
+    assert!(result.continue_processing, "{:?}", result.violation);
+    let minted = DelegationPayload::from_pipeline_result(&result).expect("a minted payload");
+    assert_eq!(
+        minted.delegated_token.expect("token").scopes,
+        ["read", "profile"]
+    );
+}
+
 #[test]
 fn extra_scope_allowlist_rejects_whitespace_separated_entries() {
     let mut cfg = plugin_config(&token_endpoint());
