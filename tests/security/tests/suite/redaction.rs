@@ -66,7 +66,6 @@ async fn an_ssn_inside_an_array_is_redacted() {
     out.assert_no_leaks(&ssn);
 }
 
-/// Redaction paths match keys without regard to case.
 #[tokio::test]
 async fn an_uppercase_ssn_matches_a_lowercase_path() {
     let mut record = jane();
@@ -88,8 +87,14 @@ async fn a_recursive_path_redacts_nested_ssns_at_any_depth() {
     });
     let (out, ssn) = eve_reads(as_text(&result), "**.ssn").await;
     let record = out.record().expect("a record");
-    assert_eq!(record["employee"]["ssn"], "[REDACTED]");
-    assert_eq!(record["teams"][0]["member"]["SSN"], "[REDACTED]");
+    assert_eq!(
+        record["employee"]["ssn"], "[REDACTED]",
+        "employee.ssn should be redacted"
+    );
+    assert_eq!(
+        record["teams"][0]["member"]["SSN"], "[REDACTED]",
+        "teams[0].member.SSN should be redacted"
+    );
     out.assert_no_leaks(&ssn);
 }
 
@@ -99,7 +104,8 @@ async fn a_recursive_path_redacts_under_a_dotted_object_key() {
     let (out, ssn) = eve_reads(as_text(&result), "**.ssn").await;
     assert_eq!(
         out.record().expect("a record")["employee.v2"]["ssn"],
-        "[REDACTED]"
+        "[REDACTED]",
+        "employee.v2.ssn should be redacted"
     );
     out.assert_no_leaks(&ssn);
 }
