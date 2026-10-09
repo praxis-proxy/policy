@@ -107,7 +107,7 @@ use crate::upstream::{Upstream, UpstreamRequest};
 /// The praxis commit the mirrored files were last checked against. The
 /// `host-drift` job in `.github/workflows/integration-live.yml` diffs
 /// [`MIRRORED`] from here to praxis `main`, so keep the full SHA.
-pub const PRAXIS_COMMIT: &str = "24731f91707e995b479026afdbe2b1bed89c22bb";
+pub const PRAXIS_COMMIT: &str = "0e65081241e34226343e4edd01417cae1de89822";
 
 /// The praxis files this driver mirrors, relative to the praxis root.
 pub const MIRRORED: [&str; 6] = [
