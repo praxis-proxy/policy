@@ -46,6 +46,7 @@ default = []
 builtins = [
   "jwt",
   "api-key",
+  "forward-auth",
   "oauth",
   "elicitation-ciba",
   "cedar",
@@ -63,6 +64,11 @@ experimental = ["dep:tracing"]
 # these, so they are deliberately shorter than the crate names they pull.
 jwt = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/jwt"]
 api-key = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/api-key"]
+forward-auth = [
+  "_builtin",
+  "dep:praxis-policy-builtins",
+  "praxis-policy-builtins/forward-auth",
+]
 oauth = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/oauth"]
 elicitation-ciba = [
   "_builtin",

@@ -43,6 +43,37 @@ its record into the same attributes. Policies such as `require(role.hr)` work
 with either resolver. See [Recipe 7](../identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory)
 for configuration and revocation timing.
 
+`identity/forward-auth` resolves an opaque session credential — a cookie minted
+by a BFF, which PPE cannot read — by delegating to the endpoint that issued it.
+It forwards the configured inbound headers verbatim to an external auth
+sub-request (the Traefik `ForwardAuth` / nginx `auth_request` pattern), and on a
+success status maps the endpoint's response headers (the common
+`X-Auth-Request-*` convention) into the same attributes. The credential is not written to
+`raw_credentials`, so no PPE step such as `delegate` forwards it. The inbound
+`Cookie` header still reaches the upstream unless
+[`assertions.request.strip`](assertions.md) lists `cookie`.
+
+Its outcomes are classified explicitly. A **success** status projects the
+identity headers onto the subject. A configured **unauthenticated** status
+(`[401]` by default, or a `302` for an endpoint that bounces instead) — or a
+request carrying no credential — resolves to *no subject and no deny*, so
+`require(authenticated)` can bounce a browser to login through a route's
+`response:` rather than the host answering a fixed 401. A **403** denies as
+`auth.forbidden`, a refused caller kept apart from an outage. Every other status
+is no credential verdict and **fails closed** with `auth.endpoint_unavailable`,
+as does an **unreachable** endpoint, because an identity resolver runs
+`on_error: fail`. A success status that carries no mappable identity denies as a
+misconfiguration rather than looping a signed-in user back to login. It declares
+`capabilities: [perform_http]`.
+
+The resolver reads only the configured identity headers off the validation
+response; it does **not** propagate the endpoint's own response headers — a
+`Set-Cookie` in particular — back to the client, because an identity resolver
+runs on the request path, not on the response the client receives. An endpoint
+that refreshes the caller's session through its validation response should use a
+server-side session store, so the refresh is applied server-side rather than via
+a cookie that would need to reach the browser.
+
 ## What lands in the bag
 
 A resolved identity populates a flat attribute namespace that predicates read

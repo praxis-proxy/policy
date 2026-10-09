@@ -3,7 +3,7 @@
 
 [package]
 name = "praxis-policy-builtins"
-description = "PPE bundled extensions — Cedar, CEL and OPA decision points, JWT and API-key identity, OAuth delegation, CIBA elicitation, Valkey sessions, Vault secrets."
+description = "PPE bundled extensions — Cedar, CEL and OPA decision points, JWT, API-key and forward-auth identity, OAuth delegation, CIBA elicitation, Valkey sessions, Vault secrets."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -28,6 +28,9 @@ default = []
 # table nobody maintains.
 jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64"]
 api-key = ["_engine-core", "_plugins", "dep:sha2"]
+# No extra deps: the resolver reuses the shared HTTP seam and claim mapper that
+# `_engine-core` already brings, and delegation carries no crypto of its own.
+forward-auth = ["_engine-core", "_plugins"]
 oauth = [
   "_engine-core",
   "_plugins",
@@ -331,6 +334,11 @@ required-features = ["jwt"]
 name = "api_key"
 path = "tests/api_key/main.rs"
 required-features = ["api-key"]
+
+[[test]]
+name = "forward_auth"
+path = "tests/forward_auth/main.rs"
+required-features = ["forward-auth"]
 
 [[test]]
 name = "oauth"

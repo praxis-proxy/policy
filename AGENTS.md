@@ -66,9 +66,10 @@ crates/
   ppe-pdp-diff  differential tests across cedar/cel/opa
   ppe-benches   criterion benches, not a default member
 
-  builtins      the nine bundled extensions, one
+  builtins      the ten bundled extensions, one
                 Cargo feature each:
                   plugins::  identity_jwt, identity_api_key,
+                             identity_forward_auth,
                              delegator_oauth, elicitation_ciba
                   pdps::     cedar_direct, cel, opa
                   session::  valkey

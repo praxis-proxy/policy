@@ -54,8 +54,8 @@
 //!
 //! No plugins are on by default (`praxis-policy` alone is the engine).
 //! `builtins` enables every bundled extension, including the Valkey session
-//! store; or pick a granular subset (`jwt`, `api-key`, `oauth`, `elicitation-ciba`,
-//! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`). Any of them brings in the registration
+//! store; or pick a granular subset (`jwt`, `api-key`, `forward-auth`, `oauth`,
+//! `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
 //! # Plugins the host supplies
@@ -138,6 +138,10 @@ pub use praxis_policy_builtins::plugins::elicitation_ciba::{
 pub use praxis_policy_builtins::plugins::identity_api_key::{
     ApiKeyIdentityFactory, KIND as API_KEY_KIND,
 };
+#[cfg(feature = "forward-auth")]
+pub use praxis_policy_builtins::plugins::identity_forward_auth::{
+    ForwardAuthFactory, KIND as FORWARD_AUTH_KIND,
+};
 #[cfg(feature = "jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
 #[cfg(feature = "experimental-quota")]
@@ -206,6 +210,8 @@ use praxis_policy_builtins::plugins::delegator_oauth as oauth_builtin;
 use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 #[cfg(feature = "api-key")]
 use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
+#[cfg(feature = "forward-auth")]
+use praxis_policy_builtins::plugins::identity_forward_auth as forward_auth_builtin;
 #[cfg(feature = "jwt")]
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 #[cfg(feature = "experimental-quota")]
@@ -215,6 +221,7 @@ use praxis_policy_builtins::plugins::quota as quota_builtin;
 register_builtins! {
     feature "jwt"                => jwt_builtin::JwtIdentityFactory,
     feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
+    feature "forward-auth"       => forward_auth_builtin::ForwardAuthFactory,
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
     feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
     // Experimental: registers only when `experimental-quota` is named, never via `builtins`.
@@ -434,6 +441,7 @@ mod tests {
         let expected = [
             (cfg!(feature = "jwt"), "identity/jwt"),
             (cfg!(feature = "api-key"), "identity/api-key"),
+            (cfg!(feature = "forward-auth"), "identity/forward-auth"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),
         ];
