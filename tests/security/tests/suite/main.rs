@@ -12,13 +12,7 @@
 //!
 //! Known gaps follow the convention in the integration suite.
 
-#![allow(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "test code"
-)]
+#![expect(clippy::expect_used, clippy::indexing_slicing, reason = "test code")]
 
 mod delegation_abuse;
 mod elicitation_abuse;

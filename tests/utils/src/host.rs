@@ -20,6 +20,8 @@
 //! - `common_message_format.rs`: `tools/call` to the tool hooks.
 //! - `error.rs`: what a deny carries (code, reason, `proto_error_code`,
 //!   `details`). The driver returns those fields, not the wire envelope.
+//! - `dispatch.rs`: the runtime bound on the synchronous response-body
+//!   hook, which this driver does not reproduce (see "Not mirrored").
 //!
 //! The sequence, per call:
 //!
@@ -79,7 +81,7 @@ use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload};
 use praxis_policy_core::config::{PolicyConfig, parse_config};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::error::{PluginError, PluginErrorRecord, PluginViolation};
-use praxis_policy_core::executor::PipelineResult;
+use praxis_policy_core::executor::{BackgroundTasks, PipelineResult};
 use praxis_policy_core::extensions::{Extensions, MetaExtension};
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::TypedHandlerAdapter;
@@ -431,6 +433,7 @@ fn attach_delegated_tokens(queued: &mut Queued, extensions: Option<&Extensions>)
 // Bodies (json_rpc.rs)
 // -----------------------------------------------------------------------------
 
+/// Read the JSON-RPC id as the string passed to CMF hooks.
 fn id_string(body: &Value) -> String {
     match body.get("id").cloned().unwrap_or(Value::Null) {
         Value::String(s) => s,
@@ -505,6 +508,7 @@ fn rewrite_response(mut body: Value, message: &Message) -> Value {
     body
 }
 
+/// Extract a policy rewrite from a pipeline result, if any.
 fn modified_message(result: &PipelineResult) -> Option<&Message> {
     result
         .modified_payload
@@ -741,6 +745,9 @@ impl HostBuilder {
     /// Start from `transport`. Its responders are registered before the
     /// host's own, so they win: a test scripts a failing endpoint with a
     /// responder for that URL, since a queued reply loses to a responder.
+    /// A queued JWKS reply is consumed during initialization, then followed
+    /// by the host's JWKS reply on refresh. Script JWKS, exchange and CIBA
+    /// faults with `respond_with` instead.
     #[must_use]
     pub fn transport(mut self, transport: FakeTransport) -> Self {
         self.transport = transport;
@@ -852,6 +859,12 @@ impl Trace {
     }
 }
 
+/// Complete background plugin work before this call's capture guard closes.
+async fn wait_background(tasks: BackgroundTasks) {
+    let errors = tasks.wait_for_background_tasks().await;
+    assert!(errors.is_empty(), "background plugin task panicked");
+}
+
 impl RefHost {
     /// A builder, for a host whose transport or session store a test
     /// scripts.
@@ -913,6 +926,7 @@ impl RefHost {
             .clone()
     }
 
+    /// Invoke one identity hook and retain its pipeline diagnostics.
     async fn resolve_identity(
         &self,
         headers: &HashMap<String, String>,
@@ -931,10 +945,11 @@ impl RefHost {
         ext.http = Some(Arc::new(mcp::http_extension(headers)));
         let payload =
             IdentityPayload::new(String::new(), TokenSource::Bearer).with_headers(headers.clone());
-        let (result, _bg) = self
+        let (result, bg) = self
             .engine
             .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, ext, None)
             .await;
+        wait_background(bg).await;
         let result = trace.keep(result);
         if !result.continue_processing {
             return Err(result.violation);
@@ -1002,7 +1017,7 @@ impl RefHost {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = mcp::tool_call_body(id, tool, &call.args);
         let call_id = id_string(&body);
-        let (pre, _bg) = self
+        let (pre, bg) = self
             .engine
             .invoke_named::<CmfHook>(
                 HOOK_CMF_TOOL_PRE_INVOKE,
@@ -1011,6 +1026,7 @@ impl RefHost {
                 None,
             )
             .await;
+        wait_background(bg).await;
         let pre = trace.keep(pre);
         if !pre.continue_processing {
             return deny(outcome, Stage::Request, pre.violation, trace);
@@ -1048,10 +1064,11 @@ impl RefHost {
             http.response_headers = outcome.response_headers.clone().into_iter().collect();
             http.status = Some(200);
             ext.http = Some(Arc::new(http));
-            let (result, _bg) = self
+            let (result, bg) = self
                 .engine
                 .invoke_named::<HttpHook>(HOOK_HTTP_RESPONSE, HttpPayload, ext, None)
                 .await;
+            wait_background(bg).await;
             let result = trace.keep(result);
             if !result.continue_processing {
                 return deny(outcome, Stage::Response, result.violation, trace);
@@ -1077,10 +1094,11 @@ impl RefHost {
         {
             post_ext.http = Some(http);
         }
-        let (post, _bg) = self
+        let (post, bg) = self
             .engine
             .invoke_named::<CmfHook>(HOOK_CMF_TOOL_POST_INVOKE, payload, post_ext, None)
             .await;
+        wait_background(bg).await;
         let post = trace.keep(post);
         if !post.continue_processing {
             return deny(outcome, Stage::Response, post.violation, trace);

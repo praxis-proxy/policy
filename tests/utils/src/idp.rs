@@ -181,7 +181,7 @@ pub fn claims_of(token: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-#[allow(
+#[expect(
     clippy::cast_possible_wrap,
     reason = "seconds since 1970 fit in an i64"
 )]

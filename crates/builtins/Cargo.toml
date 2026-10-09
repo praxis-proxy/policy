@@ -113,7 +113,7 @@ zeroize = { workspace = true }
 # timing sidechannel) with no fixed release — which then propagates the
 # advisory to every downstream consumer. aws-lc-rs keeps `rsa` out of the
 # runtime tree at the cost of a C/cmake build step.
-jsonwebtoken = { version = "11", optional = true, features = ["aws_lc_rs"] }
+jsonwebtoken = { workspace = true, optional = true, features = ["aws_lc_rs"] }
 
 # --- jwt, oauth, elicitation-ciba -------------------------------------------
 
@@ -121,7 +121,7 @@ jsonwebtoken = { version = "11", optional = true, features = ["aws_lc_rs"] }
 # claim interop check in the OAuth delegator, and the approver-claim decode in
 # CIBA. None of the three verifies a signature with it. jsonwebtoken 11 still
 # pulls 0.22, so both versions sit in the tree until it catches up.
-base64 = { version = "0.23", optional = true }
+base64 = { workspace = true, optional = true }
 
 # --- api-key, oauth, valkey --------------------------------------------------
 
@@ -296,7 +296,7 @@ sha2 = { workspace = true }
 
 # RSA keypair + JWK fixtures for the JWT tests. `rsa` generates keypairs;
 # `pkcs8` encodes them in the PEM format jsonwebtoken accepts.
-rsa = { version = "0.9", features = ["pem"] }
+rsa = { workspace = true, features = ["pem"] }
 
 # rsa 0.9's `RsaPrivateKey::new(&mut rng, bits)` takes an rng
 # implementing `rand_core::CryptoRngCore` — `rand::thread_rng()`
@@ -305,7 +305,7 @@ rsa = { version = "0.9", features = ["pem"] }
 # implements it (0.9 -> rand_core 0.9, 0.10 -> rand_core 0.10). rsa 0.10
 # is the fix and is still pre-release, so this stays until it ships;
 # `dependabot.yml` ignores rand majors for the same reason.
-rand = "0.8"
+rand = { workspace = true }
 
 # Spins a real `valkey/valkey` container for the session-store integration
 # tests; those are `#[ignore]`d by default.

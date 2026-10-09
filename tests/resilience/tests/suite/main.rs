@@ -8,11 +8,10 @@
 //!
 //! Known gaps follow the convention in the integration suite.
 
-#![allow(
+#![expect(
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
-    clippy::unwrap_used,
     reason = "test code"
 )]
 

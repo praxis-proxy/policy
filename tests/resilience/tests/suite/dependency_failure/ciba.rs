@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use base64::Engine as _;
 use bytes::Bytes;
 use praxis_policy_core::http::HttpResponse;
 use praxis_policy_core::http_testing::FakeTransport;
@@ -39,11 +40,13 @@ fn assert_attributed(out: &Outcome, plugin_code: &str, row: &str) {
     assert_ne!(out.proto_error_code(), Some(PENDING), "{row}: not pending");
 }
 
+/// Build the above-threshold call used by both OP failure legs.
 fn large_adjustment() -> Call {
     Call::new(Persona::Bob, "adjust_compensation")
         .args(json!({ "employee_id": "EMP-001234", "amount": 25_000 }))
 }
 
+/// Track the inbound credentials that must stay out of diagnostics.
 fn planted(call: &Call) -> Planted {
     let mut planted = call.planted();
     planted.plant("client secret", CLIENT_SECRET);
@@ -171,4 +174,88 @@ async fn a_failing_token_poll_on_retry_denies_without_inventing_an_outcome() {
             "{row}: the retry polled"
         );
     }
+}
+
+/// A malicious OP can reflect the client's Basic credential in an error
+/// body. Neither the plain secret nor its encoded form may reach the caller.
+fn reflected_body() -> (String, String) {
+    let basic =
+        base64::engine::general_purpose::STANDARD.encode(format!("praxis-gateway:{CLIENT_SECRET}"));
+    (format!("plain={CLIENT_SECRET}; basic={basic}"), basic)
+}
+
+/// Require a reflected OP body to stay out of the caller-visible deny.
+fn assert_reflected_body_is_private(out: &Outcome, basic: &str, planted: &Planted) {
+    assert_eq!(out.denied_at, Some(Stage::Request), "the OP failure denies");
+    assert_eq!(
+        out.violation_code(),
+        Some(APPROVAL_STEP),
+        "the approval step denies"
+    );
+    assert!(out.upstream.is_none(), "the upstream was not called");
+    let reason = out.violation.as_ref().map_or("", |v| v.reason.as_str());
+    assert!(
+        !reason.contains(CLIENT_SECRET) && !reason.contains(basic),
+        "known gap #181 ciba-op-body-secret-leak: OP response body reached the deny reason"
+    );
+    out.assert_no_leaks(planted);
+}
+
+/// A rejected backchannel request must not reveal either credential encoding.
+#[tokio::test]
+#[should_panic(expected = "known gap #181 ciba-op-body-secret-leak")]
+async fn known_gap_a_backchannel_error_does_not_reflect_client_credentials() {
+    let (body, basic) = reflected_body();
+    let transport = FakeTransport::new().respond_with(CIBA_BACKCHANNEL_URL, move |_| {
+        Ok(HttpResponse::new(503, Bytes::from(body.clone())))
+    });
+    let host = RefHost::builder()
+        .transport(transport)
+        .start(Fixture::Cedar.hermetic())
+        .await
+        .expect("start the reflected backchannel fixture");
+    let call = large_adjustment();
+    let mut planted = planted(&call);
+    planted.plant("Basic client credential", basic.clone());
+    let out = host.call(call).await;
+    assert_eq!(host.transport().call_count_for(CIBA_BACKCHANNEL_URL), 1);
+    assert_reflected_body_is_private(&out, &basic, &planted);
+}
+
+/// A rejected token poll must not reveal either credential encoding.
+#[tokio::test]
+#[should_panic(expected = "known gap #181 ciba-op-body-secret-leak")]
+async fn known_gap_a_poll_error_does_not_reflect_client_credentials() {
+    let (body, basic) = reflected_body();
+    let armed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&armed);
+    let transport = FakeTransport::new().respond_with(CIBA_TOKEN_URL, move |_| {
+        if flag.load(Ordering::SeqCst) {
+            Ok(HttpResponse::new(503, Bytes::from(body.clone())))
+        } else {
+            Ok(HttpResponse::new(
+                400,
+                Bytes::from_static(br#"{"error":"authorization_pending"}"#),
+            ))
+        }
+    });
+    let host = RefHost::builder()
+        .transport(transport)
+        .start(Fixture::Cedar.hermetic())
+        .await
+        .expect("start the reflected poll fixture");
+    let first = host.call(large_adjustment()).await;
+    assert_eq!(first.proto_error_code(), Some(PENDING));
+    let id = first
+        .detail("elicitation_id")
+        .and_then(Value::as_str)
+        .expect("a pending elicitation id")
+        .to_owned();
+    armed.store(true, Ordering::SeqCst);
+    let call = large_adjustment().elicitation_id(&id);
+    let mut planted = planted(&call);
+    planted.plant("Basic client credential", basic.clone());
+    let out = host.call(call).await;
+    assert!(host.transport().call_count_for(CIBA_TOKEN_URL) >= 2);
+    assert_reflected_body_is_private(&out, &basic, &planted);
 }

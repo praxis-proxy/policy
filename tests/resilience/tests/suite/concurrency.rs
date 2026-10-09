@@ -77,7 +77,7 @@ struct Knobs {
     workers: usize,
 }
 
-#[allow(
+#[expect(
     clippy::print_stderr,
     reason = "the seed is printed so a failure can be replayed"
 )]
@@ -823,12 +823,12 @@ fn percentile_index(n: usize, p: usize) -> usize {
 /// baseline is printed but not asserted: on a shared CI runner it measures
 /// the machine, not the engine.
 #[test]
-#[allow(clippy::print_stderr, reason = "the measured times explain a failure")]
+#[expect(clippy::print_stderr, reason = "the measured times explain a failure")]
 fn concurrent_reads_overlap_their_dependency_calls() {
-    const LATENCY: Duration = Duration::from_millis(25);
-    /// Well under the 32 tasks, so a busy runner still clears it; serialized
-    /// calls give exactly 1.
-    const MIN_OVERLAP: usize = 4;
+    const LATENCY: Duration = Duration::from_millis(100);
+    /// Two concurrent dependency calls distinguish overlap from a lock held
+    /// across I/O, which yields exactly one even on a busy runner.
+    const MIN_OVERLAP: usize = 2;
     const TASKS: usize = 32;
     const CALLS_PER_TASK: usize = 3;
     let k = knobs("latency");

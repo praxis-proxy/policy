@@ -23,6 +23,7 @@ async fn bob_is_denied_an_email_carrying_an_ssn() {
         let out = host.call(call).await;
         assert_eq!(out.denied_at, Some(Stage::Request));
         assert_eq!(out.violation_code(), Some("pii.detected"));
+        assert_eq!(out.proto_error_code(), None, "a plain -32001 deny");
         assert_eq!(upstream_calls(&host), 0);
         assert_eq!(
             audit_for(&out, "send_email").len(),

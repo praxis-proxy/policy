@@ -52,12 +52,12 @@ praxis-policy-plugin-audit-logger = { path = "../../reference/plugins/audit-logg
 
 # Optional so the default pass resolves none of them; `suite` turns them on.
 async-trait = { workspace = true, optional = true }
-base64 = { version = "0.23", optional = true }
+base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
-jsonwebtoken = { version = "11", optional = true, features = ["aws_lc_rs"] }
+jsonwebtoken = { workspace = true, optional = true, features = ["aws_lc_rs"] }
 # Pinned to 0.8 for rsa 0.9's rand_core; see `crates/builtins/Cargo.toml`.
-rand = { version = "0.8", optional = true }
-rsa = { version = "0.9", optional = true, features = ["pem"] }
+rand = { workspace = true, optional = true }
+rsa = { workspace = true, optional = true, features = ["pem"] }
 serde_json = { workspace = true, optional = true }
 serde_yaml = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

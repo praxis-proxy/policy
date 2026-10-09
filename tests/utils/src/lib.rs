@@ -7,12 +7,15 @@
 //! builds an empty crate and unifies no builtin features. A crate-level
 //! `#![cfg]` would strip these docs too and trip `missing_docs`.
 
-#![allow(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::missing_panics_doc,
-    clippy::panic,
-    reason = "test harness; a broken fixture should fail the test loudly"
+#![cfg_attr(
+    feature = "suite",
+    expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::missing_panics_doc,
+        clippy::panic,
+        reason = "test harness; a broken fixture should fail the test loudly"
+    )
 )]
 
 #[cfg(feature = "suite")]

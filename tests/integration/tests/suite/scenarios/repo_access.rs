@@ -46,6 +46,7 @@ async fn alice_is_denied_an_external_repo_by_the_pdp() {
         let out = host.call(call).await;
         assert_eq!(out.denied_at, Some(Stage::Request));
         assert_eq!(out.violation_code(), Some(fixture.deny_violation()));
+        assert_eq!(out.proto_error_code(), None, "a plain -32001 deny");
         assert_eq!(upstream_calls(&host), 0);
         assert_eq!(host.transport().call_count_for(TOKEN_EXCHANGE_URL), 0);
         out.assert_no_leaks(&planted);
@@ -68,6 +69,7 @@ async fn bob_is_denied_repo_search_at_the_team_gate() {
             out.violation_code(),
             Some("routes.tool:search_repos.pre_invocation[0]")
         );
+        assert_eq!(out.proto_error_code(), None, "a plain -32001 deny");
         assert_eq!(upstream_calls(&host), 0);
         assert_eq!(host.transport().call_count_for(TOKEN_EXCHANGE_URL), 0);
         out.assert_no_leaks(&planted);

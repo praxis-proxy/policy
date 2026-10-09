@@ -21,6 +21,7 @@ async fn alice_is_denied_compensation_at_the_role_gate() {
             out.violation_code(),
             Some("routes.tool:get_compensation.pre_invocation[0]")
         );
+        assert_eq!(out.proto_error_code(), None, "a plain -32001 deny");
         assert_eq!(upstream_calls(&host), 0);
         assert_eq!(
             host.transport().call_count_for(TOKEN_EXCHANGE_URL),

@@ -55,6 +55,7 @@ pub(super) async fn tainted_session(host: RefHost) {
     let s3 = host.call(call).await;
     assert_eq!(s3.denied_at, Some(Stage::Request), "S3");
     assert_eq!(s3.violation_code(), Some("session_tainted_secret"), "S3");
+    assert_eq!(s3.proto_error_code(), None, "S3: a plain -32001 deny");
     assert_eq!(upstream_calls(&host), 2, "S3 reaches no upstream");
     s3.assert_no_leaks(&secrets);
 }

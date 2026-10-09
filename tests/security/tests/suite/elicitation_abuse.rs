@@ -19,11 +19,13 @@ use crate::support::{elicitation_id, planted_for};
 /// Where the approval step denies from.
 const APPROVAL_STEP: &str = "routes.tool:adjust_compensation.pre_invocation[1]";
 
+/// Build an adjustment call from Bob with the requested amount.
 fn adjust(amount: i64) -> Call {
     Call::new(Persona::Bob, "adjust_compensation")
         .args(json!({ "employee_id": "EMP-001234", "amount": amount }))
 }
 
+/// Make the scripted OP approve with the supplied manager identity.
 fn approve(host: &RefHost, approver: &str) {
     host.ciba().set(CibaPoll::Approved {
         approver: approver.to_owned(),
@@ -39,6 +41,7 @@ fn applied(host: &RefHost, tool: &str) -> usize {
         .count()
 }
 
+/// Obtain an approved correlation id without applying it.
 async fn approved_unused(host: &RefHost) -> String {
     let call = adjust(25_000);
     let planted = planted_for(&call);
@@ -66,6 +69,7 @@ async fn approved_once(host: &RefHost) -> String {
     id
 }
 
+/// Require a failed approval to stop before the upstream.
 fn assert_not_applied(out: &Outcome) {
     assert_eq!(out.denied_at, Some(Stage::Request), "{:?}", out.violation);
     assert!(out.upstream.is_none(), "the upstream was not called");
@@ -79,7 +83,7 @@ async fn an_unused_approval_applies_for_its_owner_and_tool() {
 #[tokio::test]
 async fn an_approval_does_not_cover_a_larger_amount() {
     let host = RefHost::hermetic(Fixture::Cedar).await;
-    let id = approved_once(&host).await;
+    let id = approved_unused(&host).await;
     let call = adjust(90_000).elicitation_id(&id);
     let planted = planted_for(&call);
     let out = host.call(call).await;
@@ -87,7 +91,7 @@ async fn an_approval_does_not_cover_a_larger_amount() {
     assert_eq!(out.violation_code(), Some(APPROVAL_STEP));
     let reason = &out.violation.as_ref().expect("a violation").reason;
     assert!(reason.contains("scope not satisfied"), "{reason}");
-    assert_eq!(applied(&host, "adjust_compensation"), 1);
+    assert_eq!(applied(&host, "adjust_compensation"), 0);
     out.assert_no_leaks(&planted);
 }
 

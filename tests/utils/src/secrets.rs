@@ -17,8 +17,16 @@ use serde_json::Value;
 use crate::capture::Events;
 
 /// The secrets one test planted.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Planted(Vec<(String, String)>);
+
+impl std::fmt::Debug for Planted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(label, _)| label))
+            .finish()
+    }
+}
 
 impl Planted {
     /// No secrets yet.

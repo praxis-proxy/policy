@@ -19,6 +19,13 @@ on:
   schedule:
     - cron: "37 5 * * 1"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/integration-live.yml
+      - tests/integration/fixtures/keycloak/**
+      - tests/integration/tests/suite/scenarios/live.rs
+      - tests/utils/src/host.rs
+      - tests/utils/src/live.rs
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

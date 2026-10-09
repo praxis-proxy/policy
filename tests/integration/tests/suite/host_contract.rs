@@ -30,11 +30,81 @@ use praxis_policy_test_utils::upstream::Upstream;
 use praxis_policy_test_utils::{host, mcp};
 use serde_json::{Value, json};
 
+/// Build a lowercase header map for direct transport calls.
 fn headers(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect()
+}
+
+/// Invalid Python int inputs return an RPC error while truthy strings reveal the SSN.
+#[test]
+fn upstream_matches_python_amount_errors_and_truthiness() {
+    let upstream = Upstream::new();
+    let headers = HashMap::new();
+    for amount in [
+        json!(null),
+        json!({"value": 25_000}),
+        json!([25_000]),
+        json!("nope"),
+    ] {
+        let reply = upstream.call(
+            &mcp::tool_call_body(
+                1,
+                "adjust_compensation",
+                &json!({"employee_id": "EMP-001234", "amount": amount}),
+            ),
+            &headers,
+        );
+        assert_eq!(reply["error"]["code"], -32_000);
+    }
+
+    let reply = upstream.call(
+        &mcp::tool_call_body(
+            2,
+            "get_compensation",
+            &json!({"employee_id": "EMP-001234", "include_ssn": "yes"}),
+        ),
+        &headers,
+    );
+    let record: Value = serde_json::from_str(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text"),
+    )
+    .expect("record");
+    assert_eq!(record["ssn"], "123-45-6789");
+    assert_eq!(
+        record["salary"], 125_000,
+        "rejected adjustments did not apply"
+    );
+
+    let reply = upstream.call(
+        &mcp::tool_call_body(
+            3,
+            "adjust_compensation",
+            &json!({"employee_id": "EMP-001234", "amount": "25"}),
+        ),
+        &headers,
+    );
+    let applied: Value = serde_json::from_str(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text"),
+    )
+    .expect("record");
+    assert_eq!(applied["new_salary"], 125_025);
+}
+
+/// Debugging a planted-secret set shows labels while concealing values.
+#[test]
+fn planted_debug_never_prints_secret_values() {
+    let mut planted = Planted::new();
+    planted.plant("client secret", CLIENT_SECRET);
+    let rendered = format!("{planted:?}");
+    assert!(rendered.contains("client secret"));
+    assert!(!rendered.contains(CLIENT_SECRET));
 }
 
 const CLIENT_AUTH: &str = "Basic cHJheGlzLWdhdGV3YXk6cHJheGlzLWdhdGV3YXktc2VjcmV0";
@@ -44,6 +114,7 @@ async fn post_form(transport: &FakeTransport, url: &str, form: &[(&str, &str)]) 
     post_with_auth(transport, url, form, Some(CLIENT_AUTH)).await
 }
 
+/// Post a form to the scripted identity provider with client authentication.
 async fn post_with_auth(
     transport: &FakeTransport,
     url: &str,
@@ -102,6 +173,7 @@ plugins:
       claim_mapper: standard
 "#;
 
+/// Every scripted persona token validates with the JWKS the host serves.
 #[tokio::test]
 async fn persona_tokens_verify_against_the_published_jwks() {
     let transport =
@@ -155,6 +227,7 @@ async fn persona_tokens_verify_against_the_published_jwks() {
     assert_eq!(identity.client.expect("a client").client_id, "hr-copilot");
 }
 
+/// Exchange replies derive their claims from the request form.
 #[tokio::test]
 async fn token_exchange_mints_from_the_request_form() {
     let subject_token = Persona::Bob.token();
@@ -229,6 +302,7 @@ async fn token_exchange_mints_from_the_request_form() {
     assert_eq!((status, &body["error"]), (400, &json!("invalid_request")));
 }
 
+/// The scripted OP supports pending, approval and terminal poll results.
 #[tokio::test]
 async fn ciba_answers_pending_then_approved_then_each_terminal_state() {
     let ciba = Ciba::new();
@@ -275,6 +349,7 @@ async fn ciba_answers_pending_then_approved_then_each_terminal_state() {
     }
 }
 
+/// The scripted `IdP` refuses unauthenticated and malformed grants.
 #[tokio::test]
 async fn the_fake_idp_rejects_missing_auth_and_malformed_grants() {
     let ciba = Ciba::new();
@@ -372,6 +447,7 @@ plugins:
     engine
 }
 
+/// Run one tool invoke whose audit event the capture tests inspect.
 async fn audited_call(engine: &PolicyEngine, arguments: Value) {
     let ext = mcp::tool_extensions(
         Extensions::default(),
@@ -399,6 +475,7 @@ fn sources_of(events: &Events) -> Vec<String> {
         .collect()
 }
 
+/// A spawned audit event stays in the call capture on one runtime thread.
 #[tokio::test]
 async fn audit_from_a_spawned_plugin_task_is_captured_on_a_current_thread_runtime() {
     let (events, _guard) = capture::capturing();
@@ -412,6 +489,7 @@ async fn audit_from_a_spawned_plugin_task_is_captured_on_a_current_thread_runtim
     assert_eq!(records[0]["tool_call"]["args"]["to"], "partner@example.com");
 }
 
+/// A worker thread capture records its own spawned audit event.
 #[test]
 fn audit_from_a_spawned_plugin_task_is_captured_on_a_multi_thread_runtime() {
     let runtime = capture::multi_thread(2);
@@ -460,6 +538,7 @@ fn parallel_captures_each_see_only_their_own_records() {
     }
 }
 
+/// The leak assertion inspects audit records as well as returned values.
 #[tokio::test]
 async fn the_leak_assertion_fails_when_a_planted_secret_reaches_an_audit_record() {
     let token = Persona::Bob.token();
@@ -491,6 +570,7 @@ async fn the_leak_assertion_fails_when_a_planted_secret_reaches_an_audit_record(
     assert!(message.contains("ssn"), "{message}");
 }
 
+/// The upstream log records requests and decodes delegated bearer claims.
 #[test]
 fn the_upstream_records_calls_and_decodes_bearer_claims() {
     let upstream = Upstream::new().with_result("send_email", json!({ "content": [] }));
@@ -530,6 +610,7 @@ fn the_upstream_records_calls_and_decodes_bearer_claims() {
     assert!(seen[1].jwt_claims("authorization").is_none());
 }
 
+/// MCP helper payloads match the fields the praxis filter expects.
 #[test]
 fn mcp_builders_match_the_filter_shapes() {
     let ext = mcp::tool_extensions(
@@ -575,6 +656,7 @@ fn jane_with_ssn() -> Value {
     json!({ "employee_id": "EMP-001234", "include_ssn": true })
 }
 
+/// Each policy fixture can initialize the full reference host.
 #[tokio::test]
 async fn every_fixture_loads_and_initializes() {
     for fixture in Fixture::ALL {
@@ -593,6 +675,7 @@ async fn every_fixture_loads_and_initializes() {
     }
 }
 
+/// Missing identity material denies before any upstream request.
 #[tokio::test]
 async fn a_call_without_tokens_is_denied_at_the_identity_gate() {
     for fixture in Fixture::ALL {
@@ -615,6 +698,7 @@ async fn a_call_without_tokens_is_denied_at_the_identity_gate() {
     }
 }
 
+/// An allowed call forwards its delegated bearer to the upstream.
 #[tokio::test]
 async fn an_allowed_call_reaches_the_upstream_with_a_delegated_token() {
     for fixture in Fixture::ALL {
@@ -667,6 +751,7 @@ async fn an_allowed_call_reaches_the_upstream_with_a_delegated_token() {
     }
 }
 
+/// A PDP deny retains the violation selected by the fixture.
 #[tokio::test]
 async fn the_pdp_step_denies_with_the_fixture_violation() {
     for fixture in Fixture::ALL {
@@ -727,6 +812,7 @@ async fn an_unknown_tool_passes_on_identity_with_the_global_assertions() {
     }
 }
 
+/// Pending approval exposes its protocol code and correlation details.
 #[tokio::test]
 async fn a_pending_elicitation_carries_its_protocol_code_and_details() {
     let host = RefHost::hermetic(Fixture::Cedar).await;
@@ -760,6 +846,7 @@ async fn a_pending_elicitation_carries_its_protocol_code_and_details() {
     assert!(host.upstream().requests().is_empty());
 }
 
+/// A secret assertion is visible to the upstream but absent from diagnostics.
 #[tokio::test]
 async fn a_secret_assertion_reaches_only_the_upstream_in_clear() {
     const KEY: &str = "sk-hr-mcp-0f9e8d7c";
@@ -819,6 +906,7 @@ impl SessionStoreFactory for Unreachable {
     }
 }
 
+/// A custom session store registered by the builder loads by kind.
 #[tokio::test]
 async fn a_builder_session_store_is_selectable_by_kind() {
     let yaml = Fixture::Cedar.hermetic().replacen(
@@ -834,6 +922,7 @@ async fn a_builder_session_store_is_selectable_by_kind() {
     assert!(err.to_string().contains("unreachable"), "{err}");
 }
 
+/// The response hook receives the request session for policy evaluation.
 #[tokio::test]
 async fn http_response_policy_loads_the_request_session() {
     let yaml = Fixture::Cedar.hermetic().replacen("global:\n", r#"global:
@@ -868,6 +957,7 @@ async fn http_response_policy_loads_the_request_session() {
     }
 }
 
+/// Add a recorded token to the secrets checked against an outcome.
 fn assert_recorded_token(out: &mut host::Outcome, token: &str, label: &str) {
     out.response_headers
         .insert("x-leak".to_owned(), token.to_owned());
@@ -882,6 +972,7 @@ fn assert_recorded_token(out: &mut host::Outcome, token: &str, label: &str) {
     out.response_headers.remove("x-leak");
 }
 
+/// Script one endpoint with a fixed JSON response.
 fn fixed_reply(url: &str, body: Value) -> FakeTransport {
     let body = body.to_string();
     FakeTransport::new().respond_with(url, move |_| {
@@ -889,6 +980,7 @@ fn fixed_reply(url: &str, body: Value) -> FakeTransport {
     })
 }
 
+/// CIBA tokens from earlier calls remain in later leak checks.
 #[tokio::test]
 async fn leak_checks_retain_ciba_tokens_across_calls() {
     let access = "ciba-access-secret-180";
@@ -936,6 +1028,7 @@ async fn leak_checks_retain_ciba_tokens_across_calls() {
     assert_recorded_token(&mut later, access, "access_token");
 }
 
+/// A token minted before a deny remains subject to leak checks.
 #[tokio::test]
 async fn leak_checks_include_tokens_minted_before_a_denial() {
     let minted = "minted-before-denial-180";

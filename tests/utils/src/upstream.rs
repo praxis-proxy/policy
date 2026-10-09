@@ -60,6 +60,7 @@ impl std::fmt::Debug for Upstream {
     }
 }
 
+/// Return a fresh copy of the demo employee records.
 fn employees() -> BTreeMap<&'static str, Value> {
     BTreeMap::from([
         (
@@ -92,6 +93,7 @@ fn employees() -> BTreeMap<&'static str, Value> {
     ])
 }
 
+/// Return the demo repository records used by `search_repos`.
 fn repos() -> Value {
     json!([
         {"name": "internal/web-app", "visibility": "internal", "stars": 24, "language": "TypeScript"},
@@ -102,10 +104,64 @@ fn repos() -> Value {
     ])
 }
 
+/// Read a string argument, using the demo server default when absent.
 fn arg_str<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
+/// Python truthiness for the JSON values accepted by the demo server.
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(v) => *v,
+        Value::Number(v) => v.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(v) => !v.is_empty(),
+        Value::Array(v) => !v.is_empty(),
+        Value::Object(v) => !v.is_empty(),
+    }
+}
+
+/// The JSON inputs accepted by Python's `int(args.get("amount", 0))`.
+fn python_int(value: Option<&Value>) -> Result<i64, String> {
+    let Some(value) = value else { return Ok(0) };
+    match value {
+        Value::Bool(v) => Ok(i64::from(*v)),
+        Value::Number(v) => {
+            if let Some(n) = v.as_i64() {
+                Ok(n)
+            } else if let Some(n) = v.as_u64() {
+                i64::try_from(n)
+                    .map_err(|_error| "amount exceeds the test server's integer range".to_owned())
+            } else {
+                let n = v.as_f64().ok_or_else(|| "invalid amount".to_owned())?;
+                // Exact 2^63 as an f64; decimal spelling trips the lossy-literal lint.
+                let limit = f64::from_bits(0x43e0_0000_0000_0000);
+                if !n.is_finite() || !(-limit..limit).contains(&n) {
+                    return Err("amount exceeds the test server's integer range".to_owned());
+                }
+                #[expect(clippy::cast_possible_truncation, reason = "mirrors Python int()")]
+                Ok(n as i64)
+            }
+        },
+        Value::String(v) => v
+            .trim()
+            .parse::<i64>()
+            .map_err(|_error| format!("invalid literal for int() with base 10: {v:?}")),
+        Value::Null | Value::Array(_) | Value::Object(_) => {
+            let kind = match value {
+                Value::Null => "NoneType",
+                Value::Array(_) => "list",
+                Value::Object(_) => "dict",
+                Value::Bool(_) | Value::Number(_) | Value::String(_) => "unknown",
+            };
+            Err(format!(
+                "int() argument must be a string, a bytes-like object or a real number, not '{kind}'"
+            ))
+        },
+    }
+}
+
+/// Project a record onto the keys requested by a tool.
 fn pick(record: &Value, keys: &[&str]) -> Value {
     Value::Object(
         keys.iter()
@@ -116,10 +172,10 @@ fn pick(record: &Value, keys: &[&str]) -> Value {
 
 impl State {
     /// `server.py`'s tool logic. `None` for an unknown tool.
-    fn run(&mut self, tool: &str, args: &Value) -> Option<Value> {
+    fn run(&mut self, tool: &str, args: &Value) -> Result<Option<Value>, String> {
         let not_found = |id: &str| json!({ "error": format!("Employee {id} not found") });
         let id = arg_str(args, "employee_id");
-        Some(match tool {
+        Ok(Some(match tool {
             "get_compensation" => match self.employees.get(id) {
                 None => not_found(id),
                 Some(e) => {
@@ -132,7 +188,7 @@ impl State {
                         "title",
                         "internal_notes",
                     ];
-                    if args.get("include_ssn").and_then(Value::as_bool) == Some(true) {
+                    if args.get("include_ssn").is_some_and(truthy) {
                         keys.push("ssn");
                     }
                     pick(e, &keys)
@@ -193,14 +249,7 @@ impl State {
                 })
             },
             "adjust_compensation" => {
-                // `int(...)` in `server.py` accepts a float or a numeric string.
-                #[allow(clippy::cast_possible_truncation, reason = "mirrors Python int()")]
-                let amount = args.get("amount").map_or(0, |a| {
-                    a.as_i64()
-                        .or_else(|| a.as_f64().map(|f| f as i64))
-                        .or_else(|| a.as_str().and_then(|s| s.trim().parse().ok()))
-                        .unwrap_or(0)
-                });
+                let amount = python_int(args.get("amount"))?;
                 match self.employees.get_mut(id) {
                     None => not_found(id),
                     Some(e) => {
@@ -216,8 +265,8 @@ impl State {
                     },
                 }
             },
-            _ => return None,
-        })
+            _ => return Ok(None),
+        }))
     }
 }
 
@@ -249,6 +298,7 @@ impl Upstream {
         self.lock().overrides.insert(tool.to_owned(), result);
     }
 
+    /// Recover the upstream state lock even after a failed test.
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -295,17 +345,22 @@ impl Upstream {
             return (reply, Some(seen));
         }
         let reply = match state.run(&tool, &arguments) {
-            Some(out) => json!({
+            Ok(Some(out)) => json!({
                 "jsonrpc": "2.0",
                 "id": rpc_id,
                 "result": {
                     "content": [{ "type": "text", "text": serde_json::to_string_pretty(&out).unwrap_or_default() }],
                 },
             }),
-            None => json!({
+            Ok(None) => json!({
                 "jsonrpc": "2.0",
                 "id": rpc_id,
                 "error": { "code": -32601, "message": format!("Unknown tool: {tool}") },
+            }),
+            Err(message) => json!({
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": { "code": -32000, "message": message },
             }),
         };
         (reply, Some(seen))

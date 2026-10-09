@@ -187,9 +187,10 @@ the defect stands and fails once the fix lands. The fixing change removes
 the marker and the prefix. Preconditions and leak checks run before the gap
 assertion, so unrelated failures cannot satisfy it.
 
-Exact field paths and argument schemas have positive policy tests: `SSN`,
-`employee.ssn`, and the host's joined `text` field need explicit redaction
-rules; numeric approval gates need type and presence checks.
+The redaction cases are policy shape, not engine gaps: `redact` names an
+exact path, so `SSN`, `employee.ssn` and the host's joined `text` field each
+need their own rule. `tests/security/tests/suite/redaction.rs` holds the
+positive tests. Numeric approval gates need type and presence checks.
 
 ### Live mode
 
@@ -214,7 +215,7 @@ Stock Keycloak serves it, with token exchange on; `PPE_KEYCLOAK_URL` must
 match the issuer it advertises:
 
 ```console
-docker run -d --rm --name ppe-keycloak -p 8081:8081 \
+docker run -d --rm --name ppe-keycloak -p 127.0.0.1:8081:8081 \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -e KC_HOSTNAME=http://localhost:8081 -e KC_FEATURES=token-exchange-standard \
   -v "$PWD/tests/integration/fixtures/keycloak:/opt/keycloak/data/import:ro" \

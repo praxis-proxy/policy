@@ -88,6 +88,11 @@ readme = "README.md"
 #
 
 [workspace.dependencies]
+base64 = "0.23.1"
+jsonwebtoken = "11.1.0"
+# rsa 0.9 uses rand_core 0.6, which rand 0.8 implements.
+rand = "0.8.8"
+rsa = "0.9.10"
 # Minimal tokio feature floor for crates that take `tokio = { workspace = true }`
 # without their own `features`. Production code uses time, sync, task/spawn and
 # a multi-threaded runtime; `net` and `io` appear only in tests, and the HTTP

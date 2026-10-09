@@ -14,11 +14,10 @@
 //! while the defect stands and fails once the fix lands. Remove the marker and
 //! the prefix in the fixing change.
 
-#![allow(
+#![expect(
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
-    clippy::unwrap_used,
     reason = "test code"
 )]
 

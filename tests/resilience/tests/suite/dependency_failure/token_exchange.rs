@@ -34,8 +34,9 @@ async fn a_failing_token_endpoint_denies_the_call_before_the_upstream() {
         ("connect", Fault::Connect, "delegation.idp_unreachable"),
         // oauth_e2e.rs: a_timed_out_exchange_is_not_retried.
         ("timeout", Fault::Timeout, "delegation.idp_timeout"),
-        // oauth_e2e.rs: a_lost_answer_is_recorded_unknown_not_rejected. An
-        // answer too large to read was delivered, so its mint is unknown.
+        // No builtin test scripts an oversized answer. The code follows from
+        // `HttpTransportError::may_have_reached_peer`: the answer was
+        // delivered and not read, so the mint is indeterminate, as on a timeout.
         ("oversized", Fault::TooLarge, "delegation.idp_timeout"),
         // oauth_e2e.rs: a_server_error_is_recorded_unknown_not_rejected.
         (

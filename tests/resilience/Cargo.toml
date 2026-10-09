@@ -29,6 +29,7 @@ praxis-policy-test-utils = { workspace = true }
 praxis-policy = { path = "../../crates/ppe" }
 praxis-policy-core = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

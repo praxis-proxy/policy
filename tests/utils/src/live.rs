@@ -60,7 +60,7 @@ fn require<const N: usize>(test: &str, names: [&str; N]) -> Option<[String; N]> 
     if values.iter().all(Option::is_some) {
         return Some(values.map(Option::unwrap_or_default));
     }
-    #[allow(clippy::print_stderr, reason = "the skip notice is the point")]
+    #[expect(clippy::print_stderr, reason = "the skip notice is the point")]
     {
         eprintln!("SKIPPED {test}: set {}", names.join(", "));
     }

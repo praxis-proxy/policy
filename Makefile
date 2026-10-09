@@ -427,10 +427,10 @@ release: release-tool
 # checkout; --allow-dirty lets it run locally with work in progress.
 .PHONY: publish-dry
 publish-dry:
-	@$(CARGO) package --workspace --locked --allow-dirty
+	@$(CARGO) package --workspace --exclude praxis-policy-test-utils --locked --allow-dirty
 # Packaging with default features compiles none of the bundled extensions, so
 # the dry run would prove nothing about them.
-	@$(CARGO) package --workspace --locked --allow-dirty --all-features
+	@$(CARGO) package --workspace --exclude praxis-policy-test-utils --locked --allow-dirty --all-features
 
 # Tag the current commit and push it. The tag is what the release workflow
 # triggers on. VERSION must be semver with no leading `v`.
