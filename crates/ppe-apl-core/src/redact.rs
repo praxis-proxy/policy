@@ -51,6 +51,8 @@ pub enum TypeLabel {
     Set(usize),
     /// A map or object.
     Map,
+    /// Present value whose original JSON shape is not retained in the bag.
+    NonScalar,
 }
 
 impl TypeLabel {
@@ -76,6 +78,7 @@ impl From<&AttributeValue> for TypeLabel {
             AttributeValue::Float(_) => Self::Float,
             AttributeValue::String(_) => Self::String,
             AttributeValue::StringSet(set) => Self::Set(set.len()),
+            AttributeValue::NonScalar => Self::NonScalar,
         }
     }
 }
@@ -91,6 +94,7 @@ impl fmt::Display for TypeLabel {
             Self::List(n) => write!(f, "list({n})"),
             Self::Set(n) => write!(f, "set({n})"),
             Self::Map => f.write_str("map"),
+            Self::NonScalar => f.write_str("non-scalar"),
         }
     }
 }

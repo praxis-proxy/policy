@@ -33,7 +33,7 @@ use praxis_policy_test_utils::fixtures::{CLIENT_SECRET, Fixture};
 use praxis_policy_test_utils::idp::{self, CIBA_BACKCHANNEL_URL, Persona, TOKEN_EXCHANGE_URL};
 use praxis_policy_test_utils::secrets::Planted;
 use praxis_policy_test_utils::{host, mcp};
-use serde_json::{Value, json};
+use serde_json::json;
 
 /// The scripted `IdP` for JWKS, the real transport for everything else.
 #[derive(Debug)]
@@ -78,9 +78,7 @@ async fn a_dependency_on_loopback_is_refused_with_the_egress_code() {
             "https://[::1]:9/ciba",
             "adjust_compensation",
             json!({ "employee_id": "EMP-001234", "amount": 25_000 }),
-            // A failed elicitation denies under its step; the plugin's code
-            // is in the reason. See `ciba.rs`.
-            "routes.tool:adjust_compensation.pre_invocation[1]",
+            "elicitation.egress_denied",
         ),
     ];
     for (row, from, to, tool, args, code) in rows {
@@ -135,11 +133,6 @@ async fn a_dependency_on_loopback_is_refused_with_the_egress_code() {
         assert!(!pre.continue_processing, "{row}: the call was allowed");
         let violation = pre.violation.as_ref().expect("a violation");
         assert_eq!(violation.code, code, "{row}: {violation:?}");
-        assert!(
-            violation.code.ends_with("egress_denied")
-                || violation.reason.contains("elicitation.egress_denied"),
-            "{row}: attributed to the egress refusal: {violation:?}"
-        );
         assert_ne!(
             violation.proto_error_code,
             Some(-32_120),
@@ -156,7 +149,7 @@ async fn a_dependency_on_loopback_is_refused_with_the_egress_code() {
         planted.plant("client secret", CLIENT_SECRET);
         planted.assert_absent_json(
             "the violation",
-            &serde_json::to_value(violation).unwrap_or(Value::Null),
+            &serde_json::to_value(violation).expect("serialize the violation for leak checking"),
         );
     }
 }

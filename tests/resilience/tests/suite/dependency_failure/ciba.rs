@@ -24,12 +24,6 @@ use super::{Fault, assert_fail_closed};
 /// The protocol code a pending elicitation carries.
 const PENDING: i64 = -32_120;
 
-/// The `require_approval` step. A failed elicitation halts as a deny whose
-/// code is the step's rule source; the plugin's code is in the reason.
-/// `docs/content/apl/elicitation.md` documents channel errors as failing
-/// closed and names no code.
-const APPROVAL_STEP: &str = "routes.tool:adjust_compensation.pre_invocation[1]";
-
 /// Assert the deny names the plugin's code in its reason.
 fn assert_attributed(out: &Outcome, plugin_code: &str, row: &str) {
     let reason = out.violation.as_ref().map_or("", |v| v.reason.as_str());
@@ -96,7 +90,7 @@ async fn a_failing_backchannel_denies_rather_than_reporting_pending() {
         let call = large_adjustment();
         let planted = planted(&call);
         let out = host.call(call).await;
-        assert_fail_closed(&host, &out, Stage::Request, APPROVAL_STEP, &planted, row);
+        assert_fail_closed(&host, &out, Stage::Request, code, &planted, row);
         assert_attributed(&out, code, row);
         assert!(
             host.transport().call_count_for(CIBA_BACKCHANNEL_URL) >= 1,
@@ -167,7 +161,7 @@ async fn a_failing_token_poll_on_retry_denies_without_inventing_an_outcome() {
         let retry = large_adjustment().elicitation_id(&id);
         let planted = planted(&retry);
         let out = host.call(retry).await;
-        assert_fail_closed(&host, &out, Stage::Request, APPROVAL_STEP, &planted, row);
+        assert_fail_closed(&host, &out, Stage::Request, code, &planted, row);
         assert_attributed(&out, code, row);
         assert!(
             host.transport().call_count_for(CIBA_TOKEN_URL) > polls,
@@ -189,22 +183,21 @@ fn assert_reflected_body_is_private(out: &Outcome, basic: &str, planted: &Plante
     assert_eq!(out.denied_at, Some(Stage::Request), "the OP failure denies");
     assert_eq!(
         out.violation_code(),
-        Some(APPROVAL_STEP),
-        "the approval step denies"
+        Some("elicitation.op_rejected"),
+        "the CIBA plugin code identifies the denial"
     );
     assert!(out.upstream.is_none(), "the upstream was not called");
     let reason = out.violation.as_ref().map_or("", |v| v.reason.as_str());
     assert!(
         !reason.contains(CLIENT_SECRET) && !reason.contains(basic),
-        "known gap #181 ciba-op-body-secret-leak: OP response body reached the deny reason"
+        "OP response body reached the deny reason"
     );
     out.assert_no_leaks(planted);
 }
 
 /// A rejected backchannel request must not reveal either credential encoding.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 ciba-op-body-secret-leak")]
-async fn known_gap_a_backchannel_error_does_not_reflect_client_credentials() {
+async fn a_backchannel_error_does_not_reflect_client_credentials() {
     let (body, basic) = reflected_body();
     let body = Bytes::from(body);
     let transport = FakeTransport::new().respond_with(CIBA_BACKCHANNEL_URL, move |_| {
@@ -225,8 +218,7 @@ async fn known_gap_a_backchannel_error_does_not_reflect_client_credentials() {
 
 /// A rejected token poll must not reveal either credential encoding.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 ciba-op-body-secret-leak")]
-async fn known_gap_a_poll_error_does_not_reflect_client_credentials() {
+async fn a_poll_error_does_not_reflect_client_credentials() {
     let (body, basic) = reflected_body();
     let body = Bytes::from(body);
     let armed = Arc::new(AtomicBool::new(false));

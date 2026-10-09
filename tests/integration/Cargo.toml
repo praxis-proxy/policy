@@ -26,10 +26,10 @@ suite = ["praxis-policy-test-utils/suite"]
 # No features here: test-utils' `suite` turns on what these need.
 [dev-dependencies]
 praxis-policy-test-utils = { workspace = true }
-praxis-policy = { path = "../../crates/ppe" }
+praxis-policy = { workspace = true }
 praxis-policy-core = { workspace = true }
-praxis-policy-plugin-audit-logger = { path = "../../reference/plugins/audit-logger" }
-praxis-policy-plugin-pii-scanner = { path = "../../reference/plugins/pii-scanner" }
+praxis-policy-plugin-audit-logger = { workspace = true }
+praxis-policy-plugin-pii-scanner = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }

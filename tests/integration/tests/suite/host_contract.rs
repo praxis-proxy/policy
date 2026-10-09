@@ -919,7 +919,10 @@ async fn a_builder_session_store_is_selectable_by_kind() {
         .start(&yaml)
         .await
         .expect_err("the store fails to build");
-    assert!(err.to_string().contains("unreachable"), "{err}");
+    assert!(
+        err.to_string().contains("session store unreachable"),
+        "{err}"
+    );
 }
 
 /// The response hook receives the request session for policy evaluation.

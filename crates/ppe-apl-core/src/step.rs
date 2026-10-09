@@ -862,6 +862,25 @@ pub enum ElicitationError {
     /// this through the step's `on_error`.
     #[error("elicitation handler error: {0}")]
     Handler(String),
+
+    /// A handler denied with a stable plugin violation code.
+    #[error("elicitation handler error {code}: {reason}")]
+    HandlerViolation {
+        /// Stable code from the plugin violation.
+        code: String,
+        /// Human-readable failure detail.
+        reason: String,
+    },
+}
+
+impl ElicitationError {
+    /// Stable plugin code, when the failure came from a handler denial.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::HandlerViolation { code, .. } => Some(code),
+            _ => None,
+        }
+    }
 }
 
 /// [`ElicitationInvoker`] impl that returns `NotFound` for every call.

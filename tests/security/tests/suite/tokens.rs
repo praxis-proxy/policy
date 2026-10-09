@@ -239,10 +239,9 @@ async fn a_kid_from_another_trusted_issuer_does_not_cross_over() {
 
 /// RFC 7515 section 4.1.11: a recipient that does not understand an
 /// extension listed in `crit` must reject the token. jsonwebtoken parses
-/// `crit` and never enforces it, and `identity_jwt` does not check it.
+/// `crit` but does not enforce it, so the resolver must reject it.
 #[tokio::test]
-#[should_panic(expected = "known gap #181 jwt-crit-ignored")]
-async fn known_gap_an_unknown_crit_header_is_rejected() {
+async fn an_unknown_crit_header_is_rejected() {
     let host = RefHost::hermetic(Fixture::Cedar).await;
     let token = idp::forge(
         &header(
@@ -255,10 +254,10 @@ async fn known_gap_an_unknown_crit_header_is_rejected() {
     let planted = planted_for(&call);
     let out = host.call(call).await;
     out.assert_no_leaks(&planted);
+    assert_eq!(out.denied_at, Some(Stage::Identity));
     assert_eq!(
-        out.denied_at,
-        Some(Stage::Identity),
-        "known gap #181 jwt-crit-ignored: an unknown crit extension was accepted"
+        out.violation_code(),
+        Some("auth.unsupported_critical_header")
     );
 }
 

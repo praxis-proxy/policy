@@ -638,6 +638,32 @@ no claims bag and says so at load rather than ignoring the setting.
 
 ## Caching a delegated token
 
+The OAuth delegator checks each token-exchange response by default. It requires
+an access-token or JWT `issued_token_type`, rejects scopes outside a non-empty
+requested set unless listed in `allowed_extra_scopes`, and checks a JWT access
+token's readable `scope` claim by the same rule. It checks `aud` against the
+requested audience and `sub` against the caller token's subject or the
+authenticated identity when the caller token is opaque. If neither supplies a
+subject, a JWT response is rejected. Opaque issued access tokens have no claims
+to inspect locally, even when they contain periods. These claim reads do not
+verify the returned token's signature; the configured token endpoint and TLS
+connection are the trust boundary. Set `strict_response_validation: false`
+under the delegator's `config:` only for an IdP whose response cannot satisfy
+these checks. The default is `true`.
+
+An empty requested scope set accepts the scopes the IdP returns, as in Recipe
+3's `client_credentials` grant. When requesting scopes from an IdP that always
+adds defaults, configure the delegator with, for example,
+`allowed_extra_scopes: [profile, email]`. Only those named extras pass strict
+validation. For a readable JWT with a `scope` claim, required permissions must
+be present in that claim and the delegated token reports its scopes. Otherwise,
+the granted scopes come from the token response or the request when the IdP
+omits them.
+
+The JWT identity resolver rejects non-empty `crit` headers with
+`auth.unsupported_critical_header`; it implements no critical header
+extensions.
+
 A token exchange is a network call on the request path. The optional
 `cache:` block holds a minted token until it expires:
 

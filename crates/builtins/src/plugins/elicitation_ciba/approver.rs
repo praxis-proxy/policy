@@ -49,7 +49,7 @@ use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use crate::plugins::elicitation_ciba::KIND;
 use crate::plugins::elicitation_ciba::config::{CibaConfig, require_https};
 use crate::plugins::elicitation_ciba::store::{
-    Correlation, CorrelationStore, InMemoryCorrelationStore,
+    Correlation, CorrelationStore, InMemoryCorrelationStore, TakeResult,
 };
 
 /// OIDC CIBA grant type for the token-endpoint poll.
@@ -286,10 +286,9 @@ impl CibaApprover {
 
         if !response.is_success() {
             let status = response.status;
-            let body = String::from_utf8_lossy(&response.body).into_owned();
             return deny(
                 "elicitation.op_rejected",
-                format!("CIBA backchannel rejected ({status}): {body}"),
+                format!("CIBA backchannel rejected ({status})"),
             );
         }
 
@@ -306,23 +305,42 @@ impl CibaApprover {
         // The `auth_req_id` IS the elicitation id the agent echoes on
         // retry — opaque and unique, no separate id to generate.
         let id = parsed.auth_req_id;
+        let ttl = parsed
+            .expires_in
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or_else(|| requested_expiry.parse::<i64>().unwrap_or(0));
+        if ttl <= 0 {
+            return deny(
+                "elicitation.bad_response",
+                "CIBA backchannel expiry must be positive",
+            );
+        }
+        let now = Utc::now();
+        let Some(expires_at) = chrono::Duration::try_seconds(ttl)
+            .and_then(|duration| now.checked_add_signed(duration))
+        else {
+            return deny(
+                "elicitation.bad_response",
+                "CIBA backchannel expiry is out of range",
+            );
+        };
         self.store.put(
             &id,
             Correlation {
                 expected_approver: login_hint.to_owned(),
                 resolved_approver: None,
+                route_key: payload.route_key().to_owned(),
+                tool: payload.tool().to_owned(),
+                requester: payload.requester().to_owned(),
+                expires_at,
             },
         );
-
-        let expires_at = parsed
-            .expires_in
-            .map(|secs| (Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339());
 
         let mut out = payload.clone();
         out.id = Some(id);
         out.status = Some(ElicitationStatusKind::Pending);
         out.approver = Some(login_hint.to_owned());
-        out.expires_at = expires_at;
+        out.expires_at = Some(expires_at.to_rfc3339());
         PluginResult::modify_payload(out)
     }
 
@@ -341,15 +359,26 @@ impl CibaApprover {
             },
         };
 
+        let Some(correlation) = self.store.get(id) else {
+            return deny("elicitation.unknown_id", "unknown elicitation id");
+        };
+        if correlation.route_key != payload.route_key()
+            || correlation.tool != payload.tool()
+            || correlation.requester != payload.requester()
+        {
+            return deny(
+                "elicitation.binding_mismatch",
+                "approval belongs to another route, tool, or requester",
+            );
+        }
+
         // Cache short-circuit. The OP's `auth_req_id` is single-use: once a
         // poll succeeds we exchange it for tokens (consuming it) and cache
         // just the approver. A later check — e.g. the confirm-then-apply
         // retry after a `peek` already resolved approval — must NOT re-poll
         // (the spent id would come back `invalid_grant`). Replay the cached
         // approved result instead; `validate` re-compares the approver.
-        if let Some(corr) = self.store.get(id)
-            && corr.resolved_approver.is_some()
-        {
+        if correlation.resolved_approver.is_some() {
             let mut out = payload.clone();
             out.status = Some(ElicitationStatusKind::Resolved);
             out.outcome = Some(ElicitationOutcomeKind::Approved);
@@ -425,7 +454,7 @@ impl CibaApprover {
             _ => {
                 return deny(
                     "elicitation.op_rejected",
-                    format!("CIBA token poll failed ({status}): {body}"),
+                    format!("CIBA token poll failed ({status})"),
                 );
             },
         };
@@ -447,9 +476,44 @@ impl CibaApprover {
             },
         };
 
-        let correlation = match self.store.get(id) {
-            Some(c) => c,
-            None => return invalid(payload, "unknown elicitation id"),
+        let correlation = if payload.peek() {
+            match self.store.get(id) {
+                Some(c)
+                    if c.route_key == payload.route_key()
+                        && c.tool == payload.tool()
+                        && c.requester == payload.requester() =>
+                {
+                    c
+                },
+                Some(_) => {
+                    return deny(
+                        "elicitation.binding_mismatch",
+                        "approval belongs to another route, tool, or requester",
+                    );
+                },
+                None => return deny("elicitation.unknown_id", "unknown elicitation id"),
+            }
+        } else {
+            match self.store.take_if_ready(
+                id,
+                payload.route_key(),
+                payload.tool(),
+                payload.requester(),
+            ) {
+                TakeResult::Ready(c) => c,
+                TakeResult::Missing => {
+                    return deny("elicitation.unknown_id", "unknown elicitation id");
+                },
+                TakeResult::BindingMismatch => {
+                    return deny(
+                        "elicitation.binding_mismatch",
+                        "approval belongs to another route, tool, or requester",
+                    );
+                },
+                TakeResult::Pending => {
+                    return invalid(payload, "elicitation has no resolved approver");
+                },
+            }
         };
         // Both sides of this comparison are values already stored from the
         // OP's authenticated TLS response, not a token read at rest — this
@@ -498,6 +562,18 @@ impl HookHandler<ElicitationHook> for CibaApprover {
         ext: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<ElicitationPayload> {
+        if payload.route_key().trim().is_empty() {
+            return deny(
+                "elicitation.bad_request",
+                "CIBA approval requires a non-empty policy route",
+            );
+        }
+        if payload.requester().trim().is_empty() {
+            return deny(
+                "elicitation.bad_request",
+                "CIBA approval requires a non-empty requester subject id",
+            );
+        }
         // Each operation resolves the transport itself, *after* checking
         // its own arguments, and `validate` never does — it compares a
         // stored approver and touches no network.
@@ -693,6 +769,10 @@ mod tests {
                 Correlation {
                     expected_approver: (*expected).to_owned(),
                     resolved_approver: resolved.map(str::to_owned),
+                    route_key: "tool:adjust@sandbox".into(),
+                    tool: "adjust".into(),
+                    requester: "bob".into(),
+                    expires_at: Utc::now() + chrono::Duration::hours(1),
                 },
             );
         }
@@ -712,7 +792,11 @@ mod tests {
     }
 
     fn validate_payload(id: Option<&str>) -> ElicitationPayload {
-        let p = ElicitationPayload::new(ElicitationOp::Validate, "approval", "");
+        let p = ElicitationPayload::new(ElicitationOp::Validate, "approval", "").with_binding(
+            "tool:adjust@sandbox",
+            "adjust",
+            "bob",
+        );
         match id {
             Some(id) => p.with_elicitation_id(id),
             None => p,
@@ -765,25 +849,22 @@ mod tests {
         );
     }
 
-    /// An id the store has never seen must be invalid rather than accepted. This
-    /// is the replay and guess case: a fabricated correlation id must not pass.
+    /// An id the store has never seen must deny with the plugin code. This is
+    /// the replay and guess case: a fabricated correlation id must not pass.
     #[tokio::test]
     async fn validate_rejects_an_unknown_elicitation_id() {
         let a = approver_with(&[]);
-        let out = a
+        let result = a
             .handle(
                 &validate_payload(Some("REQ-does-not-exist")),
                 &Extensions::default(),
                 &mut PluginContext::new(),
             )
-            .await
-            .modified_payload
-            .expect("validate returns a payload");
-        assert_eq!(out.valid, Some(false));
-        assert!(
-            out.reason.unwrap_or_default().contains("unknown"),
-            "the reason must say the id is unknown"
-        );
+            .await;
+        assert!(!result.continue_processing);
+        let violation = result.violation.expect("unknown id violation");
+        assert_eq!(violation.code, "elicitation.unknown_id");
+        assert!(violation.reason.contains("unknown elicitation id"));
     }
 
     /// A correlation that exists but has not resolved must be invalid, not
@@ -829,7 +910,11 @@ mod tests {
     #[tokio::test]
     async fn check_without_an_elicitation_id_is_a_bad_request() {
         let a = approver_with(&[]);
-        let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "");
+        let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "").with_binding(
+            "tool:adjust@sandbox",
+            "adjust",
+            "bob",
+        );
         let r = a
             .handle(&payload, &Extensions::default(), &mut PluginContext::new())
             .await;
@@ -845,7 +930,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_without_a_login_hint_is_a_bad_request() {
         let a = approver_with(&[]);
-        let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "");
+        let payload = ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "")
+            .with_binding("tool:adjust@sandbox", "adjust", "bob");
         let r = a
             .handle(&payload, &Extensions::default(), &mut PluginContext::new())
             .await;

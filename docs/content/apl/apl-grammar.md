@@ -48,6 +48,15 @@ There is no `apl:` wrapper. An `authorization:` block must contain at least one
 entry in `pre_invocation:` or `post_invocation:`. A declared `args:` or
 `result:` field must contain at least one stage.
 
+Redaction matches object keys without case sensitivity. A `**` segment is
+available in a path containing a `redact` stage: `result: { "**.ssn":
+"redact(!perm.view_ssn)" }` covers `ssn` under any nested object or array.
+Matching keeps each JSON key intact, including keys containing `.`. If a
+recursive path exceeds the depth, match count, or traversal work limit, the
+request is denied instead of returning a partly redacted value.
+Other field operations retain exact path matching. String values containing
+JSON are treated as strings; redact the `text` field or use a PII scanner.
+
 ---
 
 ## Lexical rules
@@ -148,7 +157,8 @@ Precedence, from loosest to tightest:
 | 5 | comparisons, `contains`, `in`, `not in` |
 
 A bare path is true when its value is truthy. `exists(path)` is true when the
-key is present, regardless of its value.
+key is present, regardless of its value. A JSON `null` or object under
+`args` or `result` counts as present.
 
 The attribute must be on the left of a comparison. The right operand is a
 literal, number, or Boolean. Use `in` or `not in` to test a value against an

@@ -45,10 +45,10 @@ suite = [
 ]
 
 [dependencies]
-praxis-policy = { path = "../../crates/ppe" }
+praxis-policy = { workspace = true }
 praxis-policy-core = { workspace = true }
-praxis-policy-plugin-pii-scanner = { path = "../../reference/plugins/pii-scanner" }
-praxis-policy-plugin-audit-logger = { path = "../../reference/plugins/audit-logger" }
+praxis-policy-plugin-pii-scanner = { workspace = true }
+praxis-policy-plugin-audit-logger = { workspace = true }
 
 # Optional so the default pass resolves none of them; `suite` turns them on.
 async-trait = { workspace = true, optional = true }

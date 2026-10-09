@@ -32,7 +32,9 @@ use praxis_policy_core::http::{HttpTransport, HttpTransportError};
 use praxis_policy_core::http_testing::FakeTransport;
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
-use praxis_policy_builtins::plugins::elicitation_ciba::CibaApprover;
+use praxis_policy_builtins::plugins::elicitation_ciba::{
+    CibaApprover, Correlation, CorrelationStore as _, InMemoryCorrelationStore,
+};
 
 // ---------------------------------------------------------------------
 // Harness
@@ -65,6 +67,24 @@ fn approver() -> CibaApprover {
     CibaApprover::new(cfg).expect("construct approver")
 }
 
+/// A check always follows a dispatch in production. Seed that prior
+/// correlation when a test isolates the polling leg.
+fn approver_with_pending() -> CibaApprover {
+    let store = InMemoryCorrelationStore::new();
+    store.put(
+        "REQ-123",
+        Correlation {
+            expected_approver: "alice@corp.com".into(),
+            resolved_approver: None,
+            route_key: "tool:adjust@sandbox".into(),
+            tool: "adjust".into(),
+            requester: "bob".into(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        },
+    );
+    approver().with_store(Arc::new(store))
+}
+
 /// Endpoint paths the scripted `OP` answers on.
 const AUTH_PATH: &str = "/ciba/auth";
 const TOKEN_PATH: &str = "/token";
@@ -90,7 +110,13 @@ async fn run(
 ) -> ElicitationPayload {
     let ext = ext_with(http);
     let mut ctx = PluginContext::new();
-    let result = approver.handle(&payload, &ext, &mut ctx).await;
+    let result = approver
+        .handle(
+            &payload.with_binding("tool:adjust@sandbox", "adjust", "bob"),
+            &ext,
+            &mut ctx,
+        )
+        .await;
     assert!(
         result.continue_processing,
         "handler denied: {:?}",
@@ -189,6 +215,46 @@ async fn dispatch_posts_backchannel_and_returns_auth_req_id() {
 }
 
 #[tokio::test]
+async fn non_positive_op_expiry_uses_the_requested_positive_ttl() {
+    for expires_in in [0, -5] {
+        let http = Arc::new(FakeTransport::new().json(
+            AUTH_PATH,
+            200,
+            &json!({ "auth_req_id": "REQ-123", "expires_in": expires_in }).to_string(),
+        ));
+        let out = run(
+            &approver(),
+            &http,
+            ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
+                .with_timeout("5m"),
+        )
+        .await;
+        assert_eq!(out.status, Some(ElicitationStatusKind::Pending));
+        let expiry = chrono::DateTime::parse_from_rfc3339(
+            out.expires_at.as_deref().expect("the dispatch expiry"),
+        )
+        .expect("a valid expiry");
+        assert!(expiry > chrono::Utc::now(), "expiry must remain usable");
+    }
+}
+
+#[tokio::test]
+async fn an_out_of_range_op_expiry_denies_before_returning_an_id() {
+    let http = Arc::new(FakeTransport::new().json(
+        AUTH_PATH,
+        200,
+        &json!({ "auth_req_id": "REQ-123", "expires_in": i64::MAX }).to_string(),
+    ));
+    let violation = deny_for(
+        &approver(),
+        &http,
+        ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+    )
+    .await;
+    assert_eq!(violation.code, "elicitation.bad_response");
+}
+
+#[tokio::test]
 async fn check_authorization_pending_maps_to_pending() {
     let http = Arc::new(FakeTransport::new().json(
         TOKEN_PATH,
@@ -196,7 +262,7 @@ async fn check_authorization_pending_maps_to_pending() {
         &json!({ "error": "authorization_pending" }).to_string(),
     ));
 
-    let app = approver();
+    let app = approver_with_pending();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
     let out = run(&app, &http, payload).await;
@@ -214,7 +280,7 @@ async fn check_success_maps_to_resolved_approved() {
         &json!({ "access_token": "at", "id_token": fake_id_token("alice@corp.com") }).to_string(),
     ));
 
-    let app = approver();
+    let app = approver_with_pending();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
     let out = run(&app, &http, payload).await;
@@ -231,7 +297,7 @@ async fn check_access_denied_maps_to_resolved_denied() {
         &json!({ "error": "access_denied" }).to_string(),
     ));
 
-    let app = approver();
+    let app = approver_with_pending();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
     let out = run(&app, &http, payload).await;
@@ -248,7 +314,7 @@ async fn check_expired_token_maps_to_expired() {
         &json!({ "error": "expired_token" }).to_string(),
     ));
 
-    let app = approver();
+    let app = approver_with_pending();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
     let out = run(&app, &http, payload).await;
@@ -307,6 +373,61 @@ async fn full_flow_dispatch_check_validate_approves() {
 }
 
 #[tokio::test]
+async fn approval_for_one_scope_cannot_redeem_on_the_same_tool_in_another_scope() {
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(
+                AUTH_PATH,
+                200,
+                &json!({ "auth_req_id": "REQ-scoped", "expires_in": 300 }).to_string(),
+            )
+            .json(
+                TOKEN_PATH,
+                200,
+                &json!({ "id_token": fake_id_token("alice@corp.com") }).to_string(),
+            ),
+    );
+    let app = approver();
+    let dispatch = run(
+        &app,
+        &http,
+        ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+    )
+    .await;
+    let id = dispatch.id.expect("dispatch id");
+
+    for operation in [ElicitationOp::Check, ElicitationOp::Validate] {
+        let payload = ElicitationPayload::new(operation, "approval", "")
+            .with_elicitation_id(&id)
+            .with_binding("tool:adjust@prod", "adjust", "bob");
+        let result = app
+            .handle(&payload, &ext_with(&http), &mut PluginContext::new())
+            .await;
+        assert!(!result.continue_processing, "{operation:?} must deny");
+        assert_eq!(
+            result.violation.expect("binding denial").code,
+            "elicitation.binding_mismatch"
+        );
+    }
+    assert_eq!(http.call_count_for(TOKEN_PATH), 0);
+
+    let approved = run(
+        &app,
+        &http,
+        ElicitationPayload::new(ElicitationOp::Check, "approval", "").with_elicitation_id(&id),
+    )
+    .await;
+    assert_eq!(approved.outcome, Some(ElicitationOutcomeKind::Approved));
+    let validated = run(
+        &app,
+        &http,
+        ElicitationPayload::new(ElicitationOp::Validate, "approval", "").with_elicitation_id(&id),
+    )
+    .await;
+    assert_eq!(validated.valid, Some(true));
+}
+
+#[tokio::test]
 async fn validate_rejects_approver_mismatch() {
     let http = Arc::new(
         FakeTransport::new()
@@ -353,6 +474,51 @@ async fn validate_rejects_approver_mismatch() {
 // Failure paths
 // ---------------------------------------------------------------------
 
+#[tokio::test]
+async fn an_empty_requester_is_rejected_on_every_operation() {
+    let app = approver();
+    let http = Arc::new(FakeTransport::new());
+    let ext = ext_with(&http);
+    for operation in [
+        ElicitationOp::Dispatch,
+        ElicitationOp::Check,
+        ElicitationOp::Validate,
+    ] {
+        let payload = ElicitationPayload::new(operation, "approval", "alice@corp.com")
+            .with_elicitation_id("REQ-123")
+            .with_binding("tool:adjust@sandbox", "adjust", "");
+        let mut ctx = PluginContext::new();
+        let result = app.handle(&payload, &ext, &mut ctx).await;
+        assert!(!result.continue_processing, "{operation:?} must deny");
+        let violation = result.violation.expect("a requester denial");
+        assert_eq!(violation.code, "elicitation.bad_request");
+        assert!(violation.reason.contains("requester subject id"));
+    }
+    assert_eq!(http.call_count(), 0);
+}
+
+#[tokio::test]
+async fn an_empty_route_is_rejected_on_every_operation() {
+    let http = Arc::new(FakeTransport::new());
+    let app = approver();
+    let ext = ext_with(&http);
+    for operation in [
+        ElicitationOp::Dispatch,
+        ElicitationOp::Check,
+        ElicitationOp::Validate,
+    ] {
+        let payload = ElicitationPayload::new(operation, "approval", "alice@corp.com")
+            .with_elicitation_id("REQ-123")
+            .with_binding("", "adjust", "bob");
+        let result = app.handle(&payload, &ext, &mut PluginContext::new()).await;
+        assert!(!result.continue_processing, "{operation:?} must deny");
+        let violation = result.violation.expect("route denial");
+        assert_eq!(violation.code, "elicitation.bad_request");
+        assert!(violation.reason.contains("policy route"));
+    }
+    assert_eq!(http.call_count(), 0);
+}
+
 /// Run a payload and require a denial, returning the violation.
 async fn deny_for(
     app: &CibaApprover,
@@ -361,7 +527,13 @@ async fn deny_for(
 ) -> praxis_policy_core::error::PluginViolation {
     let ext = ext_with(http);
     let mut ctx = PluginContext::new();
-    let result = app.handle(&payload, &ext, &mut ctx).await;
+    let result = app
+        .handle(
+            &payload.with_binding("tool:adjust@sandbox", "adjust", "bob"),
+            &ext,
+            &mut ctx,
+        )
+        .await;
     assert!(
         !result.continue_processing,
         "this case must deny rather than report a lifecycle state"
@@ -408,7 +580,7 @@ async fn a_dispatch_that_cannot_reach_the_op_denies_rather_than_reporting_pendin
 #[tokio::test]
 async fn a_check_that_cannot_reach_the_op_denies_rather_than_inventing_an_outcome() {
     let http = unreachable_op();
-    let app = approver();
+    let app = approver_with_pending();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
     let violation = deny_for(&app, &http, payload).await;
@@ -470,7 +642,7 @@ async fn a_backchannel_success_with_no_auth_req_id_denies() {
 async fn a_successful_poll_with_an_unparseable_body_denies() {
     let http = Arc::new(FakeTransport::new().json(TOKEN_PATH, 200, "not json at all"));
 
-    let app = approver();
+    let app = approver_with_pending();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
     assert_eq!(
@@ -492,14 +664,14 @@ async fn an_unrecognized_poll_error_denies_instead_of_becoming_a_lifecycle_state
         &json!({ "error": "invalid_grant" }).to_string(),
     ));
 
-    let app = approver();
+    let app = approver_with_pending();
     let payload = ElicitationPayload::new(ElicitationOp::Check, "approval", "")
         .with_elicitation_id("REQ-123");
     let violation = deny_for(&app, &http, payload).await;
     assert_eq!(violation.code, "elicitation.op_rejected");
     assert!(
-        violation.reason.contains("invalid_grant"),
-        "the unrecognized error must be quoted so it can be diagnosed: {}",
+        violation.reason.contains("(400)") && !violation.reason.contains("invalid_grant"),
+        "report the status without reflecting the OP body: {}",
         violation.reason
     );
 }
@@ -697,7 +869,7 @@ async fn a_timed_out_dispatch_is_not_retried() {
 #[tokio::test]
 async fn a_timed_out_poll_is_not_retried() {
     let http = Arc::new(FakeTransport::new().fail(TOKEN_PATH, HttpTransportError::Timeout));
-    let app = approver();
+    let app = approver_with_pending();
     let violation = deny_for(
         &app,
         &http,
@@ -748,7 +920,8 @@ async fn without_a_transport_dispatch_denies_without_calling_out() {
     let mut ctx = PluginContext::new();
     let result = app
         .handle(
-            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com"),
+            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "alice@corp.com")
+                .with_binding("tool:adjust@sandbox", "adjust", "bob"),
             &Extensions::default(),
             &mut ctx,
         )
@@ -779,7 +952,11 @@ async fn a_bad_request_is_reported_as_such_even_with_no_transport() {
     let result = app
         .handle(
             // Dispatch with an empty login hint.
-            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", ""),
+            &ElicitationPayload::new(ElicitationOp::Dispatch, "approval", "").with_binding(
+                "tool:adjust@sandbox",
+                "adjust",
+                "bob",
+            ),
             &Extensions::default(),
             &mut ctx,
         )

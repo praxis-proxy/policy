@@ -24,6 +24,11 @@ The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
 replica.
 
+The CIBA approval correlation store is also in-process memory, independent of
+the session store. Its approvals bind to the tool and requester, expire, and
+can be applied once. Pending approvals do not survive a restart or move to a
+second replica; see [Elicitation](apl/elicitation.md).
+
 The three decision points are held to each other by a differential test
 suite. Given the same attributes and equivalent policy intent, they must
 agree across their shared boolean, integer, string, and string-set

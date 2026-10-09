@@ -148,8 +148,11 @@ praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.4.1" }
 praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.4.1" }
 praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.4.1" }
 praxis-policy-builtins = { path = "crates/builtins", version = "0.4.1" }
+praxis-policy = { path = "crates/ppe", version = "0.4.1" }
 # Unpublished, so path only.
 praxis-policy-test-utils = { path = "tests/utils" }
+praxis-policy-plugin-audit-logger = { path = "reference/plugins/audit-logger" }
+praxis-policy-plugin-pii-scanner = { path = "reference/plugins/pii-scanner" }
 
 # Criterion is consumed by the unpublished `ppe-benches` crate (issue #19)
 # and by `praxis-policy-builtins`' `pdp_decision_cache` bench.

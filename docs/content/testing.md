@@ -187,10 +187,14 @@ the defect stands and fails once the fix lands. The fixing change removes
 the marker and the prefix. Preconditions and leak checks run before the gap
 assertion, so unrelated failures cannot satisfy it.
 
-The redaction cases are policy shape, not engine gaps: `redact` names an
-exact path, so `SSN`, `employee.ssn` and the host's joined `text` field each
-need their own rule. `tests/security/tests/suite/redaction.rs` holds the
-positive tests. Numeric approval gates need type and presence checks.
+Redaction paths match object keys without case sensitivity. `ssn` covers a
+top-level `SSN`; `employee.ssn` covers that nested field; `**.ssn` covers the
+name at any depth. A JSON record carried as a string in the host's joined
+`text` field is not parsed by the policy engine. Redact `text` as a whole or
+use a PII scanner for that shape. The original redaction cases were policy
+shape, and `tests/security/tests/suite/redaction.rs` holds positive tests.
+Numeric approval gates still need type and presence checks for missing
+amounts; present objects and nulls fail numeric comparisons closed.
 
 ### Live mode
 

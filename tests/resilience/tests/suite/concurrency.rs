@@ -766,14 +766,10 @@ fn approving_one_elicitation_leaves_the_others_pending() {
     });
 }
 
-/// An approved id echoed by another principal with the same manager, and
-/// the owner's exact args, is applied for that principal. The approver
-/// check passes because both share `alice`, and nothing binds the
-/// elicitation to the subject that raised it. The id is a bearer handle
-/// handed only to its owner, so this needs the id to leak first.
+/// An approved id echoed by another principal with the same manager and
+/// exact args remains bound to its original requester.
 #[test]
-#[should_panic(expected = "known gap #181 approval-requester-binding")]
-fn known_gap_an_approval_is_not_bound_to_its_requester() {
+fn an_approval_is_bound_to_its_requester() {
     let k = knobs("ciba-requester");
     let runtime = capture::multi_thread(k.workers);
     runtime.block_on(async {
@@ -810,12 +806,15 @@ fn known_gap_an_approval_is_not_bound_to_its_requester() {
         planted.plant("client secret", CLIENT_SECRET);
         let out = host.call(call).await;
         out.assert_no_leaks(&planted);
-        assert!(
-            !out.allowed(),
-            "known gap #181 approval-requester-binding: {} applied {}'s approval",
+        assert_eq!(
+            out.violation_code(),
+            Some("elicitation.binding_mismatch"),
+            "{} applied {}'s approval",
             other.label,
             owner.label
         );
+        assert!(out.upstream.is_none(), "the upstream was not called");
+        assert!(host.upstream().requests().is_empty());
     });
 }
 

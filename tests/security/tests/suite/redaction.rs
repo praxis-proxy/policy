@@ -30,7 +30,7 @@ fn as_text(record: &Value) -> Value {
 async fn eve_reads(result: Value, path: &str) -> (Outcome, Planted) {
     let yaml = Fixture::Cedar.hermetic().replacen(
         "    result:\n      ssn:",
-        &format!("    result:\n      {path}:"),
+        &format!("    result:\n      \"{path}\":"),
         1,
     );
     let host = RefHost::builder()
@@ -66,17 +66,47 @@ async fn an_ssn_inside_an_array_is_redacted() {
     out.assert_no_leaks(&ssn);
 }
 
-/// Field paths match keys exactly.
 #[tokio::test]
-async fn an_explicit_uppercase_ssn_path_is_redacted() {
+async fn an_uppercase_ssn_matches_a_lowercase_path() {
     let mut record = jane();
     let value = record
         .as_object_mut()
         .and_then(|r| r.remove("ssn"))
         .expect("an ssn");
     record["SSN"] = value;
-    let (out, ssn) = eve_reads(as_text(&record), "SSN").await;
+    let (out, ssn) = eve_reads(as_text(&record), "ssn").await;
     assert_eq!(out.record().expect("a record")["SSN"], "[REDACTED]");
+    out.assert_no_leaks(&ssn);
+}
+
+#[tokio::test]
+async fn a_recursive_path_redacts_nested_ssns_at_any_depth() {
+    let result = json!({
+        "employee": jane(),
+        "teams": [{ "member": { "SSN": JANE_SSN } }],
+    });
+    let (out, ssn) = eve_reads(as_text(&result), "**.ssn").await;
+    let record = out.record().expect("a record");
+    assert_eq!(
+        record["employee"]["ssn"], "[REDACTED]",
+        "employee.ssn should be redacted"
+    );
+    assert_eq!(
+        record["teams"][0]["member"]["SSN"], "[REDACTED]",
+        "teams[0].member.SSN should be redacted"
+    );
+    out.assert_no_leaks(&ssn);
+}
+
+#[tokio::test]
+async fn a_recursive_path_redacts_under_a_dotted_object_key() {
+    let result = json!({ "employee.v2": { "ssn": JANE_SSN } });
+    let (out, ssn) = eve_reads(as_text(&result), "**.ssn").await;
+    assert_eq!(
+        out.record().expect("a record")["employee.v2"]["ssn"],
+        "[REDACTED]",
+        "employee.v2.ssn should be redacted"
+    );
     out.assert_no_leaks(&ssn);
 }
 
