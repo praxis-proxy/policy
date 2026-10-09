@@ -351,7 +351,7 @@ async fn rejecting_resolver_halts_pipeline() {
 async fn apply_to_extensions_populates_security_and_preserves_existing_fields() {
     use praxis_policy_core::extensions::SecurityExtension;
     use praxis_policy_core::extensions::raw_credentials::{
-        RawCredentialsExtension, RawInboundToken, TokenKind, TokenRole,
+        Credential, RawCredentialsExtension, RawInboundToken, TokenKind, TokenRole,
     };
 
     // ----- Handler: produces a subject + a RawCredentialsExtension -----
@@ -382,7 +382,13 @@ async fn apply_to_extensions_populates_security_and_preserves_existing_fields() 
             let mut raw = RawCredentialsExtension::default();
             raw.inbound_tokens.insert(
                 TokenRole::User,
-                RawInboundToken::new(token_bytes, "Authorization", TokenKind::Jwt),
+                RawInboundToken::new(
+                    token_bytes,
+                    Credential::Header {
+                        name: "Authorization".into(),
+                    },
+                    TokenKind::Jwt,
+                ),
             );
             updated.raw_credentials = Some(raw);
             PluginResult::modify_payload(updated)
@@ -447,7 +453,12 @@ async fn apply_to_extensions_populates_security_and_preserves_existing_fields() 
         .inbound_tokens
         .get(&TokenRole::User)
         .expect("user token present");
-    assert_eq!(user_token.source_header, "Authorization");
+    assert_eq!(
+        user_token.source,
+        Credential::Header {
+            name: "Authorization".into()
+        }
+    );
     // Token bytes carried over end-to-end. This works because nothing
     // on this path serializes the extension — the `#[serde(skip)]` on
     // the token field would strip the bytes if it did. A host that
@@ -513,7 +524,7 @@ async fn cap_gating_post_apply_through_cmf_dispatch() {
     use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
     use praxis_policy_core::extensions::SecurityExtension;
     use praxis_policy_core::extensions::raw_credentials::{
-        RawCredentialsExtension, RawInboundToken, TokenKind, TokenRole,
+        Credential, RawCredentialsExtension, RawInboundToken, TokenKind, TokenRole,
     };
 
     // ----- Identity resolver: populates subject + one inbound token -----
@@ -542,7 +553,13 @@ async fn cap_gating_post_apply_through_cmf_dispatch() {
             let mut raw = RawCredentialsExtension::default();
             raw.inbound_tokens.insert(
                 TokenRole::User,
-                RawInboundToken::new(token, "Authorization", TokenKind::Jwt),
+                RawInboundToken::new(
+                    token,
+                    Credential::Header {
+                        name: "Authorization".into(),
+                    },
+                    TokenKind::Jwt,
+                ),
             );
             updated.raw_credentials = Some(raw);
             PluginResult::modify_payload(updated)
