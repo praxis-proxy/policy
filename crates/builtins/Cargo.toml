@@ -39,8 +39,15 @@ oauth = [
 ]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
 # Experimental per-consumer token quota against a standalone Limitador. Calls go
-# through the host transport, so no HTTP dep beyond core, the shared serde, and
+# through the host transport, so no direct HTTP dependency is needed here.
 experimental-quota = ["_engine-core", "_plugins"]
+# Embedded request limiter. The PoC uses only Limitador's in-memory store.
+experimental-ratelimit = [
+  "_engine-core",
+  "_plugins",
+  "dep:limitador",
+  "dep:praxis-policy-apl-cmf",
+]
 cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
@@ -78,6 +85,7 @@ _secrets = []
 # `apl-runtime` here would silently hand a Cedar-only consumer the runtime.
 praxis-policy-core = { workspace = true, optional = true }
 praxis-policy-apl-core = { workspace = true, optional = true }
+praxis-policy-apl-cmf = { workspace = true, optional = true }
 praxis-policy-apl-runtime = { workspace = true, optional = true }
 
 # Shared runtime crates, deliberately NOT optional. Every feature enables one
@@ -99,6 +107,11 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 # A unique key per OAuth mint attempt, so recovery can tell attempts apart.
 uuid = { workspace = true }
 zeroize = { workspace = true }
+
+# --- experimental-ratelimit --------------------------------------------------
+
+# Limitador's default feature enables Redis; this PoC needs only memory.
+limitador = { version = "0.13.0", default-features = false, optional = true }
 
 # --- jwt ---------------------------------------------------------------------
 
@@ -366,6 +379,11 @@ required-features = ["valkey"]
 name = "quota"
 path = "tests/quota/main.rs"
 required-features = ["experimental-quota"]
+
+[[test]]
+name = "ratelimit"
+path = "tests/ratelimit/main.rs"
+required-features = ["experimental-ratelimit"]
 
 [[bench]]
 name = "quota_hot_path"

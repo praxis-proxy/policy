@@ -729,7 +729,12 @@ impl AplRouteHandler {
                     rule_source
                 };
                 let reason = reason.unwrap_or_else(|| "access denied".to_owned());
-                let mut v = PluginViolation::new(code, reason);
+                let mut v = match invoker.denial_violation().await {
+                    Some(plugin_v) if plugin_v.code == code && plugin_v.reason == reason => {
+                        plugin_v
+                    },
+                    _ => PluginViolation::new(code, reason),
+                };
                 decorate_denial_response(&mut v, self.route.response.as_ref());
                 (false, Some(v))
             },

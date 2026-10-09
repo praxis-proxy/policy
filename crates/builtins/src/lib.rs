@@ -23,6 +23,7 @@
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
 //! | `quota/limitador` | `plugins::quota` |
+//! | `ratelimit/limitador` | `plugins::ratelimit` |
 //! | `cedar` | `pdps::cedar_direct` |
 //! | `cel` | `pdps::cel` |
 //! | `opa` | `pdps::opa` |

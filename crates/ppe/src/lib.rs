@@ -142,6 +142,8 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
 pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
 #[cfg(feature = "experimental-quota")]
 pub use praxis_policy_builtins::plugins::quota::{KIND as QUOTA_KIND, QuotaFactory};
+#[cfg(feature = "experimental-ratelimit")]
+pub use praxis_policy_builtins::plugins::ratelimit::{KIND as RATELIMIT_KIND, RateLimitFactory};
 #[cfg(feature = "secrets-vault")]
 pub use praxis_policy_builtins::secrets::vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
@@ -210,6 +212,8 @@ use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 #[cfg(feature = "experimental-quota")]
 use praxis_policy_builtins::plugins::quota as quota_builtin;
+#[cfg(feature = "experimental-ratelimit")]
+use praxis_policy_builtins::plugins::ratelimit as ratelimit_builtin;
 
 #[cfg(feature = "_builtin")]
 register_builtins! {
@@ -219,6 +223,7 @@ register_builtins! {
     feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
     // Experimental: registers only when `experimental-quota` is named, never via `builtins`.
     feature "experimental-quota" => quota_builtin::QuotaFactory,
+    feature "experimental-ratelimit" => ratelimit_builtin::RateLimitFactory,
 }
 
 /// The enabled PDP factories, ready to drop into
@@ -490,6 +495,26 @@ mod tests {
         assert!(
             !err.contains("no factory registered"),
             "experimental-quota is on, so quota must register; got: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "experimental-ratelimit"))]
+    #[test]
+    fn ratelimit_is_not_registered_without_the_experimental_feature() {
+        let err = load_error_for_kind("ratelimit/limitador");
+        assert!(
+            err.contains("no factory registered"),
+            "ratelimit must stay opt-in; got: {err}"
+        );
+    }
+
+    #[cfg(feature = "experimental-ratelimit")]
+    #[test]
+    fn ratelimit_registers_with_the_experimental_feature() {
+        let err = load_error_for_kind("ratelimit/limitador");
+        assert!(
+            !err.contains("no factory registered"),
+            "experimental-ratelimit is on, so its factory must register; got: {err}"
         );
     }
 }

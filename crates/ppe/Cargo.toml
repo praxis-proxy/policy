@@ -54,7 +54,7 @@ builtins = [
   "valkey",
   "secrets-vault",
 ]
-# quota is experimental: opt in via experimental-quota, never in a default build.
+# Quota and request rate limiting are experimental and never in a default build.
 
 # Marker set by every experimental feature; gates warn_experimental_features.
 experimental = ["dep:tracing"]
@@ -85,6 +85,14 @@ experimental-quota = [
   "experimental",
   "dep:praxis-policy-builtins",
   "praxis-policy-builtins/experimental-quota",
+]
+
+# Embedded in-memory request rate limiting. Not covered by semver.
+experimental-ratelimit = [
+  "_builtin",
+  "experimental",
+  "dep:praxis-policy-builtins",
+  "praxis-policy-builtins/experimental-ratelimit",
 ]
 
 # A default `HttpTransport` for hosts that inject none, built on hyper.

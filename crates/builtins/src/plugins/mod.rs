@@ -11,6 +11,7 @@
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
 //! - `quota` (`experimental-quota`) — kind `quota/limitador`
+//! - `ratelimit` (`experimental-ratelimit`) — kind `ratelimit/limitador`
 
 #[cfg(feature = "jwt")]
 pub mod identity_jwt;
@@ -26,3 +27,6 @@ pub mod elicitation_ciba;
 
 #[cfg(feature = "experimental-quota")]
 pub mod quota;
+
+#[cfg(feature = "experimental-ratelimit")]
+pub mod ratelimit;

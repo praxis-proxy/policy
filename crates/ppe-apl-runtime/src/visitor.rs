@@ -83,6 +83,7 @@ use praxis_policy_core::config::{
     PluginRouteRef, RouteEntry, route_bundle_names, route_entity_identity,
 };
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::hooks::{HookMetadata, HookPhase, lookup_hook_metadata};
 use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
 use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
 use praxis_policy_core::plugin::PluginConfig;
@@ -627,6 +628,67 @@ fn default_base_capabilities() -> std::collections::HashSet<String> {
 }
 
 impl AplConfigVisitor {
+    /// Refuse a `run(name)` step when none of that plugin's hooks can run in
+    /// this route's entity and phase. Use registered handlers when present;
+    /// handlerless declarations retain their existing load-time semantics.
+    /// `HookPluginInvoker` makes the same selection at request time, so this
+    /// catches an inherited global step before the first MCP or LLM request.
+    fn validate_run_hook_context(
+        &self,
+        mgr: &PolicyEngine,
+        route: &CompiledRoute,
+        route_key: &str,
+        entity_type: &str,
+    ) -> Result<(), VisitorError> {
+        for (effects, phase) in [
+            (&route.pre_invocation, HookPhase::Pre),
+            (&route.post_invocation, HookPhase::Post),
+        ] {
+            let mut names = HashSet::new();
+            walk_effects(effects, &mut |effect| {
+                if let Effect::Plugin { name } = effect {
+                    names.insert(name.clone());
+                }
+            });
+            for name in names {
+                let mut hooks: Vec<String> = mgr
+                    .find_plugin_entries(&name)
+                    .into_iter()
+                    .map(|(hook, _)| hook)
+                    .collect();
+                // A declaration may deliberately have no runtime handlers
+                // (for example, a load-time policy validation fixture). The
+                // engine already permits that; retain its declared-hook
+                // semantics while checking actual handlers whenever present.
+                if hooks.is_empty() {
+                    hooks = self
+                        .state
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .declared_plugin_hooks
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                let matches = hooks.iter().any(|hook| {
+                    lookup_hook_metadata(hook)
+                        .unwrap_or_else(HookMetadata::permissive)
+                        .matches(Some(entity_type), phase)
+                });
+                if !matches {
+                    hooks.sort_unstable();
+                    return Err(format!(
+                        "route '{route_key}' runs plugin '{name}' in {entity_type} {phase:?} \
+                         context, but it has no matching registered handler (hooks: {hooks:?}); \
+                         move the step to a compatible route or register a handler for this context"
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Tally the plugins a compiled route reaches, against the hook each half
     /// installs under.
     ///
@@ -1193,6 +1255,8 @@ impl ConfigVisitor for AplConfigVisitor {
             if effective.declared_phases().is_empty() {
                 continue;
             }
+
+            self.validate_run_hook_context(mgr, &effective, &route_key, entity_type)?;
 
             // Load-time soundness check: a route that delegates the
             // caller's own credential but resolves no identity for it.
@@ -2129,10 +2193,10 @@ mod tests {
             _extensions: &praxis_policy_core::extensions::Extensions,
             _ctx: &mut praxis_policy_core::context::PluginContext,
         ) -> PluginResult<HttpPayload> {
-            PluginResult::deny(PluginViolation::new(
-                CHAIN_VIOLATION,
-                "the route's plugin chain ran",
-            ))
+            PluginResult::deny(
+                PluginViolation::new(CHAIN_VIOLATION, "the route's plugin chain ran")
+                    .with_proto_error_code(429),
+            )
         }
     }
 
@@ -2332,6 +2396,11 @@ routes:
         assert_eq!(
             violation.code, CHAIN_VIOLATION,
             "a `run(name)` step is what activates a plugin in policy mode"
+        );
+        assert_eq!(
+            violation.proto_error_code,
+            Some(429),
+            "the APL route must preserve the plugin's wire status"
         );
     }
 
