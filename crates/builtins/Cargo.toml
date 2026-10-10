@@ -3,7 +3,7 @@
 
 [package]
 name = "praxis-policy-builtins"
-description = "PPE bundled extensions — Cedar, CEL and OPA decision points, JWT and API-key identity, OAuth delegation, CIBA elicitation, Valkey sessions, Vault secrets."
+description = "PPE bundled extensions — Cedar, CEL and OPA decision points, JWT and API-key identity, OAuth and Vault delegation, CIBA elicitation, Valkey sessions, Vault secrets."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -37,6 +37,7 @@ oauth = [
   "dep:getrandom",
   "dep:moka",
 ]
+delegator-vault = ["_engine-core", "_plugins", "dep:sha2", "dep:moka"]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
 # Experimental per-consumer token quota against a standalone Limitador. Calls go
 # through the host transport, so no HTTP dep beyond core, the shared serde, and
@@ -336,6 +337,11 @@ required-features = ["api-key"]
 name = "oauth"
 path = "tests/oauth/main.rs"
 required-features = ["oauth"]
+
+[[test]]
+name = "vault"
+path = "tests/vault/main.rs"
+required-features = ["delegator-vault"]
 
 [[test]]
 name = "ciba"

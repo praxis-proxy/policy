@@ -192,17 +192,9 @@ impl DelegationInvoker for DelegationPluginInvoker {
         {
             payload = payload.with_target_audience(audience);
         }
-        if let Some(perms) = cfg
-            .and_then(|m| m.get(serde_yaml::Value::String("permissions".into())))
-            .and_then(|v| v.as_sequence())
-        {
-            let list: Vec<String> = perms
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect();
-            if !list.is_empty() {
-                payload = payload.with_required_permissions(list);
-            }
+        let perms = permissions_from_cfg(cfg)?;
+        if !perms.is_empty() {
+            payload = payload.with_required_permissions(perms);
         }
         if let Some(t_kind) = cfg
             .and_then(|m| m.get(serde_yaml::Value::String("target_type".into())))
@@ -397,6 +389,27 @@ fn attenuation_from_cfg(
         .map_err(|e| DelegationError::InvalidConfig(format!("invalid `attenuation:` block: {e}")))
 }
 
+/// Parse the optional `permissions:` list into a `Vec<String>`.
+///
+/// A non-string element returns `InvalidConfig` so that an all-malformed
+/// sequence cannot silently become an empty list and bypass a downstream
+/// permissions guard.
+fn permissions_from_cfg(cfg: Option<&serde_yaml::Mapping>) -> Result<Vec<String>, DelegationError> {
+    let Some(val) = cfg.and_then(|m| m.get(serde_yaml::Value::String("permissions".into()))) else {
+        return Ok(Vec::new());
+    };
+    let perms = val.as_sequence().ok_or_else(|| {
+        DelegationError::InvalidConfig("`permissions:` must be a sequence".into())
+    })?;
+    let mut list = Vec::with_capacity(perms.len());
+    for (i, v) in perms.iter().enumerate() {
+        list.push(v.as_str().map(str::to_owned).ok_or_else(|| {
+            DelegationError::InvalidConfig(format!("`permissions[{i}]` must be a string"))
+        })?);
+    }
+    Ok(list)
+}
+
 fn auth_enforced_by_from_str(s: &str) -> AuthEnforcedBy {
     match s.to_ascii_lowercase().as_str() {
         "caller" => AuthEnforcedBy::Caller,
@@ -478,6 +491,46 @@ mod tests {
         let err = attenuation_from_cfg(Some(&cfg("attenuation:\n  actionss: [read]")))
             .expect_err("unknown attenuation key must fail closed");
         assert!(matches!(err, DelegationError::InvalidConfig(_)));
+    }
+
+    // --- permissions parsing (production path: permissions_from_cfg) ---
+
+    #[test]
+    fn permissions_string_entries_parse() {
+        let list = permissions_from_cfg(Some(&cfg("permissions:\n  - read:comp\n  - write:comp")))
+            .unwrap();
+        assert_eq!(list, vec!["read:comp", "write:comp"]);
+    }
+
+    #[test]
+    fn permissions_absent_is_empty() {
+        assert!(
+            permissions_from_cfg(Some(&cfg("target: svc")))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(permissions_from_cfg(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn non_string_permission_is_rejected() {
+        let err = permissions_from_cfg(Some(&cfg("permissions:\n  - 42")))
+            .expect_err("non-string permission must fail closed");
+        assert!(matches!(err, DelegationError::InvalidConfig(_)), "{err:?}");
+    }
+
+    #[test]
+    fn mixed_string_and_non_string_permissions_rejected() {
+        let err = permissions_from_cfg(Some(&cfg("permissions:\n  - read:comp\n  - true")))
+            .expect_err("mixed types must fail closed");
+        assert!(matches!(err, DelegationError::InvalidConfig(_)), "{err:?}");
+    }
+
+    #[test]
+    fn scalar_permissions_value_is_rejected() {
+        let err = permissions_from_cfg(Some(&cfg("permissions: read:comp")))
+            .expect_err("scalar permissions must fail closed");
+        assert!(matches!(err, DelegationError::InvalidConfig(_)), "{err:?}");
     }
 
     #[test]

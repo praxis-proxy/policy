@@ -105,6 +105,7 @@ serde_yaml = { package = "yaml_serde", version = "0.10.4" }
 serde_json = "1"
 async-trait = "0.1"
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
+moka = { version = "0.12.0", features = ["future"] }
 # HTTP types only (no client, no I/O) for the `HttpTransport` seam in
 # praxis-policy-core. Both are already in the tree via the plugins' HTTP
 # clients, so this adds nothing transitively.

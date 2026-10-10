@@ -237,7 +237,7 @@ pub enum DelegationMode {
 /// read the in-memory field and carry it on a purpose-built channel;
 /// a serialize-then-reparse silently yields an empty token. See the
 /// module docs for the conditions under which that is permitted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RawInboundToken {
     /// The raw credential bytes. Cleared on drop via `Zeroizing`.
     /// **Never serialized** — `#[serde(skip)]` strips this field.
@@ -252,6 +252,16 @@ pub struct RawInboundToken {
     /// Wire-format family of the token. Lets handlers route to the
     /// right validator without re-parsing the token contents.
     pub kind: TokenKind,
+}
+
+impl std::fmt::Debug for RawInboundToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawInboundToken")
+            .field("token", &"[REDACTED]")
+            .field("source_header", &self.source_header)
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 impl RawInboundToken {
@@ -366,7 +376,7 @@ impl DelegationKey {
 /// One minted outbound credential, produced by a `TokenDelegate`
 /// handler and cached for re-use until expiry. The `token` field is
 /// serde-skipped under the same rules as `RawInboundToken.token`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RawDelegatedToken {
     /// The minted outbound credential. Cleared on drop.
     #[serde(skip)]
@@ -389,6 +399,18 @@ pub struct RawDelegatedToken {
     /// Cache eviction trigger. Handlers re-mint when `now >=
     /// expires_at - safety_margin`.
     pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for RawDelegatedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawDelegatedToken")
+            .field("token", &"[REDACTED]")
+            .field("outbound_header", &self.outbound_header)
+            .field("audience", &self.audience)
+            .field("scopes", &self.scopes)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl RawDelegatedToken {
@@ -710,5 +732,33 @@ mod tests {
         let modern = r#"{"inbound_tokens":{},"delegated_tokens":[]}"#;
         let restored: RawCredentialsExtension = serde_json::from_str(modern).unwrap();
         assert!(restored.delegated_tokens.is_empty());
+    }
+
+    #[test]
+    fn debug_redacts_delegated_token() {
+        let tok = RawDelegatedToken::new(
+            "ghp_SENSITIVE_credential",
+            "Authorization",
+            "https://api.github.com",
+            vec!["read".into()],
+            Utc::now(),
+        );
+        let debug = format!("{tok:?}");
+        assert!(
+            !debug.contains("SENSITIVE"),
+            "Debug must not expose minted token: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("api.github.com"));
+    }
+
+    #[test]
+    fn debug_redacts_inbound_token() {
+        let tok = RawInboundToken::new("eyJ.SENSITIVE.jwt", "Authorization", TokenKind::Jwt);
+        let debug = format!("{tok:?}");
+        assert!(
+            !debug.contains("SENSITIVE"),
+            "Debug must not expose inbound token: {debug}"
+        );
     }
 }

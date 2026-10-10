@@ -225,7 +225,7 @@ pub struct AttenuationConfig {
 /// fields are private (set once via the constructor + builders,
 /// never mutated). Output fields are `pub` (handlers populate on
 /// clones and return the updated payload).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DelegationPayload {
     /// The caller's current credential — the one a token-exchange
     /// handler will swap for a downstream-scoped credential. Cleared
@@ -349,6 +349,29 @@ pub struct DelegationPayload {
     /// diagnostics). Not load-bearing for policy.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for DelegationPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DelegationPayload")
+            .field("bearer_token", &"[REDACTED]")
+            .field("actor_token", &"[REDACTED]")
+            .field("actor_role", &self.actor_role)
+            .field("subject", &self.subject)
+            .field("target_name", &self.target_name)
+            .field("target_type", &self.target_type)
+            .field("target_audience", &self.target_audience)
+            .field("required_permissions", &self.required_permissions)
+            .field("trust_domain", &self.trust_domain)
+            .field("auth_enforced_by", &self.auth_enforced_by)
+            .field("route_attenuation", &self.route_attenuation)
+            .field("delegated_token", &self.delegated_token)
+            .field("delegation_update", &self.delegation_update)
+            .field("delegation_mode", &self.delegation_mode)
+            .field("minted_at", &self.minted_at)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl DelegationPayload {
@@ -1196,5 +1219,35 @@ mod tests {
     fn target_type_defaults_to_tool() {
         let p = DelegationPayload::new("tok", "tool");
         assert_eq!(p.target_type(), &TargetType::Tool);
+    }
+
+    #[test]
+    fn debug_redacts_bearer_and_actor_tokens() {
+        let p = DelegationPayload::new("eyJ.SENSITIVE.jwt", "tool")
+            .with_actor(TokenRole::CallerWorkload, "svid.SENSITIVE.jwt");
+        let debug = format!("{p:?}");
+        assert!(
+            !debug.contains("SENSITIVE"),
+            "Debug must not expose credential bytes: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("tool"));
+    }
+
+    #[test]
+    fn debug_redacts_delegated_token() {
+        let mut p = DelegationPayload::new("tok", "tool");
+        p.delegated_token = Some(RawDelegatedToken::new(
+            "ghp_SENSITIVE_token",
+            "Authorization",
+            "https://api.github.com",
+            vec![],
+            Utc::now(),
+        ));
+        let debug = format!("{p:?}");
+        assert!(
+            !debug.contains("SENSITIVE"),
+            "Debug must not expose minted token: {debug}"
+        );
     }
 }

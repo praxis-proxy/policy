@@ -418,6 +418,14 @@ pub async fn evaluate_effects(
     let mut args_modified = false;
     let mut result_modified = false;
     let mut pending: Option<crate::step::PendingElicitation> = None;
+
+    // When the effects list contains a PDP step, delegation must not
+    // run until the PDP has allowed — otherwise the delegate plugin
+    // can log in, read secrets, and cache them even if the PDP would
+    // deny the request.
+    let require_authz_before_delegation = effects_contain_pdp(effects);
+    let mut authorized = false;
+
     for effect in effects {
         // Each top-level effect runs against the shared mutable state.
         // `Effect::When` / `Effect::Pdp` handle their own internal
@@ -440,6 +448,8 @@ pub async fn evaluate_effects(
             &mut args_modified,
             &mut result_modified,
             payload,
+            require_authz_before_delegation,
+            &mut authorized,
         ))
         .await
         {
@@ -663,6 +673,8 @@ async fn dispatch_effect(
     args_modified: &mut bool,
     result_modified: &mut bool,
     payload: &mut crate::route::RoutePayload,
+    require_authz_before_delegation: bool,
+    authorized: &mut bool,
 ) -> EffectOutcome {
     match effect {
         Effect::Allow => EffectOutcome::Continue,
@@ -701,6 +713,17 @@ async fn dispatch_effect(
         },
 
         Effect::Delegate(delegate_step) => {
+            if require_authz_before_delegation && !*authorized {
+                return EffectOutcome::Halt(Decision::Deny {
+                    reason: Some(format!(
+                        "delegate `{}` precedes authorization — \
+                         delegation must follow a PDP allow when the \
+                         route contains authorization rules",
+                        delegate_step.plugin_name,
+                    )),
+                    rule_source: delegate_step.source.clone(),
+                });
+            }
             match delegations.delegate(delegate_step).await {
                 Ok(outcome) => match &outcome.decision {
                     Decision::Allow => {
@@ -843,6 +866,8 @@ async fn dispatch_effect(
                     args_modified,
                     result_modified,
                     payload,
+                    require_authz_before_delegation,
+                    authorized,
                 ))
                 .await
                 {
@@ -871,6 +896,8 @@ async fn dispatch_effect(
                 taints,
                 constraints,
                 payload,
+                require_authz_before_delegation,
+                authorized,
             )
             .await
         },
@@ -910,6 +937,8 @@ async fn dispatch_effect(
                     args_modified,
                     result_modified,
                     payload,
+                    require_authz_before_delegation,
+                    authorized,
                 ))
                 .await
                 {
@@ -931,6 +960,7 @@ async fn dispatch_effect(
             match evaluate_pdp_contained(pdp, call, bag, &payload.structured).await {
                 Ok(pdp_result) => match pdp_result.decision {
                     Decision::Allow => {
+                        *authorized = true;
                         // Walk on_allow; if it ends without a Halt the
                         // PDP allow stands and we continue.
                         for inner in on_allow {
@@ -948,6 +978,8 @@ async fn dispatch_effect(
                                 args_modified,
                                 result_modified,
                                 payload,
+                                require_authz_before_delegation,
+                                authorized,
                             ))
                             .await
                             {
@@ -978,6 +1010,8 @@ async fn dispatch_effect(
                                 args_modified,
                                 result_modified,
                                 payload,
+                                require_authz_before_delegation,
+                                authorized,
                             ))
                             .await
                             {
@@ -1232,6 +1266,8 @@ fn dispatch_parallel<'a>(
     taints: &'a mut Vec<crate::pipeline::TaintEvent>,
     constraints: &'a mut Vec<crate::constraint::CandidateConstraint>,
     payload: &'a crate::route::RoutePayload,
+    require_authz_before_delegation: bool,
+    authorized: &'a mut bool,
 ) -> futures::future::BoxFuture<'a, EffectOutcome> {
     Box::pin(async move {
         use praxis_policy_orchestration::{
@@ -1256,6 +1292,9 @@ fn dispatch_parallel<'a>(
             Vec<crate::constraint::CandidateConstraint>,
         );
         let mut branches: Vec<ErasedBranch<BranchResult>> = Vec::with_capacity(effects.len());
+        // Each branch snapshots `authorized` — changes inside a branch
+        // are discarded and do not authorize later outer effects.
+        let authz_snapshot = *authorized;
         for effect in effects {
             let effect = effect.clone();
             let fallback = fallback_source.to_owned();
@@ -1265,12 +1304,14 @@ fn dispatch_parallel<'a>(
             let plugins = Arc::clone(plugins);
             let delegations = Arc::clone(delegations);
             let elicitations = Arc::clone(elicitations);
+            let branch_require_authz = require_authz_before_delegation;
             branches.push(Box::pin(async move {
                 let mut branch_taints: Vec<crate::pipeline::TaintEvent> = Vec::new();
                 let mut branch_constraints: Vec<crate::constraint::CandidateConstraint> =
                     Vec::new();
                 let mut branch_args_modified = false;
                 let mut branch_result_modified = false;
+                let mut branch_authorized = authz_snapshot;
                 let outcome = Box::pin(dispatch_effect(
                     &effect,
                     &fallback,
@@ -1285,6 +1326,8 @@ fn dispatch_parallel<'a>(
                     &mut branch_args_modified,
                     &mut branch_result_modified,
                     &mut branch_payload,
+                    branch_require_authz,
+                    &mut branch_authorized,
                 ))
                 .await;
                 (outcome, branch_taints, branch_constraints)
@@ -1368,6 +1411,19 @@ fn dispatch_parallel<'a>(
             Some(d) => EffectOutcome::Halt(d),
             None => EffectOutcome::Continue,
         }
+    })
+}
+
+/// Whether the effects tree contains at least one `Pdp` step, including
+/// inside `When` bodies, `Sequential`, and `Parallel` children. Used to
+/// enforce delegation-after-authorization: when a PDP exists anywhere in
+/// the phase, `delegate(...)` must not run until the PDP has allowed.
+fn effects_contain_pdp(effects: &[Effect]) -> bool {
+    effects.iter().any(|e| match e {
+        Effect::Pdp { .. } => true,
+        Effect::When { body, .. } => effects_contain_pdp(body),
+        Effect::Sequential(children) | Effect::Parallel(children) => effects_contain_pdp(children),
+        _ => false,
     })
 }
 
@@ -5415,5 +5471,140 @@ mod tests {
         ));
         assert!(!type_check(&TypeCheck::Uuid, &json!("not-a-uuid")));
         assert!(!type_check(&TypeCheck::Uuid, &json!(42)));
+    }
+
+    // ── delegation-after-authorization ordering tests ────────────
+
+    struct AllowingDelegationInvoker {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl AllowingDelegationInvoker {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+        fn calls(&self) -> u32 {
+            self.call_count.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl DelegationInvoker for AllowingDelegationInvoker {
+        async fn delegate(
+            &self,
+            _step: &crate::step::DelegateStep,
+        ) -> Result<crate::step::DelegationOutcome, crate::step::DelegationError> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(crate::step::DelegationOutcome {
+                decision: Decision::Allow,
+                granted_permissions: vec!["read".into()],
+                granted_audience: Some("https://api.test".into()),
+                granted_expires_at: None,
+            })
+        }
+    }
+
+    fn delegate_step(plugin: &str) -> Effect {
+        Effect::Delegate(crate::step::DelegateStep {
+            plugin_name: plugin.into(),
+            config_override: None,
+            on_error: None,
+            source: format!("test.{plugin}"),
+        })
+    }
+
+    #[tokio::test]
+    async fn pdp_allow_then_delegate_succeeds() {
+        let delegator = Arc::new(AllowingDelegationInvoker::new());
+        let mut bag = AttributeBag::new();
+        let steps = vec![pdp_step("allow"), delegate_step("vault")];
+        let eval = evaluate_effects(
+            &steps,
+            &mut bag,
+            &(Arc::new(FakePdp {
+                decision: Decision::Allow,
+            }) as Arc<dyn PdpResolver>),
+            &null_plugins(),
+            &(delegator.clone() as Arc<dyn DelegationInvoker>),
+            &noop_elicitations(),
+            crate::step::DispatchPhase::Pre,
+            &mut crate::route::RoutePayload::new(serde_json::Value::Null),
+        )
+        .await;
+        assert_eq!(eval.decision, Decision::Allow);
+        assert_eq!(delegator.calls(), 1, "delegation must run after PDP allow");
+    }
+
+    #[tokio::test]
+    async fn pdp_deny_prevents_delegation() {
+        let delegator = Arc::new(AllowingDelegationInvoker::new());
+        let mut bag = AttributeBag::new();
+        let steps = vec![pdp_step("deny"), delegate_step("vault")];
+        let eval = evaluate_effects(
+            &steps,
+            &mut bag,
+            &(Arc::new(FakePdp {
+                decision: Decision::Deny {
+                    reason: Some("forbidden".into()),
+                    rule_source: "pdp".into(),
+                },
+            }) as Arc<dyn PdpResolver>),
+            &null_plugins(),
+            &(delegator.clone() as Arc<dyn DelegationInvoker>),
+            &noop_elicitations(),
+            crate::step::DispatchPhase::Pre,
+            &mut crate::route::RoutePayload::new(serde_json::Value::Null),
+        )
+        .await;
+        assert!(
+            matches!(eval.decision, Decision::Deny { .. }),
+            "PDP deny halts"
+        );
+        assert_eq!(
+            delegator.calls(),
+            0,
+            "delegation must not run when PDP denies"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegate_before_pdp_is_rejected() {
+        let delegator = Arc::new(AllowingDelegationInvoker::new());
+        let mut bag = AttributeBag::new();
+        let steps = vec![delegate_step("vault"), pdp_step("allow")];
+        let eval = evaluate_effects(
+            &steps,
+            &mut bag,
+            &(Arc::new(FakePdp {
+                decision: Decision::Allow,
+            }) as Arc<dyn PdpResolver>),
+            &null_plugins(),
+            &(delegator.clone() as Arc<dyn DelegationInvoker>),
+            &noop_elicitations(),
+            crate::step::DispatchPhase::Pre,
+            &mut crate::route::RoutePayload::new(serde_json::Value::Null),
+        )
+        .await;
+        let Decision::Deny { reason, .. } = &eval.decision else {
+            panic!(
+                "expected deny for premature delegation, got {:?}",
+                eval.decision
+            );
+        };
+        assert!(
+            reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("precedes authorization"),
+            "deny reason must mention premature delegation: {reason:?}"
+        );
+        assert_eq!(
+            delegator.calls(),
+            0,
+            "delegation must not dispatch before authorization"
+        );
     }
 }
