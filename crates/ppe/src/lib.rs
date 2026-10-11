@@ -97,7 +97,9 @@ pub use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 /// carries and installs it with `PolicyEngine::set_secret_providers` before
 /// `initialize()`. [`SecretProviderFactory`] is what a host implements to add a
 /// backend of its own, and [`SecretRef`] is the handle a consumer keeps so a
-/// later refresh reaches it.
+/// later refresh reaches it. A consumer that rebuilds something on rotation
+/// reads [`SecretRef::snapshot`], which pairs the value with the generation it
+/// belongs to.
 ///
 /// `env` and `file` are always registered by
 /// [`SecretProviderRegistry::with_builtin_backends`]. Vault KV v2 is behind
@@ -111,8 +113,8 @@ pub use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 /// `PolicyEngine::secrets_last_success`, neither of which yields secret
 /// material.
 pub use praxis_policy_core::secrets::{
-    RefreshReport, SecretError, SecretProvider, SecretProviderFactory, SecretProviderRegistry,
-    SecretRef,
+    ProviderFailure, ProviderHealth, RefreshReport, SecretError, SecretProvider,
+    SecretProviderFactory, SecretProviderRegistry, SecretRef, SecretSnapshot, SecretsHealth,
 };
 
 /// Curated re-exports for plugin authors, so a plugin crate can depend on this
