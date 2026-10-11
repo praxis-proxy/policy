@@ -38,4 +38,7 @@ pub mod backends;
 pub use config::{SecretProviderConfig, SecretValueConfig, SecretsConfig};
 pub use error::SecretError;
 pub use provider::{SecretProvider, SecretProviderFactory, SecretProviderRegistry};
-pub use store::{RefreshReport, SecretRef, SecretStore};
+pub use store::{
+    ProviderFailure, ProviderHealth, RefreshReport, SecretRef, SecretSnapshot, SecretStore,
+    SecretsHealth,
+};

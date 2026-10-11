@@ -14,6 +14,7 @@
 // the request path, so the read is never on a latency path and a few
 // microseconds of blocking costs less than the machinery to avoid it.
 
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -63,6 +64,41 @@ fn classify_env(
     }
 }
 
+/// Refuse any setting on an `env` provider.
+///
+/// A key here is one no read will ever consult, since the whole address is the
+/// variable name in the value's `ref`. A `base_dir` left behind when a value
+/// moved from `file` to `env` would otherwise read as applied while the
+/// reference resolved as a variable name.
+fn reject_env_settings(settings: &serde_yaml::Value) -> Result<(), SecretError> {
+    if settings.is_null() {
+        return Ok(());
+    }
+    let Some(declared) = settings.as_mapping() else {
+        return Err(SecretError::config(
+            "`env` takes no settings, and this provider declares something that is not a mapping",
+        ));
+    };
+    if declared.is_empty() {
+        return Ok(());
+    }
+    // Sorted so a provider with two stray keys reports them the same way on
+    // every run.
+    let mut keys: Vec<String> = declared
+        .keys()
+        .map(|key| {
+            key.as_str()
+                .map_or_else(|| format!("{key:?}"), str::to_owned)
+        })
+        .collect();
+    keys.sort();
+    Err(SecretError::config(format!(
+        "`env` takes no settings, and this provider declares [{}]; a value bound to `env` names \
+         an environment variable in its `ref` and nothing else",
+        keys.join(", ")
+    )))
+}
+
 /// Builds [`EnvSecretProvider`].
 pub struct EnvSecretProviderFactory;
 
@@ -71,10 +107,10 @@ impl SecretProviderFactory for EnvSecretProviderFactory {
         "env"
     }
 
-    fn build(
-        &self,
-        _config: &SecretProviderConfig,
-    ) -> Result<Arc<dyn SecretProvider>, SecretError> {
+    fn build(&self, config: &SecretProviderConfig) -> Result<Arc<dyn SecretProvider>, SecretError> {
+        // Null or an empty mapping, depending on the path the declaration
+        // arrived on. Both mean it carries nothing but `kind`.
+        reject_env_settings(&config.settings)?;
         Ok(Arc::new(EnvSecretProvider))
     }
 }
@@ -91,16 +127,18 @@ struct FileSettings {
 
 /// Reads a value from a file, addressed by path.
 ///
-/// With `base_dir` set, a reference must be relative and must not contain
-/// `..`, so the set of files this provider can read is the directory an
-/// operator named. Without it, a reference is any path the process can open,
-/// which is the more convenient default and the less contained one.
+/// With `base_dir` set, the set of files this provider can read is the
+/// directory an operator named: a reference must be relative and free of `..`,
+/// and the file it reaches must resolve inside the directory once symlinks are
+/// followed. Without it, a reference is any path the process can open, which is
+/// the more convenient default and the less contained one.
 pub struct FileSecretProvider {
     base_dir: Option<PathBuf>,
 }
 
 impl FileSecretProvider {
-    /// Where a reference resolves, refusing one that would leave `base_dir`.
+    /// Where a reference resolves, refusing one that leaves `base_dir`
+    /// lexically.
     fn path_for(&self, reference: &str) -> Result<PathBuf, SecretError> {
         let candidate = Path::new(reference);
         let Some(base) = self.base_dir.as_ref() else {
@@ -123,21 +161,113 @@ impl FileSecretProvider {
         }
         Ok(base.join(candidate))
     }
+
+    /// Refuse a path that resolves outside `base_dir` once symlinks are
+    /// followed, and confirm `opened` is that same file.
+    ///
+    /// Opening follows symlinks, so the lexical checks in [`Self::path_for`]
+    /// bound the reference and not the file it reaches: a link below `base_dir`,
+    /// at any component or at the leaf, resolves wherever it points.
+    /// Containment has to hold against the resolved target for the directory to
+    /// be the set of files this provider can read.
+    ///
+    /// Comparing resolved paths rather than refusing links is what keeps a
+    /// Kubernetes projected mount working, since its `..data` indirection stays
+    /// inside the directory.
+    ///
+    /// `base_dir` is resolved per read rather than at build time because a
+    /// projected mount may not exist yet when the factory runs.
+    fn confirm_contained(
+        &self,
+        reference: &str,
+        path: &Path,
+        base: &Path,
+        opened: &std::fs::File,
+    ) -> Result<(), SecretError> {
+        let base = std::fs::canonicalize(base).map_err(|e| {
+            SecretError::backend(format!("resolving `base_dir` `{}`: {e}", base.display()))
+        })?;
+        let resolved = std::fs::canonicalize(path)
+            .map_err(|e| SecretError::backend(format!("resolving `{}`: {e}", path.display())))?;
+        if !resolved.starts_with(&base) {
+            return Err(SecretError::reference(
+                reference,
+                "resolves outside `base_dir` once symlinks are followed",
+            ));
+        }
+        same_file_as_opened(reference, &resolved, opened)
+    }
+}
+
+/// Confirm the descriptor the read will use is the file containment passed.
+///
+/// The check resolves a path, and the read takes its bytes from a descriptor
+/// opened before that. A link swapped in between would leave the read taking
+/// bytes from a file the check never saw. Device and inode identify the file
+/// behind the descriptor, so comparing them closes that window.
+///
+/// The crate forbids `unsafe`, so `O_NOFOLLOW` and `openat2` are unreachable
+/// and this is the strongest confirmation the standard library offers.
+#[cfg(unix)]
+fn same_file_as_opened(
+    reference: &str,
+    resolved: &Path,
+    opened: &std::fs::File,
+) -> Result<(), SecretError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let open_meta = opened
+        .metadata()
+        .map_err(|e| SecretError::backend(format!("inspecting the opened `{reference}`: {e}")))?;
+    let path_meta = std::fs::metadata(resolved)
+        .map_err(|e| SecretError::backend(format!("inspecting `{}`: {e}", resolved.display())))?;
+    if open_meta.dev() != path_meta.dev() || open_meta.ino() != path_meta.ino() {
+        return Err(SecretError::reference(
+            reference,
+            "resolved to a different file while it was being opened",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn same_file_as_opened(
+    _reference: &str,
+    _resolved: &Path,
+    _opened: &std::fs::File,
+) -> Result<(), SecretError> {
+    Ok(())
 }
 
 #[async_trait]
 impl SecretProvider for FileSecretProvider {
     async fn get_secret(&self, reference: &str) -> Result<Zeroizing<String>, SecretError> {
         let path = self.path_for(reference)?;
-        let raw = Zeroizing::new(std::fs::read_to_string(&path).map_err(|e| {
+        // Opened before containment is checked so the bytes read come from a
+        // descriptor the check confirmed, rather than from a second resolution
+        // of the path.
+        let mut opened = std::fs::File::open(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 SecretError::not_found(reference)
             } else {
                 // The path is operator-authored and safe to print; the error
                 // text comes from the OS and carries no file content.
-                SecretError::backend(format!("reading `{}`: {e}", path.display()))
+                SecretError::backend(format!("opening `{}`: {e}", path.display()))
             }
-        })?);
+        })?;
+        if let Some(base) = self.base_dir.as_ref() {
+            self.confirm_contained(reference, &path, base, &opened)?;
+        }
+
+        let mut raw = Zeroizing::new(String::new());
+        #[allow(
+            clippy::verbose_file_reads,
+            reason = "reads the descriptor containment was checked against; `fs::read_to_string` \
+                      would resolve the path a second time and read whatever it resolved to then"
+        )]
+        opened
+            .read_to_string(&mut raw)
+            .map_err(|e| SecretError::backend(format!("reading `{}`: {e}", path.display())))?;
 
         let value = trim_one_trailing_newline(&raw);
         if value.is_empty() {
@@ -197,6 +327,19 @@ mod tests {
     fn file_provider(base_dir: Option<&str>) -> FileSecretProvider {
         FileSecretProvider {
             base_dir: base_dir.map(PathBuf::from),
+        }
+    }
+
+    /// A directory nothing else is using, removed by the test that made it.
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ppe-secrets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn provider_at(base_dir: &Path) -> FileSecretProvider {
+        FileSecretProvider {
+            base_dir: Some(base_dir.to_path_buf()),
         }
     }
 
@@ -284,6 +427,139 @@ mod tests {
 
         let value = classify_env("VAR", Ok("hunter2".to_owned())).expect("reads");
         assert_eq!(value.as_str(), "hunter2");
+    }
+
+    /// A link below `base_dir` is the escape the lexical checks do not see:
+    /// the reference is relative and `..`-free, and the file is outside.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_leaf_symlink_pointing_outside_base_dir_is_refused() {
+        let root = temp_dir();
+        let base = root.join("base");
+        std::fs::create_dir_all(&base).expect("base dir");
+        std::fs::write(root.join("outside.key"), "stolen\n").expect("write");
+        std::os::unix::fs::symlink(root.join("outside.key"), base.join("escape.key"))
+            .expect("symlink");
+
+        let err = provider_at(&base)
+            .get_secret("escape.key")
+            .await
+            .expect_err("the link leaves base_dir");
+        assert!(matches!(err, SecretError::Reference { .. }), "{err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same escape one component up, where the leaf name is honest and the
+    /// directory it sits in is the link.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_directory_symlink_pointing_outside_base_dir_is_refused() {
+        let root = temp_dir();
+        let base = root.join("base");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&base).expect("base dir");
+        std::fs::create_dir_all(&elsewhere).expect("other dir");
+        std::fs::write(elsewhere.join("upstream.key"), "stolen\n").expect("write");
+        std::os::unix::fs::symlink(&elsewhere, base.join("sub")).expect("symlink");
+
+        let err = provider_at(&base)
+            .get_secret("sub/upstream.key")
+            .await
+            .expect_err("the directory link leaves base_dir");
+        assert!(matches!(err, SecretError::Reference { .. }), "{err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The shape a Kubernetes Secret volume and a CSI-projected secret both
+    /// have: the reference is a link to `..data`, which is a link to a
+    /// timestamped directory. Every hop stays inside the mount, so refusing
+    /// links outright would break every such deployment.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_projected_secret_symlink_farm_reads() {
+        let base = temp_dir();
+        let generation = base.join("..2026_10_08_00_00_00.0");
+        std::fs::create_dir_all(&generation).expect("generation dir");
+        std::fs::write(generation.join("upstream.key"), "hunter2\n").expect("write");
+        std::os::unix::fs::symlink(&generation, base.join("..data")).expect("..data");
+        std::os::unix::fs::symlink(
+            PathBuf::from("..data").join("upstream.key"),
+            base.join("upstream.key"),
+        )
+        .expect("key link");
+
+        let value = provider_at(&base)
+            .get_secret("upstream.key")
+            .await
+            .expect("a projected secret reads");
+        assert_eq!(value.as_str(), "hunter2");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `base_dir` itself may be a link, which is why containment compares two
+    /// resolved paths rather than resolving only the reference.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_base_dir_reads() {
+        let root = temp_dir();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("real dir");
+        std::fs::write(real.join("upstream.key"), "hunter2\n").expect("write");
+        let linked = root.join("linked");
+        std::os::unix::fs::symlink(&real, &linked).expect("symlink");
+
+        let value = provider_at(&linked)
+            .get_secret("upstream.key")
+            .await
+            .expect("a linked base_dir reads");
+        assert_eq!(value.as_str(), "hunter2");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_env_provider_refuses_settings() {
+        let mut settings = serde_yaml::Mapping::new();
+        settings.insert("base_dir".into(), "/tmp".into());
+        let built = EnvSecretProviderFactory.build(&SecretProviderConfig {
+            kind: "env".to_owned(),
+            settings: serde_yaml::Value::Mapping(settings),
+        });
+        let Err(err) = built else {
+            panic!("`env` reads no settings");
+        };
+        assert!(matches!(err, SecretError::Config { .. }), "{err}");
+        assert!(format!("{err}").contains("base_dir"), "{err}");
+    }
+
+    #[test]
+    fn an_env_provider_whose_settings_are_not_a_mapping_is_refused() {
+        let built = EnvSecretProviderFactory.build(&SecretProviderConfig {
+            kind: "env".to_owned(),
+            settings: serde_yaml::Value::Bool(true),
+        });
+        let Err(err) = built else {
+            panic!("`env` reads no settings");
+        };
+        assert!(matches!(err, SecretError::Config { .. }), "{err}");
+    }
+
+    #[test]
+    fn an_env_provider_declaring_only_its_kind_builds() {
+        for settings in [
+            serde_yaml::Value::Null,
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        ] {
+            EnvSecretProviderFactory
+                .build(&SecretProviderConfig {
+                    kind: "env".to_owned(),
+                    settings,
+                })
+                .expect("no settings is how `env` is declared");
+        }
     }
 
     #[test]

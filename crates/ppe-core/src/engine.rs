@@ -730,13 +730,53 @@ fn warn_on_inactive_settings(cfg: &PolicyConfig) {
     }
 }
 
+/// Refuse a reload whose `secrets:` block is not the one the resolved values
+/// came from.
+///
+/// Values are read once, during `initialize`, so a document declaring anything
+/// else describes bindings the process does not have: a value it never read, a
+/// reference it is not refreshing, a provider it never built. Applying the rest
+/// of such a document would leave the engine serving policy from one document
+/// against credentials from another, and `refresh_secrets` re-reading the
+/// references nobody declares any more.
+///
+/// Refused rather than warned for that reason: a warning would install the
+/// policy half and skip the secrets half, so a route arriving in the same
+/// reload could name a secret the store does not hold.
+/// `resolved` is `None` for an engine whose document declared nothing, which
+/// resolves no store at all. An empty block is then the baseline, which is what
+/// makes a secret added after startup a refusal rather than a declaration
+/// nothing ever reads.
+fn refuse_changed_secrets(
+    resolved: Option<&crate::secrets::SecretStore>,
+    incoming: &PolicyConfig,
+) -> Result<(), Box<PluginError>> {
+    let empty = crate::secrets::SecretsConfig::default();
+    let baseline = resolved.map_or(&empty, crate::secrets::SecretStore::declared);
+    let Some(change) = baseline.first_difference(&incoming.secrets) else {
+        return Ok(());
+    };
+    let message = format!(
+        "the `secrets:` block changed after startup: {change}. Secrets are resolved once, during \
+         initialize(), so applying this takes a restart"
+    );
+    // Logged as well as returned: a host that reports a failed reload as one
+    // line loses which declaration caused it.
+    warn!("{message}");
+    Err(Box::new(PluginError::Config { message }))
+}
+
 /// The content provenance key a config calls for, from the secrets resolved
 /// so far.
 ///
 /// `store` is `None` before the first `initialize`, and a named key then waits
-/// for `initialize` to attach it. After that, secrets are resolved once and
-/// not again on reload, so a key the store does not hold cannot be supplied
-/// and the load is refused rather than left digesting nothing.
+/// for `initialize` to attach it.
+///
+/// The refusal for a key the store does not hold is a backstop. Validation
+/// rejects a key naming a value `secrets.values` does not declare, and
+/// [`refuse_changed_secrets`] keeps the block from changing after startup, so
+/// reaching it means those two checks disagree. Erroring rather than asserting
+/// keeps a future edit to either one from digesting nothing with no sign.
 fn content_key_for(
     cfg: &PolicyConfig,
     store: Option<&crate::secrets::SecretStore>,
@@ -1315,6 +1355,12 @@ impl PolicyEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty();
         let policy_config = normalize_and_validate(policy_config, has_visitor)?;
+        // Ahead of plugin instantiation: a document that cannot be applied
+        // should not run factory code on its way to being refused, and a
+        // factory is free to register things as it goes.
+        if self.initialized.load(Ordering::Acquire) {
+            refuse_changed_secrets(self.secrets.get().map(Arc::as_ref), &policy_config)?;
+        }
         warn_on_dropped_inherited_authentication(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
@@ -1813,13 +1859,33 @@ impl PolicyEngine {
 
     /// When `provider` last re-read all of its values without a failure.
     ///
-    /// `None` once a refresh against it has failed, and until one succeeds
-    /// again. A host that alarms on the gap between this and now is alarming on
-    /// "the credentials in memory may no longer be the ones in the backend",
-    /// which is what this design trades for staying available during an outage.
+    /// Kept across a failure, so the gap between this and now is how long the
+    /// credentials in memory have gone unconfirmed against the backend. That is
+    /// what this design trades for staying available during an outage, and it
+    /// is what a host alarms on.
+    ///
+    /// `None` before the store is resolved and for a provider nothing
+    /// declares, which [`Self::secrets_health`] tells apart.
     #[must_use]
     pub fn secrets_last_success(&self, provider: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         self.secrets.get()?.provider_last_success(provider)
+    }
+
+    /// How `provider` is doing, distinguishing a failing provider from one
+    /// nothing declares and from a store that was never resolved.
+    ///
+    /// Only the engine can report the last of those: a document declaring no
+    /// secrets never builds a store at all, so there is nothing to ask.
+    #[must_use]
+    pub fn secrets_health(&self, provider: &str) -> crate::secrets::SecretsHealth {
+        use crate::secrets::SecretsHealth;
+
+        let Some(store) = self.secrets.get() else {
+            return SecretsHealth::Uninitialized;
+        };
+        store
+            .provider_health(provider)
+            .map_or(SecretsHealth::Undeclared, SecretsHealth::Resolved)
     }
 
     /// Re-read every declared secret, returning what changed and what failed.
@@ -6927,10 +6993,10 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Secrets are read once, so a reload naming a value nobody resolved has
-    /// no key to give. Refused, rather than digesting nothing with no sign.
+    /// Secrets are read once, so a reload declaring a different set describes
+    /// bindings the process does not have.
     #[tokio::test]
-    async fn a_reload_naming_an_unresolved_key_is_refused() {
+    async fn a_reload_that_renames_a_secret_is_refused() {
         let (dir, yaml) = provenance_fixture(PROVENANCE_KEY);
         let engine = engine_reading_secrets(&yaml);
         engine.initialize().await.expect("initializes");
@@ -6951,6 +7017,136 @@ secrets:
             engine.load_runtime().executor.provenance_key().is_some(),
             "the running snapshot keeps its key"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each shape of change, against one engine, so the refusal is not just
+    /// the rename case. The message has to name the declaration to put back.
+    #[tokio::test]
+    async fn every_kind_of_secrets_change_is_refused_by_name() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.expect("initializes");
+
+        let declared_value = "    upstream_key: { provider: local, ref: upstream.key }\n";
+        let changes = [
+            (
+                yaml.replace(
+                    declared_value,
+                    "    second_key: { provider: local, ref: upstream.key }\n{declared_value}",
+                )
+                .replace("{declared_value}", declared_value),
+                "second_key",
+            ),
+            (
+                yaml.replace(&format!("  values:\n{declared_value}"), "  values: {}\n"),
+                "upstream_key",
+            ),
+            (
+                yaml.replace("ref: upstream.key", "ref: other.key"),
+                "other.key",
+            ),
+            (
+                yaml.replace("    local:", "    shell: { kind: env }\n    local:"),
+                "shell",
+            ),
+            (
+                yaml.replace("kind: file, base_dir:", "kind: file, mode: 0600, base_dir:"),
+                "local",
+            ),
+        ];
+
+        for (document, expected) in changes {
+            let config = parse_fixture_config(&document)
+                .unwrap_or_else(|e| panic!("the edited document must parse: {e}\n{document}"));
+            let err = engine
+                .load_config(config)
+                .expect_err("the secrets block differs from the resolved one");
+            let msg = format!("{err}");
+            assert!(msg.contains(expected), "{msg}");
+            assert!(msg.contains("restart"), "{msg}");
+        }
+
+        engine
+            .load_config(parse_fixture_config(&yaml).unwrap())
+            .expect("the resolved document still reloads");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Before `initialize`, nothing is resolved, so there is no baseline to
+    /// diverge from and the normal load path is untouched.
+    #[tokio::test]
+    async fn a_secrets_change_before_initialize_is_not_refused() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let engine = engine_reading_secrets(&yaml);
+
+        let changed = yaml.replace(
+            "    upstream_key:",
+            "    second_key: { provider: local, ref: upstream.key }\n    upstream_key:",
+        );
+        engine
+            .load_config(parse_fixture_config(&changed).unwrap())
+            .expect("a load before initialize resolves whatever it holds");
+
+        engine.initialize().await.expect("initializes");
+        assert_eq!(
+            resolved_secrets(&engine).names(),
+            vec!["second_key", "upstream_key"],
+            "initialize resolved the document that was actually installed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An engine initialized with no document at all. Loading one that
+    /// declares secrets afterwards would leave them unresolved forever.
+    #[tokio::test]
+    async fn secrets_arriving_after_an_empty_initialize_are_refused() {
+        let engine = PolicyEngine::default();
+        assert!(
+            engine.set_secret_providers(
+                crate::secrets::SecretProviderRegistry::with_builtin_backends()
+            )
+        );
+        engine.initialize().await.expect("nothing to initialize");
+
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let err = engine
+            .load_config(parse_fixture_config(&yaml).unwrap())
+            .expect_err("nothing would ever resolve these");
+        let msg = format!("{err}");
+        // Providers are compared before values, so the provider is the first
+        // difference even though the values are the point.
+        assert!(msg.contains("local") && msg.contains("restart"), "{msg}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn secrets_health_tells_uninitialized_from_undeclared() {
+        use crate::secrets::SecretsHealth;
+
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let engine = engine_reading_secrets(&yaml);
+        assert_eq!(
+            engine.secrets_health("local"),
+            SecretsHealth::Uninitialized,
+            "nothing is refreshing before initialize, so nothing can be stale"
+        );
+
+        engine.initialize().await.expect("initializes");
+        assert!(matches!(
+            engine.secrets_health("local"),
+            SecretsHealth::Resolved(_)
+        ));
+        assert_eq!(
+            engine.secrets_health("vault-prod"),
+            SecretsHealth::Undeclared,
+            "a name the document does not declare is not a healthy provider"
+        );
+        assert!(engine.secrets_last_success("local").is_some());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -28,7 +28,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use super::error::SecretError;
 
 /// The `secrets:` block.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Not `Eq`: a provider's flattened settings are a `serde_yaml::Value`, which
+/// has no total equality.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretsConfig {
     /// Provider instances by operator-chosen name.
@@ -84,7 +87,7 @@ where
 }
 
 /// One provider instance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SecretProviderConfig {
     /// Which factory builds it.
     pub kind: String,
@@ -95,7 +98,7 @@ pub struct SecretProviderConfig {
 }
 
 /// One declared value, bound to a provider and a reference.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretValueConfig {
     /// The provider name, which must appear in [`SecretsConfig::providers`].
@@ -146,6 +149,64 @@ impl SecretsConfig {
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
+
+    /// The first way `incoming` differs from this block, named for an
+    /// operator, or `None` when the two declare the same thing.
+    ///
+    /// Reported rather than returning a bool so the refusal a reload produces
+    /// says which line to put back, which is the difference between an error an
+    /// operator can act on and one that sends them diffing two documents.
+    ///
+    /// Providers before values, each in name order, so a document with several
+    /// changes reports the same one on every run.
+    #[must_use]
+    pub fn first_difference(&self, incoming: &Self) -> Option<String> {
+        for name in sorted_union(self.providers.keys(), incoming.providers.keys()) {
+            match (self.providers.get(name), incoming.providers.get(name)) {
+                (Some(_), None) => return Some(format!("provider `{name}` is no longer declared")),
+                (None, Some(_)) => return Some(format!("provider `{name}` is newly declared")),
+                (Some(resolved), Some(new)) if resolved != new => {
+                    return Some(format!("provider `{name}` is declared differently"));
+                },
+                _ => {},
+            }
+        }
+
+        for name in sorted_union(self.values.keys(), incoming.values.keys()) {
+            match (self.values.get(name), incoming.values.get(name)) {
+                (Some(_), None) => return Some(format!("secret `{name}` is no longer declared")),
+                (None, Some(_)) => return Some(format!("secret `{name}` is newly declared")),
+                (Some(resolved), Some(new)) => {
+                    if resolved.provider != new.provider {
+                        return Some(format!(
+                            "secret `{name}` names provider `{}` rather than `{}`",
+                            new.provider, resolved.provider
+                        ));
+                    }
+                    if resolved.reference != new.reference {
+                        return Some(format!(
+                            "secret `{name}` points at `{}` rather than `{}`",
+                            new.reference, resolved.reference
+                        ));
+                    }
+                },
+                (None, None) => {},
+            }
+        }
+
+        None
+    }
+}
+
+/// Every name in either map, once, in order.
+fn sorted_union<'a>(
+    left: impl Iterator<Item = &'a String>,
+    right: impl Iterator<Item = &'a String>,
+) -> Vec<&'a String> {
+    let mut names: Vec<&String> = left.chain(right).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// Reject a name that could not be written where it is referenced from, or
@@ -297,6 +358,74 @@ values:
 ";
         serde_yaml::from_str::<SecretsConfig>(duplicated)
             .expect_err("a repeated key is ambiguous, not a last-one-wins");
+    }
+
+    /// Each shape of change a reload can carry, since the refusal names the
+    /// declaration an operator has to put back.
+    #[test]
+    fn a_difference_names_the_declaration_that_changed() {
+        let resolved = config(
+            "
+providers:
+  local: { kind: file, base_dir: /etc/ppe }
+  shell: { kind: env }
+values:
+  api_key: { provider: local, ref: upstream.key }
+",
+        );
+
+        assert!(
+            resolved.first_difference(&resolved.clone()).is_none(),
+            "the block that was resolved reloads"
+        );
+
+        let both =
+            "providers:\n  local: { kind: file, base_dir: /etc/ppe }\n  shell: { kind: env }\n";
+        let cases = [
+            (
+                format!("{both}values:\n  api_key: {{ provider: shell, ref: upstream.key }}"),
+                "names provider `shell` rather than `local`",
+            ),
+            (
+                format!("{both}values:\n  api_key: {{ provider: local, ref: other.key }}"),
+                "points at `other.key`",
+            ),
+            (format!("{both}values: {{}}"), "api_key"),
+            (
+                format!(
+                    "{both}values:\n  api_key: {{ provider: local, ref: upstream.key }}\n  \
+                         second_key: {{ provider: shell, ref: VAR }}"
+                ),
+                "second_key",
+            ),
+            (
+                "providers:\n  local: { kind: file, base_dir: /etc/ppe }\nvalues:\n  api_key: \
+                 { provider: local, ref: upstream.key }"
+                    .to_owned(),
+                "shell",
+            ),
+        ];
+
+        for (document, expected) in cases {
+            let change = resolved
+                .first_difference(&config(&document))
+                .unwrap_or_else(|| panic!("differs from the resolved block:\n{document}"));
+            assert!(change.contains(expected), "{change}");
+        }
+    }
+
+    /// Settings are part of a provider's identity: the same kind pointed at a
+    /// different directory reads different files.
+    #[test]
+    fn a_provider_whose_settings_changed_is_a_difference() {
+        let resolved =
+            config("providers:\n  local: { kind: file, base_dir: /etc/ppe }\nvalues: {}");
+        let moved = config("providers:\n  local: { kind: file, base_dir: /etc/other }\nvalues: {}");
+
+        let change = resolved
+            .first_difference(&moved)
+            .expect("a repointed base_dir is a different provider");
+        assert!(change.contains("local"), "{change}");
     }
 
     #[test]

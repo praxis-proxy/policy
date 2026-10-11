@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -66,6 +66,43 @@ impl SecretCell {
     }
 }
 
+/// One value together with the generation it was read at.
+///
+/// A consumer that has to act on rotation rather than just read the new bytes
+/// records the generation beside whatever it built from the value, and rebuilds
+/// when the generation moves. That pairing has to come from one load: a value
+/// and a generation read separately can straddle a refresh and pair the old
+/// bytes with the new generation, and the consumer then holds a resource built
+/// from a credential it believes it has already rebuilt against. Nothing moves
+/// the generation again until the value changes once more, so that resource is
+/// never rebuilt.
+pub struct SecretSnapshot {
+    value: Zeroizing<String>,
+    generation: u64,
+}
+
+impl SecretSnapshot {
+    /// The value this snapshot was taken at.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// The generation that value belongs to.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl fmt::Debug for SecretSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretSnapshot")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A handle to one declared value.
 ///
 /// Reads go through the handle, so the holder sees whatever the last refresh
@@ -96,12 +133,30 @@ impl SecretRef {
         }
     }
 
+    /// The current value and its generation, from one load.
+    ///
+    /// What a consumer that acts on rotation reads: a connection pool
+    /// authenticated when it connected, so a new password reaches it only when
+    /// it reconnects. Record [`SecretSnapshot::generation`] beside whatever was
+    /// built from [`SecretSnapshot::value`], and rebuild when a later snapshot
+    /// reports a higher one.
+    ///
+    /// Pair them from here rather than from [`Self::get`] and
+    /// [`Self::generation`], which are two loads a refresh can land between.
+    #[must_use]
+    pub fn snapshot(&self) -> SecretSnapshot {
+        let state = self.cell.state.load();
+        SecretSnapshot {
+            value: state.value.clone(),
+            generation: state.generation,
+        }
+    }
+
     /// How many times the value has changed since startup.
     ///
-    /// For a consumer that has to act on rotation rather than just read the
-    /// new bytes: a connection pool authenticated when it connected, so a new
-    /// password reaches it only when it reconnects. Record the generation
-    /// alongside whatever was built from the value, and rebuild when it moves.
+    /// For reporting the generation on its own. A consumer rebuilding on
+    /// rotation needs the value that belongs to it, which is
+    /// [`Self::snapshot`].
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.cell.state.load().generation
@@ -122,6 +177,61 @@ struct Binding {
     provider: Arc<dyn SecretProvider>,
     reference: String,
     cell: Arc<SecretCell>,
+}
+
+/// One failed refresh of a provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFailure {
+    /// When it happened.
+    pub at: DateTime<Utc>,
+    /// What the provider reported. Carries neither the value nor the
+    /// credentials the provider used to read it, per [`SecretProvider`].
+    pub reason: String,
+}
+
+/// How one provider's refreshes have been going.
+///
+/// A host alarms on the age of `last_success`, which is the gap between "the
+/// credentials in memory were confirmed against the backend" and now. That
+/// timestamp survives a failure: a provider that has been failing for an hour
+/// reports the success from before it started failing, which is what makes the
+/// gap computable. `failing` is the separate question of whether the most
+/// recent attempt worked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderHealth {
+    /// When this provider last re-read all of its values without a failure.
+    ///
+    /// `None` only before any successful read, which [`SecretStore::resolve`]
+    /// rules out for a store it builds.
+    pub last_success: Option<DateTime<Utc>>,
+
+    /// The most recent failure, kept after recovery so a host can see that a
+    /// provider has been flapping.
+    pub last_failure: Option<ProviderFailure>,
+
+    /// Whether the most recent refresh failed.
+    pub failing: bool,
+}
+
+/// What a host can learn about a provider it names.
+///
+/// Four states, because a single `Option` conflates them: a host cannot tell a
+/// provider that is failing from one nothing declares, nor either from a store
+/// that was never built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretsHealth {
+    /// No store has been resolved. The engine has not initialized, or the
+    /// document it loaded declares no secrets. Nothing is being refreshed, and
+    /// no credential is in memory to go stale.
+    Uninitialized,
+
+    /// A store exists and declares no provider by that name. An alarm that
+    /// lands here is watching a name the document no longer has, not a healthy
+    /// provider.
+    Undeclared,
+
+    /// The provider is declared, and this is how its refreshes have gone.
+    Resolved(ProviderHealth),
 }
 
 /// What one refresh did.
@@ -145,11 +255,18 @@ impl RefreshReport {
 
 /// Every declared value, resolved.
 pub struct SecretStore {
+    /// The block these bindings were resolved from.
+    ///
+    /// Held here rather than beside the store so the two cannot drift: a
+    /// reload compares against the declaration that produced the values in
+    /// memory, not against whatever config was installed last.
+    declared: SecretsConfig,
     values: HashMap<String, Binding>,
-    /// When each provider last re-read all of its values without a failure.
-    /// `None` for a provider whose most recent refresh failed, which is the
-    /// staleness signal an operator alarms on.
-    last_success: HashMap<String, ArcSwapOption<DateTime<Utc>>>,
+    /// How each declared provider's refreshes have been going. Keyed by every
+    /// provider the document declared, including one no value is bound to, so
+    /// a host alarming on a name can tell "declared and idle" from "not
+    /// declared".
+    health: HashMap<String, ArcSwap<ProviderHealth>>,
     /// Serializes refreshes so two callers cannot interleave reads against one
     /// backend, and so a slow refresh does not overlap the next one.
     refresh_lock: Mutex<()>,
@@ -232,15 +349,27 @@ impl SecretStore {
             );
         }
 
-        let now = Arc::new(Utc::now());
-        let last_success = providers
+        // Every value read, so every provider has confirmed its credentials
+        // against its backend as of now.
+        let resolved_at = Utc::now();
+        let health = providers
             .keys()
-            .map(|name| (name.clone(), ArcSwapOption::new(Some(Arc::clone(&now)))))
+            .map(|name| {
+                (
+                    name.clone(),
+                    ArcSwap::from_pointee(ProviderHealth {
+                        last_success: Some(resolved_at),
+                        last_failure: None,
+                        failing: false,
+                    }),
+                )
+            })
             .collect();
 
         Ok(Self {
+            declared: config.clone(),
             values,
-            last_success,
+            health,
             refresh_lock: Mutex::new(()),
         })
     }
@@ -249,10 +378,21 @@ impl SecretStore {
     #[must_use]
     pub fn empty() -> Self {
         Self {
+            declared: SecretsConfig::default(),
             values: HashMap::new(),
-            last_success: HashMap::new(),
+            health: HashMap::new(),
             refresh_lock: Mutex::new(()),
         }
+    }
+
+    /// The `secrets:` block these values were resolved from.
+    ///
+    /// What a reload compares against. Values are read once, during
+    /// `initialize`, so a document declaring anything else describes bindings
+    /// the process does not have.
+    #[must_use]
+    pub fn declared(&self) -> &SecretsConfig {
+        &self.declared
     }
 
     /// A handle to one declared value, or `None` when nothing declares it.
@@ -297,16 +437,27 @@ impl SecretStore {
 
     /// When this provider last re-read all of its values without a failure.
     ///
-    /// `None` once a refresh against it has failed, and until one succeeds
-    /// again. A host that alarms on the gap between this and now is alarming on
-    /// "the credentials in memory may no longer be the ones in the backend",
-    /// which is the failure this design trades availability for.
+    /// Kept across a failure, so the gap between this and now is how long the
+    /// credentials in memory have gone unconfirmed against the backend. That
+    /// gap is what a host alarms on, and it is the exposure this design accepts
+    /// in exchange for serving through a backend outage.
+    ///
+    /// `None` only for a provider nothing declares. Whether the most recent
+    /// refresh failed is [`Self::provider_health`].
     #[must_use]
     pub fn provider_last_success(&self, provider: &str) -> Option<DateTime<Utc>> {
-        self.last_success
+        self.health
             .get(provider)
-            .and_then(arc_swap::ArcSwapAny::load_full)
-            .map(|stamp| *stamp)
+            .and_then(|health| health.load().last_success)
+    }
+
+    /// How this provider's refreshes have been going, or `None` when nothing
+    /// declares it.
+    #[must_use]
+    pub fn provider_health(&self, provider: &str) -> Option<ProviderHealth> {
+        self.health
+            .get(provider)
+            .map(|health| ProviderHealth::clone(&health.load()))
     }
 
     /// Re-read every declared value.
@@ -337,7 +488,9 @@ impl SecretStore {
         let mut report = RefreshReport::default();
         for (provider_name, mut bound) in by_provider {
             bound.sort_unstable_by_key(|(name, _)| *name);
-            let mut all_read = true;
+            // The first failure, since one is enough to make the provider's
+            // values unconfirmed and the report carries them all anyway.
+            let mut failure: Option<String> = None;
             for (name, binding) in bound {
                 match binding.provider.get_secret(&binding.reference).await {
                     Ok(value) => {
@@ -348,7 +501,9 @@ impl SecretStore {
                         }
                     },
                     Err(source) => {
-                        all_read = false;
+                        if failure.is_none() {
+                            failure = Some(format!("{source}"));
+                        }
                         report.failed.push(SecretResolveError {
                             secret: name.to_owned(),
                             provider: provider_name.to_owned(),
@@ -357,15 +512,38 @@ impl SecretStore {
                     },
                 }
             }
-            if let Some(slot) = self.last_success.get(provider_name) {
-                if all_read {
-                    slot.store(Some(Arc::new(Utc::now())));
-                } else {
-                    slot.store(None);
-                }
-            }
+            self.record_refresh(provider_name, failure);
         }
         report
+    }
+
+    /// Fold one provider's result into its health, keeping what the other
+    /// outcome established.
+    ///
+    /// A success keeps the last failure, so a flapping provider stays visible
+    /// as one. A failure keeps the last success, which is the timestamp a
+    /// staleness alarm subtracts from now; clearing it would leave the host
+    /// unable to tell a provider that failed a moment ago from one that has
+    /// been failing since startup.
+    fn record_refresh(&self, provider: &str, failure: Option<String>) {
+        let Some(slot) = self.health.get(provider) else {
+            return;
+        };
+        let current = slot.load();
+        let now = Utc::now();
+        let updated = match failure {
+            None => ProviderHealth {
+                last_success: Some(now),
+                last_failure: current.last_failure.clone(),
+                failing: false,
+            },
+            Some(reason) => ProviderHealth {
+                last_success: current.last_success,
+                last_failure: Some(ProviderFailure { at: now, reason }),
+                failing: true,
+            },
+        };
+        slot.store(Arc::new(updated));
     }
 }
 
@@ -408,8 +586,9 @@ pub(crate) fn fixed(name: &str, value: &str) -> SecretStore {
         },
     );
     SecretStore {
+        declared: SecretsConfig::default(),
         values,
-        last_success: HashMap::new(),
+        health: HashMap::new(),
         refresh_lock: Mutex::new(()),
     }
 }
@@ -471,6 +650,11 @@ mod tests {
 
     /// A store over one scripted provider, built without going through config.
     fn store_over(provider: Arc<Scripted>) -> SecretStore {
+        store_over_value(provider, "first")
+    }
+
+    /// The same, for a test that needs the cell to start at a known value.
+    fn store_over_value(provider: Arc<Scripted>, initial: &str) -> SecretStore {
         let provider: Arc<dyn SecretProvider> = provider;
         let mut values = HashMap::new();
         values.insert(
@@ -479,14 +663,25 @@ mod tests {
                 provider_name: "scripted".to_owned(),
                 provider,
                 reference: "ignored".to_owned(),
-                cell: Arc::new(SecretCell::new(Zeroizing::new("first".to_owned()))),
+                cell: Arc::new(SecretCell::new(Zeroizing::new(initial.to_owned()))),
             },
         );
-        let mut last_success = HashMap::new();
-        last_success.insert("scripted".to_owned(), ArcSwapOption::empty());
+        // Never refreshed, so no success and no failure yet. `resolve` seeds a
+        // success instead, which is why these tests assert on movement rather
+        // than on an absolute stamp.
+        let mut health = HashMap::new();
+        health.insert(
+            "scripted".to_owned(),
+            ArcSwap::from_pointee(ProviderHealth {
+                last_success: None,
+                last_failure: None,
+                failing: false,
+            }),
+        );
         SecretStore {
+            declared: SecretsConfig::default(),
             values,
-            last_success,
+            health,
             refresh_lock: Mutex::new(()),
         }
     }
@@ -546,16 +741,61 @@ mod tests {
             "a stale credential serves traffic; a cleared one does not"
         );
         assert_eq!(handle.generation(), 1, "a failure is not a change");
-        assert!(
-            store.provider_last_success("scripted").is_none(),
-            "a failed provider reports no successful refresh"
-        );
 
         provider.set("third");
         let report = store.refresh().await;
         assert!(report.is_ok());
         assert_eq!(handle.get().as_str(), "third");
-        assert!(store.provider_last_success("scripted").is_some());
+    }
+
+    /// A staleness alarm subtracts the last success from now, so the failure
+    /// that makes the credential stale must not be what erases the timestamp.
+    #[tokio::test]
+    async fn a_failure_keeps_the_last_success_and_reports_itself() {
+        let provider = Scripted::new("second");
+        let store = store_over(Arc::clone(&provider));
+
+        store.refresh().await;
+        let confirmed = store
+            .provider_last_success("scripted")
+            .expect("a successful refresh records when it happened");
+
+        provider.fail();
+        store.refresh().await;
+
+        let health = store.provider_health("scripted").expect("declared");
+        assert_eq!(
+            health.last_success,
+            Some(confirmed),
+            "the age of the last success is what a staleness alarm reads"
+        );
+        assert!(health.failing, "the most recent refresh failed");
+        let failure = health.last_failure.expect("the failure is reported");
+        assert!(failure.reason.contains("unreachable"), "{}", failure.reason);
+        assert!(failure.at >= confirmed);
+
+        provider.set("third");
+        store.refresh().await;
+        let health = store.provider_health("scripted").expect("declared");
+        assert!(!health.failing, "a success clears the current failure");
+        assert!(
+            health.last_success > Some(confirmed),
+            "a success advances the timestamp"
+        );
+        assert!(
+            health.last_failure.is_some(),
+            "the earlier failure stays visible, so flapping is not invisible"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_provider_has_no_health() {
+        let store = store_over(Scripted::new("first"));
+        assert!(store.provider_health("scripted").is_some());
+        assert!(
+            store.provider_health("no-such-provider").is_none(),
+            "a name nothing declares is not a healthy provider"
+        );
     }
 
     #[tokio::test]
@@ -566,6 +806,55 @@ mod tests {
         let (a, b) = tokio::join!(store.refresh(), store.refresh());
         assert!(a.is_ok() && b.is_ok());
         assert_eq!(provider.reads(), 2, "each refresh reads once, in turn");
+    }
+
+    /// Refresh while a consumer reads. Every value the scripted provider
+    /// returns names the generation it produces, so a snapshot pairing bytes
+    /// with a generation from either side of a refresh fails the invariant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_pairs_a_value_with_its_own_generation() {
+        const ROTATIONS: u64 = 200;
+
+        let provider = Scripted::new("v0");
+        let store = Arc::new(store_over_value(Arc::clone(&provider), "v0"));
+        let handle = store.secret("api_key").expect("declared");
+
+        let rotating = {
+            let store = Arc::clone(&store);
+            let provider = Arc::clone(&provider);
+            tokio::spawn(async move {
+                for n in 1..=ROTATIONS {
+                    provider.set(&format!("v{n}"));
+                    store.refresh().await;
+                }
+            })
+        };
+
+        while !rotating.is_finished() {
+            let snapshot = handle.snapshot();
+            assert_eq!(
+                snapshot.value(),
+                format!("v{}", snapshot.generation()),
+                "the value and the generation came from different refreshes"
+            );
+            tokio::task::yield_now().await;
+        }
+        rotating.await.expect("the rotating task does not panic");
+
+        let snapshot = handle.snapshot();
+        assert_eq!(
+            snapshot.generation(),
+            ROTATIONS,
+            "every rotation changed the bytes, so every one moved the generation"
+        );
+        assert_eq!(snapshot.value(), format!("v{ROTATIONS}"));
+    }
+
+    #[test]
+    fn a_snapshot_does_not_print_its_value() {
+        let handle = SecretRef::fixed("hunter2");
+        let printed = format!("{:?}", handle.snapshot());
+        assert!(!printed.contains("hunter2"), "{printed}");
     }
 
     #[test]
