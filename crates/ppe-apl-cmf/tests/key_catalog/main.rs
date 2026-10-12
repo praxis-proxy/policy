@@ -270,6 +270,18 @@ fn type_of(value: &AttributeValue) -> KeyType {
     }
 }
 
+/// Whether an emitted value satisfies the catalog's type declaration.
+///
+/// Flattened JSON may contribute any scalar leaf or a scalar array promoted to
+/// a string set. `NonScalar` is separate: the extension walkers deliberately
+/// omit containers rather than marking them as policy-visible values.
+fn type_matches(declared: KeyType, actual: KeyType) -> bool {
+    match declared {
+        KeyType::Flattened => actual != KeyType::NonScalar,
+        expected => expected == actual,
+    }
+}
+
 // =====================================================================
 // AC 1: the bridge emits exactly the catalog
 // =====================================================================
@@ -319,9 +331,7 @@ fn every_emitted_value_has_the_documented_type() {
     for (key, value) in emitted().iter() {
         let entry = entry_for(key).expect("checked by the key set test");
         let actual = type_of(value);
-        // A flattened family takes the host JSON's type, so the key does not
-        // fix one. Everything else does.
-        if entry.ty != KeyType::Flattened && entry.ty != actual {
+        if !type_matches(entry.ty, actual) {
             wrong.push(format!(
                 "{key} is {} but the catalog says {}",
                 actual.documented(),
@@ -331,6 +341,20 @@ fn every_emitted_value_has_the_documented_type() {
     }
     wrong.sort();
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+#[test]
+fn flattened_json_accepts_leaves_but_not_non_scalar_markers() {
+    for actual in [
+        KeyType::Bool,
+        KeyType::Int,
+        KeyType::Float,
+        KeyType::String,
+        KeyType::StringSet,
+    ] {
+        assert!(type_matches(KeyType::Flattened, actual), "{actual:?}");
+    }
+    assert!(!type_matches(KeyType::Flattened, KeyType::NonScalar));
 }
 
 // =====================================================================
@@ -437,6 +461,13 @@ fn docs_path() -> PathBuf {
         .expect("docs/content/cmf-extensions.md exists")
 }
 
+fn guide_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/content/extensions.md")
+        .canonicalize()
+        .expect("docs/content/extensions.md exists")
+}
+
 /// What one documented row says about a key.
 struct Documented {
     /// The Type column, with any parenthesized qualifier dropped.
@@ -444,6 +475,27 @@ struct Documented {
 
     /// The `### N. <slot>` section the row appears under.
     slot: String,
+}
+
+/// Insert one documented row without letting a later duplicate hide it.
+fn insert_documented(rows: &mut HashMap<String, Documented>, key: String, documented: Documented) {
+    let previous = rows.insert(key.clone(), documented);
+    assert!(
+        previous.is_none(),
+        "the per-slot tables document `{key}` more than once"
+    );
+}
+
+#[test]
+#[should_panic(expected = "the per-slot tables document `subject.id` more than once")]
+fn duplicate_documented_keys_are_rejected() {
+    let documented = || Documented {
+        ty: "String".to_owned(),
+        slot: "security".to_owned(),
+    };
+    let mut rows = HashMap::new();
+    insert_documented(&mut rows, "subject.id".to_owned(), documented());
+    insert_documented(&mut rows, "subject.id".to_owned(), documented());
 }
 
 /// Each key the per-slot tables list, with the type and the section they give
@@ -504,7 +556,8 @@ fn documented() -> HashMap<String, Documented> {
         let key = key.replace("<dotted>", "<name>");
         if let Some(rest) = key.strip_prefix("<ns>.") {
             for ns in ["caller_workload", "this_workload"] {
-                rows.insert(
+                insert_documented(
+                    &mut rows,
                     format!("{ns}.{rest}"),
                     Documented {
                         ty: ty.clone(),
@@ -513,7 +566,8 @@ fn documented() -> HashMap<String, Documented> {
                 );
             }
         } else {
-            rows.insert(
+            insert_documented(
+                &mut rows,
                 key,
                 Documented {
                     ty,
@@ -591,6 +645,24 @@ fn each_key_is_documented_under_the_slot_it_comes_from() {
         misplaced.is_empty(),
         "a key under the wrong section describes a field that slot does not \
          have, and a reader looking under the right one does not find it:          {misplaced:#?}"
+    );
+}
+
+#[test]
+fn the_capability_guide_names_only_capabilities_core_recognises() {
+    use praxis_policy_core::extensions::Capability;
+
+    let text = std::fs::read_to_string(guide_path()).expect("the capability guide reads");
+    let mut unknown: Vec<&str> = text
+        .split('`')
+        .filter(|token| token.starts_with("read_"))
+        .filter(|token| serde_json::from_str::<Capability>(&format!("\"{token}\"")).is_err())
+        .collect();
+    unknown.sort_unstable();
+    unknown.dedup();
+    assert!(
+        unknown.is_empty(),
+        "docs/content/extensions.md names read capabilities core does not recognise: {unknown:?}"
     );
 }
 

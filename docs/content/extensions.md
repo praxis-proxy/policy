@@ -5,38 +5,41 @@ contextual state policy reasons about. Identity, security labels, the delegation
 chain, request headers, and agent session context are extensions.
 Each extension is bridged into the flat attribute bag APL reads, under a
 well-known namespace. Capability-gating controls which plugins may read or
-write each one.
+write credential-bearing state; operational context is unrestricted.
 
 Hosts rarely configure extensions directly. Capability gating restricts the
-state available to plugins that execute APL effects. The namespaces below are
-the exact keys an APL predicate or plugin may read. The per-type absent-value
-contract, original vs flattened keys, and the catalog of every key the
-bridge emits are in [CMF extensions and the attribute bag](cmf-extensions.md).
+sensitive state available to plugins that execute APL effects. The namespaces
+below are the exact keys an APL predicate or plugin may read. The per-type
+absent-value contract, original vs flattened keys, and the catalog of every key
+the bridge emits are in [CMF extensions and the attribute bag](cmf-extensions.md).
 
 ## The extensions
 
-Each extension flattens into bag attributes under its namespace, gated by a read
-capability. A prefix ending in `.` matches any key beneath it (`role.` matches
+Each extension flattens into bag attributes under its namespace. The Access
+column says whether a plugin needs a capability for the typed slot behind those
+keys. A prefix ending in `.` matches any key beneath it (`role.` matches
 `role.hr`); a bare name is an exact key.
 
-| Extension | Carries | Bag namespace | Read capability |
+| Extension | Carries | Bag namespace | Access |
 |-----------|---------|---------------|-----------------|
 | Security (subject) | subject id and type, roles, permissions, teams, claims, authentication status | `subject.id`, `subject.type`, `authenticated`, `subject.roles`, `subject.permissions`, `subject.teams`, `role.*`, `perm.*`, `team.*`, `claim.*` | `read_subject`, `read_roles`, `read_permissions`, `read_teams`, `read_claims` |
 | Security (client) | OAuth application identity: client id, trust level, roles, permissions, scopes, audiences, teams, claims | `client.*` | `read_client` |
 | Security (workload) | attested workload identity (SPIFFE / mTLS) for the inbound caller and for this instance | `caller_workload.*`, `this_workload.*` | `read_workload` |
-| Security (labels) | taint / classification labels for information-flow control | `security.labels`, `security.classification` | `read_labels`, `append_labels` |
+| Security (labels) | taint labels for information-flow control | `security.labels` | `read_labels`, `append_labels` |
+| Security (classification) | host classification | `security.classification` | unrestricted |
+| Security (authentication method) | host-recorded authentication method | `auth_method` | unrestricted |
 | Delegation | delegation depth, delegated flag, origin and actor subjects, chain age | `delegation.*`, `delegated` | `read_delegation`, `append_delegation` |
 | Agent | session, conversation, turn, and lineage context | `agent.*` | `read_agent` |
-| Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | `read_meta` |
-| Request | environment, request id, timestamp, trace and span ids | `request.*` | `read_request` |
+| Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | unrestricted |
+| Request | environment, request id, timestamp, trace and span ids | `request.*` | unrestricted |
 | HTTP | request line (method, path, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
-| LLM | model id, provider, capabilities | `llm.*` | `read_llm` |
+| LLM | model id, provider, capabilities | `llm.*` | unrestricted |
 | LLM request | the host-parsed inference request body | not flattened; OPA, CEL, and Cedar read it as `llm.request` | `read_llm_request` |
-| MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | `read_mcp` |
-| Completion | stop reason, token counts, model, latency | `completion.*` | `read_completion` |
-| Provenance | source, message id, parent id | `provenance.*` | `read_provenance` |
-| Framework | agentic framework name and version, node and graph ids, metadata | `framework.*` | `read_framework` |
-| Custom | free-form host-defined namespace | `custom.*` | `read_custom` |
+| MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | unrestricted |
+| Completion | stop reason, token counts, model, latency | `completion.*` | unrestricted |
+| Provenance | source, message id, parent id | `provenance.*` | unrestricted |
+| Framework | agentic framework name and version, node and graph ids, metadata | `framework.*` | unrestricted |
+| Custom | free-form host-defined namespace | `custom.*` | unrestricted |
 | Raw credentials | inbound tokens and minted delegated tokens | flow through plugin payloads, not the bag | `read_inbound_credentials`, `read_delegated_tokens` |
 | Candidate constraint | folded backend routing constraint from `restrict` effects | not a bag namespace — read by the host router | written by the policy engine |
 
@@ -59,8 +62,9 @@ policy engine is its only writer today.
 ## Capabilities
 
 A plugin declares the capabilities it needs. PPE filters the extensions before
-handing them to the plugin, so a plugin sees only what it declared. The default
-is no access; capabilities are additive grants.
+handing them to the plugin. The default for a capability-gated slot is no
+access, and capabilities are additive grants. Unrestricted slots reach every
+plugin regardless of what it declares.
 
 ```yaml
 plugins:
@@ -86,19 +90,16 @@ plugins:
 | `read_workload` | `caller_workload.*`, `this_workload.*` |
 | `read_delegation` | `delegation.*`, `delegated` |
 | `read_agent` | `agent.*` |
-| `read_meta` | `meta.*` |
-| `read_request` | `request.*` |
 | `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` |
-| `read_llm` | `llm.*` |
 | `read_llm_request` | no bag keys; gates the parsed request body on `Extensions.llm_request` |
-| `read_mcp` | `mcp.*` |
-| `read_completion` | `completion.*` |
-| `read_provenance` | `provenance.*` |
-| `read_framework` | `framework.*` |
-| `read_custom` | `custom.*` |
 | `read_labels` | the labels on the security extension. A plugin reads them from the extension; `security.labels` in the bag is what an APL predicate reads |
 | `read_inbound_credentials` | no bag keys; gates raw inbound tokens in the plugin payload |
 | `read_delegated_tokens` | no bag keys; gates minted tokens in the plugin payload |
+
+There is no read capability for `request`, `provenance`, `completion`, `llm`,
+`framework`, `mcp`, `meta`, or `custom`: those slots are unrestricted. The
+`auth_method` and `security.classification` sub-fields are unrestricted too.
+Inventing a read-capability name for one of these slots does not make it gated.
 
 `read_roles`, `read_permissions`, `read_teams`, and `read_claims` each imply the
 `read_subject` baseline (`subject.id`, `subject.type`, `authenticated`). The

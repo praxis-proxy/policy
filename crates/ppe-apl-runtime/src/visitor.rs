@@ -619,7 +619,6 @@ fn default_base_capabilities() -> std::collections::HashSet<String> {
         "read_labels",
         "read_delegation",
         "read_agent",
-        "read_meta",
     ]
     .iter()
     .map(std::string::ToString::to_string)

@@ -148,7 +148,6 @@ plugins:
     capabilities:
       - read_subject
       - read_client
-      - read_meta
       - read_delegated_tokens
     config:
       destination: tracing
