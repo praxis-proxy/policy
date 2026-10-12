@@ -436,7 +436,7 @@ plugins:
     kind: audit/logger
     hooks: [cmf.tool_pre_invoke]
     on_error: ignore
-    capabilities: [read_subject, read_meta]
+    capabilities: [read_subject]
     config:
       destination: tracing
       source: {source}

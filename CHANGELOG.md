@@ -41,6 +41,35 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   effective-policy artifact prints the name and never the value, and says that
   no plugin capability reads the slot rather than naming one.
   ([#93](https://github.com/praxis-proxy/policy/issues/93))
+- MCP `annotations` now reach policy as `mcp.tool.annotations.<name>` and the
+  same under `mcp.resource` and `mcp.prompt`, flattened through the JSON walker
+  that already carries `custom.*`, `framework.metadata.*` and `claim.*`. This
+  is where `readOnlyHint` and `destructiveHint` live, so a rule can refuse a
+  destructive tool. They had been withheld for being free-form JSON, which does
+  not distinguish them from the four maps already on the bag. The tool and
+  output schemas and the prompt's argument list stay off, now with the reason
+  recorded: they describe the shape of a call rather than a fact about this
+  one, and the argument values already reach policy as `args.*`.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- `caller_workload.attested_at` and `this_workload.attested_at` now reach
+  policy, rendered as RFC3339 with second precision and a literal `Z`. The
+  fixed width makes the string sort the way the instant does, which CEL and
+  Rego can use. **APL cannot**: its order comparison is numeric and fails
+  closed on an operand that will not coerce to a finite `f64`, so
+  `attested_at < "..."` denies every request there rather than testing
+  freshness. `caller_workload.attested_at_epoch` and
+  `this_workload.attested_at_epoch` carry the same instant as Unix seconds for
+  that reason, which APL orders on its exact integer path, so an event-pinned
+  floor such as `attested_at_epoch < 1790812800: deny` is writable: "reject
+  anything attested before the CA rotation" never goes stale. A rolling window
+  still is not writable, because APL compares an attribute against a literal
+  with no arithmetic and no `now()`; that is tracked separately. Both keys
+  truncate one value to seconds, so they cannot describe different instants,
+  and truncation is toward the past so a freshness rule errs toward stale.
+  Tests through the evaluator pin both what APL can and cannot do here. These
+  are the only instants the engine formats; `request.timestamp` and
+  `completion.created_at` are host-supplied strings with no format guarantee.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
 
 ### Changed
 
@@ -92,6 +121,34 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
     source added is not a breaking change.
   ([#93](https://github.com/praxis-proxy/policy/issues/93))
 
+### Removed
+
+- **Breaking for Rust callers of `praxis_policy_apl_cmf::constants`:** removed
+  `CAP_READ_META`, `CAP_READ_REQUEST`, `CAP_READ_LLM`, `CAP_READ_MCP`,
+  `CAP_READ_COMPLETION`, `CAP_READ_PROVENANCE`, `CAP_READ_FRAMEWORK` and
+  `CAP_READ_CUSTOM`, along with their `capability_namespaces` entries. None is
+  a `Capability` in `praxis-policy-core`: these are the eight slots core leaves
+  unrestricted, so no capability gates them and there is nothing to name.
+  Declaring one in a plugin's `capabilities:` granted nothing, and
+  `known_read_capabilities` offered it to a config validator as recognised.
+  `capability_namespaces` still answers with no prefixes for these names, now
+  through its unknown-capability path. A test deserializes every remaining
+  `CAP_*` through core's own serde impl, so a rename in core fails here instead
+  of drifting.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- **Breaking for Rust callers of `praxis_policy_apl_cmf::constants`:** removed
+  `BAG_META_PREFIX`, `BAG_REQUEST_PREFIX`, `BAG_LLM_PREFIX`, `BAG_MCP_PREFIX`,
+  `BAG_COMPLETION_PREFIX`, `BAG_PROVENANCE_PREFIX` and
+  `BAG_FRAMEWORK_PREFIX`. Their only consumer was the capability table, which
+  no longer names them because those slots are unrestricted, and they cannot
+  serve the drift prevention the module header promised: every key in those
+  namespaces is a fixed string, so a prefix constant would guard only the first
+  segment of `mcp.tool.name`. The bag keys themselves are unchanged and remain
+  readable from any policy; only the Rust constants are gone.
+  `BAG_CUSTOM_PREFIX` stays and is now used by its extractor, which composes
+  `custom.<name>` and so wants the prefix.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+
 ### Fixed
 
 - Rejected JWTs with unsupported critical headers. OAuth token exchange now
@@ -113,6 +170,47 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   travels with the HTTP extension. Plugin header writes preserve the original
   credential while allowing unrelated header changes.
   ([#93](https://github.com/praxis-proxy/policy/issues/93))
+- `capability_namespaces` no longer claims that `read_request`,
+  `read_provenance`, `read_completion`, `read_llm`, `read_framework`,
+  `read_mcp`, `read_meta` and `read_custom` unlock bag namespaces. Those eight
+  slots are `AccessPolicy::Unrestricted` in `filter_extensions`, so every
+  plugin receives them whatever it declared, and the table was telling an
+  operator that withholding a capability would withhold the data. All eight now
+  report no prefixes, and the page says which slots capabilities actually
+  withhold. A test filters a fully populated `Extensions` through
+  `filter_extensions` and asserts the gating each key declares, so the
+  description is checked against the behaviour rather than against another
+  hand-maintained list.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- `read_teams` now unlocks the flattened `team.*` prefix alongside
+  `subject.teams`. The bridge has always written `team.<name>` for each team,
+  the way `read_roles` and `read_permissions` cover their own flattened
+  aliases, but `capability_namespaces` named only the set. An operator reading
+  the table to answer what a plugin can see was told less than the plugin
+  actually receives.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+
+### Documentation
+
+- The per-slot key tables in `docs/content/cmf-extensions.md` are now checked
+  against the bridge rather than maintained by hand.
+  `crates/ppe-apl-cmf/tests/key_catalog/` declares every key the bridge emits
+  with its type, its slot and the capability that gates it, and asserts that
+  flattening a fully populated `Extensions` emits exactly those keys, that the
+  tables list exactly those keys under the right slot, and that
+  `capability_namespaces` agrees. The page also now records that `auth_method`
+  and `security.classification` are the two keys no capability gates, since
+  `filter_extensions` includes them whatever a plugin declared.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- Recorded why `client.teams` is set-only where `subject.teams` also carries
+  the flattened `team.<name>` boolean. The flattened form cannot hold a dotted
+  name, so it is lossy wherever one occurs while the set always holds every
+  member; the five collections that carry it predate the sets and the list is
+  closed. Both namespaces already have the complete form, so what `subject.*`
+  has in addition is sugar rather than a capability `client.*` lacks. A test
+  pins it, because the two loops beside it in `extract_client` do flatten and
+  completing the pattern is the obvious wrong edit.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
 
 ## [0.4.1] - 2026-10-05
 

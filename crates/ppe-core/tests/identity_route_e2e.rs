@@ -863,7 +863,7 @@ routes:
 // Identity is unusual in that resolvers typically WRITE state (subject,
 // chain) rather than read it — but they still need read capabilities
 // for any extension-derived context they consult during resolution
-// (e.g., a `read_meta`-gated resolver that branches on entity tags).
+// (e.g., a `read_labels`-gated resolver that branches on session taint).
 // ---------------------------------------------------------------------
 
 /// Build extensions seeded with subject + label so cap-gating tests

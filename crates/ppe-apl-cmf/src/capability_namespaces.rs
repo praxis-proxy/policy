@@ -81,7 +81,11 @@ const TABLE: &[CapabilityEntry] = &[
     },
     CapabilityEntry {
         name: CAP_READ_TEAMS,
+        // `team.` belongs here for the same reason `role.` belongs under
+        // `read_roles`: `security.rs` writes a flattened alias per member, so
+        // omitting the prefix understates what the capability already shows.
         prefixes: &[
+            BAG_TEAM_PREFIX,
             BAG_SUBJECT_TEAMS,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
@@ -135,14 +139,6 @@ const TABLE: &[CapabilityEntry] = &[
         prefixes: &[BAG_AGENT_PREFIX],
     },
     CapabilityEntry {
-        name: CAP_READ_META,
-        prefixes: &[BAG_META_PREFIX],
-    },
-    CapabilityEntry {
-        name: CAP_READ_REQUEST,
-        prefixes: &[BAG_REQUEST_PREFIX],
-    },
-    CapabilityEntry {
         name: CAP_READ_HEADERS,
         prefixes: &[
             BAG_HTTP_REQUEST_HEADERS_PREFIX,
@@ -157,34 +153,10 @@ const TABLE: &[CapabilityEntry] = &[
         ],
     },
     CapabilityEntry {
-        name: CAP_READ_LLM,
-        prefixes: &[BAG_LLM_PREFIX],
-    },
-    CapabilityEntry {
         // Gates `Extensions.llm_request`, which reaches PDPs through a
         // structured side channel and is never flattened into the bag.
         name: CAP_READ_LLM_REQUEST,
         prefixes: &[],
-    },
-    CapabilityEntry {
-        name: CAP_READ_MCP,
-        prefixes: &[BAG_MCP_PREFIX],
-    },
-    CapabilityEntry {
-        name: CAP_READ_COMPLETION,
-        prefixes: &[BAG_COMPLETION_PREFIX],
-    },
-    CapabilityEntry {
-        name: CAP_READ_PROVENANCE,
-        prefixes: &[BAG_PROVENANCE_PREFIX],
-    },
-    CapabilityEntry {
-        name: CAP_READ_FRAMEWORK,
-        prefixes: &[BAG_FRAMEWORK_PREFIX],
-    },
-    CapabilityEntry {
-        name: CAP_READ_CUSTOM,
-        prefixes: &[BAG_CUSTOM_PREFIX],
     },
 ];
 
@@ -294,6 +266,38 @@ mod tests {
         assert!(prefixes.contains(&BAG_HTTP_STATUS));
     }
 
+    /// The module header claims every `CAP_*` name matches a capability
+    /// praxis-policy-core recognises, with core authoritative. Eight did not:
+    /// the eight slots core leaves `Unrestricted` have no `Capability` variant,
+    /// so naming one was naming something that does not exist, and
+    /// `known_read_capabilities` offered it to a config validator as
+    /// recognised. This holds the claim rather than restating it.
+    ///
+    /// Deserializing is the check because core owns the spelling through
+    /// serde, so a rename there fails here rather than drifting.
+    #[test]
+    fn every_capability_name_is_one_core_recognises() {
+        use praxis_policy_core::extensions::Capability;
+
+        let mut unknown: Vec<&str> = Vec::new();
+        for name in known_read_capabilities().chain([
+            CAP_APPEND_LABELS,
+            CAP_APPEND_DELEGATION,
+            CAP_WRITE_HEADERS,
+        ]) {
+            if serde_json::from_str::<Capability>(&format!("\"{name}\"")).is_err() {
+                unknown.push(name);
+            }
+        }
+        unknown.sort_unstable();
+        assert!(
+            unknown.is_empty(),
+            "these name no capability core has, so declaring one grants \
+             nothing and a validator built on `known_read_capabilities` would \
+             accept it: {unknown:?}"
+        );
+    }
+
     #[test]
     fn unknown_capability_returns_empty() {
         assert!(capability_namespaces("read_nonsense").is_empty());
@@ -370,7 +374,6 @@ mod tests {
         // Spot-check canonical names are present.
         let names: HashSet<&str> = known_read_capabilities().collect();
         assert!(names.contains(CAP_READ_SUBJECT));
-        assert!(names.contains(CAP_READ_META));
         assert!(names.contains(CAP_READ_DELEGATION));
     }
 }

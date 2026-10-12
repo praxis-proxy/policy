@@ -11,15 +11,20 @@
 //
 // # Source-of-truth invariants
 //
-// * `CAP_*` names match `praxis_policy_core::extensions::filter::filter_extensions`
-//   verbatim. praxis-policy-core is authoritative — if it changes a cap name,
-//   bump here and update the mapping table.
-// * `BAG_*` prefixes match what the per-extension extractor modules
-//   (`security.rs`, `delegation.rs`, etc.) actually write into the
-//   bag. The extractor files still use string literals today; a
-//   future cleanup can refactor them to consume these constants to
-//   prevent drift. Tests in `capability_namespaces` flag the
-//   contract.
+// * Every `CAP_*` name is a capability praxis-policy-core recognises, which
+//   `every_capability_name_is_one_core_recognises` holds by deserializing each
+//   through core's own serde impl. core is authoritative: a rename there fails
+//   that test rather than drifting. There is deliberately no constant for a
+//   slot core leaves `Unrestricted`, because no capability gates one and
+//   naming it would offer a config validator a name that grants nothing.
+// * A `BAG_*` prefix exists where a key is composed with a variable, as
+//   `format!("{BAG_ROLE_PREFIX}{role}")`. A key that is a fixed string is
+//   written as a literal in its extractor, deliberately: a prefix constant
+//   would guard only the first segment of `mcp.tool.name`, which nobody
+//   mistypes, while costing an allocation and a layer of indirection.
+//   Drift between a written key and the declared vocabulary is caught by
+//   `tests/key_catalog/`, which asserts the emitted key set against the
+//   catalog, the capability gating and the documented tables.
 
 /// Capability permitting a plugin to read subject identity.
 pub const CAP_READ_SUBJECT: &str = "read_subject";
@@ -48,26 +53,10 @@ pub const CAP_READ_DELEGATED_TOKENS: &str = "read_delegated_tokens";
 pub const CAP_READ_DELEGATION: &str = "read_delegation";
 /// Capability permitting a plugin to read agent session and lineage.
 pub const CAP_READ_AGENT: &str = "read_agent";
-/// Capability permitting a plugin to read host operational metadata.
-pub const CAP_READ_META: &str = "read_meta";
-/// Capability permitting a plugin to read request environment.
-pub const CAP_READ_REQUEST: &str = "read_request";
 /// Capability permitting a plugin to read HTTP headers.
 pub const CAP_READ_HEADERS: &str = "read_headers";
-/// Capability permitting a plugin to read model identity.
-pub const CAP_READ_LLM: &str = "read_llm";
 /// Capability permitting a plugin to read the host-parsed LLM request document.
 pub const CAP_READ_LLM_REQUEST: &str = "read_llm_request";
-/// Capability permitting a plugin to read tool and resource metadata.
-pub const CAP_READ_MCP: &str = "read_mcp";
-/// Capability permitting a plugin to read completion metadata.
-pub const CAP_READ_COMPLETION: &str = "read_completion";
-/// Capability permitting a plugin to read message origin.
-pub const CAP_READ_PROVENANCE: &str = "read_provenance";
-/// Capability permitting a plugin to read framework context.
-pub const CAP_READ_FRAMEWORK: &str = "read_framework";
-/// Capability permitting a plugin to read host-supplied custom values.
-pub const CAP_READ_CUSTOM: &str = "read_custom";
 
 /// Capability permitting a plugin to append to session security labels.
 pub const CAP_APPEND_LABELS: &str = "append_labels";
@@ -142,10 +131,6 @@ pub const BAG_DELEGATED: &str = "delegated";
 
 /// Key prefix for agent session and lineage, as in `agent.<name>`.
 pub const BAG_AGENT_PREFIX: &str = "agent.";
-/// Key prefix for host operational metadata, as in `meta.<name>`.
-pub const BAG_META_PREFIX: &str = "meta.";
-/// Key prefix for request environment, as in `request.<name>`.
-pub const BAG_REQUEST_PREFIX: &str = "request.";
 /// Key prefix for http request headers, as in `http.request_headers.<name>`.
 pub const BAG_HTTP_REQUEST_HEADERS_PREFIX: &str = "http.request_headers.";
 /// Key prefix for http response headers, as in `http.response_headers.<name>`.
@@ -175,15 +160,5 @@ pub const DETAIL_HTTP_STATUS: &str = "http.status";
 pub const DETAIL_HTTP_BODY: &str = "http.body";
 /// Violation `details` key `http.headers`.
 pub const DETAIL_HTTP_HEADERS: &str = "http.headers";
-/// Key prefix for model identity, as in `llm.<name>`.
-pub const BAG_LLM_PREFIX: &str = "llm.";
-/// Key prefix for tool and resource metadata, as in `mcp.<name>`.
-pub const BAG_MCP_PREFIX: &str = "mcp.";
-/// Key prefix for completion metadata, as in `completion.<name>`.
-pub const BAG_COMPLETION_PREFIX: &str = "completion.";
-/// Key prefix for message origin, as in `provenance.<name>`.
-pub const BAG_PROVENANCE_PREFIX: &str = "provenance.";
-/// Key prefix for framework context, as in `framework.<name>`.
-pub const BAG_FRAMEWORK_PREFIX: &str = "framework.";
 /// Key prefix for host-supplied custom values, as in `custom.<name>`.
 pub const BAG_CUSTOM_PREFIX: &str = "custom.";

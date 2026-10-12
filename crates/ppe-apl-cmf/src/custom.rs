@@ -11,6 +11,7 @@
 // Namespace:
 //   custom.<dotted path>   : Bool | Int | Float | String | StringSet
 
+use crate::constants::BAG_CUSTOM_PREFIX;
 use praxis_policy_apl_core::AttributeBag;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -18,7 +19,7 @@ use std::collections::HashMap;
 /// Write host-supplied custom values into the bag.
 pub fn extract_custom(custom: &HashMap<String, Value>, bag: &mut AttributeBag) {
     for (k, v) in custom {
-        crate::payload::walk(v, &format!("custom.{k}"), bag);
+        crate::payload::walk(v, &format!("{BAG_CUSTOM_PREFIX}{k}"), bag);
     }
 }
 

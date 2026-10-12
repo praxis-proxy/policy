@@ -88,6 +88,20 @@ and incorrectly satisfy `has(role.admin)`. Address dotted names through the
 original set: `subject.roles contains "admin.readonly"` in APL or
 `"admin.readonly" in subject.roles` in CEL.
 
+That rule is also why the list above is closed rather than merely unfinished.
+The flattened form cannot represent a dotted name, so it is lossy wherever one
+occurs, while the set always holds every member. Mirroring booleans onto a
+tenth collection would spread an incomplete projection rather than complete the
+vocabulary.
+
+`client.teams` is the case that looks like an oversight and is not.
+`subject.teams` carries both forms and `client.teams` carries only the set, so
+the asymmetry sits inside one namespace pair. It stays set-only: both
+namespaces already have the complete form, and what `subject.*` has in addition
+is the lossy sugar, not a capability `client.*` is missing. An author wanting
+client team membership writes `client.teams contains "platform"`, which is also
+the only form that works when a team name contains a dot.
+
 **Authors should use the original set** for membership (`subject.roles contains
 "hr"` in APL, `"hr" in subject.roles` in CEL, `"hr" in input.subject.roles` in
 OPA). That key is present whenever the subject (or client) sub-record is, so
@@ -186,6 +200,18 @@ Keys listed **always** are written whenever the slot (and, where noted, the
 sub-record) is present. The rest are omitted when the field is `None` or the
 map has no entry.
 
+These tables are checked, not maintained by hand.
+`crates/ppe-apl-cmf/tests/key_catalog/` declares the key universe and asserts
+three things against it: that flattening a fully populated `Extensions` emits
+exactly those keys with those types, that the tables below list exactly those
+keys with the same Type cell and under the slot each key comes from, and that
+`capability_namespaces` unlocks each one through the capability it is gated on
+while leaving the ungated ones alone. A key cannot be added to a table here
+without being added to the catalog, and a key the bridge starts writing fails
+the test until both list it. A field added to an extension stops that test's
+fixture compiling, which is what turns leaving it unbridged into a decision
+someone makes rather than one nobody notices.
+
 ### 1. `security` — `SecurityExtension`
 
 **Subject** (`sec.subject` present):
@@ -227,12 +253,51 @@ These are not `agent.*`. `agent.*` is session context.
 | `<ns>.spiffe_id` | String | `Some` |
 | `<ns>.trust_domain` | String | `Some` |
 | `<ns>.attestor` | String | `Some` |
+| `<ns>.attested_at` | String | `Some`. RFC3339, second precision, `Z`. |
+| `<ns>.attested_at_epoch` | Int | `Some`. The same instant as Unix seconds. |
 | `<ns>.selectors` | StringSet | always |
 | `<ns>.client_id` | String | `Some` |
 
-`attested_at` is not in the bag. `request.timestamp` and
-`completion.created_at` are carried as plain strings, so the bag does not
-refuse timestamps; unifying the three is out of scope here.
+`attested_at` renders as RFC3339 with second precision and a literal `Z`. At
+fixed precision the string sorts the same way the instant does, which is why
+the format is pinned: variable precision would break it, because `.` sorts
+before `Z` and `00.5Z` would compare as earlier than `00Z`.
+
+**APL cannot order it.** APL's `<`, `<=`, `>` and `>=` are numeric: an operand
+that will not coerce to a finite `f64` is unorderable, and the phase fails
+closed. So `caller_workload.attested_at < "2026-10-01T00:00:00Z"` does not
+test freshness, it denies every request, including one whose attestation is
+recent:
+
+```text
+order comparison on `caller_workload.attested_at` failed (fail-closed):
+value is not a finite number
+```
+
+`attested_at_epoch` carries the same instant as Unix seconds, which APL does
+order, on `numeric_compare`'s exact integer path. That is what makes an
+event-pinned floor writable:
+
+<!-- validate: apl-rule -->
+```text
+caller_workload.attested_at_epoch < 1790812800: deny
+```
+
+"reject anything attested before the CA rotation" is a lasting control rather
+than a window that goes stale, so the literal never needs editing. What is
+*not* writable is a rolling window: APL compares an attribute against a
+literal, with no arithmetic and no `now()`, so "attested within the last hour"
+cannot be expressed against either form. That needs language support and is
+tracked separately.
+
+CEL and Rego order both forms, the string lexicographically and the epoch
+numerically.
+
+This is the one of three date keys the engine controls the format of.
+`request.timestamp` and `completion.created_at` are host-supplied strings and
+carry no format guarantee at all, so they are not ordered reliably anywhere.
+Giving the bag a date type, and APL the operators to compare one, is what makes
+a staleness rule writable in the native language.
 
 **Other**, written whenever the security slot itself is present:
 
@@ -252,7 +317,26 @@ The static `data:` payload tree (`data.*` keys) is a different source; see
 
 `capability_namespaces` maps `read_*` capabilities to bag prefixes. `read_labels`
 unlocks `security.labels`; `read_workload` unlocks `caller_workload.*` and
-`this_workload.*`. Nothing writes a `workload.*` prefix.
+`this_workload.*`. Nothing writes a `workload.*` prefix. `read_teams` unlocks
+`team.*` alongside `subject.teams`, the way `read_roles` and `read_permissions`
+unlock their flattened aliases.
+
+`auth_method` and `security.classification` are not gated. `filter_extensions`
+treats them as unrestricted sub-fields and includes them whatever a plugin
+declared, so no capability names them: naming one would describe a grant an
+operator could withhold, and these cannot be withheld.
+
+They are not alone. Eight whole slots are `AccessPolicy::Unrestricted` in
+`praxis_policy_core::extensions::filter` — `request`, `provenance`,
+`completion`, `llm`, `framework`, `mcp`, `meta` and `custom` — so **every key
+under them reaches every plugin and every PDP regardless of capabilities**. The
+`read_request`, `read_provenance`, `read_completion`, `read_llm`,
+`read_framework`, `read_mcp`, `read_meta` and `read_custom` capabilities gate
+nothing on the bag, and `capability_namespaces` returns no prefixes for them.
+
+Capabilities withhold the credential-bearing slots: `security.*` and its
+sub-records, `delegation.*`, `agent.*` and `http.*`. Those are the ones where
+declaring less actually shows a plugin less.
 
 ### 2. `delegation` — `DelegationExtension`
 
@@ -265,7 +349,20 @@ unlocks `security.labels`; `read_workload` unlocks `caller_workload.*` and
 | `delegation.actor_subject_id` | String | `Some` |
 | `delegation.age_seconds` | Float | always |
 
-Per-hop scopes, audience, and strategy stay on the typed chain.
+`chain` is a `Vec<DelegationHop>` and nothing from it is bridged, so
+`delegation.depth <= 2` is expressible and "deny if any hop granted
+`write:payroll`" is not. A plugin that needs per-hop grants reads the typed
+chain.
+
+Putting any of it on the bag first requires deciding what aggregation means,
+and the answer differs per field. A union over `scopes_granted` reports a scope
+one hop granted and a later hop narrowed, so the key would claim more authority
+than the chain conveys, and an author reading it could not tell. `from_cache`
+wants an any-hop flag rather than a union, and whether one cached hop taints
+the whole chain is an operator's decision. Per-hop `strategy` and `ttl_seconds`
+have no meaningful union at all. Indexing by position
+(`delegation.hop.2.scopes`) is not an answer either, since chain position is
+not stable across requests.
 
 ### 3. `agent` — `AgentExtension`
 
@@ -280,7 +377,14 @@ Per-hop scopes, audience, and strategy stay on the typed chain.
 | `agent.conversation.summary` | String | conversation present and summary `Some` |
 | `agent.conversation.topics` | StringSet | conversation present (always then) |
 
-`conversation.history` is not flattened.
+`conversation.history` is not flattened, and there is no length key either.
+The transcript is a `Vec<Value>` of turns, so flattening it would put message
+text on the bag under indexed keys, which is the opposite of what the bag is
+for. A plugin that needs the transcript reads the typed slot through
+`read_agent`.
+
+Turn-count gating needs no new key: `agent.turn` is an Int, so
+`agent.turn > 10` works today.
 
 ### 4. `meta` — `MetaExtension`
 
@@ -290,7 +394,7 @@ Per-hop scopes, audience, and strategy stay on the typed chain.
 | `meta.entity_name` | String | `Some` |
 | `meta.tags` | StringSet | always |
 | `meta.scope` | String | `Some` |
-| `meta.properties.<k>` | String | each map entry |
+| `meta.properties.<name>` | String | each map entry |
 
 ### 5. `request` — `RequestExtension`
 
@@ -339,6 +443,7 @@ as `context.llm.request`.
 | `mcp.tool.description` | String | `Some` |
 | `mcp.tool.server_id` | String | `Some` |
 | `mcp.tool.namespace` | String | `Some` |
+| `mcp.tool.annotations.<name>` | flattened JSON | each map entry |
 
 **Resource** present:
 
@@ -349,6 +454,7 @@ as `context.llm.request`.
 | `mcp.resource.description` | String | `Some` |
 | `mcp.resource.mime_type` | String | `Some` |
 | `mcp.resource.server_id` | String | `Some` |
+| `mcp.resource.annotations.<name>` | flattened JSON | each map entry |
 
 **Prompt** present:
 
@@ -357,8 +463,19 @@ as `context.llm.request`.
 | `mcp.prompt.name` | String | always |
 | `mcp.prompt.description` | String | `Some` |
 | `mcp.prompt.server_id` | String | `Some` |
+| `mcp.prompt.annotations.<name>` | flattened JSON | each map entry |
 
-Schemas and annotations are not flattened.
+`annotations` flattens through the same JSON walker as `custom.*`,
+`framework.metadata.*` and `claim.*`, so `readOnlyHint` and `destructiveHint`
+are readable and a rule can refuse a destructive tool. Being free-form is not
+what keeps a map off the bag, or none of those four would be on it.
+
+`ToolMetadata.input_schema`, `ToolMetadata.output_schema` and
+`PromptMetadata.arguments` stay off. They describe the shape of a call rather
+than a fact about this one, so a rule over them would assert something about
+the contract instead of the request. The argument values themselves reach
+policy as `args.*`; see
+[Payloads that are not slots](#payloads-that-are-not-slots).
 
 ### 9. `completion` — `CompletionExtension`
 
