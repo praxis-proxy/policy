@@ -12,6 +12,8 @@
 //   - non-boolean result, undeclared-variable reference, or any other
 //     evaluation error → governed by `on_error` (default `Deny`, i.e.
 //     fail-closed). `on_error: allow` flips these degenerate cases to Allow.
+//   - custom-function registration error → reject resolver construction;
+//     if it occurs later, Deny regardless of `on_error`.
 //   - a `cel:` step with no `expr` string is a config bug → `PdpError`.
 //
 // The cause of any Deny / error is recorded in `PdpDecision.diagnostics`
@@ -27,7 +29,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use cel::parser::ExpressionReferences;
-use cel::{Context, ExecutionError, Program, Value};
+use cel::{Context, DeclarationError, ExecutionError, Program, Value};
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
@@ -44,12 +46,14 @@ use crate::pdps::stack;
 /// non-boolean value. A `false` result is never affected — it is
 /// always a Deny.
 ///
-/// **Compile errors are NOT governed by this enum.** A compile error
+/// **Compile and function-registration errors are NOT governed by this enum.** A compile error
 /// means an author wrote malformed CEL; there's no legitimate reason
 /// to flip that to Allow, so it ALWAYS resolves to Deny + a loud
 /// `tracing::error!`. If you flipped a compile error to Allow you'd
 /// be silently turning malformed policy into "always allow" — which
 /// is a security-hostile default we deliberately don't expose.
+/// Function-registration failures always reject construction or deny an
+/// evaluation, including under `OnError::Allow`.
 /// Cache-full rejections (the cap was hit) are treated as eval errors
 /// — they're a runtime resource limit, not an author bug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,7 +96,8 @@ pub const DEFAULT_MAX_CACHE_ENTRIES: usize = 1024;
 /// The boxed callback is `Send + Sync + 'static` because the resolver
 /// is shared across worker threads via `Arc<dyn PdpResolver>` and lives
 /// for the process.
-pub type CelFunctionSetup = dyn Fn(&mut Context<'static, 'static>) + Send + Sync + 'static;
+pub type CelFunctionSetup =
+    dyn Fn(&mut Context<'static, 'static>) -> Result<(), DeclarationError> + Send + Sync + 'static;
 
 /// Evaluates CEL expressions, caching compiled programs under a bounded cap.
 pub struct CelResolver {
@@ -155,7 +160,10 @@ impl CelResolver {
     /// Composes: calling `with_functions` more than once stacks the
     /// callbacks. Each runs in registration order on every context.
     /// Later registrations replace earlier custom functions with the same name.
-    /// Standard-library overloads take precedence; `has` is parser-reserved.
+    /// A standard-library overload name causes a registration error;
+    /// `has` is parser-reserved.
+    /// Registration callbacks run once at construction for validation and
+    /// again for each evaluation. Keep them pure and propagate errors with `?`.
     ///
     /// # Example
     ///
@@ -168,14 +176,15 @@ impl CelResolver {
     ///     ctx.add_function("matches_prefix",
     ///         |s: Arc<String>, prefix: Arc<String>| -> bool {
     ///             s.starts_with(prefix.as_str())
-    ///         }).expect("matches_prefix is not a stdlib name");
+    ///         })?;
     ///     // Clock helper — authors can write `now() < session.expires_at`.
     ///     ctx.add_function("now", || -> i64 {
     ///         std::time::SystemTime::now()
     ///             .duration_since(std::time::UNIX_EPOCH)
     ///             .map(|d| d.as_secs() as i64).unwrap_or(0)
-    ///     }).expect("now is not a stdlib name");
-    /// });
+    ///     })?;
+    ///     Ok(())
+    /// }).expect("valid CEL function registrations");
     /// ```
     ///
     /// # Ownership of the function set
@@ -188,12 +197,26 @@ impl CelResolver {
     /// function changes that contract for every route at once, so treat
     /// the set like any other host API surface — version it, and avoid
     /// renaming/removing functions that live policies depend on.
-    pub fn with_functions<F>(mut self, setup: F) -> Self
+    ///
+    /// # Errors
+    ///
+    /// Returns a build error if a callback rejects a function registration.
+    /// In particular, `Context::add_function` rejects names used by
+    /// standard-library overloads in CEL 0.15.
+    pub fn with_functions<F>(mut self, setup: F) -> Result<Self, BuildError>
     where
-        F: Fn(&mut Context<'static, 'static>) + Send + Sync + 'static,
+        F: Fn(&mut Context<'static, 'static>) -> Result<(), DeclarationError>
+            + Send
+            + Sync
+            + 'static,
     {
+        let mut ctx = Context::default();
+        for previous in &self.function_setups {
+            previous(&mut ctx)?;
+        }
+        setup(&mut ctx)?;
         self.function_setups.push(Arc::new(setup));
-        self
+        Ok(self)
     }
 
     /// Override the resolver's dialect. Lets operators register a CEL
@@ -365,6 +388,20 @@ impl CelResolver {
             diagnostics: vec![cause],
         }
     }
+
+    /// Registration is host configuration, so a request-time failure must
+    /// deny even if runtime expression errors are configured to allow.
+    fn registration_error_decision(&self) -> PdpDecision {
+        tracing::error!("CEL function registration failed during evaluation; denying request");
+        let cause = "CEL function registration failed".to_owned();
+        PdpDecision {
+            decision: Decision::Deny {
+                reason: Some(cause.clone()),
+                rule_source: "cel".to_owned(),
+            },
+            diagnostics: vec![cause],
+        }
+    }
 }
 
 impl Default for CelResolver {
@@ -463,7 +500,9 @@ impl CelResolver {
     ) -> PdpDecision {
         let mut ctx = bag_to_context(bag, &call.args, structured);
         for setup in &self.function_setups {
-            setup(&mut ctx);
+            if setup(&mut ctx).is_err() {
+                return self.registration_error_decision();
+            }
         }
 
         // 4. Evaluate and map the result to a decision.
@@ -679,6 +718,7 @@ fn read_yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn cel_call(expr: &str) -> PdpCall {
         let mut m = serde_yaml::Mapping::new();
@@ -789,14 +829,12 @@ mod tests {
     #[tokio::test]
     async fn custom_function_registration_round_trips() {
         let r = CelResolver::new()
-            .with_functions(|ctx| {
-                ctx.add_function("twice", |n: i64| -> i64 { n * 2 })
-                    .expect("twice is not a stdlib name");
-            })
+            .with_functions(|ctx| ctx.add_function("twice", |n: i64| -> i64 { n * 2 }))
+            .expect("twice is not a stdlib name")
             .with_functions(|ctx| {
                 ctx.add_function("shout", |s: Arc<String>| -> String { s.to_uppercase() })
-                    .expect("shout is not a stdlib name");
-            });
+            })
+            .expect("shout is not a stdlib name");
         let bag = bag_with(&[("subject.id", "alice")]);
 
         // First registered function works.
@@ -822,37 +860,48 @@ mod tests {
         );
     }
 
-    /// In v0.15, `Context::add_function` returns `Err` when the name
-    /// conflicts with any existing overload in the environment (including stdlib).
-    /// `size` has stdlib overloads, so an i64 overload cannot be added via
-    /// `add_function` on a default context — use `Env::add_overload!` instead.
-    /// The stdlib string overload still works; `size(int)` is not registered.
+    /// CEL 0.15 rejects a custom function that shares a stdlib overload
+    /// name. The resolver must surface that error before serving policies,
+    /// even when expression errors are configured to allow.
+    #[test]
+    fn custom_size_stdlib_overload_rejected_at_construction() {
+        let error = CelResolver::new()
+            .with_on_error(OnError::Allow)
+            .with_functions(|ctx| ctx.add_function("size", |_n: i64| -> i64 { 777 }))
+            .err()
+            .expect("size must conflict with a standard-library overload");
+        assert!(matches!(
+            error,
+            BuildError::FunctionRegistration(DeclarationError::OverloadConflict { function })
+                if function == "size"
+        ));
+    }
+
+    /// If a callback that passed preflight later fails, the host setup
+    /// error must deny rather than flowing through `on_error: allow`.
     #[tokio::test]
-    async fn custom_size_stdlib_overload_conflicts_and_stdlib_still_works() {
-        let r = CelResolver::new().with_functions(|ctx| {
-            // Returns Err — `size` conflicts with stdlib overloads; the int
-            // overload is NOT registered. Use Env::add_overload! to extend stdlib.
-            let _ = ctx.add_function("size", |_n: i64| -> i64 { 777 });
-        });
-        let bag = bag_with(&[("subject.id", "alice")]);
+    async fn runtime_function_registration_error_denies_under_on_error_allow() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let r = CelResolver::new()
+            .with_on_error(OnError::Allow)
+            .with_functions({
+                let calls = Arc::clone(&calls);
+                move |ctx| {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        ctx.add_function("custom", |_n: i64| -> i64 { 777 })
+                    } else {
+                        ctx.add_function("size", |_n: i64| -> i64 { 777 })
+                    }
+                }
+            })
+            .expect("initial registration must pass preflight");
 
-        // Stdlib size(string) is unaffected.
-        let stdlib = r
-            .evaluate(&cel_call("size('hello') == 5"), &bag)
+        let out = r
+            .evaluate(&cel_call("true"), &AttributeBag::new())
             .await
             .unwrap();
-        assert_eq!(stdlib.decision, Decision::Allow);
-
-        // size(int) was never registered (conflict prevented it), so the
-        // expression errors at eval time → fail-closed Deny.
-        let no_overload = r
-            .evaluate(&cel_call("size(42) == 777"), &bag)
-            .await
-            .unwrap();
-        assert!(
-            matches!(no_overload.decision, Decision::Deny { .. }),
-            "size(int) has no overload in default context; must fail-closed",
-        );
+        assert!(matches!(out.decision, Decision::Deny { .. }));
+        assert_eq!(out.diagnostics, ["CEL function registration failed"]);
     }
 
     /// For non-stdlib names, a later `with_functions` callback can overwrite
@@ -862,16 +911,14 @@ mod tests {
     #[tokio::test]
     async fn later_custom_function_overwrites_earlier_one() {
         let r = CelResolver::new()
-            .with_functions(|ctx| {
-                ctx.add_function("magic", |n: i64| -> i64 { n + 100 })
-                    .expect("magic is not a stdlib name");
-            })
+            .with_functions(|ctx| ctx.add_function("magic", |n: i64| -> i64 { n + 100 }))
+            .expect("magic is not a stdlib name")
             .with_functions(|ctx| {
                 // A second registration of the same non-stdlib name overwrites the
                 // first (no env-level conflict, so add_function succeeds again).
                 ctx.add_function("magic", |n: i64| -> i64 { n + 999 })
-                    .expect("magic overwrite is allowed for non-stdlib names");
-            });
+            })
+            .expect("magic overwrite is allowed for non-stdlib names");
         let bag = bag_with(&[("subject.id", "alice")]);
 
         let out = r
@@ -1130,6 +1177,7 @@ mod tests {
                 msg.contains("on_errr"),
                 "error must name the unknown key; got {msg:?}",
             ),
+            Err(other) => panic!("expected a config-shape error, got {other}"),
             Ok(_) => panic!("unknown key `on_errr` must be rejected"),
         }
     }
