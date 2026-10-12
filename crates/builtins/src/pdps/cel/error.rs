@@ -26,7 +26,7 @@ pub enum BuildError {
     /// an unrecognized value (e.g. `on_error: maybe`).
     #[error("invalid CEL PDP config: {0}")]
     ConfigShape(String),
-    /// A host function conflicts with an overload in the CEL environment.
+    /// A host function registration was rejected by the CEL environment.
     #[error("invalid CEL function registration: {0}")]
     FunctionRegistration(#[from] cel::DeclarationError),
 }
