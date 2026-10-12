@@ -74,7 +74,8 @@
 // fail-closed default). Operators can flip a *runtime* error
 // (undeclared variable, type error, non-boolean) to allow-through via
 // `on_error: allow` in the PDP config block, but the default is `deny`.
-// Compile errors are never flippable — see `resolver::OnError`.
+// Compile and host function-registration errors are never flippable —
+// see `resolver::OnError`.
 //
 // "Non-boolean" means the expression's top-level value is anything other
 // than `true`/`false`. Common author mistakes:

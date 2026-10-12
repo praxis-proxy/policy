@@ -73,6 +73,18 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking for hosts using `CelResolver::with_functions`:** registration
+  callbacks now return `Result<(), cel::DeclarationError>`, and
+  `with_functions` returns `Result<Self, BuildError>`. CEL 0.15 rejects a
+  custom function whose name conflicts with a standard-library overload;
+  the resolver reports this at construction. A later registration failure
+  denies even with `on_error: allow`. Hosts that need such an overload must
+  migrate it to a CEL `Env` overload.
+- **Behavior change for CEL policy authors:** CEL 0.15 counts Unicode code
+  points rather than UTF-8 bytes in string `size()`, so a `size(text) <= N`
+  condition can admit more bytes of non-ASCII text. `exists()` now returns
+  `true` when one element matches even if evaluating another element errors,
+  so some requests previously denied on that error may now allow.
 - **Breaking:** `HttpExtension` adds `secret_headers`; exhaustive struct
   literals must initialize it (or use `..Default::default()`). Hosts must
   preserve this provenance when carrying HTTP state between hooks. `Debug`

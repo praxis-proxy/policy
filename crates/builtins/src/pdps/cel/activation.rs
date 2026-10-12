@@ -37,9 +37,11 @@ use praxis_policy_apl_core::route::StructuredInput;
 /// - Every dotted bag key becomes nested CEL maps; each top-level segment
 ///   (`subject`, `role`, `delegation`, `session`, `args`, …) is registered
 ///   as a CEL variable.
-/// - Each top-level key of `extra_args` (everything the author put under
-///   `cel:` besides `expr`) is registered as an additional variable —
-///   e.g. `resource`, `context` — mirroring how `cedar:` surfaces them.
+/// - Each undotted top-level key of `extra_args` (everything the author put
+///   under `cel:` besides control fields) is registered as an additional
+///   variable — e.g. `resource`, `context` — mirroring how `cedar:` surfaces
+///   them. Dotted names are skipped so CEL's longest-name lookup cannot bypass
+///   the bag-wins collision rule.
 /// - On a name collision between an `extra_args` key and a bag namespace,
 ///   the **bag wins** (the bag is the authoritative, framework-populated
 ///   vocabulary; args can't shadow it by accident).
@@ -53,7 +55,7 @@ pub fn bag_to_context(
     bag: &AttributeBag,
     extra_args: &serde_yaml::Value,
     structured: &StructuredInput,
-) -> Context<'static> {
+) -> Context<'static, 'static> {
     let mut ctx = Context::default();
 
     // 1. Author-supplied extra args first (so the bag overrides on
@@ -63,7 +65,7 @@ pub fn bag_to_context(
     if let Some(map) = extra_args.as_mapping() {
         for (k, v) in map {
             let Some(name) = k.as_str() else { continue };
-            if matches!(name, "expr" | "require_llm_request") {
+            if matches!(name, "expr" | "require_llm_request") || name.contains('.') {
                 continue;
             }
             extra_names.insert(name.to_owned());
@@ -300,7 +302,7 @@ mod tests {
 
     use serde_json::json;
 
-    fn run_cel(expr: &str, ctx: &Context<'static>) -> Result<Value, String> {
+    fn run_cel(expr: &str, ctx: &Context<'static, 'static>) -> Result<Value, String> {
         let program = cel::Program::compile(expr).map_err(|e| e.to_string())?;
         program.execute(ctx).map_err(|e| e.to_string())
     }
@@ -310,7 +312,10 @@ mod tests {
         matches!(run_cel(expr, &ctx), Ok(Value::Bool(true)))
     }
 
-    fn structured_ctx(bag: &AttributeBag, structured: &StructuredInput) -> Context<'static> {
+    fn structured_ctx(
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Context<'static, 'static> {
         bag_to_context(bag, &serde_yaml::Value::Null, structured)
     }
 
@@ -322,7 +327,7 @@ mod tests {
         StructuredInput::new(Some(Arc::new(document)), None)
     }
 
-    fn holds(expr: &str, ctx: &Context<'static>) -> bool {
+    fn holds(expr: &str, ctx: &Context<'static, 'static>) -> bool {
         matches!(run_cel(expr, ctx), Ok(Value::Bool(true)))
     }
 
@@ -451,7 +456,7 @@ mod tests {
         let mut bag = AttributeBag::new();
         bag.set("subject.id", "alice");
         let args = serde_yaml::from_str::<serde_yaml::Value>(
-            "resource:\n  kind: document\n  sensitivity: 3\nsubject: shadowed\n",
+            "resource:\n  kind: document\n  sensitivity: 3\nsubject: shadowed\nsubject.id: shadowed\n",
         )
         .unwrap();
         let ctx = bag_to_context(&bag, &args, &StructuredInput::default());
@@ -463,7 +468,8 @@ mod tests {
             ),
             Ok(Value::Bool(true))
         ));
-        // `subject` from the bag wins over the args' `subject: shadowed`.
+        // `subject` from the bag wins over both the top-level and dotted
+        // extra-arg collisions.
         assert!(matches!(
             run_cel("subject.id == 'alice'", &ctx),
             Ok(Value::Bool(true))
