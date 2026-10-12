@@ -1,5 +1,2 @@
-# Owners of record for the Praxis Policy Engine.
-#
-# Engine review stays with the people who wrote the engine. The code carries
-# their copyright, preserved in file headers and in the imported commit history.
-* @araujof @terylt
+* @praxis-proxy/project-leads
+* @praxis-proxy/policy-maintainers

@@ -31,12 +31,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{Duration, Utc};
 
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, ToolCall};
 use praxis_policy_core::context::PluginContext;
+use praxis_policy_core::delegation::{DelegationPayload, HOOK_TOKEN_DELEGATE, TokenDelegateHook};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::PluginError as CoreError;
+use praxis_policy_core::extensions::raw_credentials::{
+    RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind, TokenRole,
+};
 use praxis_policy_core::extensions::{LlmRequestDocument, MetaExtension, SecurityExtension};
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
@@ -183,6 +188,68 @@ impl HookHandler<CmfHook> for LlmRequestReader {
 
 struct LlmRequestReaderFactory {
     observed: Arc<std::sync::Mutex<Vec<Option<LlmRequestDocument>>>>,
+}
+
+/// Vault-shaped delegate used to exercise the production APL route handler.
+/// It requires an inbound caller token and writes a delegated token back into
+/// request extensions, matching the two credential capabilities Vault needs.
+struct VaultShapedDelegate {
+    cfg: PluginConfig,
+    observed_bearer: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Plugin for VaultShapedDelegate {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<TokenDelegateHook> for VaultShapedDelegate {
+    async fn handle(
+        &self,
+        payload: &DelegationPayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<DelegationPayload> {
+        self.observed_bearer
+            .lock()
+            .unwrap()
+            .push(payload.bearer_token().to_owned());
+
+        let mut updated = payload.clone();
+        updated.delegated_token = Some(
+            RawDelegatedToken::new(
+                "ghp_example",
+                "Authorization",
+                payload.target_audience().unwrap_or_default(),
+                payload.required_permissions().to_vec(),
+                Utc::now() + Duration::seconds(300),
+            )
+            .with_outbound_prefix("token "),
+        );
+        PluginResult::modify_payload(updated)
+    }
+}
+
+struct VaultShapedDelegateFactory {
+    observed_bearer: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl PluginFactory for VaultShapedDelegateFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
+        let plugin = Arc::new(VaultShapedDelegate {
+            cfg: config.clone(),
+            observed_bearer: Arc::clone(&self.observed_bearer),
+        });
+        Ok(PluginInstance {
+            plugin: plugin.clone(),
+            handlers: vec![(
+                HOOK_TOKEN_DELEGATE,
+                Arc::new(TypedHandlerAdapter::<TokenDelegateHook, _>::new(plugin)),
+            )],
+        })
+    }
 }
 
 impl PluginFactory for LlmRequestReaderFactory {
@@ -415,6 +482,96 @@ routes:
          way out of AplRouteHandler (no append_labels cap on the synthetic). \
          Got: {labels:?}"
     );
+}
+
+/// A Vault-style delegate must receive the inbound caller JWT and its minted
+/// credential must survive the outer `AplRouteHandler` capability filter.
+/// This covers the production route path, not only direct hook dispatch.
+#[tokio::test]
+async fn vault_credential_capabilities_propagate_through_apl_handler() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: vault-github
+    kind: vault-shaped-delegate
+    hooks: [token.delegate]
+    capabilities:
+      - perform_http
+      - read_inbound_credentials
+      - read_subject
+      - read_claims
+      - write_delegated_tokens
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "delegate(vault-github, target: github-api, audience: https://api.github.com)"
+"#;
+
+    let observed_bearer = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory(
+        "vault-shaped-delegate",
+        Box::new(VaultShapedDelegateFactory {
+            observed_bearer: Arc::clone(&observed_bearer),
+        }),
+    );
+    register_apl(
+        &mgr,
+        AplOptions {
+            dispatch_cache: Arc::new(DispatchCache::new()),
+            session_store: Arc::new(MemorySessionStore::new()),
+            pdps: Vec::new(),
+            pdp_factories: Vec::new(),
+            session_store_factories: Vec::new(),
+            base_capabilities: Some(std::collections::HashSet::new()),
+        },
+    );
+    mgr.load_config_yaml(YAML).expect("load_config_yaml");
+    mgr.initialize().await.expect("initialize");
+
+    let mut raw = RawCredentialsExtension::default();
+    raw.inbound_tokens.insert(
+        TokenRole::User,
+        RawInboundToken::new("caller-jwt", "Authorization", TokenKind::Jwt),
+    );
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_weather"))),
+        raw_credentials: Some(Arc::new(raw)),
+        ..Default::default()
+    };
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", cmf_payload("hi"), ext, None)
+        .await;
+    assert!(
+        result.continue_processing,
+        "Vault-shaped delegate should allow: {:?}",
+        result.violation
+    );
+    assert_eq!(
+        *observed_bearer.lock().unwrap(),
+        vec!["caller-jwt".to_owned()],
+        "read_inbound_credentials must reach the delegate payload"
+    );
+
+    let modified = result
+        .modified_extensions
+        .expect("delegate should return modified extensions");
+    let raw = modified
+        .raw_credentials
+        .as_ref()
+        .expect("raw credentials should remain present");
+    assert_eq!(
+        raw.delegated_tokens.len(),
+        1,
+        "write_delegated_tokens must survive the outer APL handler"
+    );
+    let (key, token) = raw.delegated_tokens.iter().next().unwrap();
+    assert_eq!(key.delegator_name, "vault-github");
+    assert_eq!(key.target_name, "github-api");
+    assert_eq!(&*token.token, "ghp_example");
+    assert_eq!(token.outbound_prefix, "token ");
 }
 
 /// Predicate-only route: no plugins, just `require(authenticated)`.

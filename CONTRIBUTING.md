@@ -1,173 +1,67 @@
 # Contributing
 
-## Toolchain
+Thank you for your interest in contributing! Start by
+reading the [development conventions]. Submissions that
+do not follow the conventions will be rejected.
 
-The toolchain is pinned in `rust-toolchain.toml` and is also the project MSRV.
-`cargo` picks it up automatically. Formatting and coverage both run on that
-pinned stable toolchain, so nothing here needs nightly.
+[development conventions]: docs/conventions.md
 
-## Before opening a pull request
+## Getting Started
 
-```console
-make lint
-make test
-make audit
-```
+1. Fork the repository and clone your fork
+2. Install pre-commit hooks: `make setup-hooks`
+3. Build and test: `make build && make test`
+4. Run every gate locally before pushing: `make all`
 
-`make ci` runs the same set CI does.
+Requirements are listed in [docs/development.md].
 
-Safety invariants (fail-closed behaviour at every seam) live in
-`docs/dev/safety-invariants.md`. A change that adds a plugin phase or a
-shipped PDP dialect is incomplete until that catalog has a cell for it;
-the tests fail until one is added.
+[docs/development.md]: docs/development.md
 
-## File headers
+## Tests
 
-Every source file starts with exactly these two lines, and nothing else:
+`make test` runs both feature passes. The integration,
+resilience and security suites under `tests/` run in the
+`--all-features` pass, or alone with `make
+test-integration` (all three), `make test-resilience` and
+`make test-security`. A test exposing an open defect is
+named `known_gap_*` and marked
+`#[should_panic(expected = "known gap #<issue>")]`. Live
+mode, the reference host and the host-drift check are
+described in [Testing Policy].
 
-```rust
-// SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2026 Praxis Contributors
-```
+[Testing Policy]: docs/content/testing.md#integration-suites
 
-The year is the year the file was added. `#` instead of `//` in TOML, YAML and
-shell. This covers workflows and project config, not just crate sources.
+## Picking Up an Issue
 
-One exception: `crates/ppe-core/tests/fixtures/legacy-policy-document.yaml` carries
-no header. It is a verbatim copy of a policy document authored against the engine's
-previous name, and staying byte-identical is what makes it evidence.
+Only issues a maintainer has triaged (given a milestone
+and added to a project board) are open for contributors
+to take, and only at `Medium` or `Low` priority. Urgent
+and high-priority work is assigned by maintainers. If you
+self-assign something outside these rules, a bot unassigns
+it and points you back here. See [Picking Up Work] for the
+full policy.
 
-No `Authors:` line and no path line. Both go stale: a path breaks the moment a
-file moves, and an author list stops being true as soon as somebody else edits
-the file. `git log --follow` answers both questions accurately.
+[Picking Up Work]: docs/development.md#picking-up-work
 
-## Comments explain the code, not the work that produced it
+## Larger Changes
 
-A comment earns its place by telling a reader something they need in order to
-change the code safely. Some things that feel worth writing down are not:
+Features that span multiple PRs, introduce new
+architectural patterns, or affect the public interface
+go through the [proposal process].
 
-- **Progress and task state.** Remaining-work counts, "started at X, now Y",
-  which items are deferred. It is stale within a sprint and it belongs in the
-  tracker or a `docs/plans/` document.
-- **History.** "This used to be a separate crate", "we tried X first". State the
-  requirement in the present tense. If the reason a mistake is easy to repeat is
-  itself worth knowing, say what the constraint is, not what happened.
-- **Internal milestone names.** "Slice B", "Phase 0". They mean nothing to a
-  reader and can collide with real vocabulary: this codebase documents a
-  five-phase execution model, so an unrelated "Phase 5" points at the wrong idea.
-- **Cross-repository census numbers.** A count of another project's lint set goes
-  stale when they commit, not when we do, so it cannot be kept honest.
+[proposal process]: https://github.com/praxis-proxy/enhancements/blob/main/docs/process.md
 
-```rust
-// no
-// Two passes, because folding the aggregator into the facade silently stopped
-// three tests running. A green single-pass run said nothing was wrong.
+## Pull Request Gates
 
-// yes
-// Two passes: the second is the only way to reach `#[cfg(feature = ...)]` test
-// modules. Dropping either hides tests without failing.
-```
+CI enforces reviewability on every PR:
 
-`make doc` builds the rustdoc with warnings denied, `make docs-lint` checks
-the markdown under `docs/`, and `make docs-links` checks documentation links.
-None runs as part of `make lint`, so run the relevant checks when you touch
-documentation.
+- A maximum added lines count of production code (tests, docs, examples excluded)
+- A real description of what and why - `Signed-off-by`
+  trailer on every commit (`git commit -s`)
+- Cryptographically signed commits (GPG or SSH)
+- Human authorship: commits authored or signed-off by tools are rejected
+- Conventional commit subjects (`type(scope): summary`, ≤72 chars)
 
-## Durable text carries no planning identifiers
+See the [PR conventions] section for details and override labels.
 
-Commit messages, code comments, rustdoc, changelog entries, and pull-request
-descriptions must stand on their own. Do not cite requirement or plan document
-identifiers such as `R12` or `U3` in any of them.
-
-Those documents do not ship with the code. An identifier is meaningless to
-someone reading the commit a year from now, and it rots the moment the document
-changes or moves. Describe the behavior or the reason instead:
-
-```text
-# no
-fix: address R24 fail-closed requirement in parser
-
-# yes
-fix: return a deny when the parser hits an unreachable branch
-
-    An invariant that becomes a permit if it turns out to be reachable is a
-    policy bypass, so the error path maps to deny at the decision boundary.
-```
-
-This applies to commits authored here. It does not apply to the commit history
-imported from the engine's previous home, which is preserved as written.
-
-## Imported history
-
-Most of this tree was imported from another repository with its history intact,
-so `git log` and `git blame` reach back before this repository existed. Two
-consequences are worth knowing:
-
-- Imported commit messages reference pull-request numbers from the original
-  repository. GitHub will autolink them to unrelated numbers here. They are not
-  rewritten, because rewriting them would cost more traceability than the
-  autolink noise costs.
-- Imported commits that touched both ported and excluded paths were rewritten to
-  their ported portion, so they do not correspond one-to-one with commits in the
-  original repository. Cross-tree comparison works by path and content, not by
-  commit identity.
-
-`docs/dev/port-provenance.md` records the exact source commit the import was taken
-from.
-
-## Lints
-
-`[workspace.lints]` in `Cargo.toml` is the authority. Most rules are denied; the
-ones that are not sit at the end of each section, grouped by why, with a comment
-per group. That list is a settled decision rather than a backlog: every lint that
-could silently change an enforcement decision is already denied.
-
-Three rules for contributors:
-
-- **Do not add new violations of a non-enforced lint.** It is not enforced
-  because the existing violations were judged not worth the churn, which is not
-  an invitation to add more.
-- **Do not suppress a lint at a wider scope than the code that needs it.** A
-  module-level allow that covers lints the module does not violate hides the next
-  real one, so prefer the narrowest scope, with a `reason`.
-- **`dead_code` reasons must name the out-of-tree caller.** The lint is denied.
-  A public host-facing item with no in-tree caller may keep
-  `#[allow(dead_code, reason = "...")]` only when the reason says who calls it
-  from outside this workspace. Reasons that only defer work (`future`, `TODO`,
-  `might`) are not enough; delete the item. Test fixtures may use a test-scoped
-  reason.
-
-Enforcing one of the allowed groups is welcome as a focused change, one lint at a
-time, separate from feature work. `docs/dev/lints.md` is worth reading first: it
-records which lints clippy reports as machine-fixable but cannot actually fix, and
-where a lint's suggested rewrite is worse than the code it replaces.
-
-## Multi-threaded Tokio tests
-
-`#[tokio::test]` defaults to `current_thread`. Tasks yield at `.await` but never
-run on two OS threads at the same time, so a load and a store that have no await
-between them cannot overlap.
-
-Tests that exercise registration, unregister, hot reload (`load_config` /
-`from_config`), or route-cache fill and invalidation use
-`#[tokio::test(flavor = "multi_thread")]`, including when the body is a single
-task. The flavor is set by the surface under test so a later spawn starts from
-the runtime a host uses. A single-task test of those APIs does not itself
-create overlap.
-
-Overlap is asserted in `crates/ppe-core/tests/engine_concurrency.rs`.
-
-```rust
-#[tokio::test(flavor = "multi_thread")]
-async fn register_while_other_tasks_invoke() { /* ... */ }
-```
-
-Sequential tests that do not touch those surfaces stay on `current_thread`.
-
-A seeded stress test lives in `crates/ppe-core/tests/engine_concurrency.rs`.
-Replay a failure with `PPE_STRESS_SEED`. Nightly CI runs that test under
-ThreadSanitizer (`make test-tsan`; Linux only, the target is hardcoded). The
-`Release` / `Acquire` pairing `mutate_runtime` describes is documented by the
-extracted loom model in `crates/ppe-core/tests/loom_generation_snapshot.rs`.
-That model is not wired to `engine.rs`. Default `cargo test` does not compile
-it; run `RUSTFLAGS='--cfg loom' cargo test -p praxis-policy-core --test loom_generation_snapshot`.
+[PR conventions]: docs/conventions.md#pull-request-conventions

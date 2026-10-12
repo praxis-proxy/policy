@@ -377,6 +377,43 @@ impl fmt::Debug for SecretStore {
     }
 }
 
+/// A store holding one value under one name, for tests elsewhere in the crate
+/// that need something to read a `secret.<name>` source against.
+///
+/// Assembled directly rather than through [`SecretStore::resolve`], so a caller
+/// needs no backend, no temp file, and no runtime. The provider it carries
+/// answers with the same bytes forever, which makes [`SecretStore::refresh`] a
+/// no-op here; rotation is exercised against a real backend in the engine's own
+/// tests, where it is the file being rewritten that makes the test mean
+/// something.
+#[cfg(test)]
+pub(crate) fn fixed(name: &str, value: &str) -> SecretStore {
+    struct Fixed(String);
+
+    #[async_trait::async_trait]
+    impl SecretProvider for Fixed {
+        async fn get_secret(&self, _reference: &str) -> Result<Zeroizing<String>, SecretError> {
+            Ok(Zeroizing::new(self.0.clone()))
+        }
+    }
+
+    let mut values = HashMap::new();
+    values.insert(
+        name.to_owned(),
+        Binding {
+            provider_name: "fixed".to_owned(),
+            provider: Arc::new(Fixed(value.to_owned())),
+            reference: name.to_owned(),
+            cell: Arc::new(SecretCell::new(Zeroizing::new(value.to_owned()))),
+        },
+    );
+    SecretStore {
+        values,
+        last_success: HashMap::new(),
+        refresh_lock: Mutex::new(()),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,

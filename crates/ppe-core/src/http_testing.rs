@@ -21,6 +21,7 @@
 // URL through three layers to assert on a path is a test nobody updates.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,6 +43,10 @@ struct Rule {
     replies: VecDeque<Reply>,
 }
 
+/// A reply computed from the request, for an endpoint whose answer depends
+/// on what was sent. See [`FakeTransport::respond_with`].
+type Responder = Arc<dyn Fn(&HttpRequest) -> Reply + Send + Sync>;
+
 /// An `HttpTransport` that answers from a script and records what it was
 /// asked.
 ///
@@ -55,10 +60,25 @@ struct Rule {
 #[derive(Default)]
 pub struct FakeTransport {
     rules: Mutex<Vec<Rule>>,
+    /// Checked before `rules`, so a responder wins over queued replies.
+    responders: Mutex<Vec<(String, Responder)>>,
     seen: Mutex<Vec<HttpRequest>>,
     /// Held open for this long before answering. See
     /// [`FakeTransport::with_latency`].
     latency: Option<Duration>,
+    /// Calls currently held open, and the most ever held at once. See
+    /// [`FakeTransport::peak_in_flight`].
+    in_flight: AtomicUsize,
+    peak_in_flight: AtomicUsize,
+}
+
+/// Counts one call as in flight until dropped.
+struct InFlight<'a>(&'a AtomicUsize);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl std::fmt::Debug for FakeTransport {
@@ -133,6 +153,28 @@ impl FakeTransport {
         )
     }
 
+    /// Answer any URL containing `fragment` with whatever `respond`
+    /// returns for the request.
+    ///
+    /// For an endpoint whose reply depends on the body, such as a token
+    /// endpoint minting from the form it was sent. A responder takes
+    /// priority over replies queued for the same URL.
+    #[must_use]
+    pub fn respond_with(
+        self,
+        fragment: &str,
+        respond: impl Fn(&HttpRequest) -> Result<HttpResponse, HttpTransportError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.responders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((fragment.to_owned(), Arc::new(respond)));
+        self
+    }
+
     /// Hold every call open for `latency` before answering.
     ///
     /// An instant transport cannot express concurrency. Two calls never
@@ -158,6 +200,15 @@ impl FakeTransport {
     #[must_use]
     pub fn fail(self, fragment: &str, err: HttpTransportError) -> Self {
         self.push(fragment, Err(err))
+    }
+
+    /// The most calls this transport has held open at once.
+    ///
+    /// With [`FakeTransport::with_latency`], this shows whether a caller
+    /// really overlaps its dependency calls or serializes them, without
+    /// depending on how fast the machine is.
+    pub fn peak_in_flight(&self) -> usize {
+        self.peak_in_flight.load(Ordering::SeqCst)
     }
 
     /// How many requests this transport has been given.
@@ -213,10 +264,31 @@ pub fn granting(transport: Arc<FakeTransport>) -> crate::host::InitExtensions {
 impl HttpTransport for FakeTransport {
     async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
         let url = req.url.clone();
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+        let _in_flight = InFlight(&self.in_flight);
+
+        // Clone the responder out so it runs without the lock held.
+        let responder = self
+            .responders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(fragment, _)| url.contains(fragment.as_str()))
+            .map(|(_, respond)| Arc::clone(respond));
+        let computed = responder.map(|respond| respond(&req));
+
         self.seen
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(req);
+
+        if let Some(reply) = computed {
+            if let Some(latency) = self.latency {
+                tokio::time::sleep(latency).await;
+            }
+            return reply;
+        }
 
         // Take the reply first, then sleep, so the reply queue advances
         // in arrival order rather than in wake order. The `rules` guard
@@ -335,6 +407,56 @@ mod tests {
         assert_eq!(&*one.body, b"first");
         assert_eq!(&*two.body, b"second");
         assert_eq!(&*three.body, b"second");
+    }
+
+    #[tokio::test]
+    async fn peak_in_flight_tells_overlapping_calls_from_serial_ones() {
+        let t = FakeTransport::new()
+            .json("/x", 200, "{}")
+            .with_latency(Duration::from_millis(20));
+
+        t.execute(HttpRequest::get("https://idp/x"))
+            .await
+            .expect("first");
+        t.execute(HttpRequest::get("https://idp/x"))
+            .await
+            .expect("second");
+        assert_eq!(t.peak_in_flight(), 1, "serial calls never overlap");
+
+        let (a, b, c) = tokio::join!(
+            t.execute(HttpRequest::get("https://idp/x")),
+            t.execute(HttpRequest::get("https://idp/x")),
+            t.execute(HttpRequest::get("https://idp/x")),
+        );
+        assert!(a.is_ok() && b.is_ok() && c.is_ok(), "all three answer");
+        assert_eq!(
+            t.peak_in_flight(),
+            3,
+            "joined calls are all held open at once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_responder_sees_the_request_and_wins_over_queued_replies() {
+        let t = FakeTransport::new()
+            .json("/token", 200, "queued")
+            .respond_with("/token", |req| Ok(HttpResponse::new(200, req.body.clone())));
+
+        let resp = t
+            .execute(HttpRequest::post(
+                "https://idp/token",
+                Bytes::from_static(b"audience=api"),
+            ))
+            .await
+            .expect("the responder answers");
+        assert_eq!(&*resp.body, b"audience=api");
+        assert_eq!(t.call_count_for("/token"), 1, "the call is still recorded");
+
+        let err = t
+            .execute(HttpRequest::get("https://idp/jwks"))
+            .await
+            .expect_err("no rule or responder matches");
+        assert!(matches!(err, HttpTransportError::Connect(_)), "{err}");
     }
 
     #[tokio::test]

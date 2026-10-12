@@ -1,0 +1,385 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# Ported from praxis-demos demos/policy-engine/policy-opa.yaml (a33294c). Policy
+# content is unchanged. Adjustments for the hermetic reference host:
+#   - issuer and JWKS URL: https://idp.test (was http://localhost:8081)
+#   - delegator token endpoints: https://sts.idp.test, apart from CIBA's
+#   - CIBA backchannel and token endpoints: https://ciba.idp.test
+#   - every insecure_http: true dropped, since the fake hosts are https
+#   - audit-log destination: tracing (was stderr), for capture
+#   - global.session_store (Valkey) removed: the memory store is the default
+# The document loaded against the current config shape with no other change.
+#
+# Policy engine config for the HR demo, OPA variant.
+#
+# Identical to policy.yaml EXCEPT the PDP backend for the search_repos
+# route: this config uses OPA/Rego instead of Cedar. All three variants
+# express the same decision ("engineers read internal repos; security
+# reads any") so they are directly comparable: see policy.yaml for Cedar
+# and policy-cel.yaml for CEL. Run this variant with:
+#   GATEWAY_CONFIG=praxis-opa.yaml ./restart.sh
+#
+# Hot path:
+#   1. jwt-user      validates X-User-Token against Keycloak (policy-demo realm)
+#                    → security.subject + raw_credentials.inbound_tokens[User]
+#   2. jwt-client    validates Authorization against Keycloak (same realm)
+#                    → security.client
+#   3. APL gate      require(role.hr) on the get_compensation tool
+#   4. APL delegate  workday-oauth exchanges the user's IdP token for an
+#                    audience=workday-api token via Keycloak (RFC 8693)
+#   5. APL args      ssn arg gets redacted unless caller has perm.view_ssn
+#
+# The issuer is the scripted IdP in `tests/utils/src/idp.rs`, which signs
+# with one fixed RSA key and publishes it at the JWKS URL below.
+
+engine_settings:
+  dispatch: policy
+
+plugins:
+  # User identity. Carries the human's roles + permissions claims.
+  - name: jwt-user
+    capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    config:
+      role: user
+      header: X-User-Token
+      trusted_issuers:
+        - issuer: "https://idp.test/realms/policy-demo"
+          audiences: ["praxis-gateway"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://idp.test/realms/policy-demo/protocol/openid-connect/certs"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  # Client identity. Carries the agent's client_id / azp.
+  - name: jwt-client
+    capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    config:
+      role: client
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.test/realms/policy-demo"
+          audiences: ["praxis-gateway", "account"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://idp.test/realms/policy-demo/protocol/openid-connect/certs"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  # RFC 8693 token-exchange delegator. Trades the user's hr-copilot
+  # token for a workday-api-audience-scoped access token.
+  #
+  # Pattern 1 (workday flow): the user already carries view_ssn etc.
+  # as a Keycloak user attribute → claim. The exchange just changes
+  # the audience; the perms come along for the ride.
+  - name: workday-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    mode: sequential
+    on_error: fail
+    capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
+      - read_inbound_credentials
+      - write_delegated_tokens
+    config:
+      token_endpoint: "https://sts.idp.test/realms/policy-demo/protocol/openid-connect/token"
+      client_id: "praxis-gateway"
+      # Secret source. `kind: literal` is an inline secret (dev only).
+      # Other kinds: `kind: env_var` with `name:` (read from the
+      # environment at startup) and `kind: file` with `path:` (read from
+      # a file). Prefer env_var or file in production; do not commit
+      # secrets to YAML.
+      client_secret_source:
+        kind: literal
+        secret: "praxis-gateway-secret"
+      timeout_seconds: 5
+      default_outbound_header: "Authorization"
+
+  # ----------------------------------------------------------------
+  # Field-level validator: PII scanner.
+  # ----------------------------------------------------------------
+  # Walks tool/prompt arguments looking for SSN / credit-card / email
+  # patterns. If found in `deny` mode, refuses the request. Wired on
+  # `cmf.tool_pre_invoke` so it fires before every tool call.
+  - name: pii-scan
+    kind: validator/pii-scan
+    hooks: [cmf.tool_pre_invoke]
+    mode: sequential
+    on_error: fail
+    config:
+      detect:
+        - { kind: ssn }
+        - { kind: credit_card }
+      mode: deny
+
+  # ----------------------------------------------------------------
+  # Observation: structured audit logger.
+  # ----------------------------------------------------------------
+  # Emits one JSON line per dispatched request capturing subject,
+  # client, entity, tool args, and any delegation outcomes. Never
+  # blocks — observation only.
+  #
+  # One hook, because this demo declares only `tool:` routes. Under
+  # `dispatch: policy` a plugin runs where a `run(name)` step names it, so
+  # declaring the prompt and resource hooks too would leave two of the three
+  # uncovered and the load would say so. Add them back alongside the routes
+  # that need them.
+  - name: audit-log
+    kind: audit/logger
+    hooks:
+      - cmf.tool_pre_invoke
+    mode: sequential
+    # Ordering is the order the document writes the steps: a `run(name)`
+    # step invokes the one plugin it names, so this records the final
+    # decision and the minted tokens by sitting last.
+    on_error: ignore  # observation failures don't halt traffic
+    capabilities:
+      - read_subject
+      - read_client
+      - read_meta
+      - read_delegated_tokens
+    config:
+      destination: tracing
+      source: policy-demo-gateway
+
+  # Second delegator — same plugin kind, different audience.
+  #
+  # Pattern 3 (github flow): the user's inbound token does NOT
+  # carry github perms. The github-api client in Keycloak has a
+  # per-audience claim mapper (`gh-permissions-as-scope`) that
+  # injects `gh_permissions` from the user attribute as the
+  # minted token's `permissions` claim. The IdP is the source of
+  # system-specific perm truth; the gateway just asks.
+  - name: github-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    mode: sequential
+    on_error: fail
+    capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
+      - read_inbound_credentials
+      - write_delegated_tokens
+    config:
+      token_endpoint: "https://sts.idp.test/realms/policy-demo/protocol/openid-connect/token"
+      client_id: "praxis-gateway"
+      client_secret_source:
+        kind: literal
+        secret: "praxis-gateway-secret"
+      timeout_seconds: 5
+      default_outbound_header: "Authorization"
+
+  # ----------------------------------------------------------------
+  # Human-in-the-loop: CIBA manager approval.
+  # ----------------------------------------------------------------
+  # Drives an out-of-band approval through OIDC CIBA: the gateway POSTs
+  # a backchannel auth request to Keycloak (login_hint = the approver),
+  # Keycloak pushes a decoupled prompt to the approver's device (the
+  # demo's web approval UI), and the gateway polls until it resolves.
+  # While pending, the gateway emits JSON-RPC -32120 so the agent can
+  # tell the user "awaiting sign-off" and retry — it never blocks.
+  # Registered under the name `manager-approver`; the route names it.
+  - name: manager-approver
+    capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
+    kind: elicitation/ciba
+    hooks: [elicit]
+    mode: sequential
+    on_error: fail
+    config:
+      backchannel_endpoint: "https://ciba.idp.test/realms/policy-demo/protocol/openid-connect/ext/ciba/auth"
+      token_endpoint: "https://ciba.idp.test/realms/policy-demo/protocol/openid-connect/token"
+      client_id: "praxis-gateway"
+      client_secret_source:
+        kind: literal
+        secret: "praxis-gateway-secret"
+      scope: openid
+      approver_claim: preferred_username
+      default_requested_expiry_seconds: 120
+
+global:
+  authentication:
+    - jwt-user
+    - jwt-client
+
+  # ----------------------------------------------------------------
+  # Assertions — what the engine puts on the wire.
+  # ----------------------------------------------------------------
+  # Everything above this block decides. This is the only thing that tells the
+  # upstream what was decided, as request headers it can read.
+  #
+  # The trust model first, because it is the whole story: what crosses here is
+  # UNSIGNED. hr-mcp believes `x-auth-user-id` because it believes nothing
+  # between this gateway and itself can set that header. If that is not true of
+  # your network, this feature is not what makes it true.
+  #
+  # Sources are engine-derived only. A raw inbound token and the client's own
+  # request headers are refused as sources, in code, with no config surface to
+  # widen: rendering a client-supplied header into one the upstream trusts is
+  # the laundering this exists to prevent. Scenario 12 demonstrates that.
+  assertions:
+    request:
+      headers:
+        # The stable subject identifier the JWT resolved to (`sub`).
+        # `on_missing: deny` because every route here authenticates, so an
+        # absent subject is a bug rather than an anonymous request to pass on.
+        - name: x-auth-user-id
+          from: subject.id
+          on_missing: deny
+
+        # The human-readable name, for the demo log. A claim, not a slot.
+        - name: x-auth-username
+          from: claim.preferred_username
+
+        # A collection MUST declare an encoding: a set reaching an upstream in
+        # a shape nobody chose is a shape nobody can rely on. Rendered sorted,
+        # so one identity produces identical header bytes every request.
+        - name: x-auth-roles
+          from: subject.roles
+          encode: csv
+
+        # `members:` renders one JSON object with operator-chosen keys, for
+        # everything that would otherwise be a header each.
+        - name: x-auth-context
+          members:
+            manager: claim.manager
+            teams: subject.teams
+
+      # `strip:` removes names no entry above targets. The user's raw JWT is
+      # one: `delegate(...)` already replaces `authorization` with the minted
+      # workday-api token, and this withholds the second copy, so the upstream
+      # ends up holding no credential the user issued.
+      #
+      # `authorization` is deliberately absent from the request protocol floor
+      # precisely so this is expressible. A floor header (`host`,
+      # `content-type`, `content-length`, `transfer-encoding`) fails the load
+      # rather than breaking traffic.
+      strip:
+        - x-user-token
+
+  # ----------------------------------------------------------------
+  # OPA PDP: Rego modules evaluated in-process by regorus. No sidecar
+  # and no network hop, so the decision stays on the request path.
+  #
+  # The module is declared here, once, and compiled at config load. A
+  # Rego syntax error therefore fails the load rather than surfacing as
+  # a runtime deny on the first request. Routes then query it with an
+  # `opa:` step naming a rule path.
+  #
+  # The flat attribute bag becomes the Rego `input` document, so
+  # `role.engineer` reads as `input.role.engineer` and `args.visibility`
+  # as `input.args.visibility`. The vocabulary is the same one the CEL
+  # and Cedar variants see.
+  #
+  # Choosing between the three: reach for CEL when the decision is a
+  # self-contained boolean you want to read inline in the route. Reach
+  # for Cedar when policy lives outside the route or needs its entity
+  # and relationship model. Reach for OPA when you already have Rego,
+  # or want rules that compose and can be unit-tested with the OPA
+  # tooling your org already runs. All three express the SAME decision
+  # here on purpose.
+  #
+  # `pdp:` is a `global:` key, and the only scope that accepts one: a PDP, the
+  # session store and the static attribute tree are all process-global.
+  # ----------------------------------------------------------------
+  pdp:
+    - kind: opa
+      on_error: deny   # fail-closed; the default, spelled out
+      modules:
+        - |
+          package authz
+
+          # Absent an allow rule that fires, the answer is deny. Rego's
+          # `default` is what makes this fail-closed rather than undefined.
+          default allow := false
+
+          # Engineers may read internal repos. A missing key makes the
+          # body undefined rather than an error, so a request with no
+          # engineer role simply does not match.
+          allow if {
+            input.role.engineer == true
+            input.args.visibility == "internal"
+          }
+
+          # Security may read any repo, whatever its visibility.
+          allow if {
+            input.role.security == true
+          }
+
+  # ----------------------------------------------------------------
+  # Session store: none declared, so the in-process memory store holds the
+  # taint labels `taint(secret, session)` writes, keyed by
+  # H(subject : X-Session-Id). The demo selects Valkey here; live mode
+  # puts that block back.
+  # ----------------------------------------------------------------
+
+routes:
+
+  - tool: get_compensation
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
+        - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation])"
+        - "taint(secret, session)"
+        - "run(audit-log)"
+    args:
+      ssn: "str | redact(!perm.view_ssn)"
+    result:
+      ssn: "str | redact(!perm.view_ssn)"
+
+  - tool: search_repos
+    authorization:
+      pre_invocation:
+        - "require(team.engineering | team.security)"
+        - opa:
+            query: data.authz.allow
+            on_deny:
+              - "deny('engineering may read internal repos only; security may read any', 'opa.policy_denied')"
+        - "delegate(github-oauth, target: github-api, audience: github-api, permissions: [repo:read:internal])"
+        - "!(delegation.granted.permissions contains 'repo:read:internal'): deny"
+        - "run(audit-log)"
+
+  - tool: send_email
+    authorization:
+      pre_invocation:
+        - "require(perm.email_send)"
+        - "run(audit-log)"
+        - "run(pii-scan)"
+        - "security.labels contains \"secret\": deny('external email blocked: this session accessed secret data', 'session_tainted_secret')"
+
+  # Sensitive mutating action. Small changes go straight through; an
+  # adjustment over $10K requires the requester's manager to approve
+  # out-of-band (CIBA), and the approval is bound to the live amount
+  # (`scope`) so it can't be replayed against a larger change. This
+  # route is PDP-independent (no cedar:/cel:/opa: step), so it behaves
+  # identically under all three variants.
+  - tool: adjust_compensation
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
+        - when: "args.amount > 10000"
+          do:
+            - "require_approval(manager-approver, from: claim.manager, channel: \"ciba\", scope: \"args.amount <= 25000\", purpose: \"Approve a compensation adjustment\", timeout: 24h)"
+        - "run(audit-log)"

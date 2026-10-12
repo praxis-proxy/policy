@@ -4,9 +4,17 @@
 // HttpExtension — HTTP request and response headers, the request line, and
 // the response status.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+
+/// Engine-recorded provenance for secret assertion headers. Contains no secret values.
+#[derive(Debug, Clone, Default)]
+pub struct SecretHeaderProvenance {
+    pub(crate) markers: HashMap<String, String>,
+}
 
 /// HTTP-related extensions.
 ///
@@ -17,12 +25,17 @@ use serde::{Deserialize, Serialize};
 ///   upstream) and `status` set to the status the upstream returned
 ///
 /// Capability-gated: requires `read_headers` to see, `write_headers`
-/// to modify (both request and response).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// to modify (both request and response). Secret assertions are withheld from
+/// plugin views, `Debug`, and serialization.
+#[derive(Clone, Default, Deserialize)]
 pub struct HttpExtension {
     /// HTTP request headers (inbound from caller).
     #[serde(default)]
     pub request_headers: HashMap<String, String>,
+
+    /// Preserve across hooks. Plugins cannot replace canonical provenance.
+    #[serde(skip)]
+    pub secret_headers: SecretHeaderProvenance,
 
     /// HTTP response headers (from upstream, populated post-invoke).
     #[serde(default)]
@@ -56,7 +69,68 @@ pub struct HttpExtension {
     pub scheme: Option<String>,
 }
 
+// Both diagnostics and serialization use the same safe header map as plugin views.
+#[derive(Debug, Serialize)]
+#[serde(rename = "HttpExtension")]
+struct HttpView<'a> {
+    request_headers: Cow<'a, HashMap<String, String>>,
+    response_headers: &'a HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheme: Option<&'a str>,
+}
+
+impl Serialize for HttpExtension {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.view().serialize(serializer)
+    }
+}
+
+impl fmt::Debug for HttpExtension {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.view().fmt(f)
+    }
+}
+
 impl HttpExtension {
+    fn view(&self) -> HttpView<'_> {
+        HttpView {
+            request_headers: self.redacted_request_headers(),
+            response_headers: &self.response_headers,
+            status: self.status,
+            method: self.method.as_deref(),
+            path: self.path.as_deref(),
+            host: self.host.as_deref(),
+            scheme: self.scheme.as_deref(),
+        }
+    }
+
+    pub(crate) fn redacted_request_headers(&self) -> Cow<'_, HashMap<String, String>> {
+        if self.secret_headers.markers.is_empty() {
+            return Cow::Borrowed(&self.request_headers);
+        }
+        Cow::Owned(
+            self.request_headers
+                .iter()
+                .map(|(name, value)| {
+                    let value = self
+                        .secret_headers
+                        .markers
+                        .get(&name.to_ascii_lowercase())
+                        .unwrap_or(value);
+                    (name.clone(), value.clone())
+                })
+                .collect(),
+        )
+    }
+
     // -- Request header helpers --
 
     /// Set a request header (overwrites if exists).
@@ -271,5 +345,41 @@ mod tests {
             deserialized.get_response_header("Content-Type"),
             Some("application/json")
         );
+    }
+
+    #[test]
+    fn secret_headers_are_safe_in_debug_and_serialization() {
+        let mut http = HttpExtension {
+            status: Some(201),
+            method: Some("POST".into()),
+            path: Some("/tool".into()),
+            host: Some("example.test".into()),
+            scheme: Some("https".into()),
+            ..Default::default()
+        };
+        http.set_request_header("X-Key", "credential");
+        http.set_request_header("x-key", "credential");
+        http.set_request_header("x-user", "alice");
+        http.set_response_header("x-result", "ok");
+        http.secret_headers
+            .markers
+            .insert("x-key".into(), "<redacted secret.key>".into());
+        let debug = format!("{http:?}");
+        let json = serde_json::to_string(&http).unwrap();
+        for output in [debug, json.clone()] {
+            assert!(!output.contains("credential"), "{output}");
+            assert!(output.contains("<redacted secret.key>"), "{output}");
+        }
+        let safe: HttpExtension = serde_json::from_str(&json).unwrap();
+        assert_eq!(safe.request_headers["X-Key"], "<redacted secret.key>");
+        assert_eq!(safe.request_headers["x-key"], "<redacted secret.key>");
+        assert_eq!(safe.get_request_header("x-user"), Some("alice"));
+        assert_eq!(safe.get_response_header("x-result"), Some("ok"));
+        assert_eq!(safe.status, http.status);
+        assert_eq!(safe.method, http.method);
+        assert_eq!(safe.path, http.path);
+        assert_eq!(safe.host, http.host);
+        assert_eq!(safe.scheme, http.scheme);
+        assert_eq!(http.get_request_header("x-key"), Some("credential"));
     }
 }

@@ -156,6 +156,13 @@ fn fully_populated() -> Extensions {
         path: Some("/v1".to_owned()),
         host: Some("h".to_owned()),
         scheme: Some("https".to_owned()),
+        // The one field this fixture cannot populate: the engine owns this
+        // provenance and its marker map is crate-private to the core, so no
+        // out-of-crate caller can write one. Nothing bridges it either, which
+        // is the point of it: it records which request headers carry a
+        // credential, and a bag key naming them would hand a policy author
+        // the location of every secret on the request.
+        secret_headers: Default::default(),
     };
     let llm = LLMExtension {
         model_id: Some("gpt-4".to_owned()),
@@ -259,6 +266,7 @@ fn type_of(value: &AttributeValue) -> KeyType {
         AttributeValue::Float(_) => KeyType::Float,
         AttributeValue::String(_) => KeyType::String,
         AttributeValue::StringSet(_) => KeyType::StringSet,
+        AttributeValue::NonScalar => KeyType::NonScalar,
     }
 }
 

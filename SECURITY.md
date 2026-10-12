@@ -2,15 +2,9 @@
 
 ## Supported Versions
 
-| Version | Supported |
-| ------- | --------- |
-| 0.4.x   | Yes       |
-| 0.3.x   | No        |
-| 0.2.x   | No        |
-| 0.1.x   | No        |
-
-Only the latest patch release of each minor version
-receives security updates.
+| Version | Supported  |
+| ------- | ---------- |
+| 0.1.x   | No (Alpha) |
 
 ## Reporting a Vulnerability
 
@@ -30,8 +24,8 @@ Include:
 ## Response Timeline
 
 Prior to `v1.0.0` we will work with researchers
-individually on timelines. After `v1.0.0` we will
-have a standardized response timeline.
+individually on timelines. After `v1.0.0` we will have
+a standardized response timeline.
 
 ## Severity Classification
 
@@ -43,3 +37,11 @@ have a standardized response timeline.
   effort, information disclosure of limited scope
 - **Low**: Issues requiring unlikely configurations or
   minimal impact
+
+## Safe Harbor
+
+We consider security research conducted in good faith to
+be authorized. We will not pursue legal action against
+researchers who follow this policy and report findings
+responsibly. We appreciate the effort you put into
+keeping this project secure.

@@ -137,6 +137,17 @@ pub struct ElicitationPayload {
     /// selected by name).
     channel: Option<String>,
 
+    /// The selected policy route, exact tool, and authenticated requester.
+    #[serde(default)]
+    route_key: String,
+    #[serde(default)]
+    tool: String,
+    #[serde(default)]
+    requester: String,
+    /// A status-only request must leave an approved id available to apply.
+    #[serde(default)]
+    peek: bool,
+
     /// Correlation id minted on `Dispatch`. The agent echoes it on retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -196,6 +207,10 @@ impl ElicitationPayload {
             scope: None,
             timeout: None,
             channel: None,
+            route_key: String::new(),
+            tool: String::new(),
+            requester: String::new(),
+            peek: false,
             id: None,
             status: None,
             outcome: None,
@@ -236,6 +251,45 @@ impl ElicitationPayload {
     pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
         self.channel = Some(channel.into());
         self
+    }
+
+    /// Bind the approval to the selected route, tool, and requester identity.
+    pub fn with_binding(
+        mut self,
+        route_key: impl Into<String>,
+        tool: impl Into<String>,
+        requester: impl Into<String>,
+    ) -> Self {
+        self.route_key = route_key.into();
+        self.tool = tool.into();
+        self.requester = requester.into();
+        self
+    }
+
+    /// Selected policy route, including its scope when one is configured.
+    pub fn route_key(&self) -> &str {
+        &self.route_key
+    }
+
+    /// Mark a validation as status-only, preserving the id for a later apply.
+    pub fn with_peek(mut self, peek: bool) -> Self {
+        self.peek = peek;
+        self
+    }
+
+    /// Exact tool name for this request.
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    /// Authenticated subject id for this request.
+    pub fn requester(&self) -> &str {
+        &self.requester
+    }
+
+    /// Whether this validation is status-only.
+    pub fn peek(&self) -> bool {
+        self.peek
     }
 
     /// Which operation this payload requests.

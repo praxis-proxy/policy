@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# praxis-policy-tests-security: Adversarial inputs against the full engine.
+#
+# Runs only in the `--all-features` pass. The one test target requires
+# `suite`, which forwards to test-utils so the default pass builds nothing here
+# and unifies no builtin features.
+
+[package]
+name = "praxis-policy-tests-security"
+description = "PPE security test suite."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+suite = ["praxis-policy-test-utils/suite"]
+
+# No features here: test-utils' `suite` turns on what these need.
+[dev-dependencies]
+praxis-policy-test-utils = { workspace = true }
+praxis-policy = { workspace = true }
+praxis-policy-core = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[[test]]
+name = "suite"
+path = "tests/suite/main.rs"
+required-features = ["suite"]
+
+[lints]
+workspace = true

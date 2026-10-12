@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# Two JWT identity plugins against the scripted IdP, with a one-second plugin
+# timeout. A test stalls the JWKS refresh past it. The fail-open row rewrites
+# `jwt-client` to `on_error: ignore`; its zero refresh floor makes both
+# identity passes of one call refetch, so each one stalls.
+
+engine_settings:
+  dispatch: policy
+  plugin_timeout: 1
+
+plugins:
+  - name: jwt-user
+    capabilities: [perform_http]
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    config:
+      role: user
+      header: X-User-Token
+      trusted_issuers:
+        - issuer: "https://idp.test/realms/policy-demo"
+          audiences: ["praxis-gateway"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://idp.test/realms/policy-demo/protocol/openid-connect/certs"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  - name: jwt-client
+    capabilities: [perform_http]
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail # jwt-client
+    config:
+      role: client
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.test/realms/policy-demo"
+          audiences: ["praxis-gateway"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://idp.test/realms/policy-demo/protocol/openid-connect/certs"
+            min_refresh_interval_secs: 0
+          leeway_seconds: 60
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+    - jwt-client
+
+routes:
+  - tool: get_directory
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"

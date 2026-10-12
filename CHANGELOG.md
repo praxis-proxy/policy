@@ -19,6 +19,28 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Added integration, resilience, and security test suites that exercise policy
+  decisions through the reference host, including dependency failures,
+  concurrency, credential leaks, and environment-gated live services.
+  ([#180](https://github.com/praxis-proxy/policy/pull/180))
+- Added `secret.<name>`, an assertion source for a static upstream credential.
+  A target sitting behind a shared API key had no path short of a token
+  delegator, which is per-request exchange machinery that a static credential
+  does not need. A request entry can now read a value declared under
+  `secrets.values`, and the engine renders the header: no plugin and no PDP
+  holds the bytes, and the value reaches the asserted header and nothing else.
+  The path names a declared secret and never a provider or a raw reference,
+  which is what keeps the addressable set finite and readable from the
+  document instead of being whatever a provider's credentials can reach. An
+  unknown name is a config error naming what is declared, and so is a response
+  entry naming a secret, since a response asserts toward the client and the
+  credential is the upstream's.
+  The read is synchronous from the value resolved at startup, so nothing
+  fetches on the request path, and it goes through the store at the point of
+  use, so a rotation reaches the wire on the next request after a refresh. The
+  effective-policy artifact prints the name and never the value, and says that
+  no plugin capability reads the slot rather than naming one.
+  ([#93](https://github.com/praxis-proxy/policy/issues/93))
 - MCP `annotations` now reach policy as `mcp.tool.annotations.<name>` and the
   same under `mcp.resource` and `mcp.prompt`, flattened through the JSON walker
   that already carries `custom.*`, `framework.metadata.*` and `claim.*`. This
@@ -49,27 +71,30 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `completion.created_at` are host-supplied strings with no format guarantee.
   ([#78](https://github.com/praxis-proxy/policy/issues/78))
 
-### Documentation
+### Changed
 
-- The per-slot key tables in `docs/content/cmf-extensions.md` are now checked
-  against the bridge rather than maintained by hand.
-  `crates/ppe-apl-cmf/tests/key_catalog/` declares every key the bridge emits
-  with its type, its slot and the capability that gates it, and asserts that
-  flattening a fully populated `Extensions` emits exactly those keys, that the
-  tables list exactly those keys under the right slot, and that
-  `capability_namespaces` agrees. The page also now records that `auth_method`
-  and `security.classification` are the two keys no capability gates, since
-  `filter_extensions` includes them whatever a plugin declared.
-  ([#78](https://github.com/praxis-proxy/policy/issues/78))
-- Recorded why `client.teams` is set-only where `subject.teams` also carries
-  the flattened `team.<name>` boolean. The flattened form cannot hold a dotted
-  name, so it is lossy wherever one occurs while the set always holds every
-  member; the five collections that carry it predate the sets and the list is
-  closed. Both namespaces already have the complete form, so what `subject.*`
-  has in addition is sugar rather than a capability `client.*` lacks. A test
-  pins it, because the two loops beside it in `extract_client` do flatten and
-  completing the pattern is the obvious wrong edit.
-  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- **Breaking:** `HttpExtension` adds `secret_headers`; exhaustive struct
+  literals must initialize it (or use `..Default::default()`). Hosts must
+  preserve this provenance when carrying HTTP state between hooks. `Debug`
+  and generic serialization redact marked request headers; forwarding uses
+  the canonical in-memory header map.
+- **Breaking for Rust callers of `praxis_policy_core::assertions`:** the secret
+  source widened four signatures and the `SourcePath` enum. This also affects
+  callers using `praxis-policy`, which re-exports `praxis_policy_core`, including
+  `assertions`.
+  - `SourcePath::capability` returns `Option<Capability>` instead of
+    `Capability`. A secret answers `None`, because no plugin-facing read of a
+    declared secret exists for a capability to gate, and naming one would tell
+    an operator that some grant reaches the value.
+  - `SourcePath::resolve` and `assertions::render` each take the resolved
+    `SecretStore` as a further argument, where `None` is a host that resolved
+    none. `AssertionsConfig::validate` takes the document's `SecretsConfig`,
+    which is what makes an undeclared name a load error.
+  - `SourcePath` gains a `Secret(String)` variant and is now
+    `#[non_exhaustive]`, so an out-of-crate `match` on it needs a `_` arm.
+    Marking it in the same release that already changes the enum means the next
+    source added is not a breaking change.
+  ([#93](https://github.com/praxis-proxy/policy/issues/93))
 
 ### Removed
 
@@ -101,6 +126,25 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Rejected JWTs with unsupported critical headers. OAuth token exchange now
+  validates the issued token type, granted scopes, and JWT audience and subject
+  by default. Empty scope requests accept IdP defaults, and
+  `allowed_extra_scopes` permits named defaults alongside requested scopes.
+  ([#188](https://github.com/praxis-proxy/policy/pull/188))
+- Bound CIBA approvals to the selected policy route, tool, and authenticated
+  requester, with atomic single-use redemption within a plugin instance.
+  Backchannel and poll failures no longer expose OP response bodies that may
+  contain client credentials.
+  ([#188](https://github.com/praxis-proxy/policy/pull/188))
+- Made non-scalar numeric policy comparisons fail closed. Structured JSON
+  redaction now matches keys without case sensitivity, supports recursive
+  paths, and preserves keys containing dots; recursive traversal is bounded.
+  ([#188](https://github.com/praxis-proxy/policy/pull/188))
+- Secret assertion headers are redacted in plugin and audit views across
+  subsequent hooks, config reloads, and header case normalization. Provenance
+  travels with the HTTP extension. Plugin header writes preserve the original
+  credential while allowing unrelated header changes.
+  ([#93](https://github.com/praxis-proxy/policy/issues/93))
 - `capability_namespaces` no longer claims that `read_request`,
   `read_provenance`, `read_completion`, `read_llm`, `read_framework`,
   `read_mcp`, `read_meta` and `read_custom` unlock bag namespaces. Those eight
@@ -119,6 +163,28 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   aliases, but `capability_namespaces` named only the set. An operator reading
   the table to answer what a plugin can see was told less than the plugin
   actually receives.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+
+### Documentation
+
+- The per-slot key tables in `docs/content/cmf-extensions.md` are now checked
+  against the bridge rather than maintained by hand.
+  `crates/ppe-apl-cmf/tests/key_catalog/` declares every key the bridge emits
+  with its type, its slot and the capability that gates it, and asserts that
+  flattening a fully populated `Extensions` emits exactly those keys, that the
+  tables list exactly those keys under the right slot, and that
+  `capability_namespaces` agrees. The page also now records that `auth_method`
+  and `security.classification` are the two keys no capability gates, since
+  `filter_extensions` includes them whatever a plugin declared.
+  ([#78](https://github.com/praxis-proxy/policy/issues/78))
+- Recorded why `client.teams` is set-only where `subject.teams` also carries
+  the flattened `team.<name>` boolean. The flattened form cannot hold a dotted
+  name, so it is lossy wherever one occurs while the set always holds every
+  member; the five collections that carry it predate the sets and the list is
+  closed. Both namespaces already have the complete form, so what `subject.*`
+  has in addition is sugar rather than a capability `client.*` lacks. A test
+  pins it, because the two loops beside it in `extract_client` do flatten and
+  completing the pattern is the obvious wrong edit.
   ([#78](https://github.com/praxis-proxy/policy/issues/78))
 
 ## [0.4.1] - 2026-10-05

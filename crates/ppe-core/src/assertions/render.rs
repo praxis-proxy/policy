@@ -8,6 +8,13 @@
 // claim's value is the provider's, so a rendered value carrying CR or LF is
 // dropped rather than emitted, since a header that splits is a second header
 // nobody configured.
+//
+// A `secret.<name>` source reads the store resolved at startup, so the whole
+// path stays synchronous: nothing here awaits a backend. The value reaches the
+// wire and nothing else. It is not logged, not named in a denial, and not put
+// back into extensions under any name but the header the entry targets; a
+// rejected secret is reported the same way any other rejected value is, by
+// header name and defect, never by value.
 
 use serde_json::Value;
 use tracing::warn;
@@ -15,6 +22,7 @@ use tracing::warn;
 use super::config::{Encoding, OnMissing};
 use super::resolved::{ResolvedContract, ResolvedHeader, ResolvedSource};
 use crate::extensions::Extensions;
+use crate::secrets::SecretStore;
 
 /// An entry whose source resolved to nothing, where the entry said to deny.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,17 +40,26 @@ pub struct MissingSource {
 /// whose source resolves to nothing renders nothing, which is the default; one
 /// declaring `on_missing: deny` stops the render instead.
 ///
+/// `secrets` is the store resolved at startup, which a `secret.<name>` source
+/// reads synchronously. `None` is a host that resolved no store, and leaves
+/// every secret source absent for `on_missing` to act on. Config load already
+/// refused a name no `secrets.values` entry declares, so a store that resolved
+/// holds every name a contract can ask it for.
+///
 /// # Errors
 ///
 /// Returns [`MissingSource`] naming the header and the path when an entry
-/// declaring `on_missing: deny` resolved nothing.
+/// declaring `on_missing: deny` resolved nothing. The path is the declared
+/// name, `secret.<name>`, so a denial over an unreadable secret says which one
+/// without saying what it held.
 pub fn render(
     contract: &ResolvedContract,
     ext: &Extensions,
+    secrets: Option<&SecretStore>,
 ) -> Result<Vec<(String, String)>, MissingSource> {
     let mut rendered = Vec::with_capacity(contract.headers.len());
     for header in &contract.headers {
-        match render_one(header, ext) {
+        match render_one(header, ext, secrets) {
             Rendered::Value(value) => rendered.push((header.name.clone(), value)),
             Rendered::Skip => {},
             Rendered::Missing(source) => {
@@ -73,9 +90,13 @@ enum Rendered {
 }
 
 /// Render one entry.
-fn render_one(header: &ResolvedHeader, ext: &Extensions) -> Rendered {
+fn render_one(
+    header: &ResolvedHeader,
+    ext: &Extensions,
+    secrets: Option<&SecretStore>,
+) -> Rendered {
     match &header.source {
-        ResolvedSource::From(path) => match path.resolve(ext) {
+        ResolvedSource::From(path) => match path.resolve(ext, secrets) {
             Some(value) => match encode(&value, header.encode) {
                 Some(text) => emit(&header.name, text),
                 None => Rendered::Skip,
@@ -90,7 +111,9 @@ fn render_one(header: &ResolvedHeader, ext: &Extensions) -> Rendered {
             // makes the order the same either way.
             let mut resolved: Vec<(&String, Value)> = members
                 .iter()
-                .filter_map(|(member, path)| path.resolve(ext).map(|value| (member, value)))
+                .filter_map(|(member, path)| {
+                    path.resolve(ext, secrets).map(|value| (member, value))
+                })
                 .collect();
             resolved.sort_by_key(|(member, _)| *member);
             let mut object = serde_json::Map::new();
@@ -251,6 +274,15 @@ mod tests {
         }
     }
 
+    /// Render with no store, which is what every case reading only request
+    /// state wants. The secret cases below call [`render`] with one.
+    fn render_without_secrets(
+        contract: &ResolvedContract,
+        ext: &Extensions,
+    ) -> Result<Vec<(String, String)>, MissingSource> {
+        render(contract, ext, None)
+    }
+
     fn subject(subject: SubjectExtension) -> Extensions {
         Extensions {
             security: Some(Arc::new(SecurityExtension {
@@ -282,7 +314,7 @@ mod tests {
 
     #[test]
     fn a_scalar_source_renders_bare() {
-        let rendered = render(
+        let rendered = render_without_secrets(
             &contract(vec![from("x-auth-user-id", "subject.id")]),
             &keycloak(),
         )
@@ -307,7 +339,8 @@ mod tests {
                 ("namespaces", "claim.namespace"),
             ],
         );
-        let rendered = render(&contract(vec![entry]), &keycloak()).expect("nothing denies");
+        let rendered =
+            render_without_secrets(&contract(vec![entry]), &keycloak()).expect("nothing denies");
         assert_eq!(
             rendered[0].1,
             r#"{"namespaces":["team-ml"],"projects":["team-stage","team-prod"],"roles":["ml-engineer","viewer"],"teams":["platform"]}"#
@@ -326,8 +359,8 @@ mod tests {
         };
         let ext = keycloak();
         assert_eq!(
-            render(&build(), &ext).expect("nothing denies"),
-            render(&build(), &ext).expect("nothing denies")
+            render_without_secrets(&build(), &ext).expect("nothing denies"),
+            render_without_secrets(&build(), &ext).expect("nothing denies")
         );
     }
 
@@ -345,8 +378,9 @@ mod tests {
         });
         let mut entry = from("x-shape", "claim.x");
         entry.encode = Some(Encoding::Json);
-        let one = render(&contract(vec![entry.clone()]), &structured).expect("nothing denies");
-        let two = render(&contract(vec![entry]), &text).expect("nothing denies");
+        let one = render_without_secrets(&contract(vec![entry.clone()]), &structured)
+            .expect("nothing denies");
+        let two = render_without_secrets(&contract(vec![entry]), &text).expect("nothing denies");
         assert_eq!(one[0].1, r#"["a"]"#);
         assert_eq!(two[0].1, r#""[\"a\"]""#);
         assert_ne!(one, two);
@@ -360,8 +394,9 @@ mod tests {
                 .collect(),
             ..Default::default()
         });
-        let rendered = render(&contract(vec![from("x-realm", "claim.realm_access")]), &ext)
-            .expect("nothing denies");
+        let rendered =
+            render_without_secrets(&contract(vec![from("x-realm", "claim.realm_access")]), &ext)
+                .expect("nothing denies");
         assert_eq!(rendered[0].1, r#"{"roles":["admin"]}"#);
     }
 
@@ -371,8 +406,8 @@ mod tests {
         collection.encode = Some(Encoding::Csv);
         let mut scalar = from("x-tenant", "claim.tenant");
         scalar.encode = Some(Encoding::Csv);
-        let rendered =
-            render(&contract(vec![collection, scalar]), &keycloak()).expect("nothing denies");
+        let rendered = render_without_secrets(&contract(vec![collection, scalar]), &keycloak())
+            .expect("nothing denies");
         assert_eq!(rendered[0].1, "team-stage,team-prod");
         assert_eq!(rendered[1].1, "acme");
     }
@@ -387,7 +422,8 @@ mod tests {
         as_json.encode = Some(Encoding::Json);
         let mut as_csv = from("x-csv", "claim.projects");
         as_csv.encode = Some(Encoding::Csv);
-        let rendered = render(&contract(vec![as_json, as_csv]), &ext).expect("nothing denies");
+        let rendered =
+            render_without_secrets(&contract(vec![as_json, as_csv]), &ext).expect("nothing denies");
         assert_eq!(rendered[0].1, "[]");
         assert_eq!(rendered[1].1, "");
     }
@@ -398,7 +434,7 @@ mod tests {
             id: Some("alice".to_owned()),
             ..Default::default()
         });
-        let rendered = render(
+        let rendered = render_without_secrets(
             &contract(vec![
                 from("x-auth-user-id", "subject.id"),
                 from("x-auth-tenant-id", "claim.tenant"),
@@ -416,7 +452,7 @@ mod tests {
             claims: [("tenant".to_owned(), json!("acme"))].into_iter().collect(),
             ..Default::default()
         });
-        let rendered = render(
+        let rendered = render_without_secrets(
             &contract(vec![members(
                 "x-auth-attributes",
                 &[("tenant", "claim.tenant"), ("absent", "claim.nothing")],
@@ -434,7 +470,8 @@ mod tests {
         let ext = subject(SubjectExtension::default());
         let mut entry = members("x-auth-attributes", &[("tenant", "claim.tenant")]);
         entry.on_missing = OnMissing::Deny;
-        let denied = render(&contract(vec![entry]), &ext).expect_err("the entry is missing");
+        let denied =
+            render_without_secrets(&contract(vec![entry]), &ext).expect_err("the entry is missing");
         assert_eq!(denied.header, "x-auth-attributes");
         assert_eq!(denied.source, "claim.tenant");
     }
@@ -447,7 +484,7 @@ mod tests {
         });
         let mut entry = from("x-auth-tenant-id", "claim.tenant");
         entry.on_missing = OnMissing::Deny;
-        let denied = render(&contract(vec![entry]), &ext).expect_err("deny fires");
+        let denied = render_without_secrets(&contract(vec![entry]), &ext).expect_err("deny fires");
         assert_eq!(denied.header, "x-auth-tenant-id");
         assert_eq!(denied.source, "claim.tenant");
     }
@@ -461,8 +498,9 @@ mod tests {
                 id: Some(hostile.to_owned()),
                 ..Default::default()
             });
-            let rendered = render(&contract(vec![from("x-auth-user-id", "subject.id")]), &ext)
-                .expect("a rejected value is not a denial");
+            let rendered =
+                render_without_secrets(&contract(vec![from("x-auth-user-id", "subject.id")]), &ext)
+                    .expect("a rejected value is not a denial");
             assert!(rendered.is_empty(), "{hostile:?} produced {rendered:?}");
         }
     }
@@ -473,8 +511,9 @@ mod tests {
             id: Some("alice\0root".to_owned()),
             ..Default::default()
         });
-        let rendered = render(&contract(vec![from("x-auth-user-id", "subject.id")]), &ext)
-            .expect("a rejected value is not a denial");
+        let rendered =
+            render_without_secrets(&contract(vec![from("x-auth-user-id", "subject.id")]), &ext)
+                .expect("a rejected value is not a denial");
         assert!(rendered.is_empty());
     }
 
@@ -488,7 +527,7 @@ mod tests {
         });
         let mut entry = from("x-auth-user-id", "subject.id");
         entry.on_missing = OnMissing::Deny;
-        let rendered = render(&contract(vec![entry]), &ext)
+        let rendered = render_without_secrets(&contract(vec![entry]), &ext)
             .expect("the source resolved, so nothing is absent");
         assert!(rendered.is_empty());
     }
@@ -499,13 +538,104 @@ mod tests {
     fn an_unresolvable_source_renders_nothing() {
         let mut entry = header("x-auth-user-id", ResolvedSource::Unresolvable);
         entry.on_missing = OnMissing::Deny;
-        let rendered = render(&contract(vec![entry]), &keycloak()).expect("no denial");
+        let rendered =
+            render_without_secrets(&contract(vec![entry]), &keycloak()).expect("no denial");
+        assert!(rendered.is_empty());
+    }
+
+    /// The engine renders the header. No plugin and no PDP is involved, and
+    /// the value exists here and on the wire and nowhere else.
+    #[test]
+    fn a_secret_source_renders_its_value() {
+        let store = crate::secrets::store::fixed("legacy_api_key", "sk-live-abc123");
+        let rendered = render(
+            &contract(vec![from("X-API-Key", "secret.legacy_api_key")]),
+            &Extensions::default(),
+            Some(&store),
+        )
+        .expect("nothing denies");
+        assert_eq!(
+            rendered,
+            vec![("X-API-Key".to_owned(), "sk-live-abc123".to_owned())]
+        );
+    }
+
+    /// A secret sits alongside request state rather than replacing it, so one
+    /// contract can assert both and neither read disturbs the other.
+    #[test]
+    fn a_secret_and_a_request_slot_render_in_one_contract() {
+        let store = crate::secrets::store::fixed("legacy_api_key", "sk-live-abc123");
+        let rendered = render(
+            &contract(vec![
+                from("x-auth-user-id", "subject.id"),
+                from("X-API-Key", "secret.legacy_api_key"),
+            ]),
+            &keycloak(),
+            Some(&store),
+        )
+        .expect("nothing denies");
+        assert_eq!(
+            rendered,
+            vec![
+                ("x-auth-user-id".to_owned(), "alice".to_owned()),
+                ("X-API-Key".to_owned(), "sk-live-abc123".to_owned()),
+            ]
+        );
+    }
+
+    /// `members:` takes a secret like any other source. A JSON object holding
+    /// a credential is an odd thing to want, but nothing about it is less safe
+    /// than the same value under `from:`, and refusing it would be a rule with
+    /// no reason behind it.
+    #[test]
+    fn a_secret_renders_under_members_too() {
+        let store = crate::secrets::store::fixed("legacy_api_key", "sk-live-abc123");
+        let rendered = render(
+            &contract(vec![members(
+                "x-upstream",
+                &[("key", "secret.legacy_api_key"), ("user", "subject.id")],
+            )]),
+            &keycloak(),
+            Some(&store),
+        )
+        .expect("nothing denies");
+        assert_eq!(rendered[0].1, r#"{"key":"sk-live-abc123","user":"alice"}"#);
+    }
+
+    /// `on_missing` applies to a secret as it does to any other source, and
+    /// the denial names the declared secret without saying what it held.
+    #[test]
+    fn a_denial_over_a_secret_names_it_and_never_its_value() {
+        let store = crate::secrets::store::fixed("legacy_api_key", "sk-live-abc123");
+        let mut entry = from("X-API-Key", "secret.rotated_away");
+        entry.on_missing = OnMissing::Deny;
+        let denied = render(&contract(vec![entry]), &Extensions::default(), Some(&store))
+            .expect_err("deny fires");
+        assert_eq!(denied.header, "X-API-Key");
+        assert_eq!(denied.source, "secret.rotated_away");
+        assert!(
+            !format!("{denied:?}").contains("sk-live"),
+            "a denial must not carry secret material: {denied:?}"
+        );
+    }
+
+    /// A host that resolved no store leaves a secret absent, and absence is
+    /// omission by default rather than a denial nobody asked for.
+    #[test]
+    fn a_secret_with_no_store_omits_its_header_by_default() {
+        let rendered = render(
+            &contract(vec![from("X-API-Key", "secret.legacy_api_key")]),
+            &Extensions::default(),
+            None,
+        )
+        .expect("omit is the default");
         assert!(rendered.is_empty());
     }
 
     #[test]
     fn a_contract_with_no_headers_renders_nothing() {
-        let rendered = render(&contract(Vec::new()), &keycloak()).expect("nothing denies");
+        let rendered =
+            render_without_secrets(&contract(Vec::new()), &keycloak()).expect("nothing denies");
         assert!(rendered.is_empty());
     }
 }

@@ -1028,16 +1028,17 @@ async fn dispatch_elicitation(
         .as_deref()
         .unwrap_or("deny")
         .eq_ignore_ascii_case("continue");
-    let fail = |reason: String| -> EffectOutcome {
+    let fail_with_code = |reason: String, code: Option<&str>| -> EffectOutcome {
         if on_error_continue {
             EffectOutcome::Continue
         } else {
             EffectOutcome::Halt(Decision::Deny {
                 reason: Some(reason),
-                rule_source: step.source.clone(),
+                rule_source: code.unwrap_or(&step.source).to_owned(),
             })
         }
     };
+    let fail = |reason: String| fail_with_code(reason, None);
 
     // First arrival vs. retry: the agent echoes `elicitation.id` on
     // retry. Absent → first arrival: dispatch and record the pending
@@ -1083,14 +1084,14 @@ async fn dispatch_elicitation(
                 }
                 d.id
             },
-            Err(e) => return fail(format!("elicitation dispatch failed: {e}")),
+            Err(e) => return fail_with_code(format!("elicitation dispatch failed: {e}"), e.code()),
         },
     };
 
     // Status check — non-blocking read of the channel's current state.
     let status = match elicitations.check(step, &id).await {
         Ok(s) => s,
-        Err(e) => return fail(format!("elicitation check failed: {e}")),
+        Err(e) => return fail_with_code(format!("elicitation check failed: {e}"), e.code()),
     };
 
     match status {
@@ -1136,7 +1137,9 @@ async fn dispatch_elicitation(
             // responder identity.
             let validation = match elicitations.validate(step, &id).await {
                 Ok(v) => v,
-                Err(e) => return fail(format!("elicitation validation failed: {e}")),
+                Err(e) => {
+                    return fail_with_code(format!("elicitation validation failed: {e}"), e.code());
+                },
             };
             if !validation.valid {
                 let why = validation
@@ -1413,7 +1416,7 @@ async fn dispatch_field_op(
     result_modified: &mut bool,
     payload: &mut crate::route::RoutePayload,
 ) -> EffectOutcome {
-    use crate::route::{get_dotted, remove_dotted, set_dotted};
+    use crate::route::{get_concrete, remove_concrete, set_concrete};
     use crate::step::DispatchPhase;
 
     // Pick the right side of the payload based on the path prefix.
@@ -1446,7 +1449,7 @@ async fn dispatch_field_op(
     };
 
     // Expand intermediate arrays; excessive fan-out fails closed.
-    let Some(paths) = crate::route::expand_field_paths(root, subpath) else {
+    let Some(paths) = crate::route::expand_for_pipeline(root, subpath, stages) else {
         return EffectOutcome::Halt(Decision::Deny {
             reason: Some(format!(
                 "FieldOp path `{path}` expands to too many elements to redact safely"
@@ -1463,7 +1466,7 @@ async fn dispatch_field_op(
         Side::Result => *result = true,
     };
     for concrete in paths {
-        let Some(current) = get_dotted(root, &concrete).cloned() else {
+        let Some(current) = get_concrete(root, &concrete).cloned() else {
             continue; // missing field on this element → silent no-op
         };
         // Plugins receive a root-relative field name; deny messages use the
@@ -1473,12 +1476,12 @@ async fn dispatch_field_op(
         match eval.outcome {
             FieldOutcome::Pass => {},
             FieldOutcome::Replace(new_val) => {
-                if set_dotted(root, &concrete, new_val) {
+                if set_concrete(root, &concrete, new_val) {
                     mark_modified(side, args_modified, result_modified);
                 }
             },
             FieldOutcome::Omit => {
-                if remove_dotted(root, &concrete) {
+                if remove_concrete(root, &concrete) {
                     mark_modified(side, args_modified, result_modified);
                 }
             },

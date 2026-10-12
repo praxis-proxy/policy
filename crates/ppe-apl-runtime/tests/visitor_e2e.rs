@@ -711,23 +711,22 @@ fn meta_for_entity(entity_type: &str, entity_name: &str) -> MetaExtension {
     meta
 }
 
-/// `llm:` route → annotation lands on `cmf.llm_input`. Host calling
-/// `invoke_named::<CmfHook>("cmf.llm_input", ...)` with matching meta
-/// fires the `AplRouteHandler`.
+/// Uses `deny-gate` so that a missed resolution is observable: an
+/// `allow-gate` would pass whether or not the route actually matched.
 #[tokio::test]
 async fn llm_route_annotates_on_llm_input_hook() {
     const YAML: &str = r#"
 engine_settings:
   dispatch: policy
 plugins:
-  - name: allow-gate
-    kind: allow-gate
+  - name: deny-gate
+    kind: deny-gate
     hooks: [cmf.llm_input]
 routes:
   - llm: gpt-4
     authorization:
       pre_invocation:
-        - "run(allow-gate)"
+        - "run(deny-gate)"
 "#;
     let mgr = build_manager_with_visitor(YAML).await;
 
@@ -740,29 +739,33 @@ routes:
         .await;
 
     assert!(
-        result.continue_processing,
-        "llm route should fire on cmf.llm_input: violation = {:?}",
-        result.violation
+        !result.continue_processing,
+        "llm route must fire its deny-gate on cmf.llm_input; \
+         if this is an allow, the handler never ran"
     );
+    let violation = result
+        .violation
+        .expect("deny-gate must surface a violation");
+    assert_eq!(violation.reason, "deny-gate fired");
+    assert_eq!(violation.code, "policy.forbidden");
 }
 
-/// Same llm route but post — annotation lands on `cmf.llm_output`.
-/// Previously, this would have annotated on `cmf.tool_post_invoke`
-/// and never matched.
+/// Uses `deny-gate` so that a missed resolution is observable: an
+/// `allow-gate` would pass whether or not the route actually matched.
 #[tokio::test]
 async fn llm_route_annotates_on_llm_output_hook_for_post_phase() {
     const YAML: &str = r#"
 engine_settings:
   dispatch: policy
 plugins:
-  - name: allow-gate
-    kind: allow-gate
+  - name: deny-gate
+    kind: deny-gate
     hooks: [cmf.llm_output]
 routes:
   - llm: gpt-4
     authorization:
       post_invocation:
-        - "run(allow-gate)"
+        - "run(deny-gate)"
 "#;
     let mgr = build_manager_with_visitor(YAML).await;
 
@@ -775,27 +778,33 @@ routes:
         .await;
 
     assert!(
-        result.continue_processing,
-        "llm route post-phase should fire on cmf.llm_output: violation = {:?}",
-        result.violation
+        !result.continue_processing,
+        "llm route post-phase must fire its deny-gate on cmf.llm_output; \
+         if this is an allow, the handler never ran"
     );
+    let violation = result
+        .violation
+        .expect("deny-gate must surface a violation");
+    assert_eq!(violation.reason, "deny-gate fired");
+    assert_eq!(violation.code, "policy.forbidden");
 }
 
-/// `prompt:` route → annotation lands on `cmf.prompt_pre_invoke`.
+/// Uses `deny-gate` so that a missed resolution is observable: an
+/// `allow-gate` would pass whether or not the route actually matched.
 #[tokio::test]
 async fn prompt_route_annotates_on_prompt_pre_invoke_hook() {
     const YAML: &str = r#"
 engine_settings:
   dispatch: policy
 plugins:
-  - name: allow-gate
-    kind: allow-gate
+  - name: deny-gate
+    kind: deny-gate
     hooks: [cmf.prompt_pre_invoke]
 routes:
   - prompt: summarize_email
     authorization:
       pre_invocation:
-        - "run(allow-gate)"
+        - "run(deny-gate)"
 "#;
     let mgr = build_manager_with_visitor(YAML).await;
 
@@ -808,27 +817,33 @@ routes:
         .await;
 
     assert!(
-        result.continue_processing,
-        "prompt route should fire on cmf.prompt_pre_invoke: violation = {:?}",
-        result.violation
+        !result.continue_processing,
+        "prompt route must fire its deny-gate on cmf.prompt_pre_invoke; \
+         if this is an allow, the handler never ran"
     );
+    let violation = result
+        .violation
+        .expect("deny-gate must surface a violation");
+    assert_eq!(violation.reason, "deny-gate fired");
+    assert_eq!(violation.code, "policy.forbidden");
 }
 
-/// `resource:` route → annotation lands on `cmf.resource_pre_fetch`.
+/// Uses `deny-gate` so that a missed resolution is observable: an
+/// `allow-gate` would pass whether or not the route actually matched.
 #[tokio::test]
 async fn resource_route_annotates_on_resource_pre_fetch_hook() {
     const YAML: &str = r#"
 engine_settings:
   dispatch: policy
 plugins:
-  - name: allow-gate
-    kind: allow-gate
+  - name: deny-gate
+    kind: deny-gate
     hooks: [cmf.resource_pre_fetch]
 routes:
   - resource: hr://employees/*
     authorization:
       pre_invocation:
-        - "run(allow-gate)"
+        - "run(deny-gate)"
 "#;
     let mgr = build_manager_with_visitor(YAML).await;
 
@@ -844,10 +859,15 @@ routes:
         .await;
 
     assert!(
-        result.continue_processing,
-        "resource route should fire on cmf.resource_pre_fetch: violation = {:?}",
-        result.violation
+        !result.continue_processing,
+        "resource glob route must fire its deny-gate on cmf.resource_pre_fetch; \
+         if this is an allow, the handler never ran (issue #74)"
     );
+    let violation = result
+        .violation
+        .expect("deny-gate must surface a violation");
+    assert_eq!(violation.reason, "deny-gate fired");
+    assert_eq!(violation.code, "policy.forbidden");
 }
 
 /// Cross-check: an llm route's APL annotation MUST NOT install on

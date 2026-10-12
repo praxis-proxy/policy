@@ -382,7 +382,13 @@ fn render_replacements(config: &PolicyConfig, route: Option<&RouteEntry>, out: &
 }
 
 /// A capability as its config spelling.
-fn capability_label(capability: Capability) -> String {
+fn capability_label(capability: Option<Capability>) -> String {
+    // A slot no plugin can read has no capability to print. Saying so is the
+    // point: an operator reading this column should not come away thinking some
+    // grant would let a plugin read the value.
+    let Some(capability) = capability else {
+        return "no plugin capability reads this".to_owned();
+    };
     serde_json::to_string(&capability)
         .unwrap_or_default()
         .trim_matches('"')

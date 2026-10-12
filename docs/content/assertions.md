@@ -88,10 +88,80 @@ Slot paths, addressed the way the rest of the config addresses request state:
     client.client_id  client.client_name  client.trust_level  client.roles
     client.permissions  client.teams  client.authorized_scopes
     client.authorized_audiences  client.claim.<name>
+    secret.<name>
 
 A claim name is taken whole, so a provider spelling one with dots needs no
 escaping. A bare `claim` names the whole map rather than one claim and is
 refused: a provider's claim set is not something to render wholesale.
+
+### `secret.<name>`
+
+The one source that reads nothing from the request. It names a value declared
+under [`secrets.values`](configuration.md#the-secrets-block), which is how a
+target sitting behind a static API key is reached without a token delegator,
+machinery a shared static credential does not need.
+
+```yaml
+secrets:
+  providers:
+    local: { kind: file, base_dir: /etc/ppe }
+  values:
+    legacy_api_key: { provider: local, ref: legacy.key }
+
+global:
+  assertions:
+    request:
+      headers:
+        - name: X-API-Key
+          from: secret.legacy_api_key
+```
+
+The path names a declared secret, never a provider and never a raw reference.
+That is what keeps this module's existing property intact: the engine
+originates every value a request entry asserts, so the legitimate set is finite
+and an operator can read `values:` and know what the process can reach. A raw
+reference in the path would make the addressable set whatever the provider's
+credentials happen to reach, with no list anyone could audit.
+
+Four rules follow from that:
+
+- The name must resolve to a declared `secrets.values` entry at config load. An
+  unknown name is a config error naming the level, the header, and what is
+  declared, not a header that silently renders nothing.
+- **Request direction only.** A response entry naming a secret is a config
+  error. The direction here is about the audience, not about where a value comes
+  from: a request entry asserts toward the upstream, which is the party the
+  credential authenticates to, while a response entry asserts toward the client.
+  A secret there would hand the caller the credential the engine holds on its
+  behalf. This is why `claim.tenant` is a legitimate response source and
+  `secret.<name>` is not, even though the engine originates both.
+- The read is synchronous, from the value resolved at startup. Nothing fetches
+  from a backend on the request path.
+- `on_missing` applies as it does to any other source, and a denial names
+  `secret.<name>` rather than what it held.
+
+The engine renders the header and nothing else touches the value. It does not
+reach a PDP, a plugin payload, a log line, a deny message, or the effective
+policy artifact, which prints the name only. Because a secret is read through
+the store at the point of use rather than copied out once, a
+[rotation](configuration.md#the-secrets-block) reaches the wire on the next
+request after a refresh.
+
+There is no capability that grants a plugin a read of this slot, and the
+artifact says so rather than naming one.
+
+Secret-sourced headers appear as `<redacted secret.<name>>` in plugin and
+audit views, including later hooks. Matching is case-insensitive, and a
+config reload does not remove protection from an existing exchange. A plugin
+with `write_headers` can change ordinary headers; protected request entries
+remain engine-owned until an assertion replaces or removes them.
+
+Hosts must carry `HttpExtension.secret_headers` with the request headers into
+later hooks, including when normalizing header names or adding response
+headers. Cloning the HTTP extension preserves it. Rebuilding only a plain
+header map loses that provenance. Forward using the canonical in-memory
+`request_headers`; `Debug` and generic serialization redact marked values
+and are not a lossless forwarding format for credentials.
 
 Fixed in code, never usable as a source, in either direction, with no config
 surface to widen:
@@ -109,6 +179,9 @@ The request line and the response status (`http.method`, `http.path`,
 the grammar rather than as credentials. They are host-populated, so admitting
 them later is a grammar addition and not the reversal of a security decision.
 The two refusals carry different messages.
+
+The embedding host's response-phase HTTP view is tracked separately in
+`praxis-proxy/praxis#1367`; it does not change these assertion source rules.
 
 ## The two removal mechanisms
 

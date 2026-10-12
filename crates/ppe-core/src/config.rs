@@ -2423,7 +2423,6 @@ fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<Plug
 pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
     validate_declared_hooks(config)?;
     reject_reserved_route_names(config)?;
-    validate_assertions(config)?;
 
     // An empty namespace would compose stream ids like ":decision", which is
     // neither the bare label nor a usable namespace, so refuse it rather than
@@ -2444,11 +2443,18 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
     // provider it never declared is wrong whether or not the backend is
     // reachable, and an operator should hear about it without waiting for a
     // network timeout.
+    //
+    // Ahead of the assertion walk, which checks every `secret.<name>` source
+    // against this block. A malformed declaration should be reported against
+    // the `secrets:` block that holds it rather than against whichever route
+    // first named it.
     config.secrets.validate().map_err(|e| {
         Box::new(PluginError::Config {
             message: format!("{e}"),
         })
     })?;
+
+    validate_assertions(config)?;
 
     let mut seen_names = HashSet::new();
     for plugin in &config.plugins {
@@ -3719,27 +3725,31 @@ pub(crate) fn dropped_inherited_assertions_for(
 fn validate_assertions(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
     let fail = |message: String| Box::new(PluginError::Config { message });
 
+    // Every level is checked against the one `secrets:` block, which is
+    // document-wide: a secret is declared once and any level may name it.
+    let secrets = &config.secrets;
+
     if let Some(assertions) = config.global.assertions.as_ref() {
-        assertions.validate("global").map_err(fail)?;
+        assertions.validate("global", secrets).map_err(fail)?;
     }
     for (entity_type, default) in &config.global.defaults {
         if let Some(assertions) = default.assertions.as_ref() {
             assertions
-                .validate(&format!("global.defaults.{entity_type}"))
+                .validate(&format!("global.defaults.{entity_type}"), secrets)
                 .map_err(fail)?;
         }
     }
     for (name, bundle) in &config.global.bundles {
         if let Some(assertions) = bundle.assertions.as_ref() {
             assertions
-                .validate(&format!("groups.{name}"))
+                .validate(&format!("groups.{name}"), secrets)
                 .map_err(fail)?;
         }
     }
     for (i, route) in config.routes.iter().enumerate() {
         if let Some(assertions) = route.assertions.as_ref() {
             assertions
-                .validate(&route_display_name(route, i))
+                .validate(&route_display_name(route, i), secrets)
                 .map_err(fail)?;
         }
     }
@@ -3909,6 +3919,21 @@ mod tests {
             RouteQuery::named(entity_type, entity_name).with_scope(request_scope),
         )
         .map(|matched| matched.name)
+    }
+
+    /// The scope of the route that won, or `None` when unscoped / no match.
+    fn matched_scope<'a>(
+        config: &'a PolicyConfig,
+        entity_type: &str,
+        entity_name: &str,
+        request_scope: Option<&str>,
+    ) -> Option<&'a str> {
+        resolve_route(
+            config,
+            RouteQuery::named(entity_type, entity_name).with_scope(request_scope),
+        )
+        .and_then(|m| m.route.meta.as_ref())
+        .and_then(|meta| meta.scope.as_deref())
     }
 
     /// The identity-hook counterpart of `plugins_for`.
@@ -7369,6 +7394,175 @@ routes:
         );
         assert!(err.contains("routes 0 and 1"), "{err}");
         assert!(err.contains("hr-*"), "{err}");
+    }
+
+    /// Two globs with different patterns that match overlapping names are NOT
+    /// duplicates. Each contributes its own pattern as the annotation key, so
+    /// `"hr-*"` and `"*"` install under different keys and `resolve_route`
+    /// picks the winner by specificity at dispatch time (issue #74).
+    #[test]
+    fn overlapping_globs_with_different_patterns_load() {
+        let cfg = routes_load(
+            r#"  - tool: "hr-*"
+  - tool: "*"
+"#,
+        );
+        assert_eq!(cfg.routes.len(), 2, "overlapping globs must both load");
+    }
+
+    /// A glob and an exact name that the glob would match are NOT duplicates.
+    /// The exact name and the pattern are different annotation keys, and
+    /// specificity picks the exact one at dispatch time.
+    #[test]
+    fn a_glob_and_an_exact_name_it_covers_load_together() {
+        let cfg = routes_load(
+            r#"  - tool: "hr-*"
+  - tool: hr-compensation
+"#,
+        );
+        assert_eq!(
+            cfg.routes.len(),
+            2,
+            "a glob and an exact name must both load"
+        );
+    }
+
+    /// A wildcard and exact names coexist: the annotation keys differ and
+    /// specificity governs.
+    #[test]
+    fn a_wildcard_and_exact_names_load_together() {
+        let cfg = routes_load(
+            r#"  - tool: "*"
+  - tool: get_weather
+  - tool: hr-compensation
+"#,
+        );
+        assert_eq!(
+            cfg.routes.len(),
+            3,
+            "a wildcard and exact names must all load"
+        );
+    }
+
+    /// Two identical wildcards are a duplicate — same pattern, same key.
+    #[test]
+    fn two_wildcards_collide() {
+        let err = duplicate_error(
+            r#"  - tool: "*"
+  - tool: "*"
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("*"), "{err}");
+    }
+
+    #[test]
+    fn same_glob_different_scopes_load() {
+        let cfg = routes_load(
+            r#"  - tool: "hr-*"
+    meta: { scope: tenant-a }
+  - tool: "hr-*"
+    meta: { scope: tenant-b }
+"#,
+        );
+        assert_eq!(
+            cfg.routes.len(),
+            2,
+            "same glob with different scopes must both load"
+        );
+    }
+
+    #[test]
+    fn same_glob_same_scope_collide() {
+        let err = duplicate_error(
+            r#"  - tool: "hr-*"
+    meta: { scope: tenant-a }
+  - tool: "hr-*"
+    meta: { scope: tenant-a }
+"#,
+        );
+        assert!(err.contains("routes 0 and 1"), "{err}");
+        assert!(err.contains("hr-*"), "{err}");
+    }
+
+    #[test]
+    fn test_glob_beats_wildcard() {
+        let yaml = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: "*"
+    authorization:
+      pre_invocation: ["allow"]
+  - tool: "hr-*"
+    authorization:
+      pre_invocation: ["allow"]
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(
+            matched_name(&config, "tool", "hr-compensation", None).as_deref(),
+            Some("hr-*"),
+            "the glob selector must outrank the wildcard",
+        );
+        assert_eq!(
+            matched_name(&config, "tool", "finance-report", None).as_deref(),
+            Some("*"),
+            "a name outside the glob falls through to the wildcard",
+        );
+    }
+
+    #[test]
+    fn test_scoped_route_beats_unscoped() {
+        let yaml = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: "hr-*"
+    authorization:
+      pre_invocation: ["allow"]
+  - tool: "hr-*"
+    meta: { scope: tenant-a }
+    authorization:
+      pre_invocation: ["allow"]
+"#;
+        let config = parse_config(yaml).unwrap();
+
+        assert_eq!(
+            matched_name(&config, "tool", "hr-comp", Some("tenant-a")).as_deref(),
+            Some("hr-*"),
+            "the scoped route must win for its own scope",
+        );
+        assert_eq!(
+            matched_scope(&config, "tool", "hr-comp", Some("tenant-a")),
+            Some("tenant-a"),
+            "the winning route must carry the matching scope",
+        );
+
+        // No scope → unscoped route governs.
+        assert_eq!(
+            matched_name(&config, "tool", "hr-comp", None).as_deref(),
+            Some("hr-*"),
+            "without a scope, the unscoped route governs",
+        );
+        assert_eq!(
+            matched_scope(&config, "tool", "hr-comp", None),
+            None,
+            "the unscoped route must have no scope",
+        );
+
+        // Mismatched scope → unscoped route governs.
+        assert_eq!(
+            matched_name(&config, "tool", "hr-comp", Some("tenant-b")).as_deref(),
+            Some("hr-*"),
+            "a mismatched scope falls to the unscoped route",
+        );
+        assert_eq!(
+            matched_scope(&config, "tool", "hr-comp", Some("tenant-b")),
+            None,
+            "the fallback route must have no scope",
+        );
     }
 
     // ---- the names a route is known by ------------------------------------

@@ -1,0 +1,191 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+name: Integration (live)
+
+# Scheduled/manual checks the hermetic suites cannot make:
+#
+# - live: the integration suite's `scenarios::live` tests against a real
+#   Keycloak (the demo realm), Valkey and Vault. CIBA is skipped: the stock
+#   Keycloak image has no auto-approving channel.
+# - host-drift: the praxis files the reference host mirrors, diffed from the
+#   commit recorded in tests/utils/src/host.rs to praxis main. Re-pinning
+#   PRAXIS_COMMIT after reviewing the diff is the fix.
+#
+# Pinning and toolchain follow ci.yml: SHA-pinned GitHub-owned actions, and
+# rust-toolchain.toml selects the toolchain.
+
+on:
+  schedule:
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/integration-live.yml
+      - tests/integration/fixtures/keycloak/**
+      - tests/integration/tests/suite/scenarios/live.rs
+      - tests/utils/src/host.rs
+      - tests/utils/src/live.rs
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  live:
+    name: live dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    services:
+      valkey:
+        image: valkey/valkey:8.1.10@sha256:640c5e62cea04b6d6f2084232651d0cc70362d31f4f805e7be94dbed6855e8f2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      vault:
+        # Dev mode: in-memory, `secret/` mounted as KV v2, a fixed root token.
+        image: hashicorp/vault:1.19@sha256:c4298db7f9b2ea8cab452cbff5877749087913aa035fcae62026cf16132929f5
+        ports:
+          - 8200:8200
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: root
+          VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        options: --cap-add=IPC_LOCK
+    env:
+      VALKEY_TEST_URL: redis://127.0.0.1:6379
+      PPE_KEYCLOAK_URL: http://localhost:8081
+      VAULT_ADDR: http://127.0.0.1:8200
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A step rather than a service: the realm is a repo file, and service
+      # containers start before checkout and cannot mount it.
+      - name: Start Keycloak with the demo realm
+        run: |
+          docker run -d --name keycloak -p 8081:8081 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+            -e KC_HOSTNAME=http://localhost:8081 \
+            -e KC_HTTP_ENABLED=true \
+            -e KC_FEATURES=token-exchange-standard \
+            -v "$GITHUB_WORKSPACE/tests/integration/fixtures/keycloak:/opt/keycloak/data/import:ro" \
+            quay.io/keycloak/keycloak:26.6.3@sha256:9b0330756022422149aa6502eb2def8cd47c6e1b000c7c65cdb13e7c0133e992 \
+            start-dev --import-realm --http-port=8081
+      - name: Provision Vault
+        run: |
+          v() { curl -sSf -H "X-Vault-Token: root" "$@"; }
+          for _ in $(seq 1 30); do
+            curl -sf "$VAULT_ADDR/v1/sys/health" >/dev/null && break
+            sleep 1
+          done
+          v -X PUT "$VAULT_ADDR/v1/sys/policies/acl/ppe-live-read" \
+            -d '{"policy":"path \"secret/data/hr-mcp\" { capabilities = [\"read\"] }"}'
+          v -X POST "$VAULT_ADDR/v1/sys/auth/approle" -d '{"type":"approle"}'
+          v -X POST "$VAULT_ADDR/v1/auth/approle/role/ppe-live" \
+            -d '{"token_policies":"ppe-live-read"}'
+          api_key="sk-live-$(openssl rand -hex 12)"
+          echo "::add-mask::$api_key"
+          v -X POST "$VAULT_ADDR/v1/secret/data/hr-mcp" \
+            -d "{\"data\":{\"api_key\":\"$api_key\"}}" >/dev/null
+          role_id=$(v "$VAULT_ADDR/v1/auth/approle/role/ppe-live/role-id" | jq -r .data.role_id)
+          secret_id=$(v -X POST "$VAULT_ADDR/v1/auth/approle/role/ppe-live/secret-id" \
+            | jq -r .data.secret_id)
+          echo "::add-mask::$secret_id"
+          {
+            echo "VAULT_ROLE_ID=$role_id"
+            echo "VAULT_SECRET_ID=$secret_id"
+          } >> "$GITHUB_ENV"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-live-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-live-
+      - name: Build the integration suite
+        run: cargo test --all-features -p praxis-policy-tests-integration --no-run
+      - name: Wait for the realm
+        run: |
+          for _ in $(seq 1 90); do
+            curl -sf -o /dev/null "$PPE_KEYCLOAK_URL/realms/policy-demo" && exit 0
+            sleep 2
+          done
+          docker logs --tail 50 keycloak
+          exit 1
+      # The tests never print a token. `--nocapture` shows the skip lines.
+      - name: Live scenarios
+        run: |
+          cargo test --all-features -p praxis-policy-tests-integration \
+            -- --ignored --nocapture scenarios::live::
+      - name: Keycloak logs
+        if: failure()
+        run: docker logs --tail 200 keycloak
+
+  host-drift:
+    name: reference host drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: praxis-proxy/praxis
+          ref: main
+          path: praxis-upstream
+          fetch-depth: 0
+          persist-credentials: false
+      # Compares each MIRRORED file's blob at PRAXIS_COMMIT with main and
+      # prints the diff of any that changed.
+      - name: Diff mirrored files
+        run: |
+          host=tests/utils/src/host.rs
+          commit=$(sed -n 's/^pub const PRAXIS_COMMIT: &str = "\([0-9a-f]*\)";$/\1/p' "$host")
+          files=()
+          while IFS= read -r f; do files+=("$f"); done \
+            < <(sed -n '/^pub const MIRRORED/,/^];/s/^ *"\(.*\)",$/\1/p' "$host")
+          if [ -z "$commit" ] || [ "${#files[@]}" -eq 0 ]; then
+            echo "::error file=$host::could not read PRAXIS_COMMIT or MIRRORED"
+            exit 1
+          fi
+          cd praxis-upstream
+          if ! git cat-file -e "$commit^{commit}" 2>/dev/null \
+            && ! git fetch --quiet --no-tags origin "$commit"; then
+            echo "::error file=$host::praxis commit $commit is not reachable from praxis-proxy/praxis"
+            exit 1
+          fi
+          drift=0
+          for f in "${files[@]}"; do
+            old=$(git rev-parse --verify --quiet "$commit:$f" || echo missing)
+            new=$(git rev-parse --verify --quiet "HEAD:$f" || echo missing)
+            echo "$f: $old -> $new"
+            if [ "$old" != "$new" ]; then
+              echo "::error file=$host::$f differs between $commit and praxis main"
+              drift=1
+            fi
+          done
+          if [ "$drift" -ne 0 ]; then
+            git --no-pager diff --stat "$commit" HEAD -- "${files[@]}"
+            git --no-pager diff "$commit" HEAD -- "${files[@]}"
+            exit 1
+          fi
+          echo "no drift in ${#files[@]} mirrored files since $commit"

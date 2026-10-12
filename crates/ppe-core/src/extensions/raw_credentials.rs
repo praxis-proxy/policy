@@ -237,7 +237,7 @@ pub enum DelegationMode {
 /// read the in-memory field and carry it on a purpose-built channel;
 /// a serialize-then-reparse silently yields an empty token. See the
 /// module docs for the conditions under which that is permitted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RawInboundToken {
     /// The raw credential bytes. Cleared on drop via `Zeroizing`.
     /// **Never serialized** — `#[serde(skip)]` strips this field.
@@ -252,6 +252,16 @@ pub struct RawInboundToken {
     /// Wire-format family of the token. Lets handlers route to the
     /// right validator without re-parsing the token contents.
     pub kind: TokenKind,
+}
+
+impl std::fmt::Debug for RawInboundToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawInboundToken")
+            .field("token", &"[REDACTED]")
+            .field("source_header", &self.source_header)
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 impl RawInboundToken {
@@ -271,10 +281,10 @@ impl RawInboundToken {
     }
 }
 
-/// Composite key for cached delegated tokens. Token cache lookups
-/// hit on `(subject, workload, audience, scopes, mode)` so different
-/// audiences or scope sets for the same subject mint independent
-/// tokens.
+/// Composite key for request-scoped delegated tokens. Lookups hit on
+/// `(subject, workload, delegator, target, audience, scopes, mode)` so
+/// different delegator instances, targets, audiences, or scope sets for the
+/// same subject remain independent.
 ///
 /// # Every distinguishing principal must appear here
 ///
@@ -318,6 +328,17 @@ pub struct DelegationKey {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
 
+    /// Plugin instance that produced the credential. Two delegators may serve
+    /// the same target and audience from different secret sources.
+    #[serde(default)]
+    pub delegator_name: String,
+
+    /// Logical delegation target. This defaults to the delegator plugin name
+    /// when a `delegate(...)` step omits `target`, and distinguishes separate
+    /// downstream targets served by one plugin instance.
+    #[serde(default)]
+    pub target_name: String,
+
     /// The audience the token is for.
     pub audience: String,
     /// The scopes it carries.
@@ -335,6 +356,8 @@ impl DelegationKey {
             subject_id: String::new(),
             workload_id: None,
             client_id: None,
+            delegator_name: String::new(),
+            target_name: String::new(),
             audience: audience.into(),
             scopes,
             mode,
@@ -361,12 +384,26 @@ impl DelegationKey {
         self.client_id = client_id;
         self
     }
+
+    /// Set the logical delegation target.
+    #[must_use]
+    pub fn with_target_name(mut self, target_name: impl Into<String>) -> Self {
+        self.target_name = target_name.into();
+        self
+    }
+
+    /// Set the plugin instance that produced the credential.
+    #[must_use]
+    pub fn with_delegator_name(mut self, delegator_name: impl Into<String>) -> Self {
+        self.delegator_name = delegator_name.into();
+        self
+    }
 }
 
 /// One minted outbound credential, produced by a `TokenDelegate`
 /// handler and cached for re-use until expiry. The `token` field is
 /// serde-skipped under the same rules as `RawInboundToken.token`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RawDelegatedToken {
     /// The minted outbound credential. Cleared on drop.
     #[serde(skip)]
@@ -376,6 +413,13 @@ pub struct RawDelegatedToken {
     /// upstream request. Often `"Authorization"`, sometimes
     /// audience-specific.
     pub outbound_header: String,
+
+    /// Prefix the consuming host prepends to `token` when constructing the
+    /// outbound header value. Defaults to `"Bearer "` for compatibility with
+    /// OAuth delegates; an API key uses an empty prefix and schemes such as
+    /// GitHub's use `"token "`.
+    #[serde(default = "default_delegated_outbound_prefix")]
+    pub outbound_prefix: String,
 
     /// The audience the token was minted for. Cache keys include
     /// this; the field here is for audit / debugging.
@@ -391,6 +435,19 @@ pub struct RawDelegatedToken {
     pub expires_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for RawDelegatedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawDelegatedToken")
+            .field("token", &"[REDACTED]")
+            .field("outbound_header", &self.outbound_header)
+            .field("outbound_prefix", &self.outbound_prefix)
+            .field("audience", &self.audience)
+            .field("scopes", &self.scopes)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 impl RawDelegatedToken {
     /// A token with its audience, scopes, outbound header, and expiry.
     pub fn new(
@@ -403,11 +460,23 @@ impl RawDelegatedToken {
         Self {
             token: Zeroizing::new(token.into()),
             outbound_header: outbound_header.into(),
+            outbound_prefix: default_delegated_outbound_prefix(),
             audience: audience.into(),
             scopes,
             expires_at,
         }
     }
+
+    /// Set the exact prefix the consuming host prepends to the token.
+    #[must_use]
+    pub fn with_outbound_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.outbound_prefix = prefix.into();
+        self
+    }
+}
+
+fn default_delegated_outbound_prefix() -> String {
+    "Bearer ".to_owned()
 }
 
 /// The Layer-3 raw-credentials extension.
@@ -543,12 +612,27 @@ mod tests {
             vec!["read".into()],
             Utc::now(),
         );
+        assert_eq!(tok.outbound_prefix, "Bearer ");
         let json = serde_json::to_string(&tok).unwrap();
         assert!(
             !json.contains("minted-secret-bytes"),
             "delegated token leaked: {json}"
         );
         assert!(json.contains("downstream.example.com"));
+    }
+
+    #[test]
+    fn delegated_token_outbound_prefix_is_explicit() {
+        let token = RawDelegatedToken::new(
+            "ghp_example",
+            "Authorization",
+            "https://api.github.com",
+            Vec::new(),
+            Utc::now(),
+        )
+        .with_outbound_prefix("token ");
+        assert_eq!(token.outbound_prefix, "token ");
+        assert_eq!(&*token.token, "ghp_example");
     }
 
     #[test]
@@ -567,6 +651,8 @@ mod tests {
             subject_id: "alice".into(),
             workload_id: None,
             client_id: None,
+            delegator_name: "workday-oauth".into(),
+            target_name: "workday".into(),
             audience: "https://api.example.com".into(),
             scopes: vec!["read".into(), "write".into()],
             mode: DelegationMode::OnBehalfOfUser,
@@ -575,6 +661,8 @@ mod tests {
             subject_id: "alice".into(),
             workload_id: None,
             client_id: None,
+            delegator_name: "workday-oauth".into(),
+            target_name: "workday".into(),
             audience: "https://api.example.com".into(),
             scopes: vec!["read".into(), "write".into()],
             mode: DelegationMode::OnBehalfOfUser,
@@ -602,6 +690,8 @@ mod tests {
             subject_id: String::new(),
             workload_id: Some("spiffe://corp/payroll".into()),
             client_id: None,
+            delegator_name: "hr-oauth".into(),
+            target_name: "hr-vault".into(),
             audience: "https://hr.example.com".into(),
             scopes: vec!["read".into()],
             mode: DelegationMode::AsCallerWorkload,
@@ -627,6 +717,8 @@ mod tests {
             subject_id: "alice".into(),
             workload_id: None,
             client_id: None,
+            delegator_name: "hr-oauth".into(),
+            target_name: "hr-vault".into(),
             audience: "https://hr.example.com".into(),
             scopes: vec!["read".into()],
             mode: DelegationMode::OnBehalfOfUser,
@@ -699,6 +791,7 @@ mod tests {
             .expect("the key must round-trip");
         assert_eq!(&*restored_tok.token, "", "token stays skipped");
         assert_eq!(restored_tok.audience, "workday-api");
+        assert_eq!(restored_tok.outbound_prefix, "Bearer ");
     }
 
     #[test]
@@ -710,5 +803,33 @@ mod tests {
         let modern = r#"{"inbound_tokens":{},"delegated_tokens":[]}"#;
         let restored: RawCredentialsExtension = serde_json::from_str(modern).unwrap();
         assert!(restored.delegated_tokens.is_empty());
+    }
+
+    #[test]
+    fn debug_redacts_delegated_token() {
+        let tok = RawDelegatedToken::new(
+            "ghp_SENSITIVE_credential",
+            "Authorization",
+            "https://api.github.com",
+            vec!["read".into()],
+            Utc::now(),
+        );
+        let debug = format!("{tok:?}");
+        assert!(
+            !debug.contains("SENSITIVE"),
+            "Debug must not expose minted token: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("api.github.com"));
+    }
+
+    #[test]
+    fn debug_redacts_inbound_token() {
+        let tok = RawInboundToken::new("eyJ.SENSITIVE.jwt", "Authorization", TokenKind::Jwt);
+        let debug = format!("{tok:?}");
+        assert!(
+            !debug.contains("SENSITIVE"),
+            "Debug must not expose inbound token: {debug}"
+        );
     }
 }

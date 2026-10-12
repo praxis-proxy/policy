@@ -50,6 +50,15 @@ pub(crate) enum KeyType {
     /// not the key's. A claim holding a string writes a `String` and one
     /// holding a number writes an `Int` or a `Float` under the same key.
     Flattened,
+    /// `AttributeValue::NonScalar`, which order comparisons fail closed on.
+    ///
+    /// No extension key carries one: the extractors reach the JSON walker
+    /// through `payload::walk`, which marks nothing non-scalar, so an object
+    /// or array under a flattened family contributes its leaves and no key of
+    /// its own. Declarable so the two vocabularies correspond, and so an
+    /// extractor that starts marking them fails the type test rather than
+    /// passing under `Flattened`.
+    NonScalar,
 }
 
 impl KeyType {
@@ -64,6 +73,7 @@ impl KeyType {
             Self::String => "String",
             Self::StringSet => "StringSet",
             Self::Flattened => "flattened JSON",
+            Self::NonScalar => "NonScalar",
         }
     }
 }

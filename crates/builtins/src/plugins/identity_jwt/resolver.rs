@@ -40,6 +40,7 @@
 //   * `auth.token_not_yet_valid` — `nbf` in the future
 //   * `auth.audience_mismatch` — `aud` didn't include any configured aud
 //   * `auth.algorithm_mismatch` — token uses unaccepted algo
+//   * `auth.unsupported_critical_header` — token requires an unsupported extension
 //   * `auth.mapping_failed` — claim mapper rejected the claims
 //   * `auth.config_error` — issuer config was emptied after load (`audiences`)
 //   * `auth.token_invalid` — any other validation failure
@@ -828,6 +829,12 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                     ),
                 ));
             },
+            Err(ValidateError::UnsupportedCriticalHeader) => {
+                return PluginResult::deny(PluginViolation::new(
+                    "auth.unsupported_critical_header",
+                    "token requires a critical JWT header extension this resolver does not implement",
+                ));
+            },
             Err(ValidateError::Jwt(e)) => {
                 let (code, reason) = classify_jwt_error(&e);
                 return PluginResult::deny(PluginViolation::new(code, reason));
@@ -971,6 +978,8 @@ fn strip_bearer_prefix(value: &str) -> &str {
 /// usual `jsonwebtoken::errors::Error` plus the kid-selection
 /// and JWKS-availability cases.
 enum ValidateError {
+    /// No JWT header extensions are implemented by this resolver.
+    UnsupportedCriticalHeader,
     /// The JWT's header `kid` didn't match any key the issuer's
     /// `KeyStore` knows about. Distinct from `InvalidSignature` so
     /// the verify path can surface `auth.unknown_kid` with the
@@ -1028,6 +1037,9 @@ fn validate_token(
     issuer: &TrustedIssuer,
 ) -> Result<jsonwebtoken::TokenData<ClaimMap>, ValidateError> {
     let header = jsonwebtoken::decode_header(token).map_err(ValidateError::Jwt)?;
+    if has_unsupported_critical_extensions(&header) {
+        return Err(ValidateError::UnsupportedCriticalHeader);
+    }
     let kid = header.kid.as_deref();
 
     // Acquire a read guard on the issuer's KeyStore. The guard is
@@ -1082,6 +1094,10 @@ fn validate_token(
     decode::<ClaimMap>(token, key, &validation).map_err(ValidateError::Jwt)
 }
 
+fn has_unsupported_critical_extensions(header: &jsonwebtoken::Header) -> bool {
+    header.crit.as_ref().is_some_and(|crit| !crit.is_empty())
+}
+
 /// Map jsonwebtoken errors to stable violation codes.
 fn classify_jwt_error(e: &jsonwebtoken::errors::Error) -> (&'static str, String) {
     use jsonwebtoken::errors::ErrorKind;
@@ -1124,12 +1140,21 @@ mod tests {
     /// is the difference between a one-minute and a ten-minute diagnosis.
     fn variant_of(e: &ValidateError) -> String {
         match e {
+            ValidateError::UnsupportedCriticalHeader => "UnsupportedCriticalHeader".to_owned(),
             ValidateError::UnknownKid(kid) => format!("UnknownKid({kid:?})"),
             ValidateError::KeysUnavailable => "KeysUnavailable".to_owned(),
             ValidateError::NoAlgorithms => "NoAlgorithms".to_owned(),
             ValidateError::NoAudiences => "NoAudiences".to_owned(),
             ValidateError::Jwt(inner) => format!("Jwt({inner})"),
         }
+    }
+
+    #[test]
+    fn critical_header_extensions_are_rejected() {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        assert!(!has_unsupported_critical_extensions(&header));
+        header.crit = Some(vec!["must-understand".into()]);
+        assert!(has_unsupported_critical_extensions(&header));
     }
 
     fn cfg_with_config(name: &str, config: Value) -> PluginConfig {

@@ -562,6 +562,282 @@ The MaaS mapping was checked against a captured valid response on 2026-09-24.
 HTTP error handling follows the `maas-api` source; error responses were not
 captured from the deployment.
 
+---
+
+### Recipe 8: A user's Vault-stored credential
+
+Use `delegator/vault` when each user has enrolled a downstream PAT or API key
+and PPE should retrieve it only for an authorized call. The isolation boundary
+is Vault policy, not path naming alone.
+
+Enable Vault JWT auth, bind the role to the same issuer and audience PPE
+accepts, and note the auth mount accessor:
+
+```console
+vault auth enable jwt
+vault write auth/jwt/config \
+  oidc_discovery_url=https://idp.example.com/realms/corp \
+  bound_issuer=https://idp.example.com/realms/corp
+vault auth list -format=json
+```
+
+Replace `<jwt-mount-accessor>` below with the `jwt/` accessor returned by
+`vault auth list`. The KV v2 policy path must contain `data/`; the PPE plugin
+path must not.
+
+```hcl
+path "secret/data/agents/{{identity.entity.aliases.<jwt-mount-accessor>.name}}/*" {
+  capabilities = ["read"]
+}
+```
+
+Save the policy as `ppe-user.hcl`, install it, create the role, and enroll
+Alice's GitHub token at the corresponding logical path:
+
+```console
+vault policy write ppe-user ppe-user.hcl
+vault write auth/jwt/role/ppe-user role_type=jwt \
+  bound_audiences=ppe user_claim=sub policies=ppe-user ttl=5m
+vault kv put -mount=secret agents/alice/github token=ghp_xxx
+```
+
+```yaml
+plugins:
+  - name: github-vault
+    kind: delegator/vault
+    hooks: [token.delegate]
+    capabilities:
+      - perform_http
+      - read_inbound_credentials
+      - read_subject
+      - read_claims
+      - write_delegated_tokens
+    config:
+      vault_addr: "https://vault.example.com:8200"
+      kv_mount: secret
+      secret_path_template: "agents/{{identity}}/github"
+      secret_field: token
+      outbound_header: Authorization
+      scheme_prefix: "token "
+      auth:
+        user:
+          method: jwt
+          identity_claim: sub
+          mount: jwt
+          role: ppe-user
+
+routes:
+  - tool: create_github_issue
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+        - "delegate(github-vault, target: github-api, audience: https://api.github.com, subject: user)"
+```
+
+`identity_claim` must name a stable, issuer-asserted principal. `sub` is the
+usual choice. Do not use a mutable display name, email address, request label,
+or session id. The Vault role's `user_claim` and PPE's `identity_claim` must
+resolve to the same path component.
+
+### Recipe 9: A caller workload's Vault-stored credential
+
+A workload can use the same model with its JWT-SVID. Configure the Vault JWT
+role's `user_claim` to the SPIFFE claim your issuer provides, bind its audience,
+and attach an identity-templated policy to that role. If the alias name is
+`spiffe://example.com/agent`, enroll at the exact logical path, including its
+slashes:
+
+```console
+vault auth enable -path=jwt-spiffe jwt
+vault write auth/jwt-spiffe/config \
+  oidc_discovery_url=https://spire-oidc.internal:8443 \
+  bound_issuer=https://spire-oidc.internal:8443
+vault auth list -format=json
+```
+
+Use the `jwt-spiffe/` mount accessor in the workload policy:
+
+```hcl
+path "secret/data/agents/{{identity.entity.aliases.<jwt-spiffe-mount-accessor>.name}}/*" {
+  capabilities = ["read"]
+}
+```
+
+```console
+vault policy write ppe-workload ppe-workload.hcl
+vault write auth/jwt-spiffe/role/ppe-workload role_type=jwt \
+  bound_audiences=vault user_claim=sub policies=ppe-workload ttl=5m
+vault kv put -mount=secret agents/spiffe://example.com/agent/github token=ghp_xxx
+```
+
+```yaml
+plugins:
+  - name: jwt-workload
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      role: caller_workload
+      header: X-Workload-Token
+      trusted_issuers:
+        - issuer: "https://spire-oidc.internal:8443"
+          audiences: ["vault"]
+          algorithms: [ES256]
+          decoding_key:
+            kind: jwks_url
+            url: "https://spire-oidc.internal:8443/keys"
+
+  - name: workload-github-vault
+    kind: delegator/vault
+    hooks: [token.delegate]
+    capabilities:
+      - perform_http
+      - read_inbound_credentials
+      - read_workload
+      - write_delegated_tokens
+    config:
+      vault_addr: "https://vault.example.com:8200"
+      secret_path_template: "agents/{{identity}}/github"
+      outbound_header: Authorization
+      scheme_prefix: "token "
+      auth:
+        caller_workload:
+          method: jwt
+          identity_claim: spiffe_id
+          mount: jwt-spiffe
+          role: ppe-workload
+
+routes:
+  - tool: create_github_issue
+    authentication:
+      replace_inherited: true
+      steps: [jwt-workload]
+    authorization:
+      pre_invocation:
+        - "delegate(workload-github-vault, target: github-api, audience: https://api.github.com, subject: caller_workload)"
+```
+
+The caller-workload JWT-SVID is sent to Vault as the login JWT. A single Vault
+delegator may contain separate `user`, `client`, and `caller_workload` auth
+entries; each entry selects its own `identity_claim`, mount, and role.
+In this example Vault's JWT alias comes from the SVID's `sub`, while PPE's
+validated workload slot exposes the same value as `spiffe_id`.
+
+### Recipe 10: A shared credential owned by this workload
+
+For a legacy backend that has one credential owned by this PPE deployment, use
+AppRole and a fixed path. Keep the role and secret IDs in environment variables
+or mounted secret files rather than policy YAML. Save this policy as
+`ppe-legacy.hcl`:
+
+```hcl
+path "secret/data/shared/legacy-api" {
+  capabilities = ["read"]
+}
+```
+
+```console
+vault auth enable approle
+vault policy write ppe-legacy ppe-legacy.hcl
+vault kv put -mount=secret shared/legacy-api api_key=replace-me
+vault write auth/approle/role/ppe-legacy policies=ppe-legacy token_ttl=5m
+vault read auth/approle/role/ppe-legacy/role-id
+vault write -f auth/approle/role/ppe-legacy/secret-id
+```
+
+```yaml
+plugins:
+  - name: legacy-vault
+    kind: delegator/vault
+    hooks: [token.delegate]
+    capabilities: [perform_http, write_delegated_tokens]
+    config:
+      vault_addr: "https://vault.example.com:8200"
+      secret_path_template: shared/legacy-api
+      secret_field: api_key
+      outbound_header: X-API-Key
+      auth:
+        this_workload:
+          method: approle
+          mount: approle
+          role_id_source: { kind: env_var, name: VAULT_ROLE_ID }
+          secret_id_source: { kind: file, path: /var/run/secrets/vault/secret-id }
+
+routes:
+  - tool: legacy_lookup
+    authorization:
+      pre_invocation:
+        - "delegate(legacy-vault, target: legacy-api, subject: this_workload)"
+```
+
+Omitting `scheme_prefix` deliberately produces the bare `X-API-Key` value.
+
+#### Vault delegator configuration
+
+| Field | Meaning / default |
+|---|---|
+| `vault_addr` | Required Vault base URL. HTTPS is required unless `insecure_http: true`. |
+| `kv_mount` | KV v2 mount; default `secret`. |
+| `secret_path_template` | Required logical KV path. `{{identity}}` is mandatory when any caller-scoped auth entry is configured. Do not include the KV v2 `data/` segment. |
+| `secret_field` | String field containing the downstream credential; default `token`. |
+| `outbound_header` | Header used by the downstream transport; default `Authorization`. |
+| `scheme_prefix` | Optional exact prefix the host prepends when constructing the outbound header value, such as `"token "` or `"Bearer "`. Unset means bare. |
+| `timeout_seconds` | Timeout for each Vault request; default `5`. |
+| `insecure_http` | Permit `http://` for development; default `false`. |
+| `auth.<subject>` | One entry for each allowed `user`, `client`, `caller_workload`, or `this_workload` subject. Missing entries deny. |
+| `auth.*.method` | `jwt` or `approle`. |
+| `auth.*.identity_claim` | Principal claim/field substituted for `{{identity}}`; required for a templated path. |
+| `auth.*.mount` | Auth mount; defaults to `jwt` or `approle`. |
+| `auth.*.role` | Vault role for JWT auth. |
+| `auth.*.role_id_source`, `secret_id_source` | AppRole credential sources: `env_var`, `file`, or development-only `literal`. |
+| `cache.enabled` | Reuse a resolved credential; default `false`. |
+| `cache.ttl_seconds` | Reread interval and host-side delegated-token expiry bound; default `300`. |
+| `cache.max_entries` | Maximum entries when enabled; default `10000`. |
+
+> **Praxis host compatibility:** `RawDelegatedToken` carries the exact
+> `outbound_prefix`, and this repository's reference host honors it. The
+> separately maintained Praxis proxy filter currently hard-codes `Bearer `
+> when attaching delegated tokens. Bare values and prefixes such as `token `
+> are therefore deferred until that consumer reads `outbound_prefix`; do not
+> deploy those configurations through the Praxis filter yet.
+
+#### Vault delegation denial codes
+
+| Code | Meaning |
+|---|---|
+| `delegation.vault_auth_unconfigured` | No usable auth entry exists for the selected subject. |
+| `delegation.vault_auth_failed` | Vault rejected login or returned a malformed login response. |
+| `delegation.identity_missing` | The configured identity claim/field was unavailable. |
+| `delegation.identity_invalid` | The resolved identity was unsafe for a path. |
+| `delegation.unsupported_subject` | The subject variant is unsupported. |
+| `delegation.actor_unsupported` | Static credentials cannot record an actor. |
+| `delegation.attenuation_unsupported` | A stored credential cannot honor route attenuation. |
+| `delegation.permissions_unsupported` | A stored credential cannot prove requested permissions. |
+| `delegation.bad_request` | Required request or credential input was absent or invalid. |
+| `delegation.no_transport` | The host installed no HTTP transport. |
+| `delegation.vault_timeout` | A Vault request timed out. |
+| `delegation.vault_unreachable` | Vault could not be reached. |
+| `delegation.vault_forbidden` | Vault denied the KV read. |
+| `delegation.vault_secret_not_found` | No secret exists at the resolved path. |
+| `delegation.vault_field_missing` | The configured field was absent or not a string. |
+| `delegation.vault_revoke_failed` | PPE could not revoke the temporary login token; delegation fails closed. |
+| `delegation.vault_error` | Vault returned another error or an invalid response. |
+
+#### Vault revocation window
+
+After every KV read attempt, successful or failed, PPE calls Vault
+`auth/token/revoke-self`. Revocation is armed before the KV request, so task
+cancellation also releases an independent, single-request cleanup operation.
+If an awaited revocation fails, PPE returns no downstream credential. This
+bounds the lifetime of the temporary Vault login token; it does not revoke the
+PAT or API key stored in KV.
+
+With caching enabled, `cache.ttl_seconds` is the maximum interval before PPE
+rereads Vault, so a rotated or deleted KV value may remain in memory until that
+TTL expires. The same TTL supplies `RawDelegatedToken.expires_at`, including
+when caching is disabled. That timestamp is a PPE/host handling bound, not
+evidence that the static downstream credential expires at its provider.
+
 ## Reading claims the way your IdP writes them
 
 The JWT identity plugin infers a subject from a token's claims. Which
@@ -637,6 +913,32 @@ a dot is written with `\.`. A `role: caller_workload` resolver carries
 no claims bag and says so at load rather than ignoring the setting.
 
 ## Caching a delegated token
+
+The OAuth delegator checks each token-exchange response by default. It requires
+an access-token or JWT `issued_token_type`, rejects scopes outside a non-empty
+requested set unless listed in `allowed_extra_scopes`, and checks a JWT access
+token's readable `scope` claim by the same rule. It checks `aud` against the
+requested audience and `sub` against the caller token's subject or the
+authenticated identity when the caller token is opaque. If neither supplies a
+subject, a JWT response is rejected. Opaque issued access tokens have no claims
+to inspect locally, even when they contain periods. These claim reads do not
+verify the returned token's signature; the configured token endpoint and TLS
+connection are the trust boundary. Set `strict_response_validation: false`
+under the delegator's `config:` only for an IdP whose response cannot satisfy
+these checks. The default is `true`.
+
+An empty requested scope set accepts the scopes the IdP returns, as in Recipe
+3's `client_credentials` grant. When requesting scopes from an IdP that always
+adds defaults, configure the delegator with, for example,
+`allowed_extra_scopes: [profile, email]`. Only those named extras pass strict
+validation. For a readable JWT with a `scope` claim, required permissions must
+be present in that claim and the delegated token reports its scopes. Otherwise,
+the granted scopes come from the token response or the request when the IdP
+omits them.
+
+The JWT identity resolver rejects non-empty `crit` headers with
+`auth.unsupported_critical_header`; it implements no critical header
+extensions.
 
 A token exchange is a network call on the request path. The optional
 `cache:` block holds a minted token until it expires:
@@ -715,10 +1017,8 @@ work" means the IdP documents support for the required standards, but the flow
 has no end-to-end result.
 
 <!-- Stubs to flesh out as recipes are validated:
-  - Recipe 8: per-tenant / tag-scoped identity (authentication via groups /
-    tags).
-  - Recipe 9: vault-backed delegation (exchange a token for a stored API key).
   - Live-directory validation of Recipe 7 against a running MaaS.
+  - Live-Vault validation of Recipes 8–10 against an operator deployment.
   - Live-IdP validation of Recipe 6's actor_token / `act` claim (currently
     mock-tested).
   - Per-recipe "verified against <IdP> on <date>" as the support matrix grows.

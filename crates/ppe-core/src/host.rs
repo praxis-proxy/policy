@@ -20,13 +20,13 @@
 //     never know: the request's trace span, its remaining deadline, its
 //     subrequest depth.
 //
-// The corollary is that background work cannot use these services at
-// all: a `'static` task outlives the carrier by construction, so it has
-// no invocation to borrow from and no gate to be checked against. That
-// is a feature. `identity-jwt` used to refresh JWKS on a spawned ticker
-// and it was silently dead under any host that dropped the runtime it
-// initialized on; refreshing from the verify path needs no retained
-// handle and no runtime of its own.
+// The corollary is that background work cannot retain a reusable service
+// handle: a `'static` task outlives the carrier by construction, so it has
+// no later invocation whose gate can be checked. A carrier may authorize one
+// fully-built request while it is borrowed and return that request-specific
+// future; this is reserved for cancellation cleanup such as revoking a
+// temporary credential. It conveys no handle with which to issue another
+// request.
 //
 // Two carriers, because a plugin needs services at two points in its
 // life and only one of them has a request:
@@ -54,12 +54,21 @@
 // confusing `None`; here there is nothing to reach for.
 
 use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
 use crate::http_retry::RetryPolicy;
+
+/// One HTTP operation authorized while a host-service carrier was borrowed.
+///
+/// The future owns exactly one request and its already-gated transport. It
+/// cannot be reused to issue another request, which makes it suitable for a
+/// cleanup operation that must survive cancellation of its parent handler.
+pub type HttpRequestFuture =
+    Pin<Box<dyn Future<Output = Result<HttpResponse, HttpRequestError>> + Send + 'static>>;
 
 /// Why a host service was not available to a plugin.
 ///
@@ -243,10 +252,22 @@ pub(crate) async fn run_request(
     req: HttpRequest,
     retry: RetryPolicy,
 ) -> Result<HttpResponse, HttpRequestError> {
-    let transport = slot.slot().get(HTTP_SERVICE, HTTP_CAPABILITY)?;
-    crate::http_retry::execute_with_retry(transport.as_ref(), req, retry)
-        .await
-        .map_err(HttpRequestError::Transport)
+    start_request(slot, req, retry)?.await
+}
+
+/// Resolve the capability-gated transport now and bind it to one request.
+/// The resulting future owns no reusable transport accessor.
+pub(crate) fn start_request(
+    slot: &HttpTransportSlot,
+    req: HttpRequest,
+    retry: RetryPolicy,
+) -> Result<HttpRequestFuture, HttpRequestError> {
+    let transport = Arc::clone(slot.slot().get(HTTP_SERVICE, HTTP_CAPABILITY)?);
+    Ok(Box::pin(async move {
+        crate::http_retry::execute_with_retry(transport.as_ref(), req, retry)
+            .await
+            .map_err(HttpRequestError::Transport)
+    }))
 }
 
 /// The host's HTTP transport as one carrier sees it.

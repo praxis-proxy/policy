@@ -110,8 +110,9 @@ pub(crate) enum Step {
 ///
 /// Multiple `delegate(...)` steps in the same phase are supported —
 /// each fires independently, each contributes to `Extensions`
-/// (`raw_credentials.delegated_tokens` is a `HashMap` keyed on
-/// audience+scope+mode so tokens accumulate; `delegation.chain`
+/// (`raw_credentials.delegated_tokens` is a `HashMap` keyed on delegator,
+/// target, audience, scope, mode, and principal identity so tokens accumulate;
+/// `delegation.chain`
 /// grows with each hop). But the `delegation.granted.*` bag keys
 /// are **overwritten** on each call — only the most recent
 /// delegate's grants are queryable from downstream `require(...)`
@@ -862,6 +863,25 @@ pub enum ElicitationError {
     /// this through the step's `on_error`.
     #[error("elicitation handler error: {0}")]
     Handler(String),
+
+    /// A handler denied with a stable plugin violation code.
+    #[error("elicitation handler error {code}: {reason}")]
+    HandlerViolation {
+        /// Stable code from the plugin violation.
+        code: String,
+        /// Human-readable failure detail.
+        reason: String,
+    },
+}
+
+impl ElicitationError {
+    /// Stable plugin code, when the failure came from a handler denial.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::HandlerViolation { code, .. } => Some(code),
+            _ => None,
+        }
+    }
 }
 
 /// [`ElicitationInvoker`] impl that returns `NotFound` for every call.

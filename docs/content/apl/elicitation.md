@@ -136,6 +136,20 @@ Two independent checks stand between an approval and the tool call:
 The `purpose` is recorded verbatim as the source of truth for what was approved
 — it is never derived from model output.
 
+The CIBA correlation binds the id to the selected policy route (including its
+scope), exact tool name, and authenticated requester subject that opened it. A
+different route, tool, or requester cannot poll or redeem the id; CIBA denies
+dispatch, check, and validation without a non-empty route or `subject.id`.
+OP rejection reasons report the status without reflecting the
+response body, which may contain client credentials. A successful non-peek
+validation consumes it atomically, so a
+second application fails; an `X-Policy-Elicitation-Peek` request checks without
+consuming and can be followed by one application. If a later step fails after
+validation, the id is still spent. Correlations expire and are held in this
+process's memory. A restart loses pending approvals, and a retry on another
+replica cannot find them; route approval retries to the same process until a
+shared durable store is available.
+
 ## Pipeline integration
 
 `require_approval(...)` and its sibling verbs dispatch to a plugin implementing
