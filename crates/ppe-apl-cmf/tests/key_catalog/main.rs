@@ -24,7 +24,7 @@
 // because this fixture populates everything and never exercises an absent one.
 // And the "When" column, which is prose rather than a closed vocabulary.
 
-#![allow(missing_docs, clippy::expect_used, reason = "test code")]
+#![expect(missing_docs, clippy::expect_used, reason = "test code")]
 
 mod catalog;
 
