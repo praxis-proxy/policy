@@ -1375,9 +1375,11 @@ impl PolicyEngine {
     ///
     /// Returns `PluginError::Config` when the config fails validation, when a
     /// plugin's `kind` has no registered factory, when a factory rejects the
-    /// plugin's config, when initialization is in progress, or when a
-    /// registration conflicts with one already present. The existing snapshot
-    /// is left in place, so a failed load does not disturb in-flight requests.
+    /// plugin's config, when initialization is in progress, when the `secrets:`
+    /// block changes after secrets have resolved (which requires a restart), or
+    /// when a registration conflicts with one already present. The existing
+    /// snapshot is left in place, so a failed load does not disturb in-flight
+    /// requests.
     pub fn load_config(&self, policy_config: PolicyConfig) -> Result<(), Box<PluginError>> {
         // Warn before validating: an operator whose config both sets an inactive
         // knob and fails validation should see both, not just the refusal.
@@ -7200,12 +7202,23 @@ secrets:
     #[tokio::test]
     async fn a_reload_that_renames_a_secret_is_refused() {
         let (dir, yaml) = provenance_fixture(PROVENANCE_KEY);
-        let engine = engine_reading_secrets(&yaml);
+        let engine = Arc::new(engine_reading_secrets(&yaml));
         engine.initialize().await.expect("initializes");
+        let created = Arc::new(AtomicUsize::new(0));
+        engine.register_factory(
+            "test/drop_reentrant",
+            Box::new(DropReentrantFactory {
+                engine: Arc::downgrade(&engine),
+                created: Arc::clone(&created),
+            }),
+        );
 
-        let renamed = yaml
+        let mut renamed = yaml
             .replace("upstream_key", "rotated_key")
             .replace("upstream.key", "rotated.key");
+        renamed.push_str(
+            "plugins:\n  - name: never_created\n    kind: test/drop_reentrant\n    hooks: [test_hook]\n",
+        );
         let err = engine
             .load_config(parse_fixture_config(&renamed).unwrap())
             .expect_err("the new value was never resolved");
@@ -7218,6 +7231,11 @@ secrets:
         assert!(
             engine.load_runtime().executor.provenance_key().is_some(),
             "the running snapshot keeps its key"
+        );
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            0,
+            "a rejected secrets block must not run plugin factories"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -44,6 +44,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking for secret health alarms:** `secrets_last_success(provider)` now
+  retains the last successful refresh time after a failure instead of returning
+  `None`. Hosts that used `None` to detect an outage should check
+  `secrets_health(provider)` for `failing` and use the retained timestamp to
+  measure staleness. ([#191](https://github.com/praxis-proxy/policy/pull/191))
+- **Breaking for `env` secret provider config:** settings the provider does not
+  use now cause a config error instead of being ignored. Remove those settings
+  from the `env` provider declaration.
+  ([#191](https://github.com/praxis-proxy/policy/pull/191))
+- **Breaking for secret config reloads:** after secret resolution, a reload that
+  changes the `secrets:` block is refused; restart the engine to apply new
+  provider or value declarations. Reloads with unchanged secret declarations
+  remain supported. ([#191](https://github.com/praxis-proxy/policy/pull/191))
 - **Breaking for hosts using `CelResolver::with_functions`:** registration
   callbacks now return `Result<(), cel::DeclarationError>`, and
   `with_functions` returns `Result<Self, BuildError>`. CEL 0.15 rejects a

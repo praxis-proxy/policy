@@ -429,6 +429,24 @@ mod tests {
         assert_eq!(value.as_str(), "hunter2");
     }
 
+    /// The descriptor and the resolved path must identify the same file.
+    #[cfg(unix)]
+    #[test]
+    fn an_opened_file_mismatching_the_resolved_path_is_refused() {
+        let dir = temp_dir();
+        let first = dir.join("a.key");
+        let second = dir.join("b.key");
+        std::fs::write(&first, "first").expect("write first file");
+        std::fs::write(&second, "second").expect("write second file");
+        let opened = std::fs::File::open(&first).expect("open first file");
+
+        let err = same_file_as_opened("a.key", &second, &opened)
+            .expect_err("the resolved path must match the opened descriptor");
+        assert!(matches!(err, SecretError::Reference { .. }), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A link below `base_dir` is the escape the lexical checks do not see:
     /// the reference is relative and `..`-free, and the file is outside.
     #[cfg(unix)]
