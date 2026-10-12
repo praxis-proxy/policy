@@ -25,6 +25,9 @@ the responsible human contributor signs off. Do not add AI tool trailers.
 make check          # type-check both feature sets (never links)
 make build          # workspace build (debug)
 make test           # all workspace tests (two passes)
+make test-integration  # integration + resilience + security suites
+make test-resilience   # resilience suite only
+make test-security     # security suite only
 make lint           # fmt --check + clippy -D warnings
 make lint-extra     # typos + taplo fmt --check
 make audit          # cargo deny check
@@ -73,6 +76,13 @@ crates/
 
 reference/
   plugins/      pii-scanner, audit-logger (examples)
+
+tests/          suites, `--all-features` pass only
+  integration   demo scenarios via the reference host,
+                live mode (env-gated)
+  resilience    dependency failure, concurrency
+  security      adversarial inputs
+  utils         reference host, scripted IdP, fixtures
 ```
 
 **Dependency flow:**
@@ -139,6 +149,13 @@ The Valkey session store tests are `#[ignore]`-gated
 and need `VALKEY_TEST_URL` set to run against a real
 server. `make coverage` runs them with
 `VALKEY_TESTS_OPTIONAL=1` so they skip gracefully.
+
+The suites under `tests/` skip their `#[ignore]`d
+`scenarios::live` tests unless `VALKEY_TEST_URL`,
+`PPE_KEYCLOAK_URL` or `VAULT_*` is set. A test for an
+open defect is `known_gap_*` with
+`#[should_panic(expected = "known gap #<issue>")]`.
+See `docs/content/testing.md`, Integration suites.
 
 Prefer one test binary per concern over many small
 ones. Cargo builds one binary per `tests/*.rs`, and a

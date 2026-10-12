@@ -464,8 +464,8 @@ async fn apply_to_extensions_writes_delegated_token_keyed_by_subject() {
         .expect("raw_credentials slot populated");
     assert_eq!(raw.delegated_tokens.len(), 1);
 
-    // The key is synthesized from (subject.id, workload, client, audience,
-    // scopes, mode). Built via the constructor — DelegationKey is
+    // The key is synthesized from (subject.id, workload, client, delegator,
+    // target, audience, scopes, mode). Built via the constructor — DelegationKey is
     // #[non_exhaustive]; no workload/client participated, so only the
     // subject is set.
     let expected_key = DelegationKey::new(
@@ -475,6 +475,7 @@ async fn apply_to_extensions_writes_delegated_token_keyed_by_subject() {
         // first, then attenuation capabilities).
         vec!["read:compensation".into(), "audit".into()],
     )
+    .with_target_name("get_compensation")
     .with_subject_id("alice@corp.com");
     assert!(
         raw.delegated_tokens.contains_key(&expected_key),

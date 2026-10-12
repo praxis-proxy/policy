@@ -81,7 +81,7 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// call sites differ: a JWKS fetch at startup can afford a longer
 /// deadline than a token exchange sitting in a request's critical path.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpRequest {
     /// Request method.
     pub method: Method,
@@ -125,6 +125,60 @@ pub struct HttpRequest {
     /// body, because a truncated JWKS document is indistinguishable from
     /// a malformed one.
     pub max_response_bytes: usize,
+}
+
+/// Headers whose values are safe to show in debug output. Everything
+/// else is redacted by default — an unlisted header may carry a token,
+/// API key, or session cookie, and adding it to a denylist only after
+/// someone notices is too late.
+const SAFE_HEADERS: &[&str] = &[
+    "accept",
+    "content-length",
+    "content-type",
+    "host",
+    "user-agent",
+    "x-request-id",
+];
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct RedactedHeaders<'a>(&'a HeaderMap);
+
+        impl fmt::Debug for RedactedHeaders<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_list()
+                    .entries(self.0.keys().map(|k| RedactedEntry(k, self.0)))
+                    .finish()
+            }
+        }
+
+        struct RedactedEntry<'a>(&'a HeaderName, &'a HeaderMap);
+
+        impl fmt::Debug for RedactedEntry<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                if SAFE_HEADERS.contains(&self.0.as_str()) {
+                    let val = self
+                        .1
+                        .get(self.0)
+                        .map(|v| v.to_str().unwrap_or("\u{2026}"))
+                        .unwrap_or("\u{2026}");
+                    write!(f, "{}: {val}", self.0)
+                } else {
+                    write!(f, "{}: [REDACTED]", self.0)
+                }
+            }
+        }
+
+        let mut dbg = f.debug_struct("HttpRequest");
+        dbg.field("method", &self.method);
+        dbg.field("url", &self.url);
+        dbg.field("headers", &RedactedHeaders(&self.headers));
+        dbg.field("body", &format_args!("[{} bytes]", self.body.len()));
+        dbg.field("timeout", &self.timeout);
+        dbg.field("connect_timeout", &self.connect_timeout);
+        dbg.field("max_response_bytes", &self.max_response_bytes);
+        dbg.finish()
+    }
 }
 
 impl HttpRequest {
@@ -830,5 +884,36 @@ mod tests {
         .to_string();
         assert!(msg.contains("1024"), "{msg}");
         assert!(msg.contains("2048"), "{msg}");
+    }
+
+    #[test]
+    fn debug_redacts_sensitive_headers() {
+        let req = HttpRequest::post(
+            "https://vault.test/v1/auth/jwt/login",
+            Bytes::from(r#"{"jwt":"eyJ.SENSITIVE.jwt"}"#),
+        )
+        .header("authorization", "Bearer SENSITIVE_TOKEN")
+        .unwrap()
+        .header("x-vault-token", "s.SENSITIVE_VAULT_TOKEN")
+        .unwrap()
+        .header("content-type", "application/json")
+        .unwrap();
+        let debug = format!("{req:?}");
+        assert!(
+            !debug.contains("SENSITIVE"),
+            "Debug must not expose sensitive header values or body: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("content-type"));
+        assert!(debug.contains("vault.test"));
+    }
+
+    #[test]
+    fn debug_shows_safe_headers_unredacted() {
+        let req = HttpRequest::get("https://example.com")
+            .header("x-request-id", "abc-123")
+            .unwrap();
+        let debug = format!("{req:?}");
+        assert!(debug.contains("abc-123"));
     }
 }

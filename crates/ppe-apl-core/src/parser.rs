@@ -2341,6 +2341,17 @@ fn try_parse_field_op(s: &str, rule: &str) -> Result<Option<Effect>, ParseError>
         rule: rule.to_owned(),
         msg: format!("field op `{path}`: {e}"),
     })?;
+    if path.split('.').any(|seg| seg == "**")
+        && !pipeline
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, Stage::Redact { .. }))
+    {
+        return Err(ParseError::Rule {
+            rule: rule.to_owned(),
+            msg: "`**` paths require a redact stage".to_owned(),
+        });
+    }
     if pipeline.stages.is_empty() {
         return Err(ParseError::Rule {
             rule: rule.to_owned(),
@@ -2402,9 +2413,9 @@ fn is_valid_field_path(s: &str) -> bool {
         return false;
     };
     !rest.is_empty()
-        && rest
-            .split('.')
-            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        && rest.split('.').all(|seg| {
+            seg == "**" || (!seg.is_empty() && seg.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        })
 }
 
 /// Collapse a `Step` produced by the legacy step parser into an
@@ -3179,6 +3190,17 @@ fn compile_declared_pipeline(half: &str, field: &str, chain: &str) -> Result<Pip
                  the field, so an empty chain is a no-op the author did not mean; remove the \
                  entry or give it a stage"
             ),
+        });
+    }
+    if field.split('.').any(|seg| seg == "**")
+        && !pipeline
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, Stage::Redact { .. }))
+    {
+        return Err(ParseError::Rule {
+            rule: format!("{half}.{field}: {chain:?}"),
+            msg: "`**` paths require a redact stage".to_owned(),
         });
     }
     Ok(pipeline)

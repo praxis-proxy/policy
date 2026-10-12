@@ -58,6 +58,15 @@ It exchanges the caller's inbound token for one scoped to `audience` with the
 requested `permissions`, and attaches it to the outbound request. The result
 populates delegation attributes that later rules read.
 
+The bundled `delegator/vault` plugin resolves an existing PAT or API key from
+Vault KV v2 instead of minting an OAuth token. It requires
+`perform_http`, `read_inbound_credentials`, the relevant identity-read
+capability, and `write_delegated_tokens`. `scheme_prefix` explicitly controls
+the outbound header value: use `"token "` for GitHub-style Authorization values,
+`"Bearer "` where required, or omit it for a bare `X-API-Key`. See the
+[Vault recipes](../identity-delegation.md#recipe-8-a-users-vault-stored-credential)
+for Vault policy, enrollment, and complete configuration.
+
 ## Choosing who the exchange is for
 
 By default a `delegate` step exchanges the user's token: the minted
@@ -160,8 +169,9 @@ behalf of a user while exchanging a workload SVID. Deriving it means the
 operator states one thing — which credential — and the consequence follows.
 
 The attribution is load-bearing beyond the audit trail: minted credentials are
-cached per `(subject, workload, audience, scopes, attribution)`, so tokens
-minted for one calling agent are never served to another.
+cached per `(subject, workload, delegator, target, audience, scopes,
+attribution)`, so tokens minted for one calling agent or one plugin instance
+are never silently replaced by another's.
 
 ## Delegation attributes
 

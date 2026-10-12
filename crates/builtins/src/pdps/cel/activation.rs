@@ -131,6 +131,9 @@ enum Node {
 fn build_tree(bag: &AttributeBag) -> BTreeMap<String, Node> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
+        if matches!(value, AttributeValue::NonScalar) {
+            continue;
+        }
         let segments: Vec<&str> = key.split('.').collect();
         insert(&mut root, key, &segments, attr_to_value(value));
     }
@@ -205,6 +208,7 @@ fn node_to_value(node: Node) -> Value {
 /// arithmetic such as `confidence * 100.0`.
 fn attr_to_value(attr: &AttributeValue) -> Value {
     match attr {
+        AttributeValue::NonScalar => Value::Null,
         AttributeValue::Bool(b) => Value::from(*b),
         AttributeValue::Int(i) => Value::from(*i),
         AttributeValue::Float(f) => Value::from(*f),

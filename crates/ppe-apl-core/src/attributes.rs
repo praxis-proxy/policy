@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 /// A single attribute value the evaluator can compare against.
 ///
-/// The five variants cover every shape the DSL needs:
+/// The variants cover every shape the DSL needs:
 /// `Bool` for `authenticated` / `role.*` / `perm.*`,
 /// `Int` for counts and depths,
 /// `Float` for confidences and ages,
@@ -40,6 +40,9 @@ pub enum AttributeValue {
     String(String),
     /// A set of strings, for `contains` and `in` tests.
     StringSet(HashSet<String>),
+    /// Present JSON object, null, or array that has no scalar bag value.
+    /// Order comparisons on this value fail closed.
+    NonScalar,
 }
 
 impl From<bool> for AttributeValue {
@@ -207,7 +210,7 @@ impl AttributeBag {
             AttributeValue::Int(i) => Some(i.to_string()),
             AttributeValue::Bool(b) => Some(b.to_string()),
             AttributeValue::Float(f) => Some(f.to_string()),
-            AttributeValue::StringSet(_) => None,
+            AttributeValue::StringSet(_) | AttributeValue::NonScalar => None,
         }
     }
 

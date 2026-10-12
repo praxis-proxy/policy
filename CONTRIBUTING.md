@@ -17,6 +17,20 @@ Requirements are listed in [docs/development.md].
 
 [docs/development.md]: docs/development.md
 
+## Tests
+
+`make test` runs both feature passes. The integration,
+resilience and security suites under `tests/` run in the
+`--all-features` pass, or alone with `make
+test-integration` (all three), `make test-resilience` and
+`make test-security`. A test exposing an open defect is
+named `known_gap_*` and marked
+`#[should_panic(expected = "known gap #<issue>")]`. Live
+mode, the reference host and the host-drift check are
+described in [Testing Policy].
+
+[Testing Policy]: docs/content/testing.md#integration-suites
+
 ## Picking Up an Issue
 
 Only issues a maintainer has triaged (given a milestone

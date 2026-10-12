@@ -47,6 +47,7 @@ builtins = [
   "jwt",
   "api-key",
   "oauth",
+  "delegator-vault",
   "elicitation-ciba",
   "cedar",
   "cel",
@@ -64,6 +65,7 @@ experimental = ["dep:tracing"]
 jwt = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/jwt"]
 api-key = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/api-key"]
 oauth = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/oauth"]
+delegator-vault = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/delegator-vault"]
 elicitation-ciba = [
   "_builtin",
   "dep:praxis-policy-builtins",

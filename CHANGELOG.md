@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Added integration, resilience, and security test suites that exercise policy
+  decisions through the reference host, including dependency failures,
+  concurrency, credential leaks, and environment-gated live services.
+  ([#180](https://github.com/praxis-proxy/policy/pull/180))
 - Added `secret.<name>`, an assertion source for a static upstream credential.
   A target sitting behind a shared API key had no path short of a token
   delegator, which is per-request exchange machinery that a static credential
@@ -65,6 +69,20 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Rejected JWTs with unsupported critical headers. OAuth token exchange now
+  validates the issued token type, granted scopes, and JWT audience and subject
+  by default. Empty scope requests accept IdP defaults, and
+  `allowed_extra_scopes` permits named defaults alongside requested scopes.
+  ([#188](https://github.com/praxis-proxy/policy/pull/188))
+- Bound CIBA approvals to the selected policy route, tool, and authenticated
+  requester, with atomic single-use redemption within a plugin instance.
+  Backchannel and poll failures no longer expose OP response bodies that may
+  contain client credentials.
+  ([#188](https://github.com/praxis-proxy/policy/pull/188))
+- Made non-scalar numeric policy comparisons fail closed. Structured JSON
+  redaction now matches keys without case sensitivity, supports recursive
+  paths, and preserves keys containing dots; recursive traversal is bounded.
+  ([#188](https://github.com/praxis-proxy/policy/pull/188))
 - Secret assertion headers are redacted in plugin and audit views across
   subsequent hooks, config reloads, and header case normalization. Provenance
   travels with the HTTP extension. Plugin header writes preserve the original

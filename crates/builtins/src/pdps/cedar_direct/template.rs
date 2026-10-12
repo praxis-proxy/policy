@@ -120,6 +120,11 @@ fn substitute(
     })?;
 
     Ok(match value {
+        AttributeValue::NonScalar => {
+            return Err(PdpError::Dispatch(format!(
+                "cedar:() references `{original}` but `{key}` is not a scalar value"
+            )));
+        },
         AttributeValue::String(v) => serde_yaml::Value::String(v.clone()),
         AttributeValue::Bool(v) => serde_yaml::Value::Bool(*v),
         AttributeValue::Int(v) => serde_yaml::Value::Number((*v).into()),

@@ -130,6 +130,10 @@ pub use praxis_policy_builtins::pdps::opa::OpaPdpFactory;
 pub use praxis_policy_builtins::plugins::delegator_oauth::{
     KIND as OAUTH_KIND, OAuthDelegatorFactory,
 };
+#[cfg(feature = "delegator-vault")]
+pub use praxis_policy_builtins::plugins::delegator_vault::{
+    KIND as VAULT_DELEGATOR_KIND, VaultDelegatorFactory,
+};
 #[cfg(feature = "elicitation-ciba")]
 pub use praxis_policy_builtins::plugins::elicitation_ciba::{
     CibaApproverFactory, KIND as CIBA_KIND,
@@ -202,6 +206,8 @@ macro_rules! register_builtins {
 // keyed off each extension's own `KIND` const.
 #[cfg(feature = "oauth")]
 use praxis_policy_builtins::plugins::delegator_oauth as oauth_builtin;
+#[cfg(feature = "delegator-vault")]
+use praxis_policy_builtins::plugins::delegator_vault as vault_delegator_builtin;
 #[cfg(feature = "elicitation-ciba")]
 use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 #[cfg(feature = "api-key")]
@@ -216,6 +222,7 @@ register_builtins! {
     feature "jwt"                => jwt_builtin::JwtIdentityFactory,
     feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
+    feature "delegator-vault"    => vault_delegator_builtin::VaultDelegatorFactory,
     feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
     // Experimental: registers only when `experimental-quota` is named, never via `builtins`.
     feature "experimental-quota" => quota_builtin::QuotaFactory,
@@ -435,6 +442,7 @@ mod tests {
             (cfg!(feature = "jwt"), "identity/jwt"),
             (cfg!(feature = "api-key"), "identity/api-key"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
+            (cfg!(feature = "delegator-vault"), "delegator/vault"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),
         ];
         for (enabled, kind) in expected {

@@ -12,6 +12,7 @@ name it by `kind`.
 | `identity/jwt` | identity | `jwt` | Resolve a subject from a verified JWT, with configurable claim mapping. See [Identity](apl/identity.md). |
 | `identity/api-key` | identity | `api-key` | Resolve an API key against a file or HTTP directory. See [Recipe 7](identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory). |
 | `delegator/oauth` | delegator | `oauth` | RFC 8693 token exchange, with optional caching. See [Delegation](apl/delegation.md). |
+| `delegator/vault` | delegator | `delegator-vault` | Resolve caller-scoped or workload-owned downstream credentials from Vault KV v2. See [Vault delegation recipes](identity-delegation.md#recipe-8-a-users-vault-stored-credential). |
 | `elicitation/ciba` | elicitation | `elicitation-ciba` | OIDC CIBA human approval. See [Elicitation](apl/elicitation.md). |
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
@@ -23,6 +24,11 @@ name it by `kind`.
 The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
 replica.
+
+The CIBA approval correlation store is also in-process memory, independent of
+the session store. Its approvals bind to the tool and requester, expire, and
+can be applied once. Pending approvals do not survive a restart or move to a
+second replica; see [Elicitation](apl/elicitation.md).
 
 The three decision points are held to each other by a differential test
 suite. Given the same attributes and equivalent policy intent, they must
@@ -54,10 +60,11 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all nine below: `jwt`, `api-key`, `oauth`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
+| `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
 | `jwt` | `identity/jwt` |
 | `api-key` | `identity/api-key` |
 | `oauth` | `delegator/oauth` |
+| `delegator-vault` | `delegator/vault` |
 | `elicitation-ciba` | `elicitation/ciba` |
 | `cedar` | the `cedar-direct` decision point |
 | `cel` | the `cel` decision point |

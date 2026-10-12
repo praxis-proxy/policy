@@ -82,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_covers_all_attribute_value_variants() {
+    fn catalog_covers_shared_attribute_value_variants() {
         let mut saw_bool = false;
         let mut saw_int = false;
         let mut saw_float = false;
@@ -98,6 +98,9 @@ mod tests {
                     AttributeValue::String(_) => saw_string = true,
                     AttributeValue::StringSet(set) if set.is_empty() => saw_empty_set = true,
                     AttributeValue::StringSet(_) => saw_set = true,
+                    // Present non-scalars are an APL fail-closed marker, not
+                    // part of the shared PDP scalar comparison subset.
+                    AttributeValue::NonScalar => {},
                 }
             }
         }

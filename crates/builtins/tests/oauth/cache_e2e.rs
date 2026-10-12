@@ -364,6 +364,7 @@ async fn this_workload_caches_despite_an_empty_anchor() {
         DelegationPayload::new("", "get_compensation")
             .with_subject(DelegationSubject::ThisWorkload)
             .with_target_audience("https://hr.example.com")
+            .with_required_permissions(vec!["read:compensation".to_owned()])
     };
 
     let (_, first) = delegate(&mgr, as_gateway()).await;

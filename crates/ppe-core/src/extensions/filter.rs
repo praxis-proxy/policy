@@ -1066,6 +1066,8 @@ mod tests {
                 subject_id: "alice".into(),
                 workload_id: None,
                 client_id: None,
+                delegator_name: "example-oauth".into(),
+                target_name: "example-delegator".into(),
                 audience: "https://api.example.com".into(),
                 scopes: vec!["read".into()],
                 mode: DelegationMode::OnBehalfOfUser,

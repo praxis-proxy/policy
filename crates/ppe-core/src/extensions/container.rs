@@ -27,7 +27,7 @@ use super::raw_credentials::RawCredentialsExtension;
 use super::request::RequestExtension;
 use super::routing::{CAP_WRITE_CANDIDATE_CONSTRAINT, CandidateConstraintExtension};
 use super::security::SecurityExtension;
-use crate::host::{HostServices, HttpRequestError, HttpTransportSlot};
+use crate::host::{HostServices, HttpRequestError, HttpRequestFuture, HttpTransportSlot};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::http_retry::RetryPolicy;
 
@@ -202,6 +202,25 @@ impl Clone for Extensions {
 }
 
 impl Extensions {
+    /// Authorize one HTTP request against this invocation's capability view
+    /// and return an owned, request-specific future.
+    ///
+    /// Unlike the transport slot, this future may be moved into a cleanup
+    /// task: it can complete the one operation already authorized here, but
+    /// exposes no reusable handle for issuing later requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HttpRequestError::Unavailable`] when no transport is
+    /// installed or this invocation lacks `perform_http`.
+    pub fn start_http_request(
+        &self,
+        req: HttpRequest,
+        retry: RetryPolicy,
+    ) -> Result<HttpRequestFuture, HttpRequestError> {
+        crate::host::start_request(&self.http_transport, req, retry)
+    }
+
     /// Create a copy-on-write owned copy for modification.
     ///
     /// Immutable slots share the same `Arc` (refcount bump, ~1ns).

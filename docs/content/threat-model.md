@@ -40,6 +40,23 @@ decisions from the PDP, Session Taint labels from the session store, and the
 delegation and audit state is PPE's own. The model can ask for anything; it can
 influence none of the state the answer depends on.
 
+### Vault-backed delegation obligations
+
+Caller-scoped Vault delegation is a joint PPE/Vault control. PPE derives a path
+from verified identity state and authenticates to Vault with that caller's raw
+JWT. Vault must independently bind the JWT auth alias to an identity-templated
+KV v2 policy, for example
+`secret/data/agents/{{identity.entity.aliases.<mount-accessor>.name}}/*`.
+A broad rule such as `secret/data/agents/*` removes per-principal isolation;
+PPE cannot inspect or repair Vault policy.
+
+Configure `identity_claim` to an issuer-asserted, stable principal identifier
+such as `sub` or an attested SPIFFE ID. Do not use a caller-controlled display
+name, email address, tenant-supplied label, or session identifier. PPE revokes
+the short-lived Vault login token after each read. Rotation and revocation of
+the stored downstream PAT or API key remain operator responsibilities, and a
+PPE credential cache can delay the next Vault read until its TTL expires.
+
 ## Threats and controls
 
 | Threat | Without mediation | PPE control |
