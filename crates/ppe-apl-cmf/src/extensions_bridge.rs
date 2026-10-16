@@ -13,10 +13,18 @@ use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::Extensions;
 
 use crate::{
-    agent::extract_agent, completion::extract_completion, custom::extract_custom,
-    delegation::extract_delegation, framework::extract_framework, http::extract_http,
-    llm::extract_llm, mcp::extract_mcp, meta::extract_meta, provenance::extract_provenance,
-    request::extract_request, security::extract_security,
+    agent::extract_agent,
+    completion::extract_completion,
+    custom::extract_custom,
+    delegation::extract_delegation,
+    framework::extract_framework,
+    http::extract_http,
+    llm::{extract_llm, extract_llm_request},
+    mcp::extract_mcp,
+    meta::extract_meta,
+    provenance::extract_provenance,
+    request::extract_request,
+    security::extract_security,
 };
 
 /// Flatten every present slot in `Extensions` into `bag`.
@@ -46,6 +54,9 @@ pub fn extract_extensions(ext: &Extensions, bag: &mut AttributeBag) {
     }
     if let Some(v) = &ext.llm {
         extract_llm(v, bag);
+    }
+    if let Some(v) = &ext.llm_request_parts {
+        extract_llm_request(v, bag);
     }
     if let Some(v) = &ext.mcp {
         extract_mcp(v, bag);

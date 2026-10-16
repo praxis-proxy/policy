@@ -154,9 +154,21 @@ const TABLE: &[CapabilityEntry] = &[
     },
     CapabilityEntry {
         // Gates `Extensions.llm_request`, which reaches PDPs through a
-        // structured side channel and is never flattened into the bag.
+        // structured side channel and is never flattened into the bag, and
+        // `Extensions.llm_request_parts`, which flattens into these keys.
+        // The system prompt reaches the bag only as its digest.
         name: CAP_READ_LLM_REQUEST,
-        prefixes: &[],
+        prefixes: &[
+            BAG_LLM_OFFERED_TOOLS,
+            BAG_LLM_STOP_SEQUENCES,
+            BAG_LLM_TOOL_CHOICE,
+            BAG_LLM_FORCED_TOOL,
+            BAG_LLM_MAX_TOKENS,
+            BAG_LLM_TEMPERATURE,
+            BAG_LLM_TOP_P,
+            BAG_LLM_STREAM,
+            BAG_LLM_SYSTEM_PROMPT_DIGEST,
+        ],
     },
 ];
 
@@ -319,8 +331,12 @@ mod tests {
     }
 
     #[test]
-    fn read_llm_request_is_known_but_unlocks_no_bag_keys() {
-        assert!(capability_namespaces(CAP_READ_LLM_REQUEST).is_empty());
+    fn read_llm_request_unlocks_the_typed_request_keys_only() {
+        let prefixes = capability_namespaces(CAP_READ_LLM_REQUEST);
+        assert!(prefixes.contains(&BAG_LLM_OFFERED_TOOLS));
+        assert!(prefixes.contains(&BAG_LLM_SYSTEM_PROMPT_DIGEST));
+        // Exact keys, so model identity under `llm.` stays unrestricted.
+        assert!(prefixes.iter().all(|p| !p.ends_with('.')));
         assert!(known_read_capabilities().any(|c| c == CAP_READ_LLM_REQUEST));
     }
 

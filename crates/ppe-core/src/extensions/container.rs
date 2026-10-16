@@ -19,7 +19,7 @@ use super::delegation::DelegationExtension;
 use super::framework::FrameworkExtension;
 use super::guarded::{Guarded, WriteToken};
 use super::http::HttpExtension;
-use super::llm::{LLMExtension, LlmRequestDocument};
+use super::llm::{LLMExtension, LLMRequest, LlmRequestDocument};
 use super::mcp::MCPExtension;
 use super::meta::MetaExtension;
 use super::provenance::ProvenanceExtension;
@@ -107,6 +107,13 @@ pub struct Extensions {
     #[serde(skip)]
     pub llm_request: Option<LlmRequestDocument>,
 
+    /// The host's typed reading of the same request: system prompt, offered
+    /// tools, tool choice, and sampling parameters (immutable, gated by
+    /// `read_llm_request`). Never serialized, for the same reason as
+    /// `llm_request`: it carries the verbatim system prompt.
+    #[serde(skip)]
+    pub llm_request_parts: Option<Arc<LLMRequest>>,
+
     /// Agentic framework context (immutable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framework: Option<Arc<FrameworkExtension>>,
@@ -189,6 +196,7 @@ impl Clone for Extensions {
             provenance: self.provenance.clone(),
             llm: self.llm.clone(),
             llm_request: self.llm_request.clone(),
+            llm_request_parts: self.llm_request_parts.clone(),
             framework: self.framework.clone(),
             meta: self.meta.clone(),
             custom: self.custom.clone(),
@@ -250,6 +258,7 @@ impl Extensions {
             provenance: self.provenance.clone(),
             llm: self.llm.clone(),
             llm_request: self.llm_request.clone(),
+            llm_request_parts: self.llm_request_parts.clone(),
             framework: self.framework.clone(),
             meta: self.meta.clone(),
             raw_credentials: self.raw_credentials.clone(),
@@ -299,6 +308,10 @@ impl Extensions {
                     .llm_request
                     .as_ref()
                     .map(LlmRequestDocument::shared),
+            )
+            && ptr_eq_opt(
+                self.llm_request_parts.as_ref(),
+                modified.llm_request_parts.as_ref(),
             )
             && ptr_eq_opt(self.framework.as_ref(), modified.framework.as_ref())
             && ptr_eq_opt(self.meta.as_ref(), modified.meta.as_ref())
@@ -571,6 +584,8 @@ pub struct OwnedExtensions {
     pub llm: Option<Arc<LLMExtension>>,
     /// The host-parsed LLM request body.
     pub llm_request: Option<LlmRequestDocument>,
+    /// The host's typed reading of the LLM request.
+    pub llm_request_parts: Option<Arc<LLMRequest>>,
     /// Agentic framework context.
     pub framework: Option<Arc<FrameworkExtension>>,
     /// Host-provided operational metadata.
@@ -1072,6 +1087,41 @@ mod tests {
         let back: Extensions =
             serde_json::from_value(serde_json::json!({"llm_request": {"model": "x"}})).unwrap();
         assert!(back.llm_request.is_none());
+    }
+
+    #[test]
+    fn test_llm_request_parts_are_never_serialized() {
+        let ext = Extensions {
+            llm_request_parts: Some(Arc::new(LLMRequest {
+                system_prompt: Some("secret-marker".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&ext).unwrap();
+        assert!(json.get("llm_request_parts").is_none());
+        assert!(!json.to_string().contains("secret-marker"));
+
+        let back: Extensions = serde_json::from_value(
+            serde_json::json!({"llm_request_parts": {"system_prompt": "x"}}),
+        )
+        .unwrap();
+        assert!(back.llm_request_parts.is_none());
+    }
+
+    #[test]
+    fn test_validate_immutable_rejects_changed_llm_request_parts() {
+        let ext = Extensions {
+            llm_request_parts: Some(Arc::new(LLMRequest::default())),
+            ..Default::default()
+        };
+        let mut cow = ext.cow_copy();
+        assert!(ext.validate_immutable(&cow));
+        cow.llm_request_parts = Some(Arc::new(LLMRequest {
+            max_tokens: Some(1),
+            ..Default::default()
+        }));
+        assert!(!ext.validate_immutable(&cow));
     }
 
     #[test]

@@ -26,6 +26,7 @@ members = [
   "reference/plugins/pii-scanner",
   "reference/plugins/audit-logger",
   "reference/plugins/ocsf-audit",
+  "reference/plugins/transcript-scanner",
   # Criterion suite for issue #19. Unpublished; excluded from default-members
   # so everyday `cargo build` stays lean. `cargo bench -p ppe-benches` /
   # `make bench` still pick it up, and `clippy --all-targets` compiles it.
@@ -60,6 +61,7 @@ default-members = [
   "reference/plugins/pii-scanner",
   "reference/plugins/audit-logger",
   "reference/plugins/ocsf-audit",
+  "reference/plugins/transcript-scanner",
 ]
 
 [workspace.package]
@@ -138,8 +140,8 @@ rmp-serde = "1"
 serde_bytes = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
-# One `sha2` for the whole tree. Four crates hash for unrelated reasons
-# (audit provenance, session ids, a PKCE verifier), and `hmac` 0.13 pairs
+# One `sha2` for the whole tree. Several crates hash for unrelated reasons
+# (audit provenance, session ids, a PKCE verifier, the system prompt digest), and `hmac` 0.13 pairs
 # with the `digest` 0.11 that this major brings. Splitting the requirement
 # would put two `sha2` and two `digest` in the build.
 sha2 = "0.11"

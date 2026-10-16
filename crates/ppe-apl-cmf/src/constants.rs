@@ -148,6 +148,26 @@ pub const BAG_HTTP_HOST: &str = "http.host";
 pub const BAG_HTTP_SCHEME: &str = "http.scheme";
 /// Bag key `http.status`, the response status, set on the response half only.
 pub const BAG_HTTP_STATUS: &str = "http.status";
+// LLM request — exact keys, written from `Extensions.llm_request_parts`, so
+// they ride `read_llm_request` with the request body.
+/// Bag key `llm.offered_tools`.
+pub const BAG_LLM_OFFERED_TOOLS: &str = "llm.offered_tools";
+/// Bag key `llm.stop_sequences`.
+pub const BAG_LLM_STOP_SEQUENCES: &str = "llm.stop_sequences";
+/// Bag key `llm.tool_choice`.
+pub const BAG_LLM_TOOL_CHOICE: &str = "llm.tool_choice";
+/// Bag key `llm.forced_tool`.
+pub const BAG_LLM_FORCED_TOOL: &str = "llm.forced_tool";
+/// Bag key `llm.max_tokens`.
+pub const BAG_LLM_MAX_TOKENS: &str = "llm.max_tokens";
+/// Bag key `llm.temperature`.
+pub const BAG_LLM_TEMPERATURE: &str = "llm.temperature";
+/// Bag key `llm.top_p`.
+pub const BAG_LLM_TOP_P: &str = "llm.top_p";
+/// Bag key `llm.stream`.
+pub const BAG_LLM_STREAM: &str = "llm.stream";
+/// Bag key `llm.system_prompt_digest`.
+pub const BAG_LLM_SYSTEM_PROMPT_DIGEST: &str = "llm.system_prompt_digest";
 // Violation `details` keys carrying a transpiled `denyWith` (custom HTTP
 // denial response). Shared between the producer (praxis-policy-apl-runtime route handler)
 // and any consumer (host renderer / tests) so the stringly-typed contract

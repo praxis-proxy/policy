@@ -29,8 +29,8 @@
 
 use praxis_policy_apl_cmf::constants::{
     CAP_READ_AGENT, CAP_READ_CLAIMS, CAP_READ_CLIENT, CAP_READ_DELEGATION, CAP_READ_HEADERS,
-    CAP_READ_LABELS, CAP_READ_PERMISSIONS, CAP_READ_ROLES, CAP_READ_SUBJECT, CAP_READ_TEAMS,
-    CAP_READ_WORKLOAD,
+    CAP_READ_LABELS, CAP_READ_LLM_REQUEST, CAP_READ_PERMISSIONS, CAP_READ_ROLES, CAP_READ_SUBJECT,
+    CAP_READ_TEAMS, CAP_READ_WORKLOAD,
 };
 
 /// The value type a bag key carries.
@@ -102,6 +102,8 @@ pub(crate) enum Slot {
     Http,
     /// `llm` — `LLMExtension`.
     Llm,
+    /// `llm_request_parts` — `LLMRequest`.
+    LlmRequestParts,
     /// `mcp` — `MCPExtension`.
     Mcp,
     /// `completion` — `CompletionExtension`.
@@ -126,6 +128,7 @@ impl Slot {
             Self::Request => "request",
             Self::Http => "http",
             Self::Llm => "llm",
+            Self::LlmRequestParts => "llm_request_parts",
             Self::Mcp => "mcp",
             Self::Completion => "completion",
             Self::Provenance => "provenance",
@@ -648,7 +651,62 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Llm,
     ),
-    // 8. mcp
+    // 8. llm_request_parts
+    exact(
+        "llm.offered_tools",
+        KeyType::StringSet,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    exact(
+        "llm.stop_sequences",
+        KeyType::StringSet,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    exact(
+        "llm.tool_choice",
+        KeyType::String,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    exact(
+        "llm.forced_tool",
+        KeyType::String,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    exact(
+        "llm.max_tokens",
+        KeyType::Int,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    exact(
+        "llm.temperature",
+        KeyType::Float,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    exact(
+        "llm.top_p",
+        KeyType::Float,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    exact(
+        "llm.stream",
+        KeyType::Bool,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    exact(
+        "llm.system_prompt_digest",
+        KeyType::String,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequestParts,
+    ),
+    // 9. mcp
     exact("mcp.tool.name", KeyType::String, Gating::Ungated, Slot::Mcp),
     exact(
         "mcp.tool.title",
@@ -740,7 +798,7 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Mcp,
     ),
-    // 9. completion
+    // 10. completion
     exact(
         "completion.stop_reason",
         KeyType::String,
@@ -789,7 +847,7 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Completion,
     ),
-    // 10. provenance
+    // 11. provenance
     exact(
         "provenance.source",
         KeyType::String,
@@ -808,7 +866,7 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Provenance,
     ),
-    // 11. framework
+    // 12. framework
     exact(
         "framework.framework",
         KeyType::String,
@@ -839,7 +897,7 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Framework,
     ),
-    // 12. custom
+    // 13. custom
     family(
         "custom.<name>",
         KeyType::Flattened,

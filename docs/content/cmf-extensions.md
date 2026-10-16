@@ -6,7 +6,7 @@ keys. Plugins that received the typed slot still see the original struct. This
 document is the contract for what the bridge emits, how original collections
 relate to flattened booleans, and which keys exist.
 
-The twelve slots dispatched by `extract_extensions` are listed below.
+The thirteen slots dispatched by `extract_extensions` are listed below.
 `raw_credentials`, `candidate_constraint`, and `llm_request` are not among
 them: credentials never enter the bag, a routing constraint is not a policy
 attribute, and the parsed LLM request reaches PDPs as structured JSON instead
@@ -18,7 +18,7 @@ attribute, and the parsed LLM request reaches PDPs as structured JSON instead
 - [Original collections and flattened booleans](#original-collections-and-flattened-booleans)
 - [`subject.claims`](#subjectclaims)
 - [What each decision point does with a missing key](#what-each-decision-point-does-with-a-missing-key)
-- [The twelve slots](#the-twelve-slots)
+- [The thirteen slots](#the-thirteen-slots)
 - [Payloads that are not slots](#payloads-that-are-not-slots)
 
 ---
@@ -194,7 +194,7 @@ keys), or a missing `subject.id`, is the `missing-collection` /
 
 ---
 
-## The twelve slots
+## The thirteen slots
 
 Keys listed **always** are written whenever the slot (and, where noted, the
 sub-record) is present. The rest are omitted when the field is `None` or the
@@ -428,11 +428,34 @@ A default request slot adds nothing.
 | `llm.provider` | String | `Some` |
 | `llm.capabilities` | StringSet | always |
 
-The parsed request body is a separate slot, `llm_request`, and is never
+The request itself is a separate slot, `llm_request_parts`, below.
+
+### 8. `llm_request_parts` — `LLMRequest`
+
+The host's typed reading of the LLM request. A plugin reads the slot, and these
+keys, only with `read_llm_request`.
+
+| Key | Type | When |
+|---|---|---|
+| `llm.offered_tools` | StringSet | always; tool names |
+| `llm.stop_sequences` | StringSet | always |
+| `llm.tool_choice` | String | `tool_choice` `Some` (`auto` / `none` / `required` / `tool`) |
+| `llm.forced_tool` | String | `tool_choice` is `tool` |
+| `llm.max_tokens` | Int | `Some` |
+| `llm.temperature` | Float | `Some` |
+| `llm.top_p` | Float | `Some` |
+| `llm.stream` | Bool | `Some` |
+| `llm.system_prompt_digest` | String | `system_prompt` `Some`; `sha256:<hex>` |
+
+When the slot is `None` none of these keys is written, not even the two sets:
+an empty set would claim the model was offered no tools. The system prompt's
+text is not flattened.
+
+The parsed request body is another slot, `llm_request`, and is never
 flattened. OPA and CEL read it as `llm.request` beside these keys, and Cedar
 as `context.llm.request`.
 
-### 8. `mcp` — `MCPExtension`
+### 9. `mcp` — `MCPExtension`
 
 **Tool** present:
 
@@ -477,7 +500,7 @@ the contract instead of the request. The argument values themselves reach
 policy as `args.*`; see
 [Payloads that are not slots](#payloads-that-are-not-slots).
 
-### 9. `completion` — `CompletionExtension`
+### 10. `completion` — `CompletionExtension`
 
 | Key | Type | When |
 |---|---|---|
@@ -490,7 +513,7 @@ policy as `args.*`; see
 | `completion.created_at` | String | `Some` |
 | `completion.latency_ms` | Int | `Some` |
 
-### 10. `provenance` — `ProvenanceExtension`
+### 11. `provenance` — `ProvenanceExtension`
 
 | Key | Type | When |
 |---|---|---|
@@ -498,7 +521,7 @@ policy as `args.*`; see
 | `provenance.message_id` | String | `Some` |
 | `provenance.parent_id` | String | `Some` |
 
-### 11. `framework` — `FrameworkExtension`
+### 12. `framework` — `FrameworkExtension`
 
 | Key | Type | When |
 |---|---|---|
@@ -508,7 +531,7 @@ policy as `args.*`; see
 | `framework.graph_id` | String | `Some` |
 | `framework.metadata.<dotted>` | flattened JSON | each metadata entry |
 
-### 12. `custom` — `HashMap<String, Value>`
+### 13. `custom` — `HashMap<String, Value>`
 
 | Key | Type | When |
 |---|---|---|

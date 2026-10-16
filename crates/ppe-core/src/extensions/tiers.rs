@@ -70,9 +70,11 @@ pub enum Capability {
     /// `read_subject` / `read_client` / `read_workload`.
     ReadAgent,
 
-    /// Read the host-parsed LLM request document (`Extensions.llm_request`).
-    /// It carries prompt text and client-supplied JSON, so it is never flattened
-    /// into the attribute bag.
+    /// Read the LLM request: the host-parsed body (`Extensions.llm_request`)
+    /// and the host's typed reading of it (`Extensions.llm_request_parts`).
+    /// Both carry prompt text. The body is never flattened into the attribute
+    /// bag; the typed parts flatten only tool names, sampling parameters, and a
+    /// digest of the system prompt.
     ReadLlmRequest,
 
     /// Read HTTP headers.

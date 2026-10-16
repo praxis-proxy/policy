@@ -38,7 +38,7 @@ pub enum SlotName {
     Provenance,
     /// The model identity slot.
     Llm,
-    /// The host-parsed LLM request document slot.
+    /// The LLM request slots: the host-parsed body and its typed parts.
     LlmRequest,
     /// The framework context slot.
     Framework,
@@ -359,11 +359,14 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         }
     }
 
-    // Capability-gated: the parsed LLM request document
-    if extensions.llm_request.is_some() {
+    // Capability-gated: the LLM request, both the parsed body and the
+    // host's typed reading of it. One capability covers both because they
+    // carry the same prompt text and tool definitions.
+    if extensions.llm_request.is_some() || extensions.llm_request_parts.is_some() {
         let policy = slot_policy(SlotName::LlmRequest);
         if has_read_access(&policy, capabilities) {
             filtered.llm_request = extensions.llm_request.clone();
+            filtered.llm_request_parts = extensions.llm_request_parts.clone();
         }
     }
 
@@ -564,7 +567,7 @@ fn build_filtered_subject(
 )]
 mod tests {
     use super::*;
-    use crate::extensions::llm::LlmRequestDocument;
+    use crate::extensions::llm::{LLMRequest, LlmRequestDocument};
     use crate::extensions::meta::MetaExtension;
 
     // ---- host services: the outbound-HTTP gate -------------------------
@@ -860,6 +863,44 @@ mod tests {
         assert!(
             filter_extensions(&ext, &HashSet::new())
                 .llm_request
+                .is_none()
+        );
+    }
+
+    fn extensions_with_llm_request_parts() -> Extensions {
+        Extensions {
+            llm_request_parts: Some(Arc::new(LLMRequest {
+                system_prompt: Some("You are the HR assistant.".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_read_llm_request_capability_shares_typed_parts() {
+        let ext = extensions_with_llm_request_parts();
+        let caps: HashSet<String> = ["read_llm_request".to_owned()].into();
+        let filtered = filter_extensions(&ext, &caps);
+        assert!(Arc::ptr_eq(
+            filtered.llm_request_parts.as_ref().unwrap(),
+            ext.llm_request_parts.as_ref().unwrap()
+        ));
+    }
+
+    /// The typed parts carry the verbatim system prompt, so a plugin without
+    /// `read_llm_request` must not get them, even with every other read cap.
+    #[test]
+    fn test_llm_request_parts_hidden_without_capability() {
+        let ext = extensions_with_llm_request_parts();
+        let caps: HashSet<String> = ["read_agent", "read_headers", "read_subject", "read_labels"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert!(filter_extensions(&ext, &caps).llm_request_parts.is_none());
+        assert!(
+            filter_extensions(&ext, &HashSet::new())
+                .llm_request_parts
                 .is_none()
         );
     }

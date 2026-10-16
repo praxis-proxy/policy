@@ -1,16 +1,47 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// LLMExtension → AttributeBag.
+// LLMExtension and the typed LLM request → AttributeBag.
 //
 // Namespace:
-//   llm.model_id        : String
-//   llm.provider        : String
-//   llm.capabilities    : StringSet (always present, empty rather than absent)
+//   llm.model_id              : String
+//   llm.provider              : String
+//   llm.capabilities          : StringSet (always present, empty rather than absent)
+//
+// From `Extensions.llm_request_parts`, only when the host reported one:
+//   llm.offered_tools         : StringSet of tool names (always, when `request` is present)
+//   llm.stop_sequences        : StringSet (always, when `request` is present)
+//   llm.tool_choice           : String — `auto`, `none`, `required`, or `tool`
+//   llm.forced_tool           : String (when `tool_choice` is `tool`)
+//   llm.max_tokens            : Int
+//   llm.temperature           : Float
+//   llm.top_p                 : Float
+//   llm.stream                : Bool
+//   llm.system_prompt_digest  : String, `sha256:<hex>` of the prompt's UTF-8 bytes
+//
+// An absent request writes none of these, so a predicate on one of them
+// reads a missing key. That is deliberate: "the host could not see the
+// request" must not look like "the request offered no tools".
+//
+// The system prompt itself is not bridged. The digest is enough to pin a
+// known prompt (`llm.system_prompt_digest != 'sha256:…': deny`), and a plugin
+// that needs the text reads `Extensions.llm_request_parts`, which takes
+// `read_llm_request`.
+//
+// The forced tool name is its own key rather than `llm.tool_choice.name`:
+// a key that is both a leaf and a namespace prefix collides in the CEL and
+// OPA inputs, where dotted keys become nested maps.
 
 use praxis_policy_apl_core::AttributeBag;
-use praxis_policy_core::extensions::LLMExtension;
+use praxis_policy_core::extensions::{LLMExtension, LLMRequest, ToolChoice};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
+
+use crate::constants::{
+    BAG_LLM_FORCED_TOOL, BAG_LLM_MAX_TOKENS, BAG_LLM_OFFERED_TOOLS, BAG_LLM_STOP_SEQUENCES,
+    BAG_LLM_STREAM, BAG_LLM_SYSTEM_PROMPT_DIGEST, BAG_LLM_TEMPERATURE, BAG_LLM_TOOL_CHOICE,
+    BAG_LLM_TOP_P,
+};
 
 /// Write model identity into the bag.
 pub fn extract_llm(llm: &LLMExtension, bag: &mut AttributeBag) {
@@ -26,6 +57,52 @@ pub fn extract_llm(llm: &LLMExtension, bag: &mut AttributeBag) {
     bag.set("llm.capabilities", caps);
 }
 
+/// Write what the request asks of the model into the bag.
+pub fn extract_llm_request(req: &LLMRequest, bag: &mut AttributeBag) {
+    // Sets follow the empty-set rule within a present request.
+    let offered: HashSet<String> = req.offered_tools.iter().map(|t| t.name.clone()).collect();
+    bag.set(BAG_LLM_OFFERED_TOOLS, offered);
+    let stops: HashSet<String> = req.stop_sequences.iter().cloned().collect();
+    bag.set(BAG_LLM_STOP_SEQUENCES, stops);
+
+    if let Some(choice) = &req.tool_choice {
+        let mode = match choice {
+            ToolChoice::Auto => "auto",
+            ToolChoice::None => "none",
+            ToolChoice::Required => "required",
+            ToolChoice::Tool { name } => {
+                bag.set(BAG_LLM_FORCED_TOOL, name.clone());
+                "tool"
+            },
+        };
+        bag.set(BAG_LLM_TOOL_CHOICE, mode);
+    }
+    if let Some(v) = req.max_tokens {
+        bag.set(BAG_LLM_MAX_TOKENS, i64::from(v));
+    }
+    if let Some(v) = req.temperature {
+        bag.set(BAG_LLM_TEMPERATURE, v);
+    }
+    if let Some(v) = req.top_p {
+        bag.set(BAG_LLM_TOP_P, v);
+    }
+    if let Some(v) = req.stream {
+        bag.set(BAG_LLM_STREAM, v);
+    }
+    if let Some(prompt) = &req.system_prompt {
+        bag.set(BAG_LLM_SYSTEM_PROMPT_DIGEST, sha256_ref(prompt));
+    }
+}
+
+/// `sha256:` followed by the lowercase hex digest of `text`'s UTF-8 bytes.
+fn sha256_ref(text: &str) -> String {
+    let hex: String = Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("sha256:{hex}")
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -38,6 +115,31 @@ pub fn extract_llm(llm: &LLMExtension, bag: &mut AttributeBag) {
 )]
 mod tests {
     use super::*;
+    use praxis_policy_core::extensions::{Extensions, ToolMetadata};
+    use std::sync::Arc;
+
+    fn tool(name: &str) -> ToolMetadata {
+        ToolMetadata {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Through the whole bridge, so the tests also cover how the two slots
+    /// combine.
+    fn bag_for(request: Option<LLMRequest>) -> AttributeBag {
+        let ext = Extensions {
+            llm: Some(Arc::new(LLMExtension {
+                model_id: Some("gpt-4".into()),
+                ..Default::default()
+            })),
+            llm_request_parts: request.map(Arc::new),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        crate::extract_extensions(&ext, &mut bag);
+        bag
+    }
 
     #[test]
     fn extracts_model_and_capabilities() {
@@ -52,5 +154,98 @@ mod tests {
         assert_eq!(bag.get_string("llm.provider"), Some("openai"));
         assert!(bag.set_contains("llm.capabilities", "tool_use"));
         assert!(bag.set_contains("llm.capabilities", "vision"));
+    }
+
+    #[test]
+    fn extracts_every_request_field() {
+        let bag = bag_for(Some(LLMRequest {
+            system_prompt: Some("abc".into()),
+            offered_tools: vec![tool("send_email"), tool("search")],
+            tool_choice: Some(ToolChoice::Tool {
+                name: "search".into(),
+            }),
+            max_tokens: Some(1024),
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+            stop_sequences: vec!["END".into()],
+            stream: Some(true),
+        }));
+
+        assert!(bag.set_contains("llm.offered_tools", "send_email"));
+        assert!(bag.set_contains("llm.offered_tools", "search"));
+        assert!(bag.set_contains("llm.stop_sequences", "END"));
+        assert_eq!(bag.get_string("llm.tool_choice"), Some("tool"));
+        assert_eq!(bag.get_string("llm.forced_tool"), Some("search"));
+        assert_eq!(bag.get_int("llm.max_tokens"), Some(1024));
+        assert_eq!(bag.get_float("llm.temperature"), Some(0.5));
+        assert_eq!(bag.get_float("llm.top_p"), Some(0.9));
+        assert_eq!(bag.get_bool("llm.stream"), Some(true));
+        // The well-known SHA-256 of "abc".
+        assert_eq!(
+            bag.get_string("llm.system_prompt_digest"),
+            Some("sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+    }
+
+    /// The prompt text itself never reaches the bag, under any key.
+    #[test]
+    fn the_system_prompt_text_is_not_bridged() {
+        let bag = bag_for(Some(LLMRequest {
+            system_prompt: Some("prompt-text-marker".into()),
+            ..Default::default()
+        }));
+        for (k, v) in bag.iter() {
+            if let praxis_policy_apl_core::AttributeValue::String(s) = v {
+                assert!(!s.contains("prompt-text-marker"), "{k} carries the prompt");
+            }
+        }
+    }
+
+    /// Only a forced tool writes `llm.forced_tool`; the other modes do not
+    /// leave a stale name behind.
+    #[test]
+    fn tool_choice_modes() {
+        for (choice, mode) in [
+            (ToolChoice::Auto, "auto"),
+            (ToolChoice::None, "none"),
+            (ToolChoice::Required, "required"),
+        ] {
+            let bag = bag_for(Some(LLMRequest {
+                tool_choice: Some(choice),
+                ..Default::default()
+            }));
+            assert_eq!(bag.get_string("llm.tool_choice"), Some(mode));
+            assert!(!bag.contains("llm.forced_tool"), "{mode} forces no tool");
+        }
+    }
+
+    /// A present request with nothing set still yields the two sets, empty,
+    /// so `llm.offered_tools contains 'x'` evaluates false rather than
+    /// reading a missing key. The optional scalars stay absent.
+    #[test]
+    fn an_empty_request_emits_empty_sets_and_no_scalars() {
+        let bag = bag_for(Some(LLMRequest::default()));
+        assert!(bag.get_string_set("llm.offered_tools").unwrap().is_empty());
+        assert!(bag.get_string_set("llm.stop_sequences").unwrap().is_empty());
+        for key in [
+            "llm.tool_choice",
+            "llm.forced_tool",
+            "llm.max_tokens",
+            "llm.temperature",
+            "llm.top_p",
+            "llm.stream",
+            "llm.system_prompt_digest",
+        ] {
+            assert!(!bag.contains(key), "{key} was not set on the request");
+        }
+    }
+
+    /// No request, no request keys, not even the sets: the host could not see
+    /// the request, and an empty set would claim it offered no tools.
+    #[test]
+    fn an_absent_request_emits_no_request_keys() {
+        let bag = bag_for(None);
+        let keys: HashSet<&str> = bag.iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, HashSet::from(["llm.model_id", "llm.capabilities"]));
     }
 }
