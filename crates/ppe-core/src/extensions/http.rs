@@ -53,9 +53,20 @@ pub struct HttpExtension {
     pub method: Option<String>,
 
     /// HTTP request path (e.g. `/api/v1/widgets`). Excludes the query
-    /// string unless the host chooses to include it.
+    /// string, which the host carries separately in [`query`](Self::query).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+
+    /// HTTP request query string, WITHOUT the leading `?` (e.g.
+    /// `service=git-upload-pack&foo=bar`). Separate from [`path`](Self::path)
+    /// so a policy can gate on it without the path matcher ever seeing it (the
+    /// path matcher normalizes a query away by design). `None` when the request
+    /// carried no query; an empty string means a bare trailing `?`. The host
+    /// populates this from the request-target, which is why it can distinguish
+    /// two requests that share a path and differ only by query — the case a
+    /// query-blind policy cannot express.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
 
     /// HTTP request authority/host. The host MUST populate this from a
     /// validated authority (e.g. the HTTP/2 `:authority` pseudo-header),
@@ -82,6 +93,8 @@ struct HttpView<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scheme: Option<&'a str>,
@@ -107,6 +120,7 @@ impl HttpExtension {
             status: self.status,
             method: self.method.as_deref(),
             path: self.path.as_deref(),
+            query: self.query.as_deref(),
             host: self.host.as_deref(),
             scheme: self.scheme.as_deref(),
         }
@@ -353,6 +367,7 @@ mod tests {
             status: Some(201),
             method: Some("POST".into()),
             path: Some("/tool".into()),
+            query: Some("service=git-upload-pack".into()),
             host: Some("example.test".into()),
             scheme: Some("https".into()),
             ..Default::default()
@@ -378,8 +393,38 @@ mod tests {
         assert_eq!(safe.status, http.status);
         assert_eq!(safe.method, http.method);
         assert_eq!(safe.path, http.path);
+        assert_eq!(safe.query, http.query);
         assert_eq!(safe.host, http.host);
         assert_eq!(safe.scheme, http.scheme);
         assert_eq!(http.get_request_header("x-key"), Some("credential"));
+    }
+
+    #[test]
+    fn test_query_absent_from_serialized_output_when_unset() {
+        // A request with no query produces the same wire bytes it produced
+        // before the field existed, and a peer serialized then still parses.
+        let http = HttpExtension {
+            path: Some("/x/info/refs".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&http).unwrap();
+        assert!(!json.contains("query"), "{json}");
+        let back: HttpExtension = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.query, None);
+    }
+
+    #[test]
+    fn test_query_survives_a_roundtrip() {
+        // The leading `?` is NOT part of the value; an empty query (bare `?`)
+        // is distinct from an absent one.
+        for value in ["service=git-upload-pack", "a=1&b=2", ""] {
+            let http = HttpExtension {
+                query: Some(value.to_owned()),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&http).unwrap();
+            let back: HttpExtension = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.query.as_deref(), Some(value), "{json}");
+        }
     }
 }

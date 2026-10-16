@@ -142,6 +142,8 @@ pub const BAG_HTTP_RESPONSE_HEADERS_PREFIX: &str = "http.response_headers.";
 pub const BAG_HTTP_METHOD: &str = "http.method";
 /// Bag key `http.path`.
 pub const BAG_HTTP_PATH: &str = "http.path";
+/// Bag key `http.query`, the request query string without the leading `?`.
+pub const BAG_HTTP_QUERY: &str = "http.query";
 /// Bag key `http.host`.
 pub const BAG_HTTP_HOST: &str = "http.host";
 /// Bag key `http.scheme`.
