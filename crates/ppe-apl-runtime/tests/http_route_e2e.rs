@@ -359,6 +359,21 @@ fn response(method: &str, path: &str, status: u16) -> Extensions {
     ext
 }
 
+/// The same request line with a query string attached (value excludes the
+/// leading `?`), which is what a host presents when the request-target carried
+/// one. The path and the query are separate slots, exactly as the host sets
+/// them, so a policy reading `http.query` sees it independently of the path.
+fn request_with_query(method: &str, path: &str, query: &str) -> Extensions {
+    let mut ext = request(method, path);
+    ext.http = Some(Arc::new(HttpExtension {
+        method: Some(method.to_owned()),
+        path: Some(path.to_owned()),
+        query: Some(query.to_owned()),
+        ..Default::default()
+    }));
+    ext
+}
+
 /// An HTTP request carrying a method but no path. This is the shape a host
 /// produces before it has attached the request line, and the shape that
 /// resolves no `http:` route however many are declared.
@@ -1576,6 +1591,120 @@ routes:
         )
         .await,
         "and a different status does not match"
+    );
+}
+
+/// A rule reads the request QUERY STRING and allows or denies on its value —
+/// the capability the `http.query` attribute exists to provide. This is the
+/// git fetch-vs-push distinction a reverse-proxy allowlist needs: `info/refs`
+/// shares one path across both services and differs only by
+/// `?service=git-upload-pack` (fetch, allow) vs `?service=git-receive-pack`
+/// (push, deny). Before `http.query`, no policy could read the query at all —
+/// the path matcher strips it — so this exact gate was inexpressible.
+#[tokio::test]
+async fn a_rule_gates_on_the_request_query_string() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /octocat/Hello-World.git/info/refs
+    authorization:
+      pre_invocation:
+        - "http.query == 'service=git-receive-pack': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    // The push advertisement is refused by the query value...
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/octocat/Hello-World.git/info/refs", "service=git-receive-pack")
+        )
+        .await,
+        "the receive-pack query satisfies the rule, so the request is denied"
+    );
+    // ...while the fetch advertisement on the same path passes, because its
+    // query is a different value.
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/octocat/Hello-World.git/info/refs", "service=git-upload-pack")
+        )
+        .await,
+        "the upload-pack query is a different value, so the same path passes"
+    );
+}
+
+/// The query reaches the bag SEPARATELY from the path: the path matcher strips
+/// the query by design, so a query predicate reads a value the path predicate
+/// never sees. A rule naming both the path and the query fires only when each
+/// matches its own slot, which is the independence this attribute provides.
+#[tokio::test]
+async fn the_query_is_matched_independently_of_the_path() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /repo.git/info/refs
+    authorization:
+      pre_invocation:
+        - "http.path == '/repo.git/info/refs' & http.query == 'service=git-receive-pack': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    // Path matches AND query matches -> the compound rule fires.
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/repo.git/info/refs", "service=git-receive-pack")
+        )
+        .await,
+        "the path and the query both match their own slots, so the rule denies"
+    );
+    // Same path, different query -> the query clause is false, so the request
+    // passes. The query is being read, not folded into the path.
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/repo.git/info/refs", "service=git-upload-pack")
+        )
+        .await,
+        "the path still matches but the query does not, so the compound rule is false"
+    );
+}
+
+/// A request with no query leaves `http.query` ABSENT from the bag, so an
+/// equality rule against a specific query value is false — a query-specific
+/// allowlist fails closed rather than matching an empty string. This is why
+/// `info/refs` with no `?service=` is not mistaken for the fetch service.
+#[tokio::test]
+async fn a_rule_on_the_query_does_not_fire_when_there_is_no_query() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /repo.git/info/refs
+    authorization:
+      pre_invocation:
+        - "http.query == 'service=git-upload-pack': deny"
+        - "http.method == 'TRACE': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    assert!(
+        fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/repo.git/info/refs")).await,
+        "no query exists, so the comparison is false and the query rule is inert"
+    );
+    assert!(
+        !fire(&mgr, HOOK_HTTP_REQUEST, request("TRACE", "/repo.git/info/refs")).await,
+        "the rule beside it still governs, so the block itself is live"
     );
 }
 

@@ -147,6 +147,7 @@ const TABLE: &[CapabilityEntry] = &[
             // capability as headers.
             BAG_HTTP_METHOD,
             BAG_HTTP_PATH,
+            BAG_HTTP_QUERY,
             BAG_HTTP_HOST,
             BAG_HTTP_SCHEME,
             BAG_HTTP_STATUS,
@@ -261,9 +262,10 @@ mod tests {
         let prefixes = capability_namespaces(CAP_READ_HEADERS);
         assert!(prefixes.contains(&BAG_HTTP_REQUEST_HEADERS_PREFIX));
         assert!(prefixes.contains(&BAG_HTTP_RESPONSE_HEADERS_PREFIX));
-        // The whole `http` slot is gated as one, so the response status is
-        // readable wherever response headers are.
+        // The whole `http` slot is gated as one, so the response status and
+        // the request query are readable wherever response headers are.
         assert!(prefixes.contains(&BAG_HTTP_STATUS));
+        assert!(prefixes.contains(&BAG_HTTP_QUERY));
     }
 
     /// The module header claims every `CAP_*` name matches a capability

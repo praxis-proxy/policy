@@ -154,6 +154,7 @@ fn fully_populated() -> Extensions {
         status: Some(200),
         method: Some("POST".to_owned()),
         path: Some("/v1".to_owned()),
+        query: Some("service=git-upload-pack".to_owned()),
         host: Some("h".to_owned()),
         scheme: Some("https".to_owned()),
         // The one field this fixture cannot populate: the engine owns this

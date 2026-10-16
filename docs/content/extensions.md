@@ -32,7 +32,7 @@ keys. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Agent | session, conversation, turn, and lineage context | `agent.*` | `read_agent` |
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | unrestricted |
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | unrestricted |
-| HTTP | request line (method, path, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
+| HTTP | request line (method, path, query, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
 | LLM | model id, provider, capabilities | `llm.*` | unrestricted |
 | LLM request | the host-parsed inference request body | not flattened; OPA, CEL, and Cedar read it as `llm.request` | `read_llm_request` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | unrestricted |
@@ -90,7 +90,7 @@ plugins:
 | `read_workload` | `caller_workload.*`, `this_workload.*` |
 | `read_delegation` | `delegation.*`, `delegated` |
 | `read_agent` | `agent.*` |
-| `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` |
+| `read_headers` | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` |
 | `read_llm_request` | no bag keys; gates the parsed request body on `Extensions.llm_request` |
 | `read_labels` | the labels on the security extension. A plugin reads them from the extension; `security.labels` in the bag is what an APL predicate reads |
 | `read_inbound_credentials` | no bag keys; gates raw inbound tokens in the plugin payload |

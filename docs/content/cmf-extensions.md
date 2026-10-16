@@ -414,6 +414,7 @@ A default request slot adds nothing.
 |---|---|---|
 | `http.method` | String | `Some` |
 | `http.path` | String | `Some` |
+| `http.query` | String | `Some` when the request carried a query (value excludes the leading `?`); omitted otherwise |
 | `http.host` | String | `Some` |
 | `http.scheme` | String | `Some` |
 | `http.status` | Int | `Some` (response half) |
