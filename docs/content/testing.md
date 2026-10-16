@@ -172,11 +172,17 @@ Scenarios still plant inbound credentials and other sensitive values.
 ### Host drift
 
 `host.rs` records the praxis commit it mirrors in `PRAXIS_COMMIT` and the
-files in `MIRRORED`. The `host-drift` job in
-`.github/workflows/integration-live.yml` diffs those files from that commit
-to praxis `main` and fails, naming each changed file, when they differ.
-Review the diff, update the host if the sequence changed, then move
-`PRAXIS_COMMIT`.
+files in `MIRRORED`. On pull requests, the `host-drift` job in
+`.github/workflows/integration-live.yml` checks out that exact commit and
+validates that every listed path exists as a file. Invalid pins, incomplete
+file lists and missing files fail the check. Changes to praxis `main` cannot
+change a PR's result.
+
+Scheduled and manual runs also diff those files from the reviewed commit to
+praxis `main` and fail, naming each changed file, when they differ. The logs
+record both commit IDs and the diff for review. Review the diff, update the
+host if the sequence changed, then move `PRAXIS_COMMIT`. A changed blob is a
+review signal; this check does not prove behavioral equivalence between hosts.
 
 ### Known gaps
 

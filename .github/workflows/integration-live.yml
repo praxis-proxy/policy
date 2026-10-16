@@ -8,9 +8,9 @@ name: Integration (live)
 # - live: the integration suite's `scenarios::live` tests against a real
 #   Keycloak (the demo realm), Valkey and Vault. CIBA is skipped: the stock
 #   Keycloak image has no auto-approving channel.
-# - host-drift: the praxis files the reference host mirrors, diffed from the
-#   commit recorded in tests/utils/src/host.rs to praxis main. Re-pinning
-#   PRAXIS_COMMIT after reviewing the diff is the fix.
+# - host-drift: PRs validate the mirrored files at the reviewed PRAXIS_COMMIT
+#   in tests/utils/src/host.rs. Scheduled/manual runs also compare that pin
+#   with praxis main. Review drift before updating the host and its pin.
 #
 # Pinning and toolchain follow ci.yml: SHA-pinned GitHub-owned actions, and
 # rust-toolchain.toml selects the toolchain.
@@ -147,24 +147,40 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: praxis-proxy/praxis
-          ref: main
-          path: praxis-upstream
-          fetch-depth: 0
-          persist-credentials: false
-      # Compares each MIRRORED file's blob at PRAXIS_COMMIT with main and
-      # prints the diff of any that changed.
-      - name: Diff mirrored files
+      - name: Read reviewed host commit
+        id: host
         run: |
           host=tests/utils/src/host.rs
           commit=$(sed -n 's/^pub const PRAXIS_COMMIT: &str = "\([0-9a-f]*\)";$/\1/p' "$host")
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error file=$host::PRAXIS_COMMIT must be one full 40-character commit SHA"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: praxis-proxy/praxis
+          # PR results must depend on the reviewed snapshot, not a moving
+          # branch in another repository. Drift remains a maintenance check.
+          ref: ${{ github.event_name == 'pull_request' && steps.host.outputs.commit || 'main' }}
+          path: praxis-upstream
+          fetch-depth: 0
+          persist-credentials: false
+      # Every listed path must be a file at both revisions. On PRs both
+      # revisions are the pin; scheduled/manual runs compare it with main.
+      - name: Validate mirrored files and report drift
+        env:
+          PRAXIS_COMMIT: ${{ steps.host.outputs.commit }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          host=tests/utils/src/host.rs
+          commit=$PRAXIS_COMMIT
           files=()
           while IFS= read -r f; do files+=("$f"); done \
             < <(sed -n '/^pub const MIRRORED/,/^];/s/^ *"\(.*\)",$/\1/p' "$host")
-          if [ -z "$commit" ] || [ "${#files[@]}" -eq 0 ]; then
-            echo "::error file=$host::could not read PRAXIS_COMMIT or MIRRORED"
+          count=$(sed -n 's/^pub const MIRRORED: \[&str; \([0-9][0-9]*\)\] = \[$/\1/p' "$host")
+          if [[ ! "$count" =~ ^[1-9][0-9]*$ ]] || [ "${#files[@]}" -ne "$count" ]; then
+            echo "::error file=$host::could not read every declared MIRRORED file"
             exit 1
           fi
           cd praxis-upstream
@@ -173,10 +189,24 @@ jobs:
             echo "::error file=$host::praxis commit $commit is not reachable from praxis-proxy/praxis"
             exit 1
           fi
+          target=$(git rev-parse HEAD)
+          echo "Checking $commit against $target"
+          blob() {
+            local oid
+            oid=$(git rev-parse --verify --quiet "$1:$2") \
+              && [ "$(git cat-file -t "$oid")" = blob ] \
+              && printf '%s\n' "$oid"
+          }
           drift=0
           for f in "${files[@]}"; do
-            old=$(git rev-parse --verify --quiet "$commit:$f" || echo missing)
-            new=$(git rev-parse --verify --quiet "HEAD:$f" || echo missing)
+            if ! old=$(blob "$commit" "$f"); then
+              echo "::error file=$host::$f is not a file at reviewed commit $commit"
+              exit 1
+            fi
+            if ! new=$(blob "$target" "$f"); then
+              echo "::error file=$host::$f is not a file at upstream commit $target"
+              exit 1
+            fi
             echo "$f: $old -> $new"
             if [ "$old" != "$new" ]; then
               echo "::error file=$host::$f differs between $commit and praxis main"
@@ -184,8 +214,12 @@ jobs:
             fi
           done
           if [ "$drift" -ne 0 ]; then
-            git --no-pager diff --stat "$commit" HEAD -- "${files[@]}"
-            git --no-pager diff "$commit" HEAD -- "${files[@]}"
+            git --no-pager diff --stat "$commit" "$target" -- "${files[@]}"
+            git --no-pager diff "$commit" "$target" -- "${files[@]}"
             exit 1
           fi
-          echo "no drift in ${#files[@]} mirrored files since $commit"
+          if [ "$EVENT_NAME" = pull_request ]; then
+            echo "validated ${#files[@]} mirrored files at reviewed commit $commit"
+          else
+            echo "no drift in ${#files[@]} mirrored files since $commit"
+          fi
