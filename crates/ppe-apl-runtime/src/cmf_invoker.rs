@@ -71,6 +71,7 @@ use tokio::sync::Mutex;
 
 use praxis_policy_core::cmf::CmfHook;
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::error::PluginViolation;
 use praxis_policy_core::hooks::HookPhase;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::HookTypeDef;
@@ -130,6 +131,10 @@ where
     /// parts only, so a redaction of a `ToolResult` (or any other
     /// non-text part) looks identical to no mutation at all.
     payload_modified: AtomicBool,
+    /// The original violation from a denying plugin. APL's `Decision::Deny`
+    /// retains only code and reason, so the route handler reads this to keep
+    /// protocol status and details when it builds the host-facing result.
+    denial_violation: Mutex<Option<PluginViolation>>,
     /// Pre-resolved per-route plugin lineup. Built (or fetched from a
     /// shared `DispatchCache`) at request start by the host.
     plan: Arc<RouteDispatchPlan>,
@@ -200,6 +205,7 @@ where
             extensions: Arc::new(Mutex::new(extensions)),
             payload: Arc::new(Mutex::new(payload)),
             payload_modified: AtomicBool::new(false),
+            denial_violation: Mutex::new(None),
             plan,
             session_id,
             session_store,
@@ -212,6 +218,11 @@ where
     /// re-serialization.
     pub async fn current_payload(&self) -> H::Payload {
         self.payload.lock().await.clone()
+    }
+
+    /// The full violation from a plugin that denied this request, if any.
+    pub async fn denial_violation(&self) -> Option<PluginViolation> {
+        self.denial_violation.lock().await.clone()
     }
 
     /// Did any plugin in this request hand back a payload?
@@ -413,10 +424,15 @@ where
             .await;
 
         // Map deny: violation reason → APL deny reason; plugin code →
-        // rule_source for audit attribution.
+        // rule_source for audit attribution. Keep the original violation
+        // alongside the decision so the route can preserve protocol status
+        // and details that `Decision::Deny` does not carry.
         let decision = if result.is_denied() {
             let (reason, rule_source) = match result.violation {
-                Some(v) => (Some(v.reason), v.code),
+                Some(v) => {
+                    *self.denial_violation.lock().await = Some(v.clone());
+                    (Some(v.reason), v.code)
+                },
                 None => (None, "policy.forbidden".to_owned()),
             };
             Decision::Deny {
