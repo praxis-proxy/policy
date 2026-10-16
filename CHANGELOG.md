@@ -184,6 +184,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `&` and `|` no longer abort when one operand cannot be ordered and
+  another already settles the expression. A true `|` operand or a false `&`
+  operand decides the same way in either order, so some phases that denied
+  on an unparseable value now evaluate normally. An unorderable result is
+  still fail-closed when no operand settles.
+  ([#69](https://github.com/praxis-proxy/policy/issues/69))
 - Rejected JWTs with unsupported critical headers. OAuth token exchange now
   validates the issued token type, granted scopes, and JWT audience and subject
   by default. Empty scope requests accept IdP defaults, and
