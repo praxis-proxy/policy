@@ -40,7 +40,7 @@ use praxis_policy_apl_cmf::extract_extensions;
 use praxis_policy_apl_core::{AttributeBag, AttributeValue};
 use praxis_policy_core::extensions::{
     AgentExtension, ClientExtension, ClientTrustLevel, CompletionExtension, ConversationContext,
-    DelegationExtension, DelegationHop, Extensions, FrameworkExtension, HttpExtension,
+    DelegationExtension, DelegationHop, Extensions, FrameworkExtension, HttpExtension, KeyBinding,
     LLMExtension, MCPExtension, MetaExtension, MonotonicSet, PromptMetadata, ProvenanceExtension,
     RequestExtension, ResourceMetadata, SecurityExtension, StopReason, SubjectExtension,
     SubjectType, TokenUsage, ToolMetadata, WorkloadIdentity,
@@ -53,6 +53,10 @@ use praxis_policy_core::extensions::{
 /// bridge should carry it. That is the drift this whole file exists to catch,
 /// and a `..Default::default()` here would reopen it.
 fn fully_populated() -> Extensions {
+    let binding = || KeyBinding {
+        method: "dpop".to_owned(),
+        thumbprint: "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_owned(),
+    };
     let mut annotations = HashMap::new();
     annotations.insert("readOnlyHint".to_owned(), serde_json::json!(true));
 
@@ -70,6 +74,7 @@ fn fully_populated() -> Extensions {
         attestor: Some("spire".to_owned()),
         selectors: vec![format!("k8s:ns:{id}")],
         client_id: Some(id.to_owned()),
+        key_binding: Some(binding()),
     };
 
     let security = SecurityExtension {
@@ -82,6 +87,7 @@ fn fully_populated() -> Extensions {
             permissions: HashSet::from(["read".to_owned()]),
             teams: HashSet::from(["eng".to_owned()]),
             claims: HashMap::from([("tenant".to_owned(), serde_json::json!("acme"))]),
+            key_binding: Some(binding()),
         }),
         client: Some(ClientExtension {
             client_id: "app".to_owned(),
@@ -93,6 +99,7 @@ fn fully_populated() -> Extensions {
             permissions: vec!["write".to_owned()],
             teams: vec!["platform".to_owned()],
             claims: HashMap::from([("region".to_owned(), serde_json::json!("eu"))]),
+            key_binding: Some(binding()),
         }),
         caller_workload: Some(workload("caller")),
         this_workload: Some(workload("self")),

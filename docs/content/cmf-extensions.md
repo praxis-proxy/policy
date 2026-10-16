@@ -228,6 +228,8 @@ someone makes rather than one nobody notices.
 | `team.<name>` | Bool (`true`) | each undotted member of `teams` |
 | `claim.<dotted>` | flattened JSON | each claim; see [`subject.claims`](#subjectclaims) |
 | `authenticated` | Bool (`true`) | `id` is `Some` |
+| `subject.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `subject.key_binding_thumbprint` | String | same; what the credential is bound to, as the method defines it (for `dpop`, the RFC 7638 thumbprint of the key) |
 
 **Client** (`sec.client` present):
 
@@ -244,6 +246,8 @@ someone makes rather than one nobody notices.
 | `client.authorized_audiences` | StringSet | always |
 | `client.teams` | StringSet | always |
 | `client.claim.<dotted>` | flattened JSON | each claim |
+| `client.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `client.key_binding_thumbprint` | String | same; as `subject.key_binding_thumbprint` |
 
 **Workload** (`caller_workload` / `this_workload`; same shape, two namespaces).
 These are not `agent.*`. `agent.*` is session context.
@@ -257,6 +261,8 @@ These are not `agent.*`. `agent.*` is session context.
 | `<ns>.attested_at_epoch` | Int | `Some`. The same instant as Unix seconds. |
 | `<ns>.selectors` | StringSet | always |
 | `<ns>.client_id` | String | `Some` |
+| `<ns>.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `<ns>.key_binding_thumbprint` | String | same; as `subject.key_binding_thumbprint` |
 
 `attested_at` renders as RFC3339 with second precision and a literal `Z`. At
 fixed precision the string sorts the same way the instant does, which is why

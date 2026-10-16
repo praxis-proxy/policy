@@ -451,6 +451,12 @@ impl<'a> MessageView<'a> {
                         teams.sort();
                         sub_map.insert(FIELD_TEAMS.into(), serde_json::json!(teams));
                     }
+                    if let Some(ref kb) = subject.key_binding {
+                        sub_map.insert(
+                            FIELD_KEY_BINDING.into(),
+                            serde_json::json!({ "method": kb.method, "thumbprint": kb.thumbprint }),
+                        );
+                    }
                     if !sub_map.is_empty() {
                         ext_map.insert(FIELD_SUBJECT.into(), serde_json::Value::Object(sub_map));
                     }
@@ -1528,6 +1534,10 @@ mod tests {
             // whether a policy should be able to see it. `claims` deliberately
             // is not projected: it holds raw token claims.
             claims: std::collections::HashMap::new(),
+            key_binding: Some(crate::extensions::KeyBinding {
+                method: "dpop".into(),
+                thumbprint: "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".into(),
+            }),
         });
 
         let mut http = HttpExtension::default();
@@ -1592,6 +1602,14 @@ mod tests {
         let sub = &dict["extensions"]["subject"];
         assert_eq!(sub["id"], "alice");
         assert_eq!(sub["type"], "user");
+        assert_eq!(
+            sub["key_binding"],
+            serde_json::json!({
+                "method": "dpop",
+                "thumbprint": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
+            }),
+            "a verified key binding is projected with the subject"
+        );
 
         // The three subject collections are sorted on the way out, so a policy
         // comparing against a literal list has a stable order to match.

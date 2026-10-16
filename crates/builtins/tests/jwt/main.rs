@@ -19,6 +19,7 @@
 //! their fixtures.
 
 mod claim_map_e2e;
+mod dpop_e2e;
 mod jwks_url_e2e;
 mod jwt_e2e;
 mod standard_preset_equivalence;

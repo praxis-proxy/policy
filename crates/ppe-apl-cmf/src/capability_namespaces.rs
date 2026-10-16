@@ -53,9 +53,16 @@ struct CapabilityEntry {
 const TABLE: &[CapabilityEntry] = &[
     CapabilityEntry {
         name: CAP_READ_SUBJECT,
-        // `read_subject` exposes id + type only; `authenticated` is
+        // `read_subject` exposes id + type, and the verified key binding,
+        // which says how that identity was authenticated; `authenticated` is
         // derived from those being present.
-        prefixes: &[BAG_SUBJECT_ID, BAG_SUBJECT_TYPE, BAG_AUTHENTICATED],
+        prefixes: &[
+            BAG_SUBJECT_ID,
+            BAG_SUBJECT_TYPE,
+            BAG_SUBJECT_KEY_BINDING,
+            BAG_SUBJECT_KEY_BINDING_THUMBPRINT,
+            BAG_AUTHENTICATED,
+        ],
     },
     CapabilityEntry {
         name: CAP_READ_ROLES,
@@ -66,6 +73,8 @@ const TABLE: &[CapabilityEntry] = &[
             BAG_SUBJECT_ROLES,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
+            BAG_SUBJECT_KEY_BINDING,
+            BAG_SUBJECT_KEY_BINDING_THUMBPRINT,
             BAG_AUTHENTICATED,
         ],
     },
@@ -76,6 +85,8 @@ const TABLE: &[CapabilityEntry] = &[
             BAG_SUBJECT_PERMISSIONS,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
+            BAG_SUBJECT_KEY_BINDING,
+            BAG_SUBJECT_KEY_BINDING_THUMBPRINT,
             BAG_AUTHENTICATED,
         ],
     },
@@ -89,6 +100,8 @@ const TABLE: &[CapabilityEntry] = &[
             BAG_SUBJECT_TEAMS,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
+            BAG_SUBJECT_KEY_BINDING,
+            BAG_SUBJECT_KEY_BINDING_THUMBPRINT,
             BAG_AUTHENTICATED,
         ],
     },
@@ -98,6 +111,8 @@ const TABLE: &[CapabilityEntry] = &[
             BAG_CLAIM_PREFIX,
             BAG_SUBJECT_ID,
             BAG_SUBJECT_TYPE,
+            BAG_SUBJECT_KEY_BINDING,
+            BAG_SUBJECT_KEY_BINDING_THUMBPRINT,
             BAG_AUTHENTICATED,
         ],
     },
@@ -360,8 +375,9 @@ mod tests {
         let union = unlocked_bag_prefixes(&caps);
         assert!(union.contains(BAG_SUBJECT_ID));
         // Unknown cap contributes nothing — no panic, no surprise key.
-        // read_subject contributes 3 entries; that's the total.
-        assert_eq!(union.len(), 3);
+        // read_subject contributes 5 entries (id, type, the two key binding
+        // keys, authenticated); that's the total.
+        assert_eq!(union.len(), 5);
     }
 
     #[test]

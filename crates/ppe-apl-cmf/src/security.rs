@@ -43,6 +43,9 @@
 //        StringSet, numbers and bools as strings. `{}`, `null` and an array
 //        holding a nested container set no key, and a structured claim sets
 //        only the children beneath it.
+//   sec.subject.key_binding          → subject.key_binding  : String (the proof method, e.g. "dpop")
+//                                    → subject.key_binding_thumbprint : String
+//        Present only when the resolver verified possession of the bound key.
 //   <derived>                        → authenticated        : Bool (iff subject.id is Some)
 //
 // ----- Client (OAuth application identity) ------------------------------
@@ -58,6 +61,8 @@
 //   sec.client.teams                 → client.teams         : StringSet (always)
 //   sec.client.claims                → client.claim.<k>     : flattened JSON
 //        Same shape as `claim.<k>` above.
+//   sec.client.key_binding           → client.key_binding, client.key_binding_thumbprint
+//        Same shape as `subject.key_binding` above.
 //
 // ----- Workload identity (SPIFFE / mTLS attestation) --------------------
 //   sec.caller_workload.spiffe_id    → caller_workload.spiffe_id    : String
@@ -67,6 +72,8 @@
 //                                    → caller_workload.attested_at_epoch : Int (Unix seconds)
 //   sec.caller_workload.selectors    → caller_workload.selectors    : StringSet (always)
 //   sec.caller_workload.client_id    → caller_workload.client_id    : String
+//   sec.caller_workload.key_binding  → caller_workload.key_binding, caller_workload.key_binding_thumbprint
+//        Same shape as `subject.key_binding` above.
 //   sec.this_workload.*              → this_workload.*  (same shape, our identity)
 //
 // Note: `caller_workload.*` / `this_workload.*` are separate from
@@ -86,7 +93,7 @@
 
 use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::{
-    ClientExtension, ClientTrustLevel, SecurityExtension, SubjectType, WorkloadIdentity,
+    ClientExtension, ClientTrustLevel, KeyBinding, SecurityExtension, SubjectType, WorkloadIdentity,
 };
 use std::collections::HashSet;
 
@@ -145,6 +152,9 @@ pub fn extract_security(sec: &SecurityExtension, bag: &mut AttributeBag) {
         // unprefixed. Only set when truly authenticated (subject + id present).
         if authenticated {
             bag.set(BAG_AUTHENTICATED, true);
+        }
+        if let Some(kb) = &subject.key_binding {
+            extract_key_binding("subject", kb, bag);
         }
     }
 
@@ -216,6 +226,21 @@ pub fn extract_client(client: &ClientExtension, bag: &mut AttributeBag) {
     for (k, v) in &client.claims {
         crate::payload::walk(v, &format!("client.claim.{k}"), bag);
     }
+    if let Some(kb) = &client.key_binding {
+        extract_key_binding("client", kb, bag);
+    }
+}
+
+/// Write a verified key binding under `<prefix>.key_binding` (the proof method)
+/// and `<prefix>.key_binding_thumbprint`. Both are absent when the credential
+/// was accepted without a proof of possession, so a route requiring one, such as
+/// `require(subject.key_binding == 'dpop')`, denies a bearer token.
+fn extract_key_binding(prefix: &str, kb: &KeyBinding, bag: &mut AttributeBag) {
+    bag.set(format!("{prefix}.key_binding"), kb.method.clone());
+    bag.set(
+        format!("{prefix}.key_binding_thumbprint"),
+        kb.thumbprint.clone(),
+    );
 }
 
 /// Flatten a `WorkloadIdentity` into the bag under the given namespace
@@ -237,6 +262,9 @@ pub fn extract_workload(prefix: &str, w: &WorkloadIdentity, bag: &mut AttributeB
     bag.set(format!("{prefix}.selectors"), selectors);
     if let Some(id) = &w.client_id {
         bag.set(format!("{prefix}.client_id"), id.clone());
+    }
+    if let Some(kb) = &w.key_binding {
+        extract_key_binding(prefix, kb, bag);
     }
     if let Some(at) = &w.attested_at {
         // Fixed second precision and a literal `Z`, so the string sorts the
@@ -325,6 +353,7 @@ mod tests {
                 permissions: HashSet::from(["view_ssn".to_owned()]),
                 teams: HashSet::from(["compliance".to_owned()]),
                 claims: HashMap::from([("iss".to_owned(), serde_json::json!("auth.corp"))]),
+                key_binding: None,
             }),
             this_workload: Some(WorkloadIdentity {
                 spiffe_id: Some("spiffe://corp.com/hr-tool".into()),
@@ -572,6 +601,7 @@ mod tests {
                     serde_json::json!({ "max_calls_per_min": 60 }),
                 ),
             ]),
+            key_binding: None,
         }
     }
 
@@ -1026,5 +1056,46 @@ mod tests {
             bag.get_string("this_workload.spiffe_id"),
             Some("spiffe://corp.com/gateway"),
         );
+    }
+
+    fn dpop_binding() -> KeyBinding {
+        KeyBinding {
+            method: "dpop".to_owned(),
+            thumbprint: "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_verified_key_binding_reaches_each_identity_namespace() {
+        let mut sec = alice();
+        if let Some(subject) = sec.subject.as_mut() {
+            subject.key_binding = Some(dpop_binding());
+        }
+        let mut client = agent_client();
+        client.key_binding = Some(dpop_binding());
+        sec.client = Some(client);
+        sec.caller_workload = Some(WorkloadIdentity {
+            spiffe_id: Some("spiffe://corp.com/agent".into()),
+            key_binding: Some(dpop_binding()),
+            ..Default::default()
+        });
+        let mut bag = AttributeBag::new();
+        extract_security(&sec, &mut bag);
+        for ns in ["subject", "client", "caller_workload"] {
+            assert_eq!(bag.get_string(&format!("{ns}.key_binding")), Some("dpop"));
+            assert_eq!(
+                bag.get_string(&format!("{ns}.key_binding_thumbprint")),
+                Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I")
+            );
+        }
+    }
+
+    #[test]
+    fn a_credential_without_a_proven_binding_sets_no_key_binding_keys() {
+        let mut bag = AttributeBag::new();
+        extract_security(&alice(), &mut bag);
+        assert!(!bag.contains("subject.key_binding"));
+        assert!(!bag.contains("subject.key_binding_thumbprint"));
+        assert!(!bag.contains("this_workload.key_binding"));
     }
 }

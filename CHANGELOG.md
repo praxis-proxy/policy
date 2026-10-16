@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added DPoP (RFC 9449) proof verification to `identity/jwt`, configured per
+  trusted issuer with `dpop: { mode: off | optional | required }`. A bound token
+  must carry a valid proof for the request's method and URL, signed by the key
+  in its `cnf.jkt`, and each proof is accepted once. A verified binding is
+  visible to policy as `subject.key_binding`, `client.key_binding` or
+  `caller_workload.key_binding`. Replay detection is per instance until
+  host-injected stores land (#127).
+  ([#204](https://github.com/praxis-proxy/policy/issues/204))
+
 ## [0.5.0] - 2026-10-13
 
 ### Added

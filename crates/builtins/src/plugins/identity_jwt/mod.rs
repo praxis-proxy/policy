@@ -39,6 +39,8 @@
 pub mod claim_map;
 /// Plugin configuration and its validation.
 pub mod config;
+/// `DPoP` (RFC 9449) proof-of-possession verification.
+pub mod dpop;
 /// Constructs the resolver from configuration.
 pub mod factory;
 /// The shipped claim maps, by name.
@@ -53,8 +55,8 @@ pub use claim_map::StandardClaimMap;
 // directory record maps the same way a claim set does. Re-exported here so a
 // host naming them through this crate keeps working.
 pub use config::{
-    DecodingKeySource, JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError,
-    TrustedIssuerConfig,
+    DecodingKeySource, DpopConfig, DpopMode, JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig,
+    KeySourceError, TrustedIssuerConfig,
 };
 pub use factory::{JwtIdentityFactory, KIND};
 pub use praxis_policy_core::identity::mapping::{

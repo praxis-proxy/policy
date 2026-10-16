@@ -193,6 +193,11 @@ praxis-policy-pdp-diff = { path = "../ppe-pdp-diff" }
 # handing it to the merge the runtime uses.
 serde_yaml = { workspace = true }
 serde_json = { workspace = true }
+# Test-only: `dpop_live` signs DPoP proofs with a P-256 key derived from a
+# fixed scalar, and decodes the token Keycloak binds to it.
+p256 = { workspace = true }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+base64 = { workspace = true }
 
 [lints]
 workspace = true

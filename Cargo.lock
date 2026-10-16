@@ -2850,12 +2850,15 @@ name = "praxis-policy"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "http",
  "http-body-util",
  "hyper-rustls",
  "hyper-util",
+ "jsonwebtoken",
  "mockito",
+ "p256",
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
  "praxis-policy-apl-runtime",
@@ -2936,6 +2939,7 @@ dependencies = [
  "hmac",
  "jsonwebtoken",
  "moka",
+ "p256",
  "praxis-policy-apl-core",
  "praxis-policy-apl-runtime",
  "praxis-policy-core",

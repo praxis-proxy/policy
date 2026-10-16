@@ -175,6 +175,128 @@ pub struct TrustedIssuerConfig {
     /// constructor applies a sensible value (currently 60s).
     #[serde(default)]
     pub leeway_seconds: u64,
+
+    /// Whether tokens from this issuer must be bound to the presenter's key
+    /// with `DPoP` (RFC 9449). Off by default. See [`DpopConfig`].
+    #[serde(default)]
+    pub dpop: DpopConfig,
+}
+
+/// How an issuer's tokens are checked for a `DPoP` binding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DpopMode {
+    /// Bearer tokens only. A token presented with the `DPoP` scheme is denied,
+    /// since its proof would go unchecked.
+    #[default]
+    Off,
+    /// A token carrying `cnf.jkt` must come with a valid proof; a token without
+    /// one is accepted as a bearer token. For a gradual rollout.
+    Optional,
+    /// Every token must carry `cnf.jkt` and come with a valid proof.
+    Required,
+}
+
+/// `DPoP` settings for one trusted issuer.
+///
+/// A token the issuer bound to a key records the key's thumbprint in
+/// `cnf.jkt`. The presenter then sends, with every request, a short proof JWT in
+/// a `DPoP` header, signed with that key and naming the request's method and
+/// URL, a timestamp, a unique id and a hash of the access token. A copied token
+/// is useless without the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DpopConfig {
+    /// Whether proofs are checked, and whether an unbound token is accepted.
+    #[serde(default)]
+    pub mode: DpopMode,
+
+    /// Signature algorithms accepted for the proof. Asymmetric only: a proof
+    /// signed with a shared secret proves nothing about who holds it.
+    #[serde(default = "default_dpop_algorithms")]
+    pub algorithms: Vec<Algorithm>,
+
+    /// How far a proof's `iat` may be from now, in seconds, in either
+    /// direction. Also how long its `jti` is remembered for replay detection.
+    #[serde(default = "default_dpop_iat_window_seconds")]
+    pub iat_window_seconds: u64,
+
+    /// The URL clients address, such as `https://api.example.com`, when PPE
+    /// runs behind a proxy that changes the scheme, host or port. A proof's
+    /// `htu` is compared against this plus the request path. Without it the
+    /// URL is rebuilt from the request's scheme, host and path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_base_url: Option<String>,
+}
+
+impl Default for DpopConfig {
+    fn default() -> Self {
+        Self {
+            mode: DpopMode::Off,
+            algorithms: default_dpop_algorithms(),
+            iat_window_seconds: default_dpop_iat_window_seconds(),
+            external_base_url: None,
+        }
+    }
+}
+
+fn default_dpop_algorithms() -> Vec<Algorithm> {
+    vec![Algorithm::ES256]
+}
+
+const fn default_dpop_iat_window_seconds() -> u64 {
+    60
+}
+
+/// Upper bound on `iat_window_seconds`. A wider window keeps a captured proof
+/// replayable for longer and its `jti` in memory for longer.
+const MAX_DPOP_IAT_WINDOW_SECONDS: u64 = 300;
+
+impl DpopConfig {
+    /// Reject a configuration that would weaken or disable the check.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the issuer and the offending setting.
+    pub fn validate(&self, issuer: &str) -> Result<(), String> {
+        if self.mode == DpopMode::Off {
+            return Ok(());
+        }
+        if self.algorithms.is_empty() {
+            return Err(format!(
+                "trusted_issuer '{issuer}': dpop.algorithms must list at least one algorithm"
+            ));
+        }
+        if let Some(alg) = self
+            .algorithms
+            .iter()
+            .find(|a| !crate::plugins::identity_jwt::dpop::is_asymmetric(**a))
+        {
+            return Err(format!(
+                "trusted_issuer '{issuer}': dpop.algorithms lists {alg:?}, a shared-secret \
+                 algorithm; a DPoP proof must be signed with the presenter's private key"
+            ));
+        }
+        if self.iat_window_seconds == 0 || self.iat_window_seconds > MAX_DPOP_IAT_WINDOW_SECONDS {
+            return Err(format!(
+                "trusted_issuer '{issuer}': dpop.iat_window_seconds must be between 1 and \
+                 {MAX_DPOP_IAT_WINDOW_SECONDS}"
+            ));
+        }
+        if let Some(base) = &self.external_base_url {
+            // The same normalization the request URL goes through, so a base
+            // that loads is one a proof's `htu` can match.
+            let well_formed = !base.contains(['?', '#'])
+                && crate::plugins::identity_jwt::dpop::normalize_htu(base).is_some();
+            if !well_formed {
+                return Err(format!(
+                    "trusted_issuer '{issuer}': dpop.external_base_url must be an absolute \
+                     http(s) URL without a query or fragment, got '{base}'"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Where the JWT signing key material comes from. Serializable
@@ -812,7 +934,7 @@ impl TrustedIssuerConfig {
                 self.issuer
             ));
         }
-        Ok(())
+        self.dpop.validate(&self.issuer)
     }
 
     /// Synchronously build a runtime `TrustedIssuer`. Works for
@@ -843,6 +965,7 @@ impl TrustedIssuerConfig {
             keys: std::sync::Arc::new(std::sync::RwLock::new(keys)),
             algorithms: self.algorithms,
             leeway_seconds: self.leeway_seconds,
+            dpop: self.dpop,
             source: self.decoding_key,
             refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(),
         })
@@ -892,6 +1015,7 @@ impl TrustedIssuerConfig {
             keys: std::sync::Arc::new(std::sync::RwLock::new(keys)),
             algorithms: self.algorithms,
             leeway_seconds: self.leeway_seconds,
+            dpop: self.dpop,
             source: self.decoding_key,
             refresh,
         })
@@ -1239,6 +1363,7 @@ mod tests {
             algorithms: vec![Algorithm::HS256],
             decoding_key: DecodingKeySource::Secret { secret: "s".into() },
             leeway_seconds: 0,
+            dpop: DpopConfig::default(),
         };
         let Err(e) = cfg.validate() else {
             panic!("an empty issuer must not validate")
@@ -1254,6 +1379,7 @@ mod tests {
             algorithms: vec![Algorithm::HS256],
             decoding_key: DecodingKeySource::Secret { secret: "s".into() },
             leeway_seconds: 0,
+            dpop: DpopConfig::default(),
         }
     }
 

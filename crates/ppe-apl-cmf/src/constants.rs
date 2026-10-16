@@ -76,6 +76,10 @@ pub const CAP_WRITE_HEADERS: &str = "write_headers";
 pub const BAG_SUBJECT_ID: &str = "subject.id";
 /// Bag key `subject.type`.
 pub const BAG_SUBJECT_TYPE: &str = "subject.type";
+/// Bag key `subject.key_binding`: how possession of the bound key was proved.
+pub const BAG_SUBJECT_KEY_BINDING: &str = "subject.key_binding";
+/// Bag key `subject.key_binding_thumbprint`: RFC 7638 thumbprint of that key.
+pub const BAG_SUBJECT_KEY_BINDING_THUMBPRINT: &str = "subject.key_binding_thumbprint";
 /// Bag key `subject.teams`.
 pub const BAG_SUBJECT_TEAMS: &str = "subject.teams";
 /// Bag key `subject.roles` — the full role set, with undotted members mirrored

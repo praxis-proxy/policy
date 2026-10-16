@@ -128,6 +128,36 @@ The test fails if the ordinary read is not `live-value`, or if the
 soft-deleted response is not HTTP 404 with `data.data: null`, a deletion
 timestamp, and a `SecretError::NotFound` mapping.
 
+### `DPoP` live test
+
+The `DPoP` suite in `crates/builtins/tests/jwt` signs its proofs with the same
+library the verifier uses, so a mistake shared by both sides would pass. The
+live check takes the token and its `cnf.jkt` from Keycloak instead: Keycloak
+verifies the proof sent to its token endpoint and binds the token to the key
+itself. The test then presents that token, with a fresh proof, to the
+`identity/jwt` resolver, and checks a replay, the `Bearer` scheme, and another
+key's proof are refused. It needs the `jwt` and `http-hyper` features and is
+`#[ignore]`-gated.
+
+It creates a confidential client, `ppe-dpop-live`, that requires `DPoP`-bound
+tokens in the given realm, and deletes it afterwards. Keycloak 26.4 and later
+support `DPoP` by default. Against a disposable Keycloak:
+
+```console
+docker run -d --rm --name ppe-keycloak -p 127.0.0.1:8080:8080 \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+  quay.io/keycloak/keycloak:26.8.0 start-dev
+until curl -sf http://127.0.0.1:8080/realms/master >/dev/null; do sleep 2; done
+DPOP_LIVE_KEYCLOAK_URL=http://127.0.0.1:8080 DPOP_LIVE_REALM=master \
+  DPOP_LIVE_ADMIN_USER=admin DPOP_LIVE_ADMIN_PASSWORD=admin \
+  cargo test -p praxis-policy --all-features --test dpop_live -- --ignored --nocapture
+docker stop ppe-keycloak
+```
+
+The test fails if Keycloak refuses the proof, if the token's `cnf.jkt` differs
+from the thumbprint PPE computes for the same key, or if the resolver accepts
+the token without recording the binding.
+
 ## Integration suites
 
 The suites under `tests/` drive the full engine, every builtin and the

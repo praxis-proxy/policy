@@ -525,9 +525,12 @@ fn build_filtered_subject(
     capabilities: &HashSet<String>,
 ) -> SubjectExtension {
     SubjectExtension {
-        // Always included with any subject access
+        // Always included with any subject access. The key binding says how
+        // this identity was authenticated, so it travels with the identity
+        // rather than behind a sub-capability.
         id: subject.id.clone(),
         subject_type: subject.subject_type,
+        key_binding: subject.key_binding.clone(),
         // Capability-gated sub-fields
         roles: if capabilities.contains(&cap_str(Capability::ReadRoles)) {
             subject.roles.clone()
@@ -739,6 +742,7 @@ mod tests {
             permissions: ["read_all".to_owned()].into(),
             teams: ["engineering".to_owned()].into(),
             claims: [("iss".to_owned(), serde_json::json!("example.com"))].into(),
+            key_binding: None,
         });
 
         let mut http = super::super::HttpExtension::default();

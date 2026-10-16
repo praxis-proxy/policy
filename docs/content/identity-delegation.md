@@ -912,6 +912,138 @@ at load rather than matching nothing, and a claim whose own name holds
 a dot is written with `\.`. A `role: caller_workload` resolver carries
 no claims bag and says so at load rather than ignoring the setting.
 
+## Binding tokens to the caller's key (DPoP)
+
+A bearer token works for whoever holds it, so one copied from a log or a
+misbehaving proxy works as well as the original. DPoP (RFC 9449) binds a token
+to a key. The issuer records the key's thumbprint in the token's `cnf.jkt`, and
+with every request the caller sends a short proof in a `DPoP` header, signed
+with the private key, naming the request's method and URL, the time, a unique
+id, and a hash of the token. A copied token is useless without the key, and a
+copied proof is useless for another request, after its window, or a second time.
+
+Turn it on per trusted issuer. The plugin must hold `read_headers`, because the
+proof is checked against the request line; without it the plugin refuses to
+load.
+
+<!-- validate: fragment -->
+```yaml
+- name: jwt-agent
+  kind: identity/jwt
+  capabilities: [perform_http, read_headers]
+  config:
+    trusted_issuers:
+      - issuer: https://idp.example.com/realms/agents
+        audiences: [gateway]
+        algorithms: [RS256]
+        decoding_key: { kind: jwks_url, url: https://idp.example.com/realms/agents/protocol/openid-connect/certs }
+        dpop:
+          mode: required            # off (default) | optional | required
+          algorithms: [ES256]       # proof algorithms; asymmetric only
+          iat_window_seconds: 60    # how old or early a proof may be (max 300)
+          # external_base_url: https://api.example.com   # behind a proxy
+```
+
+| Mode | Unbound token | Bound token (`cnf.jkt`) |
+|---|---|---|
+| `off` | accepted as bearer | accepted as bearer; the `DPoP` scheme is refused |
+| `optional` | accepted as bearer | needs the `DPoP` scheme and a valid proof |
+| `required` | denied | needs the `DPoP` scheme and a valid proof |
+
+A bound token presented with the `Bearer` scheme is denied in either checking
+mode, as RFC 9449 requires, even if a proof is attached. So is a token whose
+`cnf` carries no usable `jkt`, such as one bound to a certificate: it is bound in
+a way this check cannot verify, and accepting it as a bearer token would drop the
+binding.
+
+With `mode: off` the binding is not checked at all, and a bound token presented
+as `Bearer` is accepted like any other. A token stolen from a client of a
+`DPoP`-checking issuer therefore works without its key wherever the same issuer
+is trusted with `off`. Turn checking on for every entry of an issuer whose
+tokens are bound.
+
+The proof is checked for: type `dpop+jwt`; an accepted algorithm; a public key in
+its header, with no private members; that key's RFC 7638 thumbprint equal to
+`cnf.jkt`; its signature; `htm` equal to the request method; `htu` equal to the
+request URL (scheme and host compared case-insensitively, default port, query
+and fragment ignored); `iat` within the window; `ath` equal to the token's
+hash; and a `jti` not seen before.
+
+Behind a proxy that changes the scheme, host or port, set `external_base_url` to
+the URL clients address; `htu` is then compared against it plus the request
+path. Without it the URL is rebuilt from the host's request scheme, host and
+path, and a host that supplies neither denies every bound token.
+
+A verified binding is recorded on the identity the token filled, so a route
+can require it for one credential and not another:
+
+<!-- validate: apl-predicate -->
+```text
+subject.key_binding == 'dpop'
+```
+
+`subject.key_binding` (`client.key_binding`, `caller_workload.key_binding`)
+names the proof method, and `…_thumbprint` what the token is bound to: for
+`dpop`, the RFC 7638 thumbprint of the key. The method is the only one today;
+the value is an open name so a certificate-bound method can follow, and its
+thumbprint would be the certificate's, so compare a thumbprint together with
+the method:
+
+<!-- validate: apl-predicate -->
+```text
+subject.key_binding == 'dpop' & subject.key_binding_thumbprint in data.agents.approved_keys
+```
+
+The thumbprint is not a secret. It is a hash of a public key that travels in
+every proof, so it is safe to log, and it is the stable handle for pinning an
+agent to registered keys, blocking a leaked key, or correlating requests across
+token refreshes. Treat it like `subject.id` for retention: it identifies the
+key's holder. Both are absent for a token
+accepted without a proof, including a token whose `cnf` was never checked
+because the issuer's mode is `off`. `cnf.jkt` itself reaches policy as
+`claim.cnf.jkt`, but that is the issuer's statement, not proof that the caller
+holds the key.
+
+### DPoP denial codes
+
+| Code | Means |
+|---|---|
+| `auth.dpop_missing` | a bound token without a proof, a bound token sent as `Bearer`, or an unbound token where binding is required |
+| `auth.dpop_invalid` | a malformed proof or one failing a check above, a `cnf` with no usable `jkt`, or the `DPoP` scheme to an issuer with `mode: off` |
+| `auth.dpop_key_mismatch` | the proof is signed by a key other than the one the token is bound to |
+| `auth.dpop_replay` | the proof's `jti` was already used |
+| `auth.dpop_replay_unavailable` | the replay store could not answer, or this key already has its quota of live proofs; the proof is not accepted unchecked |
+| `auth.config_error` | the host supplied no request line, no method, or no scheme and host with no `external_base_url` set |
+
+### The replay window
+
+Each accepted proof's `jti` is remembered until its `iat` window closes, in this
+gateway instance's memory, at most 10,000 at a time for any one key and 100,000
+in all, so one client cannot fill the store for everyone. The store starts empty
+when the resolver is rebuilt, for example on a configuration reload. Replay
+detection therefore covers one instance: with
+several instances behind a load balancer, a captured request replayed to a
+different instance within the window is not caught. A store shared across
+instances waits on host-injected stores
+([#127](https://github.com/praxis-proxy/policy/issues/127)). Until then, keep the
+window short, or route a client's requests to one instance.
+
+Server-issued nonces (`DPoP-Nonce`) are not supported yet.
+
+A request must carry one `DPoP` header. A host that receives several should
+join them with a comma, as HTTP does for repeated headers, so the resolver can
+refuse the request; a host that keeps only one of them hides the duplicate.
+
+### Keycloak
+
+Keycloak issues DPoP-bound tokens when the client sets "Require DPoP bound
+tokens" (`dpop.bound.access.tokens`). A bound token can be exchanged only by the
+client it was issued to, with a proof from the same key. So a gateway that
+verifies the agent's bound token cannot then present it in an RFC 8693
+exchange: it delegates on its own credential instead (`subject: this_workload`),
+having verified the agent on the way in. The downstream token then speaks for
+the gateway, not the agent.
+
 ## Caching a delegated token
 
 The OAuth delegator checks each token-exchange response by default. It requires
