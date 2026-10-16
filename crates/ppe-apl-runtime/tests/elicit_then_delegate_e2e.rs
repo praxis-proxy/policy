@@ -42,7 +42,7 @@ use praxis_policy_core::elicitation::{
 };
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::extensions::raw_credentials::{
-    RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind, TokenRole,
+    Credential, RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind, TokenRole,
 };
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
@@ -256,7 +256,13 @@ async fn run_route(outcome: ElicitationOutcomeKind) -> (Decision, usize) {
     let mut raw = RawCredentialsExtension::default();
     raw.inbound_tokens.insert(
         TokenRole::User,
-        RawInboundToken::new("eyJ.fake.user", "Authorization", TokenKind::Jwt),
+        RawInboundToken::new(
+            "eyJ.fake.user",
+            Credential::Header {
+                name: "Authorization".into(),
+            },
+            TokenKind::Jwt,
+        ),
     );
     let extensions = Extensions {
         raw_credentials: Some(Arc::new(raw)),

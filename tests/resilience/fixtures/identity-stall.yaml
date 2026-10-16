@@ -19,7 +19,9 @@ plugins:
     on_error: fail
     config:
       role: user
-      header: X-User-Token
+      credential:
+        kind: header
+        name: X-User-Token
       trusted_issuers:
         - issuer: "https://idp.test/realms/policy-demo"
           audiences: ["praxis-gateway"]
@@ -38,7 +40,9 @@ plugins:
     on_error: fail # jwt-client
     config:
       role: client
-      header: Authorization
+      credential:
+        kind: header
+        name: Authorization
       trusted_issuers:
         - issuer: "https://idp.test/realms/policy-demo"
           audiences: ["praxis-gateway"]

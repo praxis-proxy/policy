@@ -39,7 +39,7 @@ use praxis_policy_core::delegation::{DelegationPayload, HOOK_TOKEN_DELEGATE, Tok
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::PluginViolation;
 use praxis_policy_core::extensions::raw_credentials::{
-    RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind, TokenRole,
+    Credential, RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind, TokenRole,
 };
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
@@ -219,7 +219,13 @@ fn ext_with_bearer(token: &str) -> Extensions {
     let mut raw = RawCredentialsExtension::default();
     raw.inbound_tokens.insert(
         TokenRole::User,
-        RawInboundToken::new(token, "Authorization", TokenKind::Jwt),
+        RawInboundToken::new(
+            token,
+            Credential::Header {
+                name: "Authorization".into(),
+            },
+            TokenKind::Jwt,
+        ),
     );
     Extensions {
         raw_credentials: Some(Arc::new(raw)),
@@ -236,7 +242,13 @@ fn ext_with_subject_and_label(token: &str, subject_id: &str, label: &str) -> Ext
     let mut raw = RawCredentialsExtension::default();
     raw.inbound_tokens.insert(
         TokenRole::User,
-        RawInboundToken::new(token, "Authorization", TokenKind::Jwt),
+        RawInboundToken::new(
+            token,
+            Credential::Header {
+                name: "Authorization".into(),
+            },
+            TokenKind::Jwt,
+        ),
     );
 
     let mut sec = SecurityExtension::default();

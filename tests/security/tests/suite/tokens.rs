@@ -184,7 +184,7 @@ const PARTNER_KID: &str = "partner-rs256";
 /// The cedar fixture with a second trusted issuer on `jwt-user`, whose JWKS
 /// publishes the foreign key under [`PARTNER_KID`].
 async fn two_issuer_host() -> RefHost {
-    let anchor = "      header: X-User-Token\n      trusted_issuers:\n";
+    let anchor = "      credential:\n        kind: header\n        name: X-User-Token\n      trusted_issuers:\n";
     let partner = format!(
         "{anchor}        - issuer: \"{PARTNER_ISSUER}\"\n          \
          audiences: [\"praxis-gateway\"]\n          algorithms: [\"RS256\"]\n          \

@@ -120,7 +120,9 @@ plugins:
     capabilities: [perform_http]
     config:
       role: user
-      header: X-User-Token
+      credential:
+        kind: header
+        name: X-User-Token
 
 global:
   pdp:
@@ -136,6 +138,73 @@ global:
 A plugin that fetches JWKS, exchanges a token, or dispatches a CIBA
 prompt must declare `perform_http`, or the engine refuses to start and
 names the plugin and the missing capability.
+
+### Credential location (`identity/jwt`)
+
+Each `identity/jwt` instance reads its token from one wire location,
+named by the `credential:` block in the plugin's `config:`. Three
+kinds are supported:
+
+| Kind | Use case | Example |
+|---|---|---|
+| `header` | The common case — a Bearer token on an HTTP header | `Authorization`, `X-User-Token` |
+| `cookie` | Browser apps that deliver the JWT in an HttpOnly cookie | `__Host-jwt`, `session` |
+| `query_param` | Endpoints where the client cannot set headers (WebSocket, SSE) | `access_token` |
+
+```yaml
+# Cookie-based JWT
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      role: user
+      credential:
+        kind: cookie
+        name: __Host-jwt
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["my-api"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://idp.example.com/.well-known/jwks.json"
+```
+
+```yaml
+# Query-parameter JWT (WebSocket handshake)
+plugins:
+  - name: jwt-ws
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      role: user
+      credential:
+        kind: query_param
+        name: access_token
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["my-api"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://idp.example.com/.well-known/jwks.json"
+```
+
+Omitting `credential:` defaults to
+`{ kind: header, name: Authorization }`.
+
+Cookie and query-string values are parsed by PPE itself, not by the
+host's HTTP framework, so the same request resolves the same credential
+regardless of which proxy sits in front of it. Duplicate cookie names or
+query-parameter names for the configured credential are rejected as
+ambiguous (`auth.ambiguous_credential`) rather than resolved by
+first-wins or last-wins.
+
+> **Security note.** A query-parameter token routinely appears in
+> access logs, CDN logs, and browser history. PPE logs a one-time
+> notice at startup when a resolver uses `query_param` so the operator
+> can scrub raw query strings from infrastructure logging.
 
 ## Next
 

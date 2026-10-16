@@ -5,8 +5,9 @@
 // IdentityResolve hook chain. Plays two roles in one type:
 //
 //   * **Input** (private fields, read-only after construction) —
-//     `raw_token`, `source`, `source_header`, `headers`, `client_host`,
-//     `client_port`. Populated by the host once at request entry and
+//     `raw_token`, `source`, `source_header`, `headers`,
+//     `raw_query_string`, `client_host`, `client_port`. Populated by
+//     the host once at request entry and
 //     never mutated by handlers. Privacy is enforced at the module
 //     boundary: external code reads through `pub fn raw_token() -> &str`
 //     etc. and has no setters or mutable field access, so even a
@@ -103,7 +104,12 @@ pub enum TokenSource {
 ///
 /// Implements `PluginPayload` so it can flow through the executor's
 /// existing Sequential-phase machinery — no bespoke plumbing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written rather than derived — see the impl below — so
+/// that `tracing::debug!(?payload)` and similar diagnostics never print
+/// `raw_token`, `raw_query_string`, or header values, any of which can
+/// carry a live bearer token in plaintext.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IdentityPayload {
     /// Raw credential bytes. Cleared on drop via `Zeroizing`.
     /// `#[serde(skip)]` — never appears in serialized output.
@@ -118,8 +124,26 @@ pub struct IdentityPayload {
     source_header: Option<String>,
 
     /// Full request headers — escape hatch for custom auth flows.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    /// Serde-skipped: headers may carry credentials and must not
+    /// appear in serialized output.
+    #[serde(skip)]
     headers: HashMap<String, String>,
+
+    /// Raw query string from the request URL, without the leading
+    /// `?`. Set explicitly by the host; `None` otherwise. PPE parses
+    /// this deterministically via `http_credential::parse_query_string`
+    /// — hosts must not pre-parse it.
+    ///
+    /// Must not be derived from `HttpExtension.path`. A credential
+    /// resolver that reads a query-parameter credential needs a
+    /// request target supplied explicitly by the host, independent of
+    /// whether `HttpExtension.path` happens to include a query string.
+    ///
+    /// `#[serde(skip)]` — the query string may contain a bearer token
+    /// (e.g. `access_token=eyJ...`). Like `raw_token`, it must never
+    /// appear in serialized output, logs, or diagnostics.
+    #[serde(skip)]
+    raw_query_string: Option<String>,
 
     /// Client IP, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +191,40 @@ pub struct IdentityPayload {
     credential_declined: bool,
 }
 
+struct RedactedHeaders<'a>(&'a HashMap<String, String>);
+
+impl std::fmt::Debug for RedactedHeaders<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(self.0.keys().map(|k| (k, "[REDACTED]")))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for IdentityPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityPayload")
+            .field("raw_token", &"[REDACTED]")
+            .field("source", &self.source)
+            .field("source_header", &self.source_header)
+            .field("headers", &RedactedHeaders(&self.headers))
+            .field(
+                "raw_query_string",
+                &self.raw_query_string.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("client_host", &self.client_host)
+            .field("client_port", &self.client_port)
+            .field("subject", &self.subject)
+            .field("client", &self.client)
+            .field("caller_workload", &self.caller_workload)
+            .field("delegation", &self.delegation)
+            .field("raw_credentials", &self.raw_credentials)
+            .field("resolved_at", &self.resolved_at)
+            .field("raw_claims", &self.raw_claims)
+            .finish()
+    }
+}
+
 impl IdentityPayload {
     /// Construct a payload with the required input fields populated.
     /// The most common entry point — hosts call this once per request
@@ -180,6 +238,7 @@ impl IdentityPayload {
             source,
             source_header: None,
             headers: HashMap::new(),
+            raw_query_string: None,
             client_host: None,
             client_port: None,
             subject: None,
@@ -216,6 +275,12 @@ impl IdentityPayload {
         self
     }
 
+    /// Set the raw query string (without the leading `?`).
+    pub fn with_raw_query_string(mut self, qs: impl Into<String>) -> Self {
+        self.raw_query_string = Some(qs.into());
+        self
+    }
+
     /// Set the client host.
     pub fn with_client_host(mut self, h: impl Into<String>) -> Self {
         self.client_host = Some(h.into());
@@ -248,6 +313,12 @@ impl IdentityPayload {
     /// The inbound headers.
     pub fn headers(&self) -> &HashMap<String, String> {
         &self.headers
+    }
+
+    /// The raw query string (without the leading `?`), when the host
+    /// supplied one.
+    pub fn raw_query_string(&self) -> Option<&str> {
+        self.raw_query_string.as_deref()
     }
 
     /// The client host.
@@ -436,12 +507,143 @@ mod tests {
     }
 
     #[test]
+    fn raw_query_string_builder_and_getter() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=eyJ.fake.jwt");
+        assert_eq!(p.raw_query_string(), Some("access_token=eyJ.fake.jwt"));
+    }
+
+    #[test]
+    fn raw_query_string_absent_by_default() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer);
+        assert_eq!(p.raw_query_string(), None);
+    }
+
+    #[test]
+    fn raw_query_string_never_serialized() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=super-secret-value");
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("super-secret-value"),
+            "raw_query_string leaked into serialized form: {json}"
+        );
+    }
+
+    #[test]
+    fn debug_output_redacts_raw_token_and_raw_query_string() {
+        let p = IdentityPayload::new("eyJ.super-secret-bearer-token.sig", TokenSource::Bearer)
+            .with_raw_query_string("access_token=super-secret-query-value");
+        let debug = format!("{p:?}");
+        assert!(
+            !debug.contains("super-secret-bearer-token"),
+            "raw_token leaked into Debug output: {debug}"
+        );
+        assert!(
+            !debug.contains("super-secret-query-value"),
+            "raw_query_string leaked into Debug output: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn debug_output_redacts_header_values() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "authorization".to_owned(),
+            "Bearer eyJ.secret.jwt".to_owned(),
+        );
+        headers.insert("cookie".to_owned(), "session=abc123".to_owned());
+        headers.insert("x-user-token".to_owned(), "custom-secret-token".to_owned());
+        headers.insert("content-type".to_owned(), "application/json".to_owned());
+        let p = IdentityPayload::new("tok", TokenSource::Bearer).with_headers(headers);
+        let debug = format!("{p:?}");
+        assert!(
+            !debug.contains("eyJ.secret.jwt"),
+            "authorization value leaked: {debug}"
+        );
+        assert!(!debug.contains("abc123"), "cookie value leaked: {debug}");
+        assert!(
+            !debug.contains("custom-secret-token"),
+            "x-user-token value leaked: {debug}"
+        );
+        assert!(
+            !debug.contains("application/json"),
+            "content-type value leaked: {debug}"
+        );
+        assert!(
+            debug.contains("authorization"),
+            "header name missing: {debug}"
+        );
+        assert!(debug.contains("cookie"), "header name missing: {debug}");
+        assert!(
+            debug.contains("x-user-token"),
+            "header name missing: {debug}"
+        );
+        assert!(
+            debug.contains("content-type"),
+            "header name missing: {debug}"
+        );
+        assert!(
+            debug.contains("[REDACTED]"),
+            "redaction placeholder missing: {debug}"
+        );
+    }
+
+    #[test]
+    fn headers_never_serialized() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_owned(), "Bearer secret-jwt".to_owned());
+        headers.insert("x-user-token".to_owned(), "custom-secret".to_owned());
+        let p = IdentityPayload::new("tok", TokenSource::Bearer).with_headers(headers);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("secret-jwt"),
+            "authorization value leaked into serialized form: {json}"
+        );
+        assert!(
+            !json.contains("custom-secret"),
+            "x-user-token value leaked into serialized form: {json}"
+        );
+        assert!(
+            !json.contains("headers"),
+            "headers field should be skipped in serialization: {json}"
+        );
+    }
+
+    #[test]
+    fn headers_absent_after_deserialize_round_trip() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_owned(), "Bearer tok".to_owned());
+        let p = IdentityPayload::new("tok", TokenSource::Bearer).with_headers(headers);
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: IdentityPayload = serde_json::from_str(&json).unwrap();
+        assert!(
+            restored.headers().is_empty(),
+            "headers is serde-skipped and must be empty after round-trip"
+        );
+    }
+
+    #[test]
+    fn debug_output_shows_whether_raw_query_string_was_present() {
+        // The redaction hides the value but keeps the Some/None shape visible,
+        // so a reader can tell "a query string was supplied but its content is
+        // hidden" apart from "no query string was supplied at all".
+        let with_qs = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=secret");
+        let without_qs = IdentityPayload::new("tok", TokenSource::Bearer);
+        assert!(format!("{with_qs:?}").contains(r#"raw_query_string: Some("[REDACTED]")"#));
+        assert!(format!("{without_qs:?}").contains("raw_query_string: None"));
+    }
+
+    #[test]
     fn handler_can_populate_output_on_clone() {
         // Exercises the typical handler pattern: clone the running
         // payload, set the output fields the handler is responsible
         // for, return the updated payload. Input fields survive
         // the clone unchanged.
-        let original = IdentityPayload::new("eyJ.tok", TokenSource::Bearer);
+        let original = IdentityPayload::new("eyJ.tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=eyJ.fake");
         let mut updated = original.clone();
         updated.subject = Some(SubjectExtension {
             id: Some("alice".into()),
@@ -449,11 +651,39 @@ mod tests {
         });
         assert_eq!(updated.raw_token(), "eyJ.tok"); // input preserved
         assert_eq!(
+            updated.raw_query_string(),
+            Some("access_token=eyJ.fake"),
+            "raw_query_string must survive clone"
+        );
+        assert_eq!(
             updated.subject.as_ref().unwrap().id.as_deref(),
             Some("alice")
         );
         // Original unchanged — the clone is a separate value.
         assert!(original.subject.is_none());
+    }
+
+    #[test]
+    fn raw_query_string_empty_string_is_some_not_none() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer).with_raw_query_string("");
+        assert_eq!(
+            p.raw_query_string(),
+            Some(""),
+            "empty string must be Some(\"\"), not None"
+        );
+    }
+
+    #[test]
+    fn raw_query_string_absent_after_deserialize_round_trip() {
+        let p = IdentityPayload::new("tok", TokenSource::Bearer)
+            .with_raw_query_string("access_token=secret");
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: IdentityPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.raw_query_string(),
+            None,
+            "raw_query_string is serde-skipped and must be None after round-trip"
+        );
     }
 
     #[test]

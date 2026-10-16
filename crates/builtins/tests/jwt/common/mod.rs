@@ -137,6 +137,20 @@ pub(crate) async fn invoke(
     token: String,
     source: TokenSource,
 ) -> PipelineResult {
+    invoke_with_payload(cfg, IdentityPayload::new(token, source)).await
+}
+
+/// Drive a pre-built `IdentityPayload` through the real handler pipeline.
+///
+/// [`invoke`] only lets a case set the bearer token and its `TokenSource` —
+/// there is no way to also populate a `Cookie` header or a raw query string.
+/// This variant takes the payload directly, so a cookie or query-param case
+/// can build one with `.with_headers(...)` / `.with_raw_query_string(...)`
+/// before driving it through the same pipeline `invoke` uses.
+pub(crate) async fn invoke_with_payload(
+    cfg: PluginConfig,
+    payload: IdentityPayload,
+) -> PipelineResult {
     let resolver = JwtIdentityResolver::new(cfg.clone()).expect("the resolver must construct");
 
     let mgr = Arc::new(PolicyEngine::default());
@@ -149,12 +163,7 @@ pub(crate) async fn invoke(
     mgr.initialize().await.expect("initialize");
 
     let (result, _bg) = mgr
-        .invoke_named::<IdentityHook>(
-            HOOK_IDENTITY_RESOLVE,
-            IdentityPayload::new(token, source),
-            Extensions::default(),
-            None,
-        )
+        .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, Extensions::default(), None)
         .await;
     result
 }

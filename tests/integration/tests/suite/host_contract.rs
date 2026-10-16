@@ -147,7 +147,9 @@ plugins:
     capabilities: [perform_http]
     config:
       role: user
-      header: X-User-Token
+      credential:
+        kind: header
+        name: X-User-Token
       trusted_issuers:
         - issuer: "https://idp.test/realms/policy-demo"
           audiences: ["praxis-gateway"]
@@ -162,7 +164,9 @@ plugins:
     capabilities: [perform_http]
     config:
       role: client
-      header: Authorization
+      credential:
+        kind: header
+        name: Authorization
       trusted_issuers:
         - issuer: "https://idp.test/realms/policy-demo"
           audiences: ["praxis-gateway"]
@@ -1050,4 +1054,112 @@ async fn leak_checks_include_tokens_minted_before_a_denial() {
     assert!(out.upstream.is_none());
     out.assert_no_leaks(&Planted::new());
     assert_recorded_token(&mut out, minted, "access_token");
+}
+
+// ---------------------------------------------------------------------------
+// Cookie and query-param credential locations (end-to-end)
+// ---------------------------------------------------------------------------
+
+const HS256_SECRET: &str = "test-secret-at-least-32-bytes-long!!";
+
+const COOKIE_CONFIG: &str = r#"
+engine_settings:
+  dispatch: hooks
+plugins:
+  - name: jwt-cookie
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    config:
+      role: user
+      credential:
+        kind: cookie
+        name: __Host-jwt
+      trusted_issuers:
+        - issuer: "https://idp.test/realms/policy-demo"
+          audiences: ["praxis-gateway"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "test-secret-at-least-32-bytes-long!!"
+      claim_mapper: standard
+"#;
+
+const QUERY_PARAM_CONFIG: &str = r#"
+engine_settings:
+  dispatch: hooks
+plugins:
+  - name: jwt-query
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    config:
+      role: user
+      credential:
+        kind: query_param
+        name: access_token
+      trusted_issuers:
+        - issuer: "https://idp.test/realms/policy-demo"
+          audiences: ["praxis-gateway"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "test-secret-at-least-32-bytes-long!!"
+      claim_mapper: standard
+"#;
+
+fn hs256_token(claims: &Value) -> String {
+    idp::forge(
+        &json!({"alg": "HS256", "typ": "JWT"}),
+        claims,
+        idp::Signer::Hs256(HS256_SECRET.as_bytes()),
+    )
+}
+
+fn standard_claims() -> Value {
+    json!({
+        "iss": idp::ISSUER,
+        "aud": idp::GATEWAY_AUDIENCE,
+        "sub": "cookie-user",
+        "preferred_username": "cookie-user",
+        "exp": 4_102_444_800_u64,
+    })
+}
+
+/// A JWT carried in a cookie resolves the user identity end-to-end.
+#[tokio::test]
+async fn cookie_credential_resolves_identity() {
+    let engine = host::engine(Vec::new());
+    engine.load_config_yaml(COOKIE_CONFIG).expect("load");
+    engine.initialize().await.expect("initialize");
+
+    let token = hs256_token(&standard_claims());
+    let payload = IdentityPayload::new(String::new(), TokenSource::Bearer)
+        .with_headers(headers(&[("cookie", &format!("__Host-jwt={token}"))]));
+    let (result, _bg) = engine
+        .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, Extensions::default(), None)
+        .await;
+    assert!(result.continue_processing, "denied: {:?}", result.violation);
+
+    let identity = IdentityPayload::from_pipeline_result(&result).expect("resolved identity");
+    let subject = identity.subject.expect("a user subject");
+    assert_eq!(subject.id.as_deref(), Some("cookie-user"));
+}
+
+/// A JWT carried in a query parameter resolves the user identity end-to-end.
+#[tokio::test]
+async fn query_param_credential_resolves_identity() {
+    let engine = host::engine(Vec::new());
+    engine.load_config_yaml(QUERY_PARAM_CONFIG).expect("load");
+    engine.initialize().await.expect("initialize");
+
+    let token = hs256_token(&standard_claims());
+    let payload = IdentityPayload::new(String::new(), TokenSource::Bearer)
+        .with_raw_query_string(format!("access_token={token}"));
+    let (result, _bg) = engine
+        .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, Extensions::default(), None)
+        .await;
+    assert!(result.continue_processing, "denied: {:?}", result.violation);
+
+    let identity = IdentityPayload::from_pipeline_result(&result).expect("resolved identity");
+    let subject = identity.subject.expect("a user subject");
+    assert_eq!(subject.id.as_deref(), Some("cookie-user"));
 }

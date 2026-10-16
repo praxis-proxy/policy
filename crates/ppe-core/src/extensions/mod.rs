@@ -65,8 +65,8 @@ pub use meta::MetaExtension;
 pub use monotonic::{DeclassifierToken, MonotonicSet};
 pub use provenance::ProvenanceExtension;
 pub use raw_credentials::{
-    DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken, RawInboundToken,
-    TokenKind, TokenRole,
+    Credential, DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken,
+    RawInboundToken, TokenKind, TokenRole,
 };
 pub use request::RequestExtension;
 pub use routing::{

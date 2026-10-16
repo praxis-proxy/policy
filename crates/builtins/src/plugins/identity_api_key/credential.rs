@@ -8,50 +8,12 @@
 // lookup querying every directory. And it is stripped before the lookup,
 // because the stored record is keyed by the key and not by the transport
 // framing around it.
-//
-// # Relationship to PR #96
-//
-// `Credential` here is a local stand-in for the shared type that PR #96 adds to
-// `ppe-core` as `praxis_policy_core::identity::Credential`, approved and
-// awaiting merge. The tag, the field name, and the variant spellings match it
-// exactly, so adopting it is a delete plus an import with no operator-visible
-// config change.
-//
-// Only `Header` is declared here. Cookie and query parameter locations are not
-// withheld on principle: a query parameter cannot be read from a plugin today
-// at all, because `IdentityPayload` carries no URI, and #96 is what adds
-// `raw_query_string` along with a parser that enforces a length limit, rejects
-// control characters, and rejects duplicate names. Writing a second cookie
-// parser here to bridge the gap would be the worse of the two.
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use praxis_policy_core::extensions::raw_credentials::Credential;
 
 use crate::plugins::identity_api_key::directory::PresentedKey;
-
-/// Where the credential sits on the request.
-///
-/// `#[non_exhaustive]` for the same reason #96 gives: a location added later
-/// must not break an exhaustive `match` downstream.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Credential {
-    /// An HTTP header, e.g. `Authorization: Bearer sk-oai-<key>`.
-    Header {
-        /// The header name.
-        name: String,
-    },
-}
-
-impl std::fmt::Display for Credential {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Header { name } => write!(f, "header '{name}'"),
-        }
-    }
-}
 
 /// Where the credential sits, and what marks it as this resolver's.
 ///
@@ -135,9 +97,24 @@ impl CredentialLocation {
     }
 
     /// The name of the wire location, whatever kind it is.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `credential` is an unknown future variant. `validate()`
+    /// rejects unsupported variants at config load, so this is
+    /// unreachable in practice.
     pub fn name(&self) -> &str {
         match &self.credential {
-            Credential::Header { name } => name,
+            Credential::Header { name }
+            | Credential::Cookie { name }
+            | Credential::QueryParam { name } => name,
+            other => {
+                debug_assert!(
+                    false,
+                    "CredentialLocation::name() called on unsupported variant: {other}"
+                );
+                "unsupported"
+            },
         }
     }
 
@@ -151,6 +128,13 @@ impl CredentialLocation {
             Credential::Header { name } => headers
                 .get(name.to_ascii_lowercase().as_str())
                 .map(String::as_str),
+            other => {
+                debug_assert!(
+                    false,
+                    "CredentialLocation::raw() called on unsupported variant: {other}"
+                );
+                None
+            },
         }
     }
 
@@ -223,6 +207,13 @@ impl CredentialLocation {
     /// admits everything, so it is a mistake worth naming rather than
     /// silently treating as absent.
     pub fn validate(&self) -> Result<(), String> {
+        if !matches!(self.credential, Credential::Header { .. }) {
+            return Err(format!(
+                "{}: identity/api-key supports header credentials only; \
+                 cookie and query_param are not yet supported",
+                self.credential
+            ));
+        }
         if self.name().trim().is_empty() {
             return Err(format!("{} has an empty name", self.credential));
         }

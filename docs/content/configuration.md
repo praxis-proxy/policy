@@ -108,7 +108,9 @@ plugins:
     capabilities: [perform_http]
     config:
       role: user
-      header: X-User-Token
+      credential:
+        kind: header
+        name: X-User-Token
       trusted_issuers:
         - issuer: "https://idp.example.com/realms/agents"
           audiences: ["ppe-gateway"]
@@ -120,6 +122,53 @@ plugins:
 A plugin that reaches outside the process must declare `perform_http`.
 Withholding it stops the call rather than degrading it, because a
 plugin that quietly skipped its IdP call would fail open.
+
+### Credential location
+
+The `identity/jwt` plugin reads one inbound credential per instance.
+The `credential:` block names where on the wire that credential sits:
+
+<!-- validate: fragment -->
+```yaml
+# Header (the default when `credential:` is omitted)
+credential:
+  kind: header
+  name: Authorization
+```
+
+<!-- validate: fragment -->
+```yaml
+# Cookie — browser apps that set an HttpOnly cookie
+credential:
+  kind: cookie
+  name: __Host-jwt
+```
+
+<!-- validate: fragment -->
+```yaml
+# Query parameter — WebSocket / SSE endpoints that cannot set headers
+credential:
+  kind: query_param
+  name: access_token
+```
+
+Omitting `credential:` entirely defaults to
+`{ kind: header, name: Authorization }`.
+
+> **Security: query-parameter credentials and logging.** A token in a
+> query string routinely appears in access logs, CDN logs, and browser
+> history outside PPE's control. PPE itself never logs the token value,
+> but infrastructure around it may capture the raw URL. When a resolver
+> is configured for `query_param`, PPE logs a one-time notice at
+> startup so the operator can scrub query strings from their own
+> logging pipeline.
+
+> **Migration from `header:`.** The previous `header:` config key is
+> removed. A config still writing `header: "Authorization"` fails the
+> load as an unrecognized field. Replace it with
+> `credential: { kind: header, name: Authorization }`. A config that
+> never set `header:` needs no change — the default remains the
+> `Authorization` header.
 
 ## Global
 
