@@ -25,7 +25,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   in its `cnf.jkt`, and each proof is accepted once. A verified binding is
   visible to policy as `subject.key_binding`, `client.key_binding` or
   `caller_workload.key_binding`. Replay detection is per instance until
-  host-injected stores land (#127).
+  host-injected stores land (#127). When an IdP refuses to exchange a
+  `DPoP`-bound token, `delegator/oauth`'s `delegation.idp_rejected` reason says
+  which token was bound and what to change, and names it in
+  `details.bound_tokens`.
   ([#204](https://github.com/praxis-proxy/policy/issues/204))
 
 ## [0.5.0] - 2026-10-13

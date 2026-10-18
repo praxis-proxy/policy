@@ -302,6 +302,7 @@ async fn a_bound_token_without_a_proof_is_denied_in_either_mode() {
     }
 }
 
+/// RFC 9449 Section 7.2: a `DPoP`-bound token sent as a bearer token is rejected.
 #[tokio::test]
 async fn a_bound_token_presented_as_bearer_is_denied_even_with_a_proof() {
     let token = bound_token(&agent());
@@ -325,6 +326,7 @@ async fn the_dpop_scheme_is_refused_by_an_issuer_that_does_not_check_proofs() {
 // One check fails
 // ---------------------------------------------------------------------
 
+/// RFC 9449 Section 4.3, check 6: the signature verifies with the header `jwk`.
 #[tokio::test]
 async fn a_proof_whose_signature_does_not_match_its_key_is_denied() {
     // Signed by another key, but carrying the agent's public key.
@@ -339,6 +341,8 @@ async fn a_proof_whose_signature_does_not_match_its_key_is_denied() {
     assert_eq!(denied_with(&result), codes::DPOP_INVALID);
 }
 
+/// RFC 9449 Section 4.3, check 12: the proof key matches the key the token is bound
+/// to (`cnf.jkt`).
 #[tokio::test]
 async fn a_proof_from_a_different_key_is_a_key_mismatch() {
     let token = bound_token(&agent());
@@ -348,6 +352,7 @@ async fn a_proof_from_a_different_key_is_a_key_mismatch() {
     assert_eq!(denied_with(&result), codes::DPOP_KEY_MISMATCH);
 }
 
+/// RFC 9449 Section 4.3, check 5: an accepted asymmetric algorithm.
 #[tokio::test]
 async fn a_proof_algorithm_the_issuer_does_not_accept_is_denied() {
     let token = bound_token(&agent());
@@ -356,6 +361,7 @@ async fn a_proof_algorithm_the_issuer_does_not_accept_is_denied() {
     assert_eq!(denied_with(&result), codes::DPOP_INVALID);
 }
 
+/// RFC 9449 Section 4.3, checks 8, 9, 11 and 12: `htm`, `htu`, `iat` and `ath`.
 #[tokio::test]
 async fn a_proof_for_another_method_url_time_or_token_is_denied() {
     let token = bound_token(&agent());
@@ -380,6 +386,7 @@ async fn a_proof_for_another_method_url_time_or_token_is_denied() {
     }
 }
 
+/// RFC 9449 Section 4.3, check 7: the `jwk` holds no private key.
 #[tokio::test]
 async fn a_proof_carrying_a_private_key_member_is_denied() {
     let token = bound_token(&agent());
@@ -397,6 +404,7 @@ async fn a_proof_carrying_a_private_key_member_is_denied() {
     assert!(reason.contains("private member"), "{reason}");
 }
 
+/// RFC 9449 Section 11.1: a proof is not accepted twice.
 #[tokio::test]
 async fn a_replayed_proof_is_denied_the_second_time() {
     let gateway = Gateway::new(required()).await;
@@ -555,6 +563,7 @@ async fn invalid_reason(proof: String) -> String {
     result.violation.expect("violation").reason
 }
 
+/// RFC 9449 Section 4.3, check 1: exactly one `DPoP` header.
 #[tokio::test]
 async fn two_dpop_headers_are_denied() {
     let token = bound_token(&agent());
@@ -563,12 +572,14 @@ async fn two_dpop_headers_are_denied() {
     assert!(reason.contains("more than one"), "{reason}");
 }
 
+/// RFC 9449 Section 4.3, check 2: a single well-formed JWT.
 #[tokio::test]
 async fn a_proof_that_is_not_a_jwt_is_denied() {
     let reason = invalid_reason("not-a-jwt".to_owned()).await;
     assert!(reason.contains("well-formed"), "{reason}");
 }
 
+/// RFC 9449 Section 4.3, check 4: `typ` is `dpop+jwt`.
 #[tokio::test]
 async fn a_proof_of_the_wrong_type_is_denied() {
     let token = bound_token(&agent());
@@ -587,6 +598,7 @@ async fn a_proof_without_a_public_key_is_denied() {
     assert!(reason.contains("jwk"), "{reason}");
 }
 
+/// RFC 9449 Section 4.3, check 3: the required claims are present.
 #[tokio::test]
 async fn a_proof_with_an_empty_or_oversized_jti_is_denied() {
     let token = bound_token(&agent());
@@ -625,6 +637,7 @@ async fn a_cnf_without_a_usable_jkt_is_denied_rather_than_treated_as_unbound() {
     }
 }
 
+/// RFC 7515 Section 4.1.11: an unsupported `crit` extension is rejected.
 #[tokio::test]
 async fn a_proof_naming_critical_extensions_is_denied() {
     let token = bound_token(&agent());
@@ -672,4 +685,36 @@ fn an_unusable_external_base_url_fails_at_load() {
             "{base} must not load"
         );
     }
+}
+
+#[test]
+fn a_dpop_issuer_with_no_proof_algorithms_or_an_out_of_range_window_fails_at_load() {
+    for dpop in [
+        json!({ "mode": "required", "algorithms": [] }),
+        json!({ "mode": "required", "iat_window_seconds": 0 }),
+        json!({ "mode": "required", "iat_window_seconds": 301 }),
+    ] {
+        let cfg = dpop_config(dpop.clone());
+        assert!(
+            JwtIdentityResolver::new(cfg).is_err(),
+            "{dpop} weakens or disables the check and must not load"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_long_client_value_is_clipped_in_the_denial_reason() {
+    let token = bound_token(&agent());
+    let key = agent();
+    let mut claims = claims_for(&token);
+    claims["htm"] = json!("X".repeat(300));
+    let reason = invalid_reason(proof(&key, &key.jwk, Algorithm::ES256, &claims)).await;
+    assert!(
+        reason.contains('…'),
+        "a 300-character htm is clipped: {reason}"
+    );
+    assert!(
+        !reason.contains(&"X".repeat(121)),
+        "no more than 120 characters of it are repeated"
+    );
 }

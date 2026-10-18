@@ -177,7 +177,9 @@ pub struct TrustedIssuerConfig {
     pub leeway_seconds: u64,
 
     /// Whether tokens from this issuer must be bound to the presenter's key
-    /// with `DPoP` (RFC 9449). Off by default. See [`DpopConfig`].
+    /// with `DPoP` ([RFC 9449]). Off by default. See [`DpopConfig`].
+    ///
+    /// [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
     #[serde(default)]
     pub dpop: DpopConfig,
 }

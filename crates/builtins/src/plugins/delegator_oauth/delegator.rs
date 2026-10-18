@@ -33,7 +33,8 @@
 //   * `delegation.idp_unreachable` — network failure
 //   * `delegation.idp_timeout` — exceeded `timeout_seconds`
 //   * `delegation.idp_rejected` — token endpoint returned 4xx/5xx (status in
-//                                  `details.http_status`)
+//                                  `details.http_status`; a `DPoP`-bound token
+//                                  sent is named in `details.bound_tokens`)
 //   * `delegation.bad_response` — response not valid JSON or
 //                                 missing required fields
 //   * `delegation.scope_too_broad` — IdP returned a token whose
@@ -502,6 +503,64 @@ fn idp_rejection(leg: &str, response: &HttpResponse) -> PluginViolation {
 /// The `details` key `idp_rejection` puts the HTTP status under.
 const IDP_STATUS_DETAIL: &str = "http_status";
 
+/// The `details` key naming the bound tokens a rejected exchange sent.
+const BOUND_TOKENS_DETAIL: &str = "bound_tokens";
+
+/// Whether a JWT says it is bound to a key (`cnf.jkt`, `DPoP`).
+///
+/// Read without verifying: the identity resolver already verified the token,
+/// and this only shapes the message of a rejection, never a decision.
+fn names_bound_key(token: &str) -> bool {
+    use base64::Engine as _;
+    token
+        .split('.')
+        .nth(1)
+        .and_then(|payload| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .ok()
+        })
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|claims| claims.pointer("/cnf/jkt").is_some())
+}
+
+/// Which of the tokens an exchange sent are bound to a key.
+fn bound_tokens_sent(subject_token: Option<&str>, actor_token: Option<&str>) -> Vec<&'static str> {
+    let mut bound = Vec::new();
+    if subject_token.is_some_and(names_bound_key) {
+        bound.push("subject_token");
+    }
+    if actor_token.is_some_and(names_bound_key) {
+        bound.push("actor_token");
+    }
+    bound
+}
+
+/// Explain a rejected exchange that sent a `DPoP`-bound token.
+///
+/// An `IdP` may let only the client a bound token was issued to exchange it,
+/// with a proof from its key, which this instance cannot produce. Keycloak
+/// does. The bare rejection does not say so, and the fix is a configuration
+/// change rather than a retry, so the reason names it.
+fn with_binding_hint(mut violation: PluginViolation, bound: &[&'static str]) -> PluginViolation {
+    if bound.is_empty() {
+        return violation;
+    }
+    violation.reason = format!(
+        "{}; the {} sent {} DPoP-bound, and an IdP may let only the client it was issued to \
+         exchange a bound token: exchange an unbound token, or delegate on this instance's own \
+         credential (subject: this_workload)",
+        violation.reason,
+        bound.join(" and "),
+        if bound.len() == 1 { "is" } else { "are" },
+    );
+    violation.details.insert(
+        BOUND_TOKENS_DETAIL.to_owned(),
+        serde_json::Value::from(bound.to_vec()),
+    );
+    violation
+}
+
 /// A fresh key per mint attempt.
 ///
 /// Recovery resolves keys across the whole log, so this must never be reused:
@@ -680,7 +739,14 @@ impl OAuthDelegator {
                     if !response.is_success() {
                         // Leg 2 submits the caller's bearer as `subject_token`,
                         // which is why `idp_rejection` never echoes the body.
-                        return Err(idp_rejection("token exchange", &response));
+                        let sent_bound = bound_tokens_sent(
+                            (!as_this_workload).then_some(subject_token.as_ref()),
+                            actor_requested.then_some(actor_token),
+                        );
+                        return Err(with_binding_hint(
+                            idp_rejection("token exchange", &response),
+                            &sent_bound,
+                        ));
                     }
 
                     match serde_json::from_slice::<TokenExchangeResponse>(&response.body) {

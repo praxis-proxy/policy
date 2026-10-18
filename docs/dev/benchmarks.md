@@ -34,6 +34,7 @@ never inside Criterion iters. Compile cost matters at load, not per request.
 | `pdp_cost` | Per-PDP cost | Cedar / CEL / OPA `evaluate` only |
 | `memory` | Memory | Session taint; policy-size decision sweep; optional dhat |
 | `heap_profile` | Memory (bytes) | Per-decision alloc + policy-size footprint (`dhat-heap`) |
+| `dpop` | Time — `DPoP` proof check | What `DPoP` adds to a request: the proof check, and recording its `jti` in the in-memory replay store |
 
 Criterion’s console/HTML report mean / median / slope. It does **not** print
 p95/p99 by default. Benches use `SamplingMode::Flat` so each sample runs the
@@ -186,6 +187,22 @@ reseed moved into the `iter_batched` setup closure, which Criterion does not
 time, and appending one label is constant work regardless of how many are
 already present. The row needs a re-capture on the reference host. Both other
 session rows still scale with their input and are unaffected.
+
+### `DPoP` proof check
+
+What a `DPoP`-bound request adds to `identity/jwt`, on top of validating the
+access token (praxis-proxy/policy#204). Captured 2026-10-17 with
+`cargo bench -p ppe-benches --bench dpop` on an Apple M2 Max (12 cores,
+64 GiB, macOS 26.6.2), `rustc` 1.96.0.
+
+| Benchmark | Median | What it measures |
+|---|---|---|
+| `dpop/verify_proof` | 49.5 µs | Decode, `typ`, `jwk` thumbprint, ES256 signature, `htm`/`htu`/`iat`/`ath` |
+| `dpop/replay_guard_first_use` | 0.30 µs | Recording a proof id in `InMemoryReplayGuard`, steady state |
+
+The ES256 signature check dominates. The cost applies only to issuers with
+`dpop.mode` set to `optional` or `required`, and only to bound tokens; with the
+default `off` there is none.
 
 ### CPU profile findings (captured flamegraph)
 

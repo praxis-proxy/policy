@@ -39,7 +39,9 @@
 pub mod claim_map;
 /// Plugin configuration and its validation.
 pub mod config;
-/// `DPoP` (RFC 9449) proof-of-possession verification.
+/// `DPoP` ([RFC 9449]) proof-of-possession verification.
+///
+/// [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
 pub mod dpop;
 /// Constructs the resolver from configuration.
 pub mod factory;

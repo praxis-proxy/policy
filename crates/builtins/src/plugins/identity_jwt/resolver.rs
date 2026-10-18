@@ -1048,7 +1048,9 @@ const CONFIG_ERROR: &str = "auth.config_error";
 enum AuthScheme {
     /// `Bearer <token>`.
     Bearer,
-    /// `DPoP <token>` (RFC 9449 section 7.1).
+    /// `DPoP <token>` ([RFC 9449 Section 7.1]).
+    ///
+    /// [RFC 9449 Section 7.1]: https://datatracker.ietf.org/doc/html/rfc9449#section-7.1
     Dpop,
     /// A bare token: the host stripped the scheme, or the header carries none.
     Unspecified,
@@ -1056,8 +1058,11 @@ enum AuthScheme {
 
 /// Split a leading `Bearer` or `DPoP` auth-scheme from a header value.
 ///
-/// Schemes are case-insensitive per RFC 9110 §11.1. Bare tokens are returned
-/// unchanged, as `Unspecified`, for hosts that strip the scheme themselves.
+/// Schemes are case-insensitive per [RFC 9110 Section 11.1]. Bare tokens are
+/// returned unchanged, as `Unspecified`, for hosts that strip the scheme
+/// themselves.
+///
+/// [RFC 9110 Section 11.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-11.1
 fn split_auth_scheme(value: &str) -> (AuthScheme, &str) {
     match value.split_once(' ') {
         Some((scheme, after)) if scheme.eq_ignore_ascii_case("bearer") => {

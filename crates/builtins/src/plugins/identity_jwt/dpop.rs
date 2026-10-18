@@ -1,25 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! `DPoP` (RFC 9449) proof verification.
+//! `DPoP` ([RFC 9449]) proof verification.
 //!
-//! An issuer that binds a token to a key records the key's RFC 7638 thumbprint in
-//! the token's `cnf.jkt`. With every request the presenter sends a proof: a JWT
-//! of type `dpop+jwt` in the `DPoP` header, signed with the private key, carrying
-//! the public key in its header and naming the request's method (`htm`) and URL
-//! (`htu`), the time (`iat`), a unique id (`jti`) and the SHA-256 of the access
-//! token (`ath`). A copied token is useless without the key, and a copied proof
-//! is useless for any other request, after its window, or a second time.
+//! An issuer that binds a token to a key records the key's [RFC 7638] thumbprint
+//! in the token's `cnf.jkt`. With every request the presenter sends a proof: a
+//! JWT of type `dpop+jwt` in the `DPoP` header, signed with the private key,
+//! carrying the public key in its header and naming the request's method (`htm`)
+//! and URL (`htu`), the time (`iat`), a unique id (`jti`) and the SHA-256 of the
+//! access token (`ath`). A copied token is useless without the key, and a copied
+//! proof is useless for any other request, after its window, or a second time.
 //!
-//! [`ProofOfPossession`](crate::plugins::identity_jwt::dpop::ProofOfPossession) is the general shape: a credential names a key, the
+//! [`ProofOfPossession`] is the general shape: a credential names a key, the
 //! request proves possession of it. `DPoP` is the first implementation; a
-//! certificate-bound token (RFC 8705) or a WIMSE proof token would be others.
+//! certificate-bound token ([RFC 8705]) or a WIMSE proof token would be others.
 //!
-//! [`ReplayGuard`](crate::plugins::identity_jwt::dpop::ReplayGuard) remembers each accepted proof's `jti` for as long as the proof
-//! counts as recent. [`InMemoryReplayGuard`](crate::plugins::identity_jwt::dpop::InMemoryReplayGuard) covers one gateway instance. Several
-//! instances need a store they share, so that a proof replayed to a different
-//! instance is still caught; that waits on host-injected stores (praxis-proxy/
-//! policy#127), and the interface here is what such a store would implement.
+//! [`ReplayGuard`] remembers each accepted proof's `jti` for as long as the
+//! proof counts as recent. [`InMemoryReplayGuard`] covers one gateway instance.
+//! Several instances need a store they share, so that a proof replayed to a
+//! different instance is still caught; that waits on host-injected stores
+//! ([praxis-proxy/policy#127]), and the interface here is what such a store
+//! would implement.
+//!
+//! [`ProofOfPossession`]: crate::plugins::identity_jwt::dpop::ProofOfPossession
+//! [`ReplayGuard`]: crate::plugins::identity_jwt::dpop::ReplayGuard
+//! [`InMemoryReplayGuard`]: crate::plugins::identity_jwt::dpop::InMemoryReplayGuard
+//! [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
+//! [RFC 7638]: https://datatracker.ietf.org/doc/html/rfc7638
+//! [RFC 8705]: https://datatracker.ietf.org/doc/html/rfc8705
+//! [praxis-proxy/policy#127]: https://github.com/praxis-proxy/policy/issues/127
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
@@ -154,18 +163,16 @@ struct ReplayState {
 
 impl ReplayState {
     fn prune(&mut self, now: i64) {
-        while let Some(first) = self.by_expiry.first() {
-            if first.0 > now {
-                break;
-            }
-            let Some((_, scope, id)) = self.by_expiry.pop_first() else {
-                break;
-            };
-            self.seen.remove(&(scope.clone(), id));
-            if let Some(count) = self.per_scope.get_mut(&scope) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.per_scope.remove(&scope);
+        // Oldest first, stopping at the first entry still live, so a call reads
+        // only what has expired. Removing in place avoids building a new tree.
+        while self.by_expiry.first().is_some_and(|entry| entry.0 <= now) {
+            if let Some((_, scope, id)) = self.by_expiry.pop_first() {
+                self.seen.remove(&(scope.clone(), id));
+                if let Some(count) = self.per_scope.get_mut(&scope) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.per_scope.remove(&scope);
+                    }
                 }
             }
         }
@@ -243,8 +250,10 @@ impl ReplayGuard for InMemoryReplayGuard {
     }
 }
 
-/// The RFC 7638 thumbprint of a public JWK: base64url SHA-256 over its required
-/// members in lexicographic order, without whitespace.
+/// The [RFC 7638 Section 3] thumbprint of a public JWK: base64url SHA-256 over
+/// its required members in lexicographic order, without whitespace.
+///
+/// [RFC 7638 Section 3]: https://datatracker.ietf.org/doc/html/rfc7638#section-3
 ///
 /// Returns `None` for a key type this verifier does not accept or a JWK missing
 /// a required member. Symmetric (`oct`) keys are not accepted: a proof signed
@@ -602,6 +611,38 @@ mod tests {
             guard.first_use("quiet", "1", 100, 0).await,
             Ok(true),
             "other keys still work"
+        );
+    }
+
+    #[tokio::test]
+    async fn expiring_one_of_a_keys_proofs_frees_one_slot_of_its_quota() {
+        let guard = InMemoryReplayGuard::new(100, 2);
+        assert_eq!(guard.first_use("k", "a", 10, 0).await, Ok(true));
+        assert_eq!(guard.first_use("k", "b", 100, 0).await, Ok(true));
+        // At now = 20 "a" has expired and "b" has not: the key holds one live
+        // proof, so one more fits and the next does not.
+        assert_eq!(
+            guard.first_use("k", "c", 100, 20).await,
+            Ok(true),
+            "expiring a proof returns its slot to the key's quota"
+        );
+        assert!(
+            matches!(
+                guard.first_use("k", "d", 100, 20).await,
+                Err(ReplayUnavailable(_))
+            ),
+            "the key is back at its quota of two live proofs"
+        );
+    }
+
+    #[test]
+    fn the_dpop_verifier_records_its_method_as_dpop() {
+        let config = DpopConfig::default();
+        let guard = InMemoryReplayGuard::default();
+        assert_eq!(DpopVerifier::new(&config, &guard).method(), METHOD);
+        assert_eq!(
+            METHOD, "dpop",
+            "policy compares key_binding against this name"
         );
     }
 

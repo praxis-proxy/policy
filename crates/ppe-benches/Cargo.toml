@@ -26,7 +26,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-praxis-policy-builtins = { workspace = true, features = ["cedar", "cel", "opa"] }
+praxis-policy-builtins = { workspace = true, features = ["cedar", "cel", "opa", "jwt"] }
 praxis-policy-core = { workspace = true }
 praxis-policy-apl-core = { workspace = true }
 praxis-policy-apl-runtime = { workspace = true }
@@ -37,6 +37,11 @@ dhat = { version = "0.3.3", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# The `dpop` bench signs proofs with a P-256 key derived from a fixed scalar.
+p256 = { workspace = true }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+base64 = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 dhat-heap = ["dep:dhat"]
@@ -62,6 +67,10 @@ harness = false
 
 [[bench]]
 name = "memory"
+harness = false
+
+[[bench]]
+name = "dpop"
 harness = false
 
 [[bench]]

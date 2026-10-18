@@ -61,6 +61,7 @@ delegator uses:
 | record both the user *and* the calling agent in the token | `subject: user`, `actor: caller_workload` | RFC 8693 `actor_token` |
 | forward a token the caller already obtained | no `delegate`, pass the header through | — |
 | authenticate a caller holding an opaque API key | `identity/api-key` → directory lookup | — |
+| require the agent to prove it holds the key its token is bound to | `dpop` on the trusted issuer, then [Recipe 11](#recipe-11-an-agent-with-a-dpop-bound-token) | RFC 9449 |
 
 ---
 
@@ -428,14 +429,21 @@ actor on the wire exactly as RFC 8693 delegation prescribes (`actor_token` +
 > `act`. PPE always sends the delegation request, but the claim only appears
 > if the service honors it.
 >
-> Keycloak does not. Keycloak's Standard Token Exchange (v2, tested here on
-> 26.6) implements impersonation only: it silently ignores `actor_token` and
-> returns a subject-only token with no `act`. The tell (probed 2026-07-28):
-> passing even a raw, untrusted-issuer SVID as the exchange's `actor_token`
-> produces no error. Keycloak never parses the parameter, so no mapper or
-> config can surface it. To see `act` end-to-end you need a delegation-capable
-> token service; against Keycloak, capture the acting agent at the PPE boundary
-> (audit / downstream header) instead. PPE resolves both principals either way.
+> Keycloak's Standard Token Exchange (v2, tested here on 26.6) does not: it
+> implements impersonation only, silently ignores `actor_token`, and returns a
+> subject-only token with no `act`. The tell (probed 2026-07-28): passing even
+> a raw, untrusted-issuer SVID as the exchange's `actor_token` produces no
+> error.
+>
+> Keycloak 26.8 adds delegation as a preview feature
+> (`token-exchange-delegation`), and it changes that outcome for this recipe.
+> It takes over any exchange carrying an `actor_token`, requires the actor
+> token to be an access token from the same realm, and requires the subject
+> token to name the actor in a `may_act` claim ([details](apl/delegation.md#on-behalf-of-a-user-with-the-agent-named)).
+> A raw SVID is not a realm token, so with that feature on, this recipe's
+> exchange is refused rather than the actor being ignored. Against Keycloak,
+> capture the acting agent at the PPE boundary (audit / downstream header)
+> instead. PPE resolves both principals either way.
 
 ---
 
@@ -838,6 +846,160 @@ TTL expires. The same TTL supplies `RawDelegatedToken.expires_at`, including
 when caching is disabled. That timestamp is a PPE/host handling bound, not
 evidence that the static downstream credential expires at its provider.
 
+### Recipe 11: An agent with a `DPoP`-bound token
+
+When: the agent's own credential should be useless to anyone who copies it,
+from a log, a proxy, or a compromised service in between.
+
+**What `DPoP` is.** An ordinary access token is a bearer token: whoever holds
+it can use it. `DPoP` binds the token to a key pair the agent holds. When the
+agent requests the token, the IdP records the public key's thumbprint in the
+token (`cnf.jkt`). On every call the agent then sends, in a `DPoP` header, a
+short proof signed with the private key, naming the HTTP method and URL, the
+time, a unique id, and a hash of the token. PPE checks the proof against the
+key the token names, so a copied token is useless without the private key, and
+a copied proof is useless for any other request, after a minute, or a second
+time. The key belongs to the agent's application, not to a person. [Binding
+tokens to the caller's key](#binding-tokens-to-the-callers-key-dpop) lists
+every check, setting and denial code.
+
+**What changes compared with the other options:**
+
+| | Bearer token (Recipes 1, 3) | `DPoP`-bound token (this recipe) | SPIFFE SVID (Recipe 2) |
+|---|---|---|---|
+| A copied credential works for someone else | yes, until it expires | no, it needs the private key | yes, until it expires |
+| What PPE checks on each call | signature, expiry, audience | the same, plus a proof for this exact request | the same, against SPIRE's keys |
+| PPE can exchange it downstream (RFC 8693) | yes | no: only the client it was issued to can, with its key | not directly; PPE uses it as a client assertion first |
+| What policy can require | `client.*`, `subject.*` | also `client.key_binding == 'dpop'` | `caller_workload.*` |
+
+The third row is the one that shapes the configuration. PPE verifies the
+agent's bound token on the way in, but cannot pass it on in a token exchange,
+so the downstream token has to come from something else. There are two ways.
+
+**Acting for a user.** The agent sends two tokens: its own `DPoP`-bound token
+in `Authorization`, with a proof in the `DPoP` header, and the signed-in user's
+token, an ordinary bearer token, in `X-User-Token`. They go to different places:
+
+1. `jwt-agent` verifies the agent's token and its proof, and fills the
+   `client` slot, including `client.key_binding`. The agent's token goes no
+   further.
+2. `jwt-user` verifies the user's token, fills the `subject` slot, and keeps
+   the raw token for delegation.
+3. `delegate(..., subject: user)` sends the user's token to the IdP as the RFC
+   8693 `subject_token`, authenticating as PPE's own client (`ppe`).
+4. The IdP returns a `workday-api` token for the user, and PPE attaches it to
+   the call to the tool.
+
+PPE is the client that requests the downstream token, the user is who it
+speaks for (`sub`), and the agent does not appear in it.
+
+```yaml
+plugins:
+  - name: jwt-agent
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [perform_http, read_headers]   # read_headers: the proof names the request line
+    config:
+      role: client
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com/realms/corp"
+          audiences: ["ppe"]
+          algorithms: ["RS256"]
+          decoding_key: { kind: jwks_url, url: "https://idp.example.com/realms/corp/protocol/openid-connect/certs" }
+          dpop: { mode: required }               # the agent's token must be bound
+
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      role: user
+      header: X-User-Token
+      trusted_issuers:
+        - issuer: "https://idp.example.com/realms/corp"   # same IdP, its own settings: no dpop
+          audiences: ["ppe"]
+          algorithms: ["RS256"]
+          decoding_key: { kind: jwks_url, url: "https://idp.example.com/realms/corp/protocol/openid-connect/certs" }
+
+  - name: workday-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    capabilities: [perform_http, read_inbound_credentials, write_delegated_tokens]
+    config:
+      token_endpoint: "https://idp.example.com/realms/corp/protocol/openid-connect/token"
+      client_id: "ppe"
+      client_secret_source: { kind: env_var, name: IDP_CLIENT_SECRET }
+
+global:
+  authentication: [jwt-agent, jwt-user]
+
+routes:
+  - tool: get_compensation
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
+        # subject: user (the default, written out): exchange the user's token
+        # from X-User-Token. The agent's bound token cannot be exchanged.
+        - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation], subject: user)"
+```
+
+Each resolver has its own issuer settings, so one IdP can be trusted with `DPoP`
+for the agent's token and without it for the user's. The proof is checked
+against the token in the agent resolver's own header, so the user resolver
+never reads it.
+
+This works only while the user's token is not itself bound to the agent's key.
+`DPoP` binds a token to whichever application requested it, so if the agent
+obtained the user's token through its own `DPoP`-bound client, that token is
+bound too, PPE cannot exchange it, and only the second option remains. The
+user's token is also still a bearer token: the binding protects the agent's
+credential, not the user's. Naming the agent as the actor in the exchange
+(Recipe 6) does not help here, because the IdP checks the actor token's binding
+and only the agent can prove it.
+
+**Acting as itself.** With no user, PPE gets the downstream token on its own
+credential, as in Recipe 3, after verifying the agent. With the plugins above,
+a route for it:
+
+<!-- validate: fragment -->
+```yaml
+routes:
+  - tool: sync_directory
+    authentication:
+      replace_inherited: true
+      steps: [jwt-agent]                         # the agent alone, no user token
+    authorization:
+      pre_invocation:
+        - "delegate(workday-oauth, target: workday-api, audience: workday-api, subject: this_workload)"
+```
+
+Here PPE requests the downstream token with `client_credentials` on its own
+client, and the token speaks for PPE (`sub` is PPE's service account). Neither
+the agent's token nor any user token is sent to the IdP.
+
+In both variants the agent is verified on the way in and governed by policy, but
+it is not named in the downstream token, because its bound token is the one
+credential PPE cannot pass on. A tool that needs to know which agent called has
+to be told separately, for example with an [assertion](assertions.md) built
+from the agent's verified identity.
+
+**Requiring the binding per route.** With `mode: required`, every token from
+that issuer is already bound when policy runs, so a route needs nothing more.
+During a rollout, `mode: optional` lets bearer tokens through, and a route can
+still insist on a bound token for its own calls:
+
+<!-- validate: apl-predicate -->
+```text
+client.key_binding == 'dpop'
+```
+
+Used as `require(client.key_binding == 'dpop')`, it denies a bearer token,
+because `client.key_binding` is set only after a proof verifies.
+
+Tested: inbound verification against Keycloak 26.8 (`dpop_live`, see
+[Testing](testing.md)); the delegation legs are those of Recipes 1 and 3.
+
 ## Reading claims the way your IdP writes them
 
 The JWT identity plugin infers a subject from a token's claims. Which
@@ -914,13 +1076,10 @@ no claims bag and says so at load rather than ignoring the setting.
 
 ## Binding tokens to the caller's key (DPoP)
 
-A bearer token works for whoever holds it, so one copied from a log or a
-misbehaving proxy works as well as the original. DPoP (RFC 9449) binds a token
-to a key. The issuer records the key's thumbprint in the token's `cnf.jkt`, and
-with every request the caller sends a short proof in a `DPoP` header, signed
-with the private key, naming the request's method and URL, the time, a unique
-id, and a hash of the token. A copied token is useless without the key, and a
-copied proof is useless for another request, after its window, or a second time.
+The reference for `DPoP` (RFC 9449) in `identity/jwt`: settings, checks, the
+policy view, denial codes and limits. For what `DPoP` is, how it compares with
+bearer tokens and SVIDs, and how to delegate when the caller's token is bound,
+start with [Recipe 11](#recipe-11-an-agent-with-a-dpop-bound-token).
 
 Turn it on per trusted issuer. The plugin must hold `read_headers`, because the
 proof is checked against the request line; without it the plugin refuses to
@@ -1040,9 +1199,9 @@ Keycloak issues DPoP-bound tokens when the client sets "Require DPoP bound
 tokens" (`dpop.bound.access.tokens`). A bound token can be exchanged only by the
 client it was issued to, with a proof from the same key. So a gateway that
 verifies the agent's bound token cannot then present it in an RFC 8693
-exchange: it delegates on its own credential instead (`subject: this_workload`),
-having verified the agent on the way in. The downstream token then speaks for
-the gateway, not the agent.
+exchange. [Recipe 11](#recipe-11-an-agent-with-a-dpop-bound-token) shows the
+two ways to get a downstream token instead: exchange a separate user token, or
+delegate on PPE's own credential (`subject: this_workload`).
 
 ## Caching a delegated token
 

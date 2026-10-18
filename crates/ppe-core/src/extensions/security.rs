@@ -36,16 +36,22 @@ pub enum SubjectType {
 /// presenter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyBinding {
-    /// How possession was proved, such as `dpop` (RFC 9449). The vocabulary is
-    /// open so other mechanisms, such as certificate-bound tokens, can follow.
+    /// How possession was proved, such as `dpop` ([RFC 9449]). The vocabulary
+    /// is open so other mechanisms, such as certificate-bound tokens
+    /// ([RFC 8705]), can follow.
+    ///
+    /// [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
+    /// [RFC 8705]: https://datatracker.ietf.org/doc/html/rfc8705
     pub method: String,
 
     /// What the credential's confirmation claim (`cnf`) binds it to, in the
-    /// form the method defines. For `dpop` that is the RFC 7638 thumbprint of
+    /// form the method defines. For `dpop` that is the [RFC 7638] thumbprint of
     /// the public key (`cnf.jkt`): base64url SHA-256 over the key's required
     /// members. A certificate-bound method would carry the certificate's
     /// SHA-256 thumbprint (`cnf.x5t#S256`) instead, so compare a thumbprint only
     /// together with [`Self::method`].
+    ///
+    /// [RFC 7638]: https://datatracker.ietf.org/doc/html/rfc7638
     pub thumbprint: String,
 }
 
