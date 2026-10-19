@@ -19,6 +19,8 @@
 // every call site builds the sink's view through `filter_extensions` rather
 // than handing over the executor's unfiltered working copy.
 
+pub mod export;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 

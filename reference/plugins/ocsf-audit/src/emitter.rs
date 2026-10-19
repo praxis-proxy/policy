@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroize as _;
 
+use praxis_policy_core::audit::export::{AuditExporter, AuditStamp, ExportError, SerializedRecord};
 use praxis_policy_core::cmf::{CmfHook, MessagePayload};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::error::PluginError;
@@ -27,7 +28,7 @@ use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
-use crate::config::{OcsfAuditConfig, OcsfDestination, SigningMode};
+use crate::config::{OcsfAuditConfig, SigningMode};
 use crate::ocsf;
 use crate::sign::{DsseSigner, NoopSigner, OcsfSigner, canonical_bytes, fingerprint_value};
 
@@ -86,6 +87,8 @@ pub struct OcsfAuditEmitter {
     chain_uid: String,
     signer: Box<dyn OcsfSigner>,
     chain: Mutex<ChainState>,
+    /// Every record goes to each of these, byte for byte.
+    exporters: Vec<Arc<dyn AuditExporter>>,
     /// Bounds detached writes if an audit callback times out while its
     /// blocking destination is still stalled.
     output_slots: Arc<Semaphore>,
@@ -142,6 +145,17 @@ impl OcsfAuditEmitter {
             // included, so this path and a `config: {}` block agree.
             None => OcsfAuditConfig::default(),
         };
+
+        // Opened here so an unwritable file fails the load, not the first
+        // verdict.
+        let exporters = typed.build_exporters().map_err(|e| {
+            Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' (praxis-policy-plugin-ocsf-audit): {e}",
+                    cfg.name
+                ),
+            })
+        })?;
 
         let chain_uid = typed.chain_uid.clone().unwrap_or_else(|| {
             // A chain spans one process (see `ChainState`), so the default
@@ -227,6 +241,7 @@ impl OcsfAuditEmitter {
             chain_uid,
             signer,
             chain: Mutex::new(ChainState::default()),
+            exporters,
             output_slots: Arc::new(Semaphore::new(MAX_PENDING_WRITES)),
         })
     }
@@ -411,20 +426,60 @@ impl OcsfAuditEmitter {
         }
     }
 
-    #[allow(
-        clippy::print_stderr,
-        reason = "writing the record to stderr is what OcsfDestination::Stderr selects; \
-                  the operator asked for this stream by name"
-    )]
-    async fn emit(&self, event: Value, permit: OwnedSemaphorePermit) {
-        let destination = self.typed.destination;
-        Self::write_off_thread(permit, move || match destination {
-            OcsfDestination::Stderr => eprintln!("{event}"),
-            OcsfDestination::Tracing => {
-                tracing::info!(target: "ocsf.audit", event = %event, "ocsf");
+    /// Serialize `event` once and hand the same bytes to every exporter, on
+    /// a blocking thread. An exporter that fails is logged and the others
+    /// still run: losing one destination must not silence the rest.
+    async fn emit(&self, event: Value, stamp: Option<AuditStamp>, permit: OwnedSemaphorePermit) {
+        let uid = event
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let bytes = match serde_json::to_vec(&event) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::error!(plugin = %self.cfg.name, error = %err, "ocsf record did not serialize");
+                return;
             },
+        };
+        let record = SerializedRecord::json(bytes)
+            .with_stamp(stamp)
+            .with_uid(uid);
+        let exporters = self.exporters.clone();
+        let plugin = self.cfg.name.clone();
+        Self::write_off_thread(permit, move || {
+            for exporter in &exporters {
+                if let Err(err) = exporter.export(std::slice::from_ref(&record)) {
+                    tracing::error!(
+                        plugin = %plugin,
+                        exporter = exporter.name(),
+                        error = %err,
+                        "ocsf record export failed"
+                    );
+                }
+            }
         })
         .await;
+    }
+}
+
+/// The `tracing` destination: one event per record at target `ocsf.audit`,
+/// the record as the `event` field. A `tracing` target is fixed at compile
+/// time, so this lives with the sink rather than among the engine's
+/// exporters.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TracingExporter;
+
+impl AuditExporter for TracingExporter {
+    fn name(&self) -> &str {
+        "tracing"
+    }
+
+    fn export(&self, batch: &[SerializedRecord]) -> Result<(), ExportError> {
+        for record in batch {
+            let event = String::from_utf8_lossy(&record.bytes);
+            tracing::info!(target: "ocsf.audit", event = %event, "ocsf");
+        }
+        Ok(())
     }
 }
 
@@ -432,6 +487,32 @@ impl OcsfAuditEmitter {
 impl Plugin for OcsfAuditEmitter {
     fn config(&self) -> &PluginConfig {
         &self.cfg
+    }
+
+    /// Flush every exporter, so records an exporter wrote without syncing
+    /// (`fsync: never` or `batch`) reach the disk before the engine stops.
+    /// Runs on a blocking thread because a flush is a blocking sync. A
+    /// failing exporter is logged and the rest are still flushed.
+    async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+        let exporters = self.exporters.clone();
+        let plugin = self.cfg.name.clone();
+        let flushed = tokio::task::spawn_blocking(move || {
+            for exporter in &exporters {
+                if let Err(err) = exporter.flush() {
+                    tracing::error!(
+                        plugin = %plugin,
+                        exporter = exporter.name(),
+                        error = %err,
+                        "ocsf exporter flush failed at shutdown"
+                    );
+                }
+            }
+        })
+        .await;
+        if let Err(err) = flushed {
+            tracing::error!(plugin = %self.cfg.name, error = %err, "ocsf exporter flush did not complete");
+        }
+        Ok(())
     }
 
     /// Attach as a decision-audit sink when run in audit-only mode (no
@@ -478,7 +559,8 @@ impl praxis_policy_core::audit::AuditHandler for OcsfAuditEmitter {
         let msg = payload.as_any().downcast_ref::<MessagePayload>();
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let event = self.build_decision(msg, ext, decisions, &now);
-        self.emit(event, permit).await;
+        self.emit(event, AuditStamp::from_decisions(decisions), permit)
+            .await;
     }
 
     fn name(&self) -> &str {
@@ -498,7 +580,7 @@ impl HookHandler<CmfHook> for OcsfAuditEmitter {
         };
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let event = self.build(payload, ext, &now);
-        self.emit(event, permit).await;
+        self.emit(event, None, permit).await;
         // Observation-only: never block the request.
         PluginResult::allow()
     }
@@ -1798,5 +1880,252 @@ mod tests {
             ev["type_uid"].as_u64().unwrap(),
             ev["class_uid"].as_u64().unwrap() * 100 + ev["activity_id"].as_u64().unwrap()
         );
+    }
+
+    // --- exporters ----------------------------------------------------------
+
+    /// A directory nothing else is using, removed when the guard drops.
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir() -> TempDir {
+        let dir = std::env::temp_dir().join(format!("ocsf-audit-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    fn exporter_names(typed: &OcsfAuditConfig) -> Vec<String> {
+        typed
+            .build_exporters()
+            .unwrap()
+            .iter()
+            .map(|e| e.name().to_owned())
+            .collect()
+    }
+
+    fn exporter_err(extra: serde_json::Value) -> String {
+        OcsfAuditEmitter::new(sink_cfg(extra))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn destination_and_exporters_together_are_rejected() {
+        let err = exporter_err(json!({
+            "destination": "stderr",
+            "exporters": [{ "kind": "stderr" }],
+        }));
+        assert!(err.contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_exporter_list_is_rejected() {
+        let err = exporter_err(json!({ "exporters": [] }));
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn an_unwritable_file_fails_construction() {
+        let err = exporter_err(json!({
+            "exporters": [{ "kind": "file", "path": "relative.ndjson" }],
+        }));
+        assert!(err.contains("must be absolute"), "{err}");
+    }
+
+    #[test]
+    fn exporter_kinds_parse_and_unknown_settings_are_rejected() {
+        let dir = temp_dir();
+        let typed: OcsfAuditConfig = serde_json::from_value(json!({
+            "exporters": [
+                { "kind": "stderr" },
+                { "kind": "tracing" },
+                { "kind": "file", "path": dir.0.join("a.ndjson"), "fsync": "batch" },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(exporter_names(&typed), ["stderr", "tracing", "file"]);
+
+        for bad in [
+            json!({ "kind": "tracing", "target": "x" }),
+            json!({ "kind": "file", "path": "/a", "mode": 1 }),
+            json!({ "kind": "kafka" }),
+        ] {
+            assert!(
+                serde_json::from_value::<OcsfAuditConfig>(json!({ "exporters": [bad.clone()] }))
+                    .is_err(),
+                "{bad} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_destination_or_exporters_records_go_to_stderr() {
+        assert_eq!(exporter_names(&OcsfAuditConfig::default()), ["stderr"]);
+        let typed: OcsfAuditConfig =
+            serde_json::from_value(json!({ "destination": "tracing" })).unwrap();
+        assert_eq!(exporter_names(&typed), ["tracing"]);
+    }
+
+    /// Signed, chained records from the decision sink, fanned out to two
+    /// files: both files hold the same bytes, one record per line, and every
+    /// record verifies offline from those bytes and the public key, with its
+    /// predecessor link intact.
+    #[tokio::test]
+    async fn file_exporters_receive_identical_verifiable_records() {
+        use crate::sign::{dsse_pae, signing_input};
+        use base64::Engine as _;
+        use p256::ecdsa::signature::Verifier as _;
+        use praxis_policy_core::audit::AuditHandler;
+
+        let dir = temp_dir();
+        let a = dir.0.join("a.ndjson");
+        let b = dir.0.join("b.ndjson");
+        let mut extra = signed_cfg().config.unwrap();
+        extra["exporters"] = json!([
+            { "kind": "file", "path": a, "fsync": "batch" },
+            { "kind": "file", "path": b },
+        ]);
+        let e = OcsfAuditEmitter::new(sink_cfg(extra)).unwrap();
+
+        for stream_seq in 0..3 {
+            let mut log = finalized(
+                vec![("cedar-pdp", PluginMode::Sequential, PluginAction::Allowed)],
+                Verdict::Allow,
+            );
+            log.set_stream(1, "gw-1:decision".into(), stream_seq, stream_seq);
+            AuditHandler::handle(&e, &tool_payload(), &subject_ext(), &log).await;
+        }
+
+        let from_a = std::fs::read(&a).unwrap();
+        assert_eq!(
+            from_a,
+            std::fs::read(&b).unwrap(),
+            "fan-out must be byte-identical"
+        );
+
+        let vk = *p256::ecdsa::SigningKey::from_slice(&[0x11_u8; 32])
+            .unwrap()
+            .verifying_key();
+        let mut prev_fp: Option<String> = None;
+        let lines: Vec<&[u8]> = from_a
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 3);
+        for (i, line) in lines.iter().enumerate() {
+            let ev: Value = serde_json::from_slice(line).unwrap();
+            assert_eq!(ev["unmapped"]["aid.stream"]["stream_seq"], i);
+            let bytes = signing_input(&ev);
+            let fp = crate::sign::fingerprint_value(&bytes);
+            let att = &ev["attestation_list"][0];
+            assert_eq!(att["fingerprint"]["value"].as_str().unwrap(), fp);
+            assert_eq!(
+                att["prev_event"]["fingerprint"]["value"]
+                    .as_str()
+                    .map(str::to_owned),
+                prev_fp,
+            );
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(ev["unmapped"]["signature_b64"].as_str().unwrap())
+                .unwrap();
+            let sig = p256::ecdsa::Signature::from_der(&der).unwrap();
+            vk.verify(&dsse_pae(&bytes), &sig)
+                .expect("a record read back from the file must verify");
+            prev_fp = Some(fp);
+        }
+    }
+
+    /// The record an exporter receives carries the executor's stamp and the
+    /// record's own uid, so a consumer or a metric can use them without
+    /// parsing the body.
+    /// Records what it was given and how often it was flushed.
+    #[derive(Debug, Default)]
+    struct Capture {
+        records: std::sync::Mutex<Vec<SerializedRecord>>,
+        flushes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl AuditExporter for Capture {
+        fn name(&self) -> &str {
+            "capture"
+        }
+        fn export(&self, batch: &[SerializedRecord]) -> Result<(), ExportError> {
+            self.records.lock().unwrap().extend_from_slice(batch);
+            Ok(())
+        }
+        fn flush(&self) -> Result<(), ExportError> {
+            self.flushes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A failing flush is logged and does not stop the others.
+    #[derive(Debug)]
+    struct FailingFlush;
+
+    impl AuditExporter for FailingFlush {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn export(&self, _batch: &[SerializedRecord]) -> Result<(), ExportError> {
+            Ok(())
+        }
+        fn flush(&self) -> Result<(), ExportError> {
+            Err(ExportError::Config("flush failed".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_flushes_every_exporter_even_after_one_fails() {
+        let first = Arc::new(Capture::default());
+        let last = Arc::new(Capture::default());
+        let mut e = OcsfAuditEmitter::new(sink_cfg(json!({}))).unwrap();
+        let (a, b): (Arc<dyn AuditExporter>, Arc<dyn AuditExporter>) =
+            (first.clone(), last.clone());
+        e.exporters = vec![a, Arc::new(FailingFlush), b];
+
+        Plugin::shutdown(&e).await.unwrap();
+
+        for capture in [&first, &last] {
+            assert_eq!(capture.flushes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn exported_records_carry_the_stamp_and_uid() {
+        use praxis_policy_core::audit::AuditHandler;
+        let capture = Arc::new(Capture::default());
+        let mut e = OcsfAuditEmitter::new(sink_cfg(json!({ "chain": true }))).unwrap();
+        let exporter: Arc<dyn AuditExporter> = capture.clone();
+        e.exporters = vec![exporter];
+
+        let mut log = finalized(
+            vec![("cedar-pdp", PluginMode::Sequential, PluginAction::Allowed)],
+            Verdict::Allow,
+        );
+        log.set_stream(5, "gw-1:decision".into(), 4, 11);
+        AuditHandler::handle(&e, &tool_payload(), &subject_ext(), &log).await;
+
+        let got = capture.records.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        let stamp = got[0].stamp.as_ref().unwrap();
+        assert_eq!(
+            (
+                stamp.epoch,
+                stamp.stream_id.as_str(),
+                stamp.stream_seq,
+                stamp.emission_seq
+            ),
+            (5, "gw-1:decision", 4, 11)
+        );
+        let ev: Value = serde_json::from_slice(&got[0].bytes).unwrap();
+        assert_eq!(got[0].uid.as_deref(), ev["metadata"]["uid"].as_str());
+        assert!(got[0].uid.is_some());
     }
 }

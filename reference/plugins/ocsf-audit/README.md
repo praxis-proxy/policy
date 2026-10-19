@@ -82,7 +82,9 @@ plugins:
       - read_labels
       - read_workload
     config:
-      destination: stderr        # or: tracing
+      exporters:                 # every record goes to each, byte for byte
+        - { kind: file, path: /var/log/praxis/ocsf.ndjson, fsync: batch }
+        - { kind: stderr }
       chain: true                # fingerprint chain, record_integrity profile
       signing: dsse              # or: none (chained but unsigned)
       signing_key_pem_path: /etc/praxis/ocsf-signing.pem   # PKCS#8 P-256
@@ -152,7 +154,7 @@ their chain positions. Order by `prev_event` (or `aid.stream.stream_seq`),
 never by arrival.
 
 **Stalled output.** The sink awaits each write on the request path, but runs
-the synchronous stderr or tracing destination on a blocking worker. The
+its exporters on a blocking worker. The
 engine's audit timeout can therefore release a request if that destination
 stalls. At most four writes per emitter can remain in flight; later callbacks
 wait for a slot before advancing the chain, and can time out while waiting.
@@ -163,7 +165,8 @@ links and stream stamps to detect gaps and order records.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `destination` | `stderr` | One JSON object per line to stderr, or `tracing` at target `ocsf.audit`. |
+| `exporters` | unset | Where records go, as a list. Each record is serialized once and written unchanged to every exporter, so the copies are byte-identical and share a `metadata.uid`. Kinds: `stderr` and `stdout` (one record per line), `file` (`path`, absolute; appended one record per line, created owner-only, never truncated; `fsync`: `never`, `batch` or `always`, default `never`; follows rename-based rotation on Unix by reopening the path, so use logrotate's `create` mode with `delaycompress` rather than `copytruncate`, which drops records written during the copy), and `tracing` (one event per record at target `ocsf.audit`). An exporter that fails is logged and the rest still run. An unwritable file fails startup. |
+| `destination` | `stderr` | A single destination, `stderr` or `tracing`, the same as one entry in `exporters`. Set `destination` or `exporters`, not both. With neither, records go to stderr. |
 | `product_name`, `vendor_name` | Praxis Policy Engine OCSF Audit / Praxis | `metadata.product`. |
 | `chain` | `true` | Attach the attestation and declare `record_integrity`. |
 | `chain_uid` | plugin name plus a random per-process suffix | `attestation.chain_uid`. One chain per process; a configured value must be unique per process (see [Chain scope](#chain-scope)). |
