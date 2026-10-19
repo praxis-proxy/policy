@@ -33,7 +33,7 @@ keys. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | unrestricted |
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | unrestricted |
 | HTTP | request line (method, path, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
-| LLM | model id, provider, capabilities | `llm.*` | unrestricted |
+| LLM | model id, provider, capabilities | `llm.model_id`, `llm.provider`, `llm.capabilities` | unrestricted |
 | LLM request | the host-parsed inference request body, and the host's typed reading of it: system prompt, offered tools, tool choice, sampling parameters | the body is not flattened; OPA, CEL, and Cedar read it as `llm.request`. The typed parts flatten to `llm.offered_tools`, `llm.stop_sequences`, `llm.tool_choice`, `llm.forced_tool`, `llm.max_tokens`, `llm.temperature`, `llm.top_p`, `llm.stream`, `llm.system_prompt_digest` | `read_llm_request` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | unrestricted |
 | Completion | stop reason, token counts, model, latency | `completion.*` | unrestricted |
