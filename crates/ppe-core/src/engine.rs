@@ -3855,6 +3855,11 @@ impl PolicyEngine {
         self.load_runtime().registry.get(name)
     }
 
+    /// Returns whether `name` identifies a registered, enabled audit sink.
+    pub fn attaches_as_audit_sink(&self, name: &str) -> bool {
+        self.load_runtime().registry.attaches_as_audit_sink(name)
+    }
+
     /// Total number of registered plugins.
     pub fn plugin_count(&self) -> usize {
         self.load_runtime().registry.plugin_count()

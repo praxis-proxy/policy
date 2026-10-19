@@ -28,10 +28,14 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use praxis_policy_apl_runtime::{AplOptions, register_apl};
+use praxis_policy_core::audit::AuditHandler;
+use praxis_policy_core::decision::DecisionLog;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::PluginError;
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
+use praxis_policy_core::hooks::payload::{Extensions, PluginPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 /// A plugin that registers no handler. Every case here is decided at load, so
@@ -57,10 +61,40 @@ impl PluginFactory for InertFactory {
     }
 }
 
-/// An engine with the `builtin` kind wired up, and nothing else.
+/// An audit sink that attaches regardless of its declared hooks.
+struct Sink(PluginConfig);
+
+impl Plugin for Sink {
+    fn config(&self) -> &PluginConfig {
+        &self.0
+    }
+
+    fn as_audit_handler(self: Arc<Self>) -> Option<Arc<dyn AuditHandler>> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl AuditHandler for Sink {
+    async fn handle(&self, _: &dyn PluginPayload, _: &Extensions, _: &DecisionLog) {}
+}
+
+struct SinkFactory;
+
+impl PluginFactory for SinkFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        Ok(PluginInstance {
+            plugin: Arc::new(Sink(config.clone())),
+            handlers: Vec::new(),
+        })
+    }
+}
+
+/// An engine with inert plugin and audit sink factories.
 fn engine() -> Arc<PolicyEngine> {
     let mgr = Arc::new(PolicyEngine::default());
     mgr.register_factory("builtin", Box::new(InertFactory));
+    mgr.register_factory("sink", Box::new(SinkFactory));
     mgr
 }
 
@@ -348,6 +382,80 @@ plugins:
     hooks: [cmf.tool_pre_invoke]
 ",
     );
+}
+
+#[test]
+fn an_audit_sink_with_no_hooks_needs_no_step() {
+    loads(
+        "
+plugins:
+  - name: ocsf-audit
+    kind: sink
+    mode: audit
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - \"require(authenticated)\"
+",
+    );
+}
+
+#[test]
+fn a_plugin_with_no_hooks_that_is_not_a_sink_is_still_reported() {
+    let e = load_err(
+        "
+plugins:
+  - name: stranded
+    kind: builtin
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - \"require(authenticated)\"
+",
+    );
+    assert!(e.contains("stranded"), "the message must name it: {e}");
+}
+
+#[test]
+fn a_sink_listing_hooks_loads_and_its_unreached_hooks_are_reported() {
+    let alarms = alarms_raised_by_loading(
+        "
+plugins:
+  - name: audit-log
+    kind: sink
+    hooks: [cmf.tool_pre_invoke]
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - \"require(authenticated)\"
+",
+    );
+    assert!(
+        alarms.contains(&NARROWED.to_owned()),
+        "the sink attaches and loads, but no step reaches its hook, so the load \
+         must say so: {alarms:?}"
+    );
+}
+
+#[test]
+fn a_disabled_sink_with_no_hooks_is_still_reported() {
+    let e = load_err(
+        "
+plugins:
+  - name: ocsf-audit
+    kind: sink
+    mode: disabled
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - \"require(authenticated)\"
+",
+    );
+    assert!(e.contains("ocsf-audit"), "the message must name it: {e}");
 }
 
 /// A config declaring no plugins has nothing to strand, so the check has

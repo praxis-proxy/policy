@@ -4,7 +4,7 @@ Thank you for your interest in contributing! Start by
 reading the [development conventions]. Submissions that
 do not follow the conventions will be rejected.
 
-[development conventions]: docs/conventions.md
+[development conventions]: docs/dev/conventions.md
 
 ## Getting Started
 
@@ -62,6 +62,6 @@ CI enforces reviewability on every PR:
 - Human authorship: commits authored or signed-off by tools are rejected
 - Conventional commit subjects (`type(scope): summary`, ≤72 chars)
 
-See the [PR conventions] section for details and override labels.
+See the [PR conventions] section for details.
 
-[PR conventions]: docs/conventions.md#pull-request-conventions
+[PR conventions]: docs/dev/conventions.md#pull-request-conventions

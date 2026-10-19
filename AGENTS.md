@@ -97,6 +97,10 @@ ppe (facade)
 
 ## Conventions
 
+Read and follow the [development conventions](docs/dev/conventions.md).
+The repository-specific decisions below take precedence over the shared
+style recommendations.
+
 ### Deliberate divergences from conventions template
 
 These are settled decisions, not a backlog:

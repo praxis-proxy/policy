@@ -62,7 +62,13 @@
 //! - JSON-RPC parsing of an invalid body, and classifier metadata;
 //! - body size ceilings;
 //! - comma-joining duplicate header lines, and header name and value
-//!   validity on the wire.
+//!   validity on the wire;
+//! - policy validation for `result:` field rules on `prompt:` and
+//!   `resource:` routes. Praxis rejects these rules; this driver accepts them.
+//!
+//! [`PRAXIS_COMMIT`]: PRAXIS_COMMIT
+//! [`MIRRORED`]: MIRRORED
+//! [`Upstream`]: crate::upstream::Upstream
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -104,10 +110,10 @@ use crate::mcp;
 use crate::secrets::{IssuedTokens, Planted};
 use crate::upstream::{Upstream, UpstreamRequest};
 
-/// The praxis commit the mirrored files were last checked against. The
-/// `host-drift` job in `.github/workflows/integration-live.yml` diffs
-/// [`MIRRORED`] from here to praxis `main`, so keep the full SHA.
-pub const PRAXIS_COMMIT: &str = "0e65081241e34226343e4edd01417cae1de89822";
+/// The praxis commit used to verify the files in [`MIRRORED`].
+///
+/// [`MIRRORED`]: MIRRORED
+pub const PRAXIS_COMMIT: &str = "dccc6b735cce2de30c00fdf4992e0d27422cd8b5";
 
 /// The praxis files this driver mirrors, relative to the praxis root.
 pub const MIRRORED: [&str; 6] = [

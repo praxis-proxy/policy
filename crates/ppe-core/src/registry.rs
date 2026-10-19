@@ -531,13 +531,21 @@ impl PluginRegistry {
     pub fn audit_handlers(&self) -> Vec<crate::audit::AttachedSink> {
         self.plugins
             .values()
-            .filter(|r| r.trusted_config().mode != crate::plugin::PluginMode::Disabled)
             .filter_map(|r| {
-                let handler = r.plugin().clone().as_audit_handler()?;
+                let handler = attached_audit_handler(r)?;
                 let capabilities = r.trusted_config().capabilities.clone();
                 Some(crate::audit::AttachedSink::new(handler, capabilities))
             })
             .collect()
+    }
+
+    /// Returns whether `name` identifies a sink included in [`audit_handlers`].
+    ///
+    /// [`audit_handlers`]: Self::audit_handlers
+    pub fn attaches_as_audit_sink(&self, name: &str) -> bool {
+        self.plugins
+            .get(name)
+            .is_some_and(|r| attached_audit_handler(r).is_some())
     }
 
     /// Returns every (`hook_name`, `HookEntry`) pair where the entry's plugin
@@ -557,6 +565,14 @@ impl PluginRegistry {
         }
         out
     }
+}
+
+/// Returns the plugin's audit handler unless the plugin is disabled.
+fn attached_audit_handler(r: &PluginRef) -> Option<Arc<dyn crate::audit::AuditHandler>> {
+    if r.trusted_config().mode == crate::plugin::PluginMode::Disabled {
+        return None;
+    }
+    Arc::clone(r.plugin()).as_audit_handler()
 }
 
 impl Default for PluginRegistry {
@@ -1103,6 +1119,9 @@ mod audit_handler_tests {
         );
 
         assert_eq!(reg.audit_handlers().len(), 1);
+        assert!(reg.attaches_as_audit_sink("sink"));
+        assert!(!reg.attaches_as_audit_sink("plain"));
+        assert!(!reg.attaches_as_audit_sink("unregistered"));
     }
 
     /// `mode: disabled` turns a sink off like any other plugin.
@@ -1119,6 +1138,7 @@ mod audit_handler_tests {
         );
 
         assert!(reg.audit_handlers().is_empty());
+        assert!(!reg.attaches_as_audit_sink("sink"));
     }
 
     #[test]

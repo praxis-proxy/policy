@@ -34,9 +34,11 @@ and a document is legal in one of them only.
 | `policy` (default) | a `run(name)` step, or a policy block that reaches one | a per-plugin `conditions:` and `priority:`, and a list-form `plugins:` |
 | `hooks` | each plugin's own `hooks:` and `conditions:` | `routes:`, `groups:`, `global:`, `global.defaults:` |
 
-Under `dispatch: policy` a plugin runs only where a step names it, so
-the load reports a declared plugin no policy reaches, by name, and
-warns when a plugin is reached on fewer hooks than it declares.
+Under `dispatch: policy`, loading fails if a declared plugin is unreachable
+and warns if a plugin is reached on fewer hooks than it declares.
+[Audit sinks](auditing.md) receive verdicts without policy steps and are
+exempt from the reachability error unless `mode: disabled`. Unused hooks
+declared by a sink still produce warnings.
 
 | Setting | Default | Meaning |
 |---|---|---|
