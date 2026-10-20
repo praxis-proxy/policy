@@ -123,6 +123,30 @@ compatibility. A present canonical set is authoritative. Cedar does not
 surface `client.*`, `http.*`, or the other slots as principal attributes. A
 Cedar policy that needs those values does not get them from this mapping.
 
+Unlike OPA (`input.http.query`) and CEL (`http.query`), Cedar's context is not
+auto-populated with the `http.*` slot — the builder injects only
+`context.delegation`, `context.meta`, and `context.security`. A Cedar step
+reaches the request line and query through a `${…}` template reference, which
+resolves from the same bag keys the HTTP extractor populates:
+
+```yaml
+- cedar:
+    action: 'Action::"read"'
+    resource:
+      type: Request
+      id: ${http.path}
+      attributes:
+        method: ${http.method}
+        query:  ${http.query}
+```
+
+`${http.query}` resolves to the raw query string (no leading `?`). The
+reference is whole-string only. A request that carried no query leaves
+`http.query` out of the bag, so `${http.query}` fails loudly rather than
+resolving empty — a query-specific Cedar rule cannot be silently satisfied by
+an absent query. As with OPA and CEL, an equality on the raw query is an
+exact-string check, not a parsed-parameter gate.
+
 ---
 
 ## `subject.claims`
