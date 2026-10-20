@@ -414,12 +414,20 @@ A default request slot adds nothing.
 |---|---|---|
 | `http.method` | String | `Some` |
 | `http.path` | String | `Some` |
-| `http.query` | String | `Some` when the request carried a query (value excludes the leading `?`); omitted otherwise |
+| `http.query` | String | `Some` when the request carried a query (value excludes the leading `?`); omitted otherwise. Readable by a rule, but its value is redacted in diagnostics — see the note below |
 | `http.host` | String | `Some` |
 | `http.scheme` | String | `Some` |
 | `http.status` | Int | `Some` (response half) |
 | `http.request_headers.<name>` | String | each header; name lowercased |
 | `http.response_headers.<name>` | String | each header; name lowercased |
+
+A rule reads `http.query` and the header values directly, but they are treated
+as potentially secret on output: a query can carry a credential (a
+query-parameter JWT, say), so `http.query` and header values are rendered as a
+type label (never their value) in a PDP's deny diagnostics, and `http.query` is
+redacted to presence-only in an `HttpExtension`'s serialized and `Debug` output.
+The redaction covers only diagnostics and serialization; a rule still evaluates
+against the live value.
 
 ### 7. `llm` — `LLMExtension`
 

@@ -1594,15 +1594,21 @@ routes:
     );
 }
 
-/// A rule reads the request QUERY STRING and allows or denies on its value —
-/// the capability the `http.query` attribute exists to provide. This is the
-/// git fetch-vs-push distinction a reverse-proxy allowlist needs: `info/refs`
-/// shares one path across both services and differs only by
-/// `?service=git-upload-pack` (fetch, allow) vs `?service=git-receive-pack`
-/// (push, deny). Before `http.query`, no policy could read the query at all —
-/// the path matcher strips it — so this exact gate was inexpressible.
+/// A rule reads the request QUERY STRING and allows or denies on its EXACT
+/// value — the capability the `http.query` attribute exists to provide. Before
+/// `http.query`, no policy could read the query at all (the path matcher strips
+/// it), so even an exact-string check on the query was inexpressible.
+///
+/// This is an exact whole-string comparison, NOT a parsed-parameter gate. It is
+/// deliberately not presented as a git push gate: `http.query` is the raw query
+/// string, so `== 'service=git-receive-pack'` matches only that exact string.
+/// A request carrying an extra parameter (`service=git-receive-pack&x=1`) has a
+/// different whole-string value and does NOT match — see
+/// `an_exact_query_match_does_not_parse_parameters` below, which pins that
+/// limitation. A real service gate must parse the `service` parameter out of
+/// the query (e.g. with the regex/`matches` builtin), not string-compare it.
 #[tokio::test]
-async fn a_rule_gates_on_the_request_query_string() {
+async fn a_rule_gates_on_the_exact_request_query_string() {
     const YAML: &str = r#"
 engine_settings:
   dispatch: policy
@@ -1615,7 +1621,7 @@ routes:
 "#;
     let (mgr, _ledger) = engine_with(YAML).await;
 
-    // The push advertisement is refused by the query value...
+    // The exact string is matched, so this request is denied...
     assert!(
         !fire(
             &mgr,
@@ -1623,10 +1629,9 @@ routes:
             request_with_query("GET", "/octocat/Hello-World.git/info/refs", "service=git-receive-pack")
         )
         .await,
-        "the receive-pack query satisfies the rule, so the request is denied"
+        "the exact receive-pack query matches the rule, so the request is denied"
     );
-    // ...while the fetch advertisement on the same path passes, because its
-    // query is a different value.
+    // ...while a different exact value on the same path passes.
     assert!(
         fire(
             &mgr,
@@ -1634,7 +1639,46 @@ routes:
             request_with_query("GET", "/octocat/Hello-World.git/info/refs", "service=git-upload-pack")
         )
         .await,
-        "the upload-pack query is a different value, so the same path passes"
+        "the upload-pack query is a different exact value, so the same path passes"
+    );
+}
+
+/// Pins the limitation of an exact-string query match: it is NOT a push gate.
+/// The deny rule names the exact string `service=git-receive-pack`, so a push
+/// advertisement that appends any extra parameter has a different whole-string
+/// value and slips past the rule. This is the reviewer's observation captured
+/// as behavior: a policy that must actually block the push service has to parse
+/// the `service` parameter, not compare the whole query string.
+#[tokio::test]
+async fn an_exact_query_match_does_not_parse_parameters() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /octocat/Hello-World.git/info/refs
+    authorization:
+      pre_invocation:
+        - "http.query == 'service=git-receive-pack': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    // Same push service, one extra parameter -> the whole-string value differs,
+    // so the exact-match deny does NOT fire and the request is ALLOWED. If the
+    // upstream tolerates the extra parameter, an exact-string rule would fail to
+    // block the push. A parameter-aware rule is required for a real gate.
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query(
+                "GET",
+                "/octocat/Hello-World.git/info/refs",
+                "service=git-receive-pack&x=1"
+            )
+        )
+        .await,
+        "an extra parameter changes the whole-string value, so the exact-match deny is bypassed"
     );
 }
 
