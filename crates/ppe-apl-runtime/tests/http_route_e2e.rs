@@ -1626,7 +1626,11 @@ routes:
         !fire(
             &mgr,
             HOOK_HTTP_REQUEST,
-            request_with_query("GET", "/octocat/Hello-World.git/info/refs", "service=git-receive-pack")
+            request_with_query(
+                "GET",
+                "/octocat/Hello-World.git/info/refs",
+                "service=git-receive-pack"
+            )
         )
         .await,
         "the exact receive-pack query matches the rule, so the request is denied"
@@ -1636,7 +1640,11 @@ routes:
         fire(
             &mgr,
             HOOK_HTTP_REQUEST,
-            request_with_query("GET", "/octocat/Hello-World.git/info/refs", "service=git-upload-pack")
+            request_with_query(
+                "GET",
+                "/octocat/Hello-World.git/info/refs",
+                "service=git-upload-pack"
+            )
         )
         .await,
         "the upload-pack query is a different exact value, so the same path passes"
@@ -1743,11 +1751,21 @@ routes:
     let (mgr, _ledger) = engine_with(YAML).await;
 
     assert!(
-        fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/repo.git/info/refs")).await,
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request("GET", "/repo.git/info/refs")
+        )
+        .await,
         "no query exists, so the comparison is false and the query rule is inert"
     );
     assert!(
-        !fire(&mgr, HOOK_HTTP_REQUEST, request("TRACE", "/repo.git/info/refs")).await,
+        !fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request("TRACE", "/repo.git/info/refs")
+        )
+        .await,
         "the rule beside it still governs, so the block itself is live"
     );
 }

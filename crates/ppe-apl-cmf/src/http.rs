@@ -95,7 +95,10 @@ mod tests {
         extract_http(&http, &mut bag);
         assert_eq!(bag.get_string("http.method"), Some("POST"));
         assert_eq!(bag.get_string("http.path"), Some("/api/widgets"));
-        assert_eq!(bag.get_string("http.query"), Some("service=git-upload-pack"));
+        assert_eq!(
+            bag.get_string("http.query"),
+            Some("service=git-upload-pack")
+        );
         assert_eq!(bag.get_string("http.host"), Some("api.example.com"));
         assert_eq!(bag.get_string("http.scheme"), Some("https"));
     }
