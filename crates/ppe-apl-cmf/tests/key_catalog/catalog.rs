@@ -102,8 +102,8 @@ pub(crate) enum Slot {
     Http,
     /// `llm` — `LLMExtension`.
     Llm,
-    /// `llm_request_parts` — `LLMRequest`.
-    LlmRequestParts,
+    /// `llm_request` — `LlmRequest`.
+    LlmRequest,
     /// `mcp` — `MCPExtension`.
     Mcp,
     /// `completion` — `CompletionExtension`.
@@ -128,7 +128,7 @@ impl Slot {
             Self::Request => "request",
             Self::Http => "http",
             Self::Llm => "llm",
-            Self::LlmRequestParts => "llm_request_parts",
+            Self::LlmRequest => "llm_request",
             Self::Mcp => "mcp",
             Self::Completion => "completion",
             Self::Provenance => "provenance",
@@ -642,7 +642,20 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Capability(CAP_READ_HEADERS),
         Slot::Http,
     ),
-    // 7. llm
+    // 7. llm model identity (legacy aliases retained)
+    exact("llm.model.id", KeyType::String, Gating::Ungated, Slot::Llm),
+    exact(
+        "llm.model.provider",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Llm,
+    ),
+    exact(
+        "llm.model.capabilities",
+        KeyType::StringSet,
+        Gating::Ungated,
+        Slot::Llm,
+    ),
     exact("llm.model_id", KeyType::String, Gating::Ungated, Slot::Llm),
     exact("llm.provider", KeyType::String, Gating::Ungated, Slot::Llm),
     exact(
@@ -651,60 +664,66 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Llm,
     ),
-    // 8. llm_request_parts
+    // 8. llm_request normalized parts
     exact(
-        "llm.offered_tools",
+        "llm.input.offered_tools",
         KeyType::StringSet,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     exact(
-        "llm.stop_sequences",
+        "llm.input.stop_sequences",
         KeyType::StringSet,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     exact(
-        "llm.tool_choice",
+        "llm.input.tool_choice",
         KeyType::String,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     exact(
-        "llm.forced_tool",
+        "llm.input.forced_tool",
         KeyType::String,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     exact(
-        "llm.max_tokens",
+        "llm.input.max_tokens",
         KeyType::Int,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     exact(
-        "llm.temperature",
+        "llm.input.candidate_count",
+        KeyType::Int,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.temperature",
         KeyType::Float,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     exact(
-        "llm.top_p",
+        "llm.input.top_p",
         KeyType::Float,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     exact(
-        "llm.stream",
+        "llm.input.stream",
         KeyType::Bool,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     exact(
-        "llm.system_prompt_digest",
+        "llm.input.instructions_digest",
         KeyType::String,
         Gating::Capability(CAP_READ_LLM_REQUEST),
-        Slot::LlmRequestParts,
+        Slot::LlmRequest,
     ),
     // 9. mcp
     exact("mcp.tool.name", KeyType::String, Gating::Ungated, Slot::Mcp),
@@ -798,7 +817,55 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Mcp,
     ),
-    // 10. completion
+    // 10. completion (legacy aliases retained)
+    exact(
+        "llm.output.stop_reason",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.tokens.input",
+        KeyType::Int,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.tokens.output",
+        KeyType::Int,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.tokens.total",
+        KeyType::Int,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.model",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.raw_format",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.created_at",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.latency_ms",
+        KeyType::Int,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
     exact(
         "completion.stop_reason",
         KeyType::String,

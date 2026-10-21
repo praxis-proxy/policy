@@ -59,7 +59,10 @@ pub use filter::{SlotName, filter_extensions};
 pub use framework::FrameworkExtension;
 pub use guarded::{Guarded, WriteToken};
 pub use http::HttpExtension;
-pub use llm::{LLMExtension, LLMRequest, LlmRequestDocument, ToolChoice};
+pub use llm::{
+    LLMExtension, LLMRequest, LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestDocument,
+    LlmRequestParts, ToolChoice,
+};
 pub use mcp::{MCPExtension, PromptMetadata, ResourceMetadata, ToolMetadata};
 pub use meta::MetaExtension;
 pub use monotonic::{DeclassifierToken, MonotonicSet};

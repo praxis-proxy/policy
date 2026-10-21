@@ -55,8 +55,8 @@ pub fn extract_extensions(ext: &Extensions, bag: &mut AttributeBag) {
     if let Some(v) = &ext.llm {
         extract_llm(v, bag);
     }
-    if let Some(v) = &ext.llm_request_parts {
-        extract_llm_request(v, bag);
+    if let Some(parts) = ext.llm_request.as_ref().and_then(|request| request.parts()) {
+        extract_llm_request(parts, bag);
     }
     if let Some(v) = &ext.mcp {
         extract_mcp(v, bag);
@@ -90,9 +90,9 @@ mod tests {
     use super::*;
     use praxis_policy_core::extensions::{
         AgentExtension, ClientExtension, CompletionExtension, ConversationContext, DataPolicy,
-        DelegationExtension, FrameworkExtension, HttpExtension, LLMExtension, MCPExtension,
-        MetaExtension, ObjectSecurityProfile, ProvenanceExtension, RequestExtension,
-        RetentionPolicy, SecurityExtension, SubjectExtension, WorkloadIdentity,
+        DelegationExtension, FrameworkExtension, HttpExtension, LLMExtension, LlmRequest,
+        LlmRequestParts, MCPExtension, MetaExtension, ObjectSecurityProfile, ProvenanceExtension,
+        RequestExtension, RetentionPolicy, SecurityExtension, SubjectExtension, WorkloadIdentity,
     };
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
@@ -121,6 +121,7 @@ mod tests {
             model_id: Some("gpt-4".into()),
             ..Default::default()
         }));
+        ext.llm_request = Some(LlmRequest::from_parts(LlmRequestParts::default()));
 
         let mut bag = AttributeBag::new();
         extract_extensions(&ext, &mut bag);
@@ -132,6 +133,8 @@ mod tests {
         assert_eq!(bag.get_string("agent.session_id"), Some("sess-1"));
         assert!(bag.set_contains("meta.tags", "pii"));
         assert_eq!(bag.get_string("llm.model_id"), Some("gpt-4"));
+        assert_eq!(bag.get_string("llm.model.id"), Some("gpt-4"));
+        assert!(bag.contains("llm.input.instructions_digest"));
     }
 
     #[test]
@@ -178,6 +181,7 @@ mod tests {
         ext.request = Some(Arc::new(RequestExtension::default()));
         ext.http = Some(Arc::new(HttpExtension::default()));
         ext.llm = Some(Arc::new(LLMExtension::default()));
+        ext.llm_request = Some(LlmRequest::from_parts(LlmRequestParts::default()));
         ext.mcp = Some(Arc::new(MCPExtension::default()));
         ext.completion = Some(Arc::new(CompletionExtension::default()));
         ext.provenance = Some(Arc::new(ProvenanceExtension::default()));
@@ -202,6 +206,9 @@ mod tests {
             "agent.conversation.topics",
             "meta.tags",
             "llm.capabilities",
+            "llm.model.capabilities",
+            "llm.input.offered_tools",
+            "llm.input.stop_sequences",
         ] {
             assert_eq!(
                 bag.get_string_set(key),
@@ -226,8 +233,10 @@ mod tests {
             "http.method",
             "http.status",
             "llm.model_id",
+            "llm.model.id",
             "mcp.tool.name",
             "completion.latency_ms",
+            "llm.output.latency_ms",
             "provenance.source",
             "framework.framework",
         ] {
@@ -249,6 +258,7 @@ mod tests {
         assert_eq!(bag.get_bool("delegated"), Some(false));
         assert_eq!(bag.get_float("delegation.age_seconds"), Some(0.0));
         assert_eq!(bag.get_string("client.client_id"), Some("app"));
+        assert!(bag.contains("llm.input.instructions_digest"));
         assert!(bag.get_string("client.trust_level").is_some());
 
         // Empty claims / custom / framework metadata: no parent object key.

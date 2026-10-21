@@ -31,9 +31,10 @@
 //   HttpExtension                  → http.method, http.path, http.host, http.scheme,
 //                                     http.status, http.request_headers.*,
 //                                     http.response_headers.*
-//   LLMExtension                   → llm.*
+//   LLMExtension                   → llm.model.* (with published aliases)
+//   LlmRequest normalized parts    → llm.input.*
 //   MCPExtension                   → mcp.tool.*, mcp.resource.*, mcp.prompt.*
-//   CompletionExtension            → completion.*
+//   CompletionExtension            → llm.output.* (with published aliases)
 //   ProvenanceExtension            → provenance.*
 //   FrameworkExtension             → framework.*  (incl. framework.metadata.*)
 //   Extensions.custom              → custom.*
@@ -54,7 +55,7 @@
 pub mod agent;
 /// Maps a plugin capability to the key prefixes it may read.
 pub mod capability_namespaces;
-/// Bridges completion metadata into `completion.*` keys.
+/// Bridges completion metadata into `llm.output.*` keys and legacy aliases.
 pub mod completion;
 /// The attribute key and capability name constants.
 pub mod constants;

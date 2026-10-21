@@ -748,7 +748,10 @@ routes:
 async fn llm_request_reaches_plugin_through_apl_handler_with_replaced_baseline() {
     let (seen, document) = observe_llm_request("[read_llm_request]").await;
     let seen = seen.expect("plugin holding read_llm_request must see the slot");
-    assert!(Arc::ptr_eq(seen.shared(), document.shared()));
+    assert!(Arc::ptr_eq(
+        seen.body_shared().unwrap(),
+        document.body_shared().unwrap()
+    ));
 }
 
 /// A plugin without `read_llm_request` sees no document, even though the
@@ -958,7 +961,7 @@ async fn llm_route_pdp_receives_host_document_without_plugins() {
         .llm_request()
         .cloned()
         .expect("llm route must carry the document");
-    assert!(Arc::ptr_eq(&seen_doc, document.shared()));
+    assert!(Arc::ptr_eq(&seen_doc, document.body_shared().unwrap()));
     assert!(seen.args().is_none(), "llm routes carry no structured args");
 }
 

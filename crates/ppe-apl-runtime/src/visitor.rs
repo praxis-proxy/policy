@@ -1442,9 +1442,9 @@ fn install_handler(
     // entity/`args.*` predicates in one evaluation. It is a no-op for hosts that
     // never populate the HTTP extension (nothing to read).
     capabilities.insert("read_headers".to_owned());
-    // The built-in PDPs read the parsed LLM request through this handler's
-    // filtered view, so the grant is intrinsic rather than left to the
-    // replaceable baseline. The slot is never flattened into the bag.
+    // The handler reads the raw body for structured PDP input and the
+    // normalized parts for gated `llm.input.*` bag keys. This grant is
+    // intrinsic rather than left to the replaceable baseline.
     capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_LLM_REQUEST.to_owned());
     // The APL engine emits the backend candidate constraint (the `restrict`
     // effect's output) into `Extensions.candidate_constraint`. That slot is

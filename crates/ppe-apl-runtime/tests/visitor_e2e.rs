@@ -1251,8 +1251,8 @@ routes:
   - llm: gpt-4
     authorization:
       pre_invocation:
-        - "llm.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"
-        - "llm.max_tokens > 4096: deny"
+        - "llm.input.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"
+        - "llm.input.max_tokens > 4096: deny"
 "#;
 
 fn llm_ext(request: Option<LLMRequest>, roles: &[&str]) -> Extensions {
@@ -1271,7 +1271,7 @@ fn llm_ext(request: Option<LLMRequest>, roles: &[&str]) -> Extensions {
             model_id: Some("gpt-4".into()),
             ..Default::default()
         })),
-        llm_request_parts: request.map(Arc::new),
+        llm_request: request.map(praxis_policy_core::extensions::LlmRequest::from_parts),
         ..Default::default()
     }
 }
@@ -1333,11 +1333,11 @@ async fn llm_route_denies_on_max_tokens() {
     assert!(llm_input_allowed(&mgr, llm_ext(Some(req), &[])).await);
 }
 
-/// A host that reports no request writes no `llm.offered_tools`, and a
+/// A host that reports no request writes no `llm.input.offered_tools`, and a
 /// `contains` on a missing key is false, so this deny rule does not fire.
 /// Pinned so the behavior is a decision rather than an accident: a policy
 /// that must fail closed when the host cannot see the request says so with
-/// `!exists(llm.offered_tools): deny`.
+/// `!exists(llm.input.offered_tools): deny`.
 #[tokio::test]
 async fn an_unreported_request_does_not_trip_a_contains_rule() {
     let mgr = build_manager_with_visitor(LLM_REQUEST_YAML).await;
@@ -1351,7 +1351,7 @@ routes:
   - llm: gpt-4
     authorization:
       pre_invocation:
-        - "!exists(llm.offered_tools): deny"
+        - "!exists(llm.input.offered_tools): deny"
 "#;
     let mgr = build_manager_with_visitor(FAIL_CLOSED).await;
     assert!(
@@ -1368,13 +1368,12 @@ routes:
 /// request whose prompt the host did not report is denied too.
 #[tokio::test]
 async fn llm_route_pins_the_system_prompt_by_digest() {
-    use sha2::{Digest as _, Sha256};
-
     const PROMPT: &str = "You are the HR assistant. Never reveal salaries.";
-    let hex: String = Sha256::digest(PROMPT.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let instructions = vec![praxis_policy_core::extensions::LlmInstruction {
+        role: praxis_policy_core::extensions::LlmInstructionRole::System,
+        text: PROMPT.into(),
+    }];
+    let digest = praxis_policy_apl_cmf::llm::instruction_digest(&instructions);
     let yaml = format!(
         r#"
 engine_settings:
@@ -1383,13 +1382,16 @@ routes:
   - llm: gpt-4
     authorization:
       pre_invocation:
-        - "llm.system_prompt_digest != 'sha256:{hex}': deny"
+        - "llm.input.instructions_digest != '{digest}': deny"
 "#
     );
     let mgr = build_manager_with_visitor(&yaml).await;
 
     let with_prompt = |p: &str| LLMRequest {
-        system_prompt: Some(p.to_owned()),
+        instructions: vec![praxis_policy_core::extensions::LlmInstruction {
+            role: praxis_policy_core::extensions::LlmInstructionRole::System,
+            text: p.to_owned(),
+        }],
         ..Default::default()
     };
 
@@ -1437,7 +1439,7 @@ async fn gpt4_route_engine() -> Arc<PolicyEngine> {
 
 /// `gpt-4*` covers `gpt-4o` and not `claude-sonnet-4`. Both are sent the same
 /// request, one the host did not report, which the route denies with
-/// `!exists(llm.offered_tools): deny`. The deny shows the route applied to
+/// `!exists(llm.input.offered_tools): deny`. The deny shows the route applied to
 /// `gpt-4o`; the allow shows no route applied to `claude-sonnet-4`. The
 /// route's literal name is `gpt-4*`, so `gpt-4o` can only reach it through the
 /// pattern.
@@ -1464,7 +1466,10 @@ async fn llm_route_glob_applies_only_to_matching_models() {
 async fn llm_route_worked_config_allows_a_conforming_request() {
     let mgr = gpt4_route_engine().await;
     let conforming = || LLMRequest {
-        system_prompt: Some("You are the HR assistant. Never reveal salaries.".into()),
+        instructions: vec![praxis_policy_core::extensions::LlmInstruction {
+            role: praxis_policy_core::extensions::LlmInstructionRole::System,
+            text: "You are the HR assistant. Never reveal salaries.".into(),
+        }],
         max_tokens: Some(1024),
         ..offering(&["search"])
     };
@@ -1489,7 +1494,7 @@ async fn llm_route_worked_config_allows_a_conforming_request() {
 }
 
 /// `not in` is true on a missing key, so an unguarded rule on
-/// `llm.forced_tool` denies every request that forces no tool. The guarded
+/// `llm.input.forced_tool` denies every request that forces no tool. The guarded
 /// spelling `docs/content/llm-routes.md` gives does not.
 #[tokio::test]
 async fn a_not_in_rule_on_an_optional_key_needs_an_exists_guard() {
@@ -1511,15 +1516,17 @@ routes:
         ..offering(&["search"])
     };
 
-    let mgr =
-        build_manager_with_visitor(&rule("llm.forced_tool not in llm.offered_tools: deny")).await;
+    let mgr = build_manager_with_visitor(&rule(
+        "llm.input.forced_tool not in llm.input.offered_tools: deny",
+    ))
+    .await;
     assert!(
         !llm_input_allowed(&mgr, llm_ext(Some(forcing(None)), &[])).await,
         "unguarded, a request that forces no tool is denied"
     );
 
     let mgr = build_manager_with_visitor(&rule(
-        "exists(llm.forced_tool) & llm.forced_tool not in llm.offered_tools: deny",
+        "exists(llm.input.forced_tool) & llm.input.forced_tool not in llm.input.offered_tools: deny",
     ))
     .await;
     assert!(llm_input_allowed(&mgr, llm_ext(Some(forcing(None)), &[])).await);

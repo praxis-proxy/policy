@@ -79,6 +79,7 @@ pub(crate) fn catalog() -> Vec<Case> {
         tool_forbidden_exact(),
         tool_permitted_only(),
         tools_empty(),
+        canonical_llm_with_request(),
         null_field(),
         float_field(),
         duplicate_elements(),
@@ -615,6 +616,28 @@ fn tools_empty() -> Case {
             Expect::AgreeAllow,
         ),
         json!({"model": "gpt-4o", "tools": []}),
+    )
+}
+
+fn canonical_llm_with_request() -> Case {
+    let mut bag = alice();
+    bag.set("llm.model.id", "gpt-4o");
+    bag.set("llm.input.max_tokens", 1024_i64);
+    bag.set("llm.output.stop_reason", "end");
+    with_apl(
+        with_request(
+            case(
+                "canonical-llm-with-request",
+                bag,
+                r#"context.llm.model.id == "gpt-4o" && context.llm.input.max_tokens == 1024 && context.llm.output.stop_reason == "end" && context.llm.request.model == "gpt-4o""#,
+                r#"llm.model.id == "gpt-4o" && llm.input.max_tokens == 1024 && llm.output.stop_reason == "end" && llm.request.model == "gpt-4o""#,
+                r#"allow if { input.llm.model.id == "gpt-4o"; input.llm.input.max_tokens == 1024; input.llm.output.stop_reason == "end"; input.llm.request.model == "gpt-4o" }"#,
+                true,
+                Expect::AgreeAllow,
+            ),
+            json!({"model": "gpt-4o", "tools": []}),
+        ),
+        "llm.input.max_tokens != 1024: deny",
     )
 }
 

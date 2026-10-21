@@ -56,7 +56,7 @@
 use cedar_policy::{
     ContextCreationError, ContextJsonError, EntityUid, RequestValidationError, Schema,
 };
-use praxis_policy_apl_core::attributes::AttributeBag;
+use praxis_policy_apl_core::attributes::{AttributeBag, AttributeValue};
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpError};
 use serde_json::{Map, Value, json};
@@ -250,7 +250,10 @@ pub fn parse<'a>(
     }
     if let Value::Object(root) = &mut merged {
         if let Some(request) = structured.llm_request {
-            root.insert("llm".to_owned(), json!({ "request": request }));
+            let llm = root.entry("llm").or_insert_with(|| json!({}));
+            if let Value::Object(fields) = llm {
+                fields.insert("request".to_owned(), request);
+            }
         }
         if let Some(args) = structured.args {
             root.insert("args".to_owned(), args);
@@ -344,7 +347,49 @@ fn build_policy_context(bag: &AttributeBag) -> Value {
         root.insert("authenticated".to_owned(), json!(auth));
     }
 
+    let mut llm = Map::new();
+    for (key, attr) in bag.iter() {
+        let Some(path) = key.strip_prefix("llm.") else {
+            continue;
+        };
+        if !["model.", "input.", "output."]
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+        {
+            continue;
+        }
+        let value = match attr {
+            AttributeValue::Bool(v) => json!(v),
+            AttributeValue::Int(v) => json!(v),
+            // Cedar has no native float; the structured sanitizer uses the
+            // same string representation for decimal() comparisons.
+            AttributeValue::Float(v) => json!(v.to_string()),
+            AttributeValue::String(v) => json!(v),
+            AttributeValue::StringSet(v) => {
+                let mut values: Vec<&str> = v.iter().map(String::as_str).collect();
+                values.sort_unstable();
+                json!(values)
+            },
+            AttributeValue::NonScalar => continue,
+        };
+        insert_record_path(&mut llm, path, value);
+    }
+    if !llm.is_empty() {
+        root.insert("llm".to_owned(), Value::Object(llm));
+    }
+
     Value::Object(root)
+}
+
+fn insert_record_path(record: &mut Map<String, Value>, path: &str, value: Value) {
+    if let Some((head, tail)) = path.split_once('.') {
+        let child = record.entry(head).or_insert_with(|| json!({}));
+        if let Value::Object(fields) = child {
+            insert_record_path(fields, tail, value);
+        }
+    } else {
+        record.insert(path.to_owned(), value);
+    }
 }
 
 /// Shallow merge `overlay` into `target`. Operator-supplied keys win on
@@ -463,6 +508,32 @@ mod tests {
         let ctx = context_debug(sanitize_structured(&input).unwrap());
         for expected in ["llm", "request", "m-under-test", "args", "eu-under-test"] {
             assert!(ctx.contains(expected), "missing {expected}: {ctx}");
+        }
+    }
+
+    #[test]
+    fn canonical_llm_bag_facts_sit_beside_the_raw_request() {
+        let mut bag = AttributeBag::new();
+        bag.set("llm.model.id", "gpt-4o");
+        bag.set("llm.input.max_tokens", 1024_i64);
+        bag.set("llm.output.tokens.total", 7_i64);
+        let structured =
+            sanitize_structured(&structured(Some(json!({"tools": []})), None)).unwrap();
+        let step = call(READ_DOC);
+        let parsed = parse(&step, &bag, structured, None).unwrap();
+        let context = format!("{:?}", parsed.context);
+        for expected in [
+            "model",
+            "gpt-4o",
+            "input",
+            "max_tokens",
+            "1024",
+            "output",
+            "total",
+            "request",
+            "tools",
+        ] {
+            assert!(context.contains(expected), "missing {expected}: {context}");
         }
     }
 

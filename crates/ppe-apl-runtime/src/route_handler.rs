@@ -449,7 +449,7 @@ impl AplRouteHandler {
                 post_extensions
                     .llm_request
                     .as_ref()
-                    .map(|doc| Arc::clone(doc.shared())),
+                    .and_then(|request| request.body_shared().map(Arc::clone)),
                 (self.structured_args && args_value.is_object())
                     .then(|| Arc::new(args_value.clone())),
             )

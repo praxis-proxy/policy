@@ -71,7 +71,7 @@ pub enum Capability {
     ReadAgent,
 
     /// Read the LLM request: the host-parsed body (`Extensions.llm_request`)
-    /// and the host's typed reading of it (`Extensions.llm_request_parts`).
+    /// and the host's normalized reading of it (`Extensions.llm_request`).
     /// Both carry prompt text. The body is never flattened into the attribute
     /// bag; the typed parts flatten only tool names, sampling parameters, and a
     /// digest of the system prompt.
