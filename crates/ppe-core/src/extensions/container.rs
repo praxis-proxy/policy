@@ -22,6 +22,7 @@ use super::http::HttpExtension;
 use super::llm::{LLMExtension, LlmRequest};
 use super::mcp::MCPExtension;
 use super::meta::MetaExtension;
+use super::metadata::{AcquiredFacts, MetadataExtension, MetadataInstallError};
 use super::provenance::ProvenanceExtension;
 use super::raw_credentials::RawCredentialsExtension;
 use super::request::RequestExtension;
@@ -115,6 +116,12 @@ pub struct Extensions {
     #[serde(default)]
     pub meta: Option<Arc<MetaExtension>>,
 
+    /// Immutable externally acquired policy facts.
+    /// Never serialized, so serde cannot carry provenance the framework did
+    /// not stamp.
+    #[serde(skip)]
+    pub metadata: Option<Arc<MetadataExtension>>,
+
     /// Custom extensions (frozen as Arc — unfrozen in `OwnedExtensions`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom: Option<Arc<HashMap<String, serde_json::Value>>>,
@@ -191,6 +198,7 @@ impl Clone for Extensions {
             llm_request: self.llm_request.clone(),
             framework: self.framework.clone(),
             meta: self.meta.clone(),
+            metadata: self.metadata.clone(),
             custom: self.custom.clone(),
             http_transport: HttpTransportSlot::default(),
             effect_log: crate::effect::EffectLogSlot::default(),
@@ -202,6 +210,54 @@ impl Clone for Extensions {
 }
 
 impl Extensions {
+    /// Clone this context for a child policy invocation without parent facts.
+    ///
+    /// Child invocations may acquire their own metadata, but acquired facts
+    /// never inherit or merge across the invocation boundary.
+    #[must_use]
+    pub fn for_child_request(&self) -> Self {
+        let mut child = self.clone();
+        child.metadata = None;
+        child
+    }
+
+    /// Keep the parent's acquired metadata when adopting a plugin's view.
+    ///
+    /// Runtime merge-back calls this so a dispatched plugin's returned
+    /// extensions can never add, replace, or drop installed records.
+    pub fn retain_metadata_from(&mut self, parent: &Self) {
+        self.metadata = parent.metadata.clone();
+    }
+
+    /// Install one source result under its trusted plugin registration.
+    ///
+    /// Callers are the metadata PIP fetch step (#184), which installs each
+    /// source result before the evaluator advances, and hosts that resolve
+    /// facts themselves before dispatch. Ordinary plugins receive an
+    /// immutable filtered view and have no metadata write capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the instance name or response shape is invalid,
+    /// or when that instance already installed a record in this invocation.
+    pub fn install_metadata(
+        &mut self,
+        instance: &str,
+        kind: &str,
+        facts: AcquiredFacts,
+    ) -> Result<(), MetadataInstallError> {
+        if let Some(existing) = self.metadata.as_mut()
+            && let Some(metadata) = Arc::get_mut(existing)
+        {
+            return metadata.install(instance, kind, facts);
+        }
+
+        let mut metadata = self.metadata.as_deref().cloned().unwrap_or_default();
+        metadata.install(instance, kind, facts)?;
+        self.metadata = Some(Arc::new(metadata));
+        Ok(())
+    }
+
     /// Authorize one HTTP request against this invocation's capability view
     /// and return an owned, request-specific future.
     ///
@@ -252,6 +308,7 @@ impl Extensions {
             llm_request: self.llm_request.clone(),
             framework: self.framework.clone(),
             meta: self.meta.clone(),
+            metadata: self.metadata.clone(),
             raw_credentials: self.raw_credentials.clone(),
 
             // Mutable/monotonic/guarded — cloned out of Arc into owned
@@ -300,6 +357,7 @@ impl Extensions {
             }
             && ptr_eq_opt(self.framework.as_ref(), modified.framework.as_ref())
             && ptr_eq_opt(self.meta.as_ref(), modified.meta.as_ref())
+            && ptr_eq_opt(self.metadata.as_ref(), modified.metadata.as_ref())
         // NOTE: `raw_credentials` is INTENTIONALLY excluded from the
         // immutable check. Framework orchestrators (praxis-policy-apl-runtime's
         // DelegationPluginInvoker) legitimately write
@@ -382,7 +440,7 @@ impl Extensions {
     /// Merge the guarded `http` slot — header maps and the request line.
     ///
     /// `write_headers` authorizes *headers*, which is what the capability is
-    /// named for. The request line (`method`, `path`, `host`, `scheme`) and the
+    /// named for. The request line (`method`, `path`, `query`, `host`, `scheme`) and the
     /// response `status` are host-populated identity that policies gate on, so
     /// they are always preserved from canonical state and never taken from
     /// `owned`. `host` in particular must come from a validated authority (see
@@ -573,6 +631,8 @@ pub struct OwnedExtensions {
     pub framework: Option<Arc<FrameworkExtension>>,
     /// Host-provided operational metadata.
     pub meta: Option<Arc<MetaExtension>>,
+    /// Externally acquired policy facts.
+    pub metadata: Option<Arc<MetadataExtension>>,
     /// Raw credentials are shared by Arc here too — write tokens for
     /// `inbound_tokens` and `delegated_tokens` mutation paths land with
     /// the `IdentityResolve` and `TokenDelegate` hooks. Until
@@ -1383,11 +1443,12 @@ mod tests {
 
     #[test]
     fn test_http_merge_preserves_request_line() {
-        // Policies gate on method/path/host/scheme (CHANGELOG 0.2.2), and
+        // Policies gate on the request line, including the query, and
         // `write_headers` does not authorize rewriting request identity.
         let mut http = HttpExtension::default();
         http.method = Some("POST".into());
         http.path = Some("/api/v1/transfer".into());
+        http.query = Some("access_token=secret".into());
         http.host = Some("bank.internal".into());
         http.scheme = Some("https".into());
 
@@ -1405,6 +1466,7 @@ mod tests {
             // A worker round trip loses these; a hostile one rewrites them.
             h.method = Some("GET".into());
             h.path = Some("/api/v1/healthz".into());
+            h.query = None;
             h.host = Some("evil.example".into());
             h.scheme = None;
         }
@@ -1415,6 +1477,7 @@ mod tests {
         let merged = ext.http.as_ref().unwrap();
         assert_eq!(merged.method.as_deref(), Some("POST"));
         assert_eq!(merged.path.as_deref(), Some("/api/v1/transfer"));
+        assert_eq!(merged.query.as_deref(), Some("access_token=secret"));
         assert_eq!(merged.host.as_deref(), Some("bank.internal"));
         assert_eq!(merged.scheme.as_deref(), Some("https"));
         assert_eq!(

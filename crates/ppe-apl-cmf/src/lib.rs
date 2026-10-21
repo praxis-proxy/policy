@@ -75,6 +75,8 @@ pub mod llm;
 pub mod mcp;
 /// Bridges operational metadata into `meta.*` keys.
 pub mod meta;
+/// Acquired metadata → `metadata.*` attributes.
+pub mod metadata;
 /// Bridges the message payload into `args.*` and `result.*` keys.
 pub mod payload;
 /// Bridges origin and threading into `provenance.*` keys.
@@ -97,6 +99,7 @@ pub use http::extract_http;
 pub use llm::{extract_llm, extract_llm_request};
 pub use mcp::extract_mcp;
 pub use meta::extract_meta;
+pub use metadata::extract_metadata;
 pub use payload::{extract_args, extract_data, extract_result};
 pub use provenance::extract_provenance;
 pub use request::extract_request;

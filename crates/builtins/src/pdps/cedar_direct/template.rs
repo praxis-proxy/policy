@@ -227,6 +227,60 @@ email: ${claim.email}
     }
 
     #[test]
+    fn substitutes_http_query_and_request_line() {
+        // Cedar's context builder does NOT auto-populate `http.*` the way OPA
+        // and CEL do (it injects only delegation/meta/security). A Cedar policy
+        // reaches the request line and query through a `${http.*}` template
+        // reference, which resolves from the same bag keys `extract_http`
+        // populates. This pins that `${http.query}` works, so a Cedar fetch-vs
+        // -push rule can read the query the way an OPA rule reads
+        // `input.http.query`.
+        let bag = bag_with(&[
+            ("http.method", "GET"),
+            ("http.path", "/octocat/Hello-World.git/info/refs"),
+            ("http.query", "service=git-upload-pack"),
+        ]);
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+method: ${http.method}
+path: ${http.path}
+query: ${http.query}
+"#,
+        )
+        .unwrap();
+        let resolved = resolve_refs(&yaml, &bag).unwrap();
+        let map = resolved.as_mapping().unwrap();
+        assert_eq!(
+            map.get(serde_yaml::Value::String("method".into()))
+                .and_then(|v| v.as_str()),
+            Some("GET")
+        );
+        assert_eq!(
+            map.get(serde_yaml::Value::String("path".into()))
+                .and_then(|v| v.as_str()),
+            Some("/octocat/Hello-World.git/info/refs")
+        );
+        assert_eq!(
+            map.get(serde_yaml::Value::String("query".into()))
+                .and_then(|v| v.as_str()),
+            Some("service=git-upload-pack")
+        );
+    }
+
+    #[test]
+    fn missing_http_query_errors_loudly() {
+        // A request with no query leaves `http.query` out of the bag, so a
+        // `${http.query}` reference fails loudly rather than resolving empty —
+        // a query-specific Cedar rule cannot be silently satisfied by an absent
+        // query. (`extract_http` omits the key when the request carried none.)
+        let bag = bag_with(&[("http.path", "/x/info/refs")]);
+        let yaml = serde_yaml::Value::String("${http.query}".into());
+        let err = resolve_refs(&yaml, &bag).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("http.query"), "error mentions the key: {msg}");
+    }
+
+    #[test]
     fn passes_through_literal_strings() {
         let bag = bag_with(&[("args.x", "ignored")]);
         // No `${...}` wrapper → literal.

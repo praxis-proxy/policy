@@ -5,10 +5,16 @@
 // config style (serde, snake_case enums, stderr default) and adds the OCSF
 // and attestation settings.
 
-//! Operator configuration: destination, product identity, chaining and
+//! Operator configuration: exporters, product identity, chaining and
 //! signing.
 
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use praxis_policy_core::audit::export::{AuditExporter, ExportError, ExporterConfig};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+
+use crate::emitter::TracingExporter;
 
 /// The `config:` block of an `audit/ocsf` plugin entry.
 ///
@@ -18,10 +24,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OcsfAuditConfig {
-    /// Where OCSF events go. The stderr default keeps the demo flow
-    /// (`docker compose logs -f | jq`) identical to audit-logger.
+    /// Where OCSF events go, as a single destination: `stderr` or
+    /// `tracing`. Mutually exclusive with `exporters`, which can name
+    /// several. With neither set, records go to stderr, which keeps the
+    /// demo flow (`docker compose logs -f | jq`) identical to audit-logger.
     #[serde(default)]
-    pub destination: OcsfDestination,
+    pub destination: Option<OcsfDestination>,
+
+    /// Where OCSF events go, as a list of exporters. Every record is
+    /// written, byte for byte, to each one. Mutually exclusive with
+    /// `destination`; an empty list is rejected.
+    ///
+    /// ```yaml
+    /// exporters:
+    ///   - { kind: file, path: /var/log/ppe/ocsf.ndjson, fsync: batch }
+    ///   - { kind: stderr }
+    /// ```
+    #[serde(default)]
+    pub exporters: Option<Vec<OcsfExporterConfig>>,
 
     /// Populates OCSF `metadata.product` so a single collector can
     /// attribute events to a deployment.
@@ -123,7 +143,8 @@ impl Default for OcsfAuditConfig {
     /// fingerprint and no signature, and nothing would say so.
     fn default() -> Self {
         Self {
-            destination: OcsfDestination::default(),
+            destination: None,
+            exporters: None,
             product_name: default_product_name(),
             vendor_name: default_vendor_name(),
             chain: default_true(),
@@ -157,6 +178,85 @@ pub enum OcsfDestination {
     Stderr,
     /// Emit via `tracing::info!` at target `ocsf.audit`.
     Tracing,
+}
+
+/// One entry of `exporters`: a built-in exporter from the engine, or
+/// `{ kind: tracing }`, which emits at target `ocsf.audit` as
+/// `destination: tracing` does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum OcsfExporterConfig {
+    /// `stderr`, `stdout` or `file`.
+    Builtin(ExporterConfig),
+    /// `tracing` at target `ocsf.audit`.
+    Tracing(TracingTag),
+}
+
+/// The `{ kind: tracing }` exporter entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TracingTag {
+    /// The only value.
+    Tracing,
+}
+
+impl<'de> Deserialize<'de> for OcsfExporterConfig {
+    /// `tracing` is checked by hand so every other kind is parsed by
+    /// `ExporterConfig` itself and keeps its own error messages.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Value::deserialize(deserializer)?;
+        if raw.get("kind").and_then(Value::as_str) == Some("tracing") {
+            if raw.as_object().is_some_and(|m| m.len() > 1) {
+                return Err(serde::de::Error::custom(
+                    "the tracing exporter takes no settings besides `kind`",
+                ));
+            }
+            return Ok(Self::Tracing(TracingTag::Tracing));
+        }
+        ExporterConfig::deserialize(raw)
+            .map(Self::Builtin)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl OcsfExporterConfig {
+    /// Build the exporter this entry names.
+    ///
+    /// # Errors
+    ///
+    /// A built-in exporter that cannot be opened, such as a `file` path that
+    /// is not absolute or not writable.
+    pub fn build(&self) -> Result<Arc<dyn AuditExporter>, ExportError> {
+        match self {
+            Self::Builtin(cfg) => cfg.build(),
+            Self::Tracing(TracingTag::Tracing) => Ok(Arc::new(TracingExporter)),
+        }
+    }
+}
+
+impl OcsfAuditConfig {
+    /// The exporters records go to: `exporters` when set, otherwise the one
+    /// `destination` names, otherwise stderr.
+    ///
+    /// # Errors
+    ///
+    /// `destination` and `exporters` both set, an empty `exporters` list, or
+    /// an exporter that cannot be opened.
+    pub fn build_exporters(&self) -> Result<Vec<Arc<dyn AuditExporter>>, ExportError> {
+        match (&self.destination, &self.exporters) {
+            (Some(_), Some(_)) => Err(ExportError::Config(
+                "set either `destination` or `exporters`, not both".to_owned(),
+            )),
+            (_, Some(list)) if list.is_empty() => Err(ExportError::Config(
+                "`exporters` is empty; name at least one, or omit it for stderr".to_owned(),
+            )),
+            (_, Some(list)) => list.iter().map(OcsfExporterConfig::build).collect(),
+            (Some(OcsfDestination::Tracing), None) => Ok(vec![Arc::new(TracingExporter)]),
+            (Some(OcsfDestination::Stderr) | None, None) => {
+                Ok(vec![ExporterConfig::Stderr.build()?])
+            },
+        }
+    }
 }
 
 /// How the attestation is signed.

@@ -74,6 +74,7 @@ use praxis_policy_apl_runtime::{AplOptions, register_apl};
 struct Seen {
     plugin: String,
     path: Option<String>,
+    query: Option<String>,
     entity_name: Option<String>,
 }
 
@@ -86,6 +87,7 @@ fn record(ledger: &Ledger, plugin: &str, ext: &Extensions) {
         .push(Seen {
             plugin: plugin.to_owned(),
             path: ext.http.as_ref().and_then(|http| http.path.clone()),
+            query: ext.http.as_ref().and_then(|http| http.query.clone()),
             entity_name: ext.meta.as_ref().and_then(|meta| meta.entity_name.clone()),
         });
 }
@@ -354,6 +356,21 @@ fn response(method: &str, path: &str, status: u16) -> Extensions {
         method: Some(method.to_owned()),
         path: Some(path.to_owned()),
         status: Some(status),
+        ..Default::default()
+    }));
+    ext
+}
+
+/// The same request line with a query string attached (value excludes the
+/// leading `?`), which is what a host presents when the request-target carried
+/// one. The path and the query are separate slots, exactly as the host sets
+/// them, so a policy reading `http.query` sees it independently of the path.
+fn request_with_query(method: &str, path: &str, query: &str) -> Extensions {
+    let mut ext = request(method, path);
+    ext.http = Some(Arc::new(HttpExtension {
+        method: Some(method.to_owned()),
+        path: Some(path.to_owned()),
+        query: Some(query.to_owned()),
         ..Default::default()
     }));
     ext
@@ -1579,6 +1596,236 @@ routes:
     );
 }
 
+/// A rule reads the request QUERY STRING and allows or denies on its EXACT
+/// value — the capability the `http.query` attribute exists to provide. Before
+/// `http.query`, no policy could read the query at all (the path matcher strips
+/// it), so even an exact-string check on the query was inexpressible.
+///
+/// This is an exact whole-string comparison, NOT a parsed-parameter gate. It is
+/// deliberately not presented as a git push gate: `http.query` is the raw query
+/// string, so `== 'service=git-receive-pack'` matches only that exact string.
+/// A request carrying an extra parameter (`service=git-receive-pack&x=1`) has a
+/// different whole-string value and does NOT match — see
+/// `an_exact_query_match_does_not_parse_parameters` below, which pins that
+/// limitation. A real service gate must parse the `service` parameter out of
+/// the query (e.g. with the regex/`matches` builtin), not string-compare it.
+#[tokio::test]
+async fn a_rule_gates_on_the_exact_request_query_string() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /octocat/Hello-World.git/info/refs
+    authorization:
+      pre_invocation:
+        - "http.query == 'service=git-receive-pack': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    // The exact string is matched, so this request is denied...
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query(
+                "GET",
+                "/octocat/Hello-World.git/info/refs",
+                "service=git-receive-pack"
+            )
+        )
+        .await,
+        "the exact receive-pack query matches the rule, so the request is denied"
+    );
+    // ...while a different exact value on the same path passes.
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query(
+                "GET",
+                "/octocat/Hello-World.git/info/refs",
+                "service=git-upload-pack"
+            )
+        )
+        .await,
+        "the upload-pack query is a different exact value, so the same path passes"
+    );
+}
+
+#[tokio::test]
+async fn plugins_need_read_query_even_when_policy_can_read_the_query() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: headers-only
+    kind: test/record
+    hooks: [http.request]
+    capabilities: [read_headers]
+  - name: query-only
+    kind: test/record
+    hooks: [http.request]
+    capabilities: [read_query]
+routes:
+  - http:
+      path_prefix: /repo.git/info/refs
+    authorization:
+      pre_invocation:
+        - "run(headers-only)"
+        - "run(query-only)"
+        - "http.query == 'service=git-receive-pack': deny"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/repo.git/info/refs", "service=git-upload-pack")
+        )
+        .await
+    );
+    let seen = observations(&ledger);
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].plugin, "headers-only");
+    assert_eq!(seen[0].path.as_deref(), Some("/repo.git/info/refs"));
+    assert_eq!(seen[0].query, None);
+    assert_eq!(seen[1].plugin, "query-only");
+    assert_eq!(seen[1].path, None);
+    assert_eq!(seen[1].query.as_deref(), Some("service=git-upload-pack"));
+
+    clear(&ledger);
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/repo.git/info/refs", "service=git-receive-pack")
+        )
+        .await
+    );
+    assert_eq!(fired(&ledger), vec!["headers-only", "query-only"]);
+}
+
+/// Pins the limitation of an exact-string query match: it is NOT a push gate.
+/// The deny rule names the exact string `service=git-receive-pack`, so a push
+/// advertisement that appends any extra parameter has a different whole-string
+/// value and slips past the rule. This is the reviewer's observation captured
+/// as behavior: a policy that must actually block the push service has to parse
+/// the `service` parameter, not compare the whole query string.
+#[tokio::test]
+async fn an_exact_query_match_does_not_parse_parameters() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /octocat/Hello-World.git/info/refs
+    authorization:
+      pre_invocation:
+        - "http.query == 'service=git-receive-pack': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    // Same push service, one extra parameter -> the whole-string value differs,
+    // so the exact-match deny does NOT fire and the request is ALLOWED. If the
+    // upstream tolerates the extra parameter, an exact-string rule would fail to
+    // block the push. A parameter-aware rule is required for a real gate.
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query(
+                "GET",
+                "/octocat/Hello-World.git/info/refs",
+                "service=git-receive-pack&x=1"
+            )
+        )
+        .await,
+        "an extra parameter changes the whole-string value, so the exact-match deny is bypassed"
+    );
+}
+
+/// The query reaches the bag SEPARATELY from the path: the path matcher strips
+/// the query by design, so a query predicate reads a value the path predicate
+/// never sees. A rule naming both the path and the query fires only when each
+/// matches its own slot, which is the independence this attribute provides.
+#[tokio::test]
+async fn the_query_is_matched_independently_of_the_path() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /repo.git/info/refs
+    authorization:
+      pre_invocation:
+        - "http.path == '/repo.git/info/refs' & http.query == 'service=git-receive-pack': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    // Path matches AND query matches -> the compound rule fires.
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/repo.git/info/refs", "service=git-receive-pack")
+        )
+        .await,
+        "the path and the query both match their own slots, so the rule denies"
+    );
+    // Same path, different query -> the query clause is false, so the request
+    // passes. The query is being read, not folded into the path.
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/repo.git/info/refs", "service=git-upload-pack")
+        )
+        .await,
+        "the path still matches but the query does not, so the compound rule is false"
+    );
+}
+
+/// A request with no query leaves `http.query` ABSENT from the bag, so an
+/// equality rule against a specific query value is false — a query-specific
+/// allowlist fails closed rather than matching an empty string. This is why
+/// `info/refs` with no `?service=` is not mistaken for the fetch service.
+#[tokio::test]
+async fn a_rule_on_the_query_does_not_fire_when_there_is_no_query() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - http:
+      path_prefix: /repo.git/info/refs
+    authorization:
+      pre_invocation:
+        - "http.query == 'service=git-upload-pack': deny"
+        - "http.method == 'TRACE': deny"
+"#;
+    let (mgr, _ledger) = engine_with(YAML).await;
+
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request("GET", "/repo.git/info/refs")
+        )
+        .await,
+        "no query exists, so the comparison is false and the query rule is inert"
+    );
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request("TRACE", "/repo.git/info/refs")
+        )
+        .await,
+        "the rule beside it still governs, so the block itself is live"
+    );
+}
+
 /// The request half carries no status, and a rule reading one there does not
 /// fire: a missing bag key makes a comparison false, so the deny does not
 /// trigger. A response-phase rule guarding a request-phase concern therefore
@@ -2206,6 +2453,7 @@ async fn the_transpiled_authorization_policy_still_resolves_its_global_http_poli
         vec![Seen {
             plugin: "keycloak-jwt".to_owned(),
             path: None,
+            query: None,
             entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
         }],
         "the global authentication list dispatches, and the request still \

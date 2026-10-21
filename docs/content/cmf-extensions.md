@@ -41,6 +41,14 @@ missing slots is out of scope.
 | `Float` | Same as `Int`. `delegation.age_seconds` is non-option and always written, including `0.0`. | Same reason: a missing telemetry field is not zero. |
 | JSON object / claims map | **No parent key.** Each scalar (or scalar-array) child is written under a dotted path. `{}`, `null`, and an array holding a nested container set nothing. | The bag has no map type. See [`subject.claims`](#subjectclaims). |
 
+Acquired metadata is the deliberate exception to the last row: each present
+object, mixed array, or `null` writes `NonScalar` at its own path so an
+installed result remains distinguishable from a missing one in APL. CEL and
+OPA skip `NonScalar` entries until the evaluator-native projection lands, so
+there this presence is not yet visible. An integer outside the `i64` range
+also projects as `NonScalar` rather than a rounded float. The structured
+record remains available to later evaluator-native projections.
+
 `ppe-pdp-diff` is the executable form of this table for the keys Cedar can
 see. Empty `subject.teams` and a subject with no roles (no `role.*` keys,
 empty `subject.roles`) must Deny on APL, CEL, cedar-direct, and OPA when the
@@ -122,6 +130,31 @@ permissions set, Cedar falls back to flattened `role.*` / `perm.*` trues for
 compatibility. A present canonical set is authoritative. Cedar does not
 surface `client.*`, `http.*`, or the other slots as principal attributes. A
 Cedar policy that needs those values does not get them from this mapping.
+
+Unlike OPA (`input.http.query`) and CEL (`http.query`), Cedar's context is not
+auto-populated with the `http.*` slot — the builder injects only
+`context.delegation`, `context.meta`, and `context.security`. A Cedar step
+reaches the request line and query through a `${…}` template reference, which
+resolves from the same bag keys the HTTP extractor populates:
+
+<!-- validate: phase-list -->
+```yaml
+- cedar:
+    action: 'Action::"read"'
+    resource:
+      type: Request
+      id: ${http.path}
+      attributes:
+        method: ${http.method}
+        query:  ${http.query}
+```
+
+`${http.query}` resolves to the raw query string (no leading `?`). The
+reference is whole-string only. A request that carried no query leaves
+`http.query` out of the bag, so `${http.query}` fails loudly rather than
+resolving empty — a query-specific Cedar rule cannot be silently satisfied by
+an absent query. As with OPA and CEL, an equality on the raw query is an
+exact-string check, not a parsed-parameter gate.
 
 ---
 
@@ -414,11 +447,23 @@ A default request slot adds nothing.
 |---|---|---|
 | `http.method` | String | `Some` |
 | `http.path` | String | `Some` |
+| `http.query` | String | `Some` when the request carried a query (value excludes the leading `?`); omitted otherwise. Readable by a rule, but its value is redacted in diagnostics — see the note below |
 | `http.host` | String | `Some` |
 | `http.scheme` | String | `Some` |
 | `http.status` | Int | `Some` (response half) |
 | `http.request_headers.<name>` | String | each header; name lowercased |
 | `http.response_headers.<name>` | String | each header; name lowercased |
+
+A rule reads `http.query` and the header values directly. Built-in PDP deny
+diagnostics render these potentially secret values as type labels, and
+`HttpExtension` renders a present query as `[REDACTED]` in its serialized and
+`Debug` output. Plugin views include the raw query only with `read_query`;
+`read_headers` alone cannot read it.
+The canonical `AttributeBag` still holds the raw value for policy evaluation;
+its `Debug` and `Serialize` implementations are not redacted, so it must not
+be used directly as a log or audit record. A host must populate the canonical
+query after any serialization boundary because `HttpExtension` serialization
+replaces its value with `[REDACTED]`.
 
 ### 7. `llm` — `LLMExtension`
 
@@ -559,6 +604,28 @@ The `completion.*` aliases remain value-identical during migration.
 | `custom.<dotted>` | flattened JSON | each map entry |
 
 An empty map adds nothing.
+
+### 13. `metadata` — `MetadataExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `metadata.<name>` | acquired JSON | each installed instance and its derived value/provenance paths |
+
+Each instance is present as `NonScalar`. Object response members project
+directly below it; a scalar, array, or `null` root uses the stable `value`
+leaf. Scalar leaves keep their type, string arrays become `StringSet`, and
+objects, mixed arrays, and `null` are present as `NonScalar`. The structured
+`AcquiredFacts` value remains authoritative and is not reconstructed from
+these flattened keys.
+
+Reserved provenance leaves are `$source`, `$outcome`, `$fetched_at`, `$cache`,
+`$status`, `$stale`, and `$error_code`; optional leaves appear only when they
+apply. `$source` carries the registered plugin kind, while the containing
+namespace carries its instance name. `$fetched_at` is an RFC 3339 UTC string
+at second precision with a `Z` suffix, such as `2026-10-19T12:00:00Z`,
+matching `<ns>.attested_at`. APL reads these leaves as ordinary path
+segments, as in `metadata.account.$outcome`. A plugin sees this slot and
+namespace only with `read_metadata`; route predicates always can.
 
 ---
 

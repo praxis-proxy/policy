@@ -19,6 +19,13 @@ const PAYLOAD_NAMESPACES: &[&str] = &[
     "custom",
     "http.request_headers",
     "http.response_headers",
+    // The query string is request-derived and may embed a credential (a
+    // query-parameter JWT, say), so a diagnostic renders only its type, never
+    // its value — the same treatment the header namespaces get. `http.query`
+    // is a leaf, so this matches the exact key, not a subtree. It gates only
+    // redaction/diagnostics; the bag→PDP input path does not consult this list,
+    // so a policy still reads the live value.
+    "http.query",
 ];
 
 /// The payload namespace a dotted path falls under, if any.
@@ -120,6 +127,9 @@ mod tests {
             payload_namespace("http.response_headers.server"),
             Some("http.response_headers")
         );
+        // The query string is payload (may embed a credential); it is the leaf
+        // `http.query`, matched exactly.
+        assert_eq!(payload_namespace("http.query"), Some("http.query"));
     }
 
     #[test]
@@ -132,6 +142,15 @@ mod tests {
             "llm",
             "argsx",
             "llm.requests",
+            // Redacting the query must not spill onto the rest of the http
+            // namespace: the method, path, host, and scheme are not payload and
+            // stay readable in diagnostics. `http.queryx` is a different key and
+            // must not be caught by the `http.query` prefix.
+            "http.method",
+            "http.path",
+            "http.host",
+            "http.scheme",
+            "http.queryx",
             "",
         ] {
             assert_eq!(payload_namespace(path), None, "{path}");

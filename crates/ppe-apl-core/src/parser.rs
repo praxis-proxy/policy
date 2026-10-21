@@ -121,6 +121,10 @@ const PLUGIN_IS_RUN: &str = "`plugin(name)` is not a step; `run(name)` is the on
 const EMPTY_SEGMENT: &str = "empty segment in an attribute path; a path is dot-separated names, \
                              so `a..b`, `a.` and `.a` name nothing";
 
+/// What a `$` segment may look like, named wherever one is refused.
+const RESERVED_SEGMENT: &str = "a `$` segment is one `$` then a name, as in \
+                                `metadata.account.$outcome`; it cannot start a path";
+
 /// What the word `not` is for, named wherever it is refused.
 const NOT_IS_RESERVED: &str = "`not` is reserved for the `not in` phrase; APL spells predicate \
                                negation `!`, as in `!authenticated`";
@@ -329,8 +333,18 @@ impl<'a> Lexer<'a> {
         // attribute, which made a predicate silently false and a `require`
         // silently deny: a policy that never matched and never said why.
         let mut has_bracket = false;
+        let mut first = true;
         loop {
             let seg_start = self.pos;
+            // A segment after the first may carry one leading `$`, which names
+            // a reserved framework leaf such as `metadata.<name>.$outcome`.
+            if !first && self.peek() == Some(b'$') {
+                self.pos += 1;
+                if !self.peek().is_some_and(is_ident_start) {
+                    return Err(self.err_at(seg_start, RESERVED_SEGMENT));
+                }
+            }
+            first = false;
             while let Some(b) = self.peek() {
                 if is_segment_char(b) {
                     self.pos += 1;
@@ -6370,6 +6384,38 @@ cedar:
             ("1e2", "there is no exponent form"),
             ("(authenticated", "expected `)`"),
             ("subject[.id]", "empty segment"),
+        ];
+        for (src, needle) in cases {
+            let err = parse_predicate(src).expect_err(src);
+            assert_rejected(err, needle);
+        }
+    }
+
+    #[test]
+    fn reserved_dollar_segments_lex_as_one_path() {
+        for src in [
+            "metadata.account.$outcome",
+            "metadata.account.$fetched_at == 'x'",
+            "exists(metadata.account.$error_code)",
+        ] {
+            parse_predicate(src).expect(src);
+        }
+        let parsed =
+            parse_predicate("exists(metadata.account.$stale)").expect("exists over `$` leaf");
+        assert!(
+            format!("{parsed:?}").contains("\"metadata.account.$stale\""),
+            "a `$` leaf must stay one attribute key: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_dollar_segments_are_rejected() {
+        let cases = [
+            ("a.$", "a `$` segment"),
+            ("a.$$b", "a `$` segment"),
+            ("a.$1", "a `$` segment"),
+            ("$a", "unexpected character `$`"),
+            ("a.b$c", "unexpected character `$`"),
         ];
         for (src, needle) in cases {
             let err = parse_predicate(src).expect_err(src);

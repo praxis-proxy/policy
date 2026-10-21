@@ -22,10 +22,26 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **`reference/plugins/transcript-scanner`** reads typed prior turns through `read_agent`, including resource blobs decoded as UTF-8 with replacement, and denies with `transcript.detected` on a configured content match. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`llm:` routes can read the request.** One gated `Extensions.llm_request` carrier holds the optional parsed body and normalized parts. The body reaches PDPs at `llm.request`; reported parts emit `llm.input.*` bag keys, including a role-aware instruction digest and candidate count. Model and completion facts emit canonical `llm.model.*` and `llm.output.*` keys. Published `llm.model_id`, `llm.provider`, `llm.capabilities`, and `completion.*` remain value-identical aliases. The carrier is never serialized and requires `read_llm_request` for plugins. Hosts constructing `Extensions` or `OwnedExtensions` with exhaustive literals must update them. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`docs/content/llm-routes.md`** documents canonical keys, missing-key behavior, host obligations, and a tested worked config. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+- Added immutable, framework-owned acquired metadata records under
+  `metadata.<instance>.*`. Plugins in the same invocation need `read_metadata`
+  to receive the typed slot or its APL projection, and cannot add, replace, or
+  remove records; `Extensions::for_child_request` starts a child policy
+  invocation without parent records. This is the protected context
+  foundation for the external metadata PIP tracked by
+  [#184](https://github.com/praxis-proxy/policy/issues/184).
+- APL attribute paths accept one leading `$` on a segment after the first,
+  so policies read provenance leaves such as `metadata.account.$outcome`.
+  Route predicates read `metadata.*` without a host grant: the synthetic APL
+  handler holds `read_metadata` intrinsically.
 
 ### Changed
 
 - **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+- **Breaking:** `Extensions` and `OwnedExtensions` add `metadata`; exhaustive
+  struct literals must initialize it (or use `..Default::default()`).
+  `Capability` adds `ReadMetadata` and `SlotName` adds `Metadata`, so
+  exhaustive matches need a new arm. `Extensions.metadata` is never
+  serialized. The new metadata enums are `#[non_exhaustive]`.
 
 ## [0.5.0] - 2026-10-13
 
@@ -194,6 +210,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `&` and `|` no longer abort when one operand cannot be ordered and
+  another already settles the expression. A true `|` operand or a false `&`
+  operand decides the same way in either order, so some phases that denied
+  on an unparseable value now evaluate normally. An unorderable result is
+  still fail-closed when no operand settles.
+  ([#69](https://github.com/praxis-proxy/policy/issues/69))
 - Rejected JWTs with unsupported critical headers. OAuth token exchange now
   validates the issued token type, granted scopes, and JWT audience and subject
   by default. Empty scope requests accept IdP defaults, and

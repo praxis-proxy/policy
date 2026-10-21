@@ -29,13 +29,15 @@
 
 use praxis_policy_apl_cmf::constants::{
     CAP_READ_AGENT, CAP_READ_CLAIMS, CAP_READ_CLIENT, CAP_READ_DELEGATION, CAP_READ_HEADERS,
-    CAP_READ_LABELS, CAP_READ_LLM_REQUEST, CAP_READ_PERMISSIONS, CAP_READ_ROLES, CAP_READ_SUBJECT,
-    CAP_READ_TEAMS, CAP_READ_WORKLOAD,
+    CAP_READ_LABELS, CAP_READ_LLM_REQUEST, CAP_READ_METADATA, CAP_READ_PERMISSIONS, CAP_READ_QUERY,
+    CAP_READ_ROLES, CAP_READ_SUBJECT, CAP_READ_TEAMS, CAP_READ_WORKLOAD,
 };
 
 /// The value type a bag key carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyType {
+    /// Any acquired JSON/provenance shape, including `NonScalar` markers.
+    Acquired,
     /// `AttributeValue::Bool`.
     Bool,
     /// `AttributeValue::Int`.
@@ -67,6 +69,7 @@ impl KeyType {
     #[must_use]
     pub(crate) const fn documented(self) -> &'static str {
         match self {
+            Self::Acquired => "acquired JSON",
             Self::Bool => "Bool",
             Self::Int => "Int",
             Self::Float => "Float",
@@ -114,6 +117,8 @@ pub(crate) enum Slot {
     Framework,
     /// `custom` — the host's own map.
     Custom,
+    /// `metadata` — externally acquired policy facts.
+    Metadata,
 }
 
 impl Slot {
@@ -134,6 +139,7 @@ impl Slot {
             Self::Provenance => "provenance",
             Self::Framework => "framework",
             Self::Custom => "custom",
+            Self::Metadata => "metadata",
         }
     }
 }
@@ -613,6 +619,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Slot::Http,
     ),
     exact(
+        "http.query",
+        KeyType::String,
+        Gating::Capability(CAP_READ_QUERY),
+        Slot::Http,
+    ),
+    exact(
         "http.host",
         KeyType::String,
         Gating::Capability(CAP_READ_HEADERS),
@@ -970,6 +982,13 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         KeyType::Flattened,
         Gating::Ungated,
         Slot::Custom,
+    ),
+    // 13. metadata
+    family(
+        "metadata.<name>",
+        KeyType::Acquired,
+        Gating::Capability(CAP_READ_METADATA),
+        Slot::Metadata,
     ),
 ];
 

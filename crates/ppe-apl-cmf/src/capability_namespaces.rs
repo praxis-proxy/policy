@@ -153,6 +153,10 @@ const TABLE: &[CapabilityEntry] = &[
         ],
     },
     CapabilityEntry {
+        name: CAP_READ_QUERY,
+        prefixes: &[BAG_HTTP_QUERY],
+    },
+    CapabilityEntry {
         // Gates the request carrier. Its body reaches PDPs through structured
         // input; its normalized parts supply these exact bag keys.
         name: CAP_READ_LLM_REQUEST,
@@ -168,6 +172,10 @@ const TABLE: &[CapabilityEntry] = &[
             BAG_LLM_STREAM,
             BAG_LLM_INSTRUCTIONS_DIGEST,
         ],
+    },
+    CapabilityEntry {
+        name: CAP_READ_METADATA,
+        prefixes: &[BAG_METADATA_PREFIX],
     },
 ];
 
@@ -272,9 +280,11 @@ mod tests {
         let prefixes = capability_namespaces(CAP_READ_HEADERS);
         assert!(prefixes.contains(&BAG_HTTP_REQUEST_HEADERS_PREFIX));
         assert!(prefixes.contains(&BAG_HTTP_RESPONSE_HEADERS_PREFIX));
-        // The whole `http` slot is gated as one, so the response status is
-        // readable wherever response headers are.
+        // The response status shares the header capability; the raw query
+        // requires a separate grant.
         assert!(prefixes.contains(&BAG_HTTP_STATUS));
+        assert!(!prefixes.contains(&BAG_HTTP_QUERY));
+        assert_eq!(capability_namespaces(CAP_READ_QUERY), &[BAG_HTTP_QUERY]);
     }
 
     /// The module header claims every `CAP_*` name matches a capability

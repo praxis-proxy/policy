@@ -36,6 +36,7 @@ use catalog::{CATALOG, Gating, KeyEntry, KeyType, Shape, entry_for};
 use praxis_policy_apl_cmf::capability_namespaces::{
     capability_namespaces, known_read_capabilities,
 };
+use praxis_policy_apl_cmf::constants::{CAP_READ_HEADERS, CAP_READ_QUERY};
 use praxis_policy_apl_cmf::extract_extensions;
 use praxis_policy_apl_core::{AttributeBag, AttributeValue};
 use praxis_policy_core::cmf::{Message, Role};
@@ -43,9 +44,9 @@ use praxis_policy_core::extensions::{
     AgentExtension, ClientExtension, ClientTrustLevel, CompletionExtension, ConversationContext,
     DelegationExtension, DelegationHop, Extensions, FrameworkExtension, HttpExtension,
     LLMExtension, LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestParts, MCPExtension,
-    MetaExtension, MonotonicSet, PromptMetadata, ProvenanceExtension, RequestExtension,
-    ResourceMetadata, SecurityExtension, StopReason, SubjectExtension, SubjectType, TokenUsage,
-    ToolChoice, ToolMetadata, WorkloadIdentity,
+    MetaExtension, MetadataCacheDisposition, MonotonicSet, PromptMetadata, ProvenanceExtension,
+    RequestExtension, ResourceMetadata, SecurityExtension, StopReason, SubjectExtension,
+    SubjectType, TokenUsage, ToolChoice, ToolMetadata, WorkloadIdentity,
 };
 
 /// One of every slot, with every field carrying a value.
@@ -156,6 +157,7 @@ fn fully_populated() -> Extensions {
         status: Some(200),
         method: Some("POST".to_owned()),
         path: Some("/v1".to_owned()),
+        query: Some("service=git-upload-pack".to_owned()),
         host: Some("h".to_owned()),
         scheme: Some("https".to_owned()),
         // The one field this fixture cannot populate: the engine owns this
@@ -243,6 +245,21 @@ fn fully_populated() -> Extensions {
         metadata: HashMap::from([("m".to_owned(), serde_json::json!(1))]),
     };
     let custom = HashMap::from([("c".to_owned(), serde_json::json!("v"))]);
+    let mut metadata_owner = Extensions::default();
+    metadata_owner
+        .install_metadata(
+            "account",
+            "metadata/http",
+            praxis_policy_core::extensions::AcquiredFacts::success(
+                serde_json::json!({"active": true, "nested": {"plan": "enterprise"}}),
+                "2026-10-01T12:00:00Z"
+                    .parse()
+                    .expect("a literal RFC3339 instant"),
+                MetadataCacheDisposition::Miss,
+            )
+            .with_status(200),
+        )
+        .expect("metadata fixture installs");
 
     // Named field by field rather than spread from `Default`, so a slot added
     // to the container also breaks this file. The three non-slot fields carry
@@ -252,6 +269,7 @@ fn fully_populated() -> Extensions {
         delegation: Some(Arc::new(delegation)),
         agent: Some(Arc::new(agent)),
         meta: Some(Arc::new(meta)),
+        metadata: metadata_owner.metadata,
         request: Some(Arc::new(request)),
         http: Some(Arc::new(http)),
         llm: Some(Arc::new(llm)),
@@ -300,6 +318,7 @@ fn type_of(value: &AttributeValue) -> KeyType {
 /// omit containers rather than marking them as policy-visible values.
 fn type_matches(declared: KeyType, actual: KeyType) -> bool {
     match declared {
+        KeyType::Acquired => true,
         KeyType::Flattened => actual != KeyType::NonScalar,
         expected => expected == actual,
     }
@@ -351,7 +370,11 @@ fn the_bridge_emits_exactly_the_catalog() {
 #[test]
 fn llm_request_path_is_reserved_and_bag_keys_do_not_collide() {
     let bag = emitted();
-    let keys: Vec<&str> = bag.iter().map(|(key, _)| key).collect();
+    let keys: Vec<&str> = bag
+        .iter()
+        .map(|(key, _)| key)
+        .filter(|key| key.starts_with("llm.") || key.starts_with("completion."))
+        .collect();
     for key in &keys {
         assert!(
             *key != "llm.request" && !key.starts_with("llm.request."),
@@ -841,6 +864,19 @@ fn each_gated_key_arrives_intact_once_its_capability_is_held() {
          emits unfiltered, so the catalog names the wrong capability or the \
          filter drops something it should not: {wrong:#?}"
     );
+}
+
+#[test]
+fn raw_http_query_reaches_pdps_and_only_plugins_with_read_query() {
+    assert_eq!(
+        bag_unfiltered().get_string("http.query"),
+        Some("service=git-upload-pack")
+    );
+    assert_eq!(
+        bag_visible_to(&[CAP_READ_QUERY]).get_string("http.query"),
+        Some("service=git-upload-pack")
+    );
+    assert!(!bag_visible_to(&[CAP_READ_HEADERS]).contains("http.query"));
 }
 
 /// Every capability against every gated key, not just the declared pair.

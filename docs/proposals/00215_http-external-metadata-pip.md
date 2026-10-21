@@ -259,7 +259,7 @@ An object response places its members directly below the instance. A text
 response, or a JSON response whose root is a scalar, array, or `null`, uses the
 stable leaf `metadata.<instance>.value`; the instance itself remains an object
 so it can also carry provenance. Metadata instance names must match
-`^[A-Za-z_][A-Za-z0-9_-]*$`; the metadata adapter rejects any other name at
+`^[A-Za-z_][A-Za-z0-9_]*$`; the metadata adapter rejects any other name at
 load even though the general plugin registry permits broader names. This
 prevents an instance such as `acct.billing` from colliding with a `billing`
 object published by an `acct` instance. JSON object keys containing `.` or
@@ -958,7 +958,7 @@ the Praxis host adapter's hardened URL-executor wiring described above.
 - Filtered and other child subrequests begin without parent `AcquiredFacts` or
   derived `metadata.*`; child fetches do not alter parent records,
   `filter_metadata`, or `structured_metadata`.
-- Metadata instance names outside `^[A-Za-z_][A-Za-z0-9_-]*$` fail at load.
+- Metadata instance names outside `^[A-Za-z_][A-Za-z0-9_]*$` fail at load.
 - Protected template sources require their gating capability; unrestricted
   `meta.*` references do not acquire a fictitious `read_meta` requirement.
 - CEL, OPA, Cedar, and APL see the same allowed scalar and string-set values;

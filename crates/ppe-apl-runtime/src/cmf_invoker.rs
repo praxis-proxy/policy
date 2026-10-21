@@ -379,7 +379,10 @@ where
 
         // Snapshot the current payload + extensions — `invoke_entries`
         // consumes by-value, so we clone for the call and keep the
-        // canonical copies in shared state for the next dispatch.
+        // canonical copies in shared state for the next dispatch. This
+        // dispatch is part of the same policy invocation, so acquired
+        // metadata is shared read-only; the executor filters it on
+        // `read_metadata`.
         let current_payload = self.payload.lock().await.clone();
         let current_extensions = self.extensions.lock().await.clone();
 
@@ -484,11 +487,13 @@ where
         // `Option<Extensions>` for the modified view — `Some` only when
         // a plugin actually changed extensions. The executor has
         // already validated label monotonicity on the way out.
-        let taints = if let Some(modified_ext) = result.modified_extensions {
+        let taints = if let Some(mut modified_ext) = result.modified_extensions {
             let after_labels = snapshot_labels(&modified_ext);
             let new_labels: Vec<String> =
                 after_labels.difference(&before_labels).cloned().collect();
-            *self.extensions.lock().await = modified_ext;
+            let mut parent_extensions = self.extensions.lock().await;
+            modified_ext.retain_metadata_from(&parent_extensions);
+            *parent_extensions = modified_ext;
             new_labels
                 .into_iter()
                 .map(|label| TaintEvent {

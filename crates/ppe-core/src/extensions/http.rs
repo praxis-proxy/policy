@@ -24,9 +24,10 @@ pub struct SecretHeaderProvenance {
 /// - Post-invoke: both header maps filled (request from original, response from
 ///   upstream) and `status` set to the status the upstream returned
 ///
-/// Capability-gated: requires `read_headers` to see, `write_headers`
-/// to modify (both request and response). Secret assertions are withheld from
-/// plugin views, `Debug`, and serialization.
+/// Headers and non-query request-line fields require `read_headers` to see.
+/// `write_headers` permits modifying request and response headers. The raw
+/// query requires `read_query`. Secret assertions are withheld from plugin
+/// views, `Debug`, and serialization.
 #[derive(Clone, Default, Deserialize)]
 pub struct HttpExtension {
     /// HTTP request headers (inbound from caller).
@@ -53,9 +54,29 @@ pub struct HttpExtension {
     pub method: Option<String>,
 
     /// HTTP request path (e.g. `/api/v1/widgets`). Excludes the query
-    /// string unless the host chooses to include it.
+    /// string, which the host carries separately in [`query`](Self::query).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+
+    /// HTTP request query string, WITHOUT the leading `?` (e.g.
+    /// `service=git-upload-pack&foo=bar`). Separate from [`path`](Self::path)
+    /// so a policy can gate on it without the path matcher ever seeing it (the
+    /// path matcher normalizes a query away by design). `None` when the request
+    /// carried no query; an empty string means a bare trailing `?`. The host
+    /// populates this from the request-target, which is why it can distinguish
+    /// two requests that share a path and differ only by query — the case a
+    /// query-blind policy cannot express.
+    ///
+    /// Treated as potentially secret: a query can embed a credential (a
+    /// query-parameter JWT, say). PDPs read the live value from the canonical
+    /// attribute bag; plugin views need `read_query` to receive it. This extension's `Serialize` and
+    /// `Debug` output and built-in PDP diagnostics redact it. The attribute bag
+    /// itself contains the raw value and must be handled as sensitive data.
+    /// Because this extension redacts on serialize, its query does not survive
+    /// a serialize/deserialize round-trip: the reconstructed value is the
+    /// placeholder, not the original policy input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
 
     /// HTTP request authority/host. The host MUST populate this from a
     /// validated authority (e.g. the HTTP/2 `:authority` pseudo-header),
@@ -69,6 +90,12 @@ pub struct HttpExtension {
     pub scheme: Option<String>,
 }
 
+/// Placeholder emitted in place of a query value on every outbound path
+/// (`Serialize`, `Debug`). Chosen to match the redaction marker other secret
+/// request values use, so a query credential reads the same in a log as a
+/// redacted header does.
+const QUERY_REDACTED: &str = "[REDACTED]";
+
 // Both diagnostics and serialization use the same safe header map as plugin views.
 #[derive(Debug, Serialize)]
 #[serde(rename = "HttpExtension")]
@@ -81,6 +108,8 @@ struct HttpView<'a> {
     method: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,6 +136,13 @@ impl HttpExtension {
             status: self.status,
             method: self.method.as_deref(),
             path: self.path.as_deref(),
+            // The query can embed a credential (a query-parameter JWT, say), so
+            // it is redacted to presence-only in this view. Both
+            // `Serialize` and `Debug` route through this view, so this one site
+            // covers both: a present query renders as `Some("[REDACTED]")`, an
+            // absent one as `None`. PDPs read the canonical attribute bag,
+            // not this diagnostic/serialization view.
+            query: self.query.as_ref().map(|_| QUERY_REDACTED),
             host: self.host.as_deref(),
             scheme: self.scheme.as_deref(),
         }
@@ -353,6 +389,7 @@ mod tests {
             status: Some(201),
             method: Some("POST".into()),
             path: Some("/tool".into()),
+            query: Some("service=git-upload-pack".into()),
             host: Some("example.test".into()),
             scheme: Some("https".into()),
             ..Default::default()
@@ -378,8 +415,106 @@ mod tests {
         assert_eq!(safe.status, http.status);
         assert_eq!(safe.method, http.method);
         assert_eq!(safe.path, http.path);
+        // The query is redacted on output (see the query-redaction tests), so a
+        // round-trip recovers only its presence, not its value — asserted there
+        // rather than here. The live value stays readable in `http` itself.
+        assert_eq!(http.query.as_deref(), Some("service=git-upload-pack"));
         assert_eq!(safe.host, http.host);
         assert_eq!(safe.scheme, http.scheme);
         assert_eq!(http.get_request_header("x-key"), Some("credential"));
+    }
+
+    #[test]
+    fn query_value_is_redacted_in_serialization_and_debug() {
+        // A query can carry a credential (e.g. a query-parameter JWT), so its
+        // VALUE must never reach serialized output, a log, or a Debug render —
+        // only its presence. Both outbound paths route through the same view,
+        // so this one case covers Serialize and Debug together.
+        let http = HttpExtension {
+            path: Some("/x/info/refs".into()),
+            query: Some("access_token=super-secret-jwt&service=git-upload-pack".into()),
+            ..Default::default()
+        };
+        let debug = format!("{http:?}");
+        let json = serde_json::to_string(&http).unwrap();
+        for output in [&debug, &json] {
+            assert!(
+                !output.contains("super-secret-jwt"),
+                "query value leaked: {output}"
+            );
+            // Not even the non-secret part of the query is emitted: the whole
+            // value is opaque, so redaction is all-or-nothing.
+            assert!(
+                !output.contains("git-upload-pack"),
+                "query value leaked: {output}"
+            );
+            assert!(output.contains("[REDACTED]"), "{output}");
+        }
+        // The live value is still readable on the struct itself, for the host
+        // and for the attribute-bag path a PDP evaluates.
+        assert_eq!(
+            http.query.as_deref(),
+            Some("access_token=super-secret-jwt&service=git-upload-pack")
+        );
+    }
+
+    #[test]
+    fn query_presence_is_visible_but_value_is_not() {
+        // Redaction preserves whether a query was present: a present query
+        // renders as `Some("[REDACTED]")`, an absent one as `None`. A policy
+        // author (or an auditor) can see that a query existed without seeing it.
+        let with_query = HttpExtension {
+            query: Some("access_token=secret".into()),
+            ..Default::default()
+        };
+        let without_query = HttpExtension {
+            path: Some("/x/info/refs".into()),
+            ..Default::default()
+        };
+        assert!(format!("{with_query:?}").contains(r#"query: Some("[REDACTED]")"#));
+        assert!(format!("{without_query:?}").contains("query: None"));
+
+        // An absent query is omitted from serialized output entirely (the field
+        // is `skip_serializing_if` None), so the wire form is unchanged for a
+        // request that carried no query.
+        let json = serde_json::to_string(&without_query).unwrap();
+        assert!(!json.contains("query"), "{json}");
+    }
+
+    #[test]
+    fn query_value_absent_after_serialize_roundtrip() {
+        // Because the value is redacted on serialize, it cannot survive a
+        // serialize -> deserialize round-trip: a peer reconstructing an
+        // HttpExtension from its serialized form recovers `[REDACTED]`, never
+        // the original credential. The live value is only ever carried in the
+        // in-process struct the host builds, not rehydrated from the wire.
+        // (Mirrors #96's `raw_query_string_absent_after_deserialize_round_trip`.)
+        for value in ["access_token=secret", "service=git-upload-pack", ""] {
+            let http = HttpExtension {
+                query: Some(value.to_owned()),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&http).unwrap();
+            let back: HttpExtension = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                back.query.as_deref(),
+                Some("[REDACTED]"),
+                "round-trip must recover the placeholder, not the value: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_query_is_redacted_not_dropped() {
+        // A bare trailing `?` is a present-but-empty query (`Some("")`), which
+        // is distinct from an absent one (`None`). Redaction must treat it as
+        // present, so its presence is not silently lost.
+        let http = HttpExtension {
+            query: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(format!("{http:?}").contains(r#"query: Some("[REDACTED]")"#));
+        let json = serde_json::to_string(&http).unwrap();
+        assert!(json.contains("[REDACTED]"), "{json}");
     }
 }

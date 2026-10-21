@@ -32,6 +32,8 @@ pub mod llm;
 pub mod mcp;
 /// Host-provided operational metadata.
 pub mod meta;
+/// Immutable externally acquired policy facts.
+pub mod metadata;
 /// An add-only set, enforced by the type.
 pub mod monotonic;
 /// Message origin and threading.
@@ -65,6 +67,10 @@ pub use llm::{
 };
 pub use mcp::{MCPExtension, PromptMetadata, ResourceMetadata, ToolMetadata};
 pub use meta::MetaExtension;
+pub use metadata::{
+    AcquiredFacts, MetadataCacheDisposition, MetadataExtension, MetadataInstallError,
+    MetadataOutcome, MetadataSource,
+};
 pub use monotonic::{DeclassifierToken, MonotonicSet};
 pub use provenance::ProvenanceExtension;
 pub use raw_credentials::{

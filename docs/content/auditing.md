@@ -65,9 +65,10 @@ Turning auditing off costs the record, not the behavior.
 A sink observes and does nothing else, and the engine enforces that rather than
 trusting it. The extensions a sink is handed are filtered against the
 capabilities its own `plugins:` entry declares, exactly as a hook plugin's are:
-a sink that declares nothing sees the ungated slots, and one that wants headers
-or credential material asks for `read_headers` or `read_inbound_credentials`
-like anything else. A sink never receives the host's HTTP transport without
+a sink that declares nothing sees the ungated slots. One that wants headers
+asks for `read_headers`; one that wants inbound tokens asks for
+`read_inbound_credentials`. A sink needs `read_query` to receive the raw HTTP
+query. A sink never receives the host's HTTP transport without
 `perform_http`, and the view it gets refuses effects outright, so a sink
 watching a plugin mint a token cannot write records under that plugin's name.
 
@@ -101,7 +102,10 @@ with `chain: true` an attestation whose fingerprint binds the record to its
 predecessor. A signing key adds a DSSE signature over the same bytes, which a
 verifier checks offline with the public key. It renders decisions only:
 `on_effect` keeps its ignoring default, so effects do not become OCSF events.
-Its README under `reference/plugins/ocsf-audit/` documents the record, the
+It writes each record through the exporters in `praxis_policy_core::audit::export`:
+`exporters:` lists any of `stderr`, `stdout`, an append-only `file`, and
+`tracing`, and every record goes to each one byte for byte. Its README under
+`reference/plugins/ocsf-audit/` documents the record, the exporters, the
 verifier rule and the sink's known deviations from the published schema.
 
 ```yaml
@@ -116,6 +120,8 @@ plugins:
       - read_labels
       - read_workload
     config:
+      exporters:
+        - { kind: file, path: /var/log/praxis/ocsf.ndjson, fsync: batch }
       chain: true
       signing: dsse
       signing_key_pem_path: /etc/praxis/ocsf-signing.pem
