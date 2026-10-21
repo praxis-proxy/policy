@@ -33,10 +33,10 @@ keys. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | unrestricted |
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | unrestricted |
 | HTTP | request line (method, path, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
-| LLM | model id, provider, capabilities | `llm.model_id`, `llm.provider`, `llm.capabilities` | unrestricted |
-| LLM request | the host-parsed inference request body, and the host's typed reading of it: system prompt, offered tools, tool choice, sampling parameters | the body is not flattened; OPA, CEL, and Cedar read it as `llm.request`. The typed parts flatten to `llm.offered_tools`, `llm.stop_sequences`, `llm.tool_choice`, `llm.forced_tool`, `llm.max_tokens`, `llm.temperature`, `llm.top_p`, `llm.stream`, `llm.system_prompt_digest` | `read_llm_request` |
+| LLM | model id, provider, capabilities | `llm.model.id`, `llm.model.provider`, `llm.model.capabilities` | unrestricted |
+| LLM request | the host-parsed inference request body, and its normalized parts: ordered instructions, offered tools, tool choice, sampling parameters | the body is not flattened; OPA, CEL, and Cedar read it as `llm.request`. The typed parts flatten to `llm.input.offered_tools`, `llm.input.stop_sequences`, `llm.input.tool_choice`, `llm.input.forced_tool`, `llm.input.max_tokens`, `llm.input.candidate_count`, `llm.input.temperature`, `llm.input.top_p`, `llm.input.stream`, `llm.input.instructions_digest` | `read_llm_request` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | unrestricted |
-| Completion | stop reason, token counts, model, latency | `completion.*` | unrestricted |
+| Completion | stop reason, token counts, model, latency | `llm.output.*` | unrestricted |
 | Provenance | source, message id, parent id | `provenance.*` | unrestricted |
 | Framework | agentic framework name and version, node and graph ids, metadata | `framework.*` | unrestricted |
 | Custom | free-form host-defined namespace | `custom.*` | unrestricted |
@@ -51,18 +51,19 @@ that needs to reason over earlier turns runs a plugin that declares
 `read_agent` and walks the typed turns itself;
 `reference/plugins/transcript-scanner` is a worked example.
 
-What a request asks of the model, when the host can see it, rides its own
-slot beside the LLM extension: `Extensions.llm_request_parts`. Its offered tools flatten to `llm.offered_tools`,
-a set of tool names, so `llm.offered_tools contains 'send_email'` is a
-predicate. The scalars flatten to `llm.max_tokens`, `llm.temperature`,
-`llm.top_p`, `llm.stream`, `llm.tool_choice` (`auto`, `none`, `required`, or
-`tool`) and `llm.forced_tool`. The system prompt reaches the bag only as
-`llm.system_prompt_digest`, `sha256:` and the hex digest of its text, which is
-enough to pin a known prompt; a plugin that declares `read_llm_request` reads
-the text from the slot. When
-the host reports no request, none of these keys exist, so a rule that must fail
-closed on an unreported request tests `exists(llm.offered_tools)`.
-[LLM Routes](llm-routes.md) lists every key an `llm:` route reads, per phase.
+The gated `Extensions.llm_request` carrier contains the parsed body and
+normalized parts. Its body is structured PDP input at `llm.request`, never a
+bag key. Reported parts emit `llm.input.offered_tools` and
+`llm.input.stop_sequences` as sets, the applicable scalar keys, and
+`llm.input.instructions_digest`. The digest preserves instruction roles,
+order, and message boundaries without exposing their text. A plugin needs
+`read_llm_request` to see either reading. With no normalized parts,
+`llm.input.*` keys are absent; use `!exists(llm.input.offered_tools): deny`
+to refuse an unreported request. The model and output facts use
+`llm.model.*` and `llm.output.*`. Legacy `llm.model_id`, `llm.provider`,
+`llm.capabilities`, and `completion.*` aliases remain value-identical for
+existing policies.
+[LLM Routes](llm-routes.md) lists the per-phase keys and a worked config.
 
 The request arguments and response body are also flattened. An object
 writes `args.<dotted>` / `result.<dotted>`; a top-level scalar or scalar
@@ -112,7 +113,7 @@ plugins:
 | `read_delegation` | `delegation.*`, `delegated` |
 | `read_agent` | `agent.*` |
 | `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` |
-| `read_llm_request` | `llm.offered_tools`, `llm.stop_sequences`, `llm.tool_choice`, `llm.forced_tool`, `llm.max_tokens`, `llm.temperature`, `llm.top_p`, `llm.stream`, `llm.system_prompt_digest`; also gates the parsed request body on `Extensions.llm_request` |
+| `read_llm_request` | `llm.input.offered_tools`, `llm.input.stop_sequences`, `llm.input.tool_choice`, `llm.input.forced_tool`, `llm.input.max_tokens`, `llm.input.candidate_count`, `llm.input.temperature`, `llm.input.top_p`, `llm.input.stream`, `llm.input.instructions_digest`; also gates the parsed request body on `Extensions.llm_request` |
 | `read_labels` | the labels on the security extension. A plugin reads them from the extension; `security.labels` in the bag is what an APL predicate reads |
 | `read_inbound_credentials` | no bag keys; gates raw inbound tokens in the plugin payload |
 | `read_delegated_tokens` | no bag keys; gates minted tokens in the plugin payload |
@@ -130,18 +131,12 @@ than the bag. APL predicates read `security.labels` from the bag directly, which
 is how `security.labels contains "secret"` works (see [Session
 Taint](apl/tainting.md)).
 
-`read_llm_request` gates two slots. The host sets `Extensions.llm_request` to
-the request body it parsed. The body carries prompt text and client-supplied
-JSON, so it is never flattened into the bag. The host sets
-`Extensions.llm_request_parts` to its typed reading of the same request; that
-flattens into the `llm.*` request keys above, with the system prompt reduced to
-its digest. A plugin without the capability sees both slots as absent, and
-neither is ever serialized. APL's route
-handler is always granted it, which is how OPA, CEL, and Cedar steps receive
-the body as `llm.request` (see [Structured request
-input](apl/pdp.md#structured-request-input)). The capability gates plugins,
-not PDP resolvers: a host resolver opts in by overriding
-`PdpResolver::evaluate_structured`.
+`read_llm_request` gates the one request carrier. The body contains
+client-supplied JSON and reaches PDPs through structured input, while the
+normalized parts supply only the exact `llm.input.*` keys listed above.
+Neither the body nor the parts are serialized with extensions. The route
+handler receives both intrinsically; plugins need the capability. Host PDP
+resolvers opt in by overriding `PdpResolver::evaluate_structured`.
 
 Membership names containing `.` remain atomic values in the canonical sets and
 do not receive flattened aliases. For example, test a dotted role with

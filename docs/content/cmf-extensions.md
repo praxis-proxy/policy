@@ -424,36 +424,47 @@ A default request slot adds nothing.
 
 | Key | Type | When |
 |---|---|---|
-| `llm.model_id` | String | `Some` |
-| `llm.provider` | String | `Some` |
-| `llm.capabilities` | StringSet | always |
+| `llm.model.id` | String | `Some` |
+| `llm.model.provider` | String | `Some` |
+| `llm.model.capabilities` | StringSet | always |
+| `llm.model_id` | String | deprecated alias of `llm.model.id` |
+| `llm.provider` | String | deprecated alias of `llm.model.provider` |
+| `llm.capabilities` | StringSet | deprecated alias of `llm.model.capabilities` |
 
-The request itself is a separate slot, `llm_request_parts`, below.
+The aliases have identical values. Keep them until old policy references can
+be detected at load time; removing a deny rule's key without that check could
+weaken a policy.
 
-### 8. `llm_request_parts` — `LLMRequest`
+### 8. `llm_request` — `LlmRequest`
 
-The host's typed reading of the LLM request. A plugin reads the slot, and these
-keys, only with `read_llm_request`.
+One gated, un-serialized carrier holds an optional parsed body and optional
+normalized parts. The following keys come only from reported normalized parts.
+A plugin needs `read_llm_request` to read the carrier and its bag keys.
 
 | Key | Type | When |
 |---|---|---|
-| `llm.offered_tools` | StringSet | always; tool names |
-| `llm.stop_sequences` | StringSet | always |
-| `llm.tool_choice` | String | `tool_choice` `Some` (`auto` / `none` / `required` / `tool`) |
-| `llm.forced_tool` | String | `tool_choice` is `tool` |
-| `llm.max_tokens` | Int | `Some` |
-| `llm.temperature` | Float | `Some` |
-| `llm.top_p` | Float | `Some` |
-| `llm.stream` | Bool | `Some` |
-| `llm.system_prompt_digest` | String | `system_prompt` `Some`; `sha256:<hex>` |
+| `llm.input.offered_tools` | StringSet | always when parts reported; tool names |
+| `llm.input.stop_sequences` | StringSet | always when parts reported |
+| `llm.input.tool_choice` | String | `Some` (`auto` / `none` / `required` / `tool`) |
+| `llm.input.forced_tool` | String | choice is `tool` |
+| `llm.input.max_tokens` | Int | effective normalized completion cap, `Some` |
+| `llm.input.candidate_count` | Int | `Some` |
+| `llm.input.temperature` | Float | `Some` |
+| `llm.input.top_p` | Float | `Some` |
+| `llm.input.stream` | Bool | `Some` |
+| `llm.input.instructions_digest` | String | always when parts reported, `sha256-v1:<hex>` |
 
-When the slot is `None` none of these keys is written, not even the two sets:
-an empty set would claim the model was offered no tools. The system prompt's
-text is not flattened.
+With no normalized parts, none of these keys is written. A reported empty
+tool list writes an empty set. Instruction text and tool schemas stay off the
+bag. The digest uses the ordered system and developer instruction records:
+`b"ppe.llm.instructions.v1\0"`, a big-endian `u32` record count, then for
+each record a role byte (system `0`, developer `1`), a big-endian `u64`
+UTF-8 byte length, and the exact text bytes. The digest is lowercase SHA-256.
+`instruction_digest` in `ppe-apl-cmf::llm` computes a policy pin.
 
-The parsed request body is another slot, `llm_request`, and is never
-flattened. OPA and CEL read it as `llm.request` beside these keys, and Cedar
-as `context.llm.request`.
+The parsed body is available to OPA and CEL at `llm.request` and to Cedar
+at `context.llm.request`; it is not a bag key. A parts-only carrier creates
+bag keys without inventing a body.
 
 ### 9. `mcp` — `MCPExtension`
 
@@ -504,14 +515,24 @@ policy as `args.*`; see
 
 | Key | Type | When |
 |---|---|---|
-| `completion.stop_reason` | String | `Some` (`end` / `return` / `call` / `max_tokens` / `stop_sequence`) |
-| `completion.tokens.input` | Int | tokens present |
-| `completion.tokens.output` | Int | tokens present |
-| `completion.tokens.total` | Int | tokens present |
-| `completion.model` | String | `Some` |
-| `completion.raw_format` | String | `Some` |
-| `completion.created_at` | String | `Some` |
-| `completion.latency_ms` | Int | `Some` |
+| `llm.output.stop_reason` | String | `Some` (`end` / `return` / `call` / `max_tokens` / `stop_sequence`) |
+| `llm.output.tokens.input` | Int | tokens present |
+| `llm.output.tokens.output` | Int | tokens present |
+| `llm.output.tokens.total` | Int | tokens present |
+| `llm.output.model` | String | `Some` |
+| `llm.output.raw_format` | String | `Some` |
+| `llm.output.created_at` | String | `Some` |
+| `llm.output.latency_ms` | Int | `Some` |
+| `completion.stop_reason` | String | `Some` (`end` / `return` / `call` / `max_tokens` / `stop_sequence`) (deprecated alias) |
+| `completion.tokens.input` | Int | tokens present (deprecated alias) |
+| `completion.tokens.output` | Int | tokens present (deprecated alias) |
+| `completion.tokens.total` | Int | tokens present (deprecated alias) |
+| `completion.model` | String | `Some` (deprecated alias) |
+| `completion.raw_format` | String | `Some` (deprecated alias) |
+| `completion.created_at` | String | `Some` (deprecated alias) |
+| `completion.latency_ms` | Int | `Some` (deprecated alias) |
+
+The `completion.*` aliases remain value-identical during migration.
 
 ### 11. `provenance` — `ProvenanceExtension`
 

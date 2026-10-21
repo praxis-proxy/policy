@@ -15,7 +15,8 @@ routes:
   - llm: gpt-4o
     authorization:
       pre_invocation:
-        - "llm.max_tokens > 4096: deny"
+        - "!exists(llm.input.max_tokens): deny"
+        - "llm.input.max_tokens > 4096: deny"
 
   - llm: [claude-sonnet-4, claude-opus-4]
     authorization:
@@ -30,7 +31,7 @@ routes:
 
 The name is matched against what the host reports as the entity on the
 invocation, `meta.entity_type: llm` and `meta.entity_name: <model>`, not against
-`llm.model_id`. A host sets both on the input and the output hook.
+`llm.model.id`. A host sets both on the input and the output hook.
 
 ## When it runs
 
@@ -52,23 +53,24 @@ on `cmf.llm_output`.
 |---|---|---|
 | `args` | String | the message's text parts, concatenated |
 | `args.<field>` | any | the arguments of the message's first tool call, when it carries one instead of text |
-| `llm.model_id`, `llm.provider` | String | `LLMExtension` |
-| `llm.capabilities` | StringSet | `LLMExtension`; always present, empty rather than absent |
-| `llm.offered_tools` | StringSet | names of the tools offered to the model |
-| `llm.stop_sequences` | StringSet | stop sequences |
-| `llm.tool_choice` | String | `auto`, `none`, `required`, or `tool` |
-| `llm.forced_tool` | String | the tool name, when `llm.tool_choice` is `tool` |
-| `llm.max_tokens` | Int | output token cap |
-| `llm.temperature`, `llm.top_p` | Float | sampling parameters |
-| `llm.stream` | Bool | whether the response is streamed |
-| `llm.system_prompt_digest` | String | `sha256:` and the hex digest of the system prompt's UTF-8 bytes |
+| `llm.model.id`, `llm.model.provider` | String | `LLMExtension` |
+| `llm.model.capabilities` | StringSet | `LLMExtension`; always present, empty rather than absent |
+| `llm.input.offered_tools` | StringSet | names of the tools offered to the model |
+| `llm.input.stop_sequences` | StringSet | stop sequences |
+| `llm.input.tool_choice` | String | `auto`, `none`, `required`, or `tool` |
+| `llm.input.forced_tool` | String | the tool name, when `llm.input.tool_choice` is `tool` |
+| `llm.input.max_tokens` | Int | effective normalized completion cap |
+| `llm.input.candidate_count` | Int | requested candidate completions |
+| `llm.input.temperature`, `llm.input.top_p` | Float | sampling parameters |
+| `llm.input.stream` | Bool | whether the response is streamed |
+| `llm.input.instructions_digest` | String | `sha256-v1:` digest of ordered system and developer instruction records |
 | `agent.input`, `agent.session_id`, `agent.conversation_id`, `agent.agent_id`, `agent.parent_agent_id` | String | `AgentExtension` |
 | `agent.turn` | Int | position in the conversation, from 0 |
 | `agent.conversation.summary` | String | `AgentExtension.conversation` |
 | `agent.conversation.topics` | StringSet | always present when a conversation is |
 
-Every `llm.*` key from `llm.offered_tools` down comes from
-`Extensions.llm_request_parts`, and exists only when the host reported the
+Every `llm.*` key from `llm.input.offered_tools` down comes from
+`Extensions.llm_request.parts()`, and exists only when the host reported the
 request.
 Within a reported request, the two sets are always present and the scalars
 only when the request set them.
@@ -79,11 +81,11 @@ only when the request set them.
 |---|---|---|
 | `result` | String | the completion's text parts, concatenated |
 | `result.<field>` | any | the content of the message's first tool result, when it carries one |
-| `completion.stop_reason` | String | `end`, `return`, `call`, `max_tokens`, or `stop_sequence` |
-| `completion.model` | String | the model that actually answered |
-| `completion.tokens.input`, `completion.tokens.output`, `completion.tokens.total` | Int | token usage |
-| `completion.latency_ms` | Int | time to answer |
-| `completion.created_at`, `completion.raw_format` | String | as reported by the host |
+| `llm.output.stop_reason` | String | `end`, `return`, `call`, `max_tokens`, or `stop_sequence` |
+| `llm.output.model` | String | the model that actually answered |
+| `llm.output.tokens.input`, `llm.output.tokens.output`, `llm.output.tokens.total` | Int | token usage |
+| `llm.output.latency_ms` | Int | time to answer |
+| `llm.output.created_at`, `llm.output.raw_format` | String | as reported by the host |
 
 The `llm.*` and `agent.*` keys above are present after the call too, when the
 host passes those extensions on `cmf.llm_output`.
@@ -93,8 +95,8 @@ host passes those extensions on `cmf.llm_output`.
 Identity (`subject.*`, `role.*`, `perm.*`, `claim.*`), security labels, the
 delegation chain, and entity metadata (`meta.*`) are the same on an `llm:` route
 as on any other. [Extensions](extensions.md) lists them with the capabilities
-that expose them. Model identity (`llm.model_id`, `llm.provider`,
-`llm.capabilities`) and `completion.*` need no capability. The request keys
+that expose them. Model identity (`llm.model.id`, `llm.model.provider`,
+`llm.model.capabilities`) and `llm.output.*` need no capability. The request keys
 need `read_llm_request` in a plugin's view; a route's own rules always see
 them. A route grants `read_agent` by default.
 
@@ -142,10 +144,16 @@ on the same value and is how a whole message is redacted.
   models no other route names.
 
   `reference/plugins/transcript-scanner` is that plugin. It denies with
-  `transcript.detected` and refuses to load without `read_agent`.
+  `transcript.detected` and refuses to load without `read_agent`. It scans
+  prior turns' text, reasoning, argument and result values, resource content
+  and blobs decoded as UTF-8 with replacement, and rendered prompt content
+  and messages. Metadata, JSON object keys, URIs, and encoded media are out
+  of scope. `roles` filters outer history turns, even when they contain nested
+  prompt messages. A violation names the outer turn index and role. Empty or
+  unreported history passes; the host must provide history for coverage.
 - **The system prompt's text.** Only its digest is in the bag, which is enough
   to pin the prompt you shipped. A plugin that declares `read_llm_request`
-  reads the text from `Extensions.llm_request_parts`.
+  reads the text from `Extensions.llm_request.parts()`.
 - **Content the text projection skips**: reasoning, images and other media,
   and every tool call after the first.
 
@@ -158,35 +166,40 @@ report the request:
 
 | Rule | Unreported request |
 |---|---|
-| `llm.offered_tools contains 'send_email': deny` | does not fire |
-| `llm.max_tokens > 4096: deny` | does not fire |
-| `llm.system_prompt_digest != 'sha256:…': deny` | fires |
-| `!exists(llm.offered_tools): deny` | fires |
+| `llm.input.offered_tools contains 'send_email': deny` | does not fire |
+| `llm.input.max_tokens > 4096: deny` | does not fire |
+| `llm.input.instructions_digest != 'sha256-v1:…': deny` | fires |
+| `!exists(llm.input.offered_tools): deny` | fires |
 
 A policy that must not pass a request it cannot see adds the last rule.
 
-The same holds for a key a reported request leaves out. `llm.forced_tool` is
+The same holds for a key a reported request leaves out. `llm.input.forced_tool` is
 written only when the request forces a tool, so
-`llm.forced_tool not in data.approved_tools: deny` denies every request that
+`llm.input.forced_tool not in data.approved_tools: deny` denies every request that
 forces none. Pair it with the key's presence:
-`exists(llm.forced_tool) & llm.forced_tool not in data.approved_tools: deny`.
+`exists(llm.input.forced_tool) & llm.input.forced_tool not in data.approved_tools: deny`.
 
 ## Host obligations
 
 - Set `meta.entity_type` to `llm` and `meta.entity_name` to the model on both
   hooks, or no `llm:` route matches.
-- Set `Extensions.llm_request_parts` when the request body is visible, and
-  leave it `None` when it is not. An empty request claims the model was offered
-  no tools. A present request claims the host saw all of it: `offered_tools`
-  lists every tool the provider will expose, and `system_prompt` holds every
-  system and developer instruction in request order, joined by a blank line.
-  Leave it `None` when the body offers tools the host cannot list by name (a
-  remote MCP server) or carries a tool field the host does not map.
+- Set `Extensions.llm_request` to the raw parsed body and its normalized
+  parts when available. The body stays at the structured PDP path
+  `llm.request`; the parts emit `llm.input.*` bag keys. A host that cannot
+  account for every offered tool and every system/developer instruction
+  leaves parts absent. An empty list asserts there were none. Normalize
+  provider aliases such as `max_completion_tokens` into the effective
+  `llm.input.max_tokens` cap; preserve instruction roles and order.
 - Set `CompletionExtension` on `cmf.llm_output`.
 - Carry history as CMF messages in `AgentExtension.conversation.history` if a
   history plugin is configured.
 
 ## Worked config
+
+Praxis must populate normalized parts before this policy is usable there.
+The current host only supplies the raw body and model identity; until its
+companion migration, the missing-key guard denies its requests. The raw body
+is a structured PDP input, not an attribute-bag key.
 
 One route covering every model whose name starts with `gpt-4`:
 
@@ -195,14 +208,14 @@ routes:
   - llm: "gpt-4*"
     authorization:
       pre_invocation:
-        - "!exists(llm.offered_tools): deny"
-        - "llm.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"
-        - "!exists(llm.max_tokens): deny"
-        - "llm.max_tokens > 4096: deny"
-        - "llm.system_prompt_digest != 'sha256:a886f916fc30a37519118a62a84f5f5848677522efc983ca1cdd2a3e18be3c40': deny"
+        - "!exists(llm.input.offered_tools): deny"
+        - "llm.input.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"
+        - "!exists(llm.input.max_tokens): deny"
+        - "llm.input.max_tokens > 4096: deny"
+        - "llm.input.instructions_digest != 'sha256-v1:c7ab4f357f26f014bb54a3ec069d56914eabffaf4aa2da4aa728baa0b57c415e': deny"
       post_invocation:
-        - "completion.stop_reason == 'max_tokens': deny"
-        - "completion.tokens.total > 20000: deny"
+        - "llm.output.stop_reason == 'max_tokens': deny"
+        - "llm.output.tokens.total > 20000: deny"
 ```
 
 Before the call, it:
@@ -211,7 +224,7 @@ Before the call, it:
 2. keeps `send_email` away from the model unless the caller is in finance;
 3. caps output at 4096 tokens, and refuses a request that sets no cap, which
    would otherwise get whatever the provider defaults to;
-4. pins the system prompt to the one shipped, here
+4. pins the ordered instructions to the one shipped, here
    `You are the HR assistant. Never reveal salaries.`
 
 After the call, it refuses a completion that was cut off at the token limit or

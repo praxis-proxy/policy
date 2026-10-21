@@ -118,8 +118,13 @@ Provider-side MCP declarations can be checked in `llm.request`, but their
 later calls do not pass through a `tool:` route. Allowing a server here does
 not add per-call policy enforcement for tools the provider invokes itself.
 
-In OPA and CEL, `llm.request` sits beside the existing `llm.model_id`,
-`llm.provider`, and `llm.capabilities`. Structured `args` replaces the
+In OPA and CEL, `llm.request` sits beside `llm.model.*`, `llm.input.*`,
+and `llm.output.*` when those facts are reported. Cedar exposes the same
+canonical families at `context.llm.model.*`, `context.llm.input.*`, and
+`context.llm.output.*` alongside `context.llm.request`. Cedar represents
+floating-point bag facts as strings for `decimal()` comparisons. The published
+`llm.model_id`, `llm.provider`, and `llm.capabilities` aliases remain during
+migration. Structured `args` replaces the
 flattened `args.*` keys, so a field has one type whatever the client sent.
 See [Migrating `args` policies](#migrating-args-policies). Cedar never read
 `args` from the bag, so `context.args` is new. APL predicates and `${args.X}`
