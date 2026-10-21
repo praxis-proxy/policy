@@ -161,6 +161,13 @@ wait for a slot before advancing the chain, and can time out while waiting.
 A timed-out write can still finish later, so consumers must use the chain
 links and stream stamps to detect gaps and order records.
 
+At graceful shutdown the sink waits up to 10 seconds for those blocking
+writes, then flushes its exporters (with a separate 10-second limit). A
+timeout is reported as a shutdown error: records from a worker still blocked
+at that point may not have reached every exporter. For file output, `fsync:
+batch` and `fsync: always` sync the file and, on Unix, its parent directory
+after an open or rotation, so the pathname is durable along with the records.
+
 ## Configuration
 
 | Key | Default | Meaning |

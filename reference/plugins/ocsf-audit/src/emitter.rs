@@ -14,6 +14,7 @@
 //! The emitter: builds, chains, signs and writes each record.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -95,6 +96,7 @@ pub struct OcsfAuditEmitter {
 }
 
 const MAX_PENDING_WRITES: usize = 4;
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build a `fingerprint` object around a hex digest.
 ///
@@ -460,6 +462,79 @@ impl OcsfAuditEmitter {
         })
         .await;
     }
+
+    /// Wait for blocking writes whose audit callbacks may already have timed
+    /// out, then prevent new writes and flush. A stalled destination makes
+    /// shutdown fail after the grace period instead of claiming durability.
+    async fn drain_and_flush(&self, grace: Duration) -> Result<(), Box<PluginError>> {
+        // The semaphore has four permits. Taking all four waits for every
+        // blocking worker, including those detached by an audit timeout.
+        let drained =
+            tokio::time::timeout(grace, Arc::clone(&self.output_slots).acquire_many_owned(4)).await;
+        let drain_guard = match drained {
+            Ok(Ok(permit)) => Some(permit),
+            Ok(Err(err)) => {
+                tracing::error!(plugin = %self.cfg.name, error = %err, "audit output closed before shutdown drain");
+                None
+            },
+            Err(_) => {
+                tracing::error!(plugin = %self.cfg.name, "audit output did not drain before shutdown timeout");
+                None
+            },
+        };
+        self.output_slots.close();
+
+        let exporters = self.exporters.clone();
+        let plugin = self.cfg.name.clone();
+        let flushed = tokio::time::timeout(
+            grace,
+            tokio::task::spawn_blocking(move || {
+                for exporter in &exporters {
+                    if let Err(err) = exporter.flush() {
+                        tracing::error!(
+                            plugin = %plugin,
+                            exporter = exporter.name(),
+                            error = %err,
+                            "ocsf exporter flush failed at shutdown"
+                        );
+                    }
+                }
+            }),
+        )
+        .await;
+        match flushed {
+            Ok(Ok(())) => {},
+            Ok(Err(err)) => {
+                return Err(PluginError::Execution {
+                    plugin_name: self.cfg.name.clone(),
+                    message: "ocsf exporter flush task failed".to_owned(),
+                    source: Some(Box::new(err)),
+                    code: None,
+                    details: Default::default(),
+                    proto_error_code: None,
+                }
+                .boxed());
+            },
+            Err(_) => {
+                tracing::error!(plugin = %self.cfg.name, "ocsf exporter flush exceeded shutdown timeout");
+                return Err(PluginError::Timeout {
+                    plugin_name: self.cfg.name.clone(),
+                    timeout_ms: u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+                    proto_error_code: None,
+                }
+                .boxed());
+            },
+        }
+        if drain_guard.is_none() {
+            return Err(PluginError::Timeout {
+                plugin_name: self.cfg.name.clone(),
+                timeout_ms: u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+                proto_error_code: None,
+            }
+            .boxed());
+        }
+        Ok(())
+    }
 }
 
 /// The `tracing` destination: one event per record at target `ocsf.audit`,
@@ -489,30 +564,11 @@ impl Plugin for OcsfAuditEmitter {
         &self.cfg
     }
 
-    /// Flush every exporter, so records an exporter wrote without syncing
-    /// (`fsync: never` or `batch`) reach the disk before the engine stops.
-    /// Runs on a blocking thread because a flush is a blocking sync. A
-    /// failing exporter is logged and the rest are still flushed.
+    /// Drain detached writes before flushing every exporter. A failing
+    /// exporter is logged and the rest are still flushed; a stalled worker
+    /// or flush makes shutdown return an error after the grace period.
     async fn shutdown(&self) -> Result<(), Box<PluginError>> {
-        let exporters = self.exporters.clone();
-        let plugin = self.cfg.name.clone();
-        let flushed = tokio::task::spawn_blocking(move || {
-            for exporter in &exporters {
-                if let Err(err) = exporter.flush() {
-                    tracing::error!(
-                        plugin = %plugin,
-                        exporter = exporter.name(),
-                        error = %err,
-                        "ocsf exporter flush failed at shutdown"
-                    );
-                }
-            }
-        })
-        .await;
-        if let Err(err) = flushed {
-            tracing::error!(plugin = %self.cfg.name, error = %err, "ocsf exporter flush did not complete");
-        }
-        Ok(())
+        self.drain_and_flush(SHUTDOWN_TIMEOUT).await
     }
 
     /// Attach as a decision-audit sink when run in audit-only mode (no
@@ -2079,6 +2135,116 @@ mod tests {
         fn flush(&self) -> Result<(), ExportError> {
             Err(ExportError::Config("flush failed".to_owned()))
         }
+    }
+
+    struct BlockingExporter {
+        entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl std::fmt::Debug for BlockingExporter {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("BlockingExporter")
+        }
+    }
+
+    impl AuditExporter for BlockingExporter {
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        fn export(&self, _batch: &[SerializedRecord]) -> Result<(), ExportError> {
+            let entered = self.entered.lock().unwrap().take();
+            if let Some(entered) = entered {
+                let _ = entered.send(());
+            }
+            let _ = self.release.lock().unwrap().recv();
+            Ok(())
+        }
+    }
+
+    fn blocking_exporter() -> (
+        Arc<dyn AuditExporter>,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        (
+            Arc::new(BlockingExporter {
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+                release: std::sync::Mutex::new(release_rx),
+            }),
+            entered_rx,
+            release_tx,
+        )
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_a_timed_out_write_before_flushing() {
+        let (blocking, entered, release) = blocking_exporter();
+        let capture = Arc::new(Capture::default());
+        let mut emitter = OcsfAuditEmitter::new(sink_cfg(json!({}))).unwrap();
+        emitter.exporters = vec![blocking, capture.clone()];
+        let emitter = Arc::new(emitter);
+        let permit = emitter.output_slot().await.unwrap();
+        let writing = {
+            let emitter = Arc::clone(&emitter);
+            tokio::spawn(async move {
+                emitter
+                    .emit(json!({ "metadata": { "uid": "record-1" } }), None, permit)
+                    .await;
+            })
+        };
+        entered.await.unwrap();
+
+        let mut shutdown = {
+            let emitter = Arc::clone(&emitter);
+            tokio::spawn(async move { Plugin::shutdown(&*emitter).await })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must wait for the detached write"
+        );
+        assert_eq!(capture.flushes.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        release.send(()).unwrap();
+        writing.await.unwrap();
+        shutdown.await.unwrap().unwrap();
+        assert_eq!(capture.records.lock().unwrap().len(), 1);
+        assert_eq!(capture.flushes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stalled_write_makes_shutdown_report_a_timeout() {
+        let (blocking, entered, release) = blocking_exporter();
+        let capture = Arc::new(Capture::default());
+        let mut emitter = OcsfAuditEmitter::new(sink_cfg(json!({}))).unwrap();
+        emitter.exporters = vec![blocking, capture.clone()];
+        let emitter = Arc::new(emitter);
+        let permit = emitter.output_slot().await.unwrap();
+        let writing = {
+            let emitter = Arc::clone(&emitter);
+            tokio::spawn(async move {
+                emitter
+                    .emit(json!({ "metadata": { "uid": "record-1" } }), None, permit)
+                    .await;
+            })
+        };
+        entered.await.unwrap();
+
+        let err = emitter
+            .drain_and_flush(Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(matches!(*err, PluginError::Timeout { .. }), "{err}");
+        assert!(emitter.output_slots.is_closed());
+        assert_eq!(capture.flushes.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        release.send(()).unwrap();
+        writing.await.unwrap();
     }
 
     #[tokio::test]

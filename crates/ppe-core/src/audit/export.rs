@@ -230,14 +230,21 @@ fn frame_line(
     buf: &mut Vec<u8>,
     record: &SerializedRecord,
 ) -> Result<(), ExportError> {
-    if record.bytes.contains(&b'\n') {
-        return Err(ExportError::Framing {
-            exporter: exporter.to_owned(),
-            reason: "record contains a newline, so line framing would split it".to_owned(),
-        });
-    }
+    validate_lines(exporter, std::slice::from_ref(record))?;
     buf.extend_from_slice(&record.bytes);
     buf.push(b'\n');
+    Ok(())
+}
+
+fn validate_lines(exporter: &str, batch: &[SerializedRecord]) -> Result<(), ExportError> {
+    for record in batch {
+        if record.bytes.contains(&b'\n') {
+            return Err(ExportError::Framing {
+                exporter: exporter.to_owned(),
+                reason: "record contains a newline, so line framing would split it".to_owned(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -305,7 +312,15 @@ impl AuditExporter for StdoutExporter {
 pub struct FileExporter {
     path: PathBuf,
     fsync: FsyncPolicy,
-    file: Mutex<File>,
+    file: Mutex<FileState>,
+}
+
+struct FileState {
+    file: File,
+    /// File sync alone cannot make a newly opened pathname durable.
+    parent_sync_pending: bool,
+    /// Avoid one warning per record while inspection or reopening fails.
+    rotation_warning: bool,
 }
 
 impl fmt::Debug for FileExporter {
@@ -337,7 +352,11 @@ impl FileExporter {
         Ok(Self {
             path: path.to_owned(),
             fsync,
-            file: Mutex::new(file),
+            file: Mutex::new(FileState {
+                file,
+                parent_sync_pending: true,
+                rotation_warning: false,
+            }),
         })
     }
 
@@ -346,6 +365,23 @@ impl FileExporter {
             exporter: format!("file:{}", self.path.display()),
             source,
         }
+    }
+
+    fn sync_file_and_parent(&self, state: &mut FileState) -> Result<(), ExportError> {
+        state.file.sync_data().map_err(|e| self.io_err(e))?;
+        #[cfg(unix)]
+        if state.parent_sync_pending {
+            let parent = self.path.parent().unwrap_or_else(|| Path::new("/"));
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|e| self.io_err(e))?;
+            state.parent_sync_pending = false;
+        }
+        #[cfg(not(unix))]
+        {
+            state.parent_sync_pending = false;
+        }
+        Ok(())
     }
 
     /// Reopen `path` if the file there is no longer the one `held` is
@@ -357,34 +393,47 @@ impl FileExporter {
     /// to the handle it holds: that file still exists, so the record is kept
     /// somewhere rather than dropped.
     #[cfg(unix)]
-    fn follow_rotation(&self, held: &mut File) {
+    fn follow_rotation(&self, state: &mut FileState) {
         use std::os::unix::fs::MetadataExt as _;
-        let Ok(ours) = held.metadata() else {
-            return;
+        let ours = match state.file.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                self.warn_rotation(state, &err, "could not inspect open audit file");
+                return;
+            },
         };
         match std::fs::metadata(&self.path) {
-            Ok(current) if current.dev() == ours.dev() && current.ino() == ours.ino() => {},
-            Ok(_) => self.reopen(held),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => self.reopen(held),
-            Err(_) => {},
+            Ok(current) if current.dev() == ours.dev() && current.ino() == ours.ino() => {
+                state.rotation_warning = false;
+            },
+            Ok(_) => self.reopen(state),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => self.reopen(state),
+            Err(err) => self.warn_rotation(state, &err, "could not inspect audit file path"),
         }
     }
 
     /// Without inode numbers there is no cheap way to tell a rotated file
     /// from the current one, so the handle is kept.
     #[cfg(not(unix))]
-    fn follow_rotation(&self, _held: &mut File) {}
+    fn follow_rotation(&self, _state: &mut FileState) {}
 
     #[cfg(unix)]
-    fn reopen(&self, held: &mut File) {
+    fn warn_rotation(&self, state: &mut FileState, err: &io::Error, message: &str) {
+        if !state.rotation_warning {
+            tracing::warn!(path = %self.path.display(), error = %err, "{message}; writing to the open file");
+            state.rotation_warning = true;
+        }
+    }
+
+    #[cfg(unix)]
+    fn reopen(&self, state: &mut FileState) {
         match open_append(&self.path) {
-            Ok(fresh) => *held = fresh,
-            Err(err) => tracing::warn!(
-                path = %self.path.display(),
-                error = %err,
-                "audit file was rotated away and could not be reopened; \
-                 writing to the rotated file"
-            ),
+            Ok(fresh) => {
+                state.file = fresh;
+                state.parent_sync_pending = true;
+                state.rotation_warning = false;
+            },
+            Err(err) => self.warn_rotation(state, &err, "could not reopen rotated audit file"),
         }
     }
 }
@@ -411,6 +460,7 @@ impl AuditExporter for FileExporter {
     }
 
     fn export(&self, batch: &[SerializedRecord]) -> Result<(), ExportError> {
+        validate_lines(self.name(), batch)?;
         // A poisoned lock is recovered: the guarded state is the file handle,
         // and a panic mid-write cannot leave it in a state a later append
         // would make worse than the partial line already on disk.
@@ -421,24 +471,24 @@ impl AuditExporter for FileExporter {
         self.follow_rotation(&mut file);
         if self.fsync == FsyncPolicy::Always {
             for record in batch {
-                write_lines(self.name(), &mut *file, std::slice::from_ref(record))?;
-                file.sync_data().map_err(|e| self.io_err(e))?;
+                write_lines(self.name(), &mut file.file, std::slice::from_ref(record))?;
+                self.sync_file_and_parent(&mut file)?;
             }
             return Ok(());
         }
-        write_lines(self.name(), &mut *file, batch)?;
+        write_lines(self.name(), &mut file.file, batch)?;
         if self.fsync == FsyncPolicy::Batch {
-            file.sync_data().map_err(|e| self.io_err(e))?;
+            self.sync_file_and_parent(&mut file)?;
         }
         Ok(())
     }
 
     fn flush(&self) -> Result<(), ExportError> {
-        let file = self
+        let mut file = self
             .file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        file.sync_data().map_err(|e| self.io_err(e))
+        self.sync_file_and_parent(&mut file)
     }
 }
 
@@ -644,6 +694,40 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, ExportError::Framing { .. }), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    }
+
+    #[test]
+    fn fsync_always_refuses_the_whole_batch_before_writing() {
+        let (_dir, path) = temp_path("audit.ndjson");
+        let exporter = FileExporter::open(&path, FsyncPolicy::Always).unwrap();
+        let err = exporter
+            .export(&[record(r#"{"a":1}"#), record("{\"b\":\n2}")])
+            .unwrap_err();
+        assert!(matches!(err, ExportError::Framing { .. }), "{err}");
+        assert!(std::fs::read(&path).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_directory_is_synced_after_open_and_reopen() {
+        let (_dir, path) = temp_path("audit.ndjson");
+        let rotated = path.with_extension("ndjson.1");
+        let exporter = FileExporter::open(&path, FsyncPolicy::Never).unwrap();
+        assert!(exporter.file.lock().unwrap().parent_sync_pending);
+
+        exporter.export(&[record("{}")]).unwrap();
+        assert!(exporter.file.lock().unwrap().parent_sync_pending);
+        exporter.flush().unwrap();
+        assert!(!exporter.file.lock().unwrap().parent_sync_pending);
+
+        std::fs::rename(&path, rotated).unwrap();
+        std::fs::File::create(&path).unwrap();
+        let mut state = exporter.file.lock().unwrap();
+        exporter.follow_rotation(&mut state);
+        assert!(state.parent_sync_pending);
+        drop(state);
+        exporter.flush().unwrap();
+        assert!(!exporter.file.lock().unwrap().parent_sync_pending);
     }
 
     #[test]
