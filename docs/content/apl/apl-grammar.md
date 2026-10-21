@@ -86,8 +86,9 @@ are invalid.
 ### Attribute paths
 
 ```ebnf
-path       = segment { "." segment } [ subscript ]
-             { "." segment [ subscript ] } ;
+path       = segment { "." tail } [ subscript ]
+             { "." tail [ subscript ] } ;
+tail       = [ "$" ] segment ;
 segment    = ( letter | "_" ) { letter | digit | "_" } ;
 subscript  = "[" path "]" ;
 letter     = "A" | ... | "Z" | "a" | ... | "z" ;
@@ -103,6 +104,11 @@ data.tenants[subject.tenant].data_region
 
 String literals are not valid subscripts. For example, `data.t[subject.id]` is
 valid and `data.t["id"]` is invalid.
+
+A segment after the first may start with one `$`. These name reserved
+framework leaves, such as the provenance of acquired metadata:
+`metadata.account.$outcome`. A path cannot start with `$`, and `$` cannot
+appear inside a segment or a subscript.
 
 ### Numbers
 

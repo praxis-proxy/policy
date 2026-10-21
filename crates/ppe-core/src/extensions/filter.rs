@@ -27,6 +27,8 @@ pub enum SlotName {
     Http,
     /// The host metadata slot.
     Meta,
+    /// Externally acquired policy facts.
+    Metadata,
     /// The delegation chain slot.
     Delegation,
     /// The host-supplied custom slot.
@@ -141,6 +143,12 @@ pub fn slot_policy(slot: SlotName) -> SlotPolicy {
             tier: MutabilityTier::Immutable,
             access: AccessPolicy::CapabilityGated,
             read_cap: Some(Capability::ReadLlmRequest),
+            write_cap: None,
+        },
+        SlotName::Metadata => SlotPolicy {
+            tier: MutabilityTier::Immutable,
+            access: AccessPolicy::CapabilityGated,
+            read_cap: Some(Capability::ReadMetadata),
             write_cap: None,
         },
         SlotName::Http => SlotPolicy {
@@ -365,6 +373,14 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         let policy = slot_policy(SlotName::LlmRequest);
         if has_read_access(&policy, capabilities) {
             filtered.llm_request = extensions.llm_request.clone();
+        }
+    }
+
+    // Capability-gated: externally acquired metadata
+    if extensions.metadata.is_some() {
+        let policy = slot_policy(SlotName::Metadata);
+        if has_read_access(&policy, capabilities) {
+            filtered.metadata = extensions.metadata.clone();
         }
     }
 
@@ -1218,6 +1234,7 @@ mod tests {
         SlotName::Agent,
         SlotName::Http,
         SlotName::Meta,
+        SlotName::Metadata,
         SlotName::Delegation,
         SlotName::Custom,
         SlotName::Mcp,

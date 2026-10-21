@@ -15,8 +15,8 @@ use praxis_policy_core::extensions::Extensions;
 use crate::{
     agent::extract_agent, completion::extract_completion, custom::extract_custom,
     delegation::extract_delegation, framework::extract_framework, http::extract_http,
-    llm::extract_llm, mcp::extract_mcp, meta::extract_meta, provenance::extract_provenance,
-    request::extract_request, security::extract_security,
+    llm::extract_llm, mcp::extract_mcp, meta::extract_meta, metadata::extract_metadata,
+    provenance::extract_provenance, request::extract_request, security::extract_security,
 };
 
 /// Flatten every present slot in `Extensions` into `bag`.
@@ -37,6 +37,9 @@ pub fn extract_extensions(ext: &Extensions, bag: &mut AttributeBag) {
     }
     if let Some(v) = &ext.meta {
         extract_meta(v, bag);
+    }
+    if let Some(v) = &ext.metadata {
+        extract_metadata(v, bag);
     }
     if let Some(v) = &ext.request {
         extract_request(v, bag);

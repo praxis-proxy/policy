@@ -162,6 +162,10 @@ const TABLE: &[CapabilityEntry] = &[
         name: CAP_READ_LLM_REQUEST,
         prefixes: &[],
     },
+    CapabilityEntry {
+        name: CAP_READ_METADATA,
+        prefixes: &[BAG_METADATA_PREFIX],
+    },
 ];
 
 /// Bag-attribute prefixes a single capability unlocks. Returns an

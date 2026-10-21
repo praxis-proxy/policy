@@ -1447,6 +1447,10 @@ fn install_handler(
     // filtered view, so the grant is intrinsic rather than left to the
     // replaceable baseline. The slot is never flattened into the bag.
     capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_LLM_REQUEST.to_owned());
+    // Route predicates read acquired facts under `metadata.*`, so the grant is
+    // intrinsic like `read_headers`. It is a no-op when nothing is installed.
+    // Plugins dispatched from the route still need their own `read_metadata`.
+    capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
     // The APL engine emits the backend candidate constraint (the `restrict`
     // effect's output) into `Extensions.candidate_constraint`. That slot is
     // write-gated in the executor, so the synthetic handler holds the write

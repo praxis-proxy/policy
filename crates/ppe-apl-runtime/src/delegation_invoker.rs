@@ -108,7 +108,8 @@ impl DelegationInvoker for DelegationPluginInvoker {
 
         // Snapshot extensions to construct the payload and pass into
         // invoke_entries. The canonical copy stays under the Mutex; this
-        // snapshot is the per-call working copy.
+        // snapshot is the per-call working copy. Acquired metadata is shared
+        // read-only within the invocation and filtered on `read_metadata`.
         let current_extensions = self.extensions.lock().await.clone();
 
         // Read step args first — the subject / actor role selection below

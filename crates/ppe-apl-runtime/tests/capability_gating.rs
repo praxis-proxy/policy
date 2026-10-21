@@ -42,7 +42,9 @@ use praxis_policy_core::error::PluginError as CoreError;
 use praxis_policy_core::extensions::raw_credentials::{
     RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind, TokenRole,
 };
-use praxis_policy_core::extensions::{LlmRequestDocument, MetaExtension, SecurityExtension};
+use praxis_policy_core::extensions::{
+    AcquiredFacts, LlmRequestDocument, MetaExtension, MetadataCacheDisposition, SecurityExtension,
+};
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
 use praxis_policy_core::hooks::payload::Extensions;
@@ -101,6 +103,54 @@ impl PluginFactory for LabelReaderFactory {
         let plugin = Arc::new(LabelReader {
             cfg: config.clone(),
             observed_labels: Arc::clone(&self.observed_labels),
+        });
+        Ok(PluginInstance {
+            plugin: plugin.clone(),
+            handlers: vec![(
+                "cmf.tool_pre_invoke",
+                Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(plugin)),
+            )],
+        })
+    }
+}
+
+/// Plugin that records whether a dispatch received the parent's metadata.
+struct MetadataReader {
+    cfg: PluginConfig,
+    observed: Arc<std::sync::Mutex<Vec<bool>>>,
+}
+
+#[async_trait]
+impl Plugin for MetadataReader {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for MetadataReader {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push(extensions.metadata.is_some());
+        PluginResult::allow()
+    }
+}
+
+struct MetadataReaderFactory {
+    observed: Arc<std::sync::Mutex<Vec<bool>>>,
+}
+
+impl PluginFactory for MetadataReaderFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
+        let plugin = Arc::new(MetadataReader {
+            cfg: config.clone(),
+            observed: Arc::clone(&self.observed),
         });
         Ok(PluginInstance {
             plugin: plugin.clone(),
@@ -196,6 +246,7 @@ struct LlmRequestReaderFactory {
 struct VaultShapedDelegate {
     cfg: PluginConfig,
     observed_bearer: Arc<std::sync::Mutex<Vec<String>>>,
+    observed_metadata: Arc<std::sync::Mutex<Vec<bool>>>,
 }
 
 #[async_trait]
@@ -209,13 +260,17 @@ impl HookHandler<TokenDelegateHook> for VaultShapedDelegate {
     async fn handle(
         &self,
         payload: &DelegationPayload,
-        _extensions: &Extensions,
+        extensions: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<DelegationPayload> {
         self.observed_bearer
             .lock()
             .unwrap()
             .push(payload.bearer_token().to_owned());
+        self.observed_metadata
+            .lock()
+            .unwrap()
+            .push(extensions.metadata.is_some());
 
         let mut updated = payload.clone();
         updated.delegated_token = Some(
@@ -234,6 +289,7 @@ impl HookHandler<TokenDelegateHook> for VaultShapedDelegate {
 
 struct VaultShapedDelegateFactory {
     observed_bearer: Arc<std::sync::Mutex<Vec<String>>>,
+    observed_metadata: Arc<std::sync::Mutex<Vec<bool>>>,
 }
 
 impl PluginFactory for VaultShapedDelegateFactory {
@@ -241,6 +297,7 @@ impl PluginFactory for VaultShapedDelegateFactory {
         let plugin = Arc::new(VaultShapedDelegate {
             cfg: config.clone(),
             observed_bearer: Arc::clone(&self.observed_bearer),
+            observed_metadata: Arc::clone(&self.observed_metadata),
         });
         Ok(PluginInstance {
             plugin: plugin.clone(),
@@ -295,9 +352,232 @@ fn extensions_with_label(label: &str) -> Extensions {
     }
 }
 
+fn extensions_with_metadata(active: bool) -> Extensions {
+    let mut extensions = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_weather"))),
+        ..Default::default()
+    };
+    extensions
+        .install_metadata(
+            "account",
+            "metadata/http",
+            AcquiredFacts::success(
+                serde_json::json!({"active": active}),
+                "2026-10-19T12:00:00Z"
+                    .parse()
+                    .expect("a literal RFC3339 instant"),
+                MetadataCacheDisposition::Disabled,
+            ),
+        )
+        .expect("metadata fixture installs");
+    extensions
+}
+
+fn extensions_with_metadata_error() -> Extensions {
+    let mut extensions = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_weather"))),
+        ..Default::default()
+    };
+    extensions
+        .install_metadata(
+            "account",
+            "metadata/http",
+            AcquiredFacts::error(
+                "metadata.upstream_error",
+                MetadataCacheDisposition::Disabled,
+            ),
+        )
+        .expect("error metadata fixture installs");
+    extensions
+}
+
 // =====================================================================
 // Scenarios
 // =====================================================================
+
+#[tokio::test]
+async fn acquired_metadata_changes_the_apl_decision() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "require(metadata.account.active)"
+"#;
+
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(YAML).expect("load_config_yaml");
+    mgr.initialize().await.expect("initialize");
+
+    let (allowed, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("hi"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+    assert!(
+        allowed.continue_processing,
+        "true acquired fact should allow: {:?}",
+        allowed.violation
+    );
+
+    let (denied, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("hi"),
+            extensions_with_metadata(false),
+            None,
+        )
+        .await;
+    assert!(
+        !denied.continue_processing,
+        "false acquired fact should deny"
+    );
+}
+
+#[tokio::test]
+async fn apl_reads_metadata_provenance_leaves() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "require(metadata.account.$outcome == 'success')"
+"#;
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(YAML)
+        .expect("a `$` provenance leaf must parse");
+    mgr.initialize().await.expect("initialize");
+
+    let (allowed, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("hi"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+    assert!(
+        allowed.continue_processing,
+        "a success record should allow: {:?}",
+        allowed.violation
+    );
+
+    let (denied, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("hi"),
+            extensions_with_metadata_error(),
+            None,
+        )
+        .await;
+    assert!(!denied.continue_processing, "an error record should deny");
+}
+
+#[tokio::test]
+async fn route_predicates_read_metadata_without_a_baseline_grant() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "require(metadata.account.active)"
+"#;
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(YAML).expect("load_config_yaml");
+    mgr.initialize().await.expect("initialize");
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("hi"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the synthetic APL handler holds read_metadata intrinsically: {:?}",
+        result.violation
+    );
+}
+
+/// Run `metadata-reader` from a route with the given plugin capabilities and
+/// return whether each dispatch saw the parent's acquired metadata.
+async fn run_metadata_reader(capabilities: &str) -> Vec<bool> {
+    let yaml = format!(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: metadata-reader
+    kind: metadata-reader
+    hooks: [cmf.tool_pre_invoke]
+    capabilities: [{capabilities}]
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "run(metadata-reader)"
+"#
+    );
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory(
+        "metadata-reader",
+        Box::new(MetadataReaderFactory {
+            observed: Arc::clone(&observed),
+        }),
+    );
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(&yaml).expect("load_config_yaml");
+    mgr.initialize().await.expect("initialize");
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("hi"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+
+    assert!(result.continue_processing, "run() plugin should allow");
+    observed.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn run_plugin_with_read_metadata_sees_parent_metadata() {
+    assert_eq!(
+        run_metadata_reader("read_metadata").await,
+        vec![true],
+        "a run() plugin in the same invocation sees metadata with read_metadata"
+    );
+}
+
+#[tokio::test]
+async fn run_plugin_without_read_metadata_sees_no_metadata() {
+    assert_eq!(
+        run_metadata_reader("").await,
+        vec![false],
+        "metadata must not reach a run() plugin without read_metadata"
+    );
+}
 
 /// Plugin declares `read_labels`; route references it; pre-existing
 /// label `EXISTING` is set on the request extensions. The plugin must
@@ -437,7 +717,7 @@ plugins:
   - name: label-writer
     kind: label-writer
     hooks: [cmf.tool_pre_invoke]
-    capabilities: [append_labels, read_labels]
+    capabilities: [append_labels, read_labels, read_metadata]
 routes:
   - tool: get_weather
     authorization:
@@ -451,10 +731,7 @@ routes:
     mgr.load_config_yaml(YAML).expect("load_config_yaml");
     mgr.initialize().await.expect("initialize");
 
-    let ext = Extensions {
-        meta: Some(Arc::new(meta_for_tool("get_weather"))),
-        ..Default::default()
-    };
+    let ext = extensions_with_metadata(true);
     let (result, _bg) = mgr
         .invoke_named::<CmfHook>("cmf.tool_pre_invoke", cmf_payload("hi"), ext, None)
         .await;
@@ -482,6 +759,14 @@ routes:
          way out of AplRouteHandler (no append_labels cap on the synthetic). \
          Got: {labels:?}"
     );
+    assert!(
+        modified
+            .metadata
+            .as_deref()
+            .and_then(|metadata| metadata.get("account"))
+            .is_some(),
+        "merging child extension changes must preserve parent metadata"
+    );
 }
 
 /// A Vault-style delegate must receive the inbound caller JWT and its minted
@@ -501,6 +786,7 @@ plugins:
       - read_inbound_credentials
       - read_subject
       - read_claims
+      - read_metadata
       - write_delegated_tokens
 routes:
   - tool: get_weather
@@ -510,11 +796,13 @@ routes:
 "#;
 
     let observed_bearer = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_metadata = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mgr = Arc::new(PolicyEngine::default());
     mgr.register_factory(
         "vault-shaped-delegate",
         Box::new(VaultShapedDelegateFactory {
             observed_bearer: Arc::clone(&observed_bearer),
+            observed_metadata: Arc::clone(&observed_metadata),
         }),
     );
     register_apl(
@@ -536,11 +824,8 @@ routes:
         TokenRole::User,
         RawInboundToken::new("caller-jwt", "Authorization", TokenKind::Jwt),
     );
-    let ext = Extensions {
-        meta: Some(Arc::new(meta_for_tool("get_weather"))),
-        raw_credentials: Some(Arc::new(raw)),
-        ..Default::default()
-    };
+    let mut ext = extensions_with_metadata(true);
+    ext.raw_credentials = Some(Arc::new(raw));
     let (result, _bg) = mgr
         .invoke_named::<CmfHook>("cmf.tool_pre_invoke", cmf_payload("hi"), ext, None)
         .await;
@@ -554,10 +839,23 @@ routes:
         vec!["caller-jwt".to_owned()],
         "read_inbound_credentials must reach the delegate payload"
     );
+    assert_eq!(
+        *observed_metadata.lock().unwrap(),
+        vec![true],
+        "a delegate in the same invocation sees metadata with read_metadata"
+    );
 
     let modified = result
         .modified_extensions
         .expect("delegate should return modified extensions");
+    assert!(
+        modified
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("account"))
+            .is_some(),
+        "parent metadata must survive the delegate step"
+    );
     let raw = modified
         .raw_credentials
         .as_ref()

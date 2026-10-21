@@ -42,9 +42,9 @@ use praxis_policy_apl_core::{AttributeBag, AttributeValue};
 use praxis_policy_core::extensions::{
     AgentExtension, ClientExtension, ClientTrustLevel, CompletionExtension, ConversationContext,
     DelegationExtension, DelegationHop, Extensions, FrameworkExtension, HttpExtension,
-    LLMExtension, MCPExtension, MetaExtension, MonotonicSet, PromptMetadata, ProvenanceExtension,
-    RequestExtension, ResourceMetadata, SecurityExtension, StopReason, SubjectExtension,
-    SubjectType, TokenUsage, ToolMetadata, WorkloadIdentity,
+    LLMExtension, MCPExtension, MetaExtension, MetadataCacheDisposition, MonotonicSet,
+    PromptMetadata, ProvenanceExtension, RequestExtension, ResourceMetadata, SecurityExtension,
+    StopReason, SubjectExtension, SubjectType, TokenUsage, ToolMetadata, WorkloadIdentity,
 };
 
 /// One of every slot, with every field carrying a value.
@@ -224,6 +224,21 @@ fn fully_populated() -> Extensions {
         metadata: HashMap::from([("m".to_owned(), serde_json::json!(1))]),
     };
     let custom = HashMap::from([("c".to_owned(), serde_json::json!("v"))]);
+    let mut metadata_owner = Extensions::default();
+    metadata_owner
+        .install_metadata(
+            "account",
+            "metadata/http",
+            praxis_policy_core::extensions::AcquiredFacts::success(
+                serde_json::json!({"active": true, "nested": {"plan": "enterprise"}}),
+                "2026-10-01T12:00:00Z"
+                    .parse()
+                    .expect("a literal RFC3339 instant"),
+                MetadataCacheDisposition::Miss,
+            )
+            .with_status(200),
+        )
+        .expect("metadata fixture installs");
 
     // Named field by field rather than spread from `Default`, so a slot added
     // to the container also breaks this file. The three non-slot fields carry
@@ -233,6 +248,7 @@ fn fully_populated() -> Extensions {
         delegation: Some(Arc::new(delegation)),
         agent: Some(Arc::new(agent)),
         meta: Some(Arc::new(meta)),
+        metadata: metadata_owner.metadata,
         request: Some(Arc::new(request)),
         http: Some(Arc::new(http)),
         llm: Some(Arc::new(llm)),
@@ -279,6 +295,7 @@ fn type_of(value: &AttributeValue) -> KeyType {
 /// omit containers rather than marking them as policy-visible values.
 fn type_matches(declared: KeyType, actual: KeyType) -> bool {
     match declared {
+        KeyType::Acquired => true,
         KeyType::Flattened => actual != KeyType::NonScalar,
         expected => expected == actual,
     }
@@ -503,14 +520,14 @@ fn duplicate_documented_keys_are_rejected() {
 /// Each key the per-slot tables list, with the type and the section they give
 /// it, normalized to the catalog's spelling.
 ///
-/// Only the tables under "The twelve slots" are read. The payload tables after
+/// Only the tables under "The thirteen slots" are read. The payload tables after
 /// it describe `args.*`, `result.*` and `data.*`, which the payload flattener
 /// writes and this bridge does not.
 fn documented() -> HashMap<String, Documented> {
     let text = std::fs::read_to_string(docs_path()).expect("the catalog page reads");
     let section = text
-        .split_once("## The twelve slots")
-        .expect("the per-slot section is still titled 'The twelve slots'")
+        .split_once("## The thirteen slots")
+        .expect("the per-slot section is still titled 'The thirteen slots'")
         .1
         .split_once("## Payloads that are not slots")
         .expect("the payload section still follows the slots")

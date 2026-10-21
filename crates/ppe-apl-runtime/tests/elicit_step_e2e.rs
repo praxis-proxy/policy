@@ -58,6 +58,7 @@ struct OpRecord {
     from: String,
     elicitation_id: Option<String>,
     purpose: Option<String>,
+    saw_metadata: bool,
 }
 
 struct FakeApprover {
@@ -83,7 +84,7 @@ impl HookHandler<ElicitationHook> for FakeApprover {
     async fn handle(
         &self,
         payload: &ElicitationPayload,
-        _ext: &Extensions,
+        ext: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<ElicitationPayload> {
         self.ledger.lock().unwrap().push(OpRecord {
@@ -92,6 +93,7 @@ impl HookHandler<ElicitationHook> for FakeApprover {
             from: payload.from().to_owned(),
             elicitation_id: payload.elicitation_id().map(str::to_owned),
             purpose: payload.purpose().map(str::to_owned),
+            saw_metadata: ext.metadata.is_some(),
         });
 
         if let Some(code) = &self.deny_code {
@@ -188,6 +190,14 @@ fn invoker(mgr: Arc<PolicyEngine>, plan: Arc<RouteDispatchPlan>) -> ElicitationP
     ElicitationPluginInvoker::new(mgr, Arc::new(AsyncMutex::new(Extensions::default())), plan)
 }
 
+fn invoker_with_extensions(
+    mgr: Arc<PolicyEngine>,
+    plan: Arc<RouteDispatchPlan>,
+    extensions: Extensions,
+) -> ElicitationPluginInvoker {
+    ElicitationPluginInvoker::new(mgr, Arc::new(AsyncMutex::new(extensions)), plan)
+}
+
 // ---------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------
@@ -223,6 +233,62 @@ async fn dispatch_maps_payload_outputs_and_passes_resolved_from() {
     assert_eq!(rec.from, "alice@example.com");
     assert_eq!(rec.purpose.as_deref(), Some("Approve raise"));
     assert!(rec.elicitation_id.is_none());
+}
+
+#[tokio::test]
+async fn elicitation_dispatch_with_read_metadata_sees_parent_metadata() {
+    assert!(
+        elicitation_saw_metadata(true).await,
+        "an elicitation plugin in the same invocation sees metadata with read_metadata"
+    );
+}
+
+#[tokio::test]
+async fn elicitation_dispatch_without_read_metadata_sees_no_metadata() {
+    assert!(
+        !elicitation_saw_metadata(false).await,
+        "metadata must not reach an elicitation plugin without read_metadata"
+    );
+}
+
+/// Dispatch one elicitation with parent metadata installed and report
+/// whether the plugin's filtered view carried it.
+async fn elicitation_saw_metadata(read_metadata: bool) -> bool {
+    let ledger = Arc::new(Mutex::new(Vec::new()));
+    let mut plugin_cfg = approver_cfg("manager-approver");
+    if read_metadata {
+        plugin_cfg.capabilities.insert("read_metadata".to_owned());
+    }
+    let plugin = Arc::new(FakeApprover {
+        cfg: plugin_cfg.clone(),
+        ledger: Arc::clone(&ledger),
+        check_status: ElicitationStatusKind::Pending,
+        check_outcome: None,
+        validate_valid: true,
+        deny_code: None,
+    });
+    let (mgr, plan) = setup(plugin, plugin_cfg).await;
+    let mut extensions = Extensions::default();
+    extensions
+        .install_metadata(
+            "account",
+            "metadata/http",
+            praxis_policy_core::extensions::AcquiredFacts::success(
+                serde_json::json!({"active": true}),
+                "2026-10-19T12:00:00Z"
+                    .parse()
+                    .expect("a literal RFC3339 instant"),
+                praxis_policy_core::extensions::MetadataCacheDisposition::Disabled,
+            ),
+        )
+        .expect("parent metadata installs");
+    let inv = invoker_with_extensions(mgr, plan, extensions);
+
+    inv.dispatch(&elicit_step(), "alice@example.com")
+        .await
+        .expect("dispatch succeeds");
+
+    ledger.lock().unwrap()[0].saw_metadata
 }
 
 #[tokio::test]

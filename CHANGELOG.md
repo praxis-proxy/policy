@@ -17,6 +17,28 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added immutable, framework-owned acquired metadata records under
+  `metadata.<instance>.*`. Plugins in the same invocation need `read_metadata`
+  to receive the typed slot or its APL projection, and cannot add, replace, or
+  remove records; `Extensions::for_child_request` starts a child policy
+  invocation without parent records. This is the protected context
+  foundation for the external metadata PIP tracked by
+  [#184](https://github.com/praxis-proxy/policy/issues/184).
+- APL attribute paths accept one leading `$` on a segment after the first,
+  so policies read provenance leaves such as `metadata.account.$outcome`.
+  Route predicates read `metadata.*` without a host grant: the synthetic APL
+  handler holds `read_metadata` intrinsically.
+
+### Changed
+
+- **Breaking:** `Extensions` and `OwnedExtensions` add `metadata`; exhaustive
+  struct literals must initialize it (or use `..Default::default()`).
+  `Capability` adds `ReadMetadata` and `SlotName` adds `Metadata`, so
+  exhaustive matches need a new arm. `Extensions.metadata` is never
+  serialized. The new metadata enums are `#[non_exhaustive]`.
+
 ## [0.5.0] - 2026-10-13
 
 ### Added
@@ -184,6 +206,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `&` and `|` no longer abort when one operand cannot be ordered and
+  another already settles the expression. A true `|` operand or a false `&`
+  operand decides the same way in either order, so some phases that denied
+  on an unparseable value now evaluate normally. An unorderable result is
+  still fail-closed when no operand settles.
+  ([#69](https://github.com/praxis-proxy/policy/issues/69))
 - Rejected JWTs with unsupported critical headers. OAuth token exchange now
   validates the issued token type, granted scopes, and JWT audience and subject
   by default. Empty scope requests accept IdP defaults, and

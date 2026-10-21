@@ -5,7 +5,7 @@ contextual state policy reasons about. Identity, security labels, the delegation
 chain, request headers, and agent session context are extensions.
 Each extension is bridged into the flat attribute bag APL reads, under a
 well-known namespace. Capability-gating controls which plugins may read or
-write credential-bearing state; operational context is unrestricted.
+write protected state; operational context remains unrestricted.
 
 Hosts rarely configure extensions directly. Capability gating restricts the
 sensitive state available to plugins that execute APL effects. The namespaces
@@ -31,6 +31,7 @@ keys. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Security (authentication method) | host-recorded authentication method | `auth_method` | unrestricted |
 | Delegation | delegation depth, delegated flag, origin and actor subjects, chain age | `delegation.*`, `delegated` | `read_delegation`, `append_delegation` |
 | Agent | session, conversation, turn, and lineage context | `agent.*` | `read_agent` |
+| Metadata | immutable facts acquired from an external policy information source, with trusted provenance | `metadata.<instance>.*` | `read_metadata` |
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | unrestricted |
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | unrestricted |
 | HTTP | request line (method, path, query, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers` for headers and non-query request-line fields; `write_headers` for header writes; `read_query` for raw `http.query` |
@@ -67,6 +68,18 @@ candidate set. Because PPE links the router in-process, this is a typed value,
 not a serialized blob. Capability-gating the write is not yet applied — the
 policy engine is its only writer today.
 
+Acquired metadata belongs to one policy invocation. The metadata PIP fetch
+step ([#184](https://github.com/praxis-proxy/policy/issues/184)), or a host
+that resolves facts before dispatch, installs one record per source instance
+with `Extensions::install_metadata`; ordinary plugin merge-back cannot add,
+replace, or remove it. Route predicates always read `metadata.*`, because the
+synthetic APL handler holds `read_metadata` intrinsically. Plugins dispatched within
+the same invocation (`run`, delegation, elicitation) see the records read-only
+when they declare `read_metadata`. A host starting a child policy invocation
+uses `Extensions::for_child_request`, which retains the ordinary request
+context but clears acquired metadata. The child may install its own records,
+and those records are not merged into the parent.
+
 ## Capabilities
 
 A plugin declares the capabilities it needs. PPE filters the extensions before
@@ -101,6 +114,7 @@ plugins:
 | `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*`; excludes raw `http.query` |
 | `read_query` | raw `http.query` only; may include credentials |
 | `read_llm_request` | no bag keys; gates the parsed request body on `Extensions.llm_request` |
+| `read_metadata` | `metadata.<instance>.*` |
 | `read_labels` | the labels on the security extension. A plugin reads them from the extension; `security.labels` in the bag is what an APL predicate reads |
 | `read_inbound_credentials` | no bag keys; gates raw inbound tokens in the plugin payload |
 | `read_delegated_tokens` | no bag keys; gates minted tokens in the plugin payload |
@@ -112,9 +126,9 @@ Inventing a read-capability name for one of these slots does not make it gated.
 
 `read_roles`, `read_permissions`, `read_teams`, and `read_claims` each imply the
 `read_subject` baseline (`subject.id`, `subject.type`, `authenticated`). The
-last three capabilities widen no plugin's bag view: labels are read from the
-typed extension, and credential material flows through plugin payloads rather
-than the bag. APL predicates read `security.labels` from the bag directly, which
+label and credential capabilities widen no plugin's bag view: labels are read
+from the typed extension, and credential material flows through plugin payloads
+rather than the bag. APL predicates read `security.labels` from the bag, which
 is how `security.labels contains "secret"` works (see [Session
 Taint](apl/tainting.md)).
 
@@ -176,8 +190,12 @@ enforces the tier:
 
 - Immutable: fixed once resolved. The verified subject identity, client,
   workload, agent, meta, request, LLM, LLM request, MCP, completion,
-  provenance, and framework extensions. The LLM request is also never
-  serialized, so it stays out of extension dumps and session stores.
+  provenance, framework, and externally acquired metadata extensions. Metadata
+  is installed once per source instance by the framework and has no plugin
+  write capability. The LLM request and acquired metadata are never
+  serialized with `Extensions`, so they stay out of extension dumps and
+  session stores, and serde cannot carry provenance the framework did not
+  stamp.
 - Monotonic: may only grow. Security labels (added via `append_labels`,
   never removed) and the delegation chain (extended via `append_delegation`).
 - Mutable: may be rewritten. HTTP headers (via `write_headers`) and the
