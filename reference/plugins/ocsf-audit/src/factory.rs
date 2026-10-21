@@ -110,7 +110,14 @@ impl PluginFactory for OcsfAuditFactory {
 )]
 mod tests {
     use super::*;
+    use praxis_policy_core::cmf::{Message, MessagePayload, Role};
+    use praxis_policy_core::config::parse_config;
+    use praxis_policy_core::context::PluginContext;
+    use praxis_policy_core::engine::PolicyEngine;
+    use praxis_policy_core::error::PluginViolation;
+    use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
     use praxis_policy_core::plugin::{OnError, PluginMode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A config the factory accepts, with `hooks` left to the caller so each
     /// test can vary the one thing it is about.
@@ -235,5 +242,100 @@ mod tests {
             assert!(message.contains("signing_key_pem_path"), "{message}");
             assert!(!message.contains("private-key-marker"), "{message}");
         }
+    }
+
+    struct TogglePlugin {
+        cfg: PluginConfig,
+        calls: AtomicUsize,
+    }
+
+    impl praxis_policy_core::plugin::Plugin for TogglePlugin {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+    }
+
+    impl HookHandler<CmfHook> for TogglePlugin {
+        async fn handle(
+            &self,
+            _payload: &MessagePayload,
+            _ext: &praxis_policy_core::extensions::Extensions,
+            _ctx: &mut PluginContext,
+        ) -> PluginResult<MessagePayload> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                PluginResult::allow()
+            } else {
+                PluginResult::deny(PluginViolation::new("denied", "second request"))
+            }
+        }
+    }
+
+    struct ToggleFactory;
+
+    impl PluginFactory for ToggleFactory {
+        fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+            let plugin = Arc::new(TogglePlugin {
+                cfg: config.clone(),
+                calls: AtomicUsize::new(0),
+            });
+            let handler: Arc<dyn praxis_policy_core::registry::AnyHookHandler> =
+                Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+            Ok(PluginInstance {
+                plugin,
+                handlers: vec![("cmf.tool_pre_invoke", handler)],
+            })
+        }
+    }
+
+    /// The configured exporter runs through the factory and engine audit
+    /// seam for both verdicts, then survives a graceful shutdown on disk.
+    #[tokio::test]
+    async fn file_exporter_records_allow_and_deny_through_the_engine() {
+        struct TempDir(std::path::PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = TempDir(
+            std::env::temp_dir().join(format!("ocsf-engine-export-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&dir.0).expect("temp directory exists");
+        let path = dir.0.join("audit.ndjson");
+        let yaml = format!(
+            "engine_settings:\n  dispatch: hooks\nplugins:\n  - name: toggle\n    kind: test/toggle\n    hooks: [cmf.tool_pre_invoke]\n    mode: sequential\n    priority: 10\n    on_error: fail\n  - name: ocsf-audit\n    kind: audit/ocsf\n    mode: audit\n    config:\n      chain: true\n      exporters:\n        - {{ kind: file, path: {}, fsync: batch }}\n",
+            path.display()
+        );
+        let config = parse_config(&yaml).expect("exporter config parses");
+        let engine = PolicyEngine::default();
+        engine.register_factory("test/toggle", Box::new(ToggleFactory));
+        engine.register_factory(KIND, Box::new(OcsfAuditFactory));
+        engine.load_config(config).expect("plugins load");
+        engine.initialize().await.expect("plugins initialize");
+
+        for should_deny in [false, true] {
+            let payload = MessagePayload {
+                message: Message::with_content(Role::Tool, vec![]),
+            };
+            let (result, _background) = engine
+                .invoke_named::<CmfHook>(
+                    "cmf.tool_pre_invoke",
+                    payload,
+                    praxis_policy_core::extensions::Extensions::default(),
+                    None,
+                )
+                .await;
+            assert_eq!(result.is_denied(), should_deny);
+        }
+        engine.shutdown().await;
+
+        let written = std::fs::read_to_string(&path).expect("file exporter wrote records");
+        let events: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid OCSF JSON line"))
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["action_id"], 1);
+        assert_eq!(events[1]["action_id"], 2);
     }
 }

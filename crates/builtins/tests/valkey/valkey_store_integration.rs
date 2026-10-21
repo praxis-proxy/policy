@@ -86,7 +86,15 @@ async fn valkey_target() -> Option<Target> {
 
 /// Build a store pointed at the target.
 fn store_for(target: &Target, ttl_seconds: Option<u64>) -> ValkeySessionStore {
-    let mut yaml = format!("kind: valkey\nendpoint: {}\n", target.url);
+    // These tests assert store semantics, not the production timeout defaults.
+    // Coverage instrumentation and concurrent test startup can delay a fresh
+    // pool connection beyond the 250 ms fail-closed default on shared runners.
+    // Keep the dedicated unreachable-endpoint test on its explicit 300 ms
+    // budget, but give live-backend assertions enough scheduling headroom.
+    let mut yaml = format!(
+        "kind: valkey\nendpoint: {}\nconnect_timeout_ms: 5000\ncommand_timeout_ms: 5000\n",
+        target.url
+    );
     if let Some(ttl) = ttl_seconds {
         yaml.push_str(&format!("ttl_seconds: {ttl}\n"));
     }
