@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Praxis Contributors
 
 // praxis-policy-plugin-transcript-scanner — CMF `HookHandler` that walks the
-// prior turns carried on `AgentExtension.conversation.history` and tests each
-// string they hold against operator-supplied patterns. A match denies with
+// prior turns carried on `AgentExtension.conversation.history` and tests
+// supported content against operator-supplied patterns. A match denies with
 // `transcript.detected`.
 //
 // History is not flattened into the APL attribute bag, so this is the way a
@@ -23,7 +23,13 @@
 //!
 //! Reads `AgentExtension.conversation.history`, which requires the
 //! `read_agent` capability, and denies the request when any prior turn holds
-//! a string matching one of the configured patterns.
+//! supported text matching one of the configured patterns. This includes text,
+//! reasoning, argument and result values, resource content and blobs decoded
+//! as UTF-8 with replacement, and rendered prompt content and messages.
+//! Metadata, JSON object keys, URIs, and encoded media are outside scope.
+//! `roles` filters outer turns, including turns with nested prompt messages.
+//! Missing history is treated as empty and allowed; the host must report
+//! history for this scanner to provide coverage.
 
 /// Plugin configuration: the patterns and the roles to scan.
 pub mod config;

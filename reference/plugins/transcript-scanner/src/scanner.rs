@@ -26,13 +26,13 @@ struct Hit<'a> {
     role: Role,
 }
 
-/// CMF plugin that walks `AgentExtension.conversation.history` and tests each
-/// string a turn holds against the configured patterns.
+/// CMF plugin that scans supported text in prior conversation turns.
 ///
-/// Per turn it reads text and reasoning parts, tool-call and prompt arguments,
-/// and tool-result content. Argument and result values are walked through
-/// nested arrays and objects, so a secret one level down in a tool result is
-/// still found.
+/// It reads text and reasoning, tool-call and prompt argument values, tool
+/// result values, resource content and blobs decoded as UTF-8 with replacement,
+/// and rendered prompt content and messages. Metadata, object keys, URIs, and
+/// encoded media are outside this reference scanner's scope. `roles` filters
+/// outer history turns, including any prompt messages nested within them.
 #[derive(Debug)]
 pub struct TranscriptScanner {
     cfg: PluginConfig,
@@ -110,9 +110,16 @@ impl TranscriptScanner {
                 content.arguments.values().find_map(|v| self.match_value(v))
             },
             ContentPart::ToolResult { content } => self.match_value(&content.content),
-            ContentPart::Resource { content } => {
-                content.content.as_deref().and_then(|t| self.match_str(t))
-            },
+            ContentPart::Resource { content } => content
+                .content
+                .as_deref()
+                .and_then(|t| self.match_str(t))
+                .or_else(|| {
+                    content
+                        .blob
+                        .as_deref()
+                        .and_then(|b| self.match_str(&String::from_utf8_lossy(b)))
+                }),
             ContentPart::PromptResult { content } => content
                 .content
                 .as_deref()
@@ -389,6 +396,60 @@ mod tests {
             let r = run(&scanner(&[]), &payload("hi"), &ext_with_history(vec![turn])).await;
             assert!(!r.continue_processing, "a prompt's {what} is scanned");
         }
+    }
+
+    #[tokio::test]
+    async fn resource_blob_is_scanned_even_with_invalid_utf8() {
+        for blob in [
+            format!("API_KEY={SECRET}").into_bytes(),
+            [vec![0xff, 0xfe], SECRET.as_bytes().to_vec()].concat(),
+        ] {
+            let resource = Message::with_content(
+                Role::Tool,
+                vec![ContentPart::Resource {
+                    content: Resource {
+                        uri: "file:///app/.env".into(),
+                        blob: Some(blob),
+                        ..Default::default()
+                    },
+                }],
+            );
+            let result = run(
+                &scanner(&[]),
+                &payload("hi"),
+                &ext_with_history(vec![resource]),
+            )
+            .await;
+            assert!(!result.continue_processing);
+        }
+    }
+
+    #[tokio::test]
+    async fn roles_filter_the_outer_turn_of_nested_prompt_messages() {
+        let outer = Message::with_content(
+            Role::Tool,
+            vec![ContentPart::PromptResult {
+                content: PromptResult {
+                    prompt_request_id: "pr".into(),
+                    prompt_name: "setup".into(),
+                    messages: vec![Message::text(Role::User, SECRET)],
+                    content: None,
+                    is_error: false,
+                    error_message: None,
+                },
+            }],
+        );
+        let ext = ext_with_history(vec![outer]);
+        assert!(
+            run(&scanner(&["user"]), &payload("hi"), &ext)
+                .await
+                .continue_processing
+        );
+        let violation = run(&scanner(&["tool"]), &payload("hi"), &ext)
+            .await
+            .violation
+            .expect("outer tool turn is in scope");
+        assert!(violation.reason.contains("turn 0 (Tool)"));
     }
 
     #[tokio::test]

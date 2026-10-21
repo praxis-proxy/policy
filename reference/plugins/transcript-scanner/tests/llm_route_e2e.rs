@@ -70,7 +70,7 @@ routes:
   - llm: "gpt-4*"
     authorization:
       pre_invocation:
-        - "llm.max_tokens > 4096: deny"
+        - "llm.input.max_tokens > 4096: deny"
 "#;
 
 async fn engine() -> Arc<PolicyEngine> {
