@@ -101,7 +101,10 @@ with `chain: true` an attestation whose fingerprint binds the record to its
 predecessor. A signing key adds a DSSE signature over the same bytes, which a
 verifier checks offline with the public key. It renders decisions only:
 `on_effect` keeps its ignoring default, so effects do not become OCSF events.
-Its README under `reference/plugins/ocsf-audit/` documents the record, the
+It writes each record through the exporters in `praxis_policy_core::audit::export`:
+`exporters:` lists any of `stderr`, `stdout`, an append-only `file`, and
+`tracing`, and every record goes to each one byte for byte. Its README under
+`reference/plugins/ocsf-audit/` documents the record, the exporters, the
 verifier rule and the sink's known deviations from the published schema.
 
 ```yaml
@@ -116,6 +119,8 @@ plugins:
       - read_labels
       - read_workload
     config:
+      exporters:
+        - { kind: file, path: /var/log/praxis/ocsf.ndjson, fsync: batch }
       chain: true
       signing: dsse
       signing_key_pem_path: /etc/praxis/ocsf-signing.pem
