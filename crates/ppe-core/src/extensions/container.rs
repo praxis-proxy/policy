@@ -384,7 +384,7 @@ impl Extensions {
     /// Merge the guarded `http` slot — header maps and the request line.
     ///
     /// `write_headers` authorizes *headers*, which is what the capability is
-    /// named for. The request line (`method`, `path`, `host`, `scheme`) and the
+    /// named for. The request line (`method`, `path`, `query`, `host`, `scheme`) and the
     /// response `status` are host-populated identity that policies gate on, so
     /// they are always preserved from canonical state and never taken from
     /// `owned`. `host` in particular must come from a validated authority (see
@@ -1353,11 +1353,12 @@ mod tests {
 
     #[test]
     fn test_http_merge_preserves_request_line() {
-        // Policies gate on method/path/host/scheme (CHANGELOG 0.2.2), and
+        // Policies gate on the request line, including the query, and
         // `write_headers` does not authorize rewriting request identity.
         let mut http = HttpExtension::default();
         http.method = Some("POST".into());
         http.path = Some("/api/v1/transfer".into());
+        http.query = Some("access_token=secret".into());
         http.host = Some("bank.internal".into());
         http.scheme = Some("https".into());
 
@@ -1375,6 +1376,7 @@ mod tests {
             // A worker round trip loses these; a hostile one rewrites them.
             h.method = Some("GET".into());
             h.path = Some("/api/v1/healthz".into());
+            h.query = None;
             h.host = Some("evil.example".into());
             h.scheme = None;
         }
@@ -1385,6 +1387,7 @@ mod tests {
         let merged = ext.http.as_ref().unwrap();
         assert_eq!(merged.method.as_deref(), Some("POST"));
         assert_eq!(merged.path.as_deref(), Some("/api/v1/transfer"));
+        assert_eq!(merged.query.as_deref(), Some("access_token=secret"));
         assert_eq!(merged.host.as_deref(), Some("bank.internal"));
         assert_eq!(merged.scheme.as_deref(), Some("https"));
         assert_eq!(

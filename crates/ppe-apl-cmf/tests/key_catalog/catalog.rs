@@ -29,8 +29,8 @@
 
 use praxis_policy_apl_cmf::constants::{
     CAP_READ_AGENT, CAP_READ_CLAIMS, CAP_READ_CLIENT, CAP_READ_DELEGATION, CAP_READ_HEADERS,
-    CAP_READ_LABELS, CAP_READ_PERMISSIONS, CAP_READ_ROLES, CAP_READ_SUBJECT, CAP_READ_TEAMS,
-    CAP_READ_WORKLOAD,
+    CAP_READ_LABELS, CAP_READ_PERMISSIONS, CAP_READ_QUERY, CAP_READ_ROLES, CAP_READ_SUBJECT,
+    CAP_READ_TEAMS, CAP_READ_WORKLOAD,
 };
 
 /// The value type a bag key carries.
@@ -612,7 +612,7 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
     exact(
         "http.query",
         KeyType::String,
-        Gating::Capability(CAP_READ_HEADERS),
+        Gating::Capability(CAP_READ_QUERY),
         Slot::Http,
     ),
     exact(

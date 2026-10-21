@@ -9,7 +9,8 @@ write credential-bearing state; operational context is unrestricted.
 
 Hosts rarely configure extensions directly. Capability gating restricts the
 sensitive state available to plugins that execute APL effects. The namespaces
-below are the exact keys an APL predicate or plugin may read. The per-type
+below are the exact keys an APL predicate may read; the Access column describes
+which of them a plugin may read. The per-type
 absent-value contract, original vs flattened keys, and the catalog of every key
 the bridge emits are in [CMF extensions and the attribute bag](cmf-extensions.md).
 
@@ -32,7 +33,7 @@ keys. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Agent | session, conversation, turn, and lineage context | `agent.*` | `read_agent` |
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | unrestricted |
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | unrestricted |
-| HTTP | request line (method, path, query, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
+| HTTP | request line (method, path, query, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers` for headers and non-query request-line fields; `write_headers` for header writes; `read_query` for raw `http.query` |
 | LLM | model id, provider, capabilities | `llm.*` | unrestricted |
 | LLM request | the host-parsed inference request body | not flattened; OPA, CEL, and Cedar read it as `llm.request` | `read_llm_request` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | unrestricted |
@@ -49,6 +50,13 @@ array writes the bare key `args` / `result`. The route name is
 `route.key`. APL field pipelines (`args:` / `result:`) operate on those. Operator-maintained static attributes
 are flattened under `data.*` — these come from config files, not the request,
 and need no capability (see [Static Attributes](apl/attributes.md)).
+
+PDPs read the raw `http.query` from the canonical attribute bag. Plugin views
+include it only with `read_query`; `read_headers` alone exposes the request and
+response headers but not the query. `read_query` alone does not expose headers
+or other request-line fields. Hosts must keep the query out of `http.path`.
+When an identity resolver also reads a query, both inputs must come from the
+same request target.
 
 Most extensions are inputs — resolved before policy runs and flattened into
 the bag for predicates to read. The candidate constraint is the exception:
@@ -90,7 +98,8 @@ plugins:
 | `read_workload` | `caller_workload.*`, `this_workload.*` |
 | `read_delegation` | `delegation.*`, `delegated` |
 | `read_agent` | `agent.*` |
-| `read_headers` | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` |
+| `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*`; excludes raw `http.query` |
+| `read_query` | raw `http.query` only; may include credentials |
 | `read_llm_request` | no bag keys; gates the parsed request body on `Extensions.llm_request` |
 | `read_labels` | the labels on the security extension. A plugin reads them from the extension; `security.labels` in the bag is what an APL predicate reads |
 | `read_inbound_credentials` | no bag keys; gates raw inbound tokens in the plugin payload |

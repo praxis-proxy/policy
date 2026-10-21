@@ -24,9 +24,10 @@ pub struct SecretHeaderProvenance {
 /// - Post-invoke: both header maps filled (request from original, response from
 ///   upstream) and `status` set to the status the upstream returned
 ///
-/// Capability-gated: requires `read_headers` to see, `write_headers`
-/// to modify (both request and response). Secret assertions are withheld from
-/// plugin views, `Debug`, and serialization.
+/// Headers and non-query request-line fields require `read_headers` to see.
+/// `write_headers` permits modifying request and response headers. The raw
+/// query requires `read_query`. Secret assertions are withheld from plugin
+/// views, `Debug`, and serialization.
 #[derive(Clone, Default, Deserialize)]
 pub struct HttpExtension {
     /// HTTP request headers (inbound from caller).
@@ -67,12 +68,13 @@ pub struct HttpExtension {
     /// query-blind policy cannot express.
     ///
     /// Treated as potentially secret: a query can embed a credential (a
-    /// query-parameter JWT, say). The live value is readable by a PDP through
-    /// the attribute bag, but it is REDACTED to presence-only on every outbound
-    /// path — `Serialize`, `Debug`, and PDP diagnostics — so it never reaches a
-    /// log, a serialized record, or a denial reason. Because the value is
-    /// redacted on serialize, it does not survive a serialize/deserialize
-    /// round-trip (a reconstructed value is the placeholder, not the original).
+    /// query-parameter JWT, say). PDPs read the live value from the canonical
+    /// attribute bag; plugin views need `read_query` to receive it. This extension's `Serialize` and
+    /// `Debug` output and built-in PDP diagnostics redact it. The attribute bag
+    /// itself contains the raw value and must be handled as sensitive data.
+    /// Because this extension redacts on serialize, its query does not survive
+    /// a serialize/deserialize round-trip: the reconstructed value is the
+    /// placeholder, not the original policy input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
 
@@ -135,12 +137,11 @@ impl HttpExtension {
             method: self.method.as_deref(),
             path: self.path.as_deref(),
             // The query can embed a credential (a query-parameter JWT, say), so
-            // it is redacted to presence-only on every outbound path. Both
+            // it is redacted to presence-only in this view. Both
             // `Serialize` and `Debug` route through this view, so this one site
             // covers both: a present query renders as `Some("[REDACTED]")`, an
-            // absent one as `None` — the value never reaches serialized output,
-            // a log, or a diagnostic. Policy evaluation is unaffected: a PDP
-            // reads the live value from the attribute bag, not from this view.
+            // absent one as `None`. PDPs read the canonical attribute bag,
+            // not this diagnostic/serialization view.
             query: self.query.as_ref().map(|_| QUERY_REDACTED),
             host: self.host.as_deref(),
             scheme: self.scheme.as_deref(),

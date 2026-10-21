@@ -944,7 +944,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             let route_arc = Arc::new(compiled.clone());
-            // `read_headers` (for `http.*`) is granted to every synthetic policy
+            // `read_headers` and `read_query` are granted to every synthetic policy
             // handler in `install_handler`, so the baseline is passed as-is here.
             if installs_pre_handler {
                 install_handler(
@@ -1436,12 +1436,13 @@ fn install_handler(
         plugin_registry,
     ));
     // Every synthetic policy handler (the entity-less HTTP catch-all, per-entity
-    // routes, and defaults) is granted `read_headers` so `http.*` request
+    // routes, and defaults) is granted `read_headers` and `read_query` so `http.*` request
     // attributes are available to policy evaluation wherever the host attaches
     // an `HttpExtension`. This lets an entity-route rule combine `http.*` with
     // entity/`args.*` predicates in one evaluation. It is a no-op for hosts that
     // never populate the HTTP extension (nothing to read).
     capabilities.insert("read_headers".to_owned());
+    capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_QUERY.to_owned());
     // The built-in PDPs read the parsed LLM request through this handler's
     // filtered view, so the grant is intrinsic rather than left to the
     // replaceable baseline. The slot is never flattened into the bag.

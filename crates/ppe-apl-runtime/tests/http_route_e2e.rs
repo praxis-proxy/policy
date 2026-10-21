@@ -74,6 +74,7 @@ use praxis_policy_apl_runtime::{AplOptions, register_apl};
 struct Seen {
     plugin: String,
     path: Option<String>,
+    query: Option<String>,
     entity_name: Option<String>,
 }
 
@@ -86,6 +87,7 @@ fn record(ledger: &Ledger, plugin: &str, ext: &Extensions) {
         .push(Seen {
             plugin: plugin.to_owned(),
             path: ext.http.as_ref().and_then(|http| http.path.clone()),
+            query: ext.http.as_ref().and_then(|http| http.query.clone()),
             entity_name: ext.meta.as_ref().and_then(|meta| meta.entity_name.clone()),
         });
 }
@@ -1651,6 +1653,60 @@ routes:
     );
 }
 
+#[tokio::test]
+async fn plugins_need_read_query_even_when_policy_can_read_the_query() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: headers-only
+    kind: test/record
+    hooks: [http.request]
+    capabilities: [read_headers]
+  - name: query-only
+    kind: test/record
+    hooks: [http.request]
+    capabilities: [read_query]
+routes:
+  - http:
+      path_prefix: /repo.git/info/refs
+    authorization:
+      pre_invocation:
+        - "run(headers-only)"
+        - "run(query-only)"
+        - "http.query == 'service=git-receive-pack': deny"
+"#;
+    let (mgr, ledger) = engine_with(YAML).await;
+
+    assert!(
+        fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/repo.git/info/refs", "service=git-upload-pack")
+        )
+        .await
+    );
+    let seen = observations(&ledger);
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].plugin, "headers-only");
+    assert_eq!(seen[0].path.as_deref(), Some("/repo.git/info/refs"));
+    assert_eq!(seen[0].query, None);
+    assert_eq!(seen[1].plugin, "query-only");
+    assert_eq!(seen[1].path, None);
+    assert_eq!(seen[1].query.as_deref(), Some("service=git-upload-pack"));
+
+    clear(&ledger);
+    assert!(
+        !fire(
+            &mgr,
+            HOOK_HTTP_REQUEST,
+            request_with_query("GET", "/repo.git/info/refs", "service=git-receive-pack")
+        )
+        .await
+    );
+    assert_eq!(fired(&ledger), vec!["headers-only", "query-only"]);
+}
+
 /// Pins the limitation of an exact-string query match: it is NOT a push gate.
 /// The deny rule names the exact string `service=git-receive-pack`, so a push
 /// advertisement that appends any extra parameter has a different whole-string
@@ -2397,6 +2453,7 @@ async fn the_transpiled_authorization_policy_still_resolves_its_global_http_poli
         vec![Seen {
             plugin: "keycloak-jwt".to_owned(),
             path: None,
+            query: None,
             entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
         }],
         "the global authentication list dispatches, and the request still \

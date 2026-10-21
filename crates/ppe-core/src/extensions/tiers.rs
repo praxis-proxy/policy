@@ -77,6 +77,8 @@ pub enum Capability {
 
     /// Read HTTP headers.
     ReadHeaders,
+    /// Read the raw HTTP query, which may contain credentials.
+    ReadQuery,
     /// Write (modify) HTTP headers.
     WriteHeaders,
 

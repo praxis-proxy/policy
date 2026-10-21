@@ -55,6 +55,8 @@ pub const CAP_READ_DELEGATION: &str = "read_delegation";
 pub const CAP_READ_AGENT: &str = "read_agent";
 /// Capability permitting a plugin to read HTTP headers.
 pub const CAP_READ_HEADERS: &str = "read_headers";
+/// Capability permitting a plugin to read the raw HTTP query.
+pub const CAP_READ_QUERY: &str = "read_query";
 /// Capability permitting a plugin to read the host-parsed LLM request document.
 pub const CAP_READ_LLM_REQUEST: &str = "read_llm_request";
 
@@ -135,9 +137,8 @@ pub const BAG_AGENT_PREFIX: &str = "agent.";
 pub const BAG_HTTP_REQUEST_HEADERS_PREFIX: &str = "http.request_headers.";
 /// Key prefix for http response headers, as in `http.response_headers.<name>`.
 pub const BAG_HTTP_RESPONSE_HEADERS_PREFIX: &str = "http.response_headers.";
-// HTTP request line — exact keys. These ride the same `read_headers`
-// capability as headers (the whole `http` slot is gated together in
-// `praxis-policy-core::extensions::filter`).
+// HTTP request line — exact keys. The query requires `read_query`;
+// the other fields ride the same `read_headers` capability as headers.
 /// Bag key `http.method`.
 pub const BAG_HTTP_METHOD: &str = "http.method";
 /// Bag key `http.path`.

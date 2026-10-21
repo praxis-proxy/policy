@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::container::Extensions;
+use super::http::HttpExtension;
 use crate::host::HttpTransportSlot;
 
 use super::security::{SecurityExtension, SubjectExtension};
@@ -367,18 +368,33 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         }
     }
 
-    // Capability-gated: http
-    if extensions.http.is_some() {
+    // Capability-gated: HTTP headers and the raw query have independent grants.
+    if let Some(http) = &extensions.http {
         let policy = slot_policy(SlotName::Http);
-        if has_read_access(&policy, capabilities) {
-            filtered.http = extensions.http.as_ref().map(|http| {
-                if http.secret_headers.markers.is_empty() {
-                    return Arc::clone(http);
-                }
-                let mut safe = (**http).clone();
-                safe.request_headers = http.redacted_request_headers().into_owned();
-                Arc::new(safe)
-            });
+        let read_headers = has_read_access(&policy, capabilities);
+        let read_query = capabilities.contains(&cap_str(Capability::ReadQuery));
+        if read_headers
+            && http.secret_headers.markers.is_empty()
+            && (read_query || http.query.is_none())
+        {
+            filtered.http = Some(Arc::clone(http));
+        } else if read_headers {
+            filtered.http = Some(Arc::new(HttpExtension {
+                request_headers: http.redacted_request_headers().into_owned(),
+                secret_headers: http.secret_headers.clone(),
+                response_headers: http.response_headers.clone(),
+                status: http.status,
+                method: http.method.clone(),
+                path: http.path.clone(),
+                query: read_query.then(|| http.query.clone()).flatten(),
+                host: http.host.clone(),
+                scheme: http.scheme.clone(),
+            }));
+        } else if read_query {
+            filtered.http = Some(Arc::new(HttpExtension {
+                query: http.query.clone(),
+                ..Default::default()
+            }));
         }
     }
 
@@ -807,6 +823,59 @@ mod tests {
         );
         // Still no agent access
         assert!(filtered.agent.is_none());
+    }
+
+    #[test]
+    fn query_credential_requires_read_query() {
+        let query = "access_token=secret&service=git-upload-pack";
+        let mut http = HttpExtension {
+            method: Some("GET".to_owned()),
+            path: Some("/repo.git/info/refs".to_owned()),
+            query: Some(query.to_owned()),
+            ..Default::default()
+        };
+        http.set_request_header("x-request-id", "123");
+        let ext = Extensions {
+            http: Some(Arc::new(http)),
+            ..Default::default()
+        };
+
+        for caps in [
+            ["read_headers"].as_slice(),
+            ["read_headers", "write_headers"].as_slice(),
+            ["read_headers", "read_inbound_credentials"].as_slice(),
+        ] {
+            let caps: HashSet<String> = caps.iter().map(|cap| (*cap).to_owned()).collect();
+            let filtered = filter_extensions(&ext, &caps);
+            let plugin_http = filtered.http.as_ref().expect("read_headers grants HTTP");
+            assert_eq!(plugin_http.query, None, "query must be hidden for {caps:?}");
+            assert_eq!(plugin_http.method.as_deref(), Some("GET"));
+            assert_eq!(plugin_http.get_request_header("x-request-id"), Some("123"));
+        }
+
+        assert_eq!(
+            ext.http.as_ref().and_then(|http| http.query.as_deref()),
+            Some(query),
+            "filtering does not change the canonical query"
+        );
+
+        let query_only: HashSet<String> = ["read_query".to_owned()].into();
+        let query_view = filter_extensions(&ext, &query_only);
+        let query_http = query_view
+            .http
+            .as_ref()
+            .expect("read_query grants HTTP query");
+        assert_eq!(query_http.query.as_deref(), Some(query));
+        assert!(query_http.method.is_none());
+        assert!(query_http.path.is_none());
+        assert!(query_http.request_headers.is_empty());
+
+        let both: HashSet<String> = ["read_headers".to_owned(), "read_query".to_owned()].into();
+        let both_view = filter_extensions(&ext, &both);
+        let both_http = both_view.http.as_ref().expect("both grants expose HTTP");
+        assert_eq!(both_http.query.as_deref(), Some(query));
+        assert_eq!(both_http.method.as_deref(), Some("GET"));
+        assert_eq!(both_http.get_request_header("x-request-id"), Some("123"));
     }
 
     #[test]

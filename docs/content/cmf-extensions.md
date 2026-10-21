@@ -129,6 +129,7 @@ auto-populated with the `http.*` slot — the builder injects only
 reaches the request line and query through a `${…}` template reference, which
 resolves from the same bag keys the HTTP extractor populates:
 
+<!-- validate: phase-list -->
 ```yaml
 - cedar:
     action: 'Action::"read"'
@@ -445,13 +446,16 @@ A default request slot adds nothing.
 | `http.request_headers.<name>` | String | each header; name lowercased |
 | `http.response_headers.<name>` | String | each header; name lowercased |
 
-A rule reads `http.query` and the header values directly, but they are treated
-as potentially secret on output: a query can carry a credential (a
-query-parameter JWT, say), so `http.query` and header values are rendered as a
-type label (never their value) in a PDP's deny diagnostics, and `http.query` is
-redacted to presence-only in an `HttpExtension`'s serialized and `Debug` output.
-The redaction covers only diagnostics and serialization; a rule still evaluates
-against the live value.
+A rule reads `http.query` and the header values directly. Built-in PDP deny
+diagnostics render these potentially secret values as type labels, and
+`HttpExtension` renders a present query as `[REDACTED]` in its serialized and
+`Debug` output. Plugin views include the raw query only with `read_query`;
+`read_headers` alone cannot read it.
+The canonical `AttributeBag` still holds the raw value for policy evaluation;
+its `Debug` and `Serialize` implementations are not redacted, so it must not
+be used directly as a log or audit record. A host must populate the canonical
+query after any serialization boundary because `HttpExtension` serialization
+replaces its value with `[REDACTED]`.
 
 ### 7. `llm` — `LLMExtension`
 
