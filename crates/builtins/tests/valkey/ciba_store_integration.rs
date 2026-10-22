@@ -272,6 +272,93 @@ async fn an_approval_dispatched_on_one_replica_redeems_on_another() {
     );
 }
 
+/// The shared-server pattern from the elicitation docs, against a Valkey with
+/// the documented `ppe-taint` and `ppe-ciba` ACL users. Needs
+/// `PPE_ACL_VALKEY=host:port` and `PPE_TAINT_PW`; skipped otherwise.
+#[tokio::test]
+#[ignore]
+async fn documented_acl_users_compartmentalize_the_two_stores() {
+    use praxis_policy_apl_runtime::SessionStore as _;
+    use praxis_policy_builtins::session::valkey::{ValkeyConfig, ValkeySessionStore};
+
+    let (Ok(endpoint), Ok(_)) = (
+        std::env::var("PPE_ACL_VALKEY"),
+        std::env::var("PPE_TAINT_PW"),
+    ) else {
+        eprintln!("SKIPPED documented_acl_users: set PPE_ACL_VALKEY, PPE_TAINT_PW");
+        return;
+    };
+    let global: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "kind: valkey\nendpoint: {endpoint}\nusername: ppe-taint\npassword: {{ env: PPE_TAINT_PW }}\n"
+    ))
+    .unwrap();
+    let taint =
+        ValkeySessionStore::from_config(&ValkeyConfig::from_value(&global).unwrap()).unwrap();
+    taint
+        .append_labels("sess", &["secret".to_owned()])
+        .await
+        .expect("ppe-taint writes taint:v1:*");
+
+    let pw = std::env::temp_dir().join("ppe-ciba-acl-pw");
+    std::fs::write(&pw, "ciba-pw\n").unwrap();
+    let reference = serde_json::json!({
+        "connection": "session_store",
+        "username": "ppe-ciba",
+        "password": { "file": pw },
+    });
+    let ciba = ValkeyCorrelationStore::from_settings(
+        "manager-approver",
+        reference.as_object().unwrap(),
+        Some(&global),
+    )
+    .unwrap();
+    ciba.put("acl", pending(60))
+        .await
+        .expect("ppe-ciba writes ciba:v1:*");
+    ciba.set_resolved_approver("acl", "alice".into())
+        .await
+        .expect("ppe-ciba may EVAL");
+    assert!(matches!(
+        ciba.take_if_ready("acl", ROUTE, "adjust", "bob")
+            .await
+            .unwrap(),
+        TakeResult::Ready(_)
+    ));
+    std::fs::remove_file(&pw).unwrap();
+
+    let raw = |user: &str, pass: &str| {
+        redis::Client::open(format!("redis://{user}:{pass}@{endpoint}")).unwrap()
+    };
+    let mut as_taint = raw("ppe-taint", "taint-pw")
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let mut as_ciba = raw("ppe-ciba", "ciba-pw")
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let forge: redis::RedisResult<()> = redis::cmd("HSET")
+        .arg("ciba:v1:manager-approver:x")
+        .arg("resolved")
+        .arg("mallory")
+        .query_async(&mut as_taint)
+        .await;
+    let forge = forge.unwrap_err();
+    assert!(
+        format!("{forge:?}").contains("No permissions"),
+        "taint credentials cannot forge an approval: {forge:?}"
+    );
+    let clear: redis::RedisResult<()> = redis::cmd("DEL")
+        .arg("taint:v1:anything")
+        .query_async(&mut as_ciba)
+        .await;
+    let clear = clear.unwrap_err();
+    assert!(
+        format!("{clear:?}").contains("No permissions"),
+        "CIBA credentials cannot clear taint: {clear:?}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

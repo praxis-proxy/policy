@@ -322,6 +322,76 @@ async fn live_ciba_a_large_adjustment_applies_after_approval() {
     .await;
 }
 
+/// Two hosts, as two replicas, share CIBA approvals through Valkey: the call
+/// suspends on one, the approval is observed and applied on the other, and the
+/// first cannot apply it again.
+#[tokio::test]
+#[ignore = "needs PPE_KEYCLOAK_URL, PPE_CIBA_AUTO_APPROVE and VALKEY_TEST_URL"]
+async fn live_ciba_an_approval_dispatched_on_one_replica_applies_on_another() {
+    let Some(realm) = live::ciba("live_ciba replicas") else {
+        return;
+    };
+    let Some(valkey) = live::valkey("live_ciba replicas") else {
+        return;
+    };
+    let targets = Targets {
+        realm: Some(&realm),
+        valkey: Some(&valkey),
+        ..Targets::default()
+    };
+    let mut doc: Value = serde_yaml::from_str(&Fixture::Cel.live(targets)).expect("yaml");
+    let ciba = doc["plugins"]
+        .as_array_mut()
+        .expect("plugins")
+        .iter_mut()
+        .find(|p| p["kind"] == "elicitation/ciba")
+        .expect("a CIBA plugin");
+    ciba["config"]["store"] = json!({ "kind": "valkey", "connection": "session_store" });
+    let yaml = serde_yaml::to_string(&doc).expect("yaml");
+    let replica = || RefHost::builder().live(targets.bases()).start(&yaml);
+    let (a, b) = (replica().await.expect("a"), replica().await.expect("b"));
+
+    let call = realm.call(Persona::Bob, "adjust_compensation").await;
+    let call = call.args(adjust(25_000));
+    let out = a.call(call.clone()).await;
+    assert_eq!(
+        out.violation_code(),
+        Some("elicitation.pending"),
+        "{:?}",
+        out.violation
+    );
+    let id = out
+        .detail("elicitation_id")
+        .and_then(Value::as_str)
+        .expect("an elicitation id")
+        .to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let peek = b.call(call.clone().elicitation_id(&id).peek()).await;
+        match peek.violation_code() {
+            Some("elicitation.approved") => break,
+            Some("elicitation.pending") if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            },
+            other => panic!(
+                "replica b cannot see the approval: {other:?} {:?}",
+                peek.violation
+            ),
+        }
+    }
+    let applied = b.call(call.clone().elicitation_id(&id)).await;
+    assert!(applied.allowed(), "{:?}", applied.violation);
+    assert_eq!(upstream_calls(&b), 1);
+
+    let replay = a.call(call.elicitation_id(&id)).await;
+    assert!(
+        !replay.allowed(),
+        "an approval applies once across replicas"
+    );
+    assert_eq!(upstream_calls(&a), 0);
+}
+
 // -----------------------------------------------------------------------------
 // Vault
 // -----------------------------------------------------------------------------

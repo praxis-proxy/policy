@@ -214,6 +214,7 @@ when its variables are unset, so `--include-ignored` stays green.
 | `PPE_KEYCLOAK_URL` | Scenarios 01 to 06 and 12 against the `policy-demo` realm |
 | `PPE_CIBA_AUTO_APPROVE` | With `PPE_KEYCLOAK_URL`, scenario 11 through a CIBA channel that approves on its own |
 | `VAULT_ADDR`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID` | The secret assertion read from Vault `secret/hr-mcp#api_key` |
+| `VALKEY_TEST_URL` with `PPE_KEYCLOAK_URL` and `PPE_CIBA_AUTO_APPROVE` | Scenario 11 across two hosts sharing a Valkey CIBA store |
 
 Live personas get real tokens from the realm: a password grant for `bob`,
 `eve` and `alice`, `client_credentials` for `hr-copilot`. Keycloak ignores
@@ -235,6 +236,23 @@ PPE_KEYCLOAK_URL=http://localhost:8081 VALKEY_TEST_URL=redis://127.0.0.1:6379 \
   cargo test --all-features -p praxis-policy-tests-integration \
   -- --ignored --nocapture scenarios::live::
 docker stop ppe-keycloak ppe-valkey
+```
+
+The Valkey harness in `crates/builtins` also checks the ACL users in
+[Elicitation](apl/elicitation.md#shared-server-separate-acl-user) when
+`PPE_ACL_VALKEY` names a server that has them and `PPE_TAINT_PW` holds the
+taint user's password:
+
+```console
+docker run -d --rm --name ppe-acl-valkey -p 127.0.0.1:6380:6379 valkey/valkey:8.1.10
+docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-taint on '>taint-pw' \
+  '~taint:v1:*' +@read +@write +@transaction -@dangerous
+docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-ciba on '>ciba-pw' \
+  '~ciba:v1:*' +@read +@write +@transaction +@scripting -@dangerous
+PPE_ACL_VALKEY=127.0.0.1:6380 PPE_TAINT_PW=taint-pw \
+  cargo nextest run -p praxis-policy-builtins --all-features --test valkey \
+  --run-ignored only -E 'test(documented_acl_users)'
+docker stop ppe-acl-valkey
 ```
 
 For Vault, provision a dev server as in the section above, with the policy
