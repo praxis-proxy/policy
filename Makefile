@@ -388,6 +388,10 @@ check-features:
 		$(CARGO) check -p praxis-policy-builtins --all-targets \
 			--no-default-features --features "$$f" || exit 1; \
 	done
+	@# The one test that only exists without another feature: CIBA naming the
+	@# missing `valkey` feature. Every other pass builds with it.
+	@$(CARGO) test -p praxis-policy-builtins --no-default-features \
+		--features elicitation-ciba --lib -- elicitation_ciba::factory
 	@echo "check-features passed"
 
 .PHONY: ci
