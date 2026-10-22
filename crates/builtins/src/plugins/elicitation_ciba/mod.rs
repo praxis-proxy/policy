@@ -32,4 +32,4 @@ pub mod store;
 pub use approver::CibaApprover;
 pub use config::{CibaConfig, ClientSecretSource};
 pub use factory::{CibaApproverFactory, KIND};
-pub use store::{Correlation, CorrelationStore, InMemoryCorrelationStore};
+pub use store::{Correlation, CorrelationStore, InMemoryCorrelationStore, StoreError, TakeResult};

@@ -49,7 +49,7 @@ use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use crate::plugins::elicitation_ciba::KIND;
 use crate::plugins::elicitation_ciba::config::{CibaConfig, require_https};
 use crate::plugins::elicitation_ciba::store::{
-    Correlation, CorrelationStore, InMemoryCorrelationStore, TakeResult,
+    Correlation, CorrelationStore, InMemoryCorrelationStore, StoreError, TakeResult,
 };
 
 /// OIDC CIBA grant type for the token-endpoint poll.
@@ -324,17 +324,17 @@ impl CibaApprover {
                 "CIBA backchannel expiry is out of range",
             );
         };
-        self.store.put(
-            &id,
-            Correlation {
-                expected_approver: login_hint.to_owned(),
-                resolved_approver: None,
-                route_key: payload.route_key().to_owned(),
-                tool: payload.tool().to_owned(),
-                requester: payload.requester().to_owned(),
-                expires_at,
-            },
-        );
+        let correlation = Correlation {
+            expected_approver: login_hint.to_owned(),
+            resolved_approver: None,
+            route_key: payload.route_key().to_owned(),
+            tool: payload.tool().to_owned(),
+            requester: payload.requester().to_owned(),
+            expires_at,
+        };
+        if let Err(e) = self.store.put(&id, correlation).await {
+            return store_unavailable(&e);
+        }
 
         let mut out = payload.clone();
         out.id = Some(id);
@@ -359,8 +359,10 @@ impl CibaApprover {
             },
         };
 
-        let Some(correlation) = self.store.get(id) else {
-            return deny("elicitation.unknown_id", "unknown elicitation id");
+        let correlation = match self.store.get(id).await {
+            Ok(Some(c)) => c,
+            Ok(None) => return deny("elicitation.unknown_id", "unknown elicitation id"),
+            Err(e) => return store_unavailable(&e),
         };
         if correlation.route_key != payload.route_key()
             || correlation.tool != payload.tool()
@@ -427,8 +429,9 @@ impl CibaApprover {
             // access_token. Extract the approver claim and drop the token.
             if let Some(token) = parsed.id_token.or(parsed.access_token)
                 && let Some(approver) = decode_jwt_claim(&token, &self.typed.approver_claim)
+                && let Err(e) = self.store.set_resolved_approver(id, approver).await
             {
-                self.store.set_resolved_approver(id, approver);
+                return store_unavailable(&e);
             }
             // token dropped here — never persisted.
             let mut out = payload.clone();
@@ -477,40 +480,41 @@ impl CibaApprover {
         };
 
         let correlation = if payload.peek() {
-            match self.store.get(id) {
-                Some(c)
+            match self.store.get(id).await {
+                Err(e) => return store_unavailable(&e),
+                Ok(Some(c))
                     if c.route_key == payload.route_key()
                         && c.tool == payload.tool()
                         && c.requester == payload.requester() =>
                 {
                     c
                 },
-                Some(_) => {
+                Ok(Some(_)) => {
                     return deny(
                         "elicitation.binding_mismatch",
                         "approval belongs to another route, tool, or requester",
                     );
                 },
-                None => return deny("elicitation.unknown_id", "unknown elicitation id"),
+                Ok(None) => return deny("elicitation.unknown_id", "unknown elicitation id"),
             }
         } else {
-            match self.store.take_if_ready(
-                id,
-                payload.route_key(),
-                payload.tool(),
-                payload.requester(),
-            ) {
-                TakeResult::Ready(c) => c,
-                TakeResult::Missing => {
+            let taken = self
+                .store
+                .take_if_ready(id, payload.route_key(), payload.tool(), payload.requester())
+                .await;
+            match taken {
+                Err(e) => return store_unavailable(&e),
+                Ok(TakeResult::Ready(c)) => c,
+                Ok(TakeResult::Missing) => {
                     return deny("elicitation.unknown_id", "unknown elicitation id");
                 },
-                TakeResult::BindingMismatch => {
+                Ok(TakeResult::BindingMismatch) => {
                     return deny(
                         "elicitation.binding_mismatch",
                         "approval belongs to another route, tool, or requester",
                     );
                 },
-                TakeResult::Pending => {
+                Ok(TakeResult::Pending) => {
                     return invalid(payload, "elicitation has no resolved approver");
                 },
             }
@@ -623,6 +627,15 @@ fn cfg_err(plugin: &str, msg: String) -> Box<PluginError> {
 
 fn deny(code: &str, reason: impl Into<String>) -> PluginResult<ElicitationPayload> {
     PluginResult::deny(PluginViolation::new(code, reason.into()))
+}
+
+/// A store failure leaves the approval's state unknown, so it denies with its
+/// own code rather than reading as a missing id.
+fn store_unavailable(err: &StoreError) -> PluginResult<ElicitationPayload> {
+    deny(
+        "elicitation.store_unavailable",
+        format!("{err}; approval state is indeterminate (fail-closed)"),
+    )
 }
 
 /// `validate` failure that is a *verdict*, not a transport error: the
@@ -764,7 +777,7 @@ mod tests {
     fn approver_with(correlations: &[(&str, &str, Option<&str>)]) -> CibaApprover {
         let store = InMemoryCorrelationStore::new();
         for (id, expected, resolved) in correlations {
-            store.put(
+            store.insert(
                 id,
                 Correlation {
                     expected_approver: (*expected).to_owned(),
