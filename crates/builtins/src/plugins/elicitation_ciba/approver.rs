@@ -39,6 +39,7 @@ use praxis_policy_core::elicitation::{
     ElicitationStatusKind,
 };
 use praxis_policy_core::error::{PluginError, PluginViolation};
+use praxis_policy_core::factory::FactoryContext;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::host::{HostServices as _, HttpRequestError};
@@ -47,7 +48,7 @@ use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 use crate::plugins::elicitation_ciba::KIND;
-use crate::plugins::elicitation_ciba::config::{CibaConfig, require_https};
+use crate::plugins::elicitation_ciba::config::{CibaConfig, StoreConfig, require_https};
 use crate::plugins::elicitation_ciba::store::{
     Correlation, CorrelationStore, InMemoryCorrelationStore, StoreError, TakeResult,
 };
@@ -95,6 +96,18 @@ impl CibaApprover {
     /// not deserialize into this plugin's settings, and when a validated field
     /// is out of range.
     pub fn new(cfg: PluginConfig) -> Result<Self, Box<PluginError>> {
+        Self::with_context(cfg, &FactoryContext::default())
+    }
+
+    /// [`Self::new`], resolving a `store` that references
+    /// `global.session_store` against `context`.
+    /// # Errors
+    ///
+    /// As [`Self::new`], and when the `store` block cannot be built.
+    pub fn with_context(
+        cfg: PluginConfig,
+        context: &FactoryContext,
+    ) -> Result<Self, Box<PluginError>> {
         let raw = cfg
             .config
             .as_ref()
@@ -123,13 +136,14 @@ impl CibaApprover {
             .map_err(|e| cfg_err(&cfg.name, format!("client secret resolve failed: {e}")))?;
 
         let http_timeout = typed.http_timeout();
+        let store = build_store(&cfg.name, typed.store.as_ref(), context)?;
 
         Ok(Self {
             cfg,
             typed,
             client_secret: Zeroizing::new(secret),
             http_timeout,
-            store: Arc::new(InMemoryCorrelationStore::new()),
+            store,
         })
     }
 
@@ -617,6 +631,55 @@ struct TokenResponse {
 struct OAuthError {
     #[serde(default)]
     error: String,
+}
+
+/// Build the configured correlation store.
+fn build_store(
+    plugin: &str,
+    store: Option<&StoreConfig>,
+    context: &FactoryContext,
+) -> Result<Arc<dyn CorrelationStore>, Box<PluginError>> {
+    match store {
+        None => {
+            tracing::warn!(
+                alarm = "ciba_store_process_local",
+                plugin,
+                "CIBA approvals are held in process memory and do not reach other replicas; \
+                 set `store.kind` to `memory` to acknowledge, or `valkey` to share them"
+            );
+            Ok(Arc::new(InMemoryCorrelationStore::new()))
+        },
+        Some(StoreConfig::Memory(_)) => Ok(Arc::new(InMemoryCorrelationStore::new())),
+        Some(StoreConfig::Valkey(settings)) => valkey_store(plugin, settings, context),
+    }
+}
+
+#[cfg(feature = "valkey")]
+fn valkey_store(
+    plugin: &str,
+    settings: &serde_json::Map<String, serde_json::Value>,
+    context: &FactoryContext,
+) -> Result<Arc<dyn CorrelationStore>, Box<PluginError>> {
+    let store =
+        crate::plugins::elicitation_ciba::valkey_store::ValkeyCorrelationStore::from_settings(
+            settings,
+            context.session_store(),
+        )
+        .map_err(|e| cfg_err(plugin, format!("store: {e}")))?;
+    Ok(Arc::new(store))
+}
+
+#[cfg(not(feature = "valkey"))]
+fn valkey_store(
+    plugin: &str,
+    _settings: &serde_json::Map<String, serde_json::Value>,
+    _context: &FactoryContext,
+) -> Result<Arc<dyn CorrelationStore>, Box<PluginError>> {
+    Err(cfg_err(
+        plugin,
+        "store kind `valkey` needs the `valkey` feature, which this build does not include"
+            .to_owned(),
+    ))
 }
 
 fn cfg_err(plugin: &str, msg: String) -> Box<PluginError> {

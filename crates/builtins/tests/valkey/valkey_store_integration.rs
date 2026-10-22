@@ -42,14 +42,14 @@ use testcontainers_modules::valkey::{VALKEY_PORT, Valkey};
 
 /// A Valkey endpoint to test against, plus the container handle when one
 /// was started (kept alive for the test's duration).
-struct Target {
-    url: String,
+pub(crate) struct Target {
+    pub(crate) url: String,
     _container: Option<ContainerAsync<Valkey>>,
 }
 
 /// Resolve a Valkey target, or skip loudly when none is available.
 /// Returns `None` to signal the caller should return early (skip).
-async fn valkey_target() -> Option<Target> {
+pub(crate) async fn valkey_target() -> Option<Target> {
     if let Ok(url) = std::env::var("VALKEY_TEST_URL") {
         return Some(Target {
             url,

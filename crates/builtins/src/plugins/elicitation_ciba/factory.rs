@@ -14,7 +14,8 @@
 //           backchannel_endpoint: https://kc/realms/corp/protocol/openid-connect/ext/ciba/auth
 //           token_endpoint:       https://kc/realms/corp/protocol/openid-connect/token
 //           client_id: praxis-policy-gateway
-//           client_secret_source: { kind: env, name: CIBA_CLIENT_SECRET }
+//           client_secret_source: { kind: env_var, name: CIBA_CLIENT_SECRET }
+//           store: { kind: memory }
 //
 // Then policy routes name it: `require_approval(manager-approver, from: claim.manager, ...)`.
 //
@@ -27,7 +28,7 @@ use std::sync::Arc;
 use praxis_policy_core::{
     elicitation::{ElicitationHook, HOOK_ELICIT},
     error::PluginError,
-    factory::{PluginFactory, PluginInstance},
+    factory::{FactoryContext, PluginFactory, PluginInstance},
     hooks::TypedHandlerAdapter,
     plugin::PluginConfig,
 };
@@ -45,7 +46,15 @@ pub struct CibaApproverFactory;
 
 impl PluginFactory for CibaApproverFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
-        let approver = Arc::new(CibaApprover::new(config.clone())?);
+        self.create_with(config, &FactoryContext::default())
+    }
+
+    fn create_with(
+        &self,
+        config: &PluginConfig,
+        context: &FactoryContext,
+    ) -> Result<PluginInstance, Box<PluginError>> {
+        let approver = Arc::new(CibaApprover::with_context(config.clone(), context)?);
         let handler = Arc::new(TypedHandlerAdapter::<ElicitationHook, _>::new(Arc::clone(
             &approver,
         )));
@@ -112,5 +121,62 @@ mod tests {
             matches!(*err, PluginError::Config { .. }),
             "expected a config error, got {err:?}"
         );
+    }
+
+    fn create_err(config: serde_json::Value) -> String {
+        CibaApproverFactory
+            .create(&cfg(config))
+            .err()
+            .expect("this config must be refused")
+            .to_string()
+    }
+
+    fn with_store(store: serde_json::Value) -> serde_json::Value {
+        let mut c = valid_config();
+        c["store"] = store;
+        c
+    }
+
+    #[test]
+    fn an_unknown_top_level_field_names_the_field_and_the_plugin() {
+        let mut bad = valid_config();
+        bad["stroe"] = serde_json::json!({ "kind": "valkey" });
+        let msg = create_err(bad);
+        assert!(msg.contains("stroe"), "names the field: {msg}");
+        assert!(msg.contains("manager-approver"), "names the plugin: {msg}");
+    }
+
+    #[test]
+    fn an_explicit_memory_store_builds() {
+        let inst = CibaApproverFactory
+            .create(&cfg(with_store(serde_json::json!({ "kind": "memory" }))))
+            .expect("memory is always available");
+        assert_eq!(inst.handlers.len(), 1);
+    }
+
+    #[test]
+    fn a_memory_store_with_settings_is_refused() {
+        let msg = create_err(with_store(
+            serde_json::json!({ "kind": "memory", "endpoint": "x" }),
+        ));
+        assert!(msg.contains("endpoint"), "names the stray setting: {msg}");
+    }
+
+    #[test]
+    fn an_unknown_store_kind_lists_the_supported_ones() {
+        let msg = create_err(with_store(serde_json::json!({ "kind": "dynamo" })));
+        assert!(
+            msg.contains("memory") && msg.contains("valkey"),
+            "lists the kinds: {msg}"
+        );
+    }
+
+    #[cfg(not(feature = "valkey"))]
+    #[test]
+    fn a_valkey_store_without_the_feature_names_the_feature() {
+        let msg = create_err(with_store(
+            serde_json::json!({ "kind": "valkey", "endpoint": "localhost:6379" }),
+        ));
+        assert!(msg.contains("`valkey` feature"), "names the feature: {msg}");
     }
 }

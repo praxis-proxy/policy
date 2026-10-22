@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// What operators write under `plugins[<name>].config:` in unified
 /// config YAML for a CIBA elicitation handler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CibaConfig {
     /// OIDC CIBA backchannel authentication endpoint — where the
     /// `dispatch` POST lands (e.g.
@@ -62,7 +63,33 @@ pub struct CibaConfig {
     /// development against a docker-compose Keycloak.
     #[serde(default)]
     pub insecure_http: bool,
+
+    /// Where pending approvals live. Omitted means process memory, with a
+    /// startup warning, because approvals then do not reach other replicas.
+    #[serde(default)]
+    pub store: Option<StoreConfig>,
 }
+
+/// The correlation store a CIBA plugin uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum StoreConfig {
+    /// Process memory. Pending approvals do not survive a restart or reach
+    /// another replica.
+    Memory(MemoryStoreConfig),
+    /// Valkey, shared across replicas. Settings are parsed when the store is
+    /// built so a build without the `valkey` feature can name it.
+    Valkey(serde_json::Map<String, serde_json::Value>),
+}
+
+/// `kind: memory` takes no settings.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "a braced struct is what lets `deny_unknown_fields` refuse stray settings"
+)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryStoreConfig {}
 
 /// Where the gateway's OAuth client secret is loaded from. Mirrors
 /// `apl-delegator-oauth`'s source enum — env var (production), file

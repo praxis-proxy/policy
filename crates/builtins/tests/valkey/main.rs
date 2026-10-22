@@ -19,3 +19,6 @@
 //! their fixtures.
 
 mod valkey_store_integration;
+
+#[cfg(feature = "elicitation-ciba")]
+mod ciba_store_integration;

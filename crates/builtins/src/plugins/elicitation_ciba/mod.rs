@@ -16,7 +16,7 @@
 //!
 //! See the module docs for the per-operation flow:
 //!   * [`config`] — typed `config:` block.
-//!   * [`store`]  — in-flight correlation store (in-memory v1).
+//!   * [`store`]  — in-flight correlation store, in memory by default.
 //!   * [`approver`] — the handler + CIBA HTTP.
 //!   * [`factory`]  — `kind: elicitation/ciba` registration.
 
@@ -28,8 +28,13 @@ pub mod config;
 pub mod factory;
 /// Tracks pending approvals across the requests that poll them.
 pub mod store;
+/// Valkey-backed correlations shared across replicas.
+#[cfg(feature = "valkey")]
+pub mod valkey_store;
 
 pub use approver::CibaApprover;
-pub use config::{CibaConfig, ClientSecretSource};
+pub use config::{CibaConfig, ClientSecretSource, MemoryStoreConfig, StoreConfig};
 pub use factory::{CibaApproverFactory, KIND};
 pub use store::{Correlation, CorrelationStore, InMemoryCorrelationStore, StoreError, TakeResult};
+#[cfg(feature = "valkey")]
+pub use valkey_store::ValkeyCorrelationStore;
