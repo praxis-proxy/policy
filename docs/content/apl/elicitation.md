@@ -290,17 +290,26 @@ plugins:
 ```
 
 A store that cannot answer, because Valkey is unreachable, slow, or returns
-data that cannot be decoded, denies with `elicitation.store_unavailable`. That
-is never read as an unknown id or as approved under the default `on_error`;
-a step set to `on_error: continue` skips instead, as for any elicitation error.
-The caller-visible reason is generic. The backend error is logged with
+data that cannot be decoded, denies with `elicitation.store_unavailable` and
+JSON-RPC `-32122` ("approval state unavailable"). That is never read as an
+unknown id or as approved under the default `on_error`; a step set to
+`on_error: continue` skips instead, as for any elicitation error. The
+caller-visible reason is generic. The backend error is logged with
 `alarm = "ciba_store_unavailable"`, the plugin, and the operation. A failed
 store after a dispatch reached the OP also logs the `auth_req_id`, because the
 approver has already been prompted.
 
 A check or validate that fails this way can be retried with the same
-elicitation id once the store recovers. A dispatch cannot: it returns no id, so
-a retry prompts the approver again.
+elicitation id once the store recovers; the `-32122` details echo it as
+`elicitation_id`. A dispatch cannot: it has no id yet, so a retry prompts the
+approver again.
+
+A successful load does not prove the store works. The pool connects lazily,
+so an unreachable server, wrong credentials, or a missing ACL grant first shows
+up as `-32122` on the first approval. Before taking traffic, check that the
+gateway host reaches the server and the credentials work, for example with
+`valkey-cli --user ppe-ciba PING`. That does not prove the data-command
+grants; the ACL test in [Testing](../testing.md) covers those.
 
 ### Durability
 

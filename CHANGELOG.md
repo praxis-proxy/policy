@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`-32122` for unavailable approval state.** An elicitation handler that cannot read or write approval state denies with `elicitation.store_unavailable` and JSON-RPC `-32122`, echoing the elicitation id on check and validate so the agent can retry it. `ELICITATION_UNAVAILABLE_CODE` is exported beside `ELICITATION_PENDING_CODE`. ([#236](https://github.com/praxis-proxy/policy/issues/236))
 - **CIBA approvals can be shared across replicas.** The `elicitation/ciba` plugin takes `store: { kind: memory | valkey }`. A Valkey store is standalone or references `global.session_store` with `connection: session_store`, overriding credentials, key prefix, and timeouts. Redeeming is atomic across replicas, and a store failure denies with `elicitation.store_unavailable`. Omitting `store` keeps process memory and logs a startup warning. ([#236](https://github.com/praxis-proxy/policy/issues/236))
 - **Valkey passwords from the environment or a file.** Both Valkey stores accept `password: { env: NAME }` or `password: { file: PATH }` beside an inline string. ([#236](https://github.com/praxis-proxy/policy/issues/236))
 - `PluginFactory::create_with` receives a `FactoryContext` carrying the raw `global.session_store` block on `load_config_yaml`. It defaults to `create`. ([#236](https://github.com/praxis-proxy/policy/issues/236))
@@ -41,7 +42,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **Breaking: the CIBA plugin config rejects unknown fields.** A key it does not recognize, such as a misspelled `store`, now fails at load naming the field instead of being ignored. ([#236](https://github.com/praxis-proxy/policy/issues/236))
-- **Breaking: `CorrelationStore` is async and fallible**, `ValkeyConfig.password` is a `PasswordSource` rather than a `String`, and `CibaConfig` has a new `store` field. Rust code implementing the trait or building either config as a struct literal must update; YAML is unaffected. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Breaking: `CorrelationStore` is async and fallible**, `ValkeyConfig.password` is a `PasswordSource` rather than a `String`, and `CibaConfig` has a new `store` field. `StoreError` is built with `StoreError::new`, and `ValkeyCorrelationStore::from_settings` returns a typed `SettingsError`. `FactoryContext`, `StoreConfig`, `PasswordSource`, and `SettingsError` are `#[non_exhaustive]`. Rust code implementing the trait, building either config as a struct literal, or matching these enums exhaustively must update; YAML is unaffected. ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
 - **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **Breaking:** `Extensions` and `OwnedExtensions` add `metadata`; exhaustive
