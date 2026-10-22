@@ -939,11 +939,12 @@ fn resolve_factories(
 fn create_plugin_instances(
     plugin_configs: &[crate::plugin::PluginConfig],
     factories: &[Arc<dyn crate::factory::PluginFactory>],
+    context: &crate::factory::FactoryContext,
 ) -> Result<Vec<crate::factory::PluginInstance>, Box<PluginError>> {
     plugin_configs
         .iter()
         .zip(factories)
-        .map(|(plugin_config, factory)| factory.create(plugin_config))
+        .map(|(plugin_config, factory)| factory.create_with(plugin_config, context))
         .collect()
 }
 
@@ -1381,6 +1382,15 @@ impl PolicyEngine {
     /// snapshot is left in place, so a failed load does not disturb in-flight
     /// requests.
     pub fn load_config(&self, policy_config: PolicyConfig) -> Result<(), Box<PluginError>> {
+        self.load_config_with(policy_config, &crate::factory::FactoryContext::default())
+    }
+
+    /// [`Self::load_config`] with document-level settings for factories.
+    fn load_config_with(
+        &self,
+        policy_config: PolicyConfig,
+        context: &crate::factory::FactoryContext,
+    ) -> Result<(), Box<PluginError>> {
         // Warn before validating: an operator whose config both sets an inactive
         // knob and fails validation should see both, not just the refusal.
         warn_on_inactive_settings(&policy_config);
@@ -1414,7 +1424,7 @@ impl PolicyEngine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             resolve_factories(&policy_config.plugins, &registry)?
         };
-        let instances = create_plugin_instances(&policy_config.plugins, &factories)?;
+        let instances = create_plugin_instances(&policy_config.plugins, &factories, context)?;
 
         // Build the new snapshot from the current one — copy-on-write so
         // concurrent invokes keep using the existing config until we swap.
@@ -1587,8 +1597,14 @@ impl PolicyEngine {
         let parsed_routes: Vec<crate::config::RouteEntry> = policy_config.routes.clone();
         let parsed_plugins: Vec<crate::plugin::PluginConfig> = policy_config.plugins.clone();
 
-        // Existing plugin-instantiation path.
-        self.load_config(policy_config)?;
+        // Existing plugin-instantiation path, with the global blocks a plugin
+        // may reference.
+        let context = crate::factory::FactoryContext::with_session_store(
+            raw.get("global")
+                .and_then(|g| g.get("session_store"))
+                .cloned(),
+        );
+        self.load_config_with(policy_config, &context)?;
 
         // Visitor walk. No-op when no visitors registered — the common
         // case for hosts that don't use the orchestrator extension point.
@@ -1724,7 +1740,11 @@ impl PolicyEngine {
 
         // Instantiate into a fresh registry, then publish atomically.
         let resolved = resolve_factories(&policy_config.plugins, factories)?;
-        let instances = create_plugin_instances(&policy_config.plugins, &resolved)?;
+        let instances = create_plugin_instances(
+            &policy_config.plugins,
+            &resolved,
+            &crate::factory::FactoryContext::default(),
+        )?;
         let mut new_registry = PluginRegistry::new();
         register_instances_into(&mut new_registry, &policy_config.plugins, &instances)?;
         let content_key = content_key_for(&policy_config, None)?;
@@ -11093,6 +11113,103 @@ routes:
         let after = engine.load_runtime().executor.effect_log().unwrap();
 
         assert!(!Arc::ptr_eq(&before, &after));
+    }
+
+    /// Records the `global.session_store` block its factory was handed, then
+    /// defers to the recording factory for the instance.
+    struct ContextFactory {
+        inner: RecordingFactory,
+        seen: SeenBlocks,
+    }
+
+    impl crate::factory::PluginFactory for ContextFactory {
+        fn create(
+            &self,
+            config: &PluginConfig,
+        ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            self.inner.create(config)
+        }
+
+        fn create_with(
+            &self,
+            config: &PluginConfig,
+            context: &crate::factory::FactoryContext,
+        ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(context.session_store().cloned());
+            self.inner.create(config)
+        }
+    }
+
+    /// One entry per `create_with` call: the block it was handed.
+    type SeenBlocks = Arc<std::sync::Mutex<Vec<Option<serde_yaml::Value>>>>;
+
+    fn context_engine() -> (Arc<PolicyEngine>, SeenBlocks) {
+        let seen = SeenBlocks::default();
+        let mgr = Arc::new(PolicyEngine::default());
+        mgr.register_factory(
+            "test/context",
+            Box::new(ContextFactory {
+                inner: RecordingFactory(Arc::new(std::sync::Mutex::new(Vec::new()))),
+                seen: Arc::clone(&seen),
+            }),
+        );
+        mgr.register_visitor(Arc::new(SilentVisitor));
+        (mgr, seen)
+    }
+
+    const CONTEXT_PLUGIN: &str = "
+plugins:
+  - name: observer
+    kind: test/context
+    hooks: [identity.resolve]
+    mode: sequential
+    capabilities: [read_headers]
+";
+
+    #[test]
+    fn a_yaml_load_hands_factories_the_global_session_store_block() {
+        let (mgr, seen) = context_engine();
+        let yaml = format!("{CONTEXT_PLUGIN}global:\n  session_store:\n    kind: memory\n");
+        load_fixture_yaml(&mgr, &yaml).expect("load");
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "create_with ran once");
+        assert_eq!(
+            seen[0]
+                .as_ref()
+                .and_then(|b| b.get("kind"))
+                .and_then(serde_yaml::Value::as_str),
+            Some("memory"),
+            "the factory sees the raw block"
+        );
+    }
+
+    #[test]
+    fn a_yaml_load_without_a_session_store_hands_factories_none() {
+        let (mgr, seen) = context_engine();
+        load_fixture_yaml(&mgr, CONTEXT_PLUGIN).expect("load");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None],
+            "create_with ran with no block"
+        );
+    }
+
+    #[test]
+    fn a_typed_load_hands_factories_an_empty_context() {
+        let (mgr, seen) = context_engine();
+        let config: PolicyConfig = serde_yaml::from_str(CONTEXT_PLUGIN).expect("parse");
+        mgr.load_config(config).expect("load");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None],
+            "no raw document, no block"
+        );
     }
 }
 

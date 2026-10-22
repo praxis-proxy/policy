@@ -58,6 +58,43 @@ pub trait PluginFactory: Send + Sync {
     /// Returns `PluginError::Config` when the entry's settings are missing,
     /// malformed, or out of range for this plugin.
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>>;
+
+    /// Create with document-level settings a plugin may reference.
+    ///
+    /// Defaults to [`Self::create`]. Override only when the plugin's config can
+    /// point at a global block, such as `global.session_store`.
+    /// # Errors
+    ///
+    /// As [`Self::create`].
+    fn create_with(
+        &self,
+        config: &PluginConfig,
+        _context: &FactoryContext,
+    ) -> Result<PluginInstance, Box<PluginError>> {
+        self.create(config)
+    }
+}
+
+/// Document-level settings handed to [`PluginFactory::create_with`].
+///
+/// Filled by `load_config_yaml`. The typed `load_config` path leaves it
+/// empty, because the raw global blocks exist only in the YAML document.
+#[derive(Clone, Debug, Default)]
+pub struct FactoryContext {
+    session_store: Option<serde_yaml::Value>,
+}
+
+impl FactoryContext {
+    /// A context carrying the raw `global.session_store` block.
+    #[must_use]
+    pub fn with_session_store(session_store: Option<serde_yaml::Value>) -> Self {
+        Self { session_store }
+    }
+
+    /// The raw `global.session_store` block, when the document has one.
+    pub fn session_store(&self) -> Option<&serde_yaml::Value> {
+        self.session_store.as_ref()
+    }
 }
 
 /// A created plugin instance — the plugin and its type-erased handlers.
