@@ -26,9 +26,8 @@
 //   - TLS required off-localhost; `noeviction` is an operator runbook
 //     concern the client can only warn about.
 //
-// The connection layer is kept internal (no public reusable API): the
-// planned OAuth token cache is the trigger to extract a shared layer
-// later, shaped by two real consumers.
+// The connection layer (`connection.rs`) is crate-internal and shared with
+// the CIBA correlation store: pool, timeouts, and key hashing live there.
 
 //! Valkey-backed session store for security labels.
 //!

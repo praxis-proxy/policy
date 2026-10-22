@@ -19,17 +19,12 @@
 // `load_labels` refreshes the TTL fail-open: the read already succeeded,
 // so a refresh failure is alarmed but the labels are still returned.
 
-use std::fmt::Write as _;
-use std::time::Duration;
-
 use async_trait::async_trait;
-use deadpool_redis::{Connection, Pool};
 use praxis_policy_apl_runtime::{SessionStore, SessionStoreError};
 use redis::AsyncCommands as _;
-use sha2::{Digest as _, Sha256};
 
 use crate::session::valkey::config::ValkeyConfig;
-use crate::session::valkey::connection::build_pool;
+use crate::session::valkey::connection::Valkey;
 use crate::session::valkey::error::BuildError;
 
 /// Valkey-backed session label store.
@@ -46,11 +41,8 @@ fn ttl_for_expire(ttl: u64) -> i64 {
 
 /// A Valkey-backed store for session security labels.
 pub struct ValkeySessionStore {
-    pool: Pool,
-    key_prefix: String,
     ttl_seconds: Option<u64>,
-    connect_timeout: Duration,
-    command_timeout: Duration,
+    valkey: Valkey,
 }
 
 impl ValkeySessionStore {
@@ -63,39 +55,9 @@ impl ValkeySessionStore {
     /// cannot be constructed from it.
     pub fn from_config(cfg: &ValkeyConfig) -> Result<Self, BuildError> {
         Ok(Self {
-            pool: build_pool(cfg)?,
-            key_prefix: cfg.key_prefix.clone(),
             ttl_seconds: cfg.ttl_seconds,
-            connect_timeout: Duration::from_millis(cfg.connect_timeout_ms),
-            command_timeout: Duration::from_millis(cfg.command_timeout_ms),
+            valkey: Valkey::new(cfg, format!("{}:", cfg.key_prefix))?,
         })
-    }
-
-    /// Key schema: `<prefix>:<hex(sha256(session_id))>`. The full-width
-    /// digest keeps the Valkey keyspace collision-free and removes raw
-    /// session ids from it.
-    fn key(&self, session_id: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(session_id.as_bytes());
-        let digest = hasher.finalize();
-        let mut hex = String::with_capacity(digest.len() * 2);
-        for byte in digest {
-            let _ = write!(hex, "{byte:02x}");
-        }
-        format!("{}:{}", self.key_prefix, hex)
-    }
-
-    /// Acquire a pooled connection, bounded by the connect timeout (the
-    /// fail-fast knob for a dead/slow endpoint, distinct from the
-    /// per-command timeout applied to SMEMBERS/SADD below).
-    async fn conn(&self) -> Result<Connection, SessionStoreError> {
-        match tokio::time::timeout(self.connect_timeout, self.pool.get()).await {
-            Ok(Ok(conn)) => Ok(conn),
-            Ok(Err(e)) => Err(backend(e)),
-            Err(_) => Err(SessionStoreError::Backend(
-                "valkey connection acquire timed out".to_owned(),
-            )),
-        }
     }
 }
 
@@ -107,21 +69,17 @@ fn backend(e: impl std::fmt::Display) -> SessionStoreError {
 #[async_trait]
 impl SessionStore for ValkeySessionStore {
     async fn load_labels(&self, session_id: &str) -> Result<Vec<String>, SessionStoreError> {
-        let key = self.key(session_id);
-        let mut conn = self.conn().await?;
+        let key = self.valkey.key(session_id);
+        let mut conn = self.valkey.conn().await.map_err(backend)?;
 
         // SMEMBERS on a missing key returns an empty set (Ok), so an
         // unknown session naturally maps to Ok(empty). Only a real
         // backend failure becomes Err.
-        let labels: Vec<String> =
-            match tokio::time::timeout(self.command_timeout, conn.smembers(&key)).await {
-                Ok(res) => res.map_err(backend)?,
-                Err(_) => {
-                    return Err(SessionStoreError::Backend(
-                        "valkey SMEMBERS timed out".to_owned(),
-                    ));
-                },
-            };
+        let labels: Vec<String> = self
+            .valkey
+            .timed("SMEMBERS", conn.smembers(&key))
+            .await
+            .map_err(backend)?;
 
         // Sliding-TTL refresh is fail-open for the read: the labels were
         // read successfully, so a refresh failure is alarmed, not failed
@@ -129,15 +87,11 @@ impl SessionStore for ValkeySessionStore {
         // expiry across requests — see the operator runbook.
         if let Some(ttl) = self.ttl_seconds {
             // Timeouts raise the same refresh-failure alarm as backend errors.
-            let refresh: Result<Result<bool, _>, _> =
-                tokio::time::timeout(self.command_timeout, conn.expire(&key, ttl_for_expire(ttl)))
-                    .await;
-            let refresh_error: Option<String> = match refresh {
-                Ok(Ok(_)) => None,
-                Ok(Err(e)) => Some(e.to_string()),
-                Err(_) => Some("EXPIRE timed out".to_owned()),
-            };
-            if let Some(e) = refresh_error {
+            let refresh: Result<bool, String> = self
+                .valkey
+                .timed("EXPIRE", conn.expire(&key, ttl_for_expire(ttl)))
+                .await;
+            if let Err(e) = refresh {
                 tracing::warn!(
                     alarm = "session_store_ttl_refresh_failed",
                     error = %e,
@@ -157,8 +111,8 @@ impl SessionStore for ValkeySessionStore {
         if labels.is_empty() {
             return Ok(());
         }
-        let key = self.key(session_id);
-        let mut conn = self.conn().await?;
+        let key = self.valkey.key(session_id);
+        let mut conn = self.valkey.conn().await.map_err(backend)?;
 
         // Atomic server-side union + optional TTL refresh in one round
         // trip (MULTI/EXEC). SADD is a commutative merge, so concurrent
@@ -170,14 +124,10 @@ impl SessionStore for ValkeySessionStore {
             pipe.expire(&key, ttl_for_expire(ttl)).ignore();
         }
 
-        match tokio::time::timeout(self.command_timeout, pipe.query_async::<()>(&mut conn)).await {
-            Ok(res) => res.map_err(backend)?,
-            Err(_) => {
-                return Err(SessionStoreError::Backend(
-                    "valkey append (SADD+EXPIRE) timed out".to_owned(),
-                ));
-            },
-        }
+        self.valkey
+            .timed("append (SADD+EXPIRE)", pipe.query_async::<()>(&mut conn))
+            .await
+            .map_err(backend)?;
         Ok(())
     }
 }
