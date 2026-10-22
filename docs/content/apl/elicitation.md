@@ -211,12 +211,14 @@ Confine each user to its own keys on the Valkey side. PPE does not create or
 check these users:
 
 ```console
-ACL SETUSER ppe-taint on >taint-password ~taint:v1:* +@read +@write -@dangerous
-ACL SETUSER ppe-ciba on >ciba-password ~ciba:v1:* +@read +@write +@scripting -@dangerous
+ACL SETUSER ppe-taint on >taint-password ~taint:v1:* +@read +@write +@transaction -@dangerous
+ACL SETUSER ppe-ciba on >ciba-password ~ciba:v1:* +@read +@write +@transaction +@scripting -@dangerous
 ```
 
-The CIBA user needs `+@scripting`: redeeming and recording the approver run as
-server-side scripts. With these users, stolen taint credentials cannot forge an
+Both users need `+@transaction`, because each store writes inside `MULTI`. The
+CIBA user also needs `+@scripting`: redeeming and recording the approver run as
+server-side scripts. A missing grant fails closed: the session store errors and
+CIBA denies with `elicitation.store_unavailable`. With these users, stolen taint credentials cannot forge an
 approver, and stolen CIBA credentials cannot clear Session Taint labels.
 
 ### Separate server
