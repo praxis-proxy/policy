@@ -1090,8 +1090,6 @@ plugins:
 const VALKEY_GLOBAL: &str =
     "global:\n  session_store:\n    kind: valkey\n    endpoint: localhost:6379\n";
 
-/// An omitted CIBA store warns once, naming the plugin, even when the session
-/// store is Valkey: the two stores are configured separately.
 #[test]
 fn an_omitted_ciba_store_warns_even_with_a_valkey_session_store() {
     for global in ["", VALKEY_GLOBAL] {

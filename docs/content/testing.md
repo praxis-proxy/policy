@@ -240,16 +240,16 @@ docker stop ppe-keycloak ppe-valkey
 
 The Valkey harness in `crates/builtins` also checks the ACL users in
 [Elicitation](apl/elicitation.md#shared-server-separate-acl-user) when
-`PPE_ACL_VALKEY` names a server that has them and `PPE_TAINT_PW` holds the
-taint user's password:
+`PPE_ACL_VALKEY` names a server that has them, and `PPE_TAINT_PW` and
+`PPE_CIBA_PW` hold their passwords:
 
 ```console
 docker run -d --rm --name ppe-acl-valkey -p 127.0.0.1:6380:6379 valkey/valkey:8.1.10
 docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-taint on '>taint-pw' \
-  '~taint:v1:*' +@read +@write +@transaction -@dangerous
+  '~taint:v1:*' +@read +@write +@transaction +ping -@dangerous
 docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-ciba on '>ciba-pw' \
-  '~ciba:v1:*' +@read +@write +@transaction +@scripting -@dangerous
-PPE_ACL_VALKEY=127.0.0.1:6380 PPE_TAINT_PW=taint-pw \
+  '~ciba:v1:*' +@read +@write +@transaction +@scripting +ping -@dangerous
+PPE_ACL_VALKEY=127.0.0.1:6380 PPE_TAINT_PW=taint-pw PPE_CIBA_PW=ciba-pw \
   cargo nextest run -p praxis-policy-builtins --all-features --test valkey \
   --run-ignored only -E 'test(documented_acl_users)'
 docker stop ppe-acl-valkey

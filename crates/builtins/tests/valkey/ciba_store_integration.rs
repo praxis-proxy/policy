@@ -169,6 +169,39 @@ async fn two_approvers_on_one_server_cannot_redeem_each_others_approvals() {
 
 #[tokio::test]
 #[ignore]
+async fn a_put_replaces_rather_than_merges_an_existing_correlation() {
+    let Some(target) = valkey_target().await else {
+        return;
+    };
+    let store = store_for(&target);
+    store.put("reput", pending(60)).await.unwrap();
+    store
+        .set_resolved_approver("reput", "alice".into())
+        .await
+        .unwrap();
+    store.put("reput", pending(60)).await.unwrap();
+
+    assert!(
+        store
+            .get("reput")
+            .await
+            .unwrap()
+            .unwrap()
+            .resolved_approver
+            .is_none(),
+        "a fresh dispatch must not inherit an earlier approval"
+    );
+    assert!(matches!(
+        store
+            .take_if_ready("reput", ROUTE, "adjust", "bob")
+            .await
+            .unwrap(),
+        TakeResult::Pending
+    ));
+}
+
+#[tokio::test]
+#[ignore]
 async fn a_correlation_expires_server_side() {
     let Some(target) = valkey_target().await else {
         return;
@@ -195,7 +228,29 @@ async fn a_correlation_expires_server_side() {
 }
 
 #[tokio::test]
-#[ignore]
+async fn a_server_that_never_replies_times_out_as_an_error() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _hold = tokio::spawn(async move {
+        let accepted = listener.accept().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        drop(accepted);
+    });
+    let settings = serde_json::json!({
+        "endpoint": addr.to_string(),
+        "connect_timeout_ms": 200,
+        "command_timeout_ms": 200,
+    });
+    let store = ValkeyCorrelationStore::from_settings("p", settings.as_object().unwrap(), None)
+        .expect("a lazy pool builds");
+    let err = store
+        .get("x")
+        .await
+        .expect_err("a silent server must fail closed");
+    assert!(err.0.contains("timed out"), "got {err}");
+}
+
+#[tokio::test]
 async fn an_unreachable_store_is_an_error_not_a_miss() {
     let settings = serde_json::json!({
         "endpoint": "localhost:1",
@@ -272,20 +327,19 @@ async fn an_approval_dispatched_on_one_replica_redeems_on_another() {
     );
 }
 
-/// The shared-server pattern from the elicitation docs, against a Valkey with
-/// the documented `ppe-taint` and `ppe-ciba` ACL users. Needs
-/// `PPE_ACL_VALKEY=host:port` and `PPE_TAINT_PW`; skipped otherwise.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs PPE_ACL_VALKEY and the ACL users from docs/content/testing.md"]
 async fn documented_acl_users_compartmentalize_the_two_stores() {
     use praxis_policy_apl_runtime::SessionStore as _;
     use praxis_policy_builtins::session::valkey::{ValkeyConfig, ValkeySessionStore};
 
-    let (Ok(endpoint), Ok(_)) = (
-        std::env::var("PPE_ACL_VALKEY"),
-        std::env::var("PPE_TAINT_PW"),
-    ) else {
-        eprintln!("SKIPPED documented_acl_users: set PPE_ACL_VALKEY, PPE_TAINT_PW");
+    let vars = ["PPE_ACL_VALKEY", "PPE_TAINT_PW", "PPE_CIBA_PW"].map(|v| std::env::var(v).ok());
+    let [Some(endpoint), Some(taint_pw), Some(ciba_pw)] = vars else {
+        assert!(
+            std::env::var("VALKEY_TESTS_OPTIONAL").as_deref() == Ok("1"),
+            "set PPE_ACL_VALKEY, PPE_TAINT_PW and PPE_CIBA_PW, or VALKEY_TESTS_OPTIONAL=1"
+        );
+        eprintln!("SKIPPED documented_acl_users: set PPE_ACL_VALKEY, PPE_TAINT_PW, PPE_CIBA_PW");
         return;
     };
     let global: serde_yaml::Value = serde_yaml::from_str(&format!(
@@ -299,8 +353,8 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
         .await
         .expect("ppe-taint writes taint:v1:*");
 
-    let pw = std::env::temp_dir().join("ppe-ciba-acl-pw");
-    std::fs::write(&pw, "ciba-pw\n").unwrap();
+    let pw = std::env::temp_dir().join(format!("ppe-ciba-acl-pw-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&pw, format!("{ciba_pw}\n")).unwrap();
     let reference = serde_json::json!({
         "connection": "session_store",
         "username": "ppe-ciba",
@@ -329,11 +383,11 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
     let raw = |user: &str, pass: &str| {
         redis::Client::open(format!("redis://{user}:{pass}@{endpoint}")).unwrap()
     };
-    let mut as_taint = raw("ppe-taint", "taint-pw")
+    let mut as_taint = raw("ppe-taint", &taint_pw)
         .get_multiplexed_async_connection()
         .await
         .unwrap();
-    let mut as_ciba = raw("ppe-ciba", "ciba-pw")
+    let mut as_ciba = raw("ppe-ciba", &ciba_pw)
         .get_multiplexed_async_connection()
         .await
         .unwrap();
@@ -344,8 +398,9 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
         .query_async(&mut as_taint)
         .await;
     let forge = forge.unwrap_err();
-    assert!(
-        format!("{forge:?}").contains("No permissions"),
+    assert_eq!(
+        forge.code(),
+        Some("NOPERM"),
         "taint credentials cannot forge an approval: {forge:?}"
     );
     let clear: redis::RedisResult<()> = redis::cmd("DEL")
@@ -353,8 +408,9 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
         .query_async(&mut as_ciba)
         .await;
     let clear = clear.unwrap_err();
-    assert!(
-        format!("{clear:?}").contains("No permissions"),
+    assert_eq!(
+        clear.code(),
+        Some("NOPERM"),
         "CIBA credentials cannot clear taint: {clear:?}"
     );
 }

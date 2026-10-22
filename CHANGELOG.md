@@ -41,7 +41,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **Breaking: the CIBA plugin config rejects unknown fields.** A key it does not recognize, such as a misspelled `store`, now fails at load naming the field instead of being ignored. ([#236](https://github.com/praxis-proxy/policy/issues/236))
-- **Breaking: `CorrelationStore` is async and fallible**, and `ValkeyConfig.password` is a `PasswordSource` rather than a `String`. Rust code implementing the trait or building `ValkeyConfig` directly must update; YAML is unaffected. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Breaking: `CorrelationStore` is async and fallible**, `ValkeyConfig.password` is a `PasswordSource` rather than a `String`, and `CibaConfig` has a new `store` field. Rust code implementing the trait or building either config as a struct literal must update; YAML is unaffected. ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
 - **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **Breaking:** `Extensions` and `OwnedExtensions` add `metadata`; exhaustive

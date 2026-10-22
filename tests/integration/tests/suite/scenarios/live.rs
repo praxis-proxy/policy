@@ -322,9 +322,6 @@ async fn live_ciba_a_large_adjustment_applies_after_approval() {
     .await;
 }
 
-/// Two hosts, as two replicas, share CIBA approvals through Valkey: the call
-/// suspends on one, the approval is observed and applied on the other, and the
-/// first cannot apply it again.
 #[tokio::test]
 #[ignore = "needs PPE_KEYCLOAK_URL, PPE_CIBA_AUTO_APPROVE and VALKEY_TEST_URL"]
 async fn live_ciba_an_approval_dispatched_on_one_replica_applies_on_another() {

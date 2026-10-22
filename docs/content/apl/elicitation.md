@@ -154,8 +154,8 @@ correlation store chosen by the plugin's `store:` block:
 
 - `kind: memory` holds approvals in this process. A restart loses them, and a
   retry on another replica cannot find them.
-- `kind: valkey` shares them across replicas and survives restarts. Redeeming
-  is atomic, so two replicas cannot both apply one approval.
+- `kind: valkey` shares them across replicas and survives gateway restarts.
+  Redeeming is atomic, so two replicas cannot both apply one approval.
 
 Omitting `store:` uses memory and logs a startup warning naming the plugin.
 `global.session_store` configures Session Taint only. It does not move CIBA
@@ -205,21 +205,26 @@ plugins:
 A reference may override `username`, `password`, `key_prefix`,
 `connect_timeout_ms`, and `command_timeout_ms`. It cannot change `endpoint` or
 `tls`; use the standalone form for a different server. A reference fails to
-load when `global.session_store` is absent or is not `kind: valkey`.
+load when `global.session_store` is absent or is not `kind: valkey`. Hosts must
+load the document with `load_config_yaml`, the only loader that reads
+`global.session_store`. Overriding `username` without `password`, or the
+reverse, is refused, so a reference never mixes two users' credentials.
 
 Confine each user to its own keys on the Valkey side. PPE does not create or
 check these users:
 
 ```console
-ACL SETUSER ppe-taint on >taint-password ~taint:v1:* +@read +@write +@transaction -@dangerous
-ACL SETUSER ppe-ciba on >ciba-password ~ciba:v1:* +@read +@write +@transaction +@scripting -@dangerous
+ACL SETUSER ppe-taint on >taint-password ~taint:v1:* +@read +@write +@transaction +ping -@dangerous
+ACL SETUSER ppe-ciba on >ciba-password ~ciba:v1:* +@read +@write +@transaction +@scripting +ping -@dangerous
 ```
 
-Both users need `+@transaction`, because each store writes inside `MULTI`. The
-CIBA user also needs `+@scripting`: redeeming and recording the approver run as
-server-side scripts. A missing grant fails closed: the session store errors and
-CIBA denies with `elicitation.store_unavailable`. With these users, stolen taint credentials cannot forge an
-approver, and stolen CIBA credentials cannot clear Session Taint labels.
+Both users need `+@transaction`, because each store writes inside `MULTI`, and
+`+ping`, which the connection pool sends to check a connection before reuse.
+The CIBA user also needs `+@scripting`: redeeming and recording the approver
+run as server-side scripts. A missing grant fails closed: the session store
+errors and CIBA denies with `elicitation.store_unavailable`. With these users,
+stolen taint credentials cannot forge an approver, and stolen CIBA credentials
+cannot clear Session Taint labels.
 
 ### Separate server
 
@@ -277,7 +282,27 @@ plugins:
 
 A store that cannot answer, because Valkey is unreachable, slow, or returns
 data that cannot be decoded, denies with `elicitation.store_unavailable`. That
-is never read as an unknown id or as approved.
+is never read as an unknown id or as approved under the default `on_error`;
+a step set to `on_error: continue` skips instead, as for any elicitation error.
+The caller-visible reason is generic. The backend error is logged with
+`alarm = "ciba_store_unavailable"`, the plugin, and the operation. A failed
+store after a dispatch reached the OP also logs the `auth_req_id`, because the
+approver has already been prompted.
+
+A check or validate that fails this way can be retried with the same
+elicitation id once the store recovers. A dispatch cannot: it returns no id, so
+a retry prompts the approver again.
+
+### Durability
+
+Single use holds only while Valkey keeps acknowledged writes. A redeemed
+approval comes back if the server restarts from an older snapshot, or fails
+over to a replica that had not received the delete. For approvals that must
+not be replayed, run the CIBA store with `appendonly yes` and
+`appendfsync always`, and without failover to an asynchronous replica. Use
+`noeviction` so memory pressure drops new writes instead of pending
+approvals. A restart that loses data fails closed: pending approvals read as
+an unknown id.
 
 ## Pipeline integration
 
