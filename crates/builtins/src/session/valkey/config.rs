@@ -7,6 +7,8 @@
 // knobs with committed safe defaults. Sentinel/Cluster fields are NOT
 // present — they are out of scope and would be dead config surface.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
 use crate::session::valkey::error::BuildError;
@@ -45,10 +47,10 @@ pub struct ValkeyConfig {
     #[serde(default)]
     pub username: Option<String>,
 
-    /// Optional auth password / ACL secret. Sourced from config/env by
-    /// the operator; never hard-coded.
+    /// Optional auth password / ACL secret: inline, `{ env: NAME }`, or
+    /// `{ file: PATH }`.
     #[serde(default)]
-    pub password: Option<String>,
+    pub password: Option<PasswordSource>,
 
     /// Key prefix/namespace for label keys.
     #[serde(default = "default_key_prefix")]
@@ -78,13 +80,62 @@ pub struct ValkeyConfig {
     // never advertises behavior the code doesn't have.
 }
 
+/// Where a Valkey password comes from.
+///
+/// Untagged so a plain string keeps working beside `{ env: NAME }` and
+/// `{ file: PATH }`. Resolved when the connection URL is built, which
+/// validation does at load.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum PasswordSource {
+    /// Given inline. Avoid outside local development.
+    Inline(String),
+    /// Read from an environment variable.
+    Env(EnvPassword),
+    /// Read from a file, trimmed, which suits a mounted secret.
+    File(FilePassword),
+}
+
+/// `{ env: NAME }`: the variable holding the password.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvPassword {
+    /// The variable name.
+    pub env: String,
+}
+
+/// `{ file: PATH }`: a file holding the password.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilePassword {
+    /// The file path.
+    pub file: PathBuf,
+}
+
+impl PasswordSource {
+    /// Resolve to the password. Errors name the source, never the secret.
+    fn resolve(&self) -> Result<String, BuildError> {
+        match self {
+            Self::Inline(secret) => Ok(secret.clone()),
+            Self::Env(EnvPassword { env }) => std::env::var(env)
+                .map_err(|e| BuildError::Config(format!("password env var '{env}': {e}"))),
+            Self::File(FilePassword { file }) => std::fs::read_to_string(file)
+                .map(|s| s.trim().to_owned())
+                .map_err(|e| {
+                    BuildError::Config(format!("password file '{}': {e}", file.display()))
+                }),
+        }
+    }
+}
+
 impl ValkeyConfig {
     /// Parse from the YAML config block, then validate.
     /// # Errors
     ///
-    /// Returns `BuildError` when the block does not deserialize, or when
-    /// validation rejects it: a non-localhost endpoint without TLS,
-    /// contradictory credentials, or a TTL too large to express as an expiry.
+    /// Returns `BuildError` when the block does not deserialize, the password
+    /// source cannot be read, or validation rejects it: a non-localhost
+    /// endpoint without TLS, contradictory credentials, or a TTL too large to
+    /// express as an expiry.
     pub fn from_value(value: &serde_yaml::Value) -> Result<Self, BuildError> {
         let cfg: ValkeyConfig =
             serde_yaml::from_value(value.clone()).map_err(|e| BuildError::Config(e.to_string()))?;
@@ -99,7 +150,7 @@ impl ValkeyConfig {
     ///
     /// All error text routes the endpoint through [`redact_endpoint`] so
     /// embedded credentials never leak into errors or logs.
-    fn validate(&self) -> Result<(), BuildError> {
+    pub(crate) fn validate(&self) -> Result<(), BuildError> {
         // A fully-formed plaintext `redis://` endpoint with `tls: true`
         // is contradictory: tls_enabled() would say "secure" while the
         // explicit scheme forces cleartext. Reject rather than silently
@@ -225,7 +276,12 @@ impl ValkeyConfig {
         // Apply credentials when either is present. `validate()` guarantees a
         // `username` is always paired with a `password`; a lone `password`
         // (default-user AUTH) stays valid and sets an empty username.
-        if self.username.is_some() || self.password.is_some() {
+        let password = self
+            .password
+            .as_ref()
+            .map(PasswordSource::resolve)
+            .transpose()?;
+        if self.username.is_some() || password.is_some() {
             // set_username/set_password percent-encode and reject hosts
             // that cannot carry userinfo (e.g. cannot-be-a-base URLs).
             url.set_username(self.username.as_deref().unwrap_or(""))
@@ -233,7 +289,7 @@ impl ValkeyConfig {
             // `set_password` shares `set_username`'s precondition (a URL with a
             // non-empty host), which the call above has already proved. The
             // error arm is an unreachable guard, not a live path.
-            if let Some(password) = &self.password {
+            if let Some(password) = &password {
                 url.set_password(Some(password)).map_err(|()| {
                     BuildError::Config("endpoint cannot carry credentials".to_owned())
                 })?;
@@ -280,6 +336,13 @@ fn endpoint_is_localhost(endpoint: &str) -> bool {
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    fn percent_decode(s: &str) -> String {
+        url::form_urlencoded::parse(format!("x={s}").as_bytes())
+            .next()
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default()
+    }
 
     fn parse(yaml: &str) -> Result<ValkeyConfig, BuildError> {
         let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
@@ -485,6 +548,68 @@ mod tests {
     fn an_unparseable_bare_endpoint_is_rejected() {
         let err = parse("kind: valkey\nendpoint: \"[::1\"\ntls: true\n").unwrap_err();
         assert!(format!("{err}").contains("invalid endpoint"), "got {err:?}");
+    }
+
+    #[test]
+    fn password_from_env_resolves_into_the_url() {
+        let home = std::env::var("HOME").expect("HOME is set for test runners");
+        let cfg =
+            parse("kind: valkey\nendpoint: localhost:6379\npassword: { env: HOME }\n").unwrap();
+        let url = url::Url::parse(&cfg.connection_url().unwrap()).unwrap();
+        assert_eq!(
+            percent_decode(url.password().unwrap_or_default()),
+            home,
+            "the env var's value is the password"
+        );
+    }
+
+    #[test]
+    fn password_from_file_is_trimmed() {
+        let path = std::env::temp_dir().join(format!("ppe-valkey-pw-{}", std::process::id()));
+        std::fs::write(&path, "from-file\n").unwrap();
+        let yaml = format!(
+            "kind: valkey\nendpoint: localhost:6379\npassword: {{ file: \"{}\" }}\n",
+            path.display()
+        );
+        let url = parse(&yaml).unwrap().connection_url().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            url.starts_with("redis://:from-file@localhost:6379"),
+            "file contents, trimmed, are the password"
+        );
+    }
+
+    #[test]
+    fn unset_password_env_var_fails_at_load_naming_the_var() {
+        let err = parse(
+            "kind: valkey\nendpoint: localhost:6379\n\
+             password: { env: _PPE_VALKEY_PW_DEFINITELY_UNSET_ }\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("_PPE_VALKEY_PW_DEFINITELY_UNSET_"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn unreadable_password_file_fails_at_load_naming_the_path() {
+        let err = parse(
+            "kind: valkey\nendpoint: localhost:6379\npassword: { file: /nonexistent/ppe-pw }\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("/nonexistent/ppe-pw"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn password_source_with_unknown_keys_is_rejected() {
+        let err =
+            parse("kind: valkey\nendpoint: localhost:6379\npassword: { env: HOME, file: /x }\n")
+                .unwrap_err();
+        assert!(matches!(err, BuildError::Config(_)), "got {err:?}");
     }
 
     /// An endpoint with no host cannot carry userinfo. `url` refuses the

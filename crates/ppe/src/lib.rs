@@ -155,7 +155,8 @@ pub use praxis_policy_builtins::secrets::vault::{
 };
 #[cfg(feature = "valkey")]
 pub use praxis_policy_builtins::session::valkey::{
-    KIND as VALKEY_KIND, ValkeyConfig, ValkeySessionStoreFactory,
+    KIND as VALKEY_KIND, PasswordSource as ValkeyPasswordSource, ValkeyConfig,
+    ValkeySessionStoreFactory,
 };
 
 // =============================================================================

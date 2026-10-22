@@ -39,7 +39,7 @@
 /// Store configuration and its validation.
 mod config;
 /// Connection setup, including TLS and authentication.
-mod connection;
+pub(crate) mod connection;
 /// Errors raised while building or reaching the store.
 mod error;
 /// Constructs the store from configuration.
@@ -47,7 +47,7 @@ mod factory;
 /// The `SessionStore` implementation.
 mod store;
 
-pub use config::ValkeyConfig;
+pub use config::{EnvPassword, FilePassword, PasswordSource, ValkeyConfig};
 pub use error::BuildError;
 pub use factory::{KIND, ValkeySessionStoreFactory};
 pub use store::ValkeySessionStore;

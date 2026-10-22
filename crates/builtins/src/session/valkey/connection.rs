@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// Internal connection layer: builds and holds the deadpool-redis
-// pool for the Valkey backend. Kept private to this module — it is NOT a
-// public reusable API. When a second consumer (the planned OAuth token
-// cache) is actually scheduled, extract a shared layer then
-// (refactor-then-reuse), shaped by two real consumers.
+// Internal connection layer: builds the deadpool-redis pool for the Valkey
+// backends. Crate-visible so the CIBA correlation store reuses it; not a
+// public API.
 
 use deadpool_redis::{Config as PoolConfig, Pool, Runtime};
 
@@ -16,7 +14,7 @@ use crate::session::valkey::error::BuildError;
 /// lazily — `create_pool` does not dial Valkey, so a bad endpoint surfaces
 /// on first use (where it correctly fails the request closed) rather than
 /// blocking `load_config_yaml`.
-pub(in crate::session::valkey) fn build_pool(cfg: &ValkeyConfig) -> Result<Pool, BuildError> {
+pub(crate) fn build_pool(cfg: &ValkeyConfig) -> Result<Pool, BuildError> {
     let url = cfg.connection_url()?;
     let pool_cfg = PoolConfig::from_url(url);
     // Note: the pool-create error is intentionally not interpolated with
