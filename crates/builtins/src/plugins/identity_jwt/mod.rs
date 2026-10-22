@@ -43,6 +43,9 @@ pub mod config;
 ///
 /// [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
 pub mod dpop;
+/// Shared `DPoP` replay detection using a host-owned Valkey pool.
+#[cfg(feature = "valkey")]
+pub mod dpop_valkey;
 /// Constructs the resolver from configuration.
 pub mod factory;
 /// The shipped claim maps, by name.
@@ -60,7 +63,7 @@ pub use config::{
     DecodingKeySource, DpopConfig, DpopMode, JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig,
     KeySourceError, TrustedIssuerConfig,
 };
-pub use factory::{JwtIdentityFactory, KIND};
+pub use factory::{JwtIdentityFactory, JwtIdentityFactoryWithReplay, KIND};
 pub use praxis_policy_core::identity::mapping::{
     ClaimMap, ClaimMapConfig, ClaimMapper, ClaimPath, ClaimsOverrides, CompiledClaimMap,
     CompiledClaimsOverrides, CompiledRoleMap, ConfiguredClaimMap, MergeMode, OnMissing, SplitMode,

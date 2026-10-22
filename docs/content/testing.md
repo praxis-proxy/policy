@@ -85,6 +85,16 @@ real server, because a session store is not meaningfully covered by a
 fake. That component makes Session Taint survive a reload or
 span a replica, so it is worth running them for real.
 
+The shared `DPoP` replay guard has an ignored Valkey test under the `jwt`
+and `valkey` features. It uses two independent connection pools to the same
+server and checks that the second gateway rejects a replay. Set
+`VALKEY_TEST_URL` or let testcontainers start Valkey, then run:
+
+```console
+cargo test -p praxis-policy-builtins --features jwt,valkey \
+  --test jwt valkey_rejects_a_replay_across_independent_gateway_pools -- --ignored
+```
+
 ### Vault KV v2 live test
 
 The Vault provider's normal suite uses `FakeTransport` for deterministic

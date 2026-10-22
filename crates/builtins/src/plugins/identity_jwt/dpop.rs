@@ -17,10 +17,8 @@
 //!
 //! [`ReplayGuard`] remembers each accepted proof's `jti` for as long as the
 //! proof counts as recent. [`InMemoryReplayGuard`] covers one gateway instance.
-//! Several instances need a store they share, so that a proof replayed to a
-//! different instance is still caught; that waits on host-injected stores
-//! ([praxis-proxy/policy#127]), and the interface here is what such a store
-//! would implement.
+//! A host running several instances can inject guards backed by one store;
+//! `ValkeyReplayGuard` is supplied when the `valkey` feature is enabled.
 //!
 //! [`ProofOfPossession`]: crate::plugins::identity_jwt::dpop::ProofOfPossession
 //! [`ReplayGuard`]: crate::plugins::identity_jwt::dpop::ReplayGuard
@@ -28,7 +26,6 @@
 //! [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
 //! [RFC 7638]: https://datatracker.ietf.org/doc/html/rfc7638
 //! [RFC 8705]: https://datatracker.ietf.org/doc/html/rfc8705
-//! [praxis-proxy/policy#127]: https://github.com/praxis-proxy/policy/issues/127
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
@@ -146,8 +143,8 @@ pub trait ReplayGuard: Send + Sync + std::fmt::Debug {
 /// Default bound on [`InMemoryReplayGuard`] entries across all keys.
 pub const DEFAULT_REPLAY_CAPACITY: usize = 100_000;
 
-/// Default bound on live entries for one key. Over the default 60-second
-/// window this allows about 166 proofs a second per key, and stops one client
+/// Default bound on live entries for one key. Over the default 121-second
+/// retention this allows about 82 proofs a second per key, and stops one client
 /// from filling the store and denying `DPoP` to every other caller.
 pub const DEFAULT_REPLAY_CAPACITY_PER_KEY: usize = 10_000;
 
@@ -308,7 +305,7 @@ fn b64url(bytes: &[u8]) -> String {
 
 /// JWK members that only a private key carries. A proof whose header holds any
 /// of them has leaked its private key, and is refused.
-const PRIVATE_JWK_MEMBERS: [&str; 7] = ["d", "p", "q", "dp", "dq", "qi", "k"];
+const PRIVATE_JWK_MEMBERS: [&str; 8] = ["d", "p", "q", "dp", "dq", "qi", "oth", "k"];
 
 #[derive(Debug, Deserialize)]
 struct ProofClaims {
@@ -480,8 +477,12 @@ impl ProofOfPossession for DpopVerifier<'_> {
     async fn verify(&self, request: &PopRequest<'_>) -> Result<KeyBinding, PopDenial> {
         let (thumbprint, claims) = self.check(request)?;
         let window = i64::try_from(self.config.iat_window_seconds).unwrap_or(i64::MAX);
-        // Remembered until the proof could no longer pass the `iat` check.
-        let expires_at = claims.iat.saturating_add(window).saturating_add(1);
+        // A second gateway's clock may be behind this one's. Retain the id for
+        // the full span in which any one clock can accept this proof, even if
+        // this gateway first saw it at the end of its own window.
+        let expires_at = request
+            .now
+            .saturating_add(window.saturating_mul(2).saturating_add(1));
         let scope = format!("{}\u{1f}{thumbprint}", request.issuer);
         match self
             .replay

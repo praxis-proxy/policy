@@ -1167,25 +1167,48 @@ holds the key.
 
 | Code | Means |
 |---|---|
-| `auth.dpop_missing` | a bound token without a proof, a bound token sent as `Bearer`, or an unbound token where binding is required |
+| `auth.dpop_missing` | a bound token without a proof, a bound token sent without the `DPoP` scheme, or an unbound token where binding is required |
 | `auth.dpop_invalid` | a malformed proof or one failing a check above, a `cnf` with no usable `jkt`, or the `DPoP` scheme to an issuer with `mode: off` |
 | `auth.dpop_key_mismatch` | the proof is signed by a key other than the one the token is bound to |
 | `auth.dpop_replay` | the proof's `jti` was already used |
 | `auth.dpop_replay_unavailable` | the replay store could not answer, or this key already has its quota of live proofs; the proof is not accepted unchecked |
-| `auth.config_error` | the host supplied no request line, no method, or no scheme and host with no `external_base_url` set |
+| `auth.config_error` | the host supplied no request line, method, or path, or no scheme and host with no `external_base_url` set |
 
 ### The replay window
 
-Each accepted proof's `jti` is remembered until its `iat` window closes, in this
-gateway instance's memory, at most 10,000 at a time for any one key and 100,000
-in all, so one client cannot fill the store for everyone. The store starts empty
-when the resolver is rebuilt, for example on a configuration reload. Replay
-detection therefore covers one instance: with
-several instances behind a load balancer, a captured request replayed to a
-different instance within the window is not caught. A store shared across
-instances waits on host-injected stores
-([#127](https://github.com/praxis-proxy/policy/issues/127)). Until then, keep the
-window short, or route a client's requests to one instance.
+The default factory remembers each accepted `jti` in this gateway instance's
+memory for twice the `iat` window plus one second after first use (121 seconds
+with the default window). This also covers a proof first seen near the end of
+one gateway's window and later seen by a gateway whose clock is behind. It
+holds at most 10,000 live proofs per key and 100,000 in all. Rebuilding the
+resolver starts a fresh store. Use this default only for a single instance.
+
+For several instances, the embedding host must register a factory with a
+shared replay guard. With the `jwt` and `valkey` features, the host can pass
+its existing `deadpool_redis::Pool` to `ValkeyReplayGuard`. Register this
+factory after `install_builtins`, if the host uses that helper:
+
+```rust
+use std::sync::Arc;
+use praxis_policy_builtins::plugins::identity_jwt::{
+    JwtIdentityFactory, KIND,
+    dpop_valkey::ValkeyReplayGuard,
+};
+
+// `pool` is a host-owned deadpool_redis::Pool for the shared Valkey database.
+let guard = Arc::new(ValkeyReplayGuard::new(pool, "dpop:replay:v1"));
+engine.register_factory(KIND, Box::new(JwtIdentityFactory::with_replay_guard(guard)));
+```
+
+Every instance must use the same Valkey database and prefix. The guard uses an
+atomic `SET NX EX` with the same conservative retention, so a second instance
+denies the same proof as `auth.dpop_replay`. Configure Valkey with a
+`noeviction` policy: evicting a live replay key would allow reuse before its
+window ends. Connection and command failures deny as
+`auth.dpop_replay_unavailable`. The host owns the pool and can retain it across
+policy reloads; the factory retains the guard. The generic host-managed store
+service remains tracked by
+[#127](https://github.com/praxis-proxy/policy/issues/127).
 
 Server-issued nonces (`DPoP-Nonce`) are not supported yet.
 

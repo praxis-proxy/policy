@@ -177,6 +177,20 @@ impl JwtIdentityResolver {
     /// not deserialize into this plugin's settings, and when a validated field
     /// is out of range.
     pub fn new(cfg: PluginConfig) -> Result<Self, Box<PluginError>> {
+        Self::with_replay_guard(cfg, Arc::new(InMemoryReplayGuard::default()))
+    }
+
+    /// Build a resolver with a host-owned replay guard. Hosts running more
+    /// than one gateway instance must pass guards backed by the same atomic
+    /// store so a proof accepted by one instance is refused by the others.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` for invalid resolver or issuer settings.
+    pub fn with_replay_guard(
+        cfg: PluginConfig,
+        replay: Arc<dyn ReplayGuard>,
+    ) -> Result<Self, Box<PluginError>> {
         let raw_config = cfg.config.as_ref().ok_or_else(|| {
             Box::new(PluginError::Config {
                 message: format!(
@@ -377,7 +391,7 @@ impl JwtIdentityResolver {
             claim_mapper,
             role: typed.role,
             header: typed.header,
-            replay: Arc::new(InMemoryReplayGuard::default()),
+            replay,
         })
     }
 }
@@ -741,7 +755,7 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 (scheme, token.to_owned())
             },
             None if !payload.raw_token().is_empty() => {
-                (AuthScheme::Unspecified, payload.raw_token().to_owned())
+                (AuthScheme::PreExtracted, payload.raw_token().to_owned())
             },
             None => {
                 return PluginResult::deny(PluginViolation::new(
@@ -1052,15 +1066,16 @@ enum AuthScheme {
     ///
     /// [RFC 9449 Section 7.1]: https://datatracker.ietf.org/doc/html/rfc9449#section-7.1
     Dpop,
-    /// A bare token: the host stripped the scheme, or the header carries none.
+    /// A bare token in the configured header.
     Unspecified,
+    /// The host supplied a token without its original authorization scheme.
+    PreExtracted,
 }
 
 /// Split a leading `Bearer` or `DPoP` auth-scheme from a header value.
 ///
-/// Schemes are case-insensitive per [RFC 9110 Section 11.1]. Bare tokens are
-/// returned unchanged, as `Unspecified`, for hosts that strip the scheme
-/// themselves.
+/// Schemes are case-insensitive per [RFC 9110 Section 11.1]. Bare tokens in
+/// the configured header are returned unchanged as `Unspecified`.
 ///
 /// [RFC 9110 Section 11.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-11.1
 fn split_auth_scheme(value: &str) -> (AuthScheme, &str) {
@@ -1078,7 +1093,9 @@ fn split_auth_scheme(value: &str) -> (AuthScheme, &str) {
 /// The URL the client addressed: the configured external base plus the request
 /// path, or the request's own scheme, host and path.
 fn request_url(http: &HttpExtension, external_base_url: Option<&str>) -> Result<String, String> {
-    let path = http.path.as_deref().unwrap_or("/");
+    let path = http.path.as_deref().ok_or_else(|| {
+        "the host supplied no request path, so a DPoP proof's htu cannot be checked".to_owned()
+    })?;
     let path = path.split(['?', '#']).next().unwrap_or("/");
     if let Some(base) = external_base_url {
         return Ok(format!("{}{path}", base.trim_end_matches('/')));
@@ -1156,10 +1173,10 @@ impl JwtIdentityResolver {
             }
             return Ok(None);
         };
-        if scheme == AuthScheme::Bearer {
+        if matches!(scheme, AuthScheme::Bearer | AuthScheme::Unspecified) {
             return Err(denial(
                 dpop_codes::DPOP_MISSING,
-                "the token is bound to a key but was presented with the Bearer scheme; present \
+                "the token is bound to a key but was not presented with the DPoP scheme; present \
                  it with the DPoP scheme and a proof"
                     .to_owned(),
             ));

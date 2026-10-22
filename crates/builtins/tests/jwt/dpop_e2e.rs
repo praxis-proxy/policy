@@ -12,7 +12,7 @@
 //! checked in.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -21,9 +21,11 @@ use p256::ecdsa::SigningKey;
 use p256::pkcs8::{EncodePrivateKey as _, LineEnding};
 use praxis_policy_builtins::plugins::identity_jwt::JwtIdentityResolver;
 use praxis_policy_builtins::plugins::identity_jwt::dpop::{
-    DpopVerifier, PopRequest, ProofOfPossession as _, ReplayGuard, ReplayUnavailable,
-    access_token_hash, codes, jwk_thumbprint,
+    DpopVerifier, InMemoryReplayGuard, PopRequest, ProofOfPossession as _, ReplayGuard,
+    ReplayUnavailable, access_token_hash, codes, jwk_thumbprint,
 };
+#[cfg(feature = "valkey")]
+use praxis_policy_builtins::plugins::identity_jwt::dpop_valkey::ValkeyReplayGuard;
 use praxis_policy_builtins::plugins::identity_jwt::{DpopConfig, DpopMode};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::executor::PipelineResult;
@@ -34,6 +36,12 @@ use praxis_policy_core::identity::{
 };
 use praxis_policy_core::plugin::PluginConfig;
 use serde_json::{Value, json};
+#[cfg(feature = "valkey")]
+use testcontainers_modules::testcontainers::ContainerAsync;
+#[cfg(feature = "valkey")]
+use testcontainers_modules::testcontainers::runners::AsyncRunner as _;
+#[cfg(feature = "valkey")]
+use testcontainers_modules::valkey::{VALKEY_PORT, Valkey};
 
 use crate::common::{TEST_AUDIENCE, TEST_ISSUER, mint, now_unix, plugin_config};
 
@@ -182,6 +190,16 @@ struct Gateway {
 impl Gateway {
     async fn new(cfg: PluginConfig) -> Self {
         let resolver = JwtIdentityResolver::new(cfg.clone()).expect("the resolver must construct");
+        Self::from_resolver(cfg, resolver).await
+    }
+
+    async fn with_replay_guard(cfg: PluginConfig, replay: Arc<dyn ReplayGuard>) -> Self {
+        let resolver = JwtIdentityResolver::with_replay_guard(cfg.clone(), replay)
+            .expect("the resolver must construct");
+        Self::from_resolver(cfg, resolver).await
+    }
+
+    async fn from_resolver(cfg: PluginConfig, resolver: JwtIdentityResolver) -> Self {
         let engine = Arc::new(PolicyEngine::default());
         engine
             .register_handler_for_names::<IdentityHook, _>(
@@ -453,6 +471,54 @@ impl ReplayGuard for UnreachableStore {
     }
 }
 
+#[derive(Debug, Default)]
+struct RetentionProbe(Mutex<Option<(i64, i64)>>);
+
+#[async_trait]
+impl ReplayGuard for RetentionProbe {
+    async fn first_use(
+        &self,
+        _: &str,
+        _: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<bool, ReplayUnavailable> {
+        *self.0.lock().expect("retention probe lock") = Some((expires_at, now));
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn a_late_proof_is_retained_for_the_full_window_across_gateway_clocks() {
+    let key = agent();
+    let token = bound_token(&key);
+    let now = now_unix();
+    let mut claims = claims_for(&token);
+    claims["iat"] = json!(now - 60);
+    let proof = proof(&key, &key.jwk, Algorithm::ES256, &claims);
+    let thumbprint = key.thumbprint();
+    let probe = RetentionProbe::default();
+    let config = DpopConfig {
+        mode: DpopMode::Required,
+        ..DpopConfig::default()
+    };
+    let verifier = DpopVerifier::new(&config, &probe);
+    verifier
+        .verify(&PopRequest {
+            issuer: TEST_ISSUER,
+            access_token: &token,
+            bound_thumbprint: &thumbprint,
+            proof: Some(&proof),
+            method: "POST",
+            url: URL,
+            now,
+        })
+        .await
+        .expect("the proof is within the iat window");
+    let (expires_at, recorded_at) = probe.0.lock().expect("retention probe lock").expect("call");
+    assert_eq!(expires_at - recorded_at, 121);
+}
+
 #[tokio::test]
 async fn an_unreachable_replay_store_denies_rather_than_accepting_unchecked() {
     let config = DpopConfig {
@@ -717,4 +783,97 @@ async fn a_long_client_value_is_clipped_in_the_denial_reason() {
         !reason.contains(&"X".repeat(121)),
         "no more than 120 characters of it are repeated"
     );
+}
+
+#[tokio::test]
+async fn a_bound_token_is_denied_when_the_host_supplies_no_path() {
+    let token = bound_token(&agent());
+    let key = agent();
+    let mut claims = claims_for(&token);
+    claims["htu"] = json!("https://gateway.test/");
+    let mut request = Request::dpop(&token, proof(&key, &key.jwk, Algorithm::ES256, &claims));
+    request.http.as_mut().expect("request line").path = None;
+    let result = send(required(), request).await;
+    assert_eq!(denied_with(&result), "auth.config_error");
+}
+
+#[tokio::test]
+async fn a_bare_authorization_value_cannot_present_a_bound_token() {
+    let token = bound_token(&agent());
+    let result = send(
+        required(),
+        Request::new(token.clone(), Some(valid_proof(&token))),
+    )
+    .await;
+    assert_eq!(denied_with(&result), codes::DPOP_MISSING);
+}
+
+#[tokio::test]
+async fn a_proof_with_an_oth_private_member_is_denied() {
+    let token = bound_token(&agent());
+    let key = agent();
+    let mut jwk = key.jwk.clone();
+    jwk["oth"] = json!([{"r":"private-prime", "d":"private-exponent", "t":"private-coefficient"}]);
+    let header = json!({ "typ": "dpop+jwt", "alg": "ES256", "jwk": jwk });
+    let result = send(
+        required(),
+        Request::dpop(&token, raw_proof(&key, &header, &claims_for(&token))),
+    )
+    .await;
+    assert_eq!(denied_with(&result), codes::DPOP_INVALID);
+}
+
+#[tokio::test]
+async fn a_shared_replay_guard_rejects_a_proof_on_a_second_instance() {
+    let replay: Arc<dyn ReplayGuard> = Arc::new(InMemoryReplayGuard::default());
+    let first = Gateway::with_replay_guard(required(), Arc::clone(&replay)).await;
+    let second = Gateway::with_replay_guard(required(), replay).await;
+    let token = bound_token(&agent());
+    let once = valid_proof(&token);
+    let a = first.send(Request::dpop(&token, once.clone())).await;
+    let b = second.send(Request::dpop(&token, once)).await;
+    assert!(a.continue_processing, "first violation = {:?}", a.violation);
+    assert_eq!(denied_with(&b), codes::DPOP_REPLAY);
+}
+
+#[cfg(feature = "valkey")]
+#[tokio::test]
+#[ignore = "requires VALKEY_TEST_URL"]
+async fn valkey_rejects_a_replay_across_independent_gateway_pools() {
+    let (url, _container): (String, Option<ContainerAsync<Valkey>>) =
+        if let Ok(url) = std::env::var("VALKEY_TEST_URL") {
+            (url, None)
+        } else {
+            match Valkey::default().start().await {
+                Ok(container) => {
+                    let host = container.get_host().await.expect("container host");
+                    let port = container
+                        .get_host_port_ipv4(VALKEY_PORT)
+                        .await
+                        .expect("container port");
+                    (format!("redis://{host}:{port}"), Some(container))
+                },
+                Err(e) if std::env::var("VALKEY_TESTS_OPTIONAL").as_deref() == Ok("1") => {
+                    eprintln!("SKIPPED: no Valkey available ({e})");
+                    return;
+                },
+                Err(e) => panic!("no Valkey available: {e}; set VALKEY_TEST_URL or start Docker"),
+            }
+        };
+    let prefix = format!("dpop:replay:test:{}", now_unix_nanos());
+    let guard = || {
+        let pool = deadpool_redis::Config::from_url(&url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("Valkey pool");
+        let replay: Arc<dyn ReplayGuard> = Arc::new(ValkeyReplayGuard::new(pool, prefix.clone()));
+        replay
+    };
+    let first = Gateway::with_replay_guard(required(), guard()).await;
+    let second = Gateway::with_replay_guard(required(), guard()).await;
+    let token = bound_token(&agent());
+    let once = valid_proof(&token);
+    let a = first.send(Request::dpop(&token, once.clone())).await;
+    assert!(a.continue_processing, "first violation = {:?}", a.violation);
+    let b = second.send(Request::dpop(&token, once)).await;
+    assert_eq!(denied_with(&b), codes::DPOP_REPLAY);
 }
