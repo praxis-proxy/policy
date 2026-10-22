@@ -382,9 +382,11 @@ async fn live_ciba_an_approval_dispatched_on_one_replica_applies_on_another() {
     assert_eq!(upstream_calls(&b), 1);
 
     let replay = a.call(call.elicitation_id(&id)).await;
-    assert!(
-        !replay.allowed(),
-        "an approval applies once across replicas"
+    assert_eq!(
+        replay.violation_code(),
+        Some("elicitation.unknown_id"),
+        "an approval applies once across replicas: {:?}",
+        replay.violation
     );
     assert_eq!(upstream_calls(&a), 0);
 }

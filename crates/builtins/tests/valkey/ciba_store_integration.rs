@@ -107,7 +107,7 @@ async fn a_mismatched_redeem_does_not_consume_the_approval() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn two_replicas_racing_to_redeem_get_exactly_one_approval() {
     let Some(target) = valkey_target().await else {
@@ -120,15 +120,24 @@ async fn two_replicas_racing_to_redeem_get_exactly_one_approval() {
         .await
         .unwrap();
 
-    let (ra, rb) = tokio::join!(
-        a.take_if_ready("race", ROUTE, "adjust", "bob"),
-        b.take_if_ready("race", ROUTE, "adjust", "bob"),
-    );
-    let ready = [ra.unwrap(), rb.unwrap()]
+    let take = |s: Arc<ValkeyCorrelationStore>| {
+        tokio::spawn(async move { s.take_if_ready("race", ROUTE, "adjust", "bob").await })
+    };
+    let (ra, rb) = tokio::join!(take(a), take(b));
+    let results = [ra.unwrap().unwrap(), rb.unwrap().unwrap()];
+    let ready = results
         .iter()
         .filter(|r| matches!(r, TakeResult::Ready(_)))
         .count();
-    assert_eq!(ready, 1, "one replica redeems, the other sees it missing");
+    let missing = results
+        .iter()
+        .filter(|r| matches!(r, TakeResult::Missing))
+        .count();
+    assert_eq!(
+        (ready, missing),
+        (1, 1),
+        "one replica redeems, the other sees it missing"
+    );
 }
 
 #[tokio::test]
@@ -247,7 +256,7 @@ async fn a_server_that_never_replies_times_out_as_an_error() {
         .get("x")
         .await
         .expect_err("a silent server must fail closed");
-    assert!(err.0.contains("timed out"), "got {err}");
+    assert!(err.message().contains("timed out"), "got {err}");
 }
 
 #[tokio::test]
