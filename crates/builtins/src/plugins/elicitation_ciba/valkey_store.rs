@@ -29,10 +29,8 @@ use crate::session::valkey::{BuildError, ValkeyConfig};
 // Constants
 // -----------------------------------------------------------------------------
 
-/// Default key prefix, distinct from the session store's `taint:v1`.
 const DEFAULT_KEY_PREFIX: &str = "ciba:v1";
 
-/// Keys a reference may set on top of the global connection.
 const REFERENCE_OVERRIDES: [&str; 5] = [
     "command_timeout_ms",
     "connect_timeout_ms",
@@ -41,8 +39,8 @@ const REFERENCE_OVERRIDES: [&str; 5] = [
     "username",
 ];
 
-/// Keys a standalone block may set. `ValkeyConfig` ignores unknown keys for
-/// the session store's sake, so a typo here must be caught before it.
+// `ValkeyConfig` accepts extra keys for the session store. CIBA must reject
+// misspelled settings instead of silently ignoring them.
 const STANDALONE_KEYS: [&str; 7] = [
     "command_timeout_ms",
     "connect_timeout_ms",
@@ -53,8 +51,7 @@ const STANDALONE_KEYS: [&str; 7] = [
     "username",
 ];
 
-/// Sets `resolved` only on a live entry, so a late poll cannot recreate an
-/// expired or redeemed one.
+// A late poll must not recreate an expired or redeemed entry.
 const SET_RESOLVED: &str = "
 if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('HSET', KEYS[1], 'resolved', ARGV[1])
@@ -62,8 +59,7 @@ end
 return 0
 ";
 
-/// Returns 0 missing, 1 mismatch, 2 pending, or the hash as a flat list once
-/// it has been deleted. A mismatch or pending entry is left in place.
+// A mismatch or pending approval must remain available for a later request.
 const TAKE_IF_READY: &str = "
 local f = redis.call('HGETALL', KEYS[1])
 if #f == 0 then return 0 end
@@ -120,20 +116,20 @@ pub enum SettingsError {
 
 /// Correlations shared across replicas through Valkey.
 pub struct ValkeyCorrelationStore {
-    /// Keys are `<key_prefix>:<plugin>:<digest>`, so each plugin instance has
-    /// its own.
     valkey: Valkey,
 }
 
 impl ValkeyCorrelationStore {
-    /// Build from a plugin's `store` settings, resolving a
-    /// `connection: session_store` reference against `session_store`.
-    /// Does not dial Valkey.
+    /// Build a store from the plugin's settings and optional session store
+    /// connection. Validation does not connect to Valkey.
+    ///
     /// # Errors
     ///
     /// Returns a [`SettingsError`] when the settings are malformed, a
     /// reference has no Valkey global store or overrides `endpoint` or `tls`,
     /// or the merged settings fail the session store's validation.
+    ///
+    /// [`SettingsError`]: crate::plugins::elicitation_ciba::valkey_store::SettingsError
     pub fn from_settings(
         plugin: &str,
         settings: &serde_json::Map<String, serde_json::Value>,
@@ -240,8 +236,6 @@ impl CorrelationStore for ValkeyCorrelationStore {
 // Utilities
 // -----------------------------------------------------------------------------
 
-/// The `ValkeyConfig` block for these settings: as given, or the global
-/// session store with this store's overrides.
 fn merge(
     settings: &serde_json::Map<String, serde_json::Value>,
     session_store: Option<&serde_yaml::Value>,
@@ -305,7 +299,7 @@ fn to_fields(c: &Correlation) -> Vec<(&'static str, String)> {
     fields
 }
 
-/// Decode a stored hash. A missing field is corruption, not a miss.
+// A missing field means the stored approval is corrupt, not absent.
 fn from_fields(f: &HashMap<String, String>) -> Result<Correlation, StoreError> {
     let field = |name: &str| {
         f.get(name)
@@ -336,9 +330,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Tests
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     #[test]
     fn a_standalone_block_gets_the_ciba_prefix() {
@@ -524,9 +518,9 @@ mod tests {
         assert!(err.message().contains("lacks"), "got {err}");
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Test Utilities
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     fn settings(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
         v.as_object().cloned().unwrap()

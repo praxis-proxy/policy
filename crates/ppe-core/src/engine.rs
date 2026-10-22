@@ -1385,7 +1385,6 @@ impl PolicyEngine {
         self.load_config_with(policy_config, &crate::factory::FactoryContext::default())
     }
 
-    /// [`Self::load_config`] with document-level settings for factories.
     fn load_config_with(
         &self,
         policy_config: PolicyConfig,

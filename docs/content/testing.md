@@ -238,10 +238,10 @@ PPE_KEYCLOAK_URL=http://localhost:8081 VALKEY_TEST_URL=redis://127.0.0.1:6379 \
 docker stop ppe-keycloak ppe-valkey
 ```
 
-The Valkey harness in `crates/builtins` also checks the ACL users in
-[Elicitation](apl/elicitation.md#shared-server-separate-acl-user) when
-`PPE_ACL_VALKEY` names a server that has them, and `PPE_TAINT_PW` and
-`PPE_CIBA_PW` hold their passwords:
+To test the ACL users in
+[Elicitation](apl/elicitation.md#shared-server-separate-acl-user), start a
+Valkey server and run the ignored `documented_acl_users` test. Set
+`PPE_ACL_VALKEY` to its address and provide both passwords:
 
 ```console
 docker run -d --rm --name ppe-acl-valkey -p 127.0.0.1:6380:6379 valkey/valkey:8.1.10

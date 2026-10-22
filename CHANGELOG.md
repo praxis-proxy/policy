@@ -19,10 +19,24 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **`-32122` for unavailable approval state.** An elicitation handler that cannot read or write approval state denies with `elicitation.store_unavailable` and JSON-RPC `-32122`, echoing the elicitation id on check and validate so the agent can retry it. `ELICITATION_UNAVAILABLE_CODE` is exported beside `ELICITATION_PENDING_CODE`. ([#236](https://github.com/praxis-proxy/policy/issues/236))
-- **CIBA approvals can be shared across replicas.** The `elicitation/ciba` plugin takes `store: { kind: memory | valkey }`. A Valkey store is standalone or references `global.session_store` with `connection: session_store`, overriding credentials, key prefix, and timeouts. Redeeming is atomic across replicas, and a store failure denies with `elicitation.store_unavailable`. Omitting `store` keeps process memory and logs a startup warning. ([#236](https://github.com/praxis-proxy/policy/issues/236))
-- **Valkey passwords from the environment or a file.** Both Valkey stores accept `password: { env: NAME }` or `password: { file: PATH }` beside an inline string. ([#236](https://github.com/praxis-proxy/policy/issues/236))
-- `PluginFactory::create_with` receives a `FactoryContext` carrying the raw `global.session_store` block on `load_config_yaml`. It defaults to `create`. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Unavailable CIBA approval state returns `-32122`.** A store read or write
+  failure denies with `elicitation.store_unavailable` and JSON-RPC `-32122`.
+  Check and validate responses include the elicitation id for retries.
+  `ELICITATION_UNAVAILABLE_CODE` is exported.
+  ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **CIBA approvals can be shared across replicas.** The `elicitation/ciba`
+  plugin accepts `store: { kind: memory | valkey }`. A Valkey store can use its
+  own connection or reference `global.session_store`, with overrides for
+  credentials, key prefix, and timeouts. Redemption is atomic across replicas.
+  Omitting `store` uses process memory and logs a startup warning.
+  ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Valkey passwords can come from an environment variable or file.** Both
+  stores accept `password: { env: NAME }` or `{ file: PATH }` alongside a
+  string. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- `PluginFactory::create_with` receives a `FactoryContext` with the raw
+  `global.session_store` block when loaded through `load_config_yaml`. It
+  defaults to `create`.
+  ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
 - **`reference/plugins/transcript-scanner`** reads typed prior turns through `read_agent`, including resource blobs decoded as UTF-8 with replacement, and denies with `transcript.detected` on a configured content match. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`llm:` routes can read the request.** One gated `Extensions.llm_request` carrier holds the optional parsed body and normalized parts. The body reaches PDPs at `llm.request`; reported parts emit `llm.input.*` bag keys, including a role-aware instruction digest and candidate count. Model and completion facts emit canonical `llm.model.*` and `llm.output.*` keys. Published `llm.model_id`, `llm.provider`, `llm.capabilities`, and `completion.*` remain value-identical aliases. The carrier is never serialized and requires `read_llm_request` for plugins. Hosts constructing `Extensions` or `OwnedExtensions` with exhaustive literals must update them. ([#70](https://github.com/praxis-proxy/policy/issues/70))
@@ -41,8 +55,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- **Breaking: the CIBA plugin config rejects unknown fields.** A key it does not recognize, such as a misspelled `store`, now fails at load naming the field instead of being ignored. ([#236](https://github.com/praxis-proxy/policy/issues/236))
-- **Breaking: `CorrelationStore` is async and fallible**, `ValkeyConfig.password` is a `PasswordSource` rather than a `String`, and `CibaConfig` has a new `store` field. `StoreError` is built with `StoreError::new`, and `ValkeyCorrelationStore::from_settings` returns a typed `SettingsError`. `FactoryContext`, `StoreConfig`, `PasswordSource`, and `SettingsError` are `#[non_exhaustive]`. Rust code implementing the trait, building either config as a struct literal, or matching these enums exhaustively must update; YAML is unaffected. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Breaking: CIBA config rejects unknown fields.** A misspelled key such as
+  `stroe` now fails at load and names the field.
+  ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Breaking Rust API changes.** `CorrelationStore` is async and fallible;
+  `ValkeyConfig.password` is a `PasswordSource`, and `CibaConfig` has a `store`
+  field. Construct `StoreError` with `StoreError::new`;
+  `ValkeyCorrelationStore::from_settings` returns `SettingsError`.
+  `FactoryContext`, `StoreConfig`, `PasswordSource`, and `SettingsError` are
+  `#[non_exhaustive]`. Trait implementations, config struct literals, and
+  exhaustive matches may need updates. YAML config is unaffected.
+  ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
 - **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **Breaking:** `Extensions` and `OwnedExtensions` add `metadata`; exhaustive

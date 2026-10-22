@@ -59,13 +59,16 @@ pub trait PluginFactory: Send + Sync {
     /// malformed, or out of range for this plugin.
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>>;
 
-    /// Create with document-level settings a plugin may reference.
+    /// Create a plugin with document-level settings it may reference.
     ///
     /// Defaults to [`Self::create`]. Override only when the plugin's config can
     /// point at a global block, such as `global.session_store`.
+    ///
     /// # Errors
     ///
     /// As [`Self::create`].
+    ///
+    /// [`Self::create`]: PluginFactory::create
     fn create_with(
         &self,
         config: &PluginConfig,
@@ -75,10 +78,12 @@ pub trait PluginFactory: Send + Sync {
     }
 }
 
-/// Document-level settings handed to [`PluginFactory::create_with`].
+/// Document-level settings passed to [`PluginFactory::create_with`].
 ///
-/// Filled by `load_config_yaml`. The typed `load_config` path leaves it
-/// empty, because the raw global blocks exist only in the YAML document.
+/// `load_config_yaml` fills this context. The typed `load_config` path passes
+/// an empty context.
+///
+/// [`PluginFactory::create_with`]: PluginFactory::create_with
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct FactoryContext {
@@ -86,7 +91,7 @@ pub struct FactoryContext {
 }
 
 impl FactoryContext {
-    /// A context carrying the raw `global.session_store` block.
+    /// Create a context with the raw `global.session_store` block.
     #[must_use]
     pub fn with_session_store(session_store: Option<serde_yaml::Value>) -> Self {
         Self { session_store }

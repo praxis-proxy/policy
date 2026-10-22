@@ -99,11 +99,14 @@ impl CibaApprover {
         Self::with_context(cfg, &FactoryContext::default())
     }
 
-    /// [`Self::new`], resolving a `store` that references
-    /// `global.session_store` against `context`.
+    /// Build an approver with document-level settings for a CIBA `store` that
+    /// references `global.session_store`.
+    ///
     /// # Errors
     ///
     /// As [`Self::new`], and when the `store` block cannot be built.
+    ///
+    /// [`Self::new`]: CibaApprover::new
     pub fn with_context(
         cfg: PluginConfig,
         context: &FactoryContext,

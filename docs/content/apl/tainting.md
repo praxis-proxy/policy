@@ -71,9 +71,9 @@ global:
     endpoint: localhost:6379
 ```
 
-`password` is inline, `{ env: NAME }`, or `{ file: PATH }`. A file's contents
-are trimmed, which suits a mounted secret. An unset variable or unreadable file
-fails at load.
+`password` accepts a string, `{ env: NAME }`, or `{ file: PATH }`. File
+contents are trimmed to support mounted secrets. An unset variable or
+unreadable file fails at load.
 
 This store does not hold CIBA approvals. Those have their own `store:` block,
 which may reuse this connection; see

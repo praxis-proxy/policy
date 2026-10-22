@@ -82,7 +82,7 @@ management by PPE.
 - `crates/ppe/tests/docs_examples/main.rs`: every fenced `yaml` block in
   `docs/` is parsed as a document unless marked.
 
-### Institutional Learnings
+### Existing Constraints
 
 - No `docs/solutions/`. Prior plans: prefer internally tagged enums with
   `deny_unknown_fields`; `flatten` and `deny_unknown_fields` do not compose;
@@ -117,17 +117,18 @@ management by PPE.
 - **Reuse session-store validation in place.** Widen
   `ValkeyConfig::validate`, `build_pool`, and the redaction helpers to
   `pub(crate)`. The CIBA store builds a `ValkeyConfig` (merged for a reference)
-  and calls the same validation, so R9 and R13 hold by construction. No module
+  and calls the same validation, which covers R9 and R13. No module
   move; the shared code stays where it is.
 - **Password source.** `ValkeyConfig.password` becomes `Option<PasswordSource>`,
-  an untagged enum of a plain string, `{env: NAME}`, or `{file: PATH}`, resolved
-  during `from_value`. Inline strings keep loading. This is a public type change
-  in `ValkeyConfig`, which the facade re-exports.
-- **Storage layout.** One hash per correlation at `<prefix>:<sha256(id)>`, with
-  `PEXPIREAT` set to `expires_at`. Default prefix `ciba:v1`. `take_if_ready` and
+  accepting a plain string, `{env: NAME}`, or `{file: PATH}`. Validation
+  resolves the source at load. Inline strings keep loading. This changes the
+  public `ValkeyConfig` type, which the facade re-exports.
+- **Storage layout.** One hash per correlation at
+  `<prefix>:<plugin>:<sha256(id)>`, with a TTL derived from `expires_at`.
+  Default prefix `ciba:v1`. `take_if_ready` and
   `set_resolved_approver` are small Lua scripts sent with `EVAL` via
-  `redis::cmd`, so the `redis` `script` feature stays off. `+@scripting` goes in
-  the documented ACL line.
+  `redis::cmd`, so the `redis` `script` feature stays off. The documented ACL
+  grants `+eval` and the commands used by the scripts.
 - **Warning test location.** The R3 warning assertion lives in the integration
   suite, which already depends on the shared capture.
 
@@ -153,8 +154,7 @@ management by PPE.
 
 ## High-Level Technical Design
 
-> *This illustrates the intended approach and is directional guidance for
-> review, not implementation specification.*
+> Config loading sketch for review. See the implementation for current behavior.
 
 ```text
 load_config_yaml(raw)
@@ -190,8 +190,8 @@ validation and pool helpers become crate-visible for reuse.
 
 **Approach:**
 - Untagged `PasswordSource` with `deny_unknown_fields` on the object arms.
-  Resolve to a `Zeroizing`-free `String` held privately after `from_value`, so
-  `connection_url` keeps using a resolved value.
+  Resolve the source when building the connection URL; validation does this
+  during config load.
 - File contents trimmed; errors name the env var or path, never the secret.
 - Widen `validate`, `build_pool` to `pub(crate)` for U4.
 
@@ -329,10 +329,10 @@ CIBA resolves standalone and reference configs.
   `ValkeyConfig::from_value` validates.
 - Reference with no global valkey block, or global kind not `valkey`, fails
   naming the plugin.
-- `put`: `HSET` + `PEXPIREAT` in a MULTI. `get`: `HGETALL`, missing fields or
-  undecodable data are `StoreError`. `set_resolved_approver` and
-  `take_if_ready`: `EVAL` scripts; take compares route/tool/requester and
-  resolved state, deleting only when ready.
+- `put`: replace the hash and set `PEXPIRE` in a MULTI. `get`: `HGETALL`;
+  missing fields or undecodable data are `StoreError`.
+  `set_resolved_approver` and `take_if_ready`: `EVAL` scripts. Take verifies
+  the route, tool, requester, and resolved state before deleting the entry.
 - The valkey test harness needs `elicitation-ciba` too, so its `[[test]]`
   `required-features` becomes `["valkey", "elicitation-ciba"]`, or the CIBA
   module is cfg-gated within it.

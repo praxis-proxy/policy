@@ -142,7 +142,7 @@ Two things make this easy to misconfigure:
     pattern. The docs explain that the prefix only prevents collisions, and the
     ACL users are the boundary: stolen taint credentials cannot forge an
     approver, and stolen CIBA credentials cannot clear taint labels.
-  - **Separate server or instance (strongest isolation).** A standalone block
+  - **Separate server or instance.** A standalone block
     with its own endpoint, TLS and credentials, with guidance on when to choose
     it: a separate failure domain, `noeviction`, retention, or backups.
   - **Reference without credential override (not compartmentalized).** Shown as
@@ -200,8 +200,8 @@ Two things make this easy to misconfigure:
 - An operator can copy the shared-server example from the docs, apply the ACL
   lines, and end up with CIBA and session-taint data that neither credential
   can cross.
-- `ce-plan` can sequence the work without inventing store semantics, failure
-  behavior or config shape.
+- The store semantics, failure behavior, and config shape are specified well
+  enough to plan the implementation.
 
 ---
 
@@ -236,8 +236,8 @@ Two things make this easy to misconfigure:
   access to CIBA keys can forge an approver, so a separate ACL user is the
   real boundary, and a prefix is only collision avoidance. Fixing endpoint and
   TLS keeps one block from describing two servers.
-- **Documentation carries the isolation story.** PPE cannot enforce Valkey ACLs,
-  so the docs ship copyable patterns that make the safe setup the obvious one.
+- **Document Valkey ACLs.** PPE cannot enforce them, so the docs provide
+  copyable commands for separate Session Taint and CIBA users.
 - **Parity with the session-taint Valkey store.** Same connection settings and
   validation, so operators learn one shape and the TLS and ACL guardrails carry
   over.

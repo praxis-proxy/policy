@@ -80,19 +80,16 @@ pub struct ValkeyConfig {
     // never advertises behavior the code doesn't have.
 }
 
-/// Where a Valkey password comes from.
-///
-/// Untagged so a plain string keeps working beside `{ env: NAME }` and
-/// `{ file: PATH }`. Resolved when the connection URL is built, which
-/// validation does at load.
+/// Password supplied inline, through an environment variable, or from a file.
+/// YAML accepts a string, `{ env: NAME }`, or `{ file: PATH }`.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum PasswordSource {
-    /// Given inline. Avoid outside local development.
+    /// A password in the config. Use only for local development.
     Inline(String),
     /// Read from an environment variable.
     Env(EnvPassword),
-    /// Read from a file, trimmed, which suits a mounted secret.
+    /// Read from a file, trimming surrounding whitespace.
     File(FilePassword),
 }
 
@@ -117,7 +114,7 @@ impl<'de> Deserialize<'de> for PasswordSource {
     }
 }
 
-/// `{ env: NAME }`: the variable holding the password.
+/// Environment variable holding a Valkey password.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvPassword {
@@ -125,7 +122,7 @@ pub struct EnvPassword {
     pub env: String,
 }
 
-/// `{ file: PATH }`: a file holding the password.
+/// File holding a Valkey password.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilePassword {

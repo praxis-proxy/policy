@@ -96,14 +96,11 @@ pub const ELICITATION_ID_HEADER: &str = "X-Policy-Elicitation-Id";
 /// Lets a human authorize while the requester separately commits execution.
 pub const ELICITATION_APPROVED_CODE: i64 = -32121;
 
-/// JSON-RPC error code emitted when an elicitation handler cannot read or
-/// write approval state: "outcome unknown, nothing was applied." A check or
-/// validate may be retried with the same elicitation id, echoed in
-/// `details`. A dispatch has no id yet, so retrying it asks the human again.
+/// JSON-RPC error code for approval state that could not be read or written.
+/// Check and validate responses echo the elicitation id in `details` so the
+/// agent can retry. A dispatch has no id to retry and may prompt again.
 pub const ELICITATION_UNAVAILABLE_CODE: i64 = -32122;
 
-/// The violation code an elicitation handler denies with when its approval
-/// state is unavailable. Mapped to [`ELICITATION_UNAVAILABLE_CODE`].
 const ELICITATION_UNAVAILABLE: &str = "elicitation.store_unavailable";
 
 /// Header an agent sets (alongside `X-Policy-Elicitation-Id`) to *peek* at an

@@ -64,8 +64,8 @@ pub struct CibaConfig {
     #[serde(default)]
     pub insecure_http: bool,
 
-    /// Where pending approvals live. Omitted means process memory, with a
-    /// startup warning, because approvals then do not reach other replicas.
+    /// Where pending approvals live. Omission uses process memory and logs a
+    /// warning; approvals then stay on this replica.
     #[serde(default)]
     pub store: Option<StoreConfig>,
 }
@@ -78,8 +78,7 @@ pub enum StoreConfig {
     /// Process memory. Pending approvals do not survive a restart or reach
     /// another replica.
     Memory(MemoryStoreConfig),
-    /// Valkey, shared across replicas. Settings are parsed when the store is
-    /// built so a build without the `valkey` feature can name it.
+    /// Valkey, shared across replicas. Requires the `valkey` feature.
     Valkey(serde_json::Map<String, serde_json::Value>),
 }
 

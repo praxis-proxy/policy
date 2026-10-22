@@ -3,22 +3,11 @@
 
 //! Out-of-band human approval over OIDC CIBA.
 //!
-//! Handles the elicitation hook, which a policy selects by name. Each dispatch,
-//! check, and validate maps onto the backchannel authentication flow, so a
-//! request can wait on a person without holding the connection open.
+//! Register the handler on the `elicit` hook and select it in APL with
+//! `require_approval`. The [`store`] module holds approvals between dispatch,
+//! check, and validate. By default, approvals stay in process memory.
 //!
-//! The host registers this handler against the `elicit` hook; APL
-//! policies select it by name (`require_approval(manager-approver, ...)`).
-//! The praxis-policy-apl-runtime bridge invokes it once per dispatch / check / validate
-//! across the elicitation's lifetime; this module turns each into the
-//! corresponding CIBA round-trip against the configured OP (Keycloak by
-//! default).
-//!
-//! See the module docs for the per-operation flow:
-//!   * [`config`] — typed `config:` block.
-//!   * [`store`]  — in-flight correlation store, in memory by default.
-//!   * [`approver`] — the handler + CIBA HTTP.
-//!   * [`factory`]  — `kind: elicitation/ciba` registration.
+//! [`store`]: crate::plugins::elicitation_ciba::store
 
 /// The elicitation hook handler.
 pub mod approver;

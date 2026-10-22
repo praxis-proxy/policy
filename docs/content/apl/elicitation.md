@@ -149,8 +149,8 @@ validation, the id is still spent. Correlations expire on their own.
 
 ## Correlation store
 
-A pending approval spans requests, so the CIBA plugin keeps it in a
-correlation store chosen by the plugin's `store:` block:
+CIBA keeps pending approvals between requests. Select the correlation store
+with the plugin's `store:` block:
 
 - `kind: memory` holds approvals in this process. A restart loses them, and a
   retry on another replica cannot find them.
@@ -161,18 +161,16 @@ Omitting `store:` uses memory and logs a startup warning naming the plugin.
 `global.session_store` configures Session Taint only. It does not move CIBA
 approvals unless a `store:` block references it.
 
-The store holds who was asked and who approved, never a token. Write access to
-it is still sensitive: anyone who can write the CIBA keys can mark an approval
-as given. Keys are `<key_prefix>:<plugin name>:<digest>`, so two CIBA plugins
-on one server never see each other's approvals, while replicas running the
-same plugin share them. The key prefix keeps CIBA and Session Taint keys apart;
-a separate Valkey ACL user is what keeps one credential from reaching the
-other's keys.
+The store holds the expected and actual approver, never a token. A user with
+write access to CIBA keys can mark an approval as given. Keys use
+`<key_prefix>:<plugin name>:<digest>`, so replicas of the same plugin share
+approvals and different plugins use different keys. The prefix prevents key
+collisions. Separate Valkey ACL users restrict access to each store's keys.
 
 ### Shared server, separate ACL user
 
-The recommended setup. The CIBA store reuses the session store's endpoint and
-TLS through `connection: session_store`, and overrides the credentials and key
+For a shared Valkey server, reference the session store's endpoint and TLS
+with `connection: session_store`, then set separate CIBA credentials and a key
 prefix:
 
 ```yaml
@@ -210,12 +208,17 @@ load the document with `load_config_yaml`, the only loader that reads
 `global.session_store`. Overriding `username` without `password`, or the
 reverse, is refused, so a reference never mixes two users' credentials.
 
-Confine each user to its own keys and to the commands its store sends. PPE
-does not create or check these users:
+Create each Valkey user with access to its store's keys and commands. PPE does
+not create or check ACL users. Run these commands with an administrator account
+on the shared server:
 
 ```console
-ACL SETUSER ppe-taint reset on >taint-password ~taint:v1:* resetchannels +sadd +smembers +expire +multi +exec +ping +unwatch +client|setinfo
-ACL SETUSER ppe-ciba reset on >ciba-password ~ciba:v1:* resetchannels +hmset +hgetall +hset +pexpire +del +exists +multi +exec +eval +ping +unwatch +client|setinfo
+valkey-cli -h valkey.internal -p 6380 --tls ACL SETUSER ppe-taint reset on \
+  '>taint-password' '~taint:v1:*' resetchannels +sadd +smembers +expire \
+  +multi +exec +ping +unwatch '+client|setinfo'
+valkey-cli -h valkey.internal -p 6380 --tls ACL SETUSER ppe-ciba reset on \
+  '>ciba-password' '~ciba:v1:*' resetchannels +hmset +hgetall +hset \
+  +pexpire +del +exists +multi +exec +eval +ping +unwatch '+client|setinfo'
 ```
 
 `reset` starts each user from nothing, so it holds only the commands listed:
@@ -226,8 +229,8 @@ ACL SETUSER ppe-ciba reset on >ciba-password ~ciba:v1:* resetchannels +hmset +hg
 | `hmset`, `hgetall`, `pexpire`, `del` | CIBA correlations and their expiry |
 | `eval`, `exists`, `hset` | CIBA redeem and resolve scripts, and the commands they run |
 | `multi`, `exec` | Both stores write inside a transaction |
-| `ping`, `unwatch` | The pool checks a connection before reuse. Without them every request opens a new connection |
-| `client\|setinfo` | The client names itself on connect. Denying it is harmless but fills the ACL log |
+| `ping`, `unwatch` | Pool connection checks; without them, each request opens a new connection |
+| `client\|setinfo` | Client identification; denying it fills the ACL log |
 
 A missing data command fails closed: the session store errors and CIBA denies
 with `elicitation.store_unavailable`. With these users, stolen taint
@@ -237,8 +240,8 @@ keyspace, or run commands outside its list.
 
 ### Separate server
 
-The strongest isolation. A standalone block names its own endpoint, TLS, and
-credentials:
+Use a standalone block to give CIBA its own Valkey server, endpoint, TLS
+settings, and credentials:
 
 ```yaml
 plugins:
@@ -266,9 +269,8 @@ required off localhost, and the default key prefix is `ciba:v1`.
 
 ### Reference without a credential override
 
-Convenient, but not compartmentalized. The CIBA store gets its own key prefix
-and connects as the session store's user, so both stores share one trust
-boundary:
+Without a credential override, CIBA uses the session store's Valkey user.
+The stores still get different key prefixes, but that user can access both:
 
 ```yaml
 global:
@@ -289,27 +291,25 @@ plugins:
       store: { kind: valkey, connection: session_store }
 ```
 
-A store that cannot answer, because Valkey is unreachable, slow, or returns
-data that cannot be decoded, denies with `elicitation.store_unavailable` and
-JSON-RPC `-32122` ("approval state unavailable"). That is never read as an
-unknown id or as approved under the default `on_error`; a step set to
-`on_error: continue` skips instead, as for any elicitation error. The
-caller-visible reason is generic. The backend error is logged with
-`alarm = "ciba_store_unavailable"`, the plugin, and the operation. A failed
-store after a dispatch reached the OP also logs the `auth_req_id`, because the
-approver has already been prompted.
+If Valkey is unreachable, times out, or returns undecodable data, the step
+denies with `elicitation.store_unavailable` and JSON-RPC `-32122` ("approval
+state unavailable"). Under the default `on_error`, the failure is neither an
+unknown id nor an approval. A step set to `on_error: continue` skips it, as
+with any elicitation error. The caller sees a generic reason. The backend
+error is logged with `alarm = "ciba_store_unavailable"`, the plugin, and the
+operation. If a dispatch reached the OP before a store failure, the log also
+includes the `auth_req_id` because the approver has already been prompted.
 
 A check or validate that fails this way can be retried with the same
 elicitation id once the store recovers; the `-32122` details echo it as
 `elicitation_id`. A dispatch cannot: it has no id yet, so a retry prompts the
 approver again.
 
-A successful load does not prove the store works. The pool connects lazily,
-so an unreachable server, wrong credentials, or a missing ACL grant first shows
-up as `-32122` on the first approval. Before taking traffic, check that the
-gateway host reaches the server and the credentials work, for example with
-`valkey-cli --user ppe-ciba PING`. That does not prove the data-command
-grants; the ACL test in [Testing](../testing.md) covers those.
+The pool connects on first use. An unreachable server, wrong credentials, or
+a missing ACL grant may therefore first appear as `-32122` on an approval.
+Before taking traffic, check connectivity and credentials from the gateway
+host, for example with `valkey-cli --user ppe-ciba PING`. The ACL test in
+[Testing](../testing.md) checks the data-command grants.
 
 ### Durability
 

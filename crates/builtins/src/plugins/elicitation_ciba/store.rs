@@ -63,16 +63,15 @@ pub enum TakeResult {
     Ready(Correlation),
 }
 
-/// A correlation store backend failed, so the outcome is unknown.
-///
-/// Never a miss: a store that cannot answer must not read as "no such id".
+/// A backend failure that leaves the approval state unknown.
+/// Callers must not treat it as a missing approval.
 #[derive(Debug, thiserror::Error)]
 #[error("correlation store unavailable: {0}")]
 pub struct StoreError(String);
 
 impl StoreError {
-    /// A failure described by `message`, which the approver logs but never
-    /// returns to the caller.
+    /// Create a failure with a message for operator logs. Do not return the
+    /// message to the request caller.
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
@@ -117,7 +116,7 @@ impl InMemoryCorrelationStore {
         Self::default()
     }
 
-    /// Seed a correlation without awaiting, for tests that skip dispatch.
+    /// Insert a correlation synchronously for test setup.
     pub fn insert(&self, id: &str, correlation: Correlation) {
         self.put_sync(id, correlation);
     }
