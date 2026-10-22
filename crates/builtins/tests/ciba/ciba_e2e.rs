@@ -1091,15 +1091,15 @@ struct FailingStore;
 #[async_trait::async_trait]
 impl CorrelationStore for FailingStore {
     async fn put(&self, _: &str, _: Correlation) -> Result<(), StoreError> {
-        Err(StoreError("down".into()))
+        Err(StoreError::new("down"))
     }
 
     async fn get(&self, _: &str) -> Result<Option<Correlation>, StoreError> {
-        Err(StoreError("down".into()))
+        Err(StoreError::new("down"))
     }
 
     async fn set_resolved_approver(&self, _: &str, _: String) -> Result<(), StoreError> {
-        Err(StoreError("down".into()))
+        Err(StoreError::new("down"))
     }
 
     async fn take_if_ready(
@@ -1109,7 +1109,7 @@ impl CorrelationStore for FailingStore {
         _: &str,
         _: &str,
     ) -> Result<TakeResult, StoreError> {
-        Err(StoreError("down".into()))
+        Err(StoreError::new("down"))
     }
 }
 
@@ -1137,7 +1137,7 @@ impl FailingWrites {
 #[async_trait::async_trait]
 impl CorrelationStore for FailingWrites {
     async fn put(&self, _: &str, _: Correlation) -> Result<(), StoreError> {
-        Err(StoreError("down".into()))
+        Err(StoreError::new("down"))
     }
 
     async fn get(&self, id: &str) -> Result<Option<Correlation>, StoreError> {
@@ -1145,7 +1145,7 @@ impl CorrelationStore for FailingWrites {
     }
 
     async fn set_resolved_approver(&self, _: &str, _: String) -> Result<(), StoreError> {
-        Err(StoreError("down".into()))
+        Err(StoreError::new("down"))
     }
 
     async fn take_if_ready(

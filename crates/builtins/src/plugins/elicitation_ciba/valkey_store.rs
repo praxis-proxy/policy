@@ -14,20 +14,16 @@
 // that, or one approver's id would satisfy the other's step.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use deadpool_redis::{Connection, Pool};
 use redis::AsyncCommands as _;
-use sha2::{Digest as _, Sha256};
 
 use crate::plugins::elicitation_ciba::store::{
     Correlation, CorrelationStore, StoreError, TakeResult,
 };
-use crate::session::valkey::ValkeyConfig;
-use crate::session::valkey::connection::build_pool;
+use crate::session::valkey::connection::Valkey;
+use crate::session::valkey::{BuildError, ValkeyConfig};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -80,16 +76,53 @@ return f
 ";
 
 // -----------------------------------------------------------------------------
+// Errors
+// -----------------------------------------------------------------------------
+
+/// Why a plugin's Valkey `store` settings were refused at load.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SettingsError {
+    /// A standalone block names a key it does not take.
+    #[error("unknown setting `{key}`; expected one of {expected}")]
+    UnknownSetting {
+        /// The offending key.
+        key: String,
+        /// The keys a standalone block takes.
+        expected: String,
+    },
+    /// A reference sets a key that only a standalone block may set.
+    #[error(
+        "`{0}` cannot be set on a `connection: session_store` reference; \
+         use a standalone block (no `connection`) for a different server"
+    )]
+    NotOverridable(String),
+    /// A reference overrides one of `username` and `password` but not both.
+    #[error("a reference overrides `username` and `password` together, or neither")]
+    PartialCredentials,
+    /// A reference has no Valkey global session store to point at.
+    #[error(
+        "`connection: session_store` needs `global.session_store` of kind valkey, \
+         loaded with `load_config_yaml`"
+    )]
+    NoSessionStore,
+    /// `connection` names something other than `session_store`.
+    #[error("unknown connection {0}; the only one is `session_store`")]
+    UnknownConnection(String),
+    /// The merged settings fail the session store's validation.
+    #[error(transparent)]
+    Invalid(#[from] BuildError),
+}
+
+// -----------------------------------------------------------------------------
 // Store
 // -----------------------------------------------------------------------------
 
 /// Correlations shared across replicas through Valkey.
 pub struct ValkeyCorrelationStore {
-    command_timeout: Duration,
-    connect_timeout: Duration,
-    /// `<key_prefix>:<plugin>:`, so each plugin instance has its own keys.
-    key_prefix: String,
-    pool: Pool,
+    /// Keys are `<key_prefix>:<plugin>:<digest>`, so each plugin instance has
+    /// its own.
+    valkey: Valkey,
 }
 
 impl ValkeyCorrelationStore {
@@ -98,52 +131,35 @@ impl ValkeyCorrelationStore {
     /// Does not dial Valkey.
     /// # Errors
     ///
-    /// Returns a message when the settings are malformed, a reference has no
-    /// Valkey global store or overrides `endpoint` or `tls`, or the merged
-    /// settings fail the session store's validation.
+    /// Returns a [`SettingsError`] when the settings are malformed, a
+    /// reference has no Valkey global store or overrides `endpoint` or `tls`,
+    /// or the merged settings fail the session store's validation.
     pub fn from_settings(
         plugin: &str,
         settings: &serde_json::Map<String, serde_json::Value>,
         session_store: Option<&serde_yaml::Value>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SettingsError> {
         let block = merge(settings, session_store)?;
-        let cfg = ValkeyConfig::from_value(&block).map_err(|e| e.to_string())?;
+        let cfg = ValkeyConfig::from_value(&block)?;
         Ok(Self {
-            command_timeout: Duration::from_millis(cfg.command_timeout_ms),
-            connect_timeout: Duration::from_millis(cfg.connect_timeout_ms),
-            key_prefix: format!("{}:{plugin}:", cfg.key_prefix),
-            pool: build_pool(&cfg).map_err(|e| e.to_string())?,
+            valkey: Valkey::new(&cfg, format!("{}:{plugin}:", cfg.key_prefix))?,
         })
     }
 
-    /// `<prefix>:<plugin>:<hex(sha256(id))>`, so raw ids stay out of the
-    /// keyspace.
     fn key(&self, id: &str) -> String {
-        let mut key = self.key_prefix.clone();
-        for byte in Sha256::digest(id.as_bytes()) {
-            let _ = write!(key, "{byte:02x}");
-        }
-        key
+        self.valkey.key(id)
     }
 
-    async fn conn(&self) -> Result<Connection, StoreError> {
-        match tokio::time::timeout(self.connect_timeout, self.pool.get()).await {
-            Ok(Ok(conn)) => Ok(conn),
-            Ok(Err(e)) => Err(StoreError(e.to_string())),
-            Err(_) => Err(StoreError("valkey connection acquire timed out".to_owned())),
-        }
+    async fn conn(&self) -> Result<deadpool_redis::Connection, StoreError> {
+        self.valkey.conn().await.map_err(StoreError::new)
     }
 
-    /// Run one command under the command timeout.
     async fn timed<T>(
         &self,
         what: &str,
         fut: impl Future<Output = redis::RedisResult<T>>,
     ) -> Result<T, StoreError> {
-        match tokio::time::timeout(self.command_timeout, fut).await {
-            Ok(res) => res.map_err(|e| StoreError(e.to_string())),
-            Err(_) => Err(StoreError(format!("valkey {what} timed out"))),
-        }
+        self.valkey.timed(what, fut).await.map_err(StoreError::new)
     }
 }
 
@@ -213,7 +229,7 @@ impl CorrelationStore for ValkeyCorrelationStore {
             redis::Value::Int(2) => Ok(TakeResult::Pending),
             other => {
                 let fields: HashMap<String, String> = redis::from_redis_value(other)
-                    .map_err(|e| StoreError(format!("undecodable take reply: {e}")))?;
+                    .map_err(|e| StoreError::new(format!("undecodable take reply: {e}")))?;
                 from_fields(&fields).map(TakeResult::Ready)
             },
         }
@@ -229,17 +245,17 @@ impl CorrelationStore for ValkeyCorrelationStore {
 fn merge(
     settings: &serde_json::Map<String, serde_json::Value>,
     session_store: Option<&serde_yaml::Value>,
-) -> Result<serde_yaml::Value, String> {
+) -> Result<serde_yaml::Value, SettingsError> {
     let mut own = settings.clone();
     own.remove("kind");
     let reference = own.remove("connection");
     let mut block = match reference {
         None => {
             if let Some(key) = own.keys().find(|k| !STANDALONE_KEYS.contains(&k.as_str())) {
-                return Err(format!(
-                    "unknown setting `{key}`; expected one of {}",
-                    STANDALONE_KEYS.join(", ")
-                ));
+                return Err(SettingsError::UnknownSetting {
+                    key: key.clone(),
+                    expected: STANDALONE_KEYS.join(", "),
+                });
             }
             own.clone()
         },
@@ -248,41 +264,31 @@ fn merge(
                 .keys()
                 .find(|k| !REFERENCE_OVERRIDES.contains(&k.as_str()))
             {
-                return Err(format!(
-                    "`{key}` cannot be set on a `connection: session_store` reference; \
-                     use a standalone block (no `connection`) for a different server"
-                ));
+                return Err(SettingsError::NotOverridable(key.clone()));
             }
             if own.contains_key("username") != own.contains_key("password") {
-                return Err("a reference overrides `username` and `password` together, \
-                            or neither"
-                    .to_owned());
+                return Err(SettingsError::PartialCredentials);
             }
             let global = session_store
                 .filter(|g| g.get("kind").and_then(serde_yaml::Value::as_str) == Some("valkey"))
-                .ok_or(
-                    "`connection: session_store` needs `global.session_store` of kind valkey, \
-                     loaded with `load_config_yaml`",
-                )?;
+                .ok_or(SettingsError::NoSessionStore)?;
             let mut base: serde_json::Map<String, serde_json::Value> = serde_json::to_value(global)
                 .ok()
                 .and_then(|v| v.as_object().cloned())
-                .ok_or("`global.session_store` is not a mapping")?;
+                .ok_or(SettingsError::NoSessionStore)?;
             base.remove("key_prefix");
             base.extend(own);
             base
         },
         Some(other) => {
-            return Err(format!(
-                "unknown connection {other}; the only one is `session_store`"
-            ));
+            return Err(SettingsError::UnknownConnection(other.to_string()));
         },
     };
     block.remove("kind");
     block
         .entry("key_prefix")
         .or_insert_with(|| DEFAULT_KEY_PREFIX.into());
-    serde_yaml::to_value(block).map_err(|e| e.to_string())
+    serde_yaml::to_value(block).map_err(|e| BuildError::Config(e.to_string()).into())
 }
 
 fn to_fields(c: &Correlation) -> Vec<(&'static str, String)> {
@@ -304,10 +310,10 @@ fn from_fields(f: &HashMap<String, String>) -> Result<Correlation, StoreError> {
     let field = |name: &str| {
         f.get(name)
             .cloned()
-            .ok_or_else(|| StoreError(format!("stored correlation lacks `{name}`")))
+            .ok_or_else(|| StoreError::new(format!("stored correlation lacks `{name}`")))
     };
     let expires_at = DateTime::parse_from_rfc3339(&field("expires_at")?)
-        .map_err(|e| StoreError(format!("stored expiry: {e}")))?
+        .map_err(|e| StoreError::new(format!("stored expiry: {e}")))?
         .with_timezone(&Utc);
     Ok(Correlation {
         expected_approver: field("expected")?,
@@ -386,7 +392,7 @@ mod tests {
                 global.as_ref(),
             )
             .unwrap_err();
-            assert!(err.contains("kind valkey"), "got {err}");
+            assert!(matches!(err, SettingsError::NoSessionStore), "got {err}");
         }
     }
 
@@ -397,7 +403,10 @@ mod tests {
             let mut s = settings(json!({ "connection": "session_store" }));
             s.insert(key.to_owned(), json!("x"));
             let err = merge(&s, Some(&global)).unwrap_err();
-            assert!(err.contains(key) && err.contains("standalone"), "got {err}");
+            assert!(
+                matches!(&err, SettingsError::NotOverridable(k) if k == key),
+                "got {err}"
+            );
         }
     }
 
@@ -407,7 +416,10 @@ mod tests {
             let mut s = settings(json!({ "endpoint": "localhost:6379" }));
             s.insert(key.to_owned(), json!("x"));
             let err = merge(&s, None).unwrap_err();
-            assert!(err.contains(key) && err.contains("endpoint"), "got {err}");
+            assert!(
+                matches!(&err, SettingsError::UnknownSetting { key: k, .. } if k == key),
+                "got {err}"
+            );
         }
     }
 
@@ -418,27 +430,40 @@ mod tests {
             let mut s = settings(json!({ "connection": "session_store" }));
             s.insert(half.to_owned(), json!("x"));
             let err = merge(&s, Some(&global)).unwrap_err();
-            assert!(err.contains("together"), "{half}: {err}");
+            assert!(
+                matches!(err, SettingsError::PartialCredentials),
+                "{half}: {err}"
+            );
         }
     }
 
     #[test]
     fn an_unknown_connection_name_is_refused() {
         let err = merge(&settings(json!({ "connection": "other" })), None).unwrap_err();
-        assert!(err.contains("session_store"), "got {err}");
+        assert!(
+            matches!(err, SettingsError::UnknownConnection(_)),
+            "got {err}"
+        );
     }
 
     #[test]
     fn merged_settings_are_validated_like_the_session_store() {
-        let global = global("kind: valkey\nendpoint: localhost:6379\n");
+        let global = global("kind: valkey\nendpoint: redis://localhost:6379\n");
         let err = ValkeyCorrelationStore::from_settings(
             "p",
-            &settings(json!({ "connection": "session_store", "username": "ppe-ciba" })),
+            &settings(json!({
+                "connection": "session_store",
+                "username": "ppe-ciba",
+                "password": "p",
+            })),
             Some(&global),
         )
         .err()
-        .expect("a username without a password is refused");
-        assert!(err.contains("password"), "got {err}");
+        .expect("a URL endpoint cannot also take separate credentials");
+        assert!(
+            matches!(err, SettingsError::Invalid(BuildError::Config(_))),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -450,7 +475,10 @@ mod tests {
         )
         .err()
         .expect("TLS is required off localhost");
-        assert!(err.contains("TLS"), "got {err}");
+        assert!(
+            matches!(err, SettingsError::Invalid(BuildError::TlsRequired(_))),
+            "got {err}"
+        );
     }
 
     #[tokio::test]
@@ -493,7 +521,7 @@ mod tests {
     fn a_hash_missing_a_field_is_an_error_not_a_miss() {
         let fields = HashMap::from([("expected".to_owned(), "alice".to_owned())]);
         let err = from_fields(&fields).unwrap_err();
-        assert!(err.0.contains("lacks"), "got {err}");
+        assert!(err.message().contains("lacks"), "got {err}");
     }
 
     // -------------------------------------------------------------------------

@@ -80,6 +80,7 @@ pub trait PluginFactory: Send + Sync {
 /// Filled by `load_config_yaml`. The typed `load_config` path leaves it
 /// empty, because the raw global blocks exist only in the YAML document.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct FactoryContext {
     session_store: Option<serde_yaml::Value>,
 }

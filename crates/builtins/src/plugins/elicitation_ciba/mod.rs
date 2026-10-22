@@ -37,4 +37,4 @@ pub use config::{CibaConfig, ClientSecretSource, MemoryStoreConfig, StoreConfig}
 pub use factory::{CibaApproverFactory, KIND};
 pub use store::{Correlation, CorrelationStore, InMemoryCorrelationStore, StoreError, TakeResult};
 #[cfg(feature = "valkey")]
-pub use valkey_store::ValkeyCorrelationStore;
+pub use valkey_store::{SettingsError, ValkeyCorrelationStore};

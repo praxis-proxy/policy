@@ -72,6 +72,7 @@ pub struct CibaConfig {
 
 /// The correlation store a CIBA plugin uses.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum StoreConfig {
     /// Process memory. Pending approvals do not survive a restart or reach

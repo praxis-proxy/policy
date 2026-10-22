@@ -85,8 +85,8 @@ pub struct ValkeyConfig {
 /// Untagged so a plain string keeps working beside `{ env: NAME }` and
 /// `{ file: PATH }`. Resolved when the connection URL is built, which
 /// validation does at load.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum PasswordSource {
     /// Given inline. Avoid outside local development.
     Inline(String),
@@ -94,6 +94,27 @@ pub enum PasswordSource {
     Env(EnvPassword),
     /// Read from a file, trimmed, which suits a mounted secret.
     File(FilePassword),
+}
+
+impl<'de> Deserialize<'de> for PasswordSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // An untagged enum's own error names no shape, so say which are valid.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Shape {
+            Inline(String),
+            Env(EnvPassword),
+            File(FilePassword),
+        }
+        match Shape::deserialize(deserializer) {
+            Ok(Shape::Inline(s)) => Ok(Self::Inline(s)),
+            Ok(Shape::Env(e)) => Ok(Self::Env(e)),
+            Ok(Shape::File(f)) => Ok(Self::File(f)),
+            Err(_) => Err(serde::de::Error::custom(
+                "`password` must be a string, `{ env: NAME }`, or `{ file: PATH }`",
+            )),
+        }
+    }
 }
 
 /// `{ env: NAME }`: the variable holding the password.
@@ -337,13 +358,6 @@ fn endpoint_is_localhost(endpoint: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn percent_decode(s: &str) -> String {
-        url::form_urlencoded::parse(format!("x={s}").as_bytes())
-            .next()
-            .map(|(_, v)| v.into_owned())
-            .unwrap_or_default()
-    }
-
     fn parse(yaml: &str) -> Result<ValkeyConfig, BuildError> {
         let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         ValkeyConfig::from_value(&v)
@@ -552,13 +566,13 @@ mod tests {
 
     #[test]
     fn password_from_env_resolves_into_the_url() {
-        let home = std::env::var("HOME").expect("HOME is set for test runners");
         let cfg =
-            parse("kind: valkey\nendpoint: localhost:6379\npassword: { env: HOME }\n").unwrap();
+            parse("kind: valkey\nendpoint: localhost:6379\npassword: { env: CARGO_PKG_NAME }\n")
+                .unwrap();
         let url = url::Url::parse(&cfg.connection_url().unwrap()).unwrap();
         assert_eq!(
-            percent_decode(url.password().unwrap_or_default()),
-            home,
+            url.password(),
+            Some(env!("CARGO_PKG_NAME")),
             "the env var's value is the password"
         );
     }
@@ -605,11 +619,14 @@ mod tests {
     }
 
     #[test]
-    fn password_source_with_unknown_keys_is_rejected() {
-        let err =
-            parse("kind: valkey\nendpoint: localhost:6379\npassword: { env: HOME, file: /x }\n")
-                .unwrap_err();
-        assert!(matches!(err, BuildError::Config(_)), "got {err:?}");
+    fn a_malformed_password_names_the_accepted_shapes() {
+        for bad in ["{ env: HOME, file: /x }", "{ vault: x }", "[a, b]"] {
+            let err = parse(&format!(
+                "kind: valkey\nendpoint: localhost:6379\npassword: {bad}\n"
+            ))
+            .unwrap_err();
+            assert!(format!("{err}").contains("`{ env: NAME }`"), "{bad}: {err}");
+        }
     }
 
     /// An endpoint with no host cannot carry userinfo. `url` refuses the

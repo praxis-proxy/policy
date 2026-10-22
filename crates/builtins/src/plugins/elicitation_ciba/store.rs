@@ -68,7 +68,20 @@ pub enum TakeResult {
 /// Never a miss: a store that cannot answer must not read as "no such id".
 #[derive(Debug, thiserror::Error)]
 #[error("correlation store unavailable: {0}")]
-pub struct StoreError(pub String);
+pub struct StoreError(String);
+
+impl StoreError {
+    /// A failure described by `message`, which the approver logs but never
+    /// returns to the caller.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    /// The failure description.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Storage for in-flight CIBA correlations, keyed by elicitation id.
 #[async_trait]
