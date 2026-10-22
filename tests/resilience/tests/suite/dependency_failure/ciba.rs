@@ -253,3 +253,50 @@ async fn a_poll_error_does_not_reflect_client_credentials() {
     assert!(host.transport().call_count_for(CIBA_TOKEN_URL) >= 2);
     assert_reflected_body_is_private(&out, &basic, &planted);
 }
+
+/// The protocol code for unavailable approval state.
+const UNAVAILABLE: i64 = -32_122;
+
+#[tokio::test]
+async fn an_unreachable_correlation_store_denies_with_its_own_protocol_code() {
+    let mut doc: serde_yaml::Value =
+        serde_yaml::from_str(Fixture::Cedar.hermetic()).expect("fixture");
+    let ciba = doc["plugins"]
+        .as_sequence_mut()
+        .expect("plugins")
+        .iter_mut()
+        .find(|p| p["kind"].as_str() == Some("elicitation/ciba"))
+        .expect("a CIBA plugin");
+    ciba["config"]["store"] = serde_yaml::from_str(
+        "{ kind: valkey, endpoint: 'localhost:1', connect_timeout_ms: 200, command_timeout_ms: 200 }",
+    )
+    .expect("store");
+    let host = RefHost::builder()
+        .start(&serde_yaml::to_string(&doc).expect("yaml"))
+        .await
+        .expect("a lazy store loads");
+    let call = large_adjustment();
+    let planted = planted(&call);
+    let out = host.call(call).await;
+
+    assert_fail_closed(
+        &host,
+        &out,
+        Stage::Request,
+        "elicitation.store_unavailable",
+        &planted,
+        "dispatch",
+    );
+    assert_eq!(out.proto_error_code(), Some(UNAVAILABLE));
+    assert!(
+        out.detail("elicitation_id").is_none(),
+        "a failed dispatch has no id to retry"
+    );
+    assert!(
+        !out.violation
+            .as_ref()
+            .map_or("", |v| v.reason.as_str())
+            .contains("localhost"),
+        "the backend detail stays in the log"
+    );
+}

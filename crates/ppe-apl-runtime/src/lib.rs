@@ -85,7 +85,7 @@ pub use pdp_router::PdpRouter;
 pub use register::{AplOptions, register_apl};
 pub use route_handler::{
     AplRouteHandler, ELICITATION_APPROVED_CODE, ELICITATION_ID_HEADER, ELICITATION_PEEK_HEADER,
-    ELICITATION_PENDING_CODE, HookFamily, Phase,
+    ELICITATION_PENDING_CODE, ELICITATION_UNAVAILABLE_CODE, HookFamily, Phase,
 };
 pub use session_store::{MemorySessionStore, SessionStore, SessionStoreError, SessionStoreFactory};
 pub use visitor::AplConfigVisitor;
