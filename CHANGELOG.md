@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **CIBA approvals can be shared across replicas.** The `elicitation/ciba` plugin takes `store: { kind: memory | valkey }`. A Valkey store is standalone or references `global.session_store` with `connection: session_store`, overriding credentials, key prefix, and timeouts. Redeeming is atomic across replicas, and a store failure denies with `elicitation.store_unavailable`. Omitting `store` keeps process memory and logs a startup warning. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Valkey passwords from the environment or a file.** Both Valkey stores accept `password: { env: NAME }` or `password: { file: PATH }` beside an inline string. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- `PluginFactory::create_with` receives a `FactoryContext` carrying the raw `global.session_store` block on `load_config_yaml`. It defaults to `create`. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+
 - **`reference/plugins/transcript-scanner`** reads typed prior turns through `read_agent`, including resource blobs decoded as UTF-8 with replacement, and denies with `transcript.detected` on a configured content match. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`llm:` routes can read the request.** One gated `Extensions.llm_request` carrier holds the optional parsed body and normalized parts. The body reaches PDPs at `llm.request`; reported parts emit `llm.input.*` bag keys, including a role-aware instruction digest and candidate count. Model and completion facts emit canonical `llm.model.*` and `llm.output.*` keys. Published `llm.model_id`, `llm.provider`, `llm.capabilities`, and `completion.*` remain value-identical aliases. The carrier is never serialized and requires `read_llm_request` for plugins. Hosts constructing `Extensions` or `OwnedExtensions` with exhaustive literals must update them. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`docs/content/llm-routes.md`** documents canonical keys, missing-key behavior, host obligations, and a tested worked config. ([#70](https://github.com/praxis-proxy/policy/issues/70))
@@ -35,6 +39,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   handler holds `read_metadata` intrinsically.
 
 ### Changed
+
+- **Breaking: the CIBA plugin config rejects unknown fields.** A key it does not recognize, such as a misspelled `store`, now fails at load naming the field instead of being ignored. ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Breaking: `CorrelationStore` is async and fallible**, and `ValkeyConfig.password` is a `PasswordSource` rather than a `String`. Rust code implementing the trait or building `ValkeyConfig` directly must update; YAML is unaffected. ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
 - **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **Breaking:** `Extensions` and `OwnedExtensions` add `metadata`; exhaustive

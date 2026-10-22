@@ -1051,3 +1051,78 @@ async fn leak_checks_include_tokens_minted_before_a_denial() {
     out.assert_no_leaks(&Planted::new());
     assert_recorded_token(&mut out, minted, "access_token");
 }
+
+/// Load a document with one CIBA plugin whose `store` is `store` (omitted when
+/// `None`), returning the process-local warnings it logged.
+fn ciba_store_warnings(store: Option<&str>, global: &str) -> Result<Vec<String>, String> {
+    let (events, _guard) = capture::capturing();
+    let engine = Arc::new(PolicyEngine::default());
+    praxis_policy::install_builtins(&engine);
+    let store = store.map_or(String::new(), |s| format!("      store: {s}\n"));
+    engine
+        .load_config_yaml(&format!(
+            "
+plugins:
+  - name: manager-approver
+    kind: elicitation/ciba
+    hooks: [elicit]
+    capabilities: [perform_http]
+    config:
+      backchannel_endpoint: https://idp.example/ciba/auth
+      token_endpoint: https://idp.example/token
+      client_id: praxis-policy-gateway
+      client_secret_source: {{ kind: literal, secret: shh }}
+{store}routes:
+  - tool: approve_raise
+    authorization:
+      pre_invocation:
+        - 'require_approval(manager-approver, from: claim.manager, purpose: \"Approve\")'
+{global}"
+        ))
+        .map_err(|e| e.to_string())?;
+    Ok(events
+        .logs()
+        .into_iter()
+        .filter(|l| l.contains("ciba_store_process_local"))
+        .collect())
+}
+
+const VALKEY_GLOBAL: &str =
+    "global:\n  session_store:\n    kind: valkey\n    endpoint: localhost:6379\n";
+
+/// An omitted CIBA store warns once, naming the plugin, even when the session
+/// store is Valkey: the two stores are configured separately.
+#[test]
+fn an_omitted_ciba_store_warns_even_with_a_valkey_session_store() {
+    for global in ["", VALKEY_GLOBAL] {
+        let warnings = ciba_store_warnings(None, global).expect("load");
+        assert_eq!(warnings.len(), 1, "global={global:?}: {warnings:#?}");
+        assert!(warnings[0].contains("manager-approver"), "{}", warnings[0]);
+    }
+}
+
+#[test]
+fn an_explicit_memory_store_does_not_warn() {
+    let warnings = ciba_store_warnings(Some("{ kind: memory }"), "").expect("load");
+    assert!(warnings.is_empty(), "{warnings:#?}");
+}
+
+#[test]
+fn a_ciba_store_can_reference_the_valkey_session_store() {
+    let warnings = ciba_store_warnings(
+        Some("{ kind: valkey, connection: session_store, key_prefix: ciba:v1 }"),
+        VALKEY_GLOBAL,
+    )
+    .expect("the reference resolves against global.session_store");
+    assert!(warnings.is_empty(), "{warnings:#?}");
+}
+
+#[test]
+fn a_ciba_store_reference_without_a_valkey_session_store_fails_to_load() {
+    let err = ciba_store_warnings(Some("{ kind: valkey, connection: session_store }"), "")
+        .expect_err("nothing to reference");
+    assert!(
+        err.contains("manager-approver") && err.contains("global.session_store"),
+        "{err}"
+    );
+}

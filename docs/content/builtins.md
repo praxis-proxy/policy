@@ -17,7 +17,7 @@ name it by `kind`.
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
-| `valkey` | session store | `valkey` | Persist Session Taint labels across processes. See [Session Taint](apl/tainting.md). |
+| `valkey` | session store | `valkey` | Persist Session Taint labels across processes, and back a shared CIBA correlation store. See [Session Taint](apl/tainting.md). |
 | `vault` | secret provider | `secrets-vault` | Resolve `secret:` references from Vault KV v2. Not auto-registered: it needs an `HttpTransport` the host supplies. |
 | `quota` | policy plugin | `experimental-quota` | Enforce a per-principal token budget through Limitador. Experimental and excluded from `builtins`. |
 
@@ -25,10 +25,12 @@ The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
 replica.
 
-The CIBA approval correlation store is also in-process memory, independent of
-the session store. Its approvals bind to the tool and requester, expire, and
-can be applied once. Pending approvals do not survive a restart or move to a
-second replica; see [Elicitation](apl/elicitation.md).
+CIBA approvals have their own correlation store, chosen by the plugin's
+`store:` block: `memory`, or `valkey` to share them across replicas.
+Configuring `global.session_store` does not change it unless the block
+references that connection. Without a `store:` block, approvals stay in
+process memory and the plugin warns at startup; see
+[Elicitation](apl/elicitation.md#correlation-store).
 
 The three decision points are held to each other by a differential test
 suite. Given the same attributes and equivalent policy intent, they must

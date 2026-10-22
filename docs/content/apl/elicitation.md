@@ -145,10 +145,137 @@ response body, which may contain client credentials. A successful non-peek
 validation consumes it atomically, so a
 second application fails; an `X-Policy-Elicitation-Peek` request checks without
 consuming and can be followed by one application. If a later step fails after
-validation, the id is still spent. Correlations expire and are held in this
-process's memory. A restart loses pending approvals, and a retry on another
-replica cannot find them; route approval retries to the same process until a
-shared durable store is available.
+validation, the id is still spent. Correlations expire on their own.
+
+## Correlation store
+
+A pending approval spans requests, so the CIBA plugin keeps it in a
+correlation store chosen by the plugin's `store:` block:
+
+- `kind: memory` holds approvals in this process. A restart loses them, and a
+  retry on another replica cannot find them.
+- `kind: valkey` shares them across replicas and survives restarts. Redeeming
+  is atomic, so two replicas cannot both apply one approval.
+
+Omitting `store:` uses memory and logs a startup warning naming the plugin.
+`global.session_store` configures Session Taint only. It does not move CIBA
+approvals unless a `store:` block references it.
+
+The store holds who was asked and who approved, never a token. Write access to
+it is still sensitive: anyone who can write the CIBA keys can mark an approval
+as given. Keys are `<key_prefix>:<plugin name>:<digest>`, so two CIBA plugins
+on one server never see each other's approvals, while replicas running the
+same plugin share them. The key prefix keeps CIBA and Session Taint keys apart;
+a separate Valkey ACL user is what keeps one credential from reaching the
+other's keys.
+
+### Shared server, separate ACL user
+
+The recommended setup. The CIBA store reuses the session store's endpoint and
+TLS through `connection: session_store`, and overrides the credentials and key
+prefix:
+
+```yaml
+global:
+  session_store:
+    kind: valkey
+    endpoint: valkey.internal:6380
+    tls: true
+    username: ppe-taint
+    password: { env: PPE_TAINT_VALKEY_PASSWORD }
+
+plugins:
+  - name: manager-approver
+    kind: elicitation/ciba
+    hooks: [elicit]
+    capabilities: [perform_http]
+    config:
+      backchannel_endpoint: https://kc/realms/corp/protocol/openid-connect/ext/ciba/auth
+      token_endpoint: https://kc/realms/corp/protocol/openid-connect/token
+      client_id: praxis-policy-gateway
+      client_secret_source: { kind: env_var, name: CIBA_CLIENT_SECRET }
+      store:
+        kind: valkey
+        connection: session_store
+        username: ppe-ciba
+        password: { file: /run/secrets/ciba-valkey-password }
+        key_prefix: ciba:v1
+```
+
+A reference may override `username`, `password`, `key_prefix`,
+`connect_timeout_ms`, and `command_timeout_ms`. It cannot change `endpoint` or
+`tls`; use the standalone form for a different server. A reference fails to
+load when `global.session_store` is absent or is not `kind: valkey`.
+
+Confine each user to its own keys on the Valkey side. PPE does not create or
+check these users:
+
+```console
+ACL SETUSER ppe-taint on >taint-password ~taint:v1:* +@read +@write -@dangerous
+ACL SETUSER ppe-ciba on >ciba-password ~ciba:v1:* +@read +@write +@scripting -@dangerous
+```
+
+The CIBA user needs `+@scripting`: redeeming and recording the approver run as
+server-side scripts. With these users, stolen taint credentials cannot forge an
+approver, and stolen CIBA credentials cannot clear Session Taint labels.
+
+### Separate server
+
+The strongest isolation. A standalone block names its own endpoint, TLS, and
+credentials:
+
+```yaml
+plugins:
+  - name: manager-approver
+    kind: elicitation/ciba
+    hooks: [elicit]
+    capabilities: [perform_http]
+    config:
+      backchannel_endpoint: https://kc/realms/corp/protocol/openid-connect/ext/ciba/auth
+      token_endpoint: https://kc/realms/corp/protocol/openid-connect/token
+      client_id: praxis-policy-gateway
+      client_secret_source: { kind: env_var, name: CIBA_CLIENT_SECRET }
+      store:
+        kind: valkey
+        endpoint: valkey-ciba.internal:6380
+        tls: true
+        username: ppe-ciba
+        password: { env: CIBA_VALKEY_PASSWORD }
+```
+
+Choose it when approvals need their own failure domain, `noeviction` policy,
+retention, or backups, so a full taint store cannot evict pending approvals.
+The standalone form takes the same settings as `global.session_store`. TLS is
+required off localhost, and the default key prefix is `ciba:v1`.
+
+### Reference without a credential override
+
+Convenient, but not compartmentalized. The CIBA store gets its own key prefix
+and connects as the session store's user, so both stores share one trust
+boundary:
+
+```yaml
+global:
+  session_store:
+    kind: valkey
+    endpoint: localhost:6379
+
+plugins:
+  - name: manager-approver
+    kind: elicitation/ciba
+    hooks: [elicit]
+    capabilities: [perform_http]
+    config:
+      backchannel_endpoint: https://kc/realms/corp/protocol/openid-connect/ext/ciba/auth
+      token_endpoint: https://kc/realms/corp/protocol/openid-connect/token
+      client_id: praxis-policy-gateway
+      client_secret_source: { kind: env_var, name: CIBA_CLIENT_SECRET }
+      store: { kind: valkey, connection: session_store }
+```
+
+A store that cannot answer, because Valkey is unreachable, slow, or returns
+data that cannot be decoded, denies with `elicitation.store_unavailable`. That
+is never read as an unknown id or as approved.
 
 ## Pipeline integration
 
