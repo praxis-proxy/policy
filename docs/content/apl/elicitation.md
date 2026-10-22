@@ -210,21 +210,30 @@ load the document with `load_config_yaml`, the only loader that reads
 `global.session_store`. Overriding `username` without `password`, or the
 reverse, is refused, so a reference never mixes two users' credentials.
 
-Confine each user to its own keys on the Valkey side. PPE does not create or
-check these users:
+Confine each user to its own keys and to the commands its store sends. PPE
+does not create or check these users:
 
 ```console
-ACL SETUSER ppe-taint on >taint-password ~taint:v1:* +@read +@write +@transaction +ping -@dangerous
-ACL SETUSER ppe-ciba on >ciba-password ~ciba:v1:* +@read +@write +@transaction +@scripting +ping -@dangerous
+ACL SETUSER ppe-taint reset on >taint-password ~taint:v1:* resetchannels +sadd +smembers +expire +multi +exec +ping +unwatch +client|setinfo
+ACL SETUSER ppe-ciba reset on >ciba-password ~ciba:v1:* resetchannels +hmset +hgetall +hset +pexpire +del +exists +multi +exec +eval +ping +unwatch +client|setinfo
 ```
 
-Both users need `+@transaction`, because each store writes inside `MULTI`, and
-`+ping`, which the connection pool sends to check a connection before reuse.
-The CIBA user also needs `+@scripting`: redeeming and recording the approver
-run as server-side scripts. A missing grant fails closed: the session store
-errors and CIBA denies with `elicitation.store_unavailable`. With these users,
-stolen taint credentials cannot forge an approver, and stolen CIBA credentials
-cannot clear Session Taint labels.
+`reset` starts each user from nothing, so it holds only the commands listed:
+
+| Commands | Why |
+|----------|-----|
+| `sadd`, `smembers`, `expire` | Session Taint labels and their TTL |
+| `hmset`, `hgetall`, `pexpire`, `del` | CIBA correlations and their expiry |
+| `eval`, `exists`, `hset` | CIBA redeem and resolve scripts, and the commands they run |
+| `multi`, `exec` | Both stores write inside a transaction |
+| `ping`, `unwatch` | The pool checks a connection before reuse. Without them every request opens a new connection |
+| `client\|setinfo` | The client names itself on connect. Denying it is harmless but fills the ACL log |
+
+A missing data command fails closed: the session store errors and CIBA denies
+with `elicitation.store_unavailable`. With these users, stolen taint
+credentials cannot forge an approver, and stolen CIBA credentials cannot clear
+Session Taint labels. Neither user can read the other's keys, list the
+keyspace, or run commands outside its list.
 
 ### Separate server
 

@@ -343,7 +343,8 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
         return;
     };
     let global: serde_yaml::Value = serde_yaml::from_str(&format!(
-        "kind: valkey\nendpoint: {endpoint}\nusername: ppe-taint\npassword: {{ env: PPE_TAINT_PW }}\n"
+        "kind: valkey\nendpoint: {endpoint}\nusername: ppe-taint\n\
+         password: {{ env: PPE_TAINT_PW }}\nttl_seconds: 60\n"
     ))
     .unwrap();
     let taint =
@@ -351,7 +352,14 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
     taint
         .append_labels("sess", &["secret".to_owned()])
         .await
-        .expect("ppe-taint writes taint:v1:*");
+        .expect("ppe-taint appends with a TTL");
+    assert_eq!(
+        taint
+            .load_labels("sess")
+            .await
+            .expect("ppe-taint loads and refreshes"),
+        vec!["secret".to_owned()]
+    );
 
     let pw = std::env::temp_dir().join(format!("ppe-ciba-acl-pw-{}", uuid::Uuid::new_v4()));
     std::fs::write(&pw, format!("{ciba_pw}\n")).unwrap();
@@ -369,13 +377,35 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
     ciba.put("acl", pending(60))
         .await
         .expect("ppe-ciba writes ciba:v1:*");
-    ciba.set_resolved_approver("acl", "alice".into())
-        .await
-        .expect("ppe-ciba may EVAL");
+    assert!(ciba.get("acl").await.expect("ppe-ciba reads").is_some());
     assert!(matches!(
         ciba.take_if_ready("acl", ROUTE, "adjust", "bob")
             .await
-            .unwrap(),
+            .expect("take"),
+        TakeResult::Pending
+    ));
+    ciba.set_resolved_approver("acl", "alice".into())
+        .await
+        .expect("ppe-ciba may EVAL");
+    ciba.set_resolved_approver("absent", "alice".into())
+        .await
+        .expect("resolving a missing id is a no-op");
+    assert!(matches!(
+        ciba.take_if_ready("acl", ROUTE, "adjust", "eve")
+            .await
+            .expect("take"),
+        TakeResult::BindingMismatch
+    ));
+    assert!(matches!(
+        ciba.take_if_ready("absent", ROUTE, "adjust", "bob")
+            .await
+            .expect("take"),
+        TakeResult::Missing
+    ));
+    assert!(matches!(
+        ciba.take_if_ready("acl", ROUTE, "adjust", "bob")
+            .await
+            .expect("take"),
         TakeResult::Ready(_)
     ));
     std::fs::remove_file(&pw).unwrap();
