@@ -470,6 +470,8 @@ impl CibaApprover {
                 && let Some(approver) = decode_jwt_claim(&token, &self.typed.approver_claim)
                 && let Err(e) = self.store.set_resolved_approver(id, approver).await
             {
+                // The OP has spent this auth_req_id. If the store did not
+                // commit the write, only a new elicitation can recover it.
                 return self.store_unavailable("check", &e);
             }
             // token dropped here — never persisted.

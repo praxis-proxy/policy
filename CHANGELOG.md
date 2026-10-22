@@ -21,7 +21,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Unavailable CIBA approval state returns `-32122`.** A store read or write
   failure denies with `elicitation.store_unavailable` and JSON-RPC `-32122`.
-  Check and validate responses include the elicitation id for retries.
+  Check and validate responses include the elicitation id to identify the
+  failed flow; a failed write can still require a new elicitation.
   `ELICITATION_UNAVAILABLE_CODE` is exported.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 - **CIBA approvals can be shared across replicas.** The `elicitation/ciba`

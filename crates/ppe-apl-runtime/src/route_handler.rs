@@ -97,8 +97,9 @@ pub const ELICITATION_ID_HEADER: &str = "X-Policy-Elicitation-Id";
 pub const ELICITATION_APPROVED_CODE: i64 = -32121;
 
 /// JSON-RPC error code for approval state that could not be read or written.
-/// Check and validate responses echo the elicitation id in `details` so the
-/// agent can retry. A dispatch has no id to retry and may prompt again.
+/// Check and validate responses echo the elicitation id in `details` to
+/// identify the failed flow. A write may have taken effect before the error,
+/// so the id does not guarantee that a retry can complete the approval.
 pub const ELICITATION_UNAVAILABLE_CODE: i64 = -32122;
 
 const ELICITATION_UNAVAILABLE: &str = "elicitation.store_unavailable";
@@ -968,8 +969,7 @@ fn approved_peek_violation(
     .with_details(details)
 }
 
-/// Build the `-32122` violation for unavailable approval state, echoing the
-/// elicitation id when the request carried one so the agent can retry it.
+/// Build the `-32122` violation, echoing the elicitation id when available.
 fn unavailable_violation(reason: String, id: Option<String>) -> PluginViolation {
     let mut details: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     if let Some(id) = id {
@@ -1185,7 +1185,7 @@ mod tests {
         assert_eq!(
             v.details.get("elicitation_id").and_then(Value::as_str),
             Some("elic-9"),
-            "a check or validate can be retried with this id"
+            "the failed flow retains its elicitation id"
         );
         assert!(
             ![ELICITATION_PENDING_CODE, ELICITATION_APPROVED_CODE]

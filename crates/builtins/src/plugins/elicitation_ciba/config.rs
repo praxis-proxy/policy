@@ -147,7 +147,7 @@ impl ClientSecretSource {
     pub fn resolve(&self) -> Result<String, String> {
         match self {
             Self::EnvVar { name } => {
-                std::env::var(name).map_err(|e| format!("env var '{name}' unavailable: {e}"))
+                std::env::var(name).map_err(|error| client_secret_env_error(name, error))
             },
             Self::File { path } => std::fs::read_to_string(path)
                 .map(|s| s.trim().to_owned())
@@ -155,6 +155,14 @@ impl ClientSecretSource {
             Self::Literal { secret } => Ok(secret.clone()),
         }
     }
+}
+
+fn client_secret_env_error(name: &str, error: std::env::VarError) -> String {
+    let reason = match error {
+        std::env::VarError::NotPresent => "is not set",
+        std::env::VarError::NotUnicode(_) => "is not valid Unicode",
+    };
+    format!("client secret env var '{name}' {reason}")
 }
 
 /// Reject `http://` for endpoints that carry credentials. `https://` is
@@ -210,6 +218,22 @@ mod tests {
             secret: "hush".into(),
         };
         assert_eq!(src.resolve().unwrap(), "hush");
+    }
+
+    #[test]
+    fn invalid_unicode_secret_env_error_omits_the_value() {
+        let message = client_secret_env_error(
+            "CIBA_SECRET",
+            std::env::VarError::NotUnicode(std::ffi::OsString::from("sensitive-value")),
+        );
+        assert!(message.contains("CIBA_SECRET"), "got {message}");
+        assert!(message.contains("not valid Unicode"), "got {message}");
+        assert!(!message.contains("sensitive-value"), "got {message}");
+        assert!(
+            client_secret_env_error("CIBA_SECRET", std::env::VarError::NotPresent)
+                .contains("not set"),
+            "a missing variable must be distinguishable from invalid Unicode"
+        );
     }
 
     #[test]

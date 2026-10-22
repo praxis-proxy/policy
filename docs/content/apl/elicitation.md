@@ -300,10 +300,14 @@ error is logged with `alarm = "ciba_store_unavailable"`, the plugin, and the
 operation. If a dispatch reached the OP before a store failure, the log also
 includes the `auth_req_id` because the approver has already been prompted.
 
-A check or validate that fails this way can be retried with the same
-elicitation id once the store recovers; the `-32122` details echo it as
-`elicitation_id`. A dispatch cannot: it has no id yet, so a retry prompts the
-approver again.
+The `-32122` details echo `elicitation_id` when the request supplied one. It
+identifies the failed flow, but does not guarantee a same-id retry. A failed
+read before polling the OP can be retried after the store recovers. If the OP
+approved a poll but the write of the resolved approver failed, the write may
+or may not have persisted. When it did not, the OP has already spent the
+`auth_req_id`; the approval is lost and a new elicitation is required. A
+failed redemption during validate may also have consumed the approval. A
+dispatch has no id yet, so retrying it may prompt the approver again.
 
 The pool connects on first use. An unreachable server, wrong credentials, or
 a missing ACL grant may therefore first appear as `-32122` on an approval.

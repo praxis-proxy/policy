@@ -135,8 +135,9 @@ impl PasswordSource {
     fn resolve(&self) -> Result<String, BuildError> {
         match self {
             Self::Inline(secret) => Ok(secret.clone()),
-            Self::Env(EnvPassword { env }) => std::env::var(env)
-                .map_err(|e| BuildError::Config(format!("password env var '{env}': {e}"))),
+            Self::Env(EnvPassword { env }) => {
+                std::env::var(env).map_err(|error| password_env_error(env, error))
+            },
             Self::File(FilePassword { file }) => std::fs::read_to_string(file)
                 .map(|s| s.trim().to_owned())
                 .map_err(|e| {
@@ -144,6 +145,14 @@ impl PasswordSource {
                 }),
         }
     }
+}
+
+fn password_env_error(name: &str, error: std::env::VarError) -> BuildError {
+    let reason = match error {
+        std::env::VarError::NotPresent => "is not set",
+        std::env::VarError::NotUnicode(_) => "is not valid Unicode",
+    };
+    BuildError::Config(format!("password env var '{name}' {reason}"))
 }
 
 impl ValkeyConfig {
@@ -601,6 +610,19 @@ mod tests {
             format!("{err}").contains("_PPE_VALKEY_PW_DEFINITELY_UNSET_"),
             "got {err}"
         );
+        assert!(format!("{err}").contains("not set"), "got {err}");
+    }
+
+    #[test]
+    fn invalid_unicode_password_env_error_omits_the_value() {
+        let error = password_env_error(
+            "PPE_SECRET",
+            std::env::VarError::NotUnicode(std::ffi::OsString::from("sensitive-value")),
+        );
+        let message = error.to_string();
+        assert!(message.contains("PPE_SECRET"), "got {message}");
+        assert!(message.contains("not valid Unicode"), "got {message}");
+        assert!(!message.contains("sensitive-value"), "got {message}");
     }
 
     #[test]

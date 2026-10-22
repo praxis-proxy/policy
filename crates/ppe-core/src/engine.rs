@@ -473,6 +473,9 @@ struct RuntimeSnapshot {
     /// Executor — stateless 5-phase pipeline engine.
     executor: Executor,
 
+    /// Document-level settings used when factories build route overrides.
+    factory_context: crate::factory::FactoryContext,
+
     /// Parsed PPE config (when loaded from file). Used for route resolution.
     policy_config: Option<PolicyConfig>,
 
@@ -926,7 +929,7 @@ fn resolve_factories(
 /// Create one plugin instance per entry in `plugin_configs`, using the
 /// factories `resolve_factories` returned for those same configs.
 ///
-/// Must run with no engine lock held. `factory.create` is host code and is
+/// Must run with no engine lock held. `factory.create_with` is host code and is
 /// free to re-enter the engine: `register_handler`, `annotate_route` and
 /// `unregister_plugin` take `runtime_write`, `register_factory` takes the
 /// `factories` write side, and neither lock is reentrant, so a caller
@@ -996,6 +999,7 @@ fn snapshot_from_config(
     policy_config: PolicyConfig,
     prev: Option<&RuntimeSnapshot>,
     content_key: Option<crate::hooks::payload::ContentKey>,
+    factory_context: &crate::factory::FactoryContext,
 ) -> RuntimeSnapshot {
     let mut executor = Executor::new(ExecutorConfig {
         timeout_seconds: policy_config.engine_settings.plugin_timeout,
@@ -1073,6 +1077,7 @@ fn snapshot_from_config(
     RuntimeSnapshot {
         registry,
         executor,
+        factory_context: factory_context.clone(),
         policy_config: Some(policy_config),
         route_cache_max_entries,
         route_annotations: HashMap::new(),
@@ -1101,6 +1106,7 @@ impl PolicyEngine {
         let snapshot = RuntimeSnapshot {
             registry: PluginRegistry::new(),
             executor: Executor::new(config.executor),
+            factory_context: crate::factory::FactoryContext::default(),
             policy_config: None,
             route_cache_max_entries: config.route_cache_max_entries,
             route_annotations: HashMap::new(),
@@ -1460,6 +1466,7 @@ impl PolicyEngine {
                 policy_config,
                 Some(current.as_ref()),
                 content_key,
+                context,
             )));
             // Same generation bump as mutate_runtime — load_config doesn't
             // go through that helper because it has to swap registry + executor
@@ -1753,6 +1760,7 @@ impl PolicyEngine {
             policy_config,
             None,
             content_key,
+            &crate::factory::FactoryContext::default(),
         )));
 
         Ok(engine)
@@ -3359,8 +3367,9 @@ impl PolicyEngine {
             {
                 if let Some(overrides) = &resolved_plugin.config_overrides {
                     // Try to create an override instance
-                    if let Some(override_entry) =
-                        self.create_override_instance(entry, overrides).await
+                    if let Some(override_entry) = self
+                        .create_override_instance(entry, overrides, &snapshot.factory_context)
+                        .await
                     {
                         filtered.push(override_entry);
                         continue;
@@ -3533,7 +3542,7 @@ impl PolicyEngine {
     /// Returns an empty `Vec` when:
     /// - the plugin name isn't registered in the engine,
     /// - the factory for the plugin's `kind` is missing,
-    /// - the factory's `create` errors,
+    /// - the factory's `create_with` errors,
     /// - or `initialize_with()` fails on the new instance.
     ///
     /// Each of those is a configuration / wiring fault the caller
@@ -3547,7 +3556,8 @@ impl PolicyEngine {
         capabilities_override: Option<&std::collections::HashSet<String>>,
         on_error_override: Option<crate::plugin::OnError>,
     ) -> Vec<(String, crate::registry::HookEntry)> {
-        let base_entries = self.find_plugin_entries(plugin_name);
+        let snapshot = self.load_runtime();
+        let base_entries = snapshot.registry.entries_for_plugin(plugin_name);
         if base_entries.is_empty() {
             return Vec::new();
         }
@@ -3624,7 +3634,7 @@ impl PolicyEngine {
         merged_config.config = Some(cfg_json);
 
         let kind = merged_config.kind.clone();
-        // The registry lock is released before `create` runs. `create` is
+        // The registry lock is released before `create_with` runs. It is
         // host-supplied code and may re-enter the engine; taking the write side
         // while this thread still held a read guard would deadlock.
         let factory = {
@@ -3644,13 +3654,13 @@ impl PolicyEngine {
             }
         };
         let instance = {
-            match factory.create(&merged_config) {
+            match factory.create_with(&merged_config, &snapshot.factory_context) {
                 Ok(i) => i,
                 Err(e) => {
                     error!(
                         plugin = %plugin_name,
                         error = %e,
-                        "build_override_entries: factory.create failed",
+                        "build_override_entries: factory.create_with failed",
                     );
                     return Vec::new();
                 },
@@ -3721,6 +3731,7 @@ impl PolicyEngine {
         &self,
         base_entry: &crate::registry::HookEntry,
         overrides: &serde_json::Value,
+        factory_context: &crate::factory::FactoryContext,
     ) -> Option<crate::registry::HookEntry> {
         let base_config = base_entry.plugin_ref.trusted_config();
         let kind = &base_config.kind;
@@ -3748,7 +3759,7 @@ impl PolicyEngine {
         // read lock just long enough to construct the instance, then drop
         // it before any `.await` so we never hold a sync lock across awaits.
         let target_hook = base_entry.handler.hook_type_name();
-        // Lock released before `create`, which runs host-supplied factory code.
+        // Lock released before `create_with`, which runs host-supplied code.
         let factory = {
             let factories = self
                 .factories
@@ -3760,7 +3771,7 @@ impl PolicyEngine {
             }
         };
         let instance = {
-            match factory.create(&merged_config) {
+            match factory.create_with(&merged_config, factory_context) {
                 Ok(i) => i,
                 Err(e) => {
                     error!(
@@ -11208,6 +11219,71 @@ plugins:
             *seen.lock().unwrap(),
             vec![None],
             "no raw document, no block"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_overrides_use_the_loaded_factory_context() {
+        register_fixture_hooks();
+        let (mgr, seen) = context_engine();
+        let yaml = format!(
+            r#"{CONTEXT_PLUGIN}engine_settings:
+  dispatch: policy
+global:
+  session_store:
+    kind: memory
+routes:
+  - tool: get_compensation
+    authentication:
+      - name: observer
+        config:
+          marker: route
+"#
+        );
+        load_fixture_yaml(&mgr, &yaml).expect("load");
+        mgr.initialize().await.expect("initialize");
+
+        let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "t".into() });
+        let (result, _) = mgr
+            .invoke_by_name(
+                crate::identity::HOOK_IDENTITY_RESOLVE,
+                payload,
+                make_meta("tool", "get_compensation", None, &[]),
+                None,
+            )
+            .await;
+        assert!(result.continue_processing, "route override runs");
+
+        let cfg_override: serde_yaml::Value =
+            serde_yaml::from_str("marker: plan").expect("override");
+        let entries = mgr
+            .build_override_entries("observer", Some(&cfg_override), None, None)
+            .await;
+        assert!(!entries.is_empty(), "dispatch-plan override runs");
+
+        let blocks = seen.lock().unwrap().clone();
+        assert_eq!(blocks.len(), 3, "base and both override paths ran");
+        assert!(
+            blocks.iter().all(|block| {
+                block
+                    .as_ref()
+                    .and_then(|value| value.get("kind"))
+                    .and_then(serde_yaml::Value::as_str)
+                    == Some("memory")
+            }),
+            "both override paths receive the YAML session store"
+        );
+
+        mgr.load_config(PolicyConfig::default())
+            .expect("typed reload");
+        let entries = mgr
+            .build_override_entries("observer", Some(&cfg_override), None, None)
+            .await;
+        assert!(!entries.is_empty(), "override after reload runs");
+        assert_eq!(
+            seen.lock().unwrap().last(),
+            Some(&None),
+            "typed reload clears the previous YAML context"
         );
     }
 }
