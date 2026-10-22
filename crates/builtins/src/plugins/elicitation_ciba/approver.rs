@@ -147,6 +147,18 @@ impl CibaApprover {
         })
     }
 
+    /// Log a store failure for operators, then deny.
+    fn store_unavailable(&self, op: &str, err: &StoreError) -> PluginResult<ElicitationPayload> {
+        tracing::error!(
+            alarm = "ciba_store_unavailable",
+            plugin = %self.cfg.name,
+            op,
+            error = %err,
+            "CIBA correlation store failed"
+        );
+        store_unavailable()
+    }
+
     /// Build a form POST to `endpoint`, carrying our client credentials.
     ///
     /// Encoding lives in `praxis_policy_core::http::form_urlencode` rather
@@ -347,7 +359,17 @@ impl CibaApprover {
             expires_at,
         };
         if let Err(e) = self.store.put(&id, correlation).await {
-            return store_unavailable(&e);
+            // The OP already prompted the human, so this id is the only link
+            // between that prompt and the lost correlation.
+            tracing::error!(
+                alarm = "ciba_store_unavailable",
+                plugin = %self.cfg.name,
+                route = payload.route_key(),
+                auth_req_id = %id,
+                error = %e,
+                "CIBA dispatch reached the OP but its correlation was not stored"
+            );
+            return store_unavailable();
         }
 
         let mut out = payload.clone();
@@ -376,7 +398,7 @@ impl CibaApprover {
         let correlation = match self.store.get(id).await {
             Ok(Some(c)) => c,
             Ok(None) => return deny("elicitation.unknown_id", "unknown elicitation id"),
-            Err(e) => return store_unavailable(&e),
+            Err(e) => return self.store_unavailable("check", &e),
         };
         if correlation.route_key != payload.route_key()
             || correlation.tool != payload.tool()
@@ -445,7 +467,7 @@ impl CibaApprover {
                 && let Some(approver) = decode_jwt_claim(&token, &self.typed.approver_claim)
                 && let Err(e) = self.store.set_resolved_approver(id, approver).await
             {
-                return store_unavailable(&e);
+                return self.store_unavailable("check", &e);
             }
             // token dropped here — never persisted.
             let mut out = payload.clone();
@@ -495,7 +517,7 @@ impl CibaApprover {
 
         let correlation = if payload.peek() {
             match self.store.get(id).await {
-                Err(e) => return store_unavailable(&e),
+                Err(e) => return self.store_unavailable("validate", &e),
                 Ok(Some(c))
                     if c.route_key == payload.route_key()
                         && c.tool == payload.tool()
@@ -517,7 +539,7 @@ impl CibaApprover {
                 .take_if_ready(id, payload.route_key(), payload.tool(), payload.requester())
                 .await;
             match taken {
-                Err(e) => return store_unavailable(&e),
+                Err(e) => return self.store_unavailable("validate", &e),
                 Ok(TakeResult::Ready(c)) => c,
                 Ok(TakeResult::Missing) => {
                     return deny("elicitation.unknown_id", "unknown elicitation id");
@@ -694,11 +716,12 @@ fn deny(code: &str, reason: impl Into<String>) -> PluginResult<ElicitationPayloa
 }
 
 /// A store failure leaves the approval's state unknown, so it denies with its
-/// own code rather than reading as a missing id.
-fn store_unavailable(err: &StoreError) -> PluginResult<ElicitationPayload> {
+/// own code rather than reading as a missing id. The backend detail goes to
+/// the log only: it can carry server names or ACL text.
+fn store_unavailable() -> PluginResult<ElicitationPayload> {
     deny(
         "elicitation.store_unavailable",
-        format!("{err}; approval state is indeterminate (fail-closed)"),
+        "approval state is unavailable (fail-closed)",
     )
 }
 

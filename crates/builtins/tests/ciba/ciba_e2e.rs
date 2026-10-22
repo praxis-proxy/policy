@@ -1038,6 +1038,11 @@ async fn a_store_that_cannot_be_read_on_check_is_not_an_unknown_id() {
     .await;
 
     assert_eq!(violation.code, "elicitation.store_unavailable");
+    assert!(
+        !violation.reason.contains("down"),
+        "backend detail stays in the log: {}",
+        violation.reason
+    );
     assert_eq!(http.call_count_for(TOKEN_PATH), 0, "no poll without state");
 }
 
