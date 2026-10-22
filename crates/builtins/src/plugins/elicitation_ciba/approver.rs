@@ -662,6 +662,7 @@ fn valkey_store(
 ) -> Result<Arc<dyn CorrelationStore>, Box<PluginError>> {
     let store =
         crate::plugins::elicitation_ciba::valkey_store::ValkeyCorrelationStore::from_settings(
+            plugin,
             settings,
             context.session_store(),
         )

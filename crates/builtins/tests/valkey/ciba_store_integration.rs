@@ -133,6 +133,42 @@ async fn two_replicas_racing_to_redeem_get_exactly_one_approval() {
 
 #[tokio::test]
 #[ignore]
+async fn two_approvers_on_one_server_cannot_redeem_each_others_approvals() {
+    let Some(target) = valkey_target().await else {
+        return;
+    };
+    let settings = serde_json::json!({
+        "endpoint": target.url,
+        "key_prefix": format!("ciba:test:{}", uuid::Uuid::new_v4()),
+    });
+    let settings = settings.as_object().unwrap();
+    let manager = ValkeyCorrelationStore::from_settings("manager", settings, None).unwrap();
+    let security = ValkeyCorrelationStore::from_settings("security", settings, None).unwrap();
+    manager.put("shared-id", pending(60)).await.unwrap();
+    manager
+        .set_resolved_approver("shared-id", "alice".into())
+        .await
+        .unwrap();
+
+    assert!(security.get("shared-id").await.unwrap().is_none());
+    assert!(matches!(
+        security
+            .take_if_ready("shared-id", ROUTE, "adjust", "bob")
+            .await
+            .unwrap(),
+        TakeResult::Missing
+    ));
+    assert!(matches!(
+        manager
+            .take_if_ready("shared-id", ROUTE, "adjust", "bob")
+            .await
+            .unwrap(),
+        TakeResult::Ready(_)
+    ));
+}
+
+#[tokio::test]
+#[ignore]
 async fn a_correlation_expires_server_side() {
     let Some(target) = valkey_target().await else {
         return;
@@ -166,7 +202,7 @@ async fn an_unreachable_store_is_an_error_not_a_miss() {
         "connect_timeout_ms": 300,
         "command_timeout_ms": 300,
     });
-    let store = ValkeyCorrelationStore::from_settings(settings.as_object().unwrap(), None)
+    let store = ValkeyCorrelationStore::from_settings("p", settings.as_object().unwrap(), None)
         .expect("a lazy pool builds");
     store
         .get("x")
@@ -249,7 +285,8 @@ fn store_for(target: &Target) -> ValkeyCorrelationStore {
         "connect_timeout_ms": 5000,
         "command_timeout_ms": 5000,
     });
-    ValkeyCorrelationStore::from_settings(settings.as_object().unwrap(), None).expect("store")
+    ValkeyCorrelationStore::from_settings("manager-approver", settings.as_object().unwrap(), None)
+        .expect("store")
 }
 
 fn pending(ttl_secs: i64) -> Correlation {

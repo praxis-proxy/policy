@@ -8,6 +8,10 @@
 // Connection settings and validation are the session store's: a standalone
 // block is a `ValkeyConfig`, and a `connection: session_store` reference is
 // the global block with this store's overrides applied.
+//
+// Keys carry the plugin name. Memory stores are per plugin, so two approvers
+// on one route never see each other's approvals; a shared keyspace must keep
+// that, or one approver's id would satisfy the other's step.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -70,6 +74,7 @@ return f
 /// Correlations shared across replicas through Valkey.
 pub struct ValkeyCorrelationStore {
     pool: Pool,
+    /// `<key_prefix>:<plugin>:`, so each plugin instance has its own keys.
     key_prefix: String,
     connect_timeout: Duration,
     command_timeout: Duration,
@@ -85,6 +90,7 @@ impl ValkeyCorrelationStore {
     /// Valkey global store or overrides `endpoint` or `tls`, or the merged
     /// settings fail the session store's validation.
     pub fn from_settings(
+        plugin: &str,
         settings: &serde_json::Map<String, serde_json::Value>,
         session_store: Option<&serde_yaml::Value>,
     ) -> Result<Self, String> {
@@ -92,15 +98,16 @@ impl ValkeyCorrelationStore {
         let cfg = ValkeyConfig::from_value(&block).map_err(|e| e.to_string())?;
         Ok(Self {
             pool: build_pool(&cfg).map_err(|e| e.to_string())?,
-            key_prefix: cfg.key_prefix,
+            key_prefix: format!("{}:{plugin}:", cfg.key_prefix),
             connect_timeout: Duration::from_millis(cfg.connect_timeout_ms),
             command_timeout: Duration::from_millis(cfg.command_timeout_ms),
         })
     }
 
-    /// `<prefix>:<hex(sha256(id))>`, so raw ids stay out of the keyspace.
+    /// `<prefix>:<plugin>:<hex(sha256(id))>`, so raw ids stay out of the
+    /// keyspace.
     fn key(&self, id: &str) -> String {
-        let mut key = format!("{}:", self.key_prefix);
+        let mut key = self.key_prefix.clone();
         for byte in Sha256::digest(id.as_bytes()) {
             let _ = write!(key, "{byte:02x}");
         }
@@ -371,6 +378,7 @@ mod tests {
     fn merged_settings_are_validated_like_the_session_store() {
         let global = global("kind: valkey\nendpoint: localhost:6379\n");
         let err = ValkeyCorrelationStore::from_settings(
+            "p",
             &settings(json!({ "connection": "session_store", "username": "ppe-ciba" })),
             Some(&global),
         )
@@ -382,12 +390,26 @@ mod tests {
     #[test]
     fn a_standalone_remote_endpoint_without_tls_is_refused() {
         let err = ValkeyCorrelationStore::from_settings(
+            "p",
             &settings(json!({ "endpoint": "valkey.prod.internal:6379" })),
             None,
         )
         .err()
         .expect("TLS is required off localhost");
         assert!(err.contains("TLS"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn keys_are_scoped_to_the_plugin_instance() {
+        let s = settings(json!({ "endpoint": "localhost:6379" }));
+        let manager = ValkeyCorrelationStore::from_settings("manager", &s, None).unwrap();
+        let security = ValkeyCorrelationStore::from_settings("security", &s, None).unwrap();
+        assert!(manager.key("id").starts_with("ciba:v1:manager:"));
+        assert_ne!(
+            manager.key("id"),
+            security.key("id"),
+            "one approver's id must not address another's correlation"
+        );
     }
 
     #[test]
