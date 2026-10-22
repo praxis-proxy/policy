@@ -150,7 +150,7 @@ impl ValkeyConfig {
     ///
     /// All error text routes the endpoint through [`redact_endpoint`] so
     /// embedded credentials never leak into errors or logs.
-    pub(crate) fn validate(&self) -> Result<(), BuildError> {
+    fn validate(&self) -> Result<(), BuildError> {
         // A fully-formed plaintext `redis://` endpoint with `tls: true`
         // is contradictory: tls_enabled() would say "secure" while the
         // explicit scheme forces cleartext. Reject rather than silently

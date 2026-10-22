@@ -38,11 +38,23 @@ const DEFAULT_KEY_PREFIX: &str = "ciba:v1";
 
 /// Keys a reference may set on top of the global connection.
 const REFERENCE_OVERRIDES: [&str; 5] = [
-    "username",
-    "password",
-    "key_prefix",
-    "connect_timeout_ms",
     "command_timeout_ms",
+    "connect_timeout_ms",
+    "key_prefix",
+    "password",
+    "username",
+];
+
+/// Keys a standalone block may set. `ValkeyConfig` ignores unknown keys for
+/// the session store's sake, so a typo here must be caught before it.
+const STANDALONE_KEYS: [&str; 7] = [
+    "command_timeout_ms",
+    "connect_timeout_ms",
+    "endpoint",
+    "key_prefix",
+    "password",
+    "tls",
+    "username",
 ];
 
 /// Sets `resolved` only on a live entry, so a late poll cannot recreate an
@@ -73,11 +85,11 @@ return f
 
 /// Correlations shared across replicas through Valkey.
 pub struct ValkeyCorrelationStore {
-    pool: Pool,
+    command_timeout: Duration,
+    connect_timeout: Duration,
     /// `<key_prefix>:<plugin>:`, so each plugin instance has its own keys.
     key_prefix: String,
-    connect_timeout: Duration,
-    command_timeout: Duration,
+    pool: Pool,
 }
 
 impl ValkeyCorrelationStore {
@@ -97,10 +109,10 @@ impl ValkeyCorrelationStore {
         let block = merge(settings, session_store)?;
         let cfg = ValkeyConfig::from_value(&block).map_err(|e| e.to_string())?;
         Ok(Self {
-            pool: build_pool(&cfg).map_err(|e| e.to_string())?,
-            key_prefix: format!("{}:{plugin}:", cfg.key_prefix),
-            connect_timeout: Duration::from_millis(cfg.connect_timeout_ms),
             command_timeout: Duration::from_millis(cfg.command_timeout_ms),
+            connect_timeout: Duration::from_millis(cfg.connect_timeout_ms),
+            key_prefix: format!("{}:{plugin}:", cfg.key_prefix),
+            pool: build_pool(&cfg).map_err(|e| e.to_string())?,
         })
     }
 
@@ -147,7 +159,11 @@ impl CorrelationStore for ValkeyCorrelationStore {
             .max(1);
         let mut conn = self.conn().await?;
         let mut pipe = redis::pipe();
+        // DEL first so a put replaces the entry, as the memory store does,
+        // rather than inheriting a stale `resolved` from an earlier one.
         pipe.atomic()
+            .del(&key)
+            .ignore()
             .hset_multiple(&key, &fields)
             .ignore()
             .pexpire(&key, ttl_ms)
@@ -215,9 +231,18 @@ fn merge(
     session_store: Option<&serde_yaml::Value>,
 ) -> Result<serde_yaml::Value, String> {
     let mut own = settings.clone();
+    own.remove("kind");
     let reference = own.remove("connection");
     let mut block = match reference {
-        None => own.clone(),
+        None => {
+            if let Some(key) = own.keys().find(|k| !STANDALONE_KEYS.contains(&k.as_str())) {
+                return Err(format!(
+                    "unknown setting `{key}`; expected one of {}",
+                    STANDALONE_KEYS.join(", ")
+                ));
+            }
+            own.clone()
+        },
         Some(serde_json::Value::String(name)) if name == "session_store" => {
             if let Some(key) = own
                 .keys()
@@ -228,9 +253,17 @@ fn merge(
                      use a standalone block (no `connection`) for a different server"
                 ));
             }
+            if own.contains_key("username") != own.contains_key("password") {
+                return Err("a reference overrides `username` and `password` together, \
+                            or neither"
+                    .to_owned());
+            }
             let global = session_store
                 .filter(|g| g.get("kind").and_then(serde_yaml::Value::as_str) == Some("valkey"))
-                .ok_or("`connection: session_store` needs `global.session_store` of kind valkey")?;
+                .ok_or(
+                    "`connection: session_store` needs `global.session_store` of kind valkey, \
+                     loaded with `load_config_yaml`",
+                )?;
             let mut base: serde_json::Map<String, serde_json::Value> = serde_json::to_value(global)
                 .ok()
                 .and_then(|v| v.as_object().cloned())
@@ -365,6 +398,27 @@ mod tests {
             s.insert(key.to_owned(), json!("x"));
             let err = merge(&s, Some(&global)).unwrap_err();
             assert!(err.contains(key) && err.contains("standalone"), "got {err}");
+        }
+    }
+
+    #[test]
+    fn a_misspelled_standalone_setting_is_refused() {
+        for key in ["pasword", "ttl_seconds"] {
+            let mut s = settings(json!({ "endpoint": "localhost:6379" }));
+            s.insert(key.to_owned(), json!("x"));
+            let err = merge(&s, None).unwrap_err();
+            assert!(err.contains(key) && err.contains("endpoint"), "got {err}");
+        }
+    }
+
+    #[test]
+    fn a_reference_overrides_credentials_as_a_pair() {
+        let global = global("kind: valkey\nendpoint: localhost:6379\nusername: u\npassword: p\n");
+        for half in ["username", "password"] {
+            let mut s = settings(json!({ "connection": "session_store" }));
+            s.insert(half.to_owned(), json!("x"));
+            let err = merge(&s, Some(&global)).unwrap_err();
+            assert!(err.contains("together"), "{half}: {err}");
         }
     }
 
