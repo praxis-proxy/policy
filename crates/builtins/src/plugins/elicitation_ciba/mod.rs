@@ -24,6 +24,8 @@ pub mod valkey_store;
 pub use approver::CibaApprover;
 pub use config::{CibaConfig, ClientSecretSource, MemoryStoreConfig, StoreConfig};
 pub use factory::{CibaApproverFactory, KIND};
-pub use store::{Correlation, CorrelationStore, InMemoryCorrelationStore, StoreError, TakeResult};
+pub use store::{
+    Correlation, CorrelationStore, InMemoryCorrelationStore, PollClaim, StoreError, TakeResult,
+};
 #[cfg(feature = "valkey")]
 pub use valkey_store::{SettingsError, ValkeyCorrelationStore};

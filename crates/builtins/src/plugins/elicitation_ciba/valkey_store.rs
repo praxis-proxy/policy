@@ -14,13 +14,14 @@
 // that, or one approver's id would satisfy the other's step.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use redis::AsyncCommands as _;
 
 use crate::plugins::elicitation_ciba::store::{
-    Correlation, CorrelationStore, StoreError, TakeResult,
+    Correlation, CorrelationStore, PollClaim, StoreError, TakeResult,
 };
 use crate::session::valkey::connection::Valkey;
 use crate::session::valkey::{BuildError, ValkeyConfig};
@@ -57,6 +58,51 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('HSET', KEYS[1], 'resolved', ARGV[1])
 end
 return 0
+";
+
+// Redis TIME keeps claim leases consistent when the gateways' clocks differ.
+// An expired owner is uncertain: the OP may have spent the single-use id.
+const CLAIM_POLL: &str = "
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('HGET', KEYS[1], 'route') ~= ARGV[3] or
+   redis.call('HGET', KEYS[1], 'tool') ~= ARGV[4] or
+   redis.call('HGET', KEYS[1], 'requester') ~= ARGV[5] then return 5 end
+if redis.call('HEXISTS', KEYS[1], 'resolved') == 1 then return 2 end
+if redis.call('HGET', KEYS[1], 'poll_unknown') == '1' then return 3 end
+local now_parts = redis.call('TIME')
+local now = tonumber(now_parts[1]) * 1000 + math.floor(tonumber(now_parts[2]) / 1000)
+local current = redis.call('HGET', KEYS[1], 'poll_owner')
+if current then
+  local deadline = tonumber(redis.call('HGET', KEYS[1], 'poll_deadline')) or 0
+  if now >= deadline then
+    redis.call('HSET', KEYS[1], 'poll_unknown', '1')
+    redis.call('HDEL', KEYS[1], 'poll_owner', 'poll_deadline')
+    return 3
+  end
+  return 1
+end
+redis.call('HSET', KEYS[1], 'poll_owner', ARGV[1], 'poll_deadline', now + tonumber(ARGV[2]))
+return 4
+";
+
+const RELEASE_POLL: &str = "
+if redis.call('HGET', KEYS[1], 'poll_owner') ~= ARGV[1] then return 0 end
+redis.call('HDEL', KEYS[1], 'poll_owner', 'poll_deadline')
+return 1
+";
+
+const COMPLETE_POLL: &str = "
+if redis.call('HGET', KEYS[1], 'poll_owner') ~= ARGV[1] then return 0 end
+redis.call('HSET', KEYS[1], 'resolved', ARGV[2])
+redis.call('HDEL', KEYS[1], 'poll_owner', 'poll_deadline')
+return 1
+";
+
+const ABANDON_POLL: &str = "
+if redis.call('HGET', KEYS[1], 'poll_owner') ~= ARGV[1] then return 0 end
+redis.call('HSET', KEYS[1], 'poll_unknown', '1')
+redis.call('HDEL', KEYS[1], 'poll_owner', 'poll_deadline')
+return 1
 ";
 
 // A mismatch or pending approval must remain available for a later request.
@@ -157,6 +203,29 @@ impl ValkeyCorrelationStore {
     ) -> Result<T, StoreError> {
         self.valkey.timed(what, fut).await.map_err(StoreError::new)
     }
+
+    async fn run_owner_script(
+        &self,
+        what: &str,
+        script: &str,
+        id: &str,
+        owner: &str,
+        approver: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let key = self.key(id);
+        let mut conn = self.conn().await?;
+        let mut cmd = redis::cmd("EVAL");
+        cmd.arg(script).arg(1).arg(&key).arg(owner);
+        if let Some(approver) = approver {
+            cmd.arg(approver);
+        }
+        let updated: i64 = self.timed(what, cmd.query_async(&mut conn)).await?;
+        if updated == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::new("poll claim is no longer owned"))
+        }
+    }
 }
 
 #[async_trait]
@@ -191,6 +260,63 @@ impl CorrelationStore for ValkeyCorrelationStore {
             return Ok(None);
         }
         from_fields(&fields).map(Some)
+    }
+
+    async fn claim_poll(
+        &self,
+        id: &str,
+        owner: &str,
+        lease: Duration,
+        route_key: &str,
+        tool: &str,
+        requester: &str,
+    ) -> Result<PollClaim, StoreError> {
+        let key = self.key(id);
+        let lease_ms = i64::try_from(lease.as_millis()).map_err(|error| {
+            StoreError::new(format!(
+                "poll lease exceeds Valkey's integer range: {error}"
+            ))
+        })?;
+        let mut conn = self.conn().await?;
+        let mut cmd = redis::cmd("EVAL");
+        cmd.arg(CLAIM_POLL)
+            .arg(1)
+            .arg(&key)
+            .arg(owner)
+            .arg(lease_ms)
+            .arg(route_key)
+            .arg(tool)
+            .arg(requester);
+        let result: i64 = self.timed("claim poll", cmd.query_async(&mut conn)).await?;
+        match result {
+            0 => Ok(PollClaim::Missing),
+            1 => Ok(PollClaim::Busy),
+            2 => Ok(PollClaim::Resolved),
+            3 => Ok(PollClaim::Uncertain),
+            4 => Ok(PollClaim::Acquired),
+            5 => Ok(PollClaim::BindingMismatch),
+            _ => Err(StoreError::new("undecodable poll claim reply")),
+        }
+    }
+
+    async fn release_poll(&self, id: &str, owner: &str) -> Result<(), StoreError> {
+        self.run_owner_script("release poll", RELEASE_POLL, id, owner, None)
+            .await
+    }
+
+    async fn complete_poll(
+        &self,
+        id: &str,
+        owner: &str,
+        approver: String,
+    ) -> Result<(), StoreError> {
+        self.run_owner_script("complete poll", COMPLETE_POLL, id, owner, Some(&approver))
+            .await
+    }
+
+    async fn abandon_poll(&self, id: &str, owner: &str) -> Result<(), StoreError> {
+        self.run_owner_script("abandon poll", ABANDON_POLL, id, owner, None)
+            .await
     }
 
     async fn set_resolved_approver(&self, id: &str, approver: String) -> Result<(), StoreError> {

@@ -10,7 +10,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use chrono::Utc;
 use praxis_policy_builtins::plugins::elicitation_ciba::{
-    CibaApprover, Correlation, CorrelationStore as _, TakeResult, ValkeyCorrelationStore,
+    CibaApprover, Correlation, CorrelationStore as _, PollClaim, TakeResult, ValkeyCorrelationStore,
 };
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::elicitation::{ElicitationOp, ElicitationPayload};
@@ -113,8 +113,9 @@ async fn two_replicas_racing_to_redeem_get_exactly_one_approval() {
     let Some(target) = valkey_target().await else {
         return;
     };
-    let a = Arc::new(store_for(&target));
-    let b = Arc::new(store_for(&target));
+    let prefix = format!("ciba:test:{}", uuid::Uuid::new_v4());
+    let a = Arc::new(store_with_prefix(&target, &prefix));
+    let b = Arc::new(store_with_prefix(&target, &prefix));
     a.put("race", pending(60)).await.unwrap();
     a.set_resolved_approver("race", "alice".into())
         .await
@@ -137,6 +138,86 @@ async fn two_replicas_racing_to_redeem_get_exactly_one_approval() {
         (ready, missing),
         (1, 1),
         "one replica redeems, the other sees it missing"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn two_replicas_claim_one_op_poll() {
+    let Some(target) = valkey_target().await else {
+        return;
+    };
+    let prefix = format!("ciba:test:{}", uuid::Uuid::new_v4());
+    let a = store_with_prefix(&target, &prefix);
+    let b = store_with_prefix(&target, &prefix);
+    a.put("poll-race", pending(60)).await.unwrap();
+    assert_eq!(
+        a.claim_poll(
+            "poll-race",
+            "a",
+            Duration::from_secs(10),
+            ROUTE,
+            "adjust",
+            "bob"
+        )
+        .await
+        .unwrap(),
+        PollClaim::Acquired
+    );
+    assert_eq!(
+        b.claim_poll(
+            "poll-race",
+            "b",
+            Duration::from_secs(10),
+            ROUTE,
+            "adjust",
+            "bob"
+        )
+        .await
+        .unwrap(),
+        PollClaim::Busy
+    );
+    a.complete_poll("poll-race", "a", "alice".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        b.claim_poll(
+            "poll-race",
+            "b",
+            Duration::from_secs(10),
+            ROUTE,
+            "adjust",
+            "bob"
+        )
+        .await
+        .unwrap(),
+        PollClaim::Resolved
+    );
+
+    a.put("expired-poll", pending(60)).await.unwrap();
+    a.claim_poll(
+        "expired-poll",
+        "a",
+        Duration::from_millis(1),
+        ROUTE,
+        "adjust",
+        "bob",
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        b.claim_poll(
+            "expired-poll",
+            "b",
+            Duration::from_secs(10),
+            ROUTE,
+            "adjust",
+            "bob"
+        )
+        .await
+        .unwrap(),
+        PollClaim::Uncertain
     );
 }
 
@@ -461,9 +542,13 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
 const ROUTE: &str = "tool:adjust@sandbox";
 
 fn store_for(target: &Target) -> ValkeyCorrelationStore {
+    store_with_prefix(target, &format!("ciba:test:{}", uuid::Uuid::new_v4()))
+}
+
+fn store_with_prefix(target: &Target, prefix: &str) -> ValkeyCorrelationStore {
     let settings = serde_json::json!({
         "endpoint": target.url,
-        "key_prefix": format!("ciba:test:{}", uuid::Uuid::new_v4()),
+        "key_prefix": prefix,
         "connect_timeout_ms": 5000,
         "command_timeout_ms": 5000,
     });

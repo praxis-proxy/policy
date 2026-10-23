@@ -17,6 +17,7 @@
     reason = "test and example code"
 )]
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::json;
@@ -33,7 +34,8 @@ use praxis_policy_core::http_testing::FakeTransport;
 use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 
 use praxis_policy_builtins::plugins::elicitation_ciba::{
-    CibaApprover, Correlation, CorrelationStore, InMemoryCorrelationStore, StoreError, TakeResult,
+    CibaApprover, Correlation, CorrelationStore, InMemoryCorrelationStore, PollClaim, StoreError,
+    TakeResult,
 };
 
 // ---------------------------------------------------------------------
@@ -740,6 +742,40 @@ async fn a_second_check_after_approval_replays_instead_of_repolling() {
     assert_eq!(http.call_count_for(TOKEN_PATH), 1);
 }
 
+#[tokio::test]
+async fn concurrent_checks_poll_a_single_use_id_once() {
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(
+                TOKEN_PATH,
+                200,
+                &json!({ "id_token": fake_id_token("alice@corp.com") }).to_string(),
+            )
+            .with_latency(Duration::from_millis(50)),
+    );
+    let app = approver_with_pending();
+    let check = || {
+        ElicitationPayload::new(ElicitationOp::Check, "approval", "").with_elicitation_id("REQ-123")
+    };
+    let (first, second) = tokio::join!(run(&app, &http, check()), run(&app, &http, check()));
+    assert_eq!(
+        http.call_count_for(TOKEN_PATH),
+        1,
+        "only the claim owner polls"
+    );
+    assert!(
+        [first.status, second.status].contains(&Some(ElicitationStatusKind::Pending)),
+        "the competing check stays pending"
+    );
+    assert!(
+        [first.outcome, second.outcome].contains(&Some(ElicitationOutcomeKind::Approved)),
+        "the owner saves the approval"
+    );
+    let replay = run(&app, &http, check()).await;
+    assert_eq!(replay.outcome, Some(ElicitationOutcomeKind::Approved));
+    assert_eq!(http.call_count_for(TOKEN_PATH), 1);
+}
+
 // ---------------------------------------------------------------------
 // Configuration the approver has to refuse
 // ---------------------------------------------------------------------
@@ -1100,6 +1136,30 @@ impl CorrelationStore for FailingStore {
         Err(StoreError::new("down"))
     }
 
+    async fn claim_poll(
+        &self,
+        _: &str,
+        _: &str,
+        _: Duration,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<PollClaim, StoreError> {
+        Err(StoreError::new("down"))
+    }
+
+    async fn release_poll(&self, _: &str, _: &str) -> Result<(), StoreError> {
+        Err(StoreError::new("down"))
+    }
+
+    async fn complete_poll(&self, _: &str, _: &str, _: String) -> Result<(), StoreError> {
+        Err(StoreError::new("down"))
+    }
+
+    async fn abandon_poll(&self, _: &str, _: &str) -> Result<(), StoreError> {
+        Err(StoreError::new("down"))
+    }
+
     async fn set_resolved_approver(&self, _: &str, _: String) -> Result<(), StoreError> {
         Err(StoreError::new("down"))
     }
@@ -1144,6 +1204,32 @@ impl CorrelationStore for FailingWrites {
 
     async fn get(&self, id: &str) -> Result<Option<Correlation>, StoreError> {
         self.0.get(id).await
+    }
+
+    async fn claim_poll(
+        &self,
+        id: &str,
+        owner: &str,
+        lease: Duration,
+        route_key: &str,
+        tool: &str,
+        requester: &str,
+    ) -> Result<PollClaim, StoreError> {
+        self.0
+            .claim_poll(id, owner, lease, route_key, tool, requester)
+            .await
+    }
+
+    async fn release_poll(&self, id: &str, owner: &str) -> Result<(), StoreError> {
+        self.0.release_poll(id, owner).await
+    }
+
+    async fn complete_poll(&self, _: &str, _: &str, _: String) -> Result<(), StoreError> {
+        Err(StoreError::new("down"))
+    }
+
+    async fn abandon_poll(&self, id: &str, owner: &str) -> Result<(), StoreError> {
+        self.0.abandon_poll(id, owner).await
     }
 
     async fn set_resolved_approver(&self, _: &str, _: String) -> Result<(), StoreError> {

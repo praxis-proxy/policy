@@ -26,6 +26,7 @@
 // they're returned as data on the payload via `modify_payload`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -50,7 +51,7 @@ use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use crate::plugins::elicitation_ciba::KIND;
 use crate::plugins::elicitation_ciba::config::{CibaConfig, StoreConfig, require_https};
 use crate::plugins::elicitation_ciba::store::{
-    Correlation, CorrelationStore, InMemoryCorrelationStore, StoreError, TakeResult,
+    Correlation, CorrelationStore, InMemoryCorrelationStore, PollClaim, StoreError, TakeResult,
 };
 
 /// OIDC CIBA grant type for the token-endpoint poll.
@@ -420,10 +421,7 @@ impl CibaApprover {
         // (the spent id would come back `invalid_grant`). Replay the cached
         // approved result instead; `validate` re-compares the approver.
         if correlation.resolved_approver.is_some() {
-            let mut out = payload.clone();
-            out.status = Some(ElicitationStatusKind::Resolved);
-            out.outcome = Some(ElicitationOutcomeKind::Approved);
-            return PluginResult::modify_payload(out);
+            return approved_check(payload);
         }
 
         let form: Vec<(&str, &str)> = vec![("grant_type", GRANT_TYPE_CIBA), ("auth_req_id", id)];
@@ -437,12 +435,62 @@ impl CibaApprover {
             Ok(r) => r,
             Err(v) => return PluginResult::deny(*v),
         };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let lease = self.http_timeout.saturating_add(Duration::from_secs(5));
+        match self
+            .store
+            .claim_poll(
+                id,
+                &owner,
+                lease,
+                payload.route_key(),
+                payload.tool(),
+                payload.requester(),
+            )
+            .await
+        {
+            Ok(PollClaim::Acquired) => {},
+            Ok(PollClaim::Busy) => {
+                let mut out = payload.clone();
+                out.status = Some(ElicitationStatusKind::Pending);
+                return PluginResult::modify_payload(out);
+            },
+            Ok(PollClaim::Resolved) => return approved_check(payload),
+            Ok(PollClaim::Missing) => {
+                return deny("elicitation.unknown_id", "unknown elicitation id");
+            },
+            Ok(PollClaim::BindingMismatch) => {
+                return deny(
+                    "elicitation.binding_mismatch",
+                    "approval belongs to another route, tool, or requester",
+                );
+            },
+            Ok(PollClaim::Uncertain) => {
+                return self.store_unavailable(
+                    "check",
+                    &StoreError::new("an earlier OP poll may have spent the approval"),
+                );
+            },
+            Err(e) => return self.store_unavailable("check", &e),
+        }
         let response = match ext
             .http_request(request, RetryPolicy::undelivered_only())
             .await
         {
             Ok(r) => r,
             Err(e) => {
+                let uncertain = matches!(
+                    &e,
+                    HttpRequestError::Transport(error) if error.may_have_reached_peer()
+                );
+                let stored = if uncertain {
+                    self.store.abandon_poll(id, &owner).await
+                } else {
+                    self.store.release_poll(id, &owner).await
+                };
+                if let Err(error) = stored {
+                    return self.store_unavailable("check", &error);
+                }
                 return PluginResult::deny(self.op_violation("CIBA token poll", &e));
             },
         };
@@ -458,6 +506,9 @@ impl CibaApprover {
             let parsed: TokenResponse = match serde_json::from_str(&body) {
                 Ok(p) => p,
                 Err(e) => {
+                    if let Err(error) = self.store.abandon_poll(id, &owner).await {
+                        return self.store_unavailable("check", &error);
+                    }
                     return deny(
                         "elicitation.bad_response",
                         format!("CIBA token response wasn't valid JSON: {e}"),
@@ -466,25 +517,45 @@ impl CibaApprover {
             };
             // Prefer the id_token (carries user claims); fall back to the
             // access_token. Extract the approver claim and drop the token.
-            if let Some(token) = parsed.id_token.or(parsed.access_token)
-                && let Some(approver) = decode_jwt_claim(&token, &self.typed.approver_claim)
-                && let Err(e) = self.store.set_resolved_approver(id, approver).await
-            {
+            let approver = parsed
+                .id_token
+                .or(parsed.access_token)
+                .and_then(|token| decode_jwt_claim(&token, &self.typed.approver_claim));
+            let Some(approver) = approver else {
+                if let Err(error) = self.store.abandon_poll(id, &owner).await {
+                    return self.store_unavailable("check", &error);
+                }
+                return deny(
+                    "elicitation.bad_response",
+                    "CIBA token response lacks approver claim",
+                );
+            };
+            if let Err(e) = self.store.complete_poll(id, &owner, approver).await {
                 // The OP has spent this auth_req_id. If the store did not
                 // commit the write, only a new elicitation can recover it.
                 return self.store_unavailable("check", &e);
             }
             // token dropped here — never persisted.
-            let mut out = payload.clone();
-            out.status = Some(ElicitationStatusKind::Resolved);
-            out.outcome = Some(ElicitationOutcomeKind::Approved);
-            return PluginResult::modify_payload(out);
+            return approved_check(payload);
         }
 
         // Non-2xx: a standard OAuth error body drives the lifecycle.
         let err_code = serde_json::from_str::<OAuthError>(&body)
             .map(|e| e.error)
             .unwrap_or_default();
+
+        if err_code == "invalid_grant" {
+            match self.store.get(id).await {
+                Ok(Some(c)) if c.resolved_approver.is_some() => {
+                    if let Err(error) = self.store.release_poll(id, &owner).await {
+                        return self.store_unavailable("check", &error);
+                    }
+                    return approved_check(payload);
+                },
+                Ok(_) => {},
+                Err(error) => return self.store_unavailable("check", &error),
+            }
+        }
 
         let (status_kind, outcome) = match err_code.as_str() {
             // Still waiting — both mean "keep polling".
@@ -496,12 +567,19 @@ impl CibaApprover {
             ),
             // Anything else is a genuine failure, not a lifecycle state.
             _ => {
+                if let Err(error) = self.store.abandon_poll(id, &owner).await {
+                    return self.store_unavailable("check", &error);
+                }
                 return deny(
                     "elicitation.op_rejected",
                     format!("CIBA token poll failed ({status})"),
                 );
             },
         };
+
+        if let Err(error) = self.store.release_poll(id, &owner).await {
+            return self.store_unavailable("check", &error);
+        }
 
         let mut out = payload.clone();
         out.status = Some(status_kind);
@@ -591,6 +669,13 @@ impl CibaApprover {
         }
         PluginResult::modify_payload(out)
     }
+}
+
+fn approved_check(payload: &ElicitationPayload) -> PluginResult<ElicitationPayload> {
+    let mut out = payload.clone();
+    out.status = Some(ElicitationStatusKind::Resolved);
+    out.outcome = Some(ElicitationOutcomeKind::Approved);
+    PluginResult::modify_payload(out)
 }
 
 #[async_trait]

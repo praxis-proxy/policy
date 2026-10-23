@@ -29,7 +29,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **CIBA approvals can be shared across replicas.** The `elicitation/ciba`
   plugin accepts `store: { kind: memory | valkey }`. A Valkey store can use its
   own connection or reference `global.session_store`, with overrides for
-  credentials, key prefix, and timeouts. Redemption is atomic across replicas.
+  credentials, key prefix, and timeouts. Poll claims and redemption are atomic
+  across replicas; an ambiguous or expired poll claim requires a new elicitation.
+  `CorrelationStore` implementers must provide the poll-claim operations.
   `store` is required; explicit `kind: memory` selects process-local storage.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 - **Valkey passwords can come from an environment variable or file.** Both

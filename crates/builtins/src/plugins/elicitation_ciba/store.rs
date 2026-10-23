@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// State tracked per in-flight elicitation.
 #[derive(Debug, Clone)]
@@ -63,6 +64,23 @@ pub enum TakeResult {
     Ready(Correlation),
 }
 
+/// Result of claiming the single-use OP poll for one correlation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollClaim {
+    /// This caller owns the poll until it finishes or becomes uncertain.
+    Acquired,
+    /// Another caller is currently polling the OP.
+    Busy,
+    /// An earlier poll has already saved an approved identity.
+    Resolved,
+    /// The correlation has expired or was redeemed.
+    Missing,
+    /// The live correlation belongs to a different route, tool, or requester.
+    BindingMismatch,
+    /// A prior poll may have spent the OP request without saving its answer.
+    Uncertain,
+}
+
 /// A backend failure that leaves the approval state unknown.
 /// Callers must not treat it as a missing approval.
 #[derive(Debug, thiserror::Error)]
@@ -89,6 +107,28 @@ pub trait CorrelationStore: Send + Sync {
     async fn put(&self, id: &str, correlation: Correlation) -> Result<(), StoreError>;
     /// Read the current state for an id, if present.
     async fn get(&self, id: &str) -> Result<Option<Correlation>, StoreError>;
+    /// Atomically claim an unresolved OP poll. An expired claim becomes
+    /// uncertain rather than allowing another poll of a possibly spent id.
+    async fn claim_poll(
+        &self,
+        id: &str,
+        owner: &str,
+        lease: Duration,
+        route_key: &str,
+        tool: &str,
+        requester: &str,
+    ) -> Result<PollClaim, StoreError>;
+    /// Release a claim after a definite result that did not consume approval.
+    async fn release_poll(&self, id: &str, owner: &str) -> Result<(), StoreError>;
+    /// Atomically save the approver and clear this owner's claim.
+    async fn complete_poll(
+        &self,
+        id: &str,
+        owner: &str,
+        approver: String,
+    ) -> Result<(), StoreError>;
+    /// Mark a poll with an ambiguous outcome; it must not be repeated.
+    async fn abandon_poll(&self, id: &str, owner: &str) -> Result<(), StoreError>;
     /// Record who approved (the extracted claim) against an existing
     /// correlation. No-op if the id is unknown.
     async fn set_resolved_approver(&self, id: &str, approver: String) -> Result<(), StoreError>;
@@ -107,7 +147,28 @@ pub trait CorrelationStore: Send + Sync {
 /// within one gateway process.
 #[derive(Debug, Default)]
 pub struct InMemoryCorrelationStore {
-    inner: Mutex<HashMap<String, Correlation>>,
+    inner: Mutex<MemoryState>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryState {
+    correlations: HashMap<String, Correlation>,
+    polls: HashMap<String, MemoryPoll>,
+}
+
+#[derive(Debug)]
+enum MemoryPoll {
+    InFlight { owner: String, deadline: Instant },
+    Uncertain,
+}
+
+impl MemoryState {
+    fn retain_live(&mut self) {
+        let now = Utc::now();
+        self.correlations.retain(|_, c| c.expires_at > now);
+        self.polls
+            .retain(|id, _| self.correlations.contains_key(id));
+    }
 }
 
 impl InMemoryCorrelationStore {
@@ -133,6 +194,99 @@ impl CorrelationStore for InMemoryCorrelationStore {
         Ok(self.get_sync(id))
     }
 
+    async fn claim_poll(
+        &self,
+        id: &str,
+        owner: &str,
+        lease: Duration,
+        route_key: &str,
+        tool: &str,
+        requester: &str,
+    ) -> Result<PollClaim, StoreError> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retain_live();
+        let Some(correlation) = state.correlations.get(id) else {
+            return Ok(PollClaim::Missing);
+        };
+        if correlation.route_key != route_key
+            || correlation.tool != tool
+            || correlation.requester != requester
+        {
+            return Ok(PollClaim::BindingMismatch);
+        }
+        if correlation.resolved_approver.is_some() {
+            return Ok(PollClaim::Resolved);
+        }
+        let result = match state.polls.get(id) {
+            Some(MemoryPoll::Uncertain) => PollClaim::Uncertain,
+            Some(MemoryPoll::InFlight { deadline, .. }) if Instant::now() >= *deadline => {
+                state.polls.insert(id.to_owned(), MemoryPoll::Uncertain);
+                PollClaim::Uncertain
+            },
+            Some(MemoryPoll::InFlight { .. }) => PollClaim::Busy,
+            None => {
+                let deadline = Instant::now()
+                    .checked_add(lease)
+                    .ok_or_else(|| StoreError::new("poll lease is too large"))?;
+                state.polls.insert(
+                    id.to_owned(),
+                    MemoryPoll::InFlight {
+                        owner: owner.to_owned(),
+                        deadline,
+                    },
+                );
+                PollClaim::Acquired
+            },
+        };
+        Ok(result)
+    }
+
+    async fn release_poll(&self, id: &str, owner: &str) -> Result<(), StoreError> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retain_live();
+        require_owner(&state.polls, id, owner)?;
+        state.polls.remove(id);
+        Ok(())
+    }
+
+    async fn complete_poll(
+        &self,
+        id: &str,
+        owner: &str,
+        approver: String,
+    ) -> Result<(), StoreError> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retain_live();
+        require_owner(&state.polls, id, owner)?;
+        let correlation = state
+            .correlations
+            .get_mut(id)
+            .ok_or_else(|| StoreError::new("poll correlation expired"))?;
+        correlation.resolved_approver = Some(approver);
+        state.polls.remove(id);
+        Ok(())
+    }
+
+    async fn abandon_poll(&self, id: &str, owner: &str) -> Result<(), StoreError> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retain_live();
+        require_owner(&state.polls, id, owner)?;
+        state.polls.insert(id.to_owned(), MemoryPoll::Uncertain);
+        Ok(())
+    }
+
     async fn set_resolved_approver(&self, id: &str, approver: String) -> Result<(), StoreError> {
         self.set_resolved_approver_sync(id, approver);
         Ok(())
@@ -151,33 +305,31 @@ impl CorrelationStore for InMemoryCorrelationStore {
 
 impl InMemoryCorrelationStore {
     fn put_sync(&self, id: &str, correlation: Correlation) {
-        let mut entries = self
+        let mut state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = Utc::now();
-        entries.retain(|_, c| c.expires_at > now);
-        entries.insert(id.to_owned(), correlation);
+        state.retain_live();
+        state.polls.remove(id);
+        state.correlations.insert(id.to_owned(), correlation);
     }
 
     fn get_sync(&self, id: &str) -> Option<Correlation> {
-        let mut entries = self
+        let mut state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = Utc::now();
-        entries.retain(|_, c| c.expires_at > now);
-        entries.get(id).cloned()
+        state.retain_live();
+        state.correlations.get(id).cloned()
     }
 
     fn set_resolved_approver_sync(&self, id: &str, approver: String) {
-        let mut entries = self
+        let mut state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = Utc::now();
-        entries.retain(|_, c| c.expires_at > now);
-        if let Some(c) = entries.get_mut(id) {
+        state.retain_live();
+        if let Some(c) = state.correlations.get_mut(id) {
             c.resolved_approver = Some(approver);
         }
     }
@@ -189,13 +341,12 @@ impl InMemoryCorrelationStore {
         tool: &str,
         requester: &str,
     ) -> TakeResult {
-        let mut entries = self
+        let mut state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = Utc::now();
-        entries.retain(|_, c| c.expires_at > now);
-        let Some(c) = entries.get(id) else {
+        state.retain_live();
+        let Some(c) = state.correlations.get(id) else {
             return TakeResult::Missing;
         };
         if c.route_key != route_key || c.tool != tool || c.requester != requester {
@@ -204,10 +355,25 @@ impl InMemoryCorrelationStore {
         if c.resolved_approver.is_none() {
             return TakeResult::Pending;
         }
-        match entries.remove(id) {
+        state.polls.remove(id);
+        match state.correlations.remove(id) {
             Some(c) => TakeResult::Ready(c),
             None => TakeResult::Missing,
         }
+    }
+}
+
+fn require_owner(
+    polls: &HashMap<String, MemoryPoll>,
+    id: &str,
+    owner: &str,
+) -> Result<(), StoreError> {
+    match polls.get(id) {
+        Some(MemoryPoll::InFlight {
+            owner: current,
+            deadline,
+        }) if current == owner && Instant::now() < *deadline => Ok(()),
+        _ => Err(StoreError::new("poll claim is no longer owned")),
     }
 }
 
@@ -215,6 +381,105 @@ impl InMemoryCorrelationStore {
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn one_poll_owner_can_complete_and_other_checkers_replay() {
+        let store = InMemoryCorrelationStore::new();
+        store.insert(
+            "req",
+            Correlation {
+                expected_approver: "alice".into(),
+                resolved_approver: None,
+                route_key: "tool:adjust@sandbox".into(),
+                tool: "adjust".into(),
+                requester: "bob".into(),
+                expires_at: Utc::now() + chrono::Duration::minutes(5),
+            },
+        );
+        let claim = |owner| {
+            store.claim_poll(
+                "req",
+                owner,
+                Duration::from_secs(10),
+                "tool:adjust@sandbox",
+                "adjust",
+                "bob",
+            )
+        };
+        assert_eq!(claim("a").await.unwrap(), PollClaim::Acquired);
+        assert_eq!(claim("b").await.unwrap(), PollClaim::Busy);
+        assert!(
+            store
+                .complete_poll("req", "b", "alice".into())
+                .await
+                .is_err()
+        );
+        store
+            .complete_poll("req", "a", "alice".into())
+            .await
+            .unwrap();
+        assert_eq!(claim("b").await.unwrap(), PollClaim::Resolved);
+        assert_eq!(
+            store
+                .get("req")
+                .await
+                .unwrap()
+                .unwrap()
+                .resolved_approver
+                .as_deref(),
+            Some("alice")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_or_ambiguous_poll_is_never_reclaimed() {
+        let store = InMemoryCorrelationStore::new();
+        store.insert(
+            "req",
+            Correlation {
+                expected_approver: "alice".into(),
+                resolved_approver: None,
+                route_key: "tool:adjust@sandbox".into(),
+                tool: "adjust".into(),
+                requester: "bob".into(),
+                expires_at: Utc::now() + chrono::Duration::minutes(5),
+            },
+        );
+        assert_eq!(
+            store
+                .claim_poll(
+                    "req",
+                    "a",
+                    Duration::ZERO,
+                    "tool:adjust@sandbox",
+                    "adjust",
+                    "bob"
+                )
+                .await
+                .unwrap(),
+            PollClaim::Acquired
+        );
+        assert_eq!(
+            store
+                .claim_poll(
+                    "req",
+                    "b",
+                    Duration::from_secs(10),
+                    "tool:adjust@sandbox",
+                    "adjust",
+                    "bob"
+                )
+                .await
+                .unwrap(),
+            PollClaim::Uncertain
+        );
+        assert!(
+            store
+                .complete_poll("req", "a", "alice".into())
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn put_get_roundtrip() {

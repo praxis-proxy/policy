@@ -156,7 +156,8 @@ with the plugin's `store:` block:
 - `kind: memory` holds approvals in this process. A restart loses them, and a
   retry on another replica cannot find them.
 - `kind: valkey` shares them across replicas and survives gateway restarts.
-  Redeeming is atomic, so two replicas cannot both apply one approval.
+  Claiming an OP poll and redeeming are atomic, so two replicas cannot poll
+  the same single-use ID concurrently or both apply one approval.
 
 `store:` is required. Choose `store: { kind: memory }` for process-local
 approvals, or configure Valkey to share them across replicas. An omitted
