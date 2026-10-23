@@ -260,7 +260,7 @@ regorus = { version = "0.12", optional = true, default-features = false, feature
 url = { version = "2", optional = true }
 
 # Async Valkey/Redis client. `default-features = false` drops the command
-# groups we don't use (acl/geo/script/streams/json). `tokio-rustls-comp`
+# groups we don't use (acl/geo/streams/json). `tokio-rustls-comp`
 # selects the rustls TLS path (tokio-rustls + rustls), keeping the tree
 # openssl-free; `connection-manager` adds reconnect-with-backoff.
 redis = { version = "1.7", optional = true, default-features = false, features = [
@@ -268,6 +268,7 @@ redis = { version = "1.7", optional = true, default-features = false, features =
   "tokio-comp",
   "tokio-rustls-comp",
   "connection-manager",
+  "script",
 ] }
 
 # External async connection pool over redis-rs. Forward the rustls TLS

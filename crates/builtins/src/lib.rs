@@ -45,3 +45,6 @@ pub mod secrets;
 
 #[cfg(feature = "_session")]
 pub mod session;
+
+#[cfg(any(feature = "valkey", feature = "elicitation-ciba"))]
+mod env_secret;

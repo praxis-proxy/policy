@@ -178,15 +178,20 @@ async fn concurrent_retries_redeem_one_approved_id_once() {
         out.assert_no_leaks(&planted);
         if !out.allowed() {
             assert_not_applied(out);
-            assert_eq!(
-                out.violation_code(),
-                Some("elicitation.unknown_id"),
-                "{:?}",
+            assert!(
+                matches!(
+                    out.violation_code(),
+                    Some("elicitation.unknown_id" | "elicitation.pending")
+                ),
+                "a competing checker may still see the poll owner: {:?}",
                 out.violation
             );
         }
     }
     assert_eq!(applied(&host, "adjust_compensation"), 1);
+    let spent = host.call(adjust(25_000).elicitation_id(&id)).await;
+    assert_not_applied(&spent);
+    assert_eq!(spent.violation_code(), Some("elicitation.unknown_id"));
 }
 
 /// The demo policy plus a second tool behind the same approver.

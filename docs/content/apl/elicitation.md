@@ -204,13 +204,13 @@ plugins:
         key_prefix: ciba:v1
 ```
 
-A reference may override `username`, `password`, `key_prefix`,
-`connect_timeout_ms`, and `command_timeout_ms`. It cannot change `endpoint` or
-`tls`; use the standalone form for a different server. A reference fails to
-load when `global.session_store` is absent or is not `kind: valkey`. Hosts must
-load the document with `load_config_yaml`, the only loader that reads
-`global.session_store`. Overriding `username` without `password`, or the
-reverse, is refused, so a reference never mixes two users' credentials.
+A reference requires its own `password`; `username` is optional for a Valkey
+default user. It may set `key_prefix`, `connect_timeout_ms`, and
+`command_timeout_ms`. The global endpoint must be a bare `host:port` with
+separate credentials: full URL endpoints cannot be referenced. Use the
+standalone form for a different server. A reference fails to load when
+`global.session_store` is absent or is not `kind: valkey`. Hosts must load the
+document with `load_config_yaml`, the loader that reads `global.session_store`.
 
 Create each Valkey user with access to its store's keys and commands. PPE does
 not create or check ACL users. Run these commands with an administrator account
@@ -222,7 +222,8 @@ valkey-cli -h valkey.internal -p 6380 --tls ACL SETUSER ppe-taint reset on \
   +multi +exec +ping +unwatch '+client|setinfo'
 valkey-cli -h valkey.internal -p 6380 --tls ACL SETUSER ppe-ciba reset on \
   '>ciba-password' '~ciba:v1:*' resetchannels +hmset +hgetall +hset \
-  +pexpire +del +exists +multi +exec +eval +ping +unwatch '+client|setinfo'
+  +pexpire +del +exists +hget +hexists +hdel +time +multi +exec \
+  +evalsha '+script|load' +ping +unwatch '+client|setinfo'
 ```
 
 `reset` starts each user from nothing, so it holds only the commands listed:
@@ -231,7 +232,8 @@ valkey-cli -h valkey.internal -p 6380 --tls ACL SETUSER ppe-ciba reset on \
 |----------|-----|
 | `sadd`, `smembers`, `expire` | Session Taint labels and their TTL |
 | `hmset`, `hgetall`, `pexpire`, `del` | CIBA correlations and their expiry |
-| `eval`, `exists`, `hset` | CIBA redeem and resolve scripts, and the commands they run |
+| `evalsha`, `script\|load` | Run cached CIBA scripts and load them after a cache miss |
+| `exists`, `hset`, `hget`, `hexists`, `hdel`, `time` | Poll claim, redeem, and resolve script commands |
 | `multi`, `exec` | Both stores write inside a transaction |
 | `ping`, `unwatch` | Pool connection checks; without them, each request opens a new connection |
 | `client\|setinfo` | Client identification; denying it fills the ACL log |
@@ -271,29 +273,11 @@ retention, or backups, so a full taint store cannot evict pending approvals.
 The standalone form takes the same settings as `global.session_store`. TLS is
 required off localhost, and the default key prefix is `ciba:v1`.
 
-### Reference without a credential override
+### Unauthenticated local Valkey
 
-Without a credential override, CIBA uses the session store's Valkey user.
-The stores still get different key prefixes, but that user can access both:
-
-```yaml
-global:
-  session_store:
-    kind: valkey
-    endpoint: localhost:6379
-
-plugins:
-  - name: manager-approver
-    kind: elicitation/ciba
-    hooks: [elicit]
-    capabilities: [perform_http]
-    config:
-      backchannel_endpoint: https://kc/realms/corp/protocol/openid-connect/ext/ciba/auth
-      token_endpoint: https://kc/realms/corp/protocol/openid-connect/token
-      client_id: praxis-policy-gateway
-      client_secret_source: { kind: env_var, name: CIBA_CLIENT_SECRET }
-      store: { kind: valkey, connection: session_store }
-```
+For a local server without AUTH, use a standalone CIBA connection with its own
+`endpoint: localhost:6379`. A reference requires CIBA credentials and will
+refuse an omitted password at configuration load.
 
 If Valkey is unreachable, times out, or returns undecodable data, the step
 denies with `elicitation.store_unavailable` and JSON-RPC `-32122` ("approval

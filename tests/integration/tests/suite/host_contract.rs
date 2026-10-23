@@ -1099,7 +1099,7 @@ fn an_explicit_memory_store_loads() {
 #[test]
 fn a_ciba_store_can_reference_the_valkey_session_store() {
     load_ciba_store(
-        Some("{ kind: valkey, connection: session_store, key_prefix: ciba:v1 }"),
+        Some("{ kind: valkey, connection: session_store, key_prefix: ciba:v1, password: ciba-secret }"),
         VALKEY_GLOBAL,
     )
     .expect("the reference resolves against global.session_store");

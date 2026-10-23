@@ -33,7 +33,7 @@ fn default_command_timeout_ms() -> u64 {
 ///
 /// Unknown keys (including `kind`, consumed by the factory dispatch) are
 /// ignored so the same block can carry the discriminator.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ValkeyConfig {
     /// Endpoint: a `redis://` / `rediss://` URL or a bare `host:port`.
     pub endpoint: String,
@@ -73,6 +73,8 @@ pub struct ValkeyConfig {
     /// Per-command response timeout (ms) — the fail-closed hot-path knob.
     #[serde(default = "default_command_timeout_ms")]
     pub command_timeout_ms: u64,
+    #[serde(skip)]
+    prepared_url: String,
     // NOTE: bounded retry + circuit-breaker are deliberately NOT implemented
     // in v0 (deferred follow-up). The store fails closed on the first
     // backend error, which is safe — it just fails faster. A `max_retries`
@@ -82,7 +84,7 @@ pub struct ValkeyConfig {
 
 /// Password supplied inline, through an environment variable, or from a file.
 /// YAML accepts a string, `{ env: NAME }`, or `{ file: PATH }`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum PasswordSource {
     /// A password in the config. Use only for local development.
@@ -114,6 +116,35 @@ impl<'de> Deserialize<'de> for PasswordSource {
     }
 }
 
+impl std::fmt::Debug for PasswordSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inline(_) => f.write_str("Inline([REDACTED])"),
+            Self::Env(source) => f.debug_tuple("Env").field(source).finish(),
+            Self::File(source) => f.debug_tuple("File").field(source).finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ValkeyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValkeyConfig")
+            .field("endpoint", &redact_endpoint(&self.endpoint))
+            .field("tls", &self.tls)
+            .field("username", &self.username)
+            .field("password", &self.password)
+            .field("key_prefix", &self.key_prefix)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field(
+                "max_session_lifetime_seconds",
+                &self.max_session_lifetime_seconds,
+            )
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("command_timeout_ms", &self.command_timeout_ms)
+            .finish()
+    }
+}
+
 /// Environment variable holding a Valkey password.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,9 +166,9 @@ impl PasswordSource {
     fn resolve(&self) -> Result<String, BuildError> {
         match self {
             Self::Inline(secret) => Ok(secret.clone()),
-            Self::Env(EnvPassword { env }) => {
-                std::env::var(env).map_err(|error| password_env_error(env, error))
-            },
+            Self::Env(EnvPassword { env }) => std::env::var(env).map_err(|error| {
+                BuildError::Config(crate::env_secret::error("password", env, error))
+            }),
             Self::File(FilePassword { file }) => std::fs::read_to_string(file)
                 .map(|s| s.trim().to_owned())
                 .map_err(|e| {
@@ -145,14 +176,6 @@ impl PasswordSource {
                 }),
         }
     }
-}
-
-fn password_env_error(name: &str, error: std::env::VarError) -> BuildError {
-    let reason = match error {
-        std::env::VarError::NotPresent => "is not set",
-        std::env::VarError::NotUnicode(_) => "is not valid Unicode",
-    };
-    BuildError::Config(format!("password env var '{name}' {reason}"))
 }
 
 impl ValkeyConfig {
@@ -164,9 +187,9 @@ impl ValkeyConfig {
     /// endpoint without TLS, contradictory credentials, or a TTL too large to
     /// express as an expiry.
     pub fn from_value(value: &serde_yaml::Value) -> Result<Self, BuildError> {
-        let cfg: ValkeyConfig =
+        let mut cfg: ValkeyConfig =
             serde_yaml::from_value(value.clone()).map_err(|e| BuildError::Config(e.to_string()))?;
-        cfg.validate()?;
+        cfg.prepared_url = cfg.validate()?;
         Ok(cfg)
     }
 
@@ -177,7 +200,7 @@ impl ValkeyConfig {
     ///
     /// All error text routes the endpoint through [`redact_endpoint`] so
     /// embedded credentials never leak into errors or logs.
-    fn validate(&self) -> Result<(), BuildError> {
+    fn validate(&self) -> Result<String, BuildError> {
         // A fully-formed plaintext `redis://` endpoint with `tls: true`
         // is contradictory: tls_enabled() would say "secure" while the
         // explicit scheme forces cleartext. Reject rather than silently
@@ -224,7 +247,7 @@ impl ValkeyConfig {
 
         // Build the URL now so a malformed endpoint / unencodable
         // credential fails at config-load, not on first request.
-        self.connection_url()?;
+        let url = self.connection_url()?;
 
         // A TTL that does not fit in an i64 is rejected here rather than
         // clamped silently, because the wrapped value is not merely wrong: it
@@ -254,7 +277,11 @@ impl ValkeyConfig {
                      accumulated taint can silently expire (downgrade-by-waiting)"
             );
         }
-        Ok(())
+        Ok(url)
+    }
+
+    pub(crate) fn prepared_url(&self) -> &str {
+        &self.prepared_url
     }
 
     /// TLS is on when explicitly set or implied by a `rediss://` scheme.
@@ -329,6 +356,7 @@ impl ValkeyConfig {
 /// Strip any `userinfo` (`user:pass@`) from an endpoint before it appears
 /// in an error message or log line, so credentials are never disclosed.
 fn redact_endpoint(endpoint: &str) -> String {
+    let endpoint = endpoint.split(['?', '#']).next().unwrap_or(endpoint);
     if let Some((scheme, after)) = endpoint.split_once("://") {
         if let Some((_userinfo, host)) = after.rsplit_once('@') {
             return format!("{scheme}://***@{host}");
@@ -513,6 +541,10 @@ mod tests {
             "rediss://***@host:6379"
         );
         assert_eq!(redact_endpoint("host:6379"), "host:6379");
+        assert_eq!(
+            redact_endpoint("redis://host:6379?password=query-secret#fragment-secret"),
+            "redis://host:6379"
+        );
     }
 
     /// A misconfigured bare endpoint can still carry userinfo, and that
@@ -615,14 +647,34 @@ mod tests {
 
     #[test]
     fn invalid_unicode_password_env_error_omits_the_value() {
-        let error = password_env_error(
+        let error = crate::env_secret::error(
+            "password",
             "PPE_SECRET",
             std::env::VarError::NotUnicode(std::ffi::OsString::from("sensitive-value")),
         );
-        let message = error.to_string();
+        let message = error;
         assert!(message.contains("PPE_SECRET"), "got {message}");
         assert!(message.contains("not valid Unicode"), "got {message}");
         assert!(!message.contains("sensitive-value"), "got {message}");
+    }
+
+    #[test]
+    fn prepared_pool_uses_the_password_read_at_config_load() {
+        let path = std::env::temp_dir().join(format!("ppe-valkey-pw-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "first-secret").unwrap();
+        let config = parse(&format!(
+            "endpoint: localhost:6379\npassword: {{ file: {} }}\n",
+            path.display()
+        ))
+        .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        crate::session::valkey::connection::Valkey::new(&config, "test:".into())
+            .expect("pool construction uses the prepared URL without reading the removed file");
+        assert!(!format!("{config:?}").contains("first-secret"));
+        assert!(
+            !format!("{:?}", PasswordSource::Inline("inline-secret".into()))
+                .contains("inline-secret")
+        );
     }
 
     #[test]

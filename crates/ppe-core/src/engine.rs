@@ -947,7 +947,10 @@ fn create_plugin_instances(
     plugin_configs
         .iter()
         .zip(factories)
-        .map(|(plugin_config, factory)| factory.create_with(plugin_config, context))
+        .map(|(plugin_config, factory)| {
+            let scoped = context.for_plugin(factory.needs_session_store_context(plugin_config));
+            factory.create_with(plugin_config, &scoped)
+        })
         .collect()
 }
 
@@ -3654,7 +3657,10 @@ impl PolicyEngine {
             }
         };
         let instance = {
-            match factory.create_with(&merged_config, &snapshot.factory_context) {
+            let scoped = snapshot
+                .factory_context
+                .for_plugin(factory.needs_session_store_context(&merged_config));
+            match factory.create_with(&merged_config, &scoped) {
                 Ok(i) => i,
                 Err(e) => {
                     error!(
@@ -3771,7 +3777,9 @@ impl PolicyEngine {
             }
         };
         let instance = {
-            match factory.create_with(&merged_config, factory_context) {
+            let scoped =
+                factory_context.for_plugin(factory.needs_session_store_context(&merged_config));
+            match factory.create_with(&merged_config, &scoped) {
                 Ok(i) => i,
                 Err(e) => {
                     error!(
@@ -11130,9 +11138,14 @@ routes:
     struct ContextFactory {
         inner: RecordingFactory,
         seen: SeenBlocks,
+        needs_context: bool,
     }
 
     impl crate::factory::PluginFactory for ContextFactory {
+        fn needs_session_store_context(&self, _config: &PluginConfig) -> bool {
+            self.needs_context
+        }
+
         fn create(
             &self,
             config: &PluginConfig,
@@ -11145,10 +11158,11 @@ routes:
             config: &PluginConfig,
             context: &crate::factory::FactoryContext,
         ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push(context.session_store().cloned());
+            self.seen.lock().unwrap().push(
+                context
+                    .session_store()
+                    .map(|connection| connection.settings().clone()),
+            );
             self.inner.create(config)
         }
     }
@@ -11157,6 +11171,10 @@ routes:
     type SeenBlocks = Arc<std::sync::Mutex<Vec<Option<serde_yaml::Value>>>>;
 
     fn context_engine() -> (Arc<PolicyEngine>, SeenBlocks) {
+        context_engine_with_scope(true)
+    }
+
+    fn context_engine_with_scope(needs_context: bool) -> (Arc<PolicyEngine>, SeenBlocks) {
         let seen = SeenBlocks::default();
         let mgr = Arc::new(PolicyEngine::default());
         mgr.register_factory(
@@ -11164,6 +11182,7 @@ routes:
             Box::new(ContextFactory {
                 inner: RecordingFactory(Arc::new(std::sync::Mutex::new(Vec::new()))),
                 seen: Arc::clone(&seen),
+                needs_context,
             }),
         );
         mgr.register_visitor(Arc::new(SilentVisitor));
@@ -11178,6 +11197,14 @@ plugins:
     mode: sequential
     capabilities: [read_headers]
 ";
+
+    #[test]
+    fn a_factory_without_an_opt_in_receives_no_session_store() {
+        let (mgr, seen) = context_engine_with_scope(false);
+        let yaml = format!("{CONTEXT_PLUGIN}global:\n  session_store:\n    kind: memory\n");
+        load_fixture_yaml(&mgr, &yaml).expect("load");
+        assert_eq!(*seen.lock().unwrap(), vec![None]);
+    }
 
     #[test]
     fn a_yaml_load_hands_factories_the_global_session_store_block() {

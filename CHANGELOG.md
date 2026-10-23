@@ -37,9 +37,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Valkey passwords can come from an environment variable or file.** Both
   stores accept `password: { env: NAME }` or `{ file: PATH }` alongside a
   string. ([#236](https://github.com/praxis-proxy/policy/issues/236))
-- `PluginFactory::create_with` receives a `FactoryContext` with the raw
-  `global.session_store` block when loaded through `load_config_yaml`. It
-  defaults to `create`.
+- `PluginFactory::create_with` receives a scoped `FactoryContext` when its
+  factory requests session-store metadata. The context contains only safe
+  connection fields. CIBA requests it for a reference and requires its own
+  password; full URL endpoints cannot be referenced. Valkey scripts use
+  `EVALSHA` with a cache-miss load. `create_with` defaults to `create`.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
 - **`reference/plugins/transcript-scanner`** reads typed prior turns through `read_agent`, including resource blobs decoded as UTF-8 with replacement, and denies with `transcript.detected` on a configured content match. ([#70](https://github.com/praxis-proxy/policy/issues/70))
@@ -66,6 +68,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `ValkeyConfig.password` is a `PasswordSource`, and `CibaConfig` has a `store`
   field. Construct `StoreError` with `StoreError::new`;
   `ValkeyCorrelationStore::from_settings` returns `SettingsError`.
+  Build `ValkeyConfig` with `from_value` so its password is resolved and
+  validated once before pool construction; direct struct literals are no
+  longer available.
   `FactoryContext`, `StoreConfig`, `PasswordSource`, and `SettingsError` are
   `#[non_exhaustive]`. Trait implementations, config struct literals, and
   exhaustive matches may need updates. YAML config is unaffected.

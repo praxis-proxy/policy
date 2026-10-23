@@ -357,19 +357,93 @@ async fn an_unreachable_store_is_an_error_not_a_miss() {
 
 #[tokio::test]
 #[ignore]
+async fn scripts_reload_after_cache_flush() {
+    let Some(target) = valkey_target().await else {
+        return;
+    };
+    let store = store_for(&target);
+    let mut admin = redis::Client::open(target.url.clone())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    store.put("reload", pending(60)).await.unwrap();
+    flush_scripts(&mut admin).await;
+    assert_eq!(
+        store
+            .claim_poll(
+                "reload",
+                "owner",
+                Duration::from_secs(5),
+                ROUTE,
+                "adjust",
+                "bob"
+            )
+            .await
+            .unwrap(),
+        PollClaim::Acquired
+    );
+    flush_scripts(&mut admin).await;
+    store.release_poll("reload", "owner").await.unwrap();
+    store
+        .claim_poll(
+            "reload",
+            "owner2",
+            Duration::from_secs(5),
+            ROUTE,
+            "adjust",
+            "bob",
+        )
+        .await
+        .unwrap();
+    flush_scripts(&mut admin).await;
+    store
+        .complete_poll("reload", "owner2", "alice".into())
+        .await
+        .unwrap();
+    flush_scripts(&mut admin).await;
+    assert!(matches!(
+        store
+            .take_if_ready("reload", ROUTE, "adjust", "bob")
+            .await
+            .unwrap(),
+        TakeResult::Ready(_)
+    ));
+    store.put("resolve", pending(60)).await.unwrap();
+    flush_scripts(&mut admin).await;
+    store
+        .set_resolved_approver("resolve", "alice".into())
+        .await
+        .unwrap();
+    store.put("abandon", pending(60)).await.unwrap();
+    store
+        .claim_poll(
+            "abandon",
+            "owner",
+            Duration::from_secs(5),
+            ROUTE,
+            "adjust",
+            "bob",
+        )
+        .await
+        .unwrap();
+    flush_scripts(&mut admin).await;
+    store.abandon_poll("abandon", "owner").await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn an_approval_dispatched_on_one_replica_redeems_on_another() {
     let Some(target) = valkey_target().await else {
         return;
     };
-    let global: serde_yaml::Value = serde_yaml::from_str(&format!(
-        "kind: valkey\nendpoint: {}\nconnect_timeout_ms: 5000\ncommand_timeout_ms: 5000\n",
-        target.url
-    ))
-    .unwrap();
-    let context = FactoryContext::with_session_store(Some(global));
     let prefix = format!("ciba:test:{}", uuid::Uuid::new_v4());
     let replica = || {
-        CibaApprover::with_context(approver_config(&prefix), &context).expect("reference builds")
+        CibaApprover::with_context(
+            approver_config(&prefix, &target.url),
+            &FactoryContext::default(),
+        )
+        .expect("standalone store builds")
     };
     let (first, second) = (replica(), replica());
     let token = format!(
@@ -461,13 +535,29 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
     let ciba = ValkeyCorrelationStore::from_settings(
         "manager-approver",
         reference.as_object().unwrap(),
-        Some(&global),
+        FactoryContext::with_session_store(Some(global)).session_store(),
     )
     .unwrap();
     ciba.put("acl", pending(60))
         .await
         .expect("ppe-ciba writes ciba:v1:*");
     assert!(ciba.get("acl").await.expect("ppe-ciba reads").is_some());
+    assert_eq!(
+        ciba.claim_poll(
+            "acl",
+            "owner",
+            Duration::from_secs(5),
+            ROUTE,
+            "adjust",
+            "bob"
+        )
+        .await
+        .expect("ppe-ciba may claim"),
+        PollClaim::Acquired
+    );
+    ciba.release_poll("acl", "owner")
+        .await
+        .expect("ppe-ciba may release");
     assert!(matches!(
         ciba.take_if_ready("acl", ROUTE, "adjust", "bob")
             .await
@@ -476,7 +566,7 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
     ));
     ciba.set_resolved_approver("acl", "alice".into())
         .await
-        .expect("ppe-ciba may EVAL");
+        .expect("ppe-ciba may run a cached script");
     ciba.set_resolved_approver("absent", "alice".into())
         .await
         .expect("resolving a missing id is a no-op");
@@ -533,6 +623,11 @@ async fn documented_acl_users_compartmentalize_the_two_stores() {
         Some("NOPERM"),
         "CIBA credentials cannot clear taint: {clear:?}"
     );
+    let read: redis::RedisResult<Vec<String>> = redis::cmd("HGETALL")
+        .arg("taint:v1:anything")
+        .query_async(&mut as_ciba)
+        .await;
+    assert_eq!(read.unwrap_err().code(), Some("NOPERM"));
 }
 
 // -----------------------------------------------------------------------------
@@ -567,7 +662,7 @@ fn pending(ttl_secs: i64) -> Correlation {
     }
 }
 
-fn approver_config(key_prefix: &str) -> PluginConfig {
+fn approver_config(key_prefix: &str, endpoint: &str) -> PluginConfig {
     PluginConfig {
         name: "manager-approver".into(),
         kind: "elicitation/ciba".into(),
@@ -577,10 +672,18 @@ fn approver_config(key_prefix: &str) -> PluginConfig {
             "token_endpoint": "https://op.example.test/token",
             "client_id": "praxis-policy-gateway",
             "client_secret_source": { "kind": "literal", "secret": "shh" },
-            "store": { "kind": "valkey", "connection": "session_store", "key_prefix": key_prefix },
+            "store": { "kind": "valkey", "endpoint": endpoint, "key_prefix": key_prefix },
         })),
         ..Default::default()
     }
+}
+
+async fn flush_scripts(admin: &mut redis::aio::MultiplexedConnection) {
+    redis::cmd("SCRIPT")
+        .arg("FLUSH")
+        .query_async::<()>(admin)
+        .await
+        .unwrap();
 }
 
 async fn handle(

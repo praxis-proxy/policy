@@ -25,6 +25,7 @@ use crate::plugins::elicitation_ciba::store::{
 };
 use crate::session::valkey::connection::Valkey;
 use crate::session::valkey::{BuildError, ValkeyConfig};
+use praxis_policy_core::factory::SessionStoreConnection;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -139,9 +140,16 @@ pub enum SettingsError {
          use a standalone block (no `connection`) for a different server"
     )]
     NotOverridable(String),
-    /// A reference overrides one of `username` and `password` but not both.
-    #[error("a reference overrides `username` and `password` together, or neither")]
-    PartialCredentials,
+    /// A reference needs its own password, separate from session taint.
+    #[error(
+        "a `connection: session_store` reference requires its own `password`; `username` is optional for default-user AUTH"
+    )]
+    MissingPassword,
+    /// A full URL cannot accept separately scoped CIBA credentials.
+    #[error(
+        "a `connection: session_store` reference needs a bare global Valkey endpoint; move the global URL to host:port with separate credentials"
+    )]
+    UrlEndpoint,
     /// A reference has no Valkey global session store to point at.
     #[error(
         "`connection: session_store` needs `global.session_store` of kind valkey, \
@@ -179,7 +187,7 @@ impl ValkeyCorrelationStore {
     pub fn from_settings(
         plugin: &str,
         settings: &serde_json::Map<String, serde_json::Value>,
-        session_store: Option<&serde_yaml::Value>,
+        session_store: Option<&SessionStoreConnection>,
     ) -> Result<Self, SettingsError> {
         let block = merge(settings, session_store)?;
         let cfg = ValkeyConfig::from_value(&block)?;
@@ -214,12 +222,13 @@ impl ValkeyCorrelationStore {
     ) -> Result<(), StoreError> {
         let key = self.key(id);
         let mut conn = self.conn().await?;
-        let mut cmd = redis::cmd("EVAL");
-        cmd.arg(script).arg(1).arg(&key).arg(owner);
+        let script = redis::Script::new(script);
+        let mut invocation = script.key(&key);
+        invocation.arg(owner);
         if let Some(approver) = approver {
-            cmd.arg(approver);
+            invocation.arg(approver);
         }
-        let updated: i64 = self.timed(what, cmd.query_async(&mut conn)).await?;
+        let updated: i64 = self.timed(what, invocation.invoke_async(&mut conn)).await?;
         if updated == 1 {
             Ok(())
         } else {
@@ -278,16 +287,17 @@ impl CorrelationStore for ValkeyCorrelationStore {
             ))
         })?;
         let mut conn = self.conn().await?;
-        let mut cmd = redis::cmd("EVAL");
-        cmd.arg(CLAIM_POLL)
-            .arg(1)
-            .arg(&key)
+        let script = redis::Script::new(CLAIM_POLL);
+        let mut invocation = script.key(&key);
+        invocation
             .arg(owner)
             .arg(lease_ms)
             .arg(route_key)
             .arg(tool)
             .arg(requester);
-        let result: i64 = self.timed("claim poll", cmd.query_async(&mut conn)).await?;
+        let result: i64 = self
+            .timed("claim poll", invocation.invoke_async(&mut conn))
+            .await?;
         match result {
             0 => Ok(PollClaim::Missing),
             1 => Ok(PollClaim::Busy),
@@ -322,10 +332,12 @@ impl CorrelationStore for ValkeyCorrelationStore {
     async fn set_resolved_approver(&self, id: &str, approver: String) -> Result<(), StoreError> {
         let key = self.key(id);
         let mut conn = self.conn().await?;
-        let mut cmd = redis::cmd("EVAL");
-        cmd.arg(SET_RESOLVED).arg(1).arg(&key).arg(approver);
-        self.timed("resolve", cmd.query_async::<()>(&mut conn))
-            .await
+        let script = redis::Script::new(SET_RESOLVED);
+        self.timed(
+            "resolve",
+            script.key(&key).arg(approver).invoke_async::<()>(&mut conn),
+        )
+        .await
     }
 
     async fn take_if_ready(
@@ -337,14 +349,12 @@ impl CorrelationStore for ValkeyCorrelationStore {
     ) -> Result<TakeResult, StoreError> {
         let key = self.key(id);
         let mut conn = self.conn().await?;
-        let mut cmd = redis::cmd("EVAL");
-        cmd.arg(TAKE_IF_READY)
-            .arg(1)
-            .arg(&key)
-            .arg(route_key)
-            .arg(tool)
-            .arg(requester);
-        let reply: redis::Value = self.timed("take", cmd.query_async(&mut conn)).await?;
+        let script = redis::Script::new(TAKE_IF_READY);
+        let mut invocation = script.key(&key);
+        invocation.arg(route_key).arg(tool).arg(requester);
+        let reply: redis::Value = self
+            .timed("take", invocation.invoke_async(&mut conn))
+            .await?;
         match reply {
             redis::Value::Int(0) => Ok(TakeResult::Missing),
             redis::Value::Int(1) => Ok(TakeResult::BindingMismatch),
@@ -364,7 +374,7 @@ impl CorrelationStore for ValkeyCorrelationStore {
 
 fn merge(
     settings: &serde_json::Map<String, serde_json::Value>,
-    session_store: Option<&serde_yaml::Value>,
+    session_store: Option<&SessionStoreConnection>,
 ) -> Result<serde_yaml::Value, SettingsError> {
     let mut own = settings.clone();
     own.remove("kind");
@@ -377,7 +387,7 @@ fn merge(
                     expected: STANDALONE_KEYS.join(", "),
                 });
             }
-            own.clone()
+            own
         },
         Some(serde_json::Value::String(name)) if name == "session_store" => {
             if let Some(key) = own
@@ -386,16 +396,22 @@ fn merge(
             {
                 return Err(SettingsError::NotOverridable(key.clone()));
             }
-            if own.contains_key("username") != own.contains_key("password") {
-                return Err(SettingsError::PartialCredentials);
-            }
             let global = session_store
-                .filter(|g| g.get("kind").and_then(serde_yaml::Value::as_str) == Some("valkey"))
+                .filter(|g| {
+                    g.settings().get("kind").and_then(serde_yaml::Value::as_str) == Some("valkey")
+                })
                 .ok_or(SettingsError::NoSessionStore)?;
-            let mut base: serde_json::Map<String, serde_json::Value> = serde_json::to_value(global)
-                .ok()
-                .and_then(|v| v.as_object().cloned())
-                .ok_or(SettingsError::NoSessionStore)?;
+            if global.has_url_endpoint() {
+                return Err(SettingsError::UrlEndpoint);
+            }
+            if own.get("password").is_none_or(serde_json::Value::is_null) {
+                return Err(SettingsError::MissingPassword);
+            }
+            let mut base: serde_json::Map<String, serde_json::Value> =
+                serde_json::to_value(global.settings())
+                    .ok()
+                    .and_then(|v| v.as_object().cloned())
+                    .ok_or(SettingsError::NoSessionStore)?;
             base.remove("key_prefix");
             base.extend(own);
             base
@@ -494,14 +510,14 @@ mod tests {
     }
 
     #[test]
-    fn a_reference_without_overrides_keeps_the_global_user() {
+    fn a_reference_without_its_own_password_is_refused() {
         let global = global("kind: valkey\nendpoint: localhost:6379\nusername: u\npassword: p\n");
-        let block = merge(
+        let err = merge(
             &settings(json!({ "connection": "session_store" })),
             Some(&global),
         )
-        .unwrap();
-        assert_eq!(block["username"], "u");
+        .unwrap_err();
+        assert!(matches!(err, SettingsError::MissingPassword));
     }
 
     #[test]
@@ -544,17 +560,30 @@ mod tests {
     }
 
     #[test]
-    fn a_reference_overrides_credentials_as_a_pair() {
+    fn a_reference_uses_only_its_own_password() {
         let global = global("kind: valkey\nendpoint: localhost:6379\nusername: u\npassword: p\n");
-        for half in ["username", "password"] {
-            let mut s = settings(json!({ "connection": "session_store" }));
-            s.insert(half.to_owned(), json!("x"));
-            let err = merge(&s, Some(&global)).unwrap_err();
-            assert!(
-                matches!(err, SettingsError::PartialCredentials),
-                "{half}: {err}"
-            );
-        }
+        let block = merge(
+            &settings(json!({ "connection": "session_store", "password": "ciba" })),
+            Some(&global),
+        )
+        .unwrap();
+        assert_eq!(block["password"], "ciba");
+        assert!(
+            block.get("username").is_none(),
+            "default-user AUTH is supported"
+        );
+        let err = merge(
+            &settings(json!({ "connection": "session_store", "username": "ciba" })),
+            Some(&global),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SettingsError::MissingPassword));
+        let err = merge(
+            &settings(json!({ "connection": "session_store", "password": null })),
+            Some(&global),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SettingsError::MissingPassword));
     }
 
     #[test]
@@ -568,7 +597,7 @@ mod tests {
 
     #[test]
     fn merged_settings_are_validated_like_the_session_store() {
-        let global = global("kind: valkey\nendpoint: redis://localhost:6379\n");
+        let global = global("kind: valkey\nendpoint: redis://user:secret@localhost:6379\n");
         let err = ValkeyCorrelationStore::from_settings(
             "p",
             &settings(json!({
@@ -580,10 +609,8 @@ mod tests {
         )
         .err()
         .expect("a URL endpoint cannot also take separate credentials");
-        assert!(
-            matches!(err, SettingsError::Invalid(BuildError::Config(_))),
-            "got {err}"
-        );
+        assert!(matches!(err, SettingsError::UrlEndpoint), "got {err}");
+        assert!(!format!("{global:?}").contains("secret"));
     }
 
     #[test]
@@ -652,7 +679,11 @@ mod tests {
         v.as_object().cloned().unwrap()
     }
 
-    fn global(yaml: &str) -> serde_yaml::Value {
-        serde_yaml::from_str(yaml).unwrap()
+    fn global(yaml: &str) -> SessionStoreConnection {
+        let value = serde_yaml::from_str(yaml).unwrap();
+        praxis_policy_core::factory::FactoryContext::with_session_store(Some(value))
+            .session_store()
+            .unwrap()
+            .clone()
     }
 }

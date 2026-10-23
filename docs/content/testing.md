@@ -248,7 +248,8 @@ docker run -d --rm --name ppe-acl-valkey -p 127.0.0.1:6380:6379 valkey/valkey:8.
 docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-taint reset on '>taint-pw' \
   '~taint:v1:*' resetchannels +sadd +smembers +expire +multi +exec +ping +unwatch '+client|setinfo'
 docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-ciba reset on '>ciba-pw' \
-  '~ciba:v1:*' resetchannels +hmset +hgetall +hset +pexpire +del +exists +multi +exec +eval \
+  '~ciba:v1:*' resetchannels +hmset +hgetall +hset +pexpire +del +exists \
+  +hget +hexists +hdel +time +multi +exec +evalsha '+script|load' \
   +ping +unwatch '+client|setinfo'
 PPE_ACL_VALKEY=127.0.0.1:6380 PPE_TAINT_PW=taint-pw PPE_CIBA_PW=ciba-pw \
   cargo nextest run -p praxis-policy-builtins --all-features --test valkey \

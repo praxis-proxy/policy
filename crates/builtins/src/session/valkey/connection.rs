@@ -63,7 +63,11 @@ impl Valkey {
 }
 
 pub(crate) fn build_pool(cfg: &ValkeyConfig) -> Result<Pool, BuildError> {
-    let url = cfg.connection_url()?;
+    let url = if cfg.prepared_url().is_empty() {
+        cfg.connection_url()?
+    } else {
+        cfg.prepared_url().to_owned()
+    };
     let pool_cfg = PoolConfig::from_url(url);
     // Note: the pool-create error is intentionally not interpolated with
     // the URL — that string carries credentials. `connection_url()` has

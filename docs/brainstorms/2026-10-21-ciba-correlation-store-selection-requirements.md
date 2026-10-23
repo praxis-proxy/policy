@@ -6,6 +6,11 @@ issue: https://github.com/praxis-proxy/policy/issues/236
 
 # Selectable CIBA correlation store, with Valkey
 
+> Implementation update for PR #239: `store` must be explicit. A Valkey
+> reference requires its own password, and `global.session_store` credentials
+> are never inherited. The earlier omission fallback described below was
+> superseded by issue #236's explicit-selection requirement.
+
 ## Summary
 
 The `elicitation/ciba` plugin config gains an explicit `store` choice with two

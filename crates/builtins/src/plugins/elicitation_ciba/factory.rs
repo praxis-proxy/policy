@@ -45,6 +45,16 @@ pub const KIND: &str = "elicitation/ciba";
 pub struct CibaApproverFactory;
 
 impl PluginFactory for CibaApproverFactory {
+    fn needs_session_store_context(&self, config: &PluginConfig) -> bool {
+        config
+            .config
+            .as_ref()
+            .and_then(|value| value.get("store"))
+            .and_then(|store| store.get("connection"))
+            .and_then(serde_json::Value::as_str)
+            == Some("session_store")
+    }
+
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
         self.create_with(config, &FactoryContext::default())
     }

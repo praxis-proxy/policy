@@ -8,6 +8,12 @@ origin: docs/brainstorms/2026-10-21-ciba-correlation-store-selection-requirement
 
 # feat: Selectable CIBA correlation store, with Valkey
 
+> Implementation update for PR #239: `store` is required, a referenced Valkey
+> connection requires separate CIBA credentials and a bare global endpoint,
+> and factory context carries safe connection metadata only. Poll claims and
+> cached scripts were added during review. The earlier implementation choices
+> below record the initial design and are superseded by this contract.
+
 ## Summary
 
 Make the CIBA correlation store async and fallible, add a typed `store` block
