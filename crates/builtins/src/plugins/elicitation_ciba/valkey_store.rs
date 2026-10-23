@@ -171,6 +171,31 @@ pub enum SettingsError {
 /// Correlations shared across replicas through Valkey.
 pub struct ValkeyCorrelationStore {
     valkey: Valkey,
+    scripts: Scripts,
+}
+
+// `Script::new` hashes its source, so each script is hashed once per store
+// rather than on every call.
+struct Scripts {
+    set_resolved: redis::Script,
+    claim_poll: redis::Script,
+    release_poll: redis::Script,
+    complete_poll: redis::Script,
+    abandon_poll: redis::Script,
+    take_if_ready: redis::Script,
+}
+
+impl Scripts {
+    fn new() -> Self {
+        Self {
+            set_resolved: redis::Script::new(SET_RESOLVED),
+            claim_poll: redis::Script::new(CLAIM_POLL),
+            release_poll: redis::Script::new(RELEASE_POLL),
+            complete_poll: redis::Script::new(COMPLETE_POLL),
+            abandon_poll: redis::Script::new(ABANDON_POLL),
+            take_if_ready: redis::Script::new(TAKE_IF_READY),
+        }
+    }
 }
 
 impl ValkeyCorrelationStore {
@@ -193,6 +218,7 @@ impl ValkeyCorrelationStore {
         let cfg = ValkeyConfig::from_value(&block)?;
         Ok(Self {
             valkey: Valkey::new(&cfg, format!("{}:{plugin}:", cfg.key_prefix))?,
+            scripts: Scripts::new(),
         })
     }
 
@@ -215,14 +241,13 @@ impl ValkeyCorrelationStore {
     async fn run_owner_script(
         &self,
         what: &str,
-        script: &str,
+        script: &redis::Script,
         id: &str,
         owner: &str,
         approver: Option<&str>,
     ) -> Result<(), StoreError> {
         let key = self.key(id);
         let mut conn = self.conn().await?;
-        let script = redis::Script::new(script);
         let mut invocation = script.key(&key);
         invocation.arg(owner);
         if let Some(approver) = approver {
@@ -287,8 +312,7 @@ impl CorrelationStore for ValkeyCorrelationStore {
             ))
         })?;
         let mut conn = self.conn().await?;
-        let script = redis::Script::new(CLAIM_POLL);
-        let mut invocation = script.key(&key);
+        let mut invocation = self.scripts.claim_poll.key(&key);
         invocation
             .arg(owner)
             .arg(lease_ms)
@@ -310,7 +334,7 @@ impl CorrelationStore for ValkeyCorrelationStore {
     }
 
     async fn release_poll(&self, id: &str, owner: &str) -> Result<(), StoreError> {
-        self.run_owner_script("release poll", RELEASE_POLL, id, owner, None)
+        self.run_owner_script("release poll", &self.scripts.release_poll, id, owner, None)
             .await
     }
 
@@ -320,22 +344,31 @@ impl CorrelationStore for ValkeyCorrelationStore {
         owner: &str,
         approver: String,
     ) -> Result<(), StoreError> {
-        self.run_owner_script("complete poll", COMPLETE_POLL, id, owner, Some(&approver))
-            .await
+        self.run_owner_script(
+            "complete poll",
+            &self.scripts.complete_poll,
+            id,
+            owner,
+            Some(&approver),
+        )
+        .await
     }
 
     async fn abandon_poll(&self, id: &str, owner: &str) -> Result<(), StoreError> {
-        self.run_owner_script("abandon poll", ABANDON_POLL, id, owner, None)
+        self.run_owner_script("abandon poll", &self.scripts.abandon_poll, id, owner, None)
             .await
     }
 
     async fn set_resolved_approver(&self, id: &str, approver: String) -> Result<(), StoreError> {
         let key = self.key(id);
         let mut conn = self.conn().await?;
-        let script = redis::Script::new(SET_RESOLVED);
         self.timed(
             "resolve",
-            script.key(&key).arg(approver).invoke_async::<()>(&mut conn),
+            self.scripts
+                .set_resolved
+                .key(&key)
+                .arg(approver)
+                .invoke_async::<()>(&mut conn),
         )
         .await
     }
@@ -349,8 +382,7 @@ impl CorrelationStore for ValkeyCorrelationStore {
     ) -> Result<TakeResult, StoreError> {
         let key = self.key(id);
         let mut conn = self.conn().await?;
-        let script = redis::Script::new(TAKE_IF_READY);
-        let mut invocation = script.key(&key);
+        let mut invocation = self.scripts.take_if_ready.key(&key);
         invocation.arg(route_key).arg(tool).arg(requester);
         let reply: redis::Value = self
             .timed("take", invocation.invoke_async(&mut conn))

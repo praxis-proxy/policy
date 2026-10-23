@@ -205,7 +205,10 @@ plugins:
 ```
 
 A reference requires its own `password`; `username` is optional for a Valkey
-default user. It may set `key_prefix`, `connect_timeout_ms`, and
+default user. A password alone does not separate CIBA from Session Taint: when
+neither block sets a `username`, both authenticate as the default user and share
+its ACL, so CIBA can read and delete taint keys. Isolation needs a `username`
+that differs from the session store's. A reference may also set `key_prefix`, `connect_timeout_ms`, and
 `command_timeout_ms`. The global endpoint must be a bare `host:port` with
 separate credentials: full URL endpoints cannot be referenced. Use the
 standalone form for a different server. A reference fails to load when
@@ -296,6 +299,16 @@ or may not have persisted. When it did not, the OP has already spent the
 `auth_req_id`; the approval is lost and a new elicitation is required. A
 failed redemption during validate may also have consumed the approval. A
 dispatch has no id yet, so retrying it may prompt the approver again.
+
+A poll whose outcome is unknown also ends the flow. The checker holds a claim
+on the id while it polls the OP. If that poll fails after it may have reached
+the OP, returns an unreadable answer, or outlives its claim, the id is marked
+uncertain and is never polled again, since the OP may have spent the
+`auth_req_id`. Every later check on that id returns `-32122` until the approval
+expires. This includes a request cancelled mid-poll, such as a client
+disconnect or a replica shutdown, even when the poll was never sent. An agent
+that receives `-32122` repeatedly for the same id should stop retrying it and
+start a new elicitation.
 
 The pool connects on first use. An unreachable server, wrong credentials, or
 a missing ACL grant may therefore first appear as `-32122` on an approval.

@@ -31,8 +31,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   own connection or reference `global.session_store`, with overrides for
   credentials, key prefix, and timeouts. Poll claims and redemption are atomic
   across replicas; an ambiguous or expired poll claim requires a new elicitation.
-  `CorrelationStore` implementers must provide the poll-claim operations.
-  `store` is required; explicit `kind: memory` selects process-local storage.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 - **Valkey passwords can come from an environment variable or file.** Both
   stores accept `password: { env: NAME }` or `{ file: PATH }` alongside a
@@ -64,7 +62,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Breaking: CIBA config rejects unknown fields.** A misspelled key such as
   `stroe` now fails at load and names the field.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
-- **Breaking Rust API changes.** `CorrelationStore` is async and fallible;
+- **Breaking: CIBA config requires `store`.** An `elicitation/ciba` plugin
+  without a `store:` block now fails at load instead of keeping approvals in
+  process memory. Add `store: { kind: memory }` to keep the previous behaviour,
+  or configure `kind: valkey` to share approvals across replicas.
+  ([#236](https://github.com/praxis-proxy/policy/issues/236))
+- **Breaking Rust API changes.** `CorrelationStore` is async and fallible, and
+  implementers must provide `claim_poll`, `release_poll`, `complete_poll`, and
+  `abandon_poll`;
   `ValkeyConfig.password` is a `PasswordSource`, and `CibaConfig` has a `store`
   field. Construct `StoreError` with `StoreError::new`;
   `ValkeyCorrelationStore::from_settings` returns `SettingsError`.
@@ -73,7 +78,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   longer available.
   `FactoryContext`, `StoreConfig`, `PasswordSource`, and `SettingsError` are
   `#[non_exhaustive]`. Trait implementations, config struct literals, and
-  exhaustive matches may need updates. YAML config is unaffected.
+  exhaustive matches may need updates.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
 - **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
