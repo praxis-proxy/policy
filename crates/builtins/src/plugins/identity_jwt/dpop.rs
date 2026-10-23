@@ -183,11 +183,19 @@ impl ReplayState {
 /// are pruned in expiry order on every call. Bounded twice: per key, so one
 /// client cannot crowd out the rest, and overall. A full store reports itself
 /// unavailable, so the proof is denied rather than accepted unchecked.
-#[derive(Debug)]
 pub struct InMemoryReplayGuard {
     state: Mutex<ReplayState>,
     capacity: usize,
     capacity_per_key: usize,
+}
+
+impl std::fmt::Debug for InMemoryReplayGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryReplayGuard")
+            .field("capacity", &self.capacity)
+            .field("capacity_per_key", &self.capacity_per_key)
+            .finish_non_exhaustive()
+    }
 }
 
 impl InMemoryReplayGuard {
@@ -597,6 +605,23 @@ mod tests {
             Ok(true),
             "expired entries are forgotten"
         );
+    }
+
+    #[tokio::test]
+    async fn replay_guard_debug_does_not_expose_live_proofs() {
+        let guard = InMemoryReplayGuard::new(10, 2);
+        assert_eq!(
+            guard
+                .first_use("secret-issuer-and-thumbprint", "secret-proof-id", 100, 0)
+                .await,
+            Ok(true)
+        );
+
+        let debug = format!("{guard:?}");
+        assert!(debug.contains("capacity: 10"), "{debug}");
+        assert!(debug.contains("capacity_per_key: 2"), "{debug}");
+        assert!(!debug.contains("secret-issuer-and-thumbprint"), "{debug}");
+        assert!(!debug.contains("secret-proof-id"), "{debug}");
     }
 
     #[tokio::test]

@@ -140,8 +140,8 @@ pub struct JwtIdentityResolver {
     /// `RawInboundToken.source_header` so forwarding plugins know
     /// where to put it (or strip it) on the upstream call.
     header: String,
-    /// Remembers accepted `DPoP` proof ids. In memory, so replay detection
-    /// covers this instance only; see the `dpop` module.
+    /// Remembers accepted `DPoP` proof ids. Uses an in-memory guard by default;
+    /// hosts can inject a shared guard for replay detection across instances.
     replay: Arc<dyn ReplayGuard>,
 }
 
