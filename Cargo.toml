@@ -101,7 +101,7 @@ rsa = "0.9.10"
 # without their own `features`. Production code uses time, sync, task/spawn and
 # a multi-threaded runtime; `net` and `io` appear only in tests, and the HTTP
 # stack unions those back in through feature unification where needed.
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1.53.3", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive", "rc"] }
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.

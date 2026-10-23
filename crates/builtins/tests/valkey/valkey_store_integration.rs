@@ -61,6 +61,7 @@ pub(crate) async fn valkey_target() -> Option<Target> {
 
 /// The script-cache test flushes all scripts on its server, so it needs an
 /// endpoint that no other test uses.
+#[cfg(feature = "elicitation-ciba")]
 pub(crate) async fn isolated_valkey_target() -> Option<Target> {
     if let Ok(url) = std::env::var("VALKEY_SCRIPT_TEST_URL") {
         if let Ok(shared_url) = std::env::var("VALKEY_TEST_URL") {
