@@ -56,6 +56,28 @@ pub(crate) async fn valkey_target() -> Option<Target> {
             _container: None,
         });
     }
+    container_target("VALKEY_TEST_URL").await
+}
+
+/// The script-cache test flushes all scripts on its server, so it needs an
+/// endpoint that no other test uses.
+pub(crate) async fn isolated_valkey_target() -> Option<Target> {
+    if let Ok(url) = std::env::var("VALKEY_SCRIPT_TEST_URL") {
+        if let Ok(shared_url) = std::env::var("VALKEY_TEST_URL") {
+            assert_ne!(
+                url, shared_url,
+                "VALKEY_SCRIPT_TEST_URL must use a different server from VALKEY_TEST_URL"
+            );
+        }
+        return Some(Target {
+            url,
+            _container: None,
+        });
+    }
+    container_target("VALKEY_SCRIPT_TEST_URL").await
+}
+
+async fn container_target(url_variable: &str) -> Option<Target> {
     match Valkey::default().start().await {
         Ok(node) => {
             let host = node.get_host().await.expect("container host");
@@ -77,7 +99,7 @@ pub(crate) async fn valkey_target() -> Option<Target> {
                 "no Valkey available: {e}\n  \
                  These tests are #[ignore]d, so running them is an explicit request and \
                  skipping silently would report success without asserting anything.\n  \
-                 Provide one with VALKEY_TEST_URL=redis://host:port, or start Docker so \
+                 Provide one with {url_variable}=redis://host:port, or start Docker so \
                  testcontainers can, or set VALKEY_TESTS_OPTIONAL=1 to skip on purpose."
             );
         },

@@ -85,6 +85,10 @@ real server, because a session store is not meaningfully covered by a
 fake. That component makes Session Taint survive a reload or
 span a replica, so it is worth running them for real.
 
+The CIBA script-cache reload test flushes the server's entire script cache.
+It starts a separate Valkey container, or uses `VALKEY_SCRIPT_TEST_URL` when
+that is set to a dedicated server. Do not point it at `VALKEY_TEST_URL`.
+
 The shared `DPoP` replay guard has an ignored Valkey test under the `jwt`
 and `valkey` features. It uses two independent connection pools to the same
 server and checks that the second gateway rejects a replay. Set

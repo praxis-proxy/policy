@@ -22,12 +22,7 @@ use praxis_policy_core::http::HttpTransport;
 use praxis_policy_core::http_testing::FakeTransport;
 use praxis_policy_core::plugin::PluginConfig;
 
-use crate::valkey_store_integration::{Target, valkey_target};
-
-// SCRIPT FLUSH affects the entire server, including other tests' script-load
-// fallback. Keep the live CIBA cases in this binary sequential so the cache
-// reload test cannot clear a script between another case's LOAD and EVALSHA.
-static SCRIPT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::valkey_store_integration::{Target, isolated_valkey_target, valkey_target};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -36,7 +31,6 @@ static SCRIPT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 #[tokio::test]
 #[ignore]
 async fn a_correlation_round_trips_and_redeems_once() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let Some(target) = valkey_target().await else {
         return;
     };
@@ -78,7 +72,6 @@ async fn a_correlation_round_trips_and_redeems_once() {
 #[tokio::test]
 #[ignore]
 async fn a_mismatched_redeem_does_not_consume_the_approval() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let Some(target) = valkey_target().await else {
         return;
     };
@@ -117,7 +110,6 @@ async fn a_mismatched_redeem_does_not_consume_the_approval() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn two_replicas_racing_to_redeem_get_exactly_one_approval() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let Some(target) = valkey_target().await else {
         return;
     };
@@ -152,7 +144,6 @@ async fn two_replicas_racing_to_redeem_get_exactly_one_approval() {
 #[tokio::test]
 #[ignore]
 async fn two_replicas_claim_one_op_poll() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let Some(target) = valkey_target().await else {
         return;
     };
@@ -233,7 +224,6 @@ async fn two_replicas_claim_one_op_poll() {
 #[tokio::test]
 #[ignore]
 async fn two_approvers_on_one_server_cannot_redeem_each_others_approvals() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let Some(target) = valkey_target().await else {
         return;
     };
@@ -270,7 +260,6 @@ async fn two_approvers_on_one_server_cannot_redeem_each_others_approvals() {
 #[tokio::test]
 #[ignore]
 async fn a_put_replaces_rather_than_merges_an_existing_correlation() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let Some(target) = valkey_target().await else {
         return;
     };
@@ -304,7 +293,6 @@ async fn a_put_replaces_rather_than_merges_an_existing_correlation() {
 #[tokio::test]
 #[ignore]
 async fn a_correlation_expires_server_side() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let Some(target) = valkey_target().await else {
         return;
     };
@@ -331,7 +319,6 @@ async fn a_correlation_expires_server_side() {
 
 #[tokio::test]
 async fn a_server_that_never_replies_times_out_as_an_error() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let _hold = tokio::spawn(async move {
@@ -355,7 +342,6 @@ async fn a_server_that_never_replies_times_out_as_an_error() {
 
 #[tokio::test]
 async fn an_unreachable_store_is_an_error_not_a_miss() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let settings = serde_json::json!({
         "endpoint": "localhost:1",
         "connect_timeout_ms": 300,
@@ -372,8 +358,7 @@ async fn an_unreachable_store_is_an_error_not_a_miss() {
 #[tokio::test]
 #[ignore]
 async fn scripts_reload_after_cache_flush() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
-    let Some(target) = valkey_target().await else {
+    let Some(target) = isolated_valkey_target().await else {
         return;
     };
     let store = store_for(&target);
@@ -449,7 +434,6 @@ async fn scripts_reload_after_cache_flush() {
 #[tokio::test]
 #[ignore]
 async fn an_approval_dispatched_on_one_replica_redeems_on_another() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     let Some(target) = valkey_target().await else {
         return;
     };
@@ -510,7 +494,6 @@ async fn an_approval_dispatched_on_one_replica_redeems_on_another() {
 #[tokio::test]
 #[ignore = "needs PPE_ACL_VALKEY and the ACL users from docs/content/testing.md"]
 async fn documented_acl_users_compartmentalize_the_two_stores() {
-    let _script_test_guard = SCRIPT_TEST_LOCK.lock().await;
     use praxis_policy_apl_runtime::SessionStore as _;
     use praxis_policy_builtins::session::valkey::{ValkeyConfig, ValkeySessionStore};
 

@@ -304,11 +304,13 @@ A poll whose outcome is unknown also ends the flow. The checker holds a claim
 on the id while it polls the OP. If that poll fails after it may have reached
 the OP, returns an unreadable answer, or outlives its claim, the id is marked
 uncertain and is never polled again, since the OP may have spent the
-`auth_req_id`. Every later check on that id returns `-32122` until the approval
-expires. This includes a request cancelled mid-poll, such as a client
-disconnect or a replica shutdown, even when the poll was never sent. An agent
-that receives `-32122` repeatedly for the same id should stop retrying it and
-start a new elicitation.
+`auth_req_id`. A request cancelled mid-poll, such as a client disconnect or
+replica shutdown, leaves its claim in place. Another check returns pending
+(`-32120`) while the claim is live. If the poll never completes, the next check
+after the lease expires marks the id uncertain and returns `-32122`; later
+checks return `-32122` until the approval expires. This can happen even when
+the cancelled poll was never sent. An agent that receives `-32122` repeatedly
+for the same id should stop retrying it and start a new elicitation.
 
 The pool connects on first use. An unreachable server, wrong credentials, or
 a missing ACL grant may therefore first appear as `-32122` on an approval.
