@@ -62,6 +62,7 @@ fn approver() -> CibaApprover {
             "client_id": "praxis-policy-gateway",
             "client_secret_source": { "kind": "literal", "secret": "shh" },
             "insecure_http": true,
+            "store": { "kind": "memory" },
         })),
     };
     CibaApprover::new(cfg).expect("construct approver")
@@ -778,6 +779,7 @@ async fn each_incomplete_ciba_config_is_refused_at_load() {
         "token_endpoint": "https://op.example/token",
         "client_id": "praxis-policy-gateway",
         "client_secret_source": { "kind": "literal", "secret": "shh" },
+        "store": { "kind": "memory" },
     });
 
     // The control: the baseline loads, so each failure below is attributable to

@@ -42,6 +42,7 @@ use praxis_policy_core::cmf::constants::{
 };
 use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::context::PluginContext;
+use praxis_policy_core::elicitation::STORE_UNAVAILABLE_CODE;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::executor::ErasedResultFields;
@@ -97,12 +98,10 @@ pub const ELICITATION_ID_HEADER: &str = "X-Policy-Elicitation-Id";
 pub const ELICITATION_APPROVED_CODE: i64 = -32121;
 
 /// JSON-RPC error code for approval state that could not be read or written.
-/// Check and validate responses echo the elicitation id in `details` to
-/// identify the failed flow. A write may have taken effect before the error,
+/// Responses echo an elicitation id in `details` when dispatch produced one or
+/// the request supplied one. A write may have taken effect before the error,
 /// so the id does not guarantee that a retry can complete the approval.
 pub const ELICITATION_UNAVAILABLE_CODE: i64 = -32122;
-
-const ELICITATION_UNAVAILABLE: &str = "elicitation.store_unavailable";
 
 /// Header an agent sets (alongside `X-Policy-Elicitation-Id`) to *peek* at an
 /// approval — resolve its status without committing the action. Truthy
@@ -752,8 +751,8 @@ impl AplRouteHandler {
                 let reason = reason.unwrap_or_else(|| "access denied".to_owned());
                 // A retry signal, like a pending elicitation, keeps its own
                 // wire shape rather than the route's `denyWith`.
-                let v = if code == ELICITATION_UNAVAILABLE {
-                    unavailable_violation(reason, elicitation_id_from_headers(&post_extensions))
+                let v = if code == STORE_UNAVAILABLE_CODE {
+                    unavailable_violation(reason, unavailable_id(&bag, &post_extensions))
                 } else {
                     let mut v = PluginViolation::new(code, reason);
                     decorate_denial_response(&mut v, self.route.response.as_ref());
@@ -937,6 +936,15 @@ fn elicitation_id_from_headers(ext: &Extensions) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn unavailable_id(
+    bag: &praxis_policy_apl_core::attributes::AttributeBag,
+    ext: &Extensions,
+) -> Option<String> {
+    bag.get_string(praxis_policy_apl_core::step::elicitation_bag_keys::ID)
+        .map(str::to_owned)
+        .or_else(|| elicitation_id_from_headers(ext))
+}
+
 /// True when the agent set `X-Policy-Elicitation-Peek` to a truthy value —
 /// it wants to resolve the approval's status without committing the action.
 fn elicitation_peek_from_headers(ext: &Extensions) -> bool {
@@ -975,7 +983,7 @@ fn unavailable_violation(reason: String, id: Option<String>) -> PluginViolation 
     if let Some(id) = id {
         details.insert("elicitation_id".into(), Value::String(id));
     }
-    PluginViolation::new(ELICITATION_UNAVAILABLE, reason)
+    PluginViolation::new(STORE_UNAVAILABLE_CODE, reason)
         .with_proto_error_code(ELICITATION_UNAVAILABLE_CODE)
         .with_details(details)
 }
@@ -1191,6 +1199,24 @@ mod tests {
             ![ELICITATION_PENDING_CODE, ELICITATION_APPROVED_CODE]
                 .contains(&ELICITATION_UNAVAILABLE_CODE),
             "unknown state must not read as pending or approved"
+        );
+    }
+
+    #[test]
+    fn first_visit_unavailable_uses_the_dispatched_id() {
+        let mut bag = praxis_policy_apl_core::attributes::AttributeBag::new();
+        bag.set(
+            praxis_policy_apl_core::step::elicitation_bag_keys::ID,
+            "dispatched-1",
+        );
+        let id = unavailable_id(&bag, &Extensions::default());
+        let violation = unavailable_violation("down".to_owned(), id);
+        assert_eq!(
+            violation
+                .details
+                .get("elicitation_id")
+                .and_then(Value::as_str),
+            Some("dispatched-1")
         );
     }
 

@@ -20,3 +20,6 @@ pub use hook::{ElicitationHook, HOOK_ELICIT};
 pub use payload::{
     ElicitationOp, ElicitationOutcomeKind, ElicitationPayload, ElicitationStatusKind,
 };
+
+/// Stable violation code for approval state that could not be read or written.
+pub const STORE_UNAVAILABLE_CODE: &str = "elicitation.store_unavailable";

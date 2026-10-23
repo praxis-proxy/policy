@@ -139,7 +139,7 @@ impl CibaApprover {
             .map_err(|e| cfg_err(&cfg.name, format!("client secret resolve failed: {e}")))?;
 
         let http_timeout = typed.http_timeout();
-        let store = build_store(&cfg.name, typed.store.as_ref(), context)?;
+        let store = build_store(&cfg.name, &typed.store, context)?;
 
         Ok(Self {
             cfg,
@@ -663,21 +663,12 @@ struct OAuthError {
 /// Build the configured correlation store.
 fn build_store(
     plugin: &str,
-    store: Option<&StoreConfig>,
+    store: &StoreConfig,
     context: &FactoryContext,
 ) -> Result<Arc<dyn CorrelationStore>, Box<PluginError>> {
     match store {
-        None => {
-            tracing::warn!(
-                alarm = "ciba_store_process_local",
-                plugin,
-                "CIBA approvals are held in process memory and do not reach other replicas; \
-                 set `store.kind` to `memory` to acknowledge, or `valkey` to share them"
-            );
-            Ok(Arc::new(InMemoryCorrelationStore::new()))
-        },
-        Some(StoreConfig::Memory(_)) => Ok(Arc::new(InMemoryCorrelationStore::new())),
-        Some(StoreConfig::Valkey(settings)) => valkey_store(plugin, settings, context),
+        StoreConfig::Memory(_) => Ok(Arc::new(InMemoryCorrelationStore::new())),
+        StoreConfig::Valkey(settings) => valkey_store(plugin, settings, context),
     }
 }
 
@@ -725,7 +716,7 @@ fn deny(code: &str, reason: impl Into<String>) -> PluginResult<ElicitationPayloa
 /// the log only: it can carry server names or ACL text.
 fn store_unavailable() -> PluginResult<ElicitationPayload> {
     deny(
-        "elicitation.store_unavailable",
+        praxis_policy_core::elicitation::STORE_UNAVAILABLE_CODE,
         "approval state is unavailable (fail-closed)",
     )
 }
@@ -890,6 +881,7 @@ mod tests {
                 "token_endpoint": "https://idp.example/token",
                 "client_id": "praxis-policy-gateway",
                 "client_secret_source": { "kind": "literal", "secret": "shh" },
+                "store": { "kind": "memory" },
             })),
             ..Default::default()
         };

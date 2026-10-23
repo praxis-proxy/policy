@@ -1047,7 +1047,9 @@ async fn dispatch_elicitation(
     bag: &mut AttributeBag,
     elicitations: &Arc<dyn crate::step::ElicitationInvoker>,
 ) -> EffectOutcome {
-    use crate::step::{ElicitationOutcome, ElicitationStatus, elicitation_bag_keys as bk};
+    use crate::step::{
+        ElicitationError, ElicitationOutcome, ElicitationStatus, elicitation_bag_keys as bk,
+    };
 
     // `on_error` applies to *failures* (channel error, invalid response,
     // expiry, still-pending) — not to a genuine denial.
@@ -1067,6 +1069,18 @@ async fn dispatch_elicitation(
         }
     };
     let fail = |reason: String| fail_with_code(reason, None);
+    let invocation_failure = |op: &str, error: ElicitationError| {
+        let code = error.code().map(str::to_owned);
+        let reason = format!("elicitation {op} failed: {error}");
+        if matches!(error, ElicitationError::StoreUnavailable { .. }) {
+            EffectOutcome::Halt(Decision::Deny {
+                reason: Some(reason),
+                rule_source: code.unwrap_or_else(|| step.source.clone()),
+            })
+        } else {
+            fail_with_code(reason, code.as_deref())
+        }
+    };
 
     // First arrival vs. retry: the agent echoes `elicitation.id` on
     // retry. Absent → first arrival: dispatch and record the pending
@@ -1112,14 +1126,14 @@ async fn dispatch_elicitation(
                 }
                 d.id
             },
-            Err(e) => return fail_with_code(format!("elicitation dispatch failed: {e}"), e.code()),
+            Err(e) => return invocation_failure("dispatch", e),
         },
     };
 
     // Status check — non-blocking read of the channel's current state.
     let status = match elicitations.check(step, &id).await {
         Ok(s) => s,
-        Err(e) => return fail_with_code(format!("elicitation check failed: {e}"), e.code()),
+        Err(e) => return invocation_failure("check", e),
     };
 
     match status {
@@ -1166,7 +1180,7 @@ async fn dispatch_elicitation(
             let validation = match elicitations.validate(step, &id).await {
                 Ok(v) => v,
                 Err(e) => {
-                    return fail_with_code(format!("elicitation validation failed: {e}"), e.code());
+                    return invocation_failure("validation", e);
                 },
             };
             if !validation.valid {
@@ -3759,6 +3773,59 @@ mod tests {
         }
     }
 
+    /// Each operation can encounter an unavailable correlation store. Even
+    /// with `on_error: continue`, none may authorize the tool call.
+    struct UnavailableElicitor {
+        failed_operation: &'static str,
+    }
+
+    #[async_trait]
+    impl crate::step::ElicitationInvoker for UnavailableElicitor {
+        async fn dispatch(
+            &self,
+            _step: &crate::step::ElicitStep,
+            _resolved_from: &str,
+        ) -> Result<crate::step::ElicitationDispatch, crate::step::ElicitationError> {
+            if self.failed_operation == "dispatch" {
+                return Err(unavailable_error());
+            }
+            Ok(crate::step::ElicitationDispatch {
+                id: "req-1".into(),
+                approver: None,
+                intent_id: None,
+                expires_at: None,
+            })
+        }
+
+        async fn check(
+            &self,
+            _step: &crate::step::ElicitStep,
+            _id: &str,
+        ) -> Result<crate::step::ElicitationStatus, crate::step::ElicitationError> {
+            if self.failed_operation == "check" {
+                return Err(unavailable_error());
+            }
+            Ok(crate::step::ElicitationStatus::Resolved {
+                outcome: crate::step::ElicitationOutcome::Approved,
+            })
+        }
+
+        async fn validate(
+            &self,
+            _step: &crate::step::ElicitStep,
+            _id: &str,
+        ) -> Result<crate::step::ElicitationValidation, crate::step::ElicitationError> {
+            Err(unavailable_error())
+        }
+    }
+
+    fn unavailable_error() -> crate::step::ElicitationError {
+        crate::step::ElicitationError::StoreUnavailable {
+            code: "elicitation.store_unavailable".into(),
+            reason: "approval state is unavailable".into(),
+        }
+    }
+
     /// Plugin invoker keyed by name → outcome.
     struct FakePlugin {
         decisions: std::collections::HashMap<String, Decision>,
@@ -5202,6 +5269,24 @@ mod tests {
         )
         .await;
         assert_eq!(eval.decision, Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn unavailable_approval_state_halts_at_every_operation() {
+        for failed_operation in ["dispatch", "check", "validate"] {
+            let invoker: Arc<dyn crate::step::ElicitationInvoker> =
+                Arc::new(UnavailableElicitor { failed_operation });
+            let mut bag = AttributeBag::new();
+            let eval = run_elicit(elicit_effect(None, Some("continue")), &invoker, &mut bag).await;
+            assert!(
+                matches!(&eval.decision, Decision::Deny { rule_source, .. } if rule_source == "elicitation.store_unavailable"),
+                "{failed_operation}: {:?}",
+                eval.decision
+            );
+            if failed_operation == "check" {
+                assert_eq!(bag.get_string("elicitation.id"), Some("req-1"));
+            }
+        }
     }
 
     #[tokio::test]

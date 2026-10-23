@@ -141,9 +141,19 @@ impl ElicitationPluginInvoker {
 
         if !result.continue_processing {
             return Err(match result.violation {
-                Some(v) => ElicitationError::HandlerViolation {
-                    code: v.code,
-                    reason: format!("{op}: plugin `{plugin_name}` halted: {}", v.reason),
+                Some(v) => {
+                    let reason = format!("{op}: plugin `{plugin_name}` halted: {}", v.reason);
+                    if v.code == praxis_policy_core::elicitation::STORE_UNAVAILABLE_CODE {
+                        ElicitationError::StoreUnavailable {
+                            code: v.code,
+                            reason,
+                        }
+                    } else {
+                        ElicitationError::HandlerViolation {
+                            code: v.code,
+                            reason,
+                        }
+                    }
                 },
                 None => ElicitationError::Handler(format!(
                     "{op}: plugin `{plugin_name}` halted without violation detail"

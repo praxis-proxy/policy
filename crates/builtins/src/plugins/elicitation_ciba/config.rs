@@ -64,10 +64,9 @@ pub struct CibaConfig {
     #[serde(default)]
     pub insecure_http: bool,
 
-    /// Where pending approvals live. Omission uses process memory and logs a
-    /// warning; approvals then stay on this replica.
-    #[serde(default)]
-    pub store: Option<StoreConfig>,
+    /// Where pending approvals live. Select process memory explicitly when
+    /// approvals need not survive a restart or cross replicas.
+    pub store: StoreConfig,
 }
 
 /// The correlation store a CIBA plugin uses.
@@ -202,6 +201,7 @@ mod tests {
             "token_endpoint": "https://kc/realms/corp/protocol/openid-connect/token",
             "client_id": "praxis-policy-gateway",
             "client_secret_source": { "kind": "literal", "secret": "dev-only" },
+            "store": { "kind": "memory" },
         });
         let cfg: CibaConfig = serde_json::from_value(raw).unwrap();
         assert_eq!(cfg.client_id, "praxis-policy-gateway");
@@ -210,6 +210,19 @@ mod tests {
         assert_eq!(cfg.http_timeout_seconds, 5);
         assert_eq!(cfg.approver_claim, "preferred_username");
         assert!(!cfg.insecure_http);
+        assert!(matches!(cfg.store, StoreConfig::Memory(_)));
+    }
+
+    #[test]
+    fn omitted_store_is_rejected() {
+        let raw = json!({
+            "backchannel_endpoint": "https://kc/ciba/auth",
+            "token_endpoint": "https://kc/token",
+            "client_id": "praxis-policy-gateway",
+            "client_secret_source": { "kind": "literal", "secret": "dev-only" },
+        });
+        let error = serde_json::from_value::<CibaConfig>(raw).unwrap_err();
+        assert!(error.to_string().contains("store"), "{error}");
     }
 
     #[test]

@@ -22,14 +22,15 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Unavailable CIBA approval state returns `-32122`.** A store read or write
   failure denies with `elicitation.store_unavailable` and JSON-RPC `-32122`.
   Check and validate responses include the elicitation id to identify the
-  failed flow; a failed write can still require a new elicitation.
+  failed flow, including a first visit after dispatch. Store failures halt
+  even under `on_error: continue`; a failed write can still require a new elicitation.
   `ELICITATION_UNAVAILABLE_CODE` is exported.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 - **CIBA approvals can be shared across replicas.** The `elicitation/ciba`
   plugin accepts `store: { kind: memory | valkey }`. A Valkey store can use its
   own connection or reference `global.session_store`, with overrides for
   credentials, key prefix, and timeouts. Redemption is atomic across replicas.
-  Omitting `store` uses process memory and logs a startup warning.
+  `store` is required; explicit `kind: memory` selects process-local storage.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 - **Valkey passwords can come from an environment variable or file.** Both
   stores accept `password: { env: NAME }` or `{ file: PATH }` alongside a

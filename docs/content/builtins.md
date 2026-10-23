@@ -28,8 +28,7 @@ replica.
 CIBA approvals have their own correlation store, chosen by the plugin's
 `store:` block: `memory`, or `valkey` to share them across replicas.
 Configuring `global.session_store` does not change it unless the block
-references that connection. Without a `store:` block, approvals stay in
-process memory and the plugin warns at startup; see
+references that connection. The CIBA `store:` block is required; see
 [Elicitation](apl/elicitation.md#correlation-store).
 
 The three decision points are held to each other by a differential test

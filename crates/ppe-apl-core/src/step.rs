@@ -872,13 +872,23 @@ pub enum ElicitationError {
         /// Human-readable failure detail.
         reason: String,
     },
+
+    /// Approval state is unknown. This always halts, even when the step sets
+    /// `on_error: continue`.
+    #[error("elicitation storage unavailable {code}: {reason}")]
+    StoreUnavailable {
+        /// Stable violation code supplied by the runtime bridge.
+        code: String,
+        /// Human-readable failure detail.
+        reason: String,
+    },
 }
 
 impl ElicitationError {
     /// Stable plugin code, when the failure came from a handler denial.
     pub fn code(&self) -> Option<&str> {
         match self {
-            Self::HandlerViolation { code, .. } => Some(code),
+            Self::HandlerViolation { code, .. } | Self::StoreUnavailable { code, .. } => Some(code),
             _ => None,
         }
     }

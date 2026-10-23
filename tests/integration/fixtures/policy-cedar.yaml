@@ -207,6 +207,7 @@ plugins:
       client_secret_source:
         kind: literal
         secret: "praxis-gateway-secret"
+      store: { kind: memory }
       scope: openid
       approver_claim: preferred_username
       default_requested_expiry_seconds: 120

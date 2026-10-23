@@ -88,6 +88,7 @@ mod tests {
             "token_endpoint": "https://idp.example/token",
             "client_id": "praxis-policy-gateway",
             "client_secret_source": { "kind": "literal", "secret": "shh" },
+            "store": { "kind": "memory" },
         })
     }
 

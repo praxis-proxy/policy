@@ -94,6 +94,7 @@ plugins:
         kind: file
         path: /etc/ppe-secrets/client-secret
       approver_claim: preferred_username
+      store: { kind: memory }
 ```
 
 `from` becomes the CIBA `login_hint`, `purpose` seeds the `binding_message`, and
@@ -157,7 +158,9 @@ with the plugin's `store:` block:
 - `kind: valkey` shares them across replicas and survives gateway restarts.
   Redeeming is atomic, so two replicas cannot both apply one approval.
 
-Omitting `store:` uses memory and logs a startup warning naming the plugin.
+`store:` is required. Choose `store: { kind: memory }` for process-local
+approvals, or configure Valkey to share them across replicas. An omitted
+selection fails configuration loading.
 `global.session_store` configures Session Taint only. It does not move CIBA
 approvals unless a `store:` block references it.
 
@@ -293,14 +296,14 @@ plugins:
 
 If Valkey is unreachable, times out, or returns undecodable data, the step
 denies with `elicitation.store_unavailable` and JSON-RPC `-32122` ("approval
-state unavailable"). Under the default `on_error`, the failure is neither an
-unknown id nor an approval. A step set to `on_error: continue` skips it, as
-with any elicitation error. The caller sees a generic reason. The backend
+state unavailable") even with `on_error: continue`. The failure is neither an
+unknown id nor an approval. The caller sees a generic reason. The backend
 error is logged with `alarm = "ciba_store_unavailable"`, the plugin, and the
 operation. If a dispatch reached the OP before a store failure, the log also
 includes the `auth_req_id` because the approver has already been prompted.
 
-The `-32122` details echo `elicitation_id` when the request supplied one. It
+The `-32122` details echo `elicitation_id` when dispatch produced one or the
+request supplied one. It
 identifies the failed flow, but does not guarantee a same-id retry. A failed
 read before polling the OP can be retried after the store recovers. If the OP
 approved a poll but the write of the resolved approver failed, the write may
