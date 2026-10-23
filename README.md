@@ -7,6 +7,7 @@
 [![crates.io](https://img.shields.io/crates/v/praxis-policy.svg)](https://crates.io/crates/praxis-policy)
 [![docs.rs](https://img.shields.io/docsrs/praxis-policy)](https://docs.rs/praxis-policy)
 [![MSRV](https://img.shields.io/badge/MSRV-1.92-blue.svg)](rust-toolchain.toml)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpolicy.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpolicy?ref=badge_shield)
 
 Policy engine for [Praxis](https://github.com/praxis-proxy/praxis), covering
 both standard policy use cases as well as AI inference and agents.
@@ -80,3 +81,5 @@ one. `make help` lists the available targets.
 ## License
 
 [Apache-2.0](LICENSE)
+
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpolicy.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpolicy?ref=badge_large)

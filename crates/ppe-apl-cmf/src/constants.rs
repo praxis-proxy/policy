@@ -55,8 +55,12 @@ pub const CAP_READ_DELEGATION: &str = "read_delegation";
 pub const CAP_READ_AGENT: &str = "read_agent";
 /// Capability permitting a plugin to read HTTP headers.
 pub const CAP_READ_HEADERS: &str = "read_headers";
+/// Capability permitting a plugin to read the raw HTTP query.
+pub const CAP_READ_QUERY: &str = "read_query";
 /// Capability permitting a plugin to read the host-parsed LLM request document.
 pub const CAP_READ_LLM_REQUEST: &str = "read_llm_request";
+/// Capability permitting a plugin to read externally acquired metadata.
+pub const CAP_READ_METADATA: &str = "read_metadata";
 
 /// Capability permitting a plugin to append to session security labels.
 pub const CAP_APPEND_LABELS: &str = "append_labels";
@@ -137,23 +141,48 @@ pub const BAG_DELEGATED: &str = "delegated";
 
 /// Key prefix for agent session and lineage, as in `agent.<name>`.
 pub const BAG_AGENT_PREFIX: &str = "agent.";
+/// Key prefix for acquired metadata, as in `metadata.<instance>.<name>`.
+pub const BAG_METADATA_PREFIX: &str = "metadata.";
 /// Key prefix for http request headers, as in `http.request_headers.<name>`.
 pub const BAG_HTTP_REQUEST_HEADERS_PREFIX: &str = "http.request_headers.";
 /// Key prefix for http response headers, as in `http.response_headers.<name>`.
 pub const BAG_HTTP_RESPONSE_HEADERS_PREFIX: &str = "http.response_headers.";
-// HTTP request line — exact keys. These ride the same `read_headers`
-// capability as headers (the whole `http` slot is gated together in
-// `praxis-policy-core::extensions::filter`).
+// HTTP request line — exact keys. The query requires `read_query`;
+// the other fields ride the same `read_headers` capability as headers.
 /// Bag key `http.method`.
 pub const BAG_HTTP_METHOD: &str = "http.method";
 /// Bag key `http.path`.
 pub const BAG_HTTP_PATH: &str = "http.path";
+/// Bag key `http.query`, the request query string without the leading `?`.
+pub const BAG_HTTP_QUERY: &str = "http.query";
 /// Bag key `http.host`.
 pub const BAG_HTTP_HOST: &str = "http.host";
 /// Bag key `http.scheme`.
 pub const BAG_HTTP_SCHEME: &str = "http.scheme";
 /// Bag key `http.status`, the response status, set on the response half only.
 pub const BAG_HTTP_STATUS: &str = "http.status";
+// Normalized request keys require `read_llm_request`. The raw body is a
+// separate structured PDP value at `llm.request`, never an attribute-bag key.
+/// Bag key `llm.input.offered_tools`.
+pub const BAG_LLM_OFFERED_TOOLS: &str = "llm.input.offered_tools";
+/// Bag key `llm.input.stop_sequences`.
+pub const BAG_LLM_STOP_SEQUENCES: &str = "llm.input.stop_sequences";
+/// Bag key `llm.input.tool_choice`.
+pub const BAG_LLM_TOOL_CHOICE: &str = "llm.input.tool_choice";
+/// Bag key `llm.input.forced_tool`.
+pub const BAG_LLM_FORCED_TOOL: &str = "llm.input.forced_tool";
+/// Bag key `llm.input.max_tokens` (the effective normalized cap).
+pub const BAG_LLM_MAX_TOKENS: &str = "llm.input.max_tokens";
+/// Bag key `llm.input.candidate_count`.
+pub const BAG_LLM_CANDIDATE_COUNT: &str = "llm.input.candidate_count";
+/// Bag key `llm.input.temperature`.
+pub const BAG_LLM_TEMPERATURE: &str = "llm.input.temperature";
+/// Bag key `llm.input.top_p`.
+pub const BAG_LLM_TOP_P: &str = "llm.input.top_p";
+/// Bag key `llm.input.stream`.
+pub const BAG_LLM_STREAM: &str = "llm.input.stream";
+/// Bag key `llm.input.instructions_digest`.
+pub const BAG_LLM_INSTRUCTIONS_DIGEST: &str = "llm.input.instructions_digest";
 // Violation `details` keys carrying a transpiled `denyWith` (custom HTTP
 // denial response). Shared between the producer (praxis-policy-apl-runtime route handler)
 // and any consumer (host renderer / tests) so the stringly-typed contract

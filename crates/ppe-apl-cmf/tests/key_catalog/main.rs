@@ -36,14 +36,17 @@ use catalog::{CATALOG, Gating, KeyEntry, KeyType, Shape, entry_for};
 use praxis_policy_apl_cmf::capability_namespaces::{
     capability_namespaces, known_read_capabilities,
 };
+use praxis_policy_apl_cmf::constants::{CAP_READ_HEADERS, CAP_READ_QUERY};
 use praxis_policy_apl_cmf::extract_extensions;
 use praxis_policy_apl_core::{AttributeBag, AttributeValue};
+use praxis_policy_core::cmf::{Message, Role};
 use praxis_policy_core::extensions::{
     AgentExtension, ClientExtension, ClientTrustLevel, CompletionExtension, ConversationContext,
     DelegationExtension, DelegationHop, Extensions, FrameworkExtension, HttpExtension, KeyBinding,
-    LLMExtension, MCPExtension, MetaExtension, MonotonicSet, PromptMetadata, ProvenanceExtension,
+    LLMExtension, LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestParts, MCPExtension,
+    MetaExtension, MetadataCacheDisposition, MonotonicSet, PromptMetadata, ProvenanceExtension,
     RequestExtension, ResourceMetadata, SecurityExtension, StopReason, SubjectExtension,
-    SubjectType, TokenUsage, ToolMetadata, WorkloadIdentity,
+    SubjectType, TokenUsage, ToolChoice, ToolMetadata, WorkloadIdentity,
 };
 
 /// One of every slot, with every field carrying a value.
@@ -136,7 +139,7 @@ fn fully_populated() -> Extensions {
         parent_agent_id: Some("pag".to_owned()),
         conversation: Some(ConversationContext {
             // The transcript is deliberately off the bag.
-            history: vec![serde_json::json!({"role": "user"})],
+            history: vec![Message::text(Role::User, "hi")],
             summary: Some("sum".to_owned()),
             topics: vec!["t1".to_owned()],
         }),
@@ -161,6 +164,7 @@ fn fully_populated() -> Extensions {
         status: Some(200),
         method: Some("POST".to_owned()),
         path: Some("/v1".to_owned()),
+        query: Some("service=git-upload-pack".to_owned()),
         host: Some("h".to_owned()),
         scheme: Some("https".to_owned()),
         // The one field this fixture cannot populate: the engine owns this
@@ -175,6 +179,25 @@ fn fully_populated() -> Extensions {
         model_id: Some("gpt-4".to_owned()),
         provider: Some("openai".to_owned()),
         capabilities: vec!["tools".to_owned()],
+    };
+    let llm_request_normalized_parts = LlmRequestParts {
+        instructions: vec![LlmInstruction {
+            role: LlmInstructionRole::System,
+            text: "prompt".to_owned(),
+        }],
+        offered_tools: vec![ToolMetadata {
+            name: "search".to_owned(),
+            ..Default::default()
+        }],
+        tool_choice: Some(ToolChoice::Tool {
+            name: "search".to_owned(),
+        }),
+        max_tokens: Some(1024),
+        candidate_count: Some(2),
+        temperature: Some(0.5),
+        top_p: Some(0.9),
+        stop_sequences: vec!["END".to_owned()],
+        stream: Some(true),
     };
     let mcp = MCPExtension {
         tool: Some(ToolMetadata {
@@ -229,6 +252,21 @@ fn fully_populated() -> Extensions {
         metadata: HashMap::from([("m".to_owned(), serde_json::json!(1))]),
     };
     let custom = HashMap::from([("c".to_owned(), serde_json::json!("v"))]);
+    let mut metadata_owner = Extensions::default();
+    metadata_owner
+        .install_metadata(
+            "account",
+            "metadata/http",
+            praxis_policy_core::extensions::AcquiredFacts::success(
+                serde_json::json!({"active": true, "nested": {"plan": "enterprise"}}),
+                "2026-10-01T12:00:00Z"
+                    .parse()
+                    .expect("a literal RFC3339 instant"),
+                MetadataCacheDisposition::Miss,
+            )
+            .with_status(200),
+        )
+        .expect("metadata fixture installs");
 
     // Named field by field rather than spread from `Default`, so a slot added
     // to the container also breaks this file. The three non-slot fields carry
@@ -238,20 +276,23 @@ fn fully_populated() -> Extensions {
         delegation: Some(Arc::new(delegation)),
         agent: Some(Arc::new(agent)),
         meta: Some(Arc::new(meta)),
+        metadata: metadata_owner.metadata,
         request: Some(Arc::new(request)),
         http: Some(Arc::new(http)),
         llm: Some(Arc::new(llm)),
+        llm_request: Some(
+            LlmRequest::new(serde_json::json!({"model":"gpt-4"}))
+                .with_parts(llm_request_normalized_parts),
+        ),
         mcp: Some(Arc::new(mcp)),
         completion: Some(Arc::new(completion)),
         provenance: Some(Arc::new(provenance)),
         framework: Some(Arc::new(framework)),
         custom: Some(Arc::new(custom)),
-        // Slots the bridge deliberately does not flatten. `llm_request`
-        // reaches a PDP through a structured side channel and
-        // `raw_credentials` through plugin payloads; neither becomes a key.
+        // The request body reaches PDPs through structured input; raw
+        // credentials reach plugins through payloads.
         candidate_constraint: None,
         raw_credentials: None,
-        llm_request: None,
         http_write_token: None,
         labels_write_token: None,
         delegation_write_token: None,
@@ -284,6 +325,7 @@ fn type_of(value: &AttributeValue) -> KeyType {
 /// omit containers rather than marking them as policy-visible values.
 fn type_matches(declared: KeyType, actual: KeyType) -> bool {
     match declared {
+        KeyType::Acquired => true,
         KeyType::Flattened => actual != KeyType::NonScalar,
         expected => expected == actual,
     }
@@ -330,6 +372,28 @@ fn the_bridge_emits_exactly_the_catalog() {
          {unemitted:?}. Either the bridge stopped writing them or the fixture \
          above stopped populating the field they come from."
     );
+}
+
+#[test]
+fn llm_request_path_is_reserved_and_bag_keys_do_not_collide() {
+    let bag = emitted();
+    let keys: Vec<&str> = bag
+        .iter()
+        .map(|(key, _)| key)
+        .filter(|key| key.starts_with("llm.") || key.starts_with("completion."))
+        .collect();
+    for key in &keys {
+        assert!(
+            *key != "llm.request" && !key.starts_with("llm.request."),
+            "{key} would overwrite the structured PDP request"
+        );
+        for other in &keys {
+            assert!(
+                *key == *other || !other.starts_with(&format!("{key}.")),
+                "{key} is both a leaf and a parent of {other}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -508,14 +572,14 @@ fn duplicate_documented_keys_are_rejected() {
 /// Each key the per-slot tables list, with the type and the section they give
 /// it, normalized to the catalog's spelling.
 ///
-/// Only the tables under "The twelve slots" are read. The payload tables after
+/// Only the tables under "The fourteen slots" are read. The payload tables after
 /// it describe `args.*`, `result.*` and `data.*`, which the payload flattener
 /// writes and this bridge does not.
 fn documented() -> HashMap<String, Documented> {
     let text = std::fs::read_to_string(docs_path()).expect("the catalog page reads");
     let section = text
-        .split_once("## The twelve slots")
-        .expect("the per-slot section is still titled 'The twelve slots'")
+        .split_once("## The fourteen slots")
+        .expect("the per-slot section is still titled 'The fourteen slots'")
         .1
         .split_once("## Payloads that are not slots")
         .expect("the payload section still follows the slots")
@@ -807,6 +871,19 @@ fn each_gated_key_arrives_intact_once_its_capability_is_held() {
          emits unfiltered, so the catalog names the wrong capability or the \
          filter drops something it should not: {wrong:#?}"
     );
+}
+
+#[test]
+fn raw_http_query_reaches_pdps_and_only_plugins_with_read_query() {
+    assert_eq!(
+        bag_unfiltered().get_string("http.query"),
+        Some("service=git-upload-pack")
+    );
+    assert_eq!(
+        bag_visible_to(&[CAP_READ_QUERY]).get_string("http.query"),
+        Some("service=git-upload-pack")
+    );
+    assert!(!bag_visible_to(&[CAP_READ_HEADERS]).contains("http.query"));
 }
 
 /// Every capability against every gated key, not just the declared pair.

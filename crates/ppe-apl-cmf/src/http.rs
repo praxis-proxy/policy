@@ -10,6 +10,7 @@
 // Namespace:
 //   http.method                    : String  (request line)
 //   http.path                      : String
+//   http.query                     : String  (query string, no leading `?`)
 //   http.host                      : String
 //   http.scheme                    : String
 //   http.status                    : Int     (response half only)
@@ -20,7 +21,7 @@ use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::HttpExtension;
 
 use crate::constants::{
-    BAG_HTTP_HOST, BAG_HTTP_METHOD, BAG_HTTP_PATH, BAG_HTTP_SCHEME, BAG_HTTP_STATUS,
+    BAG_HTTP_HOST, BAG_HTTP_METHOD, BAG_HTTP_PATH, BAG_HTTP_QUERY, BAG_HTTP_SCHEME, BAG_HTTP_STATUS,
 };
 
 /// Write the request line, the response status, and both header maps into the
@@ -35,6 +36,14 @@ pub fn extract_http(http: &HttpExtension, bag: &mut AttributeBag) {
     }
     if let Some(path) = &http.path {
         bag.set(BAG_HTTP_PATH.to_owned(), path.clone());
+    }
+    // The query is surfaced verbatim (no leading `?`) so a policy can gate on
+    // it — e.g. `http.query == "service=git-upload-pack"`. It is deliberately
+    // NOT folded into `http.path`: the path matcher strips a query by design,
+    // and keeping them separate means a query predicate and a path predicate
+    // never interfere. Absent when the request carried no query.
+    if let Some(query) = &http.query {
+        bag.set(BAG_HTTP_QUERY.to_owned(), query.clone());
     }
     if let Some(host) = &http.host {
         bag.set(BAG_HTTP_HOST.to_owned(), host.clone());
@@ -77,6 +86,7 @@ mod tests {
         let http = HttpExtension {
             method: Some("POST".to_owned()),
             path: Some("/api/widgets".to_owned()),
+            query: Some("service=git-upload-pack".to_owned()),
             host: Some("api.example.com".to_owned()),
             scheme: Some("https".to_owned()),
             ..Default::default()
@@ -85,6 +95,10 @@ mod tests {
         extract_http(&http, &mut bag);
         assert_eq!(bag.get_string("http.method"), Some("POST"));
         assert_eq!(bag.get_string("http.path"), Some("/api/widgets"));
+        assert_eq!(
+            bag.get_string("http.query"),
+            Some("service=git-upload-pack")
+        );
         assert_eq!(bag.get_string("http.host"), Some("api.example.com"));
         assert_eq!(bag.get_string("http.scheme"), Some("https"));
     }
@@ -95,6 +109,20 @@ mod tests {
         let mut bag = AttributeBag::new();
         extract_http(&http, &mut bag);
         assert_eq!(bag.get_string("http.method"), None);
+    }
+
+    #[test]
+    fn query_absent_from_bag_when_unset() {
+        // A request with no query must leave `http.query` out of the bag, so a
+        // policy allowlisting a specific query fails closed rather than seeing
+        // an empty-string match.
+        let http = HttpExtension {
+            path: Some("/x/info/refs".to_owned()),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_http(&http, &mut bag);
+        assert!(!bag.contains("http.query"));
     }
 
     #[test]

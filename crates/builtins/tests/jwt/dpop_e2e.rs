@@ -620,7 +620,11 @@ async fn without_a_scheme_and_host_the_url_needs_an_external_base_url() {
 /// code is `auth.dpop_invalid`.
 async fn invalid_reason(proof: String) -> String {
     let token = bound_token(&agent());
-    let result = send(required(), Request::dpop(&token, proof)).await;
+    invalid_reason_for_token(&token, proof).await
+}
+
+async fn invalid_reason_for_token(token: &str, proof: String) -> String {
+    let result = send(required(), Request::dpop(token, proof)).await;
     assert_eq!(
         denied_with(&result),
         codes::DPOP_INVALID,
@@ -672,7 +676,9 @@ async fn a_proof_with_an_empty_or_oversized_jti_is_denied() {
     for jti in [String::new(), "x".repeat(257)] {
         let mut claims = claims_for(&token);
         claims["jti"] = json!(jti);
-        let reason = invalid_reason(proof(&key, &key.jwk, Algorithm::ES256, &claims)).await;
+        let reason =
+            invalid_reason_for_token(&token, proof(&key, &key.jwk, Algorithm::ES256, &claims))
+                .await;
         assert!(reason.contains("jti"), "{reason}");
     }
 }

@@ -1235,6 +1235,7 @@ mod tests {
         bag.set("custom.anything_else", MARKER);
         bag.set("http.request_headers.authorization", MARKER);
         bag.set("http.response_headers.server", MARKER);
+        bag.set("http.query", MARKER);
         let structured = StructuredInput::new(
             Some(Arc::new(serde_json::json!({
                 "model": "gpt-4o",
@@ -1308,6 +1309,39 @@ mod tests {
         assert!(
             out.diagnostics
                 .contains(&"http.response_headers=map".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn false_result_snapshot_redacts_query_value() {
+        // A query can embed a credential (a query-parameter JWT, say). On a
+        // false result, the snapshot must label `http.query` by type, never
+        // print its value — the same treatment the header namespaces get. The
+        // expression need only mention `http` for the whole namespace to be
+        // referenced, so a rule checking `http.method` alone still triggers the
+        // snapshot that would otherwise print the query.
+        let r = CelResolver::new();
+        let (bag, structured) = leaky_input();
+        let out = r
+            .evaluate_structured(
+                &cel_call("http.method == 'PATCH' && http.query == 'other'"),
+                &bag,
+                &structured,
+            )
+            .await
+            .unwrap();
+        assert_no_leak(&out);
+        // Labeled by type (a string), value withheld.
+        assert!(
+            out.diagnostics.contains(&"http.query=string".to_owned()),
+            "{:?}",
+            out.diagnostics
+        );
+        // And the raw value is nowhere in the diagnostics.
+        assert!(
+            !out.diagnostics.iter().any(|d| d.contains(MARKER)),
+            "{:?}",
+            out.diagnostics
         );
     }
 

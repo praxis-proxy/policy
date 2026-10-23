@@ -29,13 +29,15 @@
 
 use praxis_policy_apl_cmf::constants::{
     CAP_READ_AGENT, CAP_READ_CLAIMS, CAP_READ_CLIENT, CAP_READ_DELEGATION, CAP_READ_HEADERS,
-    CAP_READ_LABELS, CAP_READ_PERMISSIONS, CAP_READ_ROLES, CAP_READ_SUBJECT, CAP_READ_TEAMS,
-    CAP_READ_WORKLOAD,
+    CAP_READ_LABELS, CAP_READ_LLM_REQUEST, CAP_READ_METADATA, CAP_READ_PERMISSIONS, CAP_READ_QUERY,
+    CAP_READ_ROLES, CAP_READ_SUBJECT, CAP_READ_TEAMS, CAP_READ_WORKLOAD,
 };
 
 /// The value type a bag key carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyType {
+    /// Any acquired JSON/provenance shape, including `NonScalar` markers.
+    Acquired,
     /// `AttributeValue::Bool`.
     Bool,
     /// `AttributeValue::Int`.
@@ -67,6 +69,7 @@ impl KeyType {
     #[must_use]
     pub(crate) const fn documented(self) -> &'static str {
         match self {
+            Self::Acquired => "acquired JSON",
             Self::Bool => "Bool",
             Self::Int => "Int",
             Self::Float => "Float",
@@ -102,6 +105,8 @@ pub(crate) enum Slot {
     Http,
     /// `llm` — `LLMExtension`.
     Llm,
+    /// `llm_request` — `LlmRequest`.
+    LlmRequest,
     /// `mcp` — `MCPExtension`.
     Mcp,
     /// `completion` — `CompletionExtension`.
@@ -112,6 +117,8 @@ pub(crate) enum Slot {
     Framework,
     /// `custom` — the host's own map.
     Custom,
+    /// `metadata` — externally acquired policy facts.
+    Metadata,
 }
 
 impl Slot {
@@ -126,11 +133,13 @@ impl Slot {
             Self::Request => "request",
             Self::Http => "http",
             Self::Llm => "llm",
+            Self::LlmRequest => "llm_request",
             Self::Mcp => "mcp",
             Self::Completion => "completion",
             Self::Provenance => "provenance",
             Self::Framework => "framework",
             Self::Custom => "custom",
+            Self::Metadata => "metadata",
         }
     }
 }
@@ -658,6 +667,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Slot::Http,
     ),
     exact(
+        "http.query",
+        KeyType::String,
+        Gating::Capability(CAP_READ_QUERY),
+        Slot::Http,
+    ),
+    exact(
         "http.host",
         KeyType::String,
         Gating::Capability(CAP_READ_HEADERS),
@@ -687,7 +702,20 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Capability(CAP_READ_HEADERS),
         Slot::Http,
     ),
-    // 7. llm
+    // 7. llm model identity (legacy aliases retained)
+    exact("llm.model.id", KeyType::String, Gating::Ungated, Slot::Llm),
+    exact(
+        "llm.model.provider",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Llm,
+    ),
+    exact(
+        "llm.model.capabilities",
+        KeyType::StringSet,
+        Gating::Ungated,
+        Slot::Llm,
+    ),
     exact("llm.model_id", KeyType::String, Gating::Ungated, Slot::Llm),
     exact("llm.provider", KeyType::String, Gating::Ungated, Slot::Llm),
     exact(
@@ -696,7 +724,68 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Llm,
     ),
-    // 8. mcp
+    // 8. llm_request normalized parts
+    exact(
+        "llm.input.offered_tools",
+        KeyType::StringSet,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.stop_sequences",
+        KeyType::StringSet,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.tool_choice",
+        KeyType::String,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.forced_tool",
+        KeyType::String,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.max_tokens",
+        KeyType::Int,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.candidate_count",
+        KeyType::Int,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.temperature",
+        KeyType::Float,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.top_p",
+        KeyType::Float,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.stream",
+        KeyType::Bool,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    exact(
+        "llm.input.instructions_digest",
+        KeyType::String,
+        Gating::Capability(CAP_READ_LLM_REQUEST),
+        Slot::LlmRequest,
+    ),
+    // 9. mcp
     exact("mcp.tool.name", KeyType::String, Gating::Ungated, Slot::Mcp),
     exact(
         "mcp.tool.title",
@@ -788,7 +877,55 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Mcp,
     ),
-    // 9. completion
+    // 10. completion (legacy aliases retained)
+    exact(
+        "llm.output.stop_reason",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.tokens.input",
+        KeyType::Int,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.tokens.output",
+        KeyType::Int,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.tokens.total",
+        KeyType::Int,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.model",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.raw_format",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.created_at",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
+    exact(
+        "llm.output.latency_ms",
+        KeyType::Int,
+        Gating::Ungated,
+        Slot::Completion,
+    ),
     exact(
         "completion.stop_reason",
         KeyType::String,
@@ -837,7 +974,7 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Completion,
     ),
-    // 10. provenance
+    // 11. provenance
     exact(
         "provenance.source",
         KeyType::String,
@@ -856,7 +993,7 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Provenance,
     ),
-    // 11. framework
+    // 12. framework
     exact(
         "framework.framework",
         KeyType::String,
@@ -887,12 +1024,19 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Ungated,
         Slot::Framework,
     ),
-    // 12. custom
+    // 13. custom
     family(
         "custom.<name>",
         KeyType::Flattened,
         Gating::Ungated,
         Slot::Custom,
+    ),
+    // 13. metadata
+    family(
+        "metadata.<name>",
+        KeyType::Acquired,
+        Gating::Capability(CAP_READ_METADATA),
+        Slot::Metadata,
     ),
 ];
 

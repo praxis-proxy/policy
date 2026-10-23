@@ -168,10 +168,29 @@ const TABLE: &[CapabilityEntry] = &[
         ],
     },
     CapabilityEntry {
-        // Gates `Extensions.llm_request`, which reaches PDPs through a
-        // structured side channel and is never flattened into the bag.
+        name: CAP_READ_QUERY,
+        prefixes: &[BAG_HTTP_QUERY],
+    },
+    CapabilityEntry {
+        // Gates the request carrier. Its body reaches PDPs through structured
+        // input; its normalized parts supply these exact bag keys.
         name: CAP_READ_LLM_REQUEST,
-        prefixes: &[],
+        prefixes: &[
+            BAG_LLM_OFFERED_TOOLS,
+            BAG_LLM_STOP_SEQUENCES,
+            BAG_LLM_TOOL_CHOICE,
+            BAG_LLM_FORCED_TOOL,
+            BAG_LLM_MAX_TOKENS,
+            BAG_LLM_CANDIDATE_COUNT,
+            BAG_LLM_TEMPERATURE,
+            BAG_LLM_TOP_P,
+            BAG_LLM_STREAM,
+            BAG_LLM_INSTRUCTIONS_DIGEST,
+        ],
+    },
+    CapabilityEntry {
+        name: CAP_READ_METADATA,
+        prefixes: &[BAG_METADATA_PREFIX],
     },
 ];
 
@@ -276,9 +295,11 @@ mod tests {
         let prefixes = capability_namespaces(CAP_READ_HEADERS);
         assert!(prefixes.contains(&BAG_HTTP_REQUEST_HEADERS_PREFIX));
         assert!(prefixes.contains(&BAG_HTTP_RESPONSE_HEADERS_PREFIX));
-        // The whole `http` slot is gated as one, so the response status is
-        // readable wherever response headers are.
+        // The response status shares the header capability; the raw query
+        // requires a separate grant.
         assert!(prefixes.contains(&BAG_HTTP_STATUS));
+        assert!(!prefixes.contains(&BAG_HTTP_QUERY));
+        assert_eq!(capability_namespaces(CAP_READ_QUERY), &[BAG_HTTP_QUERY]);
     }
 
     /// The module header claims every `CAP_*` name matches a capability
@@ -334,8 +355,13 @@ mod tests {
     }
 
     #[test]
-    fn read_llm_request_is_known_but_unlocks_no_bag_keys() {
-        assert!(capability_namespaces(CAP_READ_LLM_REQUEST).is_empty());
+    fn read_llm_request_unlocks_the_typed_request_keys_only() {
+        let prefixes = capability_namespaces(CAP_READ_LLM_REQUEST);
+        assert!(prefixes.contains(&BAG_LLM_OFFERED_TOOLS));
+        assert!(prefixes.contains(&BAG_LLM_INSTRUCTIONS_DIGEST));
+        assert!(prefixes.contains(&BAG_LLM_CANDIDATE_COUNT));
+        // Exact keys, so model identity under `llm.` stays unrestricted.
+        assert!(prefixes.iter().all(|p| !p.ends_with('.')));
         assert!(known_read_capabilities().any(|c| c == CAP_READ_LLM_REQUEST));
     }
 

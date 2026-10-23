@@ -75,7 +75,8 @@ crates/
                   secrets::  vault
 
 reference/
-  plugins/      pii-scanner, audit-logger (examples)
+  plugins/      pii-scanner, audit-logger,
+                transcript-scanner (examples)
 
 tests/          suites, `--all-features` pass only
   integration   demo scenarios via the reference host,

@@ -5,11 +5,12 @@ contextual state policy reasons about. Identity, security labels, the delegation
 chain, request headers, and agent session context are extensions.
 Each extension is bridged into the flat attribute bag APL reads, under a
 well-known namespace. Capability-gating controls which plugins may read or
-write credential-bearing state; operational context is unrestricted.
+write protected state; operational context remains unrestricted.
 
 Hosts rarely configure extensions directly. Capability gating restricts the
 sensitive state available to plugins that execute APL effects. The namespaces
-below are the exact keys an APL predicate or plugin may read. The per-type
+below are the exact keys an APL predicate may read; the Access column describes
+which of them a plugin may read. The per-type
 absent-value contract, original vs flattened keys, and the catalog of every key
 the bridge emits are in [CMF extensions and the attribute bag](cmf-extensions.md).
 
@@ -30,18 +31,41 @@ keys. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Security (authentication method) | host-recorded authentication method | `auth_method` | unrestricted |
 | Delegation | delegation depth, delegated flag, origin and actor subjects, chain age | `delegation.*`, `delegated` | `read_delegation`, `append_delegation` |
 | Agent | session, conversation, turn, and lineage context | `agent.*` | `read_agent` |
+| Metadata | immutable facts acquired from an external policy information source, with trusted provenance | `metadata.<instance>.*` | `read_metadata` |
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | unrestricted |
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | unrestricted |
-| HTTP | request line (method, path, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers`, `write_headers` |
-| LLM | model id, provider, capabilities | `llm.*` | unrestricted |
-| LLM request | the host-parsed inference request body | not flattened; OPA, CEL, and Cedar read it as `llm.request` | `read_llm_request` |
+| HTTP | request line (method, path, query, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers` for headers and non-query request-line fields; `write_headers` for header writes; `read_query` for raw `http.query` |
+| LLM | model id, provider, capabilities | `llm.model.id`, `llm.model.provider`, `llm.model.capabilities` | unrestricted |
+| LLM request | the host-parsed inference request body, and its normalized parts: ordered instructions, offered tools, tool choice, sampling parameters | the body is not flattened; OPA, CEL, and Cedar read it as `llm.request`. The typed parts flatten to `llm.input.offered_tools`, `llm.input.stop_sequences`, `llm.input.tool_choice`, `llm.input.forced_tool`, `llm.input.max_tokens`, `llm.input.candidate_count`, `llm.input.temperature`, `llm.input.top_p`, `llm.input.stream`, `llm.input.instructions_digest` | `read_llm_request` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | unrestricted |
-| Completion | stop reason, token counts, model, latency | `completion.*` | unrestricted |
+| Completion | stop reason, token counts, model, latency | `llm.output.*` | unrestricted |
 | Provenance | source, message id, parent id | `provenance.*` | unrestricted |
 | Framework | agentic framework name and version, node and graph ids, metadata | `framework.*` | unrestricted |
 | Custom | free-form host-defined namespace | `custom.*` | unrestricted |
 | Raw credentials | inbound tokens and minted delegated tokens | flow through plugin payloads, not the bag | `read_inbound_credentials`, `read_delegated_tokens` |
 | Candidate constraint | folded backend routing constraint from `restrict` effects | not a bag namespace — read by the host router | written by the policy engine |
+
+One field of the agent extension is carried but not flattened: the
+conversation history. `AgentExtension.conversation.history` is a list of CMF
+`Message`s, oldest first, the same type as the current turn's payload. No
+`agent.*` key exposes it, so an APL predicate cannot read it directly. A policy
+that needs to reason over earlier turns runs a plugin that declares
+`read_agent` and walks the typed turns itself;
+`reference/plugins/transcript-scanner` is a worked example.
+
+The gated `Extensions.llm_request` carrier contains the parsed body and
+normalized parts. Its body is structured PDP input at `llm.request`, never a
+bag key. Reported parts emit `llm.input.offered_tools` and
+`llm.input.stop_sequences` as sets, the applicable scalar keys, and
+`llm.input.instructions_digest`. The digest preserves instruction roles,
+order, and message boundaries without exposing their text. A plugin needs
+`read_llm_request` to see either reading. With no normalized parts,
+`llm.input.*` keys are absent; use `!exists(llm.input.offered_tools): deny`
+to refuse an unreported request. The model and output facts use
+`llm.model.*` and `llm.output.*`. Legacy `llm.model_id`, `llm.provider`,
+`llm.capabilities`, and `completion.*` aliases remain value-identical for
+existing policies.
+[LLM Routes](llm-routes.md) lists the per-phase keys and a worked config.
 
 The request arguments and response body are also flattened. An object
 writes `args.<dotted>` / `result.<dotted>`; a top-level scalar or scalar
@@ -49,6 +73,13 @@ array writes the bare key `args` / `result`. The route name is
 `route.key`. APL field pipelines (`args:` / `result:`) operate on those. Operator-maintained static attributes
 are flattened under `data.*` — these come from config files, not the request,
 and need no capability (see [Static Attributes](apl/attributes.md)).
+
+PDPs read the raw `http.query` from the canonical attribute bag. Plugin views
+include it only with `read_query`; `read_headers` alone exposes the request and
+response headers but not the query. `read_query` alone does not expose headers
+or other request-line fields. Hosts must keep the query out of `http.path`.
+When an identity resolver also reads a query, both inputs must come from the
+same request target.
 
 Most extensions are inputs — resolved before policy runs and flattened into
 the bag for predicates to read. The candidate constraint is the exception:
@@ -58,6 +89,18 @@ minted delegation tokens do, and the host router reads it typed to prune its
 candidate set. Because PPE links the router in-process, this is a typed value,
 not a serialized blob. Capability-gating the write is not yet applied — the
 policy engine is its only writer today.
+
+Acquired metadata belongs to one policy invocation. The metadata PIP fetch
+step ([#184](https://github.com/praxis-proxy/policy/issues/184)), or a host
+that resolves facts before dispatch, installs one record per source instance
+with `Extensions::install_metadata`; ordinary plugin merge-back cannot add,
+replace, or remove it. Route predicates always read `metadata.*`, because the
+synthetic APL handler holds `read_metadata` intrinsically. Plugins dispatched within
+the same invocation (`run`, delegation, elicitation) see the records read-only
+when they declare `read_metadata`. A host starting a child policy invocation
+uses `Extensions::for_child_request`, which retains the ordinary request
+context but clears acquired metadata. The child may install its own records,
+and those records are not merged into the parent.
 
 ## Capabilities
 
@@ -90,8 +133,10 @@ plugins:
 | `read_workload` | `caller_workload.*`, `this_workload.*` |
 | `read_delegation` | `delegation.*`, `delegated` |
 | `read_agent` | `agent.*` |
-| `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` |
-| `read_llm_request` | no bag keys; gates the parsed request body on `Extensions.llm_request` |
+| `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*`; excludes raw `http.query` |
+| `read_query` | raw `http.query` only; may include credentials |
+| `read_llm_request` | `llm.input.offered_tools`, `llm.input.stop_sequences`, `llm.input.tool_choice`, `llm.input.forced_tool`, `llm.input.max_tokens`, `llm.input.candidate_count`, `llm.input.temperature`, `llm.input.top_p`, `llm.input.stream`, `llm.input.instructions_digest`; also gates the parsed request body on `Extensions.llm_request` |
+| `read_metadata` | `metadata.<instance>.*` |
 | `read_labels` | the labels on the security extension. A plugin reads them from the extension; `security.labels` in the bag is what an APL predicate reads |
 | `read_inbound_credentials` | no bag keys; gates raw inbound tokens in the plugin payload |
 | `read_delegated_tokens` | no bag keys; gates minted tokens in the plugin payload |
@@ -103,21 +148,18 @@ Inventing a read-capability name for one of these slots does not make it gated.
 
 `read_roles`, `read_permissions`, `read_teams`, and `read_claims` each imply the
 `read_subject` baseline (`subject.id`, `subject.type`, `authenticated`). The
-last three capabilities widen no plugin's bag view: labels are read from the
-typed extension, and credential material flows through plugin payloads rather
-than the bag. APL predicates read `security.labels` from the bag directly, which
+label and credential capabilities widen no plugin's bag view: labels are read
+from the typed extension, and credential material flows through plugin payloads
+rather than the bag. APL predicates read `security.labels` from the bag, which
 is how `security.labels contains "secret"` works (see [Session
 Taint](apl/tainting.md)).
 
-`read_llm_request` also widens no bag view. The host sets
-`Extensions.llm_request` to the request body it parsed. The body carries
-prompt text and client-supplied JSON, so it is never flattened into the bag,
-and a plugin without the capability sees the slot as absent. APL's route
-handler is always granted it, which is how OPA, CEL, and Cedar steps receive
-the body as `llm.request` (see [Structured request
-input](apl/pdp.md#structured-request-input)). The capability gates plugins,
-not PDP resolvers: a host resolver opts in by overriding
-`PdpResolver::evaluate_structured`.
+`read_llm_request` gates the one request carrier. The body contains
+client-supplied JSON and reaches PDPs through structured input, while the
+normalized parts supply only the exact `llm.input.*` keys listed above.
+Neither the body nor the parts are serialized with extensions. The route
+handler receives both intrinsically; plugins need the capability. Host PDP
+resolvers opt in by overriding `PdpResolver::evaluate_structured`.
 
 Membership names containing `.` remain atomic values in the canonical sets and
 do not receive flattened aliases. For example, test a dotted role with
@@ -167,8 +209,12 @@ enforces the tier:
 
 - Immutable: fixed once resolved. The verified subject identity, client,
   workload, agent, meta, request, LLM, LLM request, MCP, completion,
-  provenance, and framework extensions. The LLM request is also never
-  serialized, so it stays out of extension dumps and session stores.
+  provenance, framework, and externally acquired metadata extensions. Metadata
+  is installed once per source instance by the framework and has no plugin
+  write capability. The LLM request's body and normalized parts, and acquired
+  metadata, are never serialized with `Extensions`, so they stay out of
+  extension dumps and session stores; serde cannot carry provenance the
+  framework did not stamp.
 - Monotonic: may only grow. Security labels (added via `append_labels`,
   never removed) and the delegation chain (extended via `append_delegation`).
 - Mutable: may be rewritten. HTTP headers (via `write_headers`) and the

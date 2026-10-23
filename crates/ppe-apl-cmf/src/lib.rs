@@ -31,9 +31,10 @@
 //   HttpExtension                  → http.method, http.path, http.host, http.scheme,
 //                                     http.status, http.request_headers.*,
 //                                     http.response_headers.*
-//   LLMExtension                   → llm.*
+//   LLMExtension                   → llm.model.* (with published aliases)
+//   LlmRequest normalized parts    → llm.input.*
 //   MCPExtension                   → mcp.tool.*, mcp.resource.*, mcp.prompt.*
-//   CompletionExtension            → completion.*
+//   CompletionExtension            → llm.output.* (with published aliases)
 //   ProvenanceExtension            → provenance.*
 //   FrameworkExtension             → framework.*  (incl. framework.metadata.*)
 //   Extensions.custom              → custom.*
@@ -54,7 +55,7 @@
 pub mod agent;
 /// Maps a plugin capability to the key prefixes it may read.
 pub mod capability_namespaces;
-/// Bridges completion metadata into `completion.*` keys.
+/// Bridges completion metadata into `llm.output.*` keys and legacy aliases.
 pub mod completion;
 /// The attribute key and capability name constants.
 pub mod constants;
@@ -68,12 +69,14 @@ pub mod extensions_bridge;
 pub mod framework;
 /// Bridges request and response headers into `http.*` keys.
 pub mod http;
-/// Bridges model identity into `llm.*` keys.
+/// Bridges model identity, and the request when reported, into `llm.*` keys.
 pub mod llm;
 /// Bridges tool and resource metadata into `mcp.*` keys.
 pub mod mcp;
 /// Bridges operational metadata into `meta.*` keys.
 pub mod meta;
+/// Acquired metadata → `metadata.*` attributes.
+pub mod metadata;
 /// Bridges the message payload into `args.*` and `result.*` keys.
 pub mod payload;
 /// Bridges origin and threading into `provenance.*` keys.
@@ -93,9 +96,10 @@ pub use delegation::extract_delegation;
 pub use extensions_bridge::extract_extensions;
 pub use framework::extract_framework;
 pub use http::extract_http;
-pub use llm::extract_llm;
+pub use llm::{extract_llm, extract_llm_request};
 pub use mcp::extract_mcp;
 pub use meta::extract_meta;
+pub use metadata::extract_metadata;
 pub use payload::{extract_args, extract_data, extract_result};
 pub use provenance::extract_provenance;
 pub use request::extract_request;

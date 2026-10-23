@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::container::Extensions;
+use super::http::HttpExtension;
 use crate::host::HttpTransportSlot;
 
 use super::security::{SecurityExtension, SubjectExtension};
@@ -26,6 +27,8 @@ pub enum SlotName {
     Http,
     /// The host metadata slot.
     Meta,
+    /// Externally acquired policy facts.
+    Metadata,
     /// The delegation chain slot.
     Delegation,
     /// The host-supplied custom slot.
@@ -38,7 +41,7 @@ pub enum SlotName {
     Provenance,
     /// The model identity slot.
     Llm,
-    /// The host-parsed LLM request document slot.
+    /// The parsed body and normalized parts of one LLM request.
     LlmRequest,
     /// The framework context slot.
     Framework,
@@ -140,6 +143,12 @@ pub fn slot_policy(slot: SlotName) -> SlotPolicy {
             tier: MutabilityTier::Immutable,
             access: AccessPolicy::CapabilityGated,
             read_cap: Some(Capability::ReadLlmRequest),
+            write_cap: None,
+        },
+        SlotName::Metadata => SlotPolicy {
+            tier: MutabilityTier::Immutable,
+            access: AccessPolicy::CapabilityGated,
+            read_cap: Some(Capability::ReadMetadata),
             write_cap: None,
         },
         SlotName::Http => SlotPolicy {
@@ -359,7 +368,7 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         }
     }
 
-    // Capability-gated: the parsed LLM request document
+    // Capability-gated: one carrier holds both readings of the request.
     if extensions.llm_request.is_some() {
         let policy = slot_policy(SlotName::LlmRequest);
         if has_read_access(&policy, capabilities) {
@@ -367,18 +376,41 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         }
     }
 
-    // Capability-gated: http
-    if extensions.http.is_some() {
-        let policy = slot_policy(SlotName::Http);
+    // Capability-gated: externally acquired metadata
+    if extensions.metadata.is_some() {
+        let policy = slot_policy(SlotName::Metadata);
         if has_read_access(&policy, capabilities) {
-            filtered.http = extensions.http.as_ref().map(|http| {
-                if http.secret_headers.markers.is_empty() {
-                    return Arc::clone(http);
-                }
-                let mut safe = (**http).clone();
-                safe.request_headers = http.redacted_request_headers().into_owned();
-                Arc::new(safe)
-            });
+            filtered.metadata = extensions.metadata.clone();
+        }
+    }
+
+    // Capability-gated: HTTP headers and the raw query have independent grants.
+    if let Some(http) = &extensions.http {
+        let policy = slot_policy(SlotName::Http);
+        let read_headers = has_read_access(&policy, capabilities);
+        let read_query = capabilities.contains(&cap_str(Capability::ReadQuery));
+        if read_headers
+            && http.secret_headers.markers.is_empty()
+            && (read_query || http.query.is_none())
+        {
+            filtered.http = Some(Arc::clone(http));
+        } else if read_headers {
+            filtered.http = Some(Arc::new(HttpExtension {
+                request_headers: http.redacted_request_headers().into_owned(),
+                secret_headers: http.secret_headers.clone(),
+                response_headers: http.response_headers.clone(),
+                status: http.status,
+                method: http.method.clone(),
+                path: http.path.clone(),
+                query: read_query.then(|| http.query.clone()).flatten(),
+                host: http.host.clone(),
+                scheme: http.scheme.clone(),
+            }));
+        } else if read_query {
+            filtered.http = Some(Arc::new(HttpExtension {
+                query: http.query.clone(),
+                ..Default::default()
+            }));
         }
     }
 
@@ -567,7 +599,7 @@ fn build_filtered_subject(
 )]
 mod tests {
     use super::*;
-    use crate::extensions::llm::LlmRequestDocument;
+    use crate::extensions::llm::{LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestParts};
     use crate::extensions::meta::MetaExtension;
 
     // ---- host services: the outbound-HTTP gate -------------------------
@@ -814,6 +846,59 @@ mod tests {
     }
 
     #[test]
+    fn query_credential_requires_read_query() {
+        let query = "access_token=secret&service=git-upload-pack";
+        let mut http = HttpExtension {
+            method: Some("GET".to_owned()),
+            path: Some("/repo.git/info/refs".to_owned()),
+            query: Some(query.to_owned()),
+            ..Default::default()
+        };
+        http.set_request_header("x-request-id", "123");
+        let ext = Extensions {
+            http: Some(Arc::new(http)),
+            ..Default::default()
+        };
+
+        for caps in [
+            ["read_headers"].as_slice(),
+            ["read_headers", "write_headers"].as_slice(),
+            ["read_headers", "read_inbound_credentials"].as_slice(),
+        ] {
+            let caps: HashSet<String> = caps.iter().map(|cap| (*cap).to_owned()).collect();
+            let filtered = filter_extensions(&ext, &caps);
+            let plugin_http = filtered.http.as_ref().expect("read_headers grants HTTP");
+            assert_eq!(plugin_http.query, None, "query must be hidden for {caps:?}");
+            assert_eq!(plugin_http.method.as_deref(), Some("GET"));
+            assert_eq!(plugin_http.get_request_header("x-request-id"), Some("123"));
+        }
+
+        assert_eq!(
+            ext.http.as_ref().and_then(|http| http.query.as_deref()),
+            Some(query),
+            "filtering does not change the canonical query"
+        );
+
+        let query_only: HashSet<String> = ["read_query".to_owned()].into();
+        let query_view = filter_extensions(&ext, &query_only);
+        let query_http = query_view
+            .http
+            .as_ref()
+            .expect("read_query grants HTTP query");
+        assert_eq!(query_http.query.as_deref(), Some(query));
+        assert!(query_http.method.is_none());
+        assert!(query_http.path.is_none());
+        assert!(query_http.request_headers.is_empty());
+
+        let both: HashSet<String> = ["read_headers".to_owned(), "read_query".to_owned()].into();
+        let both_view = filter_extensions(&ext, &both);
+        let both_http = both_view.http.as_ref().expect("both grants expose HTTP");
+        assert_eq!(both_http.query.as_deref(), Some(query));
+        assert_eq!(both_http.method.as_deref(), Some("GET"));
+        assert_eq!(both_http.get_request_header("x-request-id"), Some("123"));
+    }
+
+    #[test]
     fn test_read_agent_capability() {
         let ext = make_full_extensions();
         let caps: HashSet<String> = ["read_agent".to_owned()].into();
@@ -826,7 +911,7 @@ mod tests {
 
     fn extensions_with_llm_request() -> Extensions {
         Extensions {
-            llm_request: Some(LlmRequestDocument::new(serde_json::json!({
+            llm_request: Some(LlmRequest::new(serde_json::json!({
                 "model": "gpt-4o",
                 "tools": [{"type": "function", "name": "search"}],
             }))),
@@ -840,10 +925,13 @@ mod tests {
         let caps: HashSet<String> = ["read_llm_request".to_owned()].into();
         let filtered = filter_extensions(&ext, &caps);
 
-        assert!(Arc::ptr_eq(
-            filtered.llm_request.as_ref().unwrap().shared(),
-            ext.llm_request.as_ref().unwrap().shared()
-        ));
+        assert!(
+            filtered
+                .llm_request
+                .as_ref()
+                .unwrap()
+                .ptr_eq(ext.llm_request.as_ref().unwrap())
+        );
     }
 
     #[test]
@@ -861,6 +949,50 @@ mod tests {
         .collect();
         let filtered = filter_extensions(&ext, &caps);
         assert!(filtered.llm_request.is_none());
+        assert!(
+            filter_extensions(&ext, &HashSet::new())
+                .llm_request
+                .is_none()
+        );
+    }
+
+    fn extensions_with_llm_request_normalized_parts() -> Extensions {
+        Extensions {
+            llm_request: Some(LlmRequest::from_parts(LlmRequestParts {
+                instructions: vec![LlmInstruction {
+                    role: LlmInstructionRole::System,
+                    text: "You are the HR assistant.".into(),
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_read_llm_request_capability_shares_typed_parts() {
+        let ext = extensions_with_llm_request_normalized_parts();
+        let caps: HashSet<String> = ["read_llm_request".to_owned()].into();
+        let filtered = filter_extensions(&ext, &caps);
+        assert!(
+            filtered
+                .llm_request
+                .as_ref()
+                .unwrap()
+                .ptr_eq(ext.llm_request.as_ref().unwrap())
+        );
+    }
+
+    /// The typed parts carry the verbatim system prompt, so a plugin without
+    /// `read_llm_request` must not get them, even with every other read cap.
+    #[test]
+    fn test_llm_request_normalized_parts_hidden_without_capability() {
+        let ext = extensions_with_llm_request_normalized_parts();
+        let caps: HashSet<String> = ["read_agent", "read_headers", "read_subject", "read_labels"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert!(filter_extensions(&ext, &caps).llm_request.is_none());
         assert!(
             filter_extensions(&ext, &HashSet::new())
                 .llm_request
@@ -1153,6 +1285,7 @@ mod tests {
         SlotName::Agent,
         SlotName::Http,
         SlotName::Meta,
+        SlotName::Metadata,
         SlotName::Delegation,
         SlotName::Custom,
         SlotName::Mcp,

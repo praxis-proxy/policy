@@ -70,13 +70,21 @@ pub enum Capability {
     /// `read_subject` / `read_client` / `read_workload`.
     ReadAgent,
 
-    /// Read the host-parsed LLM request document (`Extensions.llm_request`).
-    /// It carries prompt text and client-supplied JSON, so it is never flattened
-    /// into the attribute bag.
+    /// Read the LLM request: the host-parsed body (`Extensions.llm_request`)
+    /// and the host's normalized reading of it (`Extensions.llm_request`).
+    /// Both carry prompt text. The body is never flattened into the attribute
+    /// bag; the typed parts flatten only tool names, sampling parameters, and a
+    /// digest of the system prompt.
     ReadLlmRequest,
+
+    /// Read immutable externally acquired policy facts
+    /// (`Extensions.metadata`).
+    ReadMetadata,
 
     /// Read HTTP headers.
     ReadHeaders,
+    /// Read the raw HTTP query, which may contain credentials.
+    ReadQuery,
     /// Write (modify) HTTP headers.
     WriteHeaders,
 
@@ -190,5 +198,17 @@ mod tests {
     fn test_read_llm_request_serde() {
         let json = serde_json::to_string(&Capability::ReadLlmRequest).unwrap();
         assert_eq!(json, "\"read_llm_request\"");
+    }
+
+    #[test]
+    fn read_metadata_serde_name_is_stable() {
+        let json = serde_json::to_string(&Capability::ReadMetadata).unwrap();
+        assert_eq!(json, "\"read_metadata\"");
+    }
+
+    #[test]
+    fn metadata_has_no_write_capability() {
+        serde_json::from_str::<Capability>("\"write_metadata\"")
+            .expect_err("metadata must not gain a general write capability");
     }
 }

@@ -19,9 +19,10 @@ use super::delegation::DelegationExtension;
 use super::framework::FrameworkExtension;
 use super::guarded::{Guarded, WriteToken};
 use super::http::HttpExtension;
-use super::llm::{LLMExtension, LlmRequestDocument};
+use super::llm::{LLMExtension, LlmRequest};
 use super::mcp::MCPExtension;
 use super::meta::MetaExtension;
+use super::metadata::{AcquiredFacts, MetadataExtension, MetadataInstallError};
 use super::provenance::ProvenanceExtension;
 use super::raw_credentials::RawCredentialsExtension;
 use super::request::RequestExtension;
@@ -102,10 +103,10 @@ pub struct Extensions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm: Option<Arc<LLMExtension>>,
 
-    /// The host-parsed LLM request body (immutable, gated by `read_llm_request`).
-    /// Never serialized, so it stays out of extension dumps and session stores.
+    /// Parsed body and normalized parts of the LLM request (immutable,
+    /// gated by `read_llm_request`). Never serialized.
     #[serde(skip)]
-    pub llm_request: Option<LlmRequestDocument>,
+    pub llm_request: Option<LlmRequest>,
 
     /// Agentic framework context (immutable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,6 +115,12 @@ pub struct Extensions {
     /// Host-provided operational metadata (immutable).
     #[serde(default)]
     pub meta: Option<Arc<MetaExtension>>,
+
+    /// Immutable externally acquired policy facts.
+    /// Never serialized, so serde cannot carry provenance the framework did
+    /// not stamp.
+    #[serde(skip)]
+    pub metadata: Option<Arc<MetadataExtension>>,
 
     /// Custom extensions (frozen as Arc — unfrozen in `OwnedExtensions`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +198,7 @@ impl Clone for Extensions {
             llm_request: self.llm_request.clone(),
             framework: self.framework.clone(),
             meta: self.meta.clone(),
+            metadata: self.metadata.clone(),
             custom: self.custom.clone(),
             http_transport: HttpTransportSlot::default(),
             effect_log: crate::effect::EffectLogSlot::default(),
@@ -202,6 +210,54 @@ impl Clone for Extensions {
 }
 
 impl Extensions {
+    /// Clone this context for a child policy invocation without parent facts.
+    ///
+    /// Child invocations may acquire their own metadata, but acquired facts
+    /// never inherit or merge across the invocation boundary.
+    #[must_use]
+    pub fn for_child_request(&self) -> Self {
+        let mut child = self.clone();
+        child.metadata = None;
+        child
+    }
+
+    /// Keep the parent's acquired metadata when adopting a plugin's view.
+    ///
+    /// Runtime merge-back calls this so a dispatched plugin's returned
+    /// extensions can never add, replace, or drop installed records.
+    pub fn retain_metadata_from(&mut self, parent: &Self) {
+        self.metadata = parent.metadata.clone();
+    }
+
+    /// Install one source result under its trusted plugin registration.
+    ///
+    /// Callers are the metadata PIP fetch step (#184), which installs each
+    /// source result before the evaluator advances, and hosts that resolve
+    /// facts themselves before dispatch. Ordinary plugins receive an
+    /// immutable filtered view and have no metadata write capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the instance name or response shape is invalid,
+    /// or when that instance already installed a record in this invocation.
+    pub fn install_metadata(
+        &mut self,
+        instance: &str,
+        kind: &str,
+        facts: AcquiredFacts,
+    ) -> Result<(), MetadataInstallError> {
+        if let Some(existing) = self.metadata.as_mut()
+            && let Some(metadata) = Arc::get_mut(existing)
+        {
+            return metadata.install(instance, kind, facts);
+        }
+
+        let mut metadata = self.metadata.as_deref().cloned().unwrap_or_default();
+        metadata.install(instance, kind, facts)?;
+        self.metadata = Some(Arc::new(metadata));
+        Ok(())
+    }
+
     /// Authorize one HTTP request against this invocation's capability view
     /// and return an owned, request-specific future.
     ///
@@ -252,6 +308,7 @@ impl Extensions {
             llm_request: self.llm_request.clone(),
             framework: self.framework.clone(),
             meta: self.meta.clone(),
+            metadata: self.metadata.clone(),
             raw_credentials: self.raw_credentials.clone(),
 
             // Mutable/monotonic/guarded — cloned out of Arc into owned
@@ -293,15 +350,14 @@ impl Extensions {
             && ptr_eq_opt(self.completion.as_ref(), modified.completion.as_ref())
             && ptr_eq_opt(self.provenance.as_ref(), modified.provenance.as_ref())
             && ptr_eq_opt(self.llm.as_ref(), modified.llm.as_ref())
-            && ptr_eq_opt(
-                self.llm_request.as_ref().map(LlmRequestDocument::shared),
-                modified
-                    .llm_request
-                    .as_ref()
-                    .map(LlmRequestDocument::shared),
-            )
+            && match (&self.llm_request, &modified.llm_request) {
+                (Some(a), Some(b)) => a.ptr_eq(b),
+                (None, Some(_)) => false,
+                _ => true,
+            }
             && ptr_eq_opt(self.framework.as_ref(), modified.framework.as_ref())
             && ptr_eq_opt(self.meta.as_ref(), modified.meta.as_ref())
+            && ptr_eq_opt(self.metadata.as_ref(), modified.metadata.as_ref())
         // NOTE: `raw_credentials` is INTENTIONALLY excluded from the
         // immutable check. Framework orchestrators (praxis-policy-apl-runtime's
         // DelegationPluginInvoker) legitimately write
@@ -384,7 +440,7 @@ impl Extensions {
     /// Merge the guarded `http` slot — header maps and the request line.
     ///
     /// `write_headers` authorizes *headers*, which is what the capability is
-    /// named for. The request line (`method`, `path`, `host`, `scheme`) and the
+    /// named for. The request line (`method`, `path`, `query`, `host`, `scheme`) and the
     /// response `status` are host-populated identity that policies gate on, so
     /// they are always preserved from canonical state and never taken from
     /// `owned`. `host` in particular must come from a validated authority (see
@@ -569,12 +625,14 @@ pub struct OwnedExtensions {
     pub provenance: Option<Arc<ProvenanceExtension>>,
     /// Model identity and capabilities.
     pub llm: Option<Arc<LLMExtension>>,
-    /// The host-parsed LLM request body.
-    pub llm_request: Option<LlmRequestDocument>,
+    /// The host-parsed body and normalized parts of the LLM request.
+    pub llm_request: Option<LlmRequest>,
     /// Agentic framework context.
     pub framework: Option<Arc<FrameworkExtension>>,
     /// Host-provided operational metadata.
     pub meta: Option<Arc<MetaExtension>>,
+    /// Externally acquired policy facts.
+    pub metadata: Option<Arc<MetadataExtension>>,
     /// Raw credentials are shared by Arc here too — write tokens for
     /// `inbound_tokens` and `delegated_tokens` mutation paths land with
     /// the `IdentityResolve` and `TokenDelegate` hooks. Until
@@ -613,6 +671,7 @@ pub struct OwnedExtensions {
 )]
 mod tests {
     use super::*;
+    use crate::extensions::llm::{LlmInstruction, LlmInstructionRole, LlmRequestParts};
     use crate::extensions::security::SubjectExtension;
 
     fn make_extensions() -> Extensions {
@@ -999,7 +1058,7 @@ mod tests {
 
     fn extensions_with_llm_request() -> Extensions {
         Extensions {
-            llm_request: Some(LlmRequestDocument::new(serde_json::json!({
+            llm_request: Some(LlmRequest::new(serde_json::json!({
                 "model": "gpt-4o",
                 "tools": [{"type": "function", "name": "search"}],
             }))),
@@ -1011,10 +1070,12 @@ mod tests {
     fn test_llm_request_shares_arc_through_cow_copy() {
         let ext = extensions_with_llm_request();
         let cow = ext.cow_copy();
-        assert!(Arc::ptr_eq(
-            ext.llm_request.as_ref().unwrap().shared(),
-            cow.llm_request.as_ref().unwrap().shared()
-        ));
+        assert!(
+            ext.llm_request
+                .as_ref()
+                .unwrap()
+                .ptr_eq(cow.llm_request.as_ref().unwrap())
+        );
         assert!(ext.validate_immutable(&cow));
     }
 
@@ -1022,9 +1083,7 @@ mod tests {
     fn test_validate_immutable_rejects_changed_llm_request() {
         let ext = extensions_with_llm_request();
         let mut cow = ext.cow_copy();
-        cow.llm_request = Some(LlmRequestDocument::new(
-            serde_json::json!({"model": "other"}),
-        ));
+        cow.llm_request = Some(LlmRequest::new(serde_json::json!({"model": "other"})));
         assert!(!ext.validate_immutable(&cow));
     }
 
@@ -1032,34 +1091,24 @@ mod tests {
     fn test_validate_immutable_rejects_fabricated_llm_request() {
         let ext = Extensions::default();
         let mut cow = ext.cow_copy();
-        cow.llm_request = Some(LlmRequestDocument::new(
-            serde_json::json!({"model": "forged"}),
-        ));
+        cow.llm_request = Some(LlmRequest::new(serde_json::json!({"model": "forged"})));
         assert!(!ext.validate_immutable(&cow));
     }
 
     #[test]
     fn test_merge_owned_keeps_host_llm_request() {
         let mut ext = extensions_with_llm_request();
-        let host = Arc::clone(ext.llm_request.as_ref().unwrap().shared());
+        let host = ext.llm_request.as_ref().unwrap().clone();
 
         let mut replaced = ext.cow_copy();
-        replaced.llm_request = Some(LlmRequestDocument::new(
-            serde_json::json!({"model": "other"}),
-        ));
+        replaced.llm_request = Some(LlmRequest::new(serde_json::json!({"model": "other"})));
         ext.merge_owned(replaced);
-        assert!(Arc::ptr_eq(
-            ext.llm_request.as_ref().unwrap().shared(),
-            &host
-        ));
+        assert!(ext.llm_request.as_ref().unwrap().ptr_eq(&host));
 
         let mut cleared = ext.cow_copy();
         cleared.llm_request = None;
         ext.merge_owned(cleared);
-        assert!(Arc::ptr_eq(
-            ext.llm_request.as_ref().unwrap().shared(),
-            &host
-        ));
+        assert!(ext.llm_request.as_ref().unwrap().ptr_eq(&host));
     }
 
     #[test]
@@ -1075,13 +1124,54 @@ mod tests {
     }
 
     #[test]
+    fn test_llm_request_normalized_parts_are_never_serialized() {
+        let ext = Extensions {
+            llm_request: Some(LlmRequest::from_parts(LlmRequestParts {
+                instructions: vec![LlmInstruction {
+                    role: LlmInstructionRole::System,
+                    text: "secret-marker".into(),
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&ext).unwrap();
+        assert!(json.get("llm_request").is_none());
+        assert!(!json.to_string().contains("secret-marker"));
+
+        assert!(!format!("{ext:?}").contains("secret-marker"));
+        assert!(!format!("{:?}", ext.cow_copy()).contains("secret-marker"));
+
+        let back: Extensions =
+            serde_json::from_value(serde_json::json!({"llm_request": {"body": "x"}})).unwrap();
+        assert!(back.llm_request.is_none());
+    }
+
+    #[test]
+    fn test_validate_immutable_rejects_changed_llm_request_normalized_parts() {
+        let ext = Extensions {
+            llm_request: Some(LlmRequest::from_parts(LlmRequestParts::default())),
+            ..Default::default()
+        };
+        let mut cow = ext.cow_copy();
+        assert!(ext.validate_immutable(&cow));
+        cow.llm_request = Some(LlmRequest::from_parts(LlmRequestParts {
+            max_tokens: Some(1),
+            ..Default::default()
+        }));
+        assert!(!ext.validate_immutable(&cow));
+    }
+
+    #[test]
     fn test_clone_shares_llm_request_arc() {
         let ext = extensions_with_llm_request();
         let cloned = ext.clone();
-        assert!(Arc::ptr_eq(
-            ext.llm_request.as_ref().unwrap().shared(),
-            cloned.llm_request.as_ref().unwrap().shared()
-        ));
+        assert!(
+            ext.llm_request
+                .as_ref()
+                .unwrap()
+                .ptr_eq(cloned.llm_request.as_ref().unwrap())
+        );
     }
 
     #[test]
@@ -1353,11 +1443,12 @@ mod tests {
 
     #[test]
     fn test_http_merge_preserves_request_line() {
-        // Policies gate on method/path/host/scheme (CHANGELOG 0.2.2), and
+        // Policies gate on the request line, including the query, and
         // `write_headers` does not authorize rewriting request identity.
         let mut http = HttpExtension::default();
         http.method = Some("POST".into());
         http.path = Some("/api/v1/transfer".into());
+        http.query = Some("access_token=secret".into());
         http.host = Some("bank.internal".into());
         http.scheme = Some("https".into());
 
@@ -1375,6 +1466,7 @@ mod tests {
             // A worker round trip loses these; a hostile one rewrites them.
             h.method = Some("GET".into());
             h.path = Some("/api/v1/healthz".into());
+            h.query = None;
             h.host = Some("evil.example".into());
             h.scheme = None;
         }
@@ -1385,6 +1477,7 @@ mod tests {
         let merged = ext.http.as_ref().unwrap();
         assert_eq!(merged.method.as_deref(), Some("POST"));
         assert_eq!(merged.path.as_deref(), Some("/api/v1/transfer"));
+        assert_eq!(merged.query.as_deref(), Some("access_token=secret"));
         assert_eq!(merged.host.as_deref(), Some("bank.internal"));
         assert_eq!(merged.scheme.as_deref(), Some("https"));
         assert_eq!(

@@ -330,6 +330,16 @@ mod tests {
     }
 
     #[test]
+    fn raw_http_query_reaches_opa_input() {
+        let mut bag = AttributeBag::new();
+        bag.set("http.query", "access_token=secret&service=git-upload-pack");
+        assert!(rego_eval(
+            "input.http.query == \"access_token=secret&service=git-upload-pack\"",
+            &bag
+        ));
+    }
+
+    #[test]
     fn single_segment_key_is_top_level_field() {
         let mut bag = AttributeBag::new();
         bag.set("authenticated", true);

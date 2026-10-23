@@ -82,7 +82,9 @@ plugins:
       - read_labels
       - read_workload
     config:
-      destination: stderr        # or: tracing
+      exporters:                 # every record goes to each, byte for byte
+        - { kind: file, path: /var/log/praxis/ocsf.ndjson, fsync: batch }
+        - { kind: stderr }
       chain: true                # fingerprint chain, record_integrity profile
       signing: dsse              # or: none (chained but unsigned)
       signing_key_pem_path: /etc/praxis/ocsf-signing.pem   # PKCS#8 P-256
@@ -152,18 +154,26 @@ their chain positions. Order by `prev_event` (or `aid.stream.stream_seq`),
 never by arrival.
 
 **Stalled output.** The sink awaits each write on the request path, but runs
-the synchronous stderr or tracing destination on a blocking worker. The
+its exporters on a blocking worker. The
 engine's audit timeout can therefore release a request if that destination
 stalls. At most four writes per emitter can remain in flight; later callbacks
 wait for a slot before advancing the chain, and can time out while waiting.
 A timed-out write can still finish later, so consumers must use the chain
 links and stream stamps to detect gaps and order records.
 
+At graceful shutdown the sink waits up to 10 seconds for those blocking
+writes, then flushes its exporters (with a separate 10-second limit). A
+timeout is reported as a shutdown error: records from a worker still blocked
+at that point may not have reached every exporter. For file output, `fsync:
+batch` and `fsync: always` sync the file and, on Unix, its parent directory
+after an open or rotation, so the pathname is durable along with the records.
+
 ## Configuration
 
 | Key | Default | Meaning |
 |---|---|---|
-| `destination` | `stderr` | One JSON object per line to stderr, or `tracing` at target `ocsf.audit`. |
+| `exporters` | unset | Where records go, as a list. Each record is serialized once and written unchanged to every exporter, so the copies are byte-identical and share a `metadata.uid`. Kinds: `stderr` and `stdout` (one record per line), `file` (`path`, absolute; appended one record per line, created owner-only, never truncated; `fsync`: `never`, `batch` or `always`, default `never`; follows rename-based rotation on Unix by reopening the path, so use logrotate's `create` mode with `delaycompress` rather than `copytruncate`, which drops records written during the copy), and `tracing` (one event per record at target `ocsf.audit`). An exporter that fails is logged and the rest still run. An unwritable file fails startup. |
+| `destination` | `stderr` | A single destination, `stderr` or `tracing`, the same as one entry in `exporters`. Set `destination` or `exporters`, not both. With neither, records go to stderr. |
 | `product_name`, `vendor_name` | Praxis Policy Engine OCSF Audit / Praxis | `metadata.product`. |
 | `chain` | `true` | Attach the attestation and declare `record_integrity`. |
 | `chain_uid` | plugin name plus a random per-process suffix | `attestation.chain_uid`. One chain per process; a configured value must be unique per process (see [Chain scope](#chain-scope)). |
@@ -233,10 +243,9 @@ crate.
 
 ## Known deviations from OCSF 1.9.0
 
-Checked against the 1.9.0 schema files (`events/application/api_activity`,
-`objects/actor`, `objects/user`, `dictionary`). The `ai_agent`, `ai_model`,
-`message_context`, `delegation` and `attestation_list` fields the mapping
-uses are in the schema; these four are not:
+Checked against the OCSF 1.9.0 `api_activity` event, `actor`, `user`,
+`ai_agent`, `ai_model`, `message_context`, `delegation`, `api`, and
+`dictionary`. The emitted records have these deviations:
 
 | Emitted | Schema |
 |---|---|
@@ -244,9 +253,16 @@ uses are in the schema; these four are not:
 | `actor.roles` | `actor` has no `roles` member |
 | `actor.user.groups` as strings | `user.groups` is an array of `group` objects |
 | top-level `tool` and `resource` | the class carries `resources` (`resource_details[]`); there is no `tool` |
+| `ai_agent.parent_uid`, `ai_agent.conversation_uid`, `ai_agent.turn` | `ai_agent` has `uid`, `instance_uid`, `name`, `type`/`type_id`, `version`, `charter` and `ai_model`; it has no lineage or turn members |
+| `ai_model` with only `name` | `ai_provider` is also required |
+| `message_context` with only token counts | at least one of `application` or `service` is required |
+| `delegation.depth`, `.origin_subject_uid`, `.actor_subject_uid`, `.chain`, with no `uid` | `uid` is required; the emitted members are not in `delegation` |
+| no `src_endpoint` | `src_endpoint` is required on API Activity |
+| `api` only on tool-call records, with only `request.uid` | `api` is required on every API Activity event, and `api.operation` is required within it |
+| `actor` only when the security extension carries a subject (the Completion record in `SAMPLE-OUTPUT.md` has none) | `actor` is required on API Activity |
 
-All four are inside the hashed bytes, so correcting them changes every
-fingerprint and signature. They move with the deferred change to link chains
-across process starts, in the next AID-EMIT-1 revision with regenerated vectors.
-Until then a collector that validates against the schema needs to accept
-these four, and a query on `time` must parse the string.
+Fixing these deviations changes the affected fingerprints and signatures.
+The fixes are deferred to the next AID-EMIT-1 revision, alongside the change
+to link chains across process starts and regenerated vectors. Until then,
+collectors that validate against the schema must accept these deviations,
+and queries on `time` must parse a string.
