@@ -5,7 +5,8 @@
 //!
 //! Register the handler on the `elicit` hook and select it in APL with
 //! `require_approval`. The [`store`] module holds approvals between dispatch,
-//! check, and validate. By default, approvals stay in process memory.
+//! check, and validate. The required `store` block selects process memory or
+//! Valkey.
 //!
 //! [`store`]: crate::plugins::elicitation_ciba::store
 

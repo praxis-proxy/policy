@@ -436,7 +436,19 @@ impl CibaApprover {
             Err(v) => return PluginResult::deny(*v),
         };
         let owner = uuid::Uuid::new_v4().to_string();
-        let lease = self.http_timeout.saturating_add(Duration::from_secs(5));
+        let retry = RetryPolicy::undelivered_only();
+        // An undelivered connect failure can consume nearly a full request
+        // timeout. Keep the claim through every attempt and backoff so another
+        // checker cannot mark an active poll uncertain before it completes.
+        let lease = self
+            .http_timeout
+            .saturating_mul(retry.max_attempts)
+            .saturating_add(
+                retry
+                    .max_backoff
+                    .saturating_mul(retry.max_attempts.saturating_sub(1)),
+            )
+            .saturating_add(Duration::from_secs(5));
         match self
             .store
             .claim_poll(
@@ -473,10 +485,7 @@ impl CibaApprover {
             },
             Err(e) => return self.store_unavailable("check", &e),
         }
-        let response = match ext
-            .http_request(request, RetryPolicy::undelivered_only())
-            .await
-        {
+        let response = match ext.http_request(request, retry).await {
             Ok(r) => r,
             Err(e) => {
                 let uncertain = matches!(

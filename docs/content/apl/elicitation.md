@@ -300,8 +300,17 @@ dispatch has no id yet, so retrying it may prompt the approver again.
 The pool connects on first use. An unreachable server, wrong credentials, or
 a missing ACL grant may therefore first appear as `-32122` on an approval.
 Before taking traffic, check connectivity and credentials from the gateway
-host, for example with `valkey-cli --user ppe-ciba PING`. The ACL test in
-[Testing](../testing.md) checks the data-command grants.
+host using the endpoint, TLS setting, user, and password source configured for
+CIBA in the shared-server example:
+
+```console
+REDISCLI_AUTH="$(cat /run/secrets/ciba-valkey-password)" \
+  valkey-cli -h valkey.internal -p 6380 --tls --user ppe-ciba -e PING
+```
+
+Expect `PONG`. For a standalone store, use its configured endpoint and
+password source instead. The ACL test in [Testing](../testing.md) checks the
+data-command grants.
 
 ### Durability
 
