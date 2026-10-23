@@ -65,8 +65,19 @@ pub(crate) async fn valkey_target() -> Option<Target> {
 pub(crate) async fn isolated_valkey_target() -> Option<Target> {
     if let Ok(url) = std::env::var("VALKEY_SCRIPT_TEST_URL") {
         if let Ok(shared_url) = std::env::var("VALKEY_TEST_URL") {
+            let endpoint = |address: &str| {
+                let parsed = url::Url::parse(address).expect("valid Valkey test URL");
+                (
+                    parsed
+                        .host_str()
+                        .expect("Valkey test URL has a host")
+                        .to_owned(),
+                    parsed.port().unwrap_or(6379),
+                )
+            };
             assert_ne!(
-                url, shared_url,
+                endpoint(&url),
+                endpoint(&shared_url),
                 "VALKEY_SCRIPT_TEST_URL must use a different server from VALKEY_TEST_URL"
             );
         }

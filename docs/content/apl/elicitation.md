@@ -282,6 +282,8 @@ For a local server without AUTH, use a standalone CIBA connection with its own
 `endpoint: localhost:6379`. A reference requires CIBA credentials and will
 refuse an omitted password at configuration load.
 
+### Store failures
+
 If Valkey is unreachable, times out, or returns undecodable data, the step
 denies with `elicitation.store_unavailable` and JSON-RPC `-32122` ("approval
 state unavailable") even with `on_error: continue`. The failure is neither an
