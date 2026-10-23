@@ -145,7 +145,9 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
     ApiKeyIdentityFactory, KIND as API_KEY_KIND,
 };
 #[cfg(feature = "jwt")]
-pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
+pub use praxis_policy_builtins::plugins::identity_jwt::{
+    JwtIdentityFactory, JwtIdentityFactoryWithReplay, KIND as JWT_KIND,
+};
 #[cfg(feature = "experimental-quota")]
 pub use praxis_policy_builtins::plugins::quota::{KIND as QUOTA_KIND, QuotaFactory};
 #[cfg(feature = "secrets-vault")]

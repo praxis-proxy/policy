@@ -58,6 +58,7 @@ use praxis_policy_core::{
 };
 
 use crate::plugins::identity_jwt::JwtIdentityResolver;
+use crate::plugins::identity_jwt::dpop::ReplayGuard;
 
 /// The plugin `kind:` string operators write in PPE YAML to declare
 /// a JWT identity resolver.
@@ -67,6 +68,36 @@ pub const KIND: &str = "identity/jwt";
 /// `JwtIdentityResolver` from the `config:` block and registers it on
 /// the `identity.resolve` hook.
 pub struct JwtIdentityFactory;
+
+impl JwtIdentityFactory {
+    /// Use a host-owned replay guard for every resolver this factory creates.
+    /// The host can retain the guard across policy reloads and share its
+    /// backing store across gateway instances.
+    pub fn with_replay_guard(replay: Arc<dyn ReplayGuard>) -> JwtIdentityFactoryWithReplay {
+        JwtIdentityFactoryWithReplay { replay }
+    }
+}
+
+/// JWT resolver factory using a host-owned replay guard.
+pub struct JwtIdentityFactoryWithReplay {
+    replay: Arc<dyn ReplayGuard>,
+}
+
+impl PluginFactory for JwtIdentityFactoryWithReplay {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let resolver = Arc::new(JwtIdentityResolver::with_replay_guard(
+            config.clone(),
+            Arc::clone(&self.replay),
+        )?);
+        let handler = Arc::new(TypedHandlerAdapter::<IdentityHook, _>::new(Arc::clone(
+            &resolver,
+        )));
+        Ok(PluginInstance {
+            plugin: resolver,
+            handlers: vec![(HOOK_IDENTITY_RESOLVE, handler)],
+        })
+    }
+}
 
 impl PluginFactory for JwtIdentityFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {

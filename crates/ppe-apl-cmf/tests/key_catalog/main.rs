@@ -42,7 +42,7 @@ use praxis_policy_apl_core::{AttributeBag, AttributeValue};
 use praxis_policy_core::cmf::{Message, Role};
 use praxis_policy_core::extensions::{
     AgentExtension, ClientExtension, ClientTrustLevel, CompletionExtension, ConversationContext,
-    DelegationExtension, DelegationHop, Extensions, FrameworkExtension, HttpExtension,
+    DelegationExtension, DelegationHop, Extensions, FrameworkExtension, HttpExtension, KeyBinding,
     LLMExtension, LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestParts, MCPExtension,
     MetaExtension, MetadataCacheDisposition, MonotonicSet, PromptMetadata, ProvenanceExtension,
     RequestExtension, ResourceMetadata, SecurityExtension, StopReason, SubjectExtension,
@@ -56,6 +56,10 @@ use praxis_policy_core::extensions::{
 /// bridge should carry it. That is the drift this whole file exists to catch,
 /// and a `..Default::default()` here would reopen it.
 fn fully_populated() -> Extensions {
+    let binding = || KeyBinding {
+        method: "dpop".to_owned(),
+        thumbprint: "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_owned(),
+    };
     let mut annotations = HashMap::new();
     annotations.insert("readOnlyHint".to_owned(), serde_json::json!(true));
 
@@ -73,6 +77,7 @@ fn fully_populated() -> Extensions {
         attestor: Some("spire".to_owned()),
         selectors: vec![format!("k8s:ns:{id}")],
         client_id: Some(id.to_owned()),
+        key_binding: Some(binding()),
     };
 
     let security = SecurityExtension {
@@ -85,6 +90,7 @@ fn fully_populated() -> Extensions {
             permissions: HashSet::from(["read".to_owned()]),
             teams: HashSet::from(["eng".to_owned()]),
             claims: HashMap::from([("tenant".to_owned(), serde_json::json!("acme"))]),
+            key_binding: Some(binding()),
         }),
         client: Some(ClientExtension {
             client_id: "app".to_owned(),
@@ -96,6 +102,7 @@ fn fully_populated() -> Extensions {
             permissions: vec!["write".to_owned()],
             teams: vec!["platform".to_owned()],
             claims: HashMap::from([("region".to_owned(), serde_json::json!("eu"))]),
+            key_binding: Some(binding()),
         }),
         caller_workload: Some(workload("caller")),
         this_workload: Some(workload("self")),
@@ -565,14 +572,14 @@ fn duplicate_documented_keys_are_rejected() {
 /// Each key the per-slot tables list, with the type and the section they give
 /// it, normalized to the catalog's spelling.
 ///
-/// Only the tables under "The thirteen slots" are read. The payload tables after
+/// Only the tables under "The fourteen slots" are read. The payload tables after
 /// it describe `args.*`, `result.*` and `data.*`, which the payload flattener
 /// writes and this bridge does not.
 fn documented() -> HashMap<String, Documented> {
     let text = std::fs::read_to_string(docs_path()).expect("the catalog page reads");
     let section = text
-        .split_once("## The thirteen slots")
-        .expect("the per-slot section is still titled 'The thirteen slots'")
+        .split_once("## The fourteen slots")
+        .expect("the per-slot section is still titled 'The fourteen slots'")
         .1
         .split_once("## Payloads that are not slots")
         .expect("the payload section still follows the slots")

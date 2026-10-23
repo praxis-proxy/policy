@@ -599,6 +599,7 @@ mod tests {
                 authorized_scopes: vec!["b".to_owned(), "a".to_owned()],
                 authorized_audiences: vec!["praxis".to_owned()],
                 claims: [("region".to_owned(), json!("eu"))].into_iter().collect(),
+                key_binding: None,
             }),
             ..Default::default()
         });

@@ -51,6 +51,8 @@ pub const FIELD_ROLES: &str = "roles";
 pub const FIELD_PERMISSIONS: &str = "permissions";
 /// Serialized field name `teams`.
 pub const FIELD_TEAMS: &str = "teams";
+/// Context-dict key for a subject's verified key binding.
+pub const FIELD_KEY_BINDING: &str = "key_binding";
 
 // Security fields
 /// Serialized field name `labels`.

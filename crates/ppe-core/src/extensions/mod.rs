@@ -82,7 +82,7 @@ pub use routing::{
     BackendLabels, CAP_WRITE_CANDIDATE_CONSTRAINT, CandidateConstraintExtension, OnEmpty,
 };
 pub use security::{
-    ClientExtension, ClientTrustLevel, DataPolicy, ObjectSecurityProfile, RetentionPolicy,
-    SecurityExtension, SubjectExtension, SubjectType, WorkloadIdentity,
+    ClientExtension, ClientTrustLevel, DataPolicy, KeyBinding, ObjectSecurityProfile,
+    RetentionPolicy, SecurityExtension, SubjectExtension, SubjectType, WorkloadIdentity,
 };
 pub use tiers::{AccessPolicy, Capability, MutabilityTier, SlotPolicy};

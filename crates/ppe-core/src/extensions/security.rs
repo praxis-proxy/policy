@@ -26,6 +26,35 @@ pub enum SubjectType {
     System,
 }
 
+/// A credential's binding to a key its presenter proved it holds.
+///
+/// Set by an identity resolver only after it has verified the proof, so its
+/// presence means "this request came from the holder of the key", not merely
+/// "the credential names a key". A token that carries a `cnf` claim but was
+/// accepted without a proof has no `KeyBinding`; its `cnf` stays visible in the
+/// claims, which is a statement by the issuer and proves nothing about the
+/// presenter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyBinding {
+    /// How possession was proved, such as `dpop` ([RFC 9449]). The vocabulary
+    /// is open so other mechanisms, such as certificate-bound tokens
+    /// ([RFC 8705]), can follow.
+    ///
+    /// [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
+    /// [RFC 8705]: https://datatracker.ietf.org/doc/html/rfc8705
+    pub method: String,
+
+    /// What the credential's confirmation claim (`cnf`) binds it to, in the
+    /// form the method defines. For `dpop` that is the [RFC 7638] thumbprint of
+    /// the public key (`cnf.jkt`): base64url SHA-256 over the key's required
+    /// members. A certificate-bound method would carry the certificate's
+    /// SHA-256 thumbprint (`cnf.x5t#S256`) instead, so compare a thumbprint only
+    /// together with [`Self::method`].
+    ///
+    /// [RFC 7638]: https://datatracker.ietf.org/doc/html/rfc7638
+    pub thumbprint: String,
+}
+
 /// Authenticated subject identity.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubjectExtension {
@@ -57,6 +86,11 @@ pub struct SubjectExtension {
     /// Matches [`ClientExtension::claims`].
     #[serde(default)]
     pub claims: HashMap<String, Value>,
+
+    /// The key this subject's credential is bound to, set only when the
+    /// presenter proved possession of it. See [`KeyBinding`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_binding: Option<KeyBinding>,
 }
 
 impl SubjectExtension {
@@ -233,6 +267,11 @@ pub struct ClientExtension {
     /// here generally know the claim's expected shape.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub claims: HashMap<String, Value>,
+
+    /// The key this client's credential is bound to, set only when the
+    /// presenter proved possession of it. See [`KeyBinding`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_binding: Option<KeyBinding>,
 }
 
 /// SPIFFE-style workload identity, used for both inbound callers
@@ -290,6 +329,11 @@ pub struct WorkloadIdentity {
     /// `ClientExtension` slot, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+
+    /// The key this workload's credential is bound to, set only when the
+    /// presenter proved possession of it. See [`KeyBinding`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_binding: Option<KeyBinding>,
 }
 
 /// Security-related extensions.
@@ -414,6 +458,7 @@ mod tests {
             permissions: ["read_all".to_owned()].into(),
             teams: ["engineering".to_owned()].into(),
             claims: [("iss".to_owned(), serde_json::json!("auth.example.com"))].into(),
+            key_binding: None,
         };
         assert_eq!(subject.id.as_deref(), Some("alice"));
         assert_eq!(subject.subject_type, Some(SubjectType::User));

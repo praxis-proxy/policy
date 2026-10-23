@@ -26,7 +26,7 @@ default = []
 # Feature names match the facade's exactly, so each facade body is a one-line
 # forward and a rename is a lockstep two-file edit rather than a translation
 # table nobody maintains.
-jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64"]
+jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64", "dep:sha2"]
 api-key = ["_engine-core", "_plugins", "dep:sha2"]
 oauth = [
   "_engine-core",
@@ -299,6 +299,10 @@ sha2 = { workspace = true }
 # RSA keypair + JWK fixtures for the JWT tests. `rsa` generates keypairs;
 # `pkcs8` encodes them in the PEM format jsonwebtoken accepts.
 rsa = { workspace = true, features = ["pem"] }
+
+# P-256 keys for the DPoP tests, derived from fixed scalars at test time so no
+# private key is checked in. Already in the lockfile via the OCSF reference sink.
+p256 = { workspace = true }
 
 # rsa 0.9's `RsaPrivateKey::new(&mut rng, bits)` takes an rng
 # implementing `rand_core::CryptoRngCore` — `rand::thread_rng()`

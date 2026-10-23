@@ -6,11 +6,12 @@ keys. Plugins that received the typed slot still see the original struct. This
 document is the contract for what the bridge emits, how original collections
 relate to flattened booleans, and which keys exist.
 
-The thirteen slots dispatched by `extract_extensions` are listed below.
-`raw_credentials`, `candidate_constraint`, and `llm_request` are not among
-them: credentials never enter the bag, a routing constraint is not a policy
-attribute, and the parsed LLM request reaches PDPs as structured JSON instead
-(see [Structured request input](apl/pdp.md#structured-request-input)).
+The fourteen slots dispatched by `extract_extensions` are listed below.
+`raw_credentials` and `candidate_constraint` are not among them: credentials
+never enter the bag, and a routing constraint is not a policy attribute.
+`llm_request` contributes normalized parts to the bag; its parsed body reaches
+PDPs as structured JSON instead (see
+[Structured request input](apl/pdp.md#structured-request-input)).
 
 ## Contents
 
@@ -18,7 +19,7 @@ attribute, and the parsed LLM request reaches PDPs as structured JSON instead
 - [Original collections and flattened booleans](#original-collections-and-flattened-booleans)
 - [`subject.claims`](#subjectclaims)
 - [What each decision point does with a missing key](#what-each-decision-point-does-with-a-missing-key)
-- [The thirteen slots](#the-thirteen-slots)
+- [The fourteen slots](#the-fourteen-slots)
 - [Payloads that are not slots](#payloads-that-are-not-slots)
 
 ---
@@ -227,7 +228,7 @@ keys), or a missing `subject.id`, is the `missing-collection` /
 
 ---
 
-## The thirteen slots
+## The fourteen slots
 
 Keys listed **always** are written whenever the slot (and, where noted, the
 sub-record) is present. The rest are omitted when the field is `None` or the
@@ -261,6 +262,8 @@ someone makes rather than one nobody notices.
 | `team.<name>` | Bool (`true`) | each undotted member of `teams` |
 | `claim.<dotted>` | flattened JSON | each claim; see [`subject.claims`](#subjectclaims) |
 | `authenticated` | Bool (`true`) | `id` is `Some` |
+| `subject.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `subject.key_binding_thumbprint` | String | same; what the credential is bound to, as the method defines it (for `dpop`, the RFC 7638 thumbprint of the key) |
 
 **Client** (`sec.client` present):
 
@@ -277,6 +280,8 @@ someone makes rather than one nobody notices.
 | `client.authorized_audiences` | StringSet | always |
 | `client.teams` | StringSet | always |
 | `client.claim.<dotted>` | flattened JSON | each claim |
+| `client.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `client.key_binding_thumbprint` | String | same; as `subject.key_binding_thumbprint` |
 
 **Workload** (`caller_workload` / `this_workload`; same shape, two namespaces).
 These are not `agent.*`. `agent.*` is session context.
@@ -290,6 +295,8 @@ These are not `agent.*`. `agent.*` is session context.
 | `<ns>.attested_at_epoch` | Int | `Some`. The same instant as Unix seconds. |
 | `<ns>.selectors` | StringSet | always |
 | `<ns>.client_id` | String | `Some` |
+| `<ns>.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `<ns>.key_binding_thumbprint` | String | same; as `subject.key_binding_thumbprint` |
 
 `attested_at` renders as RFC3339 with second precision and a literal `Z`. At
 fixed precision the string sorts the same way the instant does, which is why
@@ -605,7 +612,7 @@ The `completion.*` aliases remain value-identical during migration.
 
 An empty map adds nothing.
 
-### 13. `metadata` — `MetadataExtension`
+### 14. `metadata` — `MetadataExtension`
 
 | Key | Type | When |
 |---|---|---|

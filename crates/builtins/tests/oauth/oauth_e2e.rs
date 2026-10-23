@@ -85,7 +85,16 @@ fn plugin_config(token_endpoint: &str) -> PluginConfig {
 }
 
 fn build_payload(target: &str, audience: &str, scopes: &[&str]) -> DelegationPayload {
-    DelegationPayload::new("caller-bearer-token-bytes", target)
+    build_payload_with_bearer("caller-bearer-token-bytes", target, audience, scopes)
+}
+
+fn build_payload_with_bearer(
+    bearer: &str,
+    target: &str,
+    audience: &str,
+    scopes: &[&str],
+) -> DelegationPayload {
+    DelegationPayload::new(bearer, target)
         .with_target_type(TargetType::Tool)
         .with_target_audience(audience)
         .with_required_permissions(
@@ -1905,5 +1914,79 @@ async fn a_delegator_in_a_non_serial_mode_refuses_before_calling_the_idp() {
     assert!(
         http.requests().is_empty(),
         "no credential is minted for a result that would be discarded"
+    );
+}
+
+/// A token exchange the `IdP` refuses, sending `payload`.
+async fn rejected(payload: DelegationPayload) -> praxis_policy_core::error::PluginViolation {
+    let http = idp(400, &json!({ "error": "invalid_request" }).to_string());
+    let mgr = build_manager(&http).await;
+    let result = invoke(&mgr, payload).await;
+    assert!(!result.continue_processing, "the IdP refused the exchange");
+    result.violation.expect("a rejection")
+}
+
+fn bound_jwt() -> String {
+    test_jwt(
+        json!({ "sub": "agent-1", "cnf": { "jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I" } }),
+    )
+}
+
+/// RFC 9449 lets an `IdP` refuse to exchange a bound token for any client but
+/// the one it was issued to, and Keycloak does. The rejection says why.
+#[tokio::test]
+async fn a_rejected_exchange_of_a_dpop_bound_subject_token_says_so() {
+    let payload =
+        build_payload_with_bearer(&bound_jwt(), "tool", "https://hr.example.com", &["read"]);
+    let violation = rejected(payload).await;
+    assert_eq!(violation.code, "delegation.idp_rejected");
+    assert!(
+        violation
+            .reason
+            .contains("subject_token sent is DPoP-bound")
+            && violation.reason.contains("subject: this_workload"),
+        "the reason names the bound token and the fix: {}",
+        violation.reason
+    );
+    assert_eq!(
+        violation.details.get("bound_tokens"),
+        Some(&json!(["subject_token"]))
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_exchange_with_a_dpop_bound_actor_token_says_so() {
+    let payload = build_payload("tool", "https://hr.example.com", &["read"])
+        .with_actor(TokenRole::Client, bound_jwt());
+    let violation = rejected(payload).await;
+    assert!(
+        violation.reason.contains("actor_token sent is DPoP-bound"),
+        "the reason names the bound actor token: {}",
+        violation.reason
+    );
+    assert_eq!(
+        violation.details.get("bound_tokens"),
+        Some(&json!(["actor_token"]))
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_exchange_of_an_unbound_token_carries_no_binding_hint() {
+    let unbound = test_jwt(json!({ "sub": "alice" }));
+    let violation = rejected(build_payload_with_bearer(
+        &unbound,
+        "tool",
+        "https://hr.example.com",
+        &["read"],
+    ))
+    .await;
+    assert!(
+        !violation.reason.contains("DPoP"),
+        "nothing about binding when no bound token was sent: {}",
+        violation.reason
+    );
+    assert!(
+        !violation.details.contains_key("bound_tokens"),
+        "no bound_tokens detail"
     );
 }

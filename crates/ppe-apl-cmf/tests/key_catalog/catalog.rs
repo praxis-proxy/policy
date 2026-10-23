@@ -296,6 +296,18 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Capability(CAP_READ_SUBJECT),
         Slot::Security,
     ),
+    exact(
+        "subject.key_binding",
+        KeyType::String,
+        Gating::Capability(CAP_READ_SUBJECT),
+        Slot::Security,
+    ),
+    exact(
+        "subject.key_binding_thumbprint",
+        KeyType::String,
+        Gating::Capability(CAP_READ_SUBJECT),
+        Slot::Security,
+    ),
     // 1. security — client
     exact(
         "client.client_id",
@@ -363,6 +375,18 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Gating::Capability(CAP_READ_CLIENT),
         Slot::Security,
     ),
+    exact(
+        "client.key_binding",
+        KeyType::String,
+        Gating::Capability(CAP_READ_CLIENT),
+        Slot::Security,
+    ),
+    exact(
+        "client.key_binding_thumbprint",
+        KeyType::String,
+        Gating::Capability(CAP_READ_CLIENT),
+        Slot::Security,
+    ),
     // 1. security — workload, one namespace each
     exact(
         "caller_workload.spiffe_id",
@@ -407,6 +431,18 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Slot::Security,
     ),
     exact(
+        "caller_workload.key_binding",
+        KeyType::String,
+        Gating::Capability(CAP_READ_WORKLOAD),
+        Slot::Security,
+    ),
+    exact(
+        "caller_workload.key_binding_thumbprint",
+        KeyType::String,
+        Gating::Capability(CAP_READ_WORKLOAD),
+        Slot::Security,
+    ),
+    exact(
         "this_workload.spiffe_id",
         KeyType::String,
         Gating::Capability(CAP_READ_WORKLOAD),
@@ -444,6 +480,18 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
     ),
     exact(
         "this_workload.client_id",
+        KeyType::String,
+        Gating::Capability(CAP_READ_WORKLOAD),
+        Slot::Security,
+    ),
+    exact(
+        "this_workload.key_binding",
+        KeyType::String,
+        Gating::Capability(CAP_READ_WORKLOAD),
+        Slot::Security,
+    ),
+    exact(
+        "this_workload.key_binding_thumbprint",
         KeyType::String,
         Gating::Capability(CAP_READ_WORKLOAD),
         Slot::Security,

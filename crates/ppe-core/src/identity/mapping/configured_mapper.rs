@@ -486,6 +486,9 @@ impl ClaimMapper for ConfiguredClaimMap {
             attestor: Some(self.profile.attestor.to_owned()),
             selectors,
             client_id,
+            // Set by the resolver after it verifies a proof of possession;
+            // the claims alone never establish one.
+            key_binding: None,
         })
     }
 }

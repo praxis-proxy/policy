@@ -183,6 +183,10 @@ pub struct TrustedIssuer {
     /// Defaults applied in `JwtIdentityResolver::new`.
     pub leeway_seconds: u64,
 
+    /// `DPoP` settings, validated at load. See
+    /// [`DpopConfig`](crate::plugins::identity_jwt::config::DpopConfig).
+    pub dpop: crate::plugins::identity_jwt::config::DpopConfig,
+
     /// Where this issuer's keys came from, so it can re-fetch them.
     ///
     /// The verify path refreshes on demand — an unknown `kid` means the
@@ -387,6 +391,7 @@ mod tests {
             ))),
             algorithms: vec![Algorithm::HS256],
             leeway_seconds: 60,
+            dpop: crate::plugins::identity_jwt::config::DpopConfig::default(),
             source: crate::plugins::identity_jwt::config::DecodingKeySource::Secret {
                 secret: secret.to_owned(),
             },
