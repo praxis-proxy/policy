@@ -65,7 +65,7 @@ async fn each_invalid_user_token_stops_at_identity() {
                 &Persona::Bob.claims(),
                 Signer::Unsigned,
             ),
-            "auth.malformed_header",
+            "auth.malformed_credential",
         ),
         (
             "HS256 keyed with the published RSA modulus",
@@ -111,17 +111,17 @@ async fn each_invalid_user_token_stops_at_identity() {
         (
             "truncated to two segments",
             format!("{}.{}", segments[0], segments[1]),
-            "auth.malformed_header",
+            "auth.malformed_credential",
         ),
         (
             "non-base64 payload",
             format!("{}.!!not*base64!!.{}", segments[0], segments[2]),
-            "auth.malformed_header",
+            "auth.malformed_credential",
         ),
         (
             "non-base64 signature",
             format!("{}.{}.!!not*base64!!", segments[0], segments[1]),
-            "auth.malformed_header",
+            "auth.malformed_credential",
         ),
     ];
     for (label, token, code) in cases {
@@ -184,7 +184,7 @@ const PARTNER_KID: &str = "partner-rs256";
 /// The cedar fixture with a second trusted issuer on `jwt-user`, whose JWKS
 /// publishes the foreign key under [`PARTNER_KID`].
 async fn two_issuer_host() -> RefHost {
-    let anchor = "      header: X-User-Token\n      trusted_issuers:\n";
+    let anchor = "      credential:\n        kind: header\n        name: X-User-Token\n      trusted_issuers:\n";
     let partner = format!(
         "{anchor}        - issuer: \"{PARTNER_ISSUER}\"\n          \
          audiences: [\"praxis-gateway\"]\n          algorithms: [\"RS256\"]\n          \

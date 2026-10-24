@@ -20,8 +20,9 @@ Every request crosses two identity boundaries:
 ![Two identity boundaries. Inbound: identity.resolve validates credentials and fills typed identity slots, additively. Outbound: token.delegate mints the downstream credential, chosen per route by subject.](../images/identity_two_boundaries.svg)
 
 - Inbound. `identity.resolve` plugins each read one credential (from a
-  header) and land a typed identity in a slot. They are additive: one request
-  can carry a user token *and* a workload SVID, both validated.
+  header, cookie, or query parameter) and land a typed identity in a slot.
+  They are additive: one request can carry a user token *and* a workload
+  SVID, both validated.
 - Outbound. A `delegate(...)` step in the route runs a `token.delegate`
   plugin that mints the credential attached to the upstream call. The step's
   `subject:` chooses what the minted token *speaks for*.
@@ -30,11 +31,23 @@ Every request crosses two identity boundaries:
 
 ### Identity slots (inbound)
 
-| Slot | Who it is | Typical header | Resolver |
+| Slot | Principal | Credential | JWT role |
 |---|---|---|---|
-| `subject` | the human on whose behalf the call is made | `X-User-Token` | `identity/jwt` (`role: user`) |
-| `client` | the OAuth app / agent as a registered client | `Authorization` | `identity/jwt` (`role: client`) |
-| `caller_workload` | the *calling workload's own* identity (e.g. a SPIFFE SVID) | `X-Workload-Token` | `identity/jwt` (`role: caller_workload`) |
+| `subject` | Human user | `X-User-Token` | `user` |
+| `client` | Calling app | `Authorization` | `client` |
+| `caller_workload` | Calling service | `X-Workload-Token` | `caller_workload` |
+
+Each resolver reads from one wire location — header, cookie, or query
+parameter — named in the `credential:` block. See
+[Configuration — Credential location](configuration.md#credential-location).
+
+> **Delegation and non-header credentials.** Delegated tokens are
+> attached to the upstream call as HTTP headers (Bearer tokens). When
+> the inbound credential came from a cookie or query parameter, the
+> delegator still mints a header-based outbound token. The inbound
+> cookie or query parameter is not automatically stripped from the
+> upstream request the way an inbound header is. Hosts that forward
+> the raw request must handle this themselves.
 
 ### Delegation subjects (outbound)
 
@@ -180,7 +193,9 @@ plugins:
     hooks: [identity.resolve]
     config:
       role: user
-      header: X-User-Token
+      credential:
+        kind: header
+        name: X-User-Token
       trusted_issuers:
         - issuer: "https://idp.example.com/realms/corp"
           audiences: ["ppe"]        # the audience the user token is minted for
@@ -235,7 +250,9 @@ plugins:
     on_error: fail
     config:
       role: caller_workload
-      header: X-Workload-Token
+      credential:
+        kind: header
+        name: X-Workload-Token
       trusted_issuers:
         - issuer: "https://spire-oidc.internal:8443"   # SPIRE OIDC discovery
           audiences: ["https://idp.example.com/realms/corp"]   # SVID aud = the IdP
@@ -314,7 +331,9 @@ plugins:
     hooks: [identity.resolve]
     config:
       role: client                 # the agent as an OAuth client
-      header: Authorization        # a normal bearer token, NOT X-Workload-Token
+      credential:
+        kind: header
+        name: Authorization        # a normal bearer token, NOT X-Workload-Token
       trusted_issuers:
         - issuer: "https://idp.example.com/realms/corp"
           audiences: ["ppe"]
@@ -686,7 +705,9 @@ plugins:
     capabilities: [perform_http]
     config:
       role: caller_workload
-      header: X-Workload-Token
+      credential:
+        kind: header
+        name: X-Workload-Token
       trusted_issuers:
         - issuer: "https://spire-oidc.internal:8443"
           audiences: ["vault"]
@@ -901,7 +922,9 @@ plugins:
     capabilities: [perform_http, read_headers]   # read_headers: the proof names the request line
     config:
       role: client
-      header: Authorization
+      credential:
+        kind: header
+        name: Authorization
       trusted_issuers:
         - issuer: "https://idp.example.com/realms/corp"
           audiences: ["ppe"]
@@ -915,7 +938,9 @@ plugins:
     capabilities: [perform_http]
     config:
       role: user
-      header: X-User-Token
+      credential:
+        kind: header
+        name: X-User-Token
       trusted_issuers:
         - issuer: "https://idp.example.com/realms/corp"   # same IdP, its own settings: no dpop
           audiences: ["ppe"]

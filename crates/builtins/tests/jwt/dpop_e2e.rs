@@ -453,6 +453,42 @@ fn turning_on_dpop_without_read_headers_fails_at_load() {
 }
 
 #[test]
+fn dpop_with_cookie_or_query_credential_fails_at_load() {
+    for kind in ["cookie", "query_param"] {
+        for mode in ["optional", "required"] {
+            let mut cfg = dpop_config(json!({ "mode": mode }));
+            let name = cfg.name.clone();
+            let config = cfg.config.as_mut().expect("config block");
+            config["credential"] = json!({ "kind": kind, "name": "access_token" });
+
+            let Err(error) = JwtIdentityResolver::new(cfg) else {
+                panic!("{kind} credential with {mode} DPoP must fail at load");
+            };
+            let message = error.to_string();
+            assert!(message.contains(&name), "plugin name missing: {message}");
+            assert!(message.contains(TEST_ISSUER), "issuer missing: {message}");
+            assert!(
+                message.contains("header credential"),
+                "remedy missing: {message}"
+            );
+            assert!(
+                message.contains("disable DPoP"),
+                "remedy missing: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dpop_with_explicit_header_credential_loads() {
+    let mut cfg = required();
+    cfg.config.as_mut().expect("config block")["credential"] =
+        json!({ "kind": "header", "name": "Authorization" });
+
+    JwtIdentityResolver::new(cfg).expect("DPoP supports an explicit header credential");
+}
+
+#[test]
 fn a_shared_secret_proof_algorithm_fails_at_load() {
     let cfg = dpop_config(json!({ "mode": "required", "algorithms": ["HS256"] }));
     let Err(e) = JwtIdentityResolver::new(cfg) else {

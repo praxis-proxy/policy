@@ -5,8 +5,9 @@
 // IdentityResolve hook chain. Plays two roles in one type:
 //
 //   * **Input** (private fields, read-only after construction) —
-//     `raw_token`, `source`, `source_header`, `headers`, `client_host`,
-//     `client_port`. Populated by the host once at request entry and
+//     `raw_token`, `source`, `source_header`, `headers`,
+//     `client_host`, `client_port`. Populated by
+//     the host once at request entry and
 //     never mutated by handlers. Privacy is enforced at the module
 //     boundary: external code reads through `pub fn raw_token() -> &str`
 //     etc. and has no setters or mutable field access, so even a
@@ -94,16 +95,13 @@ pub enum TokenSource {
     Custom(String),
 }
 
-/// State threaded through the `IdentityResolve` hook chain.
+/// Request inputs and resolved identities shared by identity resolvers.
 ///
-/// See the module-level docs for the input/output split. In short:
-/// **input fields are private** (set once via the constructor +
-/// builders, never mutated), **output fields are `pub`** (handlers
-/// populate them on clones and return the updated payload).
+/// Hosts set private inputs through constructors and builders. Resolvers
+/// fill the public output fields.
 ///
-/// Implements `PluginPayload` so it can flow through the executor's
-/// existing Sequential-phase machinery — no bespoke plumbing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Debug` output redacts the raw token and all header values.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IdentityPayload {
     /// Raw credential bytes. Cleared on drop via `Zeroizing`.
     /// `#[serde(skip)]` — never appears in serialized output.
@@ -118,7 +116,9 @@ pub struct IdentityPayload {
     source_header: Option<String>,
 
     /// Full request headers — escape hatch for custom auth flows.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    /// Serde-skipped: headers may carry credentials and must not
+    /// appear in serialized output.
+    #[serde(skip)]
     headers: HashMap<String, String>,
 
     /// Client IP, when known.
@@ -165,6 +165,36 @@ pub struct IdentityPayload {
     /// another population. Kept inside the hook pipeline, never serialized.
     #[serde(skip)]
     credential_declined: bool,
+}
+
+struct RedactedHeaders<'a>(&'a HashMap<String, String>);
+
+impl std::fmt::Debug for RedactedHeaders<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(self.0.keys().map(|k| (k, "[REDACTED]")))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for IdentityPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityPayload")
+            .field("raw_token", &"[REDACTED]")
+            .field("source", &self.source)
+            .field("source_header", &self.source_header)
+            .field("headers", &RedactedHeaders(&self.headers))
+            .field("client_host", &self.client_host)
+            .field("client_port", &self.client_port)
+            .field("subject", &self.subject)
+            .field("client", &self.client)
+            .field("caller_workload", &self.caller_workload)
+            .field("delegation", &self.delegation)
+            .field("raw_credentials", &self.raw_credentials)
+            .field("resolved_at", &self.resolved_at)
+            .field("raw_claims", &self.raw_claims)
+            .finish()
+    }
 }
 
 impl IdentityPayload {
@@ -436,23 +466,107 @@ mod tests {
     }
 
     #[test]
+    fn debug_output_redacts_raw_token() {
+        let p = IdentityPayload::new("eyJ.super-secret-bearer-token.sig", TokenSource::Bearer);
+        let debug = format!("{p:?}");
+        assert!(
+            !debug.contains("super-secret-bearer-token"),
+            "raw_token leaked into Debug output: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn debug_output_redacts_header_values() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "authorization".to_owned(),
+            "Bearer eyJ.secret.jwt".to_owned(),
+        );
+        headers.insert("cookie".to_owned(), "session=abc123".to_owned());
+        headers.insert("x-user-token".to_owned(), "custom-secret-token".to_owned());
+        headers.insert("content-type".to_owned(), "application/json".to_owned());
+        let p = IdentityPayload::new("tok", TokenSource::Bearer).with_headers(headers);
+        let debug = format!("{p:?}");
+        assert!(
+            !debug.contains("eyJ.secret.jwt"),
+            "authorization value leaked: {debug}"
+        );
+        assert!(!debug.contains("abc123"), "cookie value leaked: {debug}");
+        assert!(
+            !debug.contains("custom-secret-token"),
+            "x-user-token value leaked: {debug}"
+        );
+        assert!(
+            !debug.contains("application/json"),
+            "content-type value leaked: {debug}"
+        );
+        assert!(
+            debug.contains("authorization"),
+            "header name missing: {debug}"
+        );
+        assert!(debug.contains("cookie"), "header name missing: {debug}");
+        assert!(
+            debug.contains("x-user-token"),
+            "header name missing: {debug}"
+        );
+        assert!(
+            debug.contains("content-type"),
+            "header name missing: {debug}"
+        );
+        assert!(
+            debug.contains("[REDACTED]"),
+            "redaction placeholder missing: {debug}"
+        );
+    }
+
+    #[test]
+    fn headers_never_serialized() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_owned(), "Bearer secret-jwt".to_owned());
+        headers.insert("x-user-token".to_owned(), "custom-secret".to_owned());
+        let p = IdentityPayload::new("tok", TokenSource::Bearer).with_headers(headers);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("secret-jwt"),
+            "authorization value leaked into serialized form: {json}"
+        );
+        assert!(
+            !json.contains("custom-secret"),
+            "x-user-token value leaked into serialized form: {json}"
+        );
+        assert!(
+            !json.contains("headers"),
+            "headers field should be skipped in serialization: {json}"
+        );
+    }
+
+    #[test]
+    fn headers_absent_after_deserialize_round_trip() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_owned(), "Bearer tok".to_owned());
+        let p = IdentityPayload::new("tok", TokenSource::Bearer).with_headers(headers);
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: IdentityPayload = serde_json::from_str(&json).unwrap();
+        assert!(
+            restored.headers().is_empty(),
+            "headers is serde-skipped and must be empty after round-trip"
+        );
+    }
+
+    #[test]
     fn handler_can_populate_output_on_clone() {
-        // Exercises the typical handler pattern: clone the running
-        // payload, set the output fields the handler is responsible
-        // for, return the updated payload. Input fields survive
-        // the clone unchanged.
         let original = IdentityPayload::new("eyJ.tok", TokenSource::Bearer);
         let mut updated = original.clone();
         updated.subject = Some(SubjectExtension {
             id: Some("alice".into()),
             ..Default::default()
         });
-        assert_eq!(updated.raw_token(), "eyJ.tok"); // input preserved
+        assert_eq!(updated.raw_token(), "eyJ.tok");
         assert_eq!(
             updated.subject.as_ref().unwrap().id.as_deref(),
             Some("alice")
         );
-        // Original unchanged — the clone is a separate value.
         assert!(original.subject.is_none());
     }
 

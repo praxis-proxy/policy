@@ -127,7 +127,7 @@ fn resolver_config(jwks_url: &str) -> PluginConfig {
         capabilities: ["perform_http".to_owned()].into(),
         config: Some(json!({
             "role": "user",
-            "header": "Authorization",
+            "credential": { "kind": "header", "name": "Authorization" },
             "trusted_issuers": [{
                 "issuer": ISS,
                 "audiences": [AUD],
@@ -740,7 +740,7 @@ async fn every_misconfigured_issuer_is_named_in_one_message() {
     let mut cfg = resolver_config(&jwks_url());
     cfg.config = Some(json!({
         "role": "user",
-        "header": "Authorization",
+        "credential": { "kind": "header", "name": "Authorization" },
         "trusted_issuers": [
             {
                 "issuer": "https://a.example.test",
@@ -819,7 +819,7 @@ async fn jwks_refresh_picks_up_rotated_key() {
         capabilities: ["perform_http".to_owned()].into(),
         config: Some(json!({
             "role": "user",
-            "header": "Authorization",
+            "credential": { "kind": "header", "name": "Authorization" },
             "trusted_issuers": [{
                 "issuer": ISS,
                 "audiences": [AUD],
@@ -1183,7 +1183,7 @@ fn tuned_config(refresh_secs: u64, min_refresh_interval_secs: u64) -> PluginConf
     let mut cfg = resolver_config(&jwks_url());
     cfg.config = Some(json!({
         "role": "user",
-        "header": "Authorization",
+        "credential": { "kind": "header", "name": "Authorization" },
         "trusted_issuers": [{
             "issuer": ISS,
             "audiences": [AUD],

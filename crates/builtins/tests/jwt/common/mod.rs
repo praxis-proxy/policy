@@ -137,6 +137,23 @@ pub(crate) async fn invoke(
     token: String,
     source: TokenSource,
 ) -> PipelineResult {
+    invoke_with_payload(cfg, IdentityPayload::new(token, source)).await
+}
+
+/// Run a prepared payload through the identity hook.
+pub(crate) async fn invoke_with_payload(
+    cfg: PluginConfig,
+    payload: IdentityPayload,
+) -> PipelineResult {
+    invoke_with_payload_and_ext(cfg, payload, Extensions::default()).await
+}
+
+/// Run a prepared payload and extensions through the identity hook.
+pub(crate) async fn invoke_with_payload_and_ext(
+    cfg: PluginConfig,
+    payload: IdentityPayload,
+    ext: Extensions,
+) -> PipelineResult {
     let resolver = JwtIdentityResolver::new(cfg.clone()).expect("the resolver must construct");
 
     let mgr = Arc::new(PolicyEngine::default());
@@ -149,14 +166,20 @@ pub(crate) async fn invoke(
     mgr.initialize().await.expect("initialize");
 
     let (result, _bg) = mgr
-        .invoke_named::<IdentityHook>(
-            HOOK_IDENTITY_RESOLVE,
-            IdentityPayload::new(token, source),
-            Extensions::default(),
-            None,
-        )
+        .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, ext, None)
         .await;
     result
+}
+
+pub(crate) fn extensions_with_query(query: Option<String>) -> Extensions {
+    use praxis_policy_core::extensions::HttpExtension;
+    Extensions {
+        http: Some(Arc::new(HttpExtension {
+            query,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
 }
 
 /// A set's contents in a stable order, for an assertion message worth reading.

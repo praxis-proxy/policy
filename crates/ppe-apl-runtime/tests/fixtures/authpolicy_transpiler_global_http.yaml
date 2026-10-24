@@ -29,7 +29,9 @@ plugins:
   on_error: fail
   config:
     role: user
-    header: Authorization
+    credential:
+      kind: header
+      name: Authorization
     trusted_issuers:
     - issuer: http://localhost:8081/realms/policy-demo
       algorithms:

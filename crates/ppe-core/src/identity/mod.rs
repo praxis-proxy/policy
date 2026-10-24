@@ -14,6 +14,8 @@
 // framework merge-into-Extensions logic, no APL integration. Those
 // land later.
 
+/// Shared credential location and extraction types.
+pub mod credential;
 /// The identity resolution hook.
 pub mod hook;
 /// Maps a JSON record onto the typed identity slots.
@@ -23,6 +25,7 @@ pub mod payload;
 /// Per-route identity configuration.
 pub mod route_config;
 
+pub use credential::{CredentialLocation, Extraction};
 pub use hook::{HOOK_IDENTITY_RESOLVE, IdentityHook};
 pub use mapping::{
     ClaimMap, ClaimMapConfig, ClaimMapper, ClaimPath, ConfiguredClaimMap, MappingProfile,

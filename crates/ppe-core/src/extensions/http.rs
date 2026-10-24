@@ -488,7 +488,6 @@ mod tests {
         // HttpExtension from its serialized form recovers `[REDACTED]`, never
         // the original credential. The live value is only ever carried in the
         // in-process struct the host builds, not rehydrated from the wire.
-        // (Mirrors #96's `raw_query_string_absent_after_deserialize_round_trip`.)
         for value in ["access_token=secret", "service=git-upload-pack", ""] {
             let http = HttpExtension {
                 query: Some(value.to_owned()),

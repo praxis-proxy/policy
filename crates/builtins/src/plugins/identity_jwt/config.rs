@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use jsonwebtoken::{Algorithm, DecodingKey};
-use praxis_policy_core::extensions::raw_credentials::TokenRole;
+use praxis_policy_core::extensions::raw_credentials::{Credential, TokenRole};
 use serde::{Deserialize, Serialize};
 
 use praxis_policy_core::host::{HostServices, HttpRequestError};
@@ -27,16 +27,16 @@ use praxis_policy_core::identity::mapping::ClaimMapConfig;
 /// Top-level plugin config — what operators write under
 /// `plugins[<name>].config:` in unified-config YAML.
 ///
-/// One instance of this plugin handles ONE inbound credential
-/// (one header, one role). Wire multiple instances if a deployment
-/// expects multiple inbound tokens — e.g. user JWT in
-/// `X-User-Token`, OAuth client token in `Authorization`, and a
-/// SPIFFE JWT-SVID in `X-Workload-Token`.
+/// Each instance resolves one credential and one role. Configure multiple
+/// instances when a request carries separate user, client, or workload tokens.
 ///
 /// Unknown keys are rejected. Every field here is optional or defaulted, so a
 /// misspelling would otherwise deserialize to the default and take effect
 /// silently: `claim_maps` would leave the resolver on the standard preset while
 /// the operator believed their map was live.
+///
+/// The legacy `header` field remains accepted for existing configurations.
+/// New configurations should use `credential`; setting both is an error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JwtIdentityResolverConfig {
@@ -57,14 +57,19 @@ pub struct JwtIdentityResolverConfig {
     #[serde(default = "default_role")]
     pub role: TokenRole,
 
-    /// HTTP header name this resolver reads its token from
-    /// (e.g. `"Authorization"`, `"X-User-Token"`). The `Bearer `
-    /// prefix is stripped if present. Recorded on
-    /// `RawInboundToken.source_header` so forwarding plugins can
-    /// re-attach (or strip) the credential under the same name.
-    /// Default `Authorization` matches the most common case.
-    #[serde(default = "default_header")]
-    pub header: String,
+    /// Where this resolver reads its token: a header, cookie, or query
+    /// parameter. Header values may use the `Bearer` scheme.
+    ///
+    /// `None` uses the legacy `header` field when present, or the
+    /// `Authorization` header otherwise.
+    #[serde(default)]
+    pub credential: Option<Credential>,
+
+    /// Deprecated header name. Construction logs a migration warning; use
+    /// `credential: { kind: header, name: ... }` for new configurations.
+    /// Cannot be set alongside `credential`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
 
     /// Which shipped preset to map claims with: `standard`, `keycloak`,
     /// `auth0` or `cognito`. Omitted resolves to `standard`, which reproduces
@@ -135,10 +140,6 @@ const fn default_min_refresh_interval_secs() -> u64 {
 
 fn default_refresh_secs() -> u64 {
     600
-}
-
-fn default_header() -> String {
-    "Authorization".to_owned()
 }
 
 /// One issuer's config — issuer URL, audiences, decoding key
@@ -1154,6 +1155,82 @@ mod tests {
         assert_eq!(cfg.claim_mapper.as_deref(), Some("standard"));
     }
 
+    #[test]
+    fn credential_block_alone_deserializes() {
+        let raw = json!({
+            "trusted_issuers": [minimal_issuer()],
+            "credential": { "kind": "cookie", "name": "__Host-jwt" },
+        });
+        let cfg: JwtIdentityResolverConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            cfg.credential,
+            Some(Credential::Cookie {
+                name: "__Host-jwt".into()
+            })
+        );
+    }
+
+    #[test]
+    fn credential_omitted_leaves_selection_to_resolver() {
+        let raw = json!({ "trusted_issuers": [minimal_issuer()] });
+        let cfg: JwtIdentityResolverConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            cfg.credential, None,
+            "deserialization leaves it unspecified"
+        );
+    }
+
+    #[test]
+    fn misspelled_key_is_rejected() {
+        let raw = json!({
+            "trusted_issuers": [minimal_issuer()],
+            "credentials": { "kind": "header", "name": "Authorization" },
+        });
+        let err = serde_json::from_value::<JwtIdentityResolverConfig>(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("credentials"),
+            "error should name the unknown field: {err}"
+        );
+    }
+
+    #[test]
+    fn legacy_header_field_deserializes() {
+        let raw = json!({
+            "trusted_issuers": [minimal_issuer()],
+            "header": "X-User-Token",
+        });
+        let cfg: JwtIdentityResolverConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(cfg.header.as_deref(), Some("X-User-Token"));
+        assert_eq!(cfg.credential, None);
+    }
+
+    #[test]
+    fn config_round_trips_through_serialize_deserialize() {
+        let raw = json!({
+            "trusted_issuers": [minimal_issuer()],
+            "credential": { "kind": "query_param", "name": "access_token" },
+        });
+        let cfg: JwtIdentityResolverConfig = serde_json::from_value(raw).unwrap();
+        let serialized = serde_json::to_value(&cfg).unwrap();
+        let round_tripped: JwtIdentityResolverConfig = serde_json::from_value(serialized).unwrap();
+        assert_eq!(round_tripped.credential, cfg.credential);
+    }
+
+    #[test]
+    fn credential_header_kind_deserializes() {
+        let raw = json!({
+            "trusted_issuers": [minimal_issuer()],
+            "credential": { "kind": "header", "name": "Authorization" },
+        });
+        let cfg: JwtIdentityResolverConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            cfg.credential,
+            Some(Credential::Header {
+                name: "Authorization".into()
+            })
+        );
+    }
+
     // ---- JWKS documents the IdP might actually serve -----------------------
     //
     // The e2e tests all serve a well-formed JWKS with a valid `kid`, so every
@@ -1373,18 +1450,6 @@ mod tests {
         assert!(e.contains("issuer"), "{e}");
     }
 
-    fn issuer_for_audience_checks(audiences: Vec<String>, skip: bool) -> TrustedIssuerConfig {
-        TrustedIssuerConfig {
-            issuer: "https://idp.example".into(),
-            audiences,
-            skip_audience_validation: skip,
-            algorithms: vec![Algorithm::HS256],
-            decoding_key: DecodingKeySource::Secret { secret: "s".into() },
-            leeway_seconds: 0,
-            dpop: DpopConfig::default(),
-        }
-    }
-
     /// Omitted and explicitly empty `audiences` are the same fault when skip
     /// is off: the issuer would accept a token minted for any app.
     #[test]
@@ -1410,5 +1475,33 @@ mod tests {
             .expect_err("skip plus a list must fail");
         assert!(err.contains("skip_audience_validation"), "{err}");
         assert!(err.contains("pick one"), "{err}");
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    fn minimal_issuer() -> serde_json::Value {
+        json!({
+            "issuer": "https://idp.example.com",
+            "audiences": ["my-api"],
+            "algorithms": ["HS256"],
+            "decoding_key": {
+                "kind": "secret",
+                "secret": "test-secret",
+            },
+        })
+    }
+
+    fn issuer_for_audience_checks(audiences: Vec<String>, skip: bool) -> TrustedIssuerConfig {
+        TrustedIssuerConfig {
+            issuer: "https://idp.example".into(),
+            audiences,
+            skip_audience_validation: skip,
+            algorithms: vec![Algorithm::HS256],
+            decoding_key: DecodingKeySource::Secret { secret: "s".into() },
+            leeway_seconds: 0,
+            dpop: DpopConfig::default(),
+        }
     }
 }

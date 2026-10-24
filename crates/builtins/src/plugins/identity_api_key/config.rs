@@ -7,14 +7,14 @@
 // every request reads as an outage, and the operator looking at it is reading
 // the wrong logs.
 
-use praxis_policy_core::extensions::raw_credentials::TokenRole;
+use praxis_policy_core::extensions::raw_credentials::{Credential, TokenRole};
 use praxis_policy_core::identity::mapping::{ClaimMapConfig, ClaimsOverrides, ConfiguredClaimMap};
 use serde::{Deserialize, Serialize};
 
 use crate::plugins::identity_api_key::cache::CacheConfig;
-use crate::plugins::identity_api_key::credential::{Credential, CredentialLocation};
 use crate::plugins::identity_api_key::file_directory::FileDirectoryConfig;
 use crate::plugins::identity_api_key::http_directory::HttpDirectoryConfig;
+use praxis_policy_core::identity::credential::CredentialLocation;
 
 /// Which backend holds the records.
 #[derive(Debug, Clone, Serialize, Deserialize)]

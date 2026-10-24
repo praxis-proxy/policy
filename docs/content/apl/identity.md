@@ -25,7 +25,9 @@ plugins:
     hooks: [identity.resolve]
     config:
       role: user
-      header: X-User-Token
+      credential:
+        kind: header
+        name: X-User-Token
       trusted_issuers:
         - issuer: "https://idp.example.com/realms/agents"
           audiences: ["ppe-gateway"]
@@ -70,7 +72,8 @@ written as attribute paths. Use the canonical sets for either case:
 A request often carries more than one identity: the end user, the calling
 application, and the calling workload. Register an identity plugin per source.
 The bundled JWT plugin takes a `role` (`user`, `client`, or `caller_workload`)
-and a `header`, so each inbound credential resolves into its own namespace:
+and a `credential` location (header, cookie, or query parameter), so each
+inbound credential resolves into its own namespace:
 
 | `role` | Namespace | Typical credential |
 |--------|-----------|--------------------|
@@ -93,7 +96,9 @@ plugins:
     hooks: [identity.resolve]
     config:
       role: caller_workload
-      header: X-Workload-Token
+      credential:
+        kind: header
+        name: X-Workload-Token
       trusted_issuers:
         - issuer: "https://spire.example.com"
           audiences: ["ppe-gateway"]
@@ -118,6 +123,43 @@ The bag distinguishes two machine identities:
 They are not interchangeable, and confusing them is how a token minted for one
 agent ends up presented by another. Delegation depends on the distinction — see
 [Delegation](delegation.md).
+
+### Credential location
+
+Each resolver reads its token from one wire location, named by
+`credential:` in the plugin config:
+
+| Kind | Use | Example name |
+|---|---|---|
+| `header` (default) | Bearer token | `Authorization` |
+| `cookie` | Browser session | `__Host-jwt` |
+| `query_param` | WebSocket or SSE | `access_token` |
+
+```yaml
+# A browser app whose JWT arrives in a cookie
+plugins:
+  - name: jwt-browser
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      role: user
+      credential:
+        kind: cookie
+        name: __Host-jwt
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["my-app"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://idp.example.com/.well-known/jwks.json"
+```
+
+Cookie and query-string values are parsed by PPE, not by the host's HTTP
+framework, so the same request resolves identically regardless of which
+proxy sits in front of it. See
+[Configuration — Credential location](../configuration.md#credential-location)
+for the full reference and security notes.
 
 ## Pipeline integration
 

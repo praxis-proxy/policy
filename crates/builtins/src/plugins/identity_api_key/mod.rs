@@ -57,9 +57,10 @@ pub mod resolver;
 
 pub use cache::{CacheConfig, CachingDirectory};
 pub use config::{ApiKeyResolverConfig, ExpiryPolicy, OnDirectoryError, ProviderConfig};
-pub use credential::{Credential, CredentialLocation, Extraction};
+pub use credential::{CredentialLocation, Extraction};
 pub use directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 pub use factory::{ApiKeyIdentityFactory, KIND};
 pub use file_directory::{FileDirectory, FileDirectoryConfig, FileRecord, IndexKind, RecordFile};
 pub use http_directory::{HttpDirectory, HttpDirectoryConfig};
+pub use praxis_policy_core::extensions::raw_credentials::Credential;
 pub use resolver::{ApiKeyIdentityResolver, codes};

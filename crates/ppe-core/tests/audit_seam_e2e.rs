@@ -41,8 +41,8 @@ use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::PluginError;
 use praxis_policy_core::executor::erase_result;
 use praxis_policy_core::extensions::{
-    HttpExtension, MetaExtension, RawCredentialsExtension, RawInboundToken, SecurityExtension,
-    SubjectExtension, TokenKind, TokenRole,
+    Credential, HttpExtension, MetaExtension, RawCredentialsExtension, RawInboundToken,
+    SecurityExtension, SubjectExtension, TokenKind, TokenRole,
 };
 use praxis_policy_core::hooks::payload::{Extensions, PluginPayload};
 use praxis_policy_core::hooks::trait_def::PluginResult;
@@ -301,7 +301,9 @@ fn tenantless(mut ext: Extensions) -> Extensions {
             TokenRole::Client,
             RawInboundToken::new(
                 "a-bearer-nobody-should-see",
-                "authorization",
+                Credential::Header {
+                    name: "authorization".to_owned(),
+                },
                 TokenKind::Jwt,
             ),
         )]

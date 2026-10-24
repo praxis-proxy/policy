@@ -139,10 +139,65 @@ pub async fn resolve_with_payload(
     resolver: &ApiKeyIdentityResolver,
     payload: &IdentityPayload,
 ) -> PluginResult<IdentityPayload> {
-    let ext = Extensions::default();
+    resolve_with_payload_and_ext(resolver, payload, Extensions::default()).await
+}
+
+/// Run the resolver against a payload + extensions.
+pub async fn resolve_with_payload_and_ext(
+    resolver: &ApiKeyIdentityResolver,
+    payload: &IdentityPayload,
+    ext: Extensions,
+) -> PluginResult<IdentityPayload> {
     let mut ctx = PluginContext::default();
     <ApiKeyIdentityResolver as HookHandler<IdentityHook>>::handle(resolver, payload, &ext, &mut ctx)
         .await
+}
+
+/// A config block with a cookie credential.
+pub fn cookie_config(path: &str, cookie_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "credential": { "kind": "cookie", "name": cookie_name },
+        "provider": { "kind": "file", "path": path },
+        "record_map": { "subject": { "id": "user", "roles": "groups" } },
+    })
+}
+
+/// A config block with a query-param credential.
+pub fn query_param_config(path: &str, param_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "credential": { "kind": "query_param", "name": param_name },
+        "provider": { "kind": "file", "path": path },
+        "record_map": { "subject": { "id": "user", "roles": "groups" } },
+    })
+}
+
+/// Run the resolver against a request carrying a cookie.
+pub async fn resolve_with_cookie(
+    resolver: &ApiKeyIdentityResolver,
+    cookie_header: &str,
+) -> PluginResult<IdentityPayload> {
+    let mut headers = HashMap::new();
+    headers.insert("cookie".to_owned(), cookie_header.to_owned());
+    let payload = IdentityPayload::new("", TokenSource::ApiKey).with_headers(headers);
+    resolve_with_payload(resolver, &payload).await
+}
+
+/// Run the resolver against a request carrying a query string.
+pub async fn resolve_with_query(
+    resolver: &ApiKeyIdentityResolver,
+    query_string: &str,
+) -> PluginResult<IdentityPayload> {
+    use praxis_policy_core::extensions::HttpExtension;
+    use std::sync::Arc;
+    let payload = IdentityPayload::new("", TokenSource::ApiKey).with_headers(HashMap::new());
+    let ext = Extensions {
+        http: Some(Arc::new(HttpExtension {
+            query: Some(query_string.to_owned()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    resolve_with_payload_and_ext(resolver, &payload, ext).await
 }
 
 /// The denial code on a result, or `None` when it allowed.

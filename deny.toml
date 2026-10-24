@@ -22,17 +22,6 @@ maximum-db-staleness = "P30D"
 # transitive dependency that does not exist here, and the other is the
 # rustls-pemfile entry below, which is retained for a different reason.
 ignore = [
-    # --- Dev-only: container test harness for the session store ---
-    # tar and PAX extraction flaws in the tokio tar crate pulled by
-    # testcontainers, an unconditional dev-dependency of
-    # praxis-policy-builtins. Still reached only by the ignore-gated session-store
-    # integration tests.
-    "RUSTSEC-2026-0066",
-    "RUSTSEC-2026-0112",
-    "RUSTSEC-2026-0113",
-    "RUSTSEC-2026-0145",
-    # rustls-pemfile unmaintained, via the docker client behind testcontainers.
-    "RUSTSEC-2025-0134",
     # --- Dev-only: RSA keypair generation in the JWT extension's tests ---
     # Marvin timing sidechannel in `rsa`, with no fixed release. `rsa` is a
     # dev-dependency only, for fixture key generation. The runtime uses the

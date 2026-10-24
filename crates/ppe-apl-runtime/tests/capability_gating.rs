@@ -40,7 +40,7 @@ use praxis_policy_core::delegation::{DelegationPayload, HOOK_TOKEN_DELEGATE, Tok
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::PluginError as CoreError;
 use praxis_policy_core::extensions::raw_credentials::{
-    RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind, TokenRole,
+    Credential, RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind, TokenRole,
 };
 use praxis_policy_core::extensions::{
     AcquiredFacts, LlmRequestDocument, MetaExtension, MetadataCacheDisposition, SecurityExtension,
@@ -822,7 +822,13 @@ routes:
     let mut raw = RawCredentialsExtension::default();
     raw.inbound_tokens.insert(
         TokenRole::User,
-        RawInboundToken::new("caller-jwt", "Authorization", TokenKind::Jwt),
+        RawInboundToken::new(
+            "caller-jwt",
+            Credential::Header {
+                name: "Authorization".into(),
+            },
+            TokenKind::Jwt,
+        ),
     );
     let mut ext = extensions_with_metadata(true);
     ext.raw_credentials = Some(Arc::new(raw));

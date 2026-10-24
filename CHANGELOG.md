@@ -70,7 +70,76 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   Route predicates read `metadata.*` without a host grant: the synthetic APL
   handler holds `read_metadata` intrinsically.
 
+- **Typed credential locations for the `identity/jwt` plugin.** The plugin can
+  now extract bearer JWTs from HTTP headers, cookies, or query parameters — one
+  location per resolver instance. A new `credential:` config block names a
+  `kind` (`header`, `cookie`, or `query_param`) and a `name`. Cookie and
+  query-string values are parsed by PPE itself (`ppe-core::http_credential`),
+  not by whichever HTTP framework the host runs, so the same request resolves
+  the same credential regardless of which proxy sits in front of it. DPoP
+  requires a header credential; cookie and query parameter locations are
+  refused at load when an issuer enables DPoP.
+  The legacy `header:` setting remains supported but logs a deprecation
+  warning when the resolver is built. New configurations should use
+  `credential:`; the two settings cannot be combined:
+
+  ```yaml
+  # Legacy (still supported)
+  plugins:
+    - name: user-jwt
+      kind: identity/jwt
+      config:
+        header: "Authorization"
+        trusted_issuers: [...]
+
+  # Preferred
+  plugins:
+    - name: user-jwt
+      kind: identity/jwt
+      config:
+        credential:
+          kind: header
+          name: Authorization
+        trusted_issuers: [...]
+  ```
+
+  Omitting both settings defaults to the `Authorization` header.
+
+  Runtime deny codes for credential extraction: `auth.missing_credential`
+  (no value at the configured location), `auth.empty_credential` (no token
+  in the named value), `auth.ambiguous_credential` (duplicate configured name
+  or differently cased header keys), and `auth.malformed_credential` (parse
+  failure). Malformed JWTs use
+  `auth.malformed_credential` at every credential location.
+
+  **Security note**: a resolver configured for `credential: { kind: query_param
+  }` logs a one-time notice at construction, because a query-parameter token
+  routinely appears in infrastructure logs (access logs, CDN logs, browser
+  history) outside PPE's control — PPE's own logging never prints the token
+  value, in either the old or the new field.
+  ([#64](https://github.com/praxis-proxy/policy/issues/64))
+
 ### Changed
+
+- **Breaking for embedders**: `RawInboundToken.source_header: String` is
+  replaced by `RawInboundToken.source: Credential`, and its constructor becomes
+  `RawInboundToken::new(token, source: Credential, kind)`. The serialized JSON
+  shape changes from `{"source_header":"Authorization"}` to
+  `{"source":{"kind":"header","name":"Authorization"}}` — the value is now a
+  `Credential` object, not a plain string, so persisted or wire JSON using the
+  old shape must be migrated. `Credential` (in
+  `praxis_policy_core::extensions`) is the new shared type recording where any
+  identity plugin extracted a credential from, so downstream consumers can
+  read a uniform location type. `RawInboundToken`'s `Debug` continues to
+  redact the token.
+
+  `IdentityPayload.headers` is now `#[serde(skip)]` — the field is no longer
+  included in serialized output. Previously it was `skip_serializing_if =
+  "HashMap::is_empty"`, which could include request headers in serialized
+  payloads when non-empty. Headers may carry credentials and must not appear
+  in serialized output. Out-of-process hosts that relied on receiving headers
+  through serialized `IdentityPayload` should read them from the input request
+  directly.
 
 - **Breaking for the reference audit plugins:** `audit/logger` requires
   `destination:` and `audit/ocsf` requires `destination:` or `exporters:`.
@@ -110,7 +179,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `Capability` adds `ReadMetadata` and `SlotName` adds `Metadata`, so
   exhaustive matches need a new arm. `Extensions.metadata` is never
   serialized. The new metadata enums are `#[non_exhaustive]`.
-
 ## [0.5.0] - 2026-10-13
 
 ### Added
@@ -580,7 +648,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Each shipped preset records what it omits.** Auth0 and Keycloak put their roles claim where no preset can name it, so those need a hand-written `claim_map`. Presets leave a field empty rather than filling it with the wrong concept, because Keycloak's `groups` holds realm roles and Cognito's `cognito:roles` holds IAM role ARNs. Each preset's description says what it covers and what is opt-in at the provider. ([#31](https://github.com/praxis-proxy/policy/pull/31))
 
 - **Roles and permissions are readable as whole sets.** `subject.roles`, `subject.permissions`, `client.roles`, and `client.permissions` join `subject.teams` as `StringSet` bag keys, so a policy can write `"hr" in subject.roles` rather than enumerating `role.<name>` booleans. The flattened boolean keys are unchanged. ([#7](https://github.com/praxis-proxy/policy/pull/7))
-
 ### Changed
 
 - **`require(P)` is now a predicate meaning `!P`.** It accepts general predicates, including comparisons, negation, and composition with `&` or `|`. Existing accepted forms retain their semantics: `require(a)`, `require(a, b)`, and `require(a | b)` still normalize to the same trees.
@@ -761,7 +828,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **The unused `hooks::types::hook_names` and `hooks::types::cmf_hook_names` modules.** **Breaking for Rust callers**: import CMF names from `praxis_policy_core::cmf::constants`, alongside `identity::HOOK_IDENTITY_RESOLVE`, `delegation::HOOK_TOKEN_DELEGATE`, and `elicitation::HOOK_ELICIT`. Their operator-facing string values remain stable.
 
 - **`AplRouteHandler::with_pdp_router` is gone.** Install a `PdpRouter` through `with_pdp`, which is what the visitor already does. ([#13](https://github.com/praxis-proxy/policy/issues/13))
-
 ### Fixed
 
 - **Delegators and elicitation handlers are no longer reported as narrowed when their family-specific hooks are reached.** `delegate(...)` is credited to `token.delegate`, and elicitation verbs to `elicit`. Unreached hooks declared by those plugins are still reported.

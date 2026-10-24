@@ -25,7 +25,7 @@ use crate::plugins::identity_api_key::config::{
     ApiKeyResolverConfig, ExpiryPolicy, ProviderConfig,
 };
 use crate::plugins::identity_api_key::credential::{CredentialLocation, Extraction};
-use crate::plugins::identity_api_key::directory::KeyDirectory;
+use crate::plugins::identity_api_key::directory::{KeyDirectory, PresentedKey};
 use crate::plugins::identity_api_key::file_directory::FileDirectory;
 use crate::plugins::identity_api_key::http_directory::HttpDirectory;
 
@@ -46,6 +46,10 @@ pub mod codes {
     pub const MISSING_CREDENTIAL: &str = "auth.missing_credential";
     /// The location held a value and it was empty.
     pub const EMPTY_CREDENTIAL: &str = "auth.empty_credential";
+    /// The credential name appeared more than once.
+    pub const AMBIGUOUS_CREDENTIAL: &str = "auth.ambiguous_credential";
+    /// The credential input is structurally malformed.
+    pub const MALFORMED_CREDENTIAL: &str = "auth.malformed_credential";
     /// The directory answered, and no record matched.
     pub const KEY_UNKNOWN: &str = "auth.key_unknown";
     /// A record matched and has expired.
@@ -150,26 +154,15 @@ impl HookHandler<IdentityHook> for ApiKeyIdentityResolver {
     ) -> PluginResult<IdentityPayload> {
         let location = &self.location;
 
-        let presented = match location.extract(payload.headers()) {
-            Extraction::Found => match location.presented(payload.headers()) {
-                Some(key) => key,
-                // `extract` said Found, so this is unreachable. Denying rather
-                // than unwrapping keeps a future divergence between the two a
-                // rejected request instead of a panicked worker.
-                None => {
-                    return PluginResult::deny(PluginViolation::new(
-                        codes::MISSING_CREDENTIAL,
-                        format!("no credential at {}", location.credential),
-                    ));
-                },
-            },
-            Extraction::Missing => {
+        let presented = match location.raw_from_ext(payload.headers(), ext) {
+            Ok(key) => PresentedKey::new(key.as_bytes()),
+            Err(Extraction::Missing) => {
                 return PluginResult::deny(PluginViolation::new(
                     codes::MISSING_CREDENTIAL,
                     format!("no credential at {}", location.credential),
                 ));
             },
-            Extraction::Empty => {
+            Err(Extraction::Empty) => {
                 return PluginResult::deny(PluginViolation::new(
                     codes::EMPTY_CREDENTIAL,
                     format!("{} holds an empty credential", location.credential),
@@ -178,10 +171,28 @@ impl HookHandler<IdentityHook> for ApiKeyIdentityResolver {
             // Another resolver's key population. Carry the decline to the
             // executor while leaving identity slots untouched for whoever
             // services it; denying here would make two populations impossible.
-            Extraction::WrongPrefix => {
+            Err(Extraction::WrongPrefix) => {
                 let mut updated = payload.clone();
                 updated.mark_credential_declined();
                 return PluginResult::modify_payload(updated);
+            },
+            Err(Extraction::Ambiguous) => {
+                return PluginResult::deny(PluginViolation::new(
+                    codes::AMBIGUOUS_CREDENTIAL,
+                    format!("ambiguous credential at {}", location.credential),
+                ));
+            },
+            Err(Extraction::Malformed) => {
+                return PluginResult::deny(PluginViolation::new(
+                    codes::MALFORMED_CREDENTIAL,
+                    format!("malformed credential at {}", location.credential),
+                ));
+            },
+            Err(_) => {
+                return PluginResult::deny(PluginViolation::new(
+                    codes::MISSING_CREDENTIAL,
+                    format!("unexpected extraction outcome at {}", location.credential),
+                ));
             },
         };
 

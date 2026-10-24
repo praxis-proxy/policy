@@ -2,10 +2,6 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Record fields onto the identity slots, through the shared mapper.
-//!
-//! The raw credential checks cover only fields this resolver writes. The
-//! inbound header map is still serialized in `IdentityPayload`, including
-//! credentials supplied by a caller.
 
 use crate::support::{RecordFile, denial_code, file_config, hash, resolve_with_header, resolver};
 

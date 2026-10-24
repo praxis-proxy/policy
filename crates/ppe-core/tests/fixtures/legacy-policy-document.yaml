@@ -33,7 +33,9 @@ plugins:
       - perform_http
     config:
       role: user
-      header: X-User-Token
+      credential:
+        kind: header
+        name: X-User-Token
       trusted_issuers:
         - issuer: "http://localhost:8081/realms/cpex-demo"
           audiences: ["praxis-gateway"]
@@ -59,7 +61,9 @@ plugins:
       - perform_http
     config:
       role: client
-      header: Authorization
+      credential:
+        kind: header
+        name: Authorization
       trusted_issuers:
         - issuer: "http://localhost:8081/realms/cpex-demo"
           audiences: ["praxis-gateway", "account"]
