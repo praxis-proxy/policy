@@ -399,14 +399,10 @@ mod tests {
             )
             .await;
 
-        assert!(
-            !result.continue_processing,
-            "unknown source must deny",
-        );
+        assert!(!result.continue_processing, "unknown source must deny",);
         let violation = result.violation.expect("unknown source must deny");
         assert_eq!(
-            violation.code,
-            "plugin.not_found",
+            violation.code, "plugin.not_found",
             "unknown source denies with plugin.not_found",
         );
         assert!(
