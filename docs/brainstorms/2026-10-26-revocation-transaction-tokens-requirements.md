@@ -32,9 +32,9 @@ This proposal adds three things:
    tracks `lineage_root` and `lineage` across derived credentials, so revoking a relationship
    or a delegation hop stops further use through PPE.
 
-These checks can stop an agent across governed calls, stop one delegation, task, tool, or
-pending request while other work continues, or stop a declared combination, such as one agent's
-use of one tool for one principal. Lineage lets a root or delegation revocation deny
+These checks can stop an agent across governed calls, stop one delegation, task, tool, or call
+waiting for approval while other work continues, or stop a declared combination, such as one
+agent's use of one tool for one principal. Lineage lets a root or delegation revocation deny
 descendants. Checks can withhold a result or prevent new credentials. PPE may also originate
 scoped revocations within its authority, such as a tripwire quarantine of an agent, task, or
 mandate.
@@ -61,9 +61,9 @@ covers only the subjects and checks listed in section 3.6.
 
 ### Goals
 
-- Stop covered PPE calls for an agent, principal, delegation, task, tool, or request within a
-  declared delay of at most 300 seconds (ODIS L3-04). For downstream receivers, the bound comes
-  from their revocation check or the transaction token's expiry (TXN-12).
+- Stop covered PPE calls for an agent, principal, delegation, task, tool, or pending approval
+  within a declared delay of at most 300 seconds (ODIS L3-04). For downstream receivers, the
+  bound comes from their revocation check or the transaction token's expiry (TXN-12).
 - Deny an indeterminate state with a distinct reason; a lost signal must not fail open.
 - Enforce revocation in the framework on every covered route.
 - Work with any credential type and any standards-based IdP as it is today, with Keycloak as
@@ -141,10 +141,10 @@ covers only the subjects and checks listed in section 3.6.
 
 | ID | Requirement | Refs |
 |---|---|---|
-| REV-01 | Revocation MUST be expressible over these call attributes: principal, principal session, agent, agent session, runtime instance, credential, delegation hop, task, tool, resource, and request, and over declared conjunctions of them (REV-08). | Router Table 2 |
-| REV-02 | Each attribute MUST have a stable identifier derivable from the call: `iss`+`sub`, `sid` (principal sessions only), `agent_session_id` (agent sessions, section 1), agent ID, `runtime_instance_id` (possibly the holder-key thumbprint), `jti` or `credential_id`, the lineage root (`lineage_root`) and hops, and `task_id` for tasks, taken from the delegation and never from the agent or the session (carried in a transaction token's `tctx`). | BRG-13, PSP-22 |
+| REV-01 | Revocation MUST be expressible over these call attributes: principal, principal session, agent, agent session, runtime instance, credential, delegation hop, task, tool, resource, and pending approval (keyed by the elicitation ID PPE issues), and over declared conjunctions of them (REV-08). There is no per-call level: an ordinary call is too short to revoke individually, and a call already dispatched cannot be recalled. The closest equivalent is a narrow shape such as `{principal, agent session, tool}`, which blocks that tool for that run until the entry is lifted or expires. | Router Table 2 |
+| REV-02 | Each attribute MUST have a stable identifier derivable from the call: `iss`+`sub`, `sid` (principal sessions only), `agent_session_id` (agent sessions, section 1), agent ID, `runtime_instance_id` (possibly the holder-key thumbprint), `jti` or `credential_id`, the lineage root (`lineage_root`) and hops, the elicitation ID for a pending approval, and `task_id` for tasks, taken from the delegation and never from the agent or the session (carried in a transaction token's `tctx`). | BRG-13, PSP-22 |
 | REV-03 | Every derived credential (exchanged token, transaction token, child delegation) MUST carry its lineage: the typed root (`lineage_root`: a source grant ID or the relationship key) unchanged, and the hop IDs. Each derivation copies its parent's lineage and appends its own hop, as `{hop_id, created_seq, created_at}` stamped by PPE; copied entries keep their original values. A check MUST deny if the root or any hop is revoked, stopping descendants without revoking each token separately. A check MUST evaluate the call's own identifiers together with every ancestor's: from the caller's token, from PPE's record for a token it holds, or from a transaction token's `tctx`, counting every agent in the actor chain as an agent key (section 3.4). | BRG-13, L2-05 |
-| REV-04 | A revocation MUST be accepted only from a party authorized to revoke that subject: the IdP for principals and credentials, the credential issuer for agents and instances, the Bridge for delegations, the enforcement point or an operator for tool access, tasks and requests. | RTR-41, L3-04 |
+| REV-04 | A revocation MUST be accepted only from a party authorized to revoke that subject: the IdP for principals and credentials, the credential issuer for agents and instances, the Bridge for delegations, the enforcement point or an operator for tool access, tasks and pending approvals. | RTR-41, L3-04 |
 | REV-05 | Revocation MUST work regardless of credential technology: JWT, opaque token, API key, payment mandate. Each credential MUST have an issue time or generation the check can compare against. | |
 | REV-06 | Agent sessions MUST be issued by the enforcement point, never named by the agent, and bound to the agent, its runtime instance and the grant; a session handle presented by any other caller MUST be rejected. A session MUST survive token refresh, MUST record its parent session and principal session, and a check MUST include parent session identifiers. Revoking a session stops that run and its sub-agents, not the agent. Limits and taint MUST also be keyed by agent and grant, so opening a new session does not reset them. | policy#217 |
 | REV-07 | Where an IdP or Bridge issues source grant IDs, the lineage root MUST use them, and a revoked source grant ID MUST NOT be revived by a new token issue time; a new authorization arrives with a new ID. Without source grant IDs, the relationship shape is the finest root-level revocation, and the deployment MUST NOT claim per-consent revocation. | Grant Management, ODIS §6.3 |
@@ -190,7 +190,7 @@ grant at its issuer (REV-24).
 
 | ID | Requirement | Refs |
 |---|---|---|
-| REV-23 | The enforcement point MAY revoke within its own authority (tool access, task, request, a mandate it governs, a quarantine of the current agent or delegation). Each such revocation MUST be scoped, expire, be rate-capped per rule, and be recorded. | RTR-63 |
+| REV-23 | The enforcement point MAY revoke within its own authority (tool access, task, pending approval, a mandate it governs, a quarantine of the current agent or delegation). Each such revocation MUST be scoped, expire, be rate-capped per rule, and be recorded. | RTR-63 |
 | REV-24 | Broader revocations MUST be reported to the issuing party, not applied by the enforcement point on its behalf. | RTR-63 |
 | REV-25 | Credentials the enforcement point obtained itself SHOULD be revoked at their issuer where it supports revocation. | RFC 7009 |
 | REV-26 | Every revocation, and every call denied because of one, MUST be recorded with its source and reason. | RTR-50, RTR-64 |
@@ -262,7 +262,7 @@ flowchart LR
 
 | Req | Keycloak provides | PPE (and feeder) provides | Gap | Phase |
 |---|---|---|---|---|
-| REV-01 | Principal, session, client, token | Instance, delegation hop, task, agent session, tool, resource, request, and declared conjunctions | Agent session is PPE's definition until ODIS defines one (#25) | 1 to 3 |
+| REV-01 | Principal, session, client, token | Instance, delegation hop, task, agent session, tool, resource, pending approval, and declared conjunctions | Agent session is PPE's definition until ODIS defines one (#25) | 1 to 3 |
 | REV-02 | `sub`, `sid`, `client_id`, `jti` | `lineage_root` and `lineage` for its own exchanges; `task_id`; `jkt` once DPoP lands | Keycloak puts no lineage in tokens without a custom protocol mapper; `sid` breaks on delegation exchange | 3 |
 | REV-03 | Standard exchange retains `sid`; delegation exchange starts a new session. Keycloak issues no source grant ID. An optional protocol mapper might copy lineage, but is untested. | PPE roots lineage at the relationship key, or a source grant ID where one exists. Transaction tokens carry lineage in `tctx`; PPE stores lineage for external tokens it holds. | Direct Keycloak tokens for child agents start new lineages. | 3 |
 | REV-04 | Is the authority for its subjects | Feeder accepts only configured sources per level | | 2 |
@@ -948,8 +948,9 @@ existing connections when a peer's certificate is revoked.
 3. How API keys get an issue time or generation, so "revoked before" applies to them (REV-05).
 4. How a feeder failover hands over an SSF stream without a gap, given one stream per receiver
    in Keycloak.
-5. Whether a request-level revocation needs a store entry or only a local cancel in the running
-   engine.
+5. Resolved: there is no per-call revocation level (REV-01). A call waiting for approval is
+   revoked by its elicitation ID, which the retry presents; other calls are stopped by broader
+   entries, the narrowest being `{principal, agent session, tool}`.
 6. Claim names for `lineage_root` and `lineage`, and whether ODIS's Delegation Record
    (`delegation_chain`, `originating_authorization_ref`) should align with them.
 7. Whether the Keycloak protocol mapper is worth building: it would give lineage for agents
@@ -984,7 +985,7 @@ existing connections when a peer's certificate is revoked.
     makes consent withdrawal observable so the feeder can write relationship entries.
 18. The default set of declared shapes, and who may write each: for example principal, agent,
     session, agent session, relationship, agent and tool, relationship and tool, task, hop,
-    request. Also the default key bound per check, maximum delegation depth and maximum
+    pending approval, and principal, agent session and tool. Also the default key bound per check, maximum delegation depth and maximum
     resources per call (REV-08).
 19. The default maximum lifetimes of root credentials and delegation hops, which bound how long
     lifted cutoffs are retained (REV-09), and the clock-skew bound for root token `iat`
