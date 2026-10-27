@@ -172,7 +172,7 @@ grant at its issuer (REV-24).
 | REV-12 | Lost, duplicated or reordered signals MUST converge: cutoff-based revocation keeps the latest cutoff, exact-ID revocation remains applied for its declared lifetime, and suspension keeps the newest event's state. | |
 | REV-13 | A signal MUST be acknowledged only after it is durably stored. | RFC 8936 |
 | REV-14 | Each source MUST declare a maximum staleness. A source silent beyond it is indeterminate. | BRG-11, RTR-43 |
-| REV-15 | Each source stream MUST have exactly one active ingester, and every enforcement instance MUST read the same store. | |
+| REV-15 | Each source stream MUST have exactly one active ingester, and every enforcement instance MUST read the same store. The ingester holds a lease whose epoch increases with each new holder; every write MUST carry that epoch, and the store MUST reject a write whose epoch is older than the newest it has seen, so an ingester that lost its lease cannot overwrite newer state. | |
 
 ### 2.3 Enforcement
 
@@ -276,7 +276,7 @@ flowchart LR
 | REV-12 | | Store semantics: max cutoff, exact-ID revocation for its declared lifetime, newest suspension | | 1 |
 | REV-13 | Push retries 8 times, then dead letter | Feeder acknowledges after the store write | | 2 |
 | REV-14 | SSF verification events | Watermark per source; check reads it | | 1, 2 |
-| REV-15 | One stream per receiver | Single feeder instance per stream | Feeder failover without a gap | 2 |
+| REV-15 | One stream per receiver | Single feeder instance per stream; lease epoch on every write, stale epochs rejected by an atomic compare in the store | Feeder failover without a gap | 2 |
 | REV-16 | Refuses exchange for revoked subject or actor tokens: a secondary check only. | `AplRouteHandler::evaluate` checks pre and post; approval resume re-checks. | Streaming release; check (2) needs the delegation invoker call site. | 0 for checks 1, 3, 4; 3 for check 2 |
 | REV-17 | Does not cascade RFC 7009 to exchanged tokens | Deny derived authority on PPE-mediated calls; checking receivers deny on use, expiry-only receivers rely on TXN-12 | Tokens already held outside PPE may remain usable until expiry or issuer revocation | 3 |
 | REV-18 | | `auth.revoked`, `auth.revocation_unavailable`; checker cannot be `on_error: ignore` | | 0 |
@@ -711,7 +711,7 @@ subjects or receivers scheduled later.
 |---|---|
 | 0: hook and introspection | Every declared covered, nonstreaming route runs the required checks, including a route with no policy steps and an approval retry. Unmatched calls are denied or explicitly excluded. A covered credential role with no inspectable token denies as unavailable; inactive tokens deny as revoked, while slow or unreachable introspection denies as unavailable. The configured cache TTL meets REV-19. |
 | 1: store checker | With seeded store entries, every declared shape is checked across PPE instances, including a conjunction that matches, one that differs in a single attribute, and one that matches only through an ancestor agent. Distinct tuples that concatenate to the same string produce different keys. A call over the key bound denies. A lifted revocation still denies derivations created before the lift and allows new ones; a lifted block allows both. An old hop presented through a token minted after the lift, or extended by a delegation made after the lift, is denied. A cutoff does not expire while a hop or root credential it covers is within its declared lifetime. A PPE instance whose clock runs ahead still has a pre-lift hop denied. With source grant IDs, a token refreshed under an old ID remains denied, a new ID passes, and a relationship lift without complete grant coverage is refused. Without a source grant ID, root tokens issued before the lift, during an active revocation, or within the skew window after the lift are denied; a token refreshed after that window passes, as documented. A stale watermark or store outage denies as unavailable. |
-| 2: feeder | Verified signals are acknowledged only after durable write; duplicates and reordered signals converge; polling recovers a missed event. Tests cover failover and stale-source denial and measure receipt-to-enforcement delay against the declared bound of at most 300 seconds. |
+| 2: feeder | Verified signals are acknowledged only after durable write; duplicates and reordered signals converge; polling recovers a missed event. Tests cover failover, stale-source denial, and rejection of writes from a feeder whose lease has passed to another instance, and measure receipt-to-enforcement delay against the declared bound of at most 300 seconds. |
 | 3: lineage and transaction tokens | Root and intermediate revocations stop PPE-mediated calls and cached credentials. Resolve whether store-associated lineage satisfies REV-03; verify a distinct source grant identity and complete coverage of old grants before claiming new-work-only relationship lifts. Checking and expiry-only receivers meet TXN-12. Define the versioned TXN-11 profile and test matched, mismatched, and unmatchable calls. |
 
 Streaming result release, credential types without introspection, and later-phase subjects
@@ -751,7 +751,7 @@ After #127.
 
 | Component | Work |
 |---|---|
-| Feeder (new service; home undecided) | Receive SSF push and poll; verify SETs from configured transmitters; dedupe by `jti`; acknowledge after write. Reconcile Keycloak client and user state through admin polling. Provide an authority-scoped operator API, verification requests, watermarks, and one active lease per stream. |
+| Feeder (new service; home undecided) | Receive SSF push and poll; verify SETs from configured transmitters; dedupe by `jti`; acknowledge after write. Reconcile Keycloak client and user state through admin polling. Provide an authority-scoped operator API, verification requests, watermarks, and one active lease per stream, fencing every write with the lease epoch. |
 | Keycloak | Enable SSF in the demo realm only; a receiver client; a service account for the feeder with read access to clients and users. |
 | Demo | Act 6: stop the feeder and show `auth.revocation_unavailable`. |
 | Tests | Feeder unit tests; integration against the demo Keycloak. |
