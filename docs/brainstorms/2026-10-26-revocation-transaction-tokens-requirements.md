@@ -178,7 +178,7 @@ grant at its issuer (REV-24).
 
 | ID | Requirement | Refs |
 |---|---|---|
-| REV-16 | The enforcement point MUST check revocation (1) after caller authentication, (2) before obtaining, minting, or reusing a derived credential, (3) immediately before dispatch, including after approval waits, and (4) before result release. No route or policy can omit these checks. | RTR-42 |
+| REV-16 | The enforcement point MUST check revocation (1) after caller authentication, (2) before obtaining, minting, or reusing a derived credential, (3) immediately before dispatch, including after approval waits, and (4) before result release. No route or policy can omit these checks. Check (4) runs in PPE's post phase, which the host calls. On a covered route the host MUST call it before releasing any part of a result, and result paths that do not call it MUST be denied or explicitly excluded under REV-22. | RTR-42 |
 | REV-17 | Revoking a subject MUST stop further PPE-mediated use of its derived authority: delegations, child-agent calls, cached downstream credentials, and new transaction tokens. Receivers that check revocation MUST deny an existing transaction token once the revocation reaches them. An expiry-only receiver may continue accepting one until expiry, bounded by TXN-12. Other tokens held outside PPE depend on their issuer's revocation support. | BRG-13, PSP-29 |
 | REV-18 | A revoked subject MUST be denied as revoked. An indeterminate source MUST deny with a distinct reason. Neither may fail open. | RTR-03, RTR-43 |
 | REV-19 | Propagation from receipt to enforcement MUST stay within the declared delay, at most 300 seconds within a trust domain. | L3-04 |
@@ -709,7 +709,7 @@ subjects or receivers scheduled later.
 
 | Phase | Exit criteria |
 |---|---|
-| 0: hook and introspection | Every declared covered, nonstreaming route runs the required checks, including a route with no policy steps and an approval retry. Unmatched calls are denied or explicitly excluded. A covered credential role with no inspectable token denies as unavailable; inactive tokens deny as revoked, while slow or unreachable introspection denies as unavailable. The configured cache TTL meets REV-19. |
+| 0: hook and introspection | Every declared covered, nonstreaming route runs the required checks, including a route with no policy steps and an approval retry. Unmatched calls are denied or explicitly excluded. A covered credential role with no inspectable token denies as unavailable; inactive tokens deny as revoked, while slow or unreachable introspection denies as unavailable. The configured cache TTL meets REV-19. On the reference host, a result is not released when the post-phase check denies. |
 | 1: store checker | With seeded store entries, every declared shape is checked across PPE instances, including a conjunction that matches, one that differs in a single attribute, and one that matches only through an ancestor agent. Distinct tuples that concatenate to the same string produce different keys. A call over the key bound denies. A lifted revocation still denies derivations created before the lift and allows new ones; a lifted block allows both. An old hop presented through a token minted after the lift, or extended by a delegation made after the lift, is denied. A cutoff does not expire while a hop or root credential it covers is within its declared lifetime. A PPE instance whose clock runs ahead still has a pre-lift hop denied. With source grant IDs, a token refreshed under an old ID remains denied, a new ID passes, and a relationship lift without complete grant coverage is refused. Without a source grant ID, root tokens issued before the lift, during an active revocation, or within the skew window after the lift are denied; a token refreshed after that window passes, as documented. A stale watermark or store outage denies as unavailable, and so does a read from a replica whose lag exceeds its budget or cannot be measured; with replication paused, a check against the lagging replica denies rather than missing a revocation. |
 | 2: feeder | Verified signals are acknowledged only after durable write; duplicates and reordered signals converge; polling recovers a missed event. Tests cover failover, stale-source denial, rejection of writes from a feeder whose lease has passed to another instance, and a feeder crash after the store write but before acknowledgement, after which the source redelivers and the duplicate converges, and measure receipt-to-enforcement delay against the declared bound of at most 300 seconds. |
 | 3: lineage and transaction tokens | Root and intermediate revocations stop PPE-mediated calls and cached credentials. Resolve whether store-associated lineage satisfies REV-03; verify a distinct source grant identity and complete coverage of old grants before claiming new-work-only relationship lifts. Checking and expiry-only receivers meet TXN-12. Define the versioned TXN-11 profile and test matched, mismatched, and unmatchable calls. |
@@ -905,9 +905,11 @@ trust bundle.
 | Per-call check | PPE | Workload and runtime-instance keys (REV-01) on every call, including mid-connection, plus every other level |
 | Signals | Feeder | CRL updates and SPIRE events, written as store entries keyed by SPIFFE ID or certificate fingerprint |
 
-Two asks of Praxis: pass the verified peer identity (SPIFFE ID and certificate fingerprint) to
-PPE as the caller's workload identity, so per-call checks can use it; and, optionally, close
-existing connections when a peer's certificate is revoked.
+Three asks of Praxis: pass the verified peer identity (SPIFFE ID and certificate fingerprint)
+to PPE as the caller's workload identity, so per-call checks can use it; confirm that every
+path that releases a result to the caller (response headers, body, trailers, and responses
+Praxis generates itself) calls PPE's post phase first, or excludes that route (REV-16); and,
+optionally, close existing connections when a peer's certificate is revoked.
 
 ## 4. Security considerations
 
