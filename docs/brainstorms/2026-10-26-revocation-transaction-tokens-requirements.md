@@ -113,9 +113,12 @@ covers only the subjects and checks listed in section 3.6.
   ever changes. The sequence orders hops against lifts; the time is for audit. In tokens and
   records the root travels as a typed `lineage_root`, `{type: source_grant | relationship,
   issuer, value}`, so a relationship key is never mistaken for a grant ID.
-- **Watermark:** the last time the feeder confirmed synchronization with a signal source
-  through a completed poll or verification event round trip. A watermark older than
-  `max_staleness_secs` makes the source indeterminate; checks deny as unavailable.
+- **Watermark:** the last completeness checkpoint for a signal source: a poll drained to empty
+  (`moreAvailable: false`) with every received event durably stored and acknowledged, or a
+  full-state reconciliation that completed. A watermark older than `max_staleness_secs` makes
+  the source indeterminate; checks deny as unavailable. SSF verification events confirm only
+  that the source is reachable and never advance the watermark, because SSF allows them to
+  arrive ahead of events still queued at the transmitter (SSF §8.1.4.2).
 - **Principal session (`sid`):** the user's login session at the IdP, shared by every client
   and agent that signs in through it. Revoking it logs the user out everywhere.
 - **Agent session:** one continuous run of an agent under a grant, identified and bound by PPE
@@ -171,7 +174,7 @@ grant at its issuer (REV-24).
 | REV-11 | The system MUST accept pushed and pulled signals. Where a source exposes full state, such as client or user status, it MUST reconcile periodically to recover lost events. | RFC 8935, 8936 |
 | REV-12 | Lost, duplicated or reordered signals MUST converge: cutoff-based revocation keeps the latest cutoff, exact-ID revocation remains applied for its declared lifetime, and suspension keeps the newest event's state. | |
 | REV-13 | A signal MUST be acknowledged only after it is durably stored. Durable MUST be declared as either replicated to a declared number of replicas before acknowledgement, or written to an append-only log fsynced on every write; a write the primary accepted but could lose on failover does not count. | RFC 8936 |
-| REV-14 | Each source MUST declare a maximum staleness. A source silent beyond it is indeterminate. | BRG-11, RTR-43 |
+| REV-14 | Each source MUST declare a maximum staleness, measured from its last completeness checkpoint: a poll drained to empty with everything received durably stored, or a completed full-state reconciliation. Liveness signals such as verification events MUST NOT count as a checkpoint. A source without a checkpoint inside its bound is indeterminate. | BRG-11, RTR-43, SSF §8.1.4.2 |
 | REV-15 | Each source stream MUST have exactly one active ingester, and every enforcement instance MUST read the same store. The ingester holds a lease whose epoch increases with each new holder; every write MUST carry that epoch, and the store MUST reject a write whose epoch is older than the newest it has seen, so an ingester that lost its lease cannot overwrite newer state. The store MAY be eventually consistent, provided that the maximum staleness of any read a check performs is bounded, measured while running and counted within the declared revocation delay (REV-19), with checks denying as unavailable when the bound cannot be confirmed; and that a write acknowledged as durable (REV-13) is not lost on failover, or the remaining loss window is declared. | REV-13, REV-19 |
 
 ### 2.3 Enforcement
@@ -275,7 +278,7 @@ flowchart LR
 | REV-11 | SSF push and short poll; admin API state | Feeder polls admin API for clients and users | No events for clients (agents) | 2 |
 | REV-12 | | Store semantics: max cutoff, exact-ID revocation for its declared lifetime, newest suspension | | 1 |
 | REV-13 | Push retries 8 times, then dead letter | Feeder acknowledges after the declared durable write: replicas confirmed with Valkey `WAIT`, or append-only log fsynced on every write; the remaining failover window is declared (REV-15) | Polled admin state recovers on the next poll; acknowledged SSF events do not | 2 |
-| REV-14 | SSF verification events | Watermark per source; check reads it | | 1, 2 |
+| REV-14 | SSF verification events (liveness only); poll with `moreAvailable`; admin API state | Watermark per source advanced only by drained polls and completed reconciliations; verification events raise a liveness alarm only; check reads the watermark | A push-only source with no poll or reconciliation path goes indeterminate after its bound | 1, 2 |
 | REV-15 | One stream per receiver | Single feeder instance per stream; lease epoch on every write, stale epochs rejected by an atomic compare in the store. Valkey replicates asynchronously: checks read from the primary, or from replicas whose reported replication lag is within budget; `WAIT` to a declared number of replicas narrows, but does not close, the failover loss window | Feeder failover without a gap | 2 |
 | REV-16 | Refuses exchange for revoked subject or actor tokens: a secondary check only. | `AplRouteHandler::evaluate` checks pre and post; approval resume re-checks. | Streaming release; check (2) needs the delegation invoker call site. | 0 for checks 1, 3, 4; 3 for check 2 |
 | REV-17 | Does not cascade RFC 7009 to exchanged tokens | Deny derived authority on PPE-mediated calls; checking receivers deny on use, expiry-only receivers rely on TXN-12 | Tokens already held outside PPE may remain usable until expiry or issuer revocation | 3 |
@@ -695,8 +698,8 @@ sequenceDiagram
         P->>S: revocation.check
         S-->>P: watermark older than max_staleness_secs
         P-->>A: deny auth.revocation_unavailable
-        F->>K: poll succeeds
-        F->>S: reconcile, advance watermark
+        F->>K: poll drains, reconciliation completes
+        F->>S: advance watermark
         A->>P: call
         P-->>A: permitted
     end
@@ -711,7 +714,7 @@ subjects or receivers scheduled later.
 |---|---|
 | 0: hook and introspection | Every declared covered, nonstreaming route runs the required checks, including a route with no policy steps and an approval retry. Unmatched calls are denied or explicitly excluded. A covered credential role with no inspectable token denies as unavailable; inactive tokens deny as revoked, while slow or unreachable introspection denies as unavailable. The configured cache TTL meets REV-19. On the reference host, a result is not released when the post-phase check denies. |
 | 1: store checker | With seeded store entries, every declared shape is checked across PPE instances, including a conjunction that matches, one that differs in a single attribute, and one that matches only through an ancestor agent. Distinct tuples that concatenate to the same string produce different keys. A call over the key bound denies. A lifted revocation still denies derivations created before the lift and allows new ones; a lifted block allows both. An old hop presented through a token minted after the lift, or extended by a delegation made after the lift, is denied. A cutoff does not expire while a hop or root credential it covers is within its declared lifetime. A PPE instance whose clock runs ahead still has a pre-lift hop denied. With source grant IDs, a token refreshed under an old ID remains denied, a new ID passes, and a relationship lift without complete grant coverage is refused. Without a source grant ID, root tokens issued before the lift, during an active revocation, or within the skew window after the lift are denied; a token refreshed after that window passes, as documented. A stale watermark or store outage denies as unavailable, and so does a read from a replica whose lag exceeds its budget or cannot be measured; with replication paused, a check against the lagging replica denies rather than missing a revocation. |
-| 2: feeder | Verified signals are acknowledged only after durable write; duplicates and reordered signals converge; polling recovers a missed event. Tests cover failover, stale-source denial, rejection of writes from a feeder whose lease has passed to another instance, and a feeder crash after the store write but before acknowledgement, after which the source redelivers and the duplicate converges, and measure receipt-to-enforcement delay against the declared bound of at most 300 seconds. |
+| 2: feeder | Verified signals are acknowledged only after durable write; duplicates and reordered signals converge; polling recovers a missed event. Tests cover failover, stale-source denial, rejection of writes from a feeder whose lease has passed to another instance, and a feeder crash after the store write but before acknowledgement, after which the source redelivers and the duplicate converges, a verification event arriving ahead of a queued revocation, which does not advance the watermark, so checks deny as unavailable once the bound passes, and measure receipt-to-enforcement delay against the declared bound of at most 300 seconds. |
 | 3: lineage and transaction tokens | Root and intermediate revocations stop PPE-mediated calls and cached credentials. Resolve whether store-associated lineage satisfies REV-03; verify a distinct source grant identity and complete coverage of old grants before claiming new-work-only relationship lifts. Checking and expiry-only receivers meet TXN-12. Define the versioned TXN-11 profile and test matched, mismatched, and unmatchable calls. On every supported host, `Authorization` and `Txn-Token` reach the downstream service as separate headers with unchanged values, including on forwarded and retried calls; a missing or rewritten header fails the gate. |
 
 Streaming result release, credential types without introspection, and later-phase subjects
