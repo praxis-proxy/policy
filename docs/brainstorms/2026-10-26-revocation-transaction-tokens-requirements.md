@@ -28,9 +28,10 @@ This proposal adds three things:
 2. **Signals and shared state:** A feeder ingests IdP signals (SSF events, and admin API
    polling where events are missing), plus operator and PPE signals, into a store all PPE
    instances share.
-3. **Transaction tokens and lineage:** PPE mints short-lived tokens for internal services and
-   tracks `lineage_root` and `lineage` across derived credentials, so revoking a relationship
-   or a delegation hop stops further use through PPE.
+3. **Transaction tokens, Delegation Records and lineage:** PPE mints a short-lived token per
+   call for internal services, issues a Delegation Record to each sub-agent it hands work to,
+   and tracks `lineage_root` and `lineage` across derived credentials, so revoking a
+   relationship or a delegation hop stops further use through PPE.
 
 These checks can stop an agent across governed calls, stop one delegation, task, tool, or call
 waiting for approval while other work continues, or stop a declared combination, such as one
@@ -51,10 +52,12 @@ itself.
 Forwarding an agent's token is unsuitable, especially when bound to the agent's key. An
 IdP-exchanged token may outlive the call and generally lacks the gateway's delegation and task
 identifiers. The transaction token carries root `sid` and agent, `lineage_root`, `lineage`, and
-`task_id` so a downstream PPE can check them. It also links records across services by `txn`,
-task, and lineage. PPE issues no new token after revocation; an issued token remains usable
-until expiry unless the receiver checks revocation. Its short lifetime and single approved
-operation limit that exposure. WIMSE proof tokens can bind it by hash.
+`task_id` so a downstream PPE can check them. A sub-agent never forwards one: it receives a
+Delegation Record when work is handed to it, and PPE mints a fresh transaction token for each
+of its calls. It also links records across services by `txn`, task, and lineage. PPE issues no
+new token after revocation; an issued token remains usable until expiry unless the receiver
+checks revocation. Its short lifetime and single approved operation limit that exposure. WIMSE
+proof tokens can bind it by hash.
 
 Nothing proposed here is built yet. The goals below describe the complete design; phase 0
 covers only the subjects and checks listed in section 3.6.
@@ -132,11 +135,17 @@ covers only the subjects and checks listed in section 3.6.
   parent's. PPE assigns `task_id` for the sub-agent delegations it mediates; a root task's
   `task_id` comes from the IdP or a Bridge, and with Keycloak today the root task is the user's
   grant itself.
+- **Delegation Record:** what a delegate receives when work is handed to it: the lineage, task,
+  agent session, root context, actor chain and granted authorizations, signed by its issuer and
+  lasting as long as the delegation (ODIS §6.3, L2-05). PPE issues it in the Bridge's
+  Delegation Service role for handoffs through it, or an IdP may issue it. It carries authority
+  for the principal, not identity: the delegate still authenticates as itself.
 - **Transaction token:** a short-lived signed JWT minted per transaction inside one trust
   domain, carrying the principal and the transaction's authorization context
   ([draft-ietf-oauth-transaction-tokens-11](https://datatracker.ietf.org/doc/draft-ietf-oauth-transaction-tokens/)).
   It is context for authorization decisions, not a credential that authenticates a workload,
-  and not an access token.
+  and not an access token. PPE mints one per call after its checks; an agent never forwards one
+  as its authority.
 
 ## 2. Requirements
 
@@ -214,6 +223,15 @@ grant at its issuer (REV-24).
 | TXN-10 | A receiver whose route needs a transaction token MUST deny a call that arrives without one, never fall back to fewer checks. | |
 | TXN-11 | A receiver MUST compare the token with the actual call under a shared, versioned call-matching profile: the resolved target, operation, resource and approved parameters, and the same principal as any access token. It MUST deny when the profile is unknown, the call cannot be reconstructed, or a field differs. It SHOULD check presenter binding (a WIMSE proof token carrying the token's hash, `tth`) and single use by `txn`. | Txn-Tokens §13.1, §13.2 |
 | TXN-12 | Each receiving route MUST declare whether it checks revocation on use or relies on token expiry. A checking receiver MUST deny revoked or indeterminate context. For an expiry-only receiver, the transaction token's lifetime MUST NOT exceed the declared revocation delay. | REV-17, REV-19 |
+| TXN-13 | Transaction tokens MUST be minted per call by the enforcement point after its checks, from the presenting agent's Delegation Record or caller context plus that call's details. An agent MUST NOT forward a transaction token as its authority, and minting one is not a delegation hop. | TXN-09 |
+
+### 2.6 Delegation records
+
+| ID | Requirement | Refs |
+|---|---|---|
+| DEL-01 | A Delegation Record MUST be issued by a trusted Layer 2 authority: the enforcement point acting as the Bridge's Delegation Service for handoffs through it, or an IdP that produces the required fields. It MUST carry the lineage root and hops with their creation ordering, `task_id`, `agent_session_id`, the root principal and its `sid` where the authorization is tied to that login, the actor chain, and granted authorizations equal to or narrower than the delegator's, and MUST expire no later than its parent. It MUST be signed by its issuer and bound to the delegate's identity and key, and the delegate's proof of possession on each call MUST cover it. It is not a credential: the delegate authenticates with its own. | ODIS §6.3, L2-05, L2-06 |
+| DEL-02 | Delegated authority MUST come only from a presented Delegation Record. A call without one MUST be evaluated as the agent acting on its own authority, without the principal or delegated permissions, so dropping a record removes authority rather than evading revocation. This relies on delegates holding no standing authority over the principal's resources, which is an assumption of this design rather than an ODIS requirement. | TXN-10 |
+| DEL-03 | A delegation between agents MUST be a governed call through the enforcement point. It verifies the delegating agent and any record it presents, checks revocation, resolves the target agent from trusted routing or a registry, and asks policy whether the caller may call the target, whether it may delegate, and what ceiling the delegate receives; only then does it record the hop and issue the record. The delegation call carries its own access token where the target needs one and its own per-call transaction token, separate from the record it delivers. Results return through result release (REV-16), and a delegate's own calls back to its delegator are governed as the delegate's calls under its record. | L2-06, RTR-42 |
 
 ## 3. Design: PPE, with Keycloak as the reference IdP
 
@@ -225,7 +243,7 @@ grant at its issuer (REV-24).
 | Feeder | Separate process that ingests Keycloak SSF events and admin API polls, accepts operator and PPE writes, normalizes signals to SETs, and updates the store and source watermarks. Each source is an adapter: a generic SSF adapter, and one admin-state adapter per IdP (section 3.7). |
 | Revocation store | Shared Valkey store. One key per declared shape and attribute values: the hash of a canonical, typed tuple (shape and version, then each attribute's name, issuer namespace, type and value), for example `rev:principal_agent_tool:v1:<sha256>`. A lift atomically increments a shared monotonic sequence counter on the primary and records `lift_seq` and `lifted_at` in the entry. The sequence orders lifts against PPE hop creation; the timestamp is compared with root IdP credentials' issue times, subject to clock skew. A lifted revocation stays as a cutoff through the declared skew window plus the longest declared lifetime of a credential or derivation it covers (REV-09). Reissuable subjects keep the latest "revoked before T" cutoff; delegation hops are revoked by identity until derived credentials expire, while source grant IDs remain denied until the issuer confirms they cannot issue new credentials and PPE can establish that all derived credentials have expired. Suspensions keep the newest event's state. Also holds source watermarks. |
 | PPE `revocation.check` | A plugin hook the engine calls from the route handler. Backends: introspection (phase 0) and the store. |
-| PPE delegators | `delegator/oauth` exchanges at Keycloak; `delegator/txn-token` mints transaction tokens. Both record `lineage`. |
+| PPE delegators | `delegator/oauth` exchanges at Keycloak; `delegator/txn-token` mints per-call transaction tokens. Both record `lineage`. PPE also issues Delegation Records to sub-agents (DEL-01). |
 
 ```mermaid
 %%{init: {"theme": "default", "themeVariables": {"background": "#ffffff"}}}%%
@@ -267,10 +285,10 @@ flowchart LR
 |---|---|---|---|---|
 | REV-01 | Principal, session, client, token | Instance, delegation hop, task, agent session, tool, resource, pending approval, and declared conjunctions | Agent session is PPE's definition until ODIS defines one (#25) | 1 to 3 |
 | REV-02 | `sub`, `sid`, `client_id`, `jti` | `lineage_root` and `lineage` for its own exchanges; `task_id`; `jkt` once DPoP lands | Keycloak puts no lineage in tokens without a custom protocol mapper; `sid` breaks on delegation exchange | 3 |
-| REV-03 | Standard exchange retains `sid`; delegation exchange starts a new session. Keycloak issues no source grant ID. An optional protocol mapper might copy lineage, but is untested. | PPE roots lineage at the relationship key, or a source grant ID where one exists. Transaction tokens carry lineage in `tctx`; PPE stores lineage for external tokens it holds. | Direct Keycloak tokens for child agents start new lineages. | 3 |
+| REV-03 | Standard exchange retains `sid`; delegation exchange starts a new session. Keycloak issues no source grant ID. An optional protocol mapper might copy lineage, but is untested. | PPE roots lineage at the relationship key, or a source grant ID where one exists. Transaction tokens carry lineage in `tctx`; PPE stores lineage for external tokens it holds. | Direct Keycloak tokens for child agents start new lineages unless an IdP issues Delegation Records (DEL-01). | 3 |
 | REV-04 | Is the authority for its subjects | Feeder accepts only configured sources per level | | 2 |
 | REV-05 | JWTs and opaque tokens have `iat` | Check by `iat` against "revoked before" | API keys have no issue time | later |
-| REV-06 | No agent session concept | PPE mints and binds session handles; records them in the store; carries `agent_session_id` in `tctx` | Handle transport (header or MCP session); default timeouts | 3 |
+| REV-06 | No agent session concept | PPE mints and binds session handles; records them in the store; carries `agent_session_id` in Delegation Records and `tctx` | Handle transport (header or MCP session); default timeouts | 3 |
 | REV-07 | No source grant ID; user-to-client consent is the closest concept. | Uses source grant IDs where an IdP issues them; otherwise the relationship shape. | Per-consent revocation unavailable with Keycloak today. | 3 |
 | REV-08 | Cannot express conjunctions | Declared shapes in configuration; feeder validates shape and per-shape authority on write; check builds canonical typed keys per declared shape, expanded over ancestor agents and affected resources within the bound, and reads them in one `MGET` | Default shape set and key bound to agree (question 18) | 1, 2 |
 | REV-09 | No equivalent | Hops carry immutable `created_seq` (from the store's shared sequence) and `created_at` in lineage, records and `tctx`; a lift atomically records `lift_seq` for hops and `lifted_at` for root IdP token issue times; relationship lifts with source grant IDs also require exact-ID denials or a grant-generation cutoff; block entries are deleted on lift | Issuer-complete grant inventory or a generation fence may be unavailable; default maximum root credential and hop lifetimes, and clock-skew bound (question 19) | 1, 2 |
@@ -303,6 +321,10 @@ flowchart LR
 | TXN-10 | | Downstream PPE route setting: transaction token required | | 3 |
 | TXN-11 | | Define a versioned call-matching profile; downstream PPE compares it with the resolved call; `txn` seen-set and WPT checks follow where supported. | Normalization of resources, defaults, and parameters needs a shared profile. | 3, later |
 | TXN-12 | | Declare each route checking or expiry-only; checking routes deny revoked or indeterminate context, and expiry-only token lifetimes fit the delay. | Nonchecking services cannot provide immediate revocation. | 3 |
+| TXN-13 | | `delegator/txn-token` mints per call from the presenting agent's record or caller context | | 3 |
+| DEL-01 | Delegation exchange with `act` gives the actor chain only: no `delegation_id`, parent reference, `task_id` or attenuation check | PPE issues records in the Bridge role for handoffs through it, and accepts records from IdPs configured as trusted | An IdP-issued record needs the protocol mapper or native support | 3 |
+| DEL-02 | | A call without a record is evaluated as the agent's own authority | Assumes delegates hold no standing authority | 3 |
+| DEL-03 | | Delegation is a governed agent-to-agent call | PPE does not yet govern agent-to-agent calls; until it does, records come from an IdP or those delegations are excluded | 3, later |
 
 REV-03 requires derived credentials to carry lineage, while the phase 3 mapping keeps lineage
 for external exchanged tokens in PPE's store. Whether associated store metadata satisfies the
@@ -369,6 +391,24 @@ number representation; a field that cannot be reconstructed or compared causes d
 For example, `invoices.pay` for invoice 123 and amount 1,500 must not authorize invoice 124 or
 a different amount. The exact profile and which component owns it remain open (question 16).
 
+#### Agent-to-agent calls
+
+A handoff from agent A to agent B is a call like any other, so it gets the same per-call
+treatment as a call to a tool, and the Delegation Record travels beside it as what B receives
+(DEL-03).
+
+| On the delegation call | What | Lifetime |
+|---|---|---|
+| `Authorization` | Access token B's endpoint accepts, where it needs one; otherwise PPE's workload authentication | The call |
+| `Txn-Token` | Per-call context for "A delegates this subtask to B", carrying A's lineage | The call |
+| Delegation record header | B's new Delegation Record: `[root, b1]`, task, ceiling | The delegation |
+
+On B's later calls, B presents its own credential and its Delegation Record; PPE checks the
+lineage, evaluates the call within the ceiling, and mints a per-call transaction token and any
+access token the target needs. Delegation through PPE depends on PPE governing agent-to-agent
+calls, which it does not do yet; until then, records come from an IdP or those delegations are
+excluded from coverage (REV-22).
+
 ### 3.4 Revocation identifiers: lifecycle and reach
 
 #### Lifecycle
@@ -376,15 +416,17 @@ a different amount. The exact profile and which component owns it remain open (q
 PPE assigns, records, carries, and checks its identifiers:
 
 1. **Assign:** Root lineage at a source grant ID where the IdP issues one, otherwise at the
-   relationship key `hash(issuer, principal, agent)`. Append a new hop ID for each PPE-mediated
-   exchange, transaction-token mint, or subtask delegation.
+   relationship key `hash(issuer, principal, agent)`. Append a new hop ID for each delegation
+   to another agent. Held downstream credentials and transaction tokens are not hops; each
+   records its own `created_seq`.
 2. **Record:** Keep `{lineage_root, lineage, root sid, agent, task_id, agent_session_id,
    created_seq, created_at}` for IdP-issued tokens PPE holds, keyed by the token or cache
    entry; PPE cannot add these claims to the IdP's token.
-3. **Carry:** Put the identifiers in a transaction token's `tctx` for downstream services, PPE
-   instances, and child agents.
-4. **Check:** Collect identifiers from the caller's token, PPE's record for a held token, and
-   any incoming transaction token. Read applicable revocation entries in one `MGET`.
+3. **Carry:** Put the identifiers in a Delegation Record for a child agent, and in each
+   per-call transaction token's `tctx` for downstream services and PPE instances.
+4. **Check:** Collect identifiers from the caller's token, PPE's record for a held token, a
+   child agent's Delegation Record, and any incoming transaction token. Read applicable
+   revocation entries in one `MGET`.
 
 The relationship key is the pair, not one consent. Blocking it stops every PPE-mediated call
 where that agent acts for that principal until the block is lifted, which restores everything.
@@ -399,18 +441,19 @@ from a new authorization (REV-07). Writes and lifts are recorded (REV-08).
 Alice's agent A calls PPE (sid S)
   PPE roots lineage at relationship key G = hash(issuer, Alice, A)  assign
 A's call needs Workday
-  PPE exchanges at Keycloak; new hop w1                          assign
-  store: Workday token key -> {G, [G, w1], S, A}                 record
-A delegates a subtask to sub-agent B
-  PPE creates hop b1 and task T1, mints B's transaction token
-  tctx: {G, [G, b1], S, A, T1}                                   carry
-B calls a tool with its own credential and the Txn-Token
-  PPE reads tctx and checks G, b1, S, A, B, T1                   check
+  PPE exchanges at Keycloak and holds the token                  assign
+  store: Workday token key -> {G, [G], S, A, created_seq}        record
+A delegates a subtask to sub-agent B through PPE
+  PPE creates hop b1 and task T1, issues B's Delegation Record
+  record: {G, [G, b1], S, A, T1}                                 carry
+B calls a tool with its own credential and the Delegation Record
+  PPE checks G, b1, S, A, B, T1, then mints a per-call Txn-Token check
 Operator revokes b1 -> feeder writes the entry -> B's next call is denied
 ```
 
-The store records lineage for tokens PPE holds; transaction tokens carry it across PPE's
-boundary. Without them, lineage checks stop at that boundary.
+The store records lineage for tokens PPE holds; Delegation Records carry it to child agents,
+and transaction tokens carry it to downstream services. Without them, lineage checks stop at
+PPE's boundary.
 
 #### Reach
 
@@ -424,17 +467,18 @@ through:
 |---|---|
 | The agent calling PPE with its own token | The caller's token: `sub`, `sid`, `client_id`, `iat` |
 | PPE about to use an exchanged token it holds | The caller's token on the same call. PPE uses a held token only while handling a call, and checks that call first |
-| A call that has left PPE: a downstream PPE, an internal service, a child agent | The transaction token's `tctx`: root `sid` and agent, `lineage_root`, `lineage`, `task_id`; and every agent in `act` |
+| A child agent calling PPE | Its Delegation Record: root `sid` and agent, `lineage_root`, `lineage`, `task_id`; and every agent in the actor chain |
+| A call that has left PPE: a downstream PPE or an internal service | The per-call transaction token's `tctx`, with the same fields |
 
 **Example: revoking Alice's session S.** Agent A holds a token with `sid=S`. PPE has exchanged
 for a Workday token and cached it, and A has delegated a subtask to child agent B, which
-received a transaction token. The operator revokes S.
+received a Delegation Record. The operator revokes S.
 
 | Next event | Keys that match | Result |
 |---|---|---|
 | A calls a tool with its own token | `sid=S` from the caller's token | Denied |
 | A's call would reuse the cached Workday token | `sid=S` from the caller's token on the same call, checked at `token.delegate` before the cached token is served | Denied, whether or not the Workday token contains `sid` |
-| B calls a tool with its own credential and the forwarded transaction token | Root `sid=S` from `tctx` | Denied |
+| B calls a tool with its own credential and its Delegation Record | Root `sid=S` from the record | Denied |
 | A downstream PPE receives a call carrying the transaction token | Root `sid=S` from `tctx` | Denied |
 | An internal service that does not check holds a transaction token minted before the revocation | None checked | Usable until it expires, within minutes |
 
@@ -570,7 +614,7 @@ sequenceDiagram
         P->>S: check shapes incl. {Alice, A}
         S-->>P: {Alice, A} revoked
         P-->>A: deny auth.revoked
-        B->>P: tool call: own credential, Txn-Token root {Alice, A}
+        B->>P: tool call: own credential, Delegation Record root {Alice, A}
         P->>S: check shapes incl. {Alice, A}, hop b1
         S-->>P: {Alice, A} revoked
         P-->>B: deny auth.revoked
@@ -584,10 +628,12 @@ sequenceDiagram
 
 #### One delegation revoked
 
-PPE records A's delegation to B as hop `b1` and task T1. B authenticates with its own
-credential and forwards the transaction token carrying `[G, b1]` unchanged as context (§12.2;
-TXN-09). Revoking `b1` stops B and its descendants while A continues. Until replacement tokens
-exist (TXN-05), longer work needs a fresh delegation.
+A delegates a subtask to B through PPE, which records hop `b1` and task T1 and issues B a
+Delegation Record carrying `[G, b1]`. B authenticates its calls with its own credential and
+presents the record; PPE checks the lineage and mints a per-call transaction token for each
+permitted call (DEL-01, TXN-13). Revoking `b1` stops B and its descendants while A continues.
+The record lasts as long as the delegation, so a long-running subtask needs no replacement
+tokens.
 
 ```mermaid
 %%{init: {"theme": "default", "themeVariables": {"background": "#ffffff"}}}%%
@@ -600,11 +646,11 @@ sequenceDiagram
     participant B as Sub-agent B
     rect rgb(255, 255, 255)
         A->>P: delegate subtask to B
-        P->>P: record hop b1 and subtask T1<br/>mint B's transaction token: lineage_root G, lineage G, b1
-        P->>B: subtask, Txn-Token
+        P->>P: record hop b1 and subtask T1<br/>issue B's Delegation Record: lineage G, b1
+        P->>B: subtask, Delegation Record
         O->>F: revoke delegation b1
         F->>S: revoked b1
-        B->>P: tool call: own credential, Txn-Token lineage G, b1
+        B->>P: tool call: own credential, Delegation Record G, b1
         P->>S: revocation.check G, b1, T1, A, B
         S-->>P: b1 revoked
         P-->>B: deny auth.revoked
@@ -634,15 +680,15 @@ sequenceDiagram
     participant S as Store
     rect rgb(255, 255, 255)
         A->>P: delegate payment run to B
-        P->>P: record subtask T1, mint B's transaction token
+        P->>P: record subtask T1, issue B's Delegation Record
         loop subtask T1
-            B->>P: pay_invoice: own credential, Txn-Token task T1
+            B->>P: pay_invoice: own credential, Delegation Record task T1
             P->>L: decision record
         end
         W->>L: read running total for T1
         W->>F: revoke task T1, spend rate
         F->>S: revoked task T1
-        B->>P: next pay_invoice: own credential, Txn-Token task T1
+        B->>P: next pay_invoice: own credential, Delegation Record task T1
         P->>S: revocation.check
         S-->>P: T1 revoked
         P-->>B: deny auth.revoked
@@ -767,11 +813,12 @@ After #127.
 | `ppe-apl-runtime` | Agent sessions (REV-06): mint and bind session handles to agent, instance and grant, record parent and principal sessions, and key limits and taint by agent and grant as well as session. |
 | `ppe-apl-runtime` | Second call site in `DelegationPluginInvoker::delegate`, before a token is exchanged or served from cache: REV-16 check (2). |
 | `builtins` `delegator/oauth` | Keep lineage for obtained tokens and cached entries; add production cache flush and RFC 7009 revocation for PPE-obtained tokens. |
-| `builtins` `delegator/txn-token` (new) | Mint JWS tokens (`typ` `txntoken+jwt`, `kid`) with a unique `txn`, `sub`, `scope`, `act`, `req_wl`, `aud`, `iat`, `exp`, `rctx`, and `tctx` (root `sid` and agent, versioned call descriptor, `task_id`, `lineage_root`, `lineage`). Rotate signing keys from a secrets source and expose public keys for the host to serve. |
-| `builtins` `identity/jwt` | Trust PPE as a transaction token issuer, and read a token from the `Txn-Token` header as context alongside the caller's own credential, never as its identity (section 3.3, TXN-09). Child agents authenticate with their own credentials and forward the token they received. |
+| `builtins` `delegator/txn-token` (new) | Mint a JWS token per call (TXN-13), with `typ` `txntoken+jwt` and `kid`, and a unique `txn`, `sub`, `scope`, `act`, `req_wl`, `aud`, `iat`, `exp`, `rctx`, and `tctx` (root `sid` and agent, versioned call descriptor, `task_id`, `lineage_root`, `lineage`). Rotate signing keys from a secrets source and expose public keys for the host to serve. |
+| `builtins` `identity/jwt` | Verify Delegation Records from trusted issuers (PPE, or an IdP that produces the required fields) presented by child agents alongside their own credentials (DEL-01, DEL-02); on a downstream PPE, read the `Txn-Token` header as context, never as identity (section 3.3, TXN-09). |
+| Delegation | Issue Delegation Records at governed agent-to-agent delegation (DEL-03). Depends on PPE routing agent-to-agent calls; until then, accept IdP-issued records or exclude those delegations. |
 | Downstream PPE | Routes that require a transaction token deny without one (TXN-10); match `tctx` against the resolved call and the access token's principal; keep a `txn` seen-set in the store (TXN-11). |
 | `ppe-apl-runtime` or policy | For calls with both tokens, validate each audience for its own purpose and match the principal and evaluated call; check a binding proof where supported. |
-| Keycloak | Optional: a protocol mapper spike, only if lineage must reach agents that exchange at Keycloak directly, or to expose a source grant ID (REV-07). |
+| Keycloak | Optional: a protocol mapper spike, only if lineage must reach agents that exchange at Keycloak directly, or to expose a source grant ID (REV-07). A mapper could also add Delegation Record fields to Keycloak's delegation tokens (DEL-01). |
 | Demo | Delegation-revoked scenario. |
 
 #### Phase 4 and later
@@ -969,32 +1016,9 @@ optionally, close existing connections when a peer's certificate is revoked.
 11. Whether store-associated lineage for external exchanged tokens satisfies REV-03's
     requirement that every derived credential carry `lineage_root` and `lineage`; if not, how
     those claims reach tokens PPE does not mint.
-12. Resolved: a transaction token cannot be a child agent's credential (draft §13.12). The
-    child authenticates with its own credential and forwards the transaction token as context
-    (section 3.5, "One delegation revoked").
-13. Resolved: REV-17 guarantees PPE-mediated use and checking receivers; expiry-only receivers
-    rely on TXN-12's lifetime bound. Other externally held tokens remain under their issuer's
-    revocation rules.
-14. Root tasks. Until an IdP or Bridge issues purpose-scoped delegations, a root task's
-    revocation equals revoking the user's grant. Should PPE offer a way to start a task,
-    recording a purpose-scoped delegation itself, or wait for a Bridge?
-15. Agent session defaults and transport: the idle timeout and maximum lifetime, and whether
-    PPE returns the session handle in a response header or binds it to the MCP session. The
-    definition itself (section 1, REV-06) is PPE's, offered to ODIS #25.
-16. The versioned call-matching profile for TXN-11: who defines it, how both ends normalize
-    defaults, aliases, resource IDs and numeric parameters, and whether large approved
-    parameters travel as values or a digest. A route cannot require a transaction token until
-    its receiver can apply the same profile.
-17. Whether any IdP the deployment uses issues source grant IDs (REV-07), exposes an
-    issuer-complete grant inventory or generation fence for relationship lifts (REV-09), and
-    makes consent withdrawal observable so the feeder can write relationship entries.
-18. The default set of declared shapes, and who may write each: for example principal, agent,
-    session, agent session, relationship, agent and tool, relationship and tool, task, hop,
-    pending approval, and principal, agent session and tool. Also the default key bound per check, maximum delegation depth and maximum
-    resources per call (REV-08).
-19. The default maximum lifetimes of root credentials and delegation hops, which bound how long
-    lifted cutoffs are retained (REV-09), and the clock-skew bound for root token `iat`
-    comparisons and deployments that order hops by time.
+12. Resolved: a transaction token cannot be a child agent's credential or authority (draft
+    §13.12). The child authenticates with its own credential and presents a Delegation Record;
+    PPE mints a per-call transaction token for each of its calls (DEL-01, TXN-13).
 
 ## 6. Not verified
 
