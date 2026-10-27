@@ -184,7 +184,7 @@ grant at its issuer (REV-24).
 | REV-12 | Lost, duplicated or reordered signals MUST converge: cutoff-based revocation keeps the latest cutoff, exact-ID revocation remains applied for its declared lifetime, and suspension keeps the newest event's state. | |
 | REV-13 | A signal MUST be acknowledged only after it is durably stored. Durable MUST be declared as either replicated to a declared number of replicas before acknowledgement, or written to an append-only log fsynced on every write; a write the primary accepted but could lose on failover does not count. | RFC 8936 |
 | REV-14 | Each source MUST declare a maximum staleness, measured from its last completeness checkpoint: a poll drained to empty with everything received durably stored, or a completed full-state reconciliation. Liveness signals such as verification events MUST NOT count as a checkpoint. A source without a checkpoint inside its bound is indeterminate. | BRG-11, RTR-43, SSF §8.1.4.2 |
-| REV-15 | Each source stream MUST have exactly one active ingester, and every enforcement instance MUST read the same store. The ingester holds a lease whose epoch increases with each new holder; every write MUST carry that epoch, and the store MUST reject a write whose epoch is older than the newest it has seen, so an ingester that lost its lease cannot overwrite newer state. The store MAY be eventually consistent, provided that the maximum staleness of any read a check performs is bounded, measured while running and counted within the declared revocation delay (REV-19), with checks denying as unavailable when the bound cannot be confirmed; and that a write acknowledged as durable (REV-13) is not lost on failover, or the remaining loss window is declared. | REV-13, REV-19 |
+| REV-15 | Each source stream MUST have exactly one active ingester, and every enforcement instance MUST read the same store. The ingester holds a lease whose epoch increases with each new holder; every write MUST carry that epoch, and the store MUST reject a write whose epoch is older than the newest it has seen, so an ingester that lost its lease cannot overwrite newer state. The store MAY be eventually consistent, provided that the maximum staleness of any read a check performs is bounded, measured while running and counted within the declared revocation delay (REV-19), with checks denying as unavailable when the bound cannot be confirmed; and that a write acknowledged as durable (REV-13) survives failover. Where a failover may have lost acknowledged writes, checks MUST deny as unavailable for the affected sources until each completes a full-state reconciliation. A source that cannot be reconciled, such as push-only SSF, MUST be stored where acknowledged writes survive failover. | REV-13, REV-19 |
 
 ### 2.3 Enforcement
 
@@ -295,9 +295,9 @@ flowchart LR
 | REV-10 | Signed SETs (SSF) | Feeder verifies and dedupes on SET `jti` | Keycloak SSF experimental, user-only | 2 |
 | REV-11 | SSF push and short poll; admin API state | Feeder polls admin API for clients and users | No events for clients (agents) | 2 |
 | REV-12 | | Store semantics: max cutoff, exact-ID revocation for its declared lifetime, newest suspension | | 1 |
-| REV-13 | Push retries 8 times, then dead letter | Feeder acknowledges after the declared durable write: replicas confirmed with Valkey `WAIT`, or append-only log fsynced on every write; the remaining failover window is declared (REV-15) | Polled admin state recovers on the next poll; acknowledged SSF events do not | 2 |
+| REV-13 | Push retries 8 times, then dead letter | Feeder acknowledges after the declared durable write: replicas confirmed with Valkey `WAIT`, or append-only log fsynced on every write; the remaining failover window is declared (REV-15) | Polled admin state recovers on the next poll; acknowledged SSF events do not, so SSF-only sources need the strong configuration | 2 |
 | REV-14 | SSF verification events (liveness only); poll with `moreAvailable`; admin API state | Watermark per source advanced only by drained polls and completed reconciliations; verification events raise a liveness alarm only; check reads the watermark | A push-only source with no poll or reconciliation path goes indeterminate after its bound | 1, 2 |
-| REV-15 | One stream per receiver | Single feeder instance per stream; lease epoch on every write, stale epochs rejected by an atomic compare in the store. Valkey replicates asynchronously: checks read from the primary, or from replicas whose reported replication lag is within budget; `WAIT` to a declared number of replicas narrows, but does not close, the failover loss window | Feeder failover without a gap | 2 |
+| REV-15 | One stream per receiver | Single feeder instance per stream; lease epoch on every write, stale epochs rejected by an atomic compare in the store. Valkey replicates asynchronously: checks read from the primary, or from replicas whose reported replication lag is within budget; failover promotes only a replica that confirmed the `WAIT`; otherwise, after a failover the feeder resets the affected watermarks so checks fail closed until reconciliation | Feeder failover without a gap | 2 |
 | REV-16 | Refuses exchange for revoked subject or actor tokens: a secondary check only. | `AplRouteHandler::evaluate` checks pre and post; approval resume re-checks. | Streaming release; check (2) needs the delegation invoker call site. | 0 for checks 1, 3, 4; 3 for check 2 |
 | REV-17 | Does not cascade RFC 7009 to exchanged tokens | Deny derived authority on PPE-mediated calls; checking receivers deny on use, expiry-only receivers rely on TXN-12 | Tokens already held outside PPE may remain usable until expiry or issuer revocation | 3 |
 | REV-18 | | `auth.revoked`, `auth.revocation_unavailable`; checker cannot be `on_error: ignore` | | 0 |
@@ -405,9 +405,11 @@ treatment as a call to a tool, and the Delegation Record travels beside it as wh
 
 On B's later calls, B presents its own credential and its Delegation Record; PPE checks the
 lineage, evaluates the call within the ceiling, and mints a per-call transaction token and any
-access token the target needs. Delegation through PPE depends on PPE governing agent-to-agent
-calls, which it does not do yet; until then, records come from an IdP or those delegations are
-excluded from coverage (REV-22).
+access token the target needs. B presents no token for the principal, so obtaining that access
+token is tracked separately in #285; until it lands, delegates reach only services that accept
+PPE's workload authentication with a transaction token. Delegation through PPE depends on PPE
+governing agent-to-agent calls, which it does not do yet; until then, records come from an IdP
+or those delegations are excluded from coverage (REV-22).
 
 ### 3.4 Revocation identifiers: lifecycle and reach
 
@@ -1019,6 +1021,8 @@ optionally, close existing connections when a peer's certificate is revoked.
 12. Resolved: a transaction token cannot be a child agent's credential or authority (draft
     §13.12). The child authenticates with its own credential and presents a Delegation Record;
     PPE mints a per-call transaction token for each of its calls (DEL-01, TXN-13).
+13. Obtaining principal-scoped access tokens for a delegate's calls, when B holds no token for
+    the principal to exchange, is tracked in #285.
 
 ## 6. Not verified
 
