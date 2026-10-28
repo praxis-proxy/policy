@@ -1167,10 +1167,12 @@ fn parse_step_string(line: &str, source: &str) -> Result<Step, ParseError> {
             msg: "malformed `fetch(...)`".into(),
         })?;
         let name = inside.trim();
-        if name.is_empty() || name.contains(',') {
+        if !is_valid_metadata_instance_name(name) {
             return Err(ParseError::Rule {
                 rule: trimmed.to_owned(),
-                msg: "`fetch(...)`: metadata source name must be one non-empty argument".into(),
+                msg: "`fetch(...)`: metadata source name must match \
+                      `[A-Za-z_][A-Za-z0-9_]*`"
+                    .into(),
             });
         }
         return Ok(Step::Fetch(crate::step::FetchStep {
@@ -1274,6 +1276,14 @@ fn parse_step_string(line: &str, source: &str) -> Result<Step, ParseError> {
     // Otherwise fall through to the rule parser — predicate-and-action.
     let rule = parse_rule(trimmed, source)?;
     Ok(Step::Rule(rule))
+}
+
+fn is_valid_metadata_instance_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 /// Intermediate shape produced by [`parse_delegate_call_args`]. The
@@ -5038,6 +5048,18 @@ route:
 "#;
         let error = compile_test_route("metadata", yaml).unwrap_err();
         assert_rejected(error, "allowed only in authorization.pre_invocation");
+    }
+
+    #[test]
+    fn fetch_rejects_ambiguous_metadata_instance_name() {
+        let yaml = r#"
+route:
+  authorization:
+    pre_invocation:
+      - "fetch(account.v2)"
+"#;
+        let error = compile_test_route("metadata", yaml).unwrap_err();
+        assert_rejected(error, "[A-Za-z_][A-Za-z0-9_]*");
     }
 
     #[test]

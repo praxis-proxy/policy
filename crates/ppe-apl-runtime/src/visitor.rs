@@ -85,13 +85,13 @@ use praxis_policy_core::config::{
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
 use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
-use praxis_policy_core::plugin::PluginConfig;
+use praxis_policy_core::plugin::{PluginConfig, PluginMode};
 use praxis_policy_core::ratelimit_hook::RATELIMIT_HOOK_METADATA;
 use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
 
 use praxis_policy_apl_core::attribute_source::{AttributeSource as _, AttributeTree};
 use praxis_policy_apl_core::parser::compile_policy_block_value;
-use praxis_policy_apl_core::plugin_decl::{PluginDeclaration, PluginRegistry};
+use praxis_policy_apl_core::plugin_decl::{EffectivePlugin, PluginDeclaration, PluginRegistry};
 use praxis_policy_apl_core::rules::{CompiledRoute, DenyResponse, Effect};
 use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
@@ -1022,6 +1022,13 @@ impl ConfigVisitor for AplConfigVisitor {
         )?;
         // A `response:` block at the global scope is the catch-all denyWith.
         compiled.response = response_subblock(yaml, "global");
+        let plugin_registry = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .plugin_registry
+            .clone();
+        validate_metadata_fetch_sources("global", &compiled, &plugin_registry, mgr)?;
 
         // Install catch-all handlers so the global policy also evaluates for
         // generic (non-MCP/A2A) HTTP requests, which carry no entity.
@@ -1400,6 +1407,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 )
                 .into());
             }
+            validate_metadata_fetch_sources(&route_key, &effective, plugin_registry.as_ref(), mgr)?;
 
             // Each half installs only when the effective route declares steps
             // for it, the way the global catch-all already decides.
@@ -1730,6 +1738,48 @@ fn plugin_config_to_yaml(cfg: Option<&serde_json::Value>) -> Option<serde_yaml::
 /// APL spec also allows custom orchestrator-defined error modes).
 fn on_error_to_string(on_err: &praxis_policy_core::plugin::OnError) -> String {
     on_err.to_string()
+}
+
+fn validate_metadata_fetch_sources(
+    location: &str,
+    route: &CompiledRoute,
+    registry: &PluginRegistry,
+    engine: &PolicyEngine,
+) -> Result<(), VisitorError> {
+    let mut names = Vec::new();
+    for effect in &route.pre_invocation {
+        effect.collect_fetch_names(&mut names);
+    }
+    names.sort_unstable();
+    names.dedup();
+
+    for name in names {
+        let Some(effective) = EffectivePlugin::resolve(&name, registry, &route.plugin_overrides)
+        else {
+            continue;
+        };
+        let on_error = effective.on_error.unwrap_or("fail");
+        if !on_error.eq_ignore_ascii_case("fail") && !on_error.eq_ignore_ascii_case("ignore") {
+            return Err(format!(
+                "{location}: metadata source `{name}` uses unsupported on_error `{on_error}`; \
+                 fetch sources support only `fail` or `ignore`"
+            )
+            .into());
+        }
+
+        let Some(plugin) = engine.get_plugin(&name) else {
+            continue;
+        };
+        let mode = plugin.mode();
+        if mode != PluginMode::Sequential {
+            return Err(format!(
+                "{location}: metadata source `{name}` uses mode `{mode}`; fetch sources must use \
+                 `sequential` so their AcquiredFacts result can be awaited and published"
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Assemble a section's APL block from the terms written directly on it.

@@ -246,6 +246,14 @@ routes:
         .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
         .await;
     assert!(!result.continue_processing, "on_error fail must stop");
+    assert_eq!(
+        result
+            .violation
+            .as_ref()
+            .map(|violation| violation.code.as_str()),
+        Some("metadata.upstream_error"),
+        "the source-owned normalized error must remain the denial code"
+    );
     assert!(
         result
             .modified_extensions
@@ -406,6 +414,70 @@ routes:
         .expect_err("stacked duplicate fetches must fail the load");
     assert!(
         error.to_string().contains("fetched more than once"),
+        "{error}"
+    );
+}
+
+#[test]
+fn metadata_source_with_non_sequential_mode_is_rejected_at_load() {
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(
+        "test-source",
+        Box::new(SourceFactory(SourceResult::Success)),
+    );
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    mode: audit
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        )
+        .expect_err("a read-only source mode cannot return AcquiredFacts");
+    assert!(
+        error.to_string().contains("must use `sequential`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn metadata_source_with_disable_error_policy_is_rejected_at_load() {
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(
+        "test-source",
+        Box::new(SourceFactory(SourceResult::Success)),
+    );
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    on_error: disable
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        )
+        .expect_err("disable has no defined metadata source semantics");
+    assert!(
+        error
+            .to_string()
+            .contains("support only `fail` or `ignore`"),
         "{error}"
     );
 }
