@@ -93,6 +93,15 @@ readme = "README.md"
 
 [workspace.dependencies]
 base64 = "0.23.1"
+# NFC normalisation of a Basic user-id before it is used as an index key, so
+# one name in two encodings cannot split into two directory entries (or slip
+# past a duplicate check). The Unicode-maintained reference implementation and
+# the crate the `unicode-*` family is built around; it is already in the
+# lockfile as a transitive of the Cedar stack, but a transitive is not a
+# declared edge, so a `--features basic` build would not resolve it.
+# Deliberately not `icu`/`icu_normalizer`: a full ICU data pipeline for one
+# normalisation form is a new dependency tree for no additional capability.
+unicode-normalization = "0.1.26"
 jsonwebtoken = "11.1.0"
 # rsa 0.9 uses rand_core 0.6, which rand 0.8 implements.
 rand = "0.8.8"
