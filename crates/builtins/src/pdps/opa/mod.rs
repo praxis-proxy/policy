@@ -76,7 +76,7 @@ pub use resolver::{OnError, OpaResolver};
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used, reason = "tests")]
 mod regorus_api_smoke {
-    // Pins the exact regorus 0.11 API the resolver is built on: incremental
+    // Pins the regorus API the resolver is built on: incremental
     // module load, JSON input, query eval, and the Value shapes for allow /
     // deny-set / undefined. If a regorus upgrade changes any of these, this
     // fails loudly here rather than deep in the resolver.
