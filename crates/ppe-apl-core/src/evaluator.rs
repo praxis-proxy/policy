@@ -738,7 +738,7 @@ async fn dispatch_effect(
                     "metadata fetch `{}` failed: {error}",
                     fetch_step.plugin_name
                 )),
-                rule_source: fetch_step.source.clone(),
+                rule_source: error.source_code().unwrap_or(&fetch_step.source).to_owned(),
             }),
         },
 

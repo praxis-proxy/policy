@@ -83,8 +83,8 @@ use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::pipeline::{TaintEvent, TaintScope};
 use praxis_policy_apl_core::step::{
-    DispatchPhase, FetchStep, MetadataFetchOutcome, PluginError, PluginInvocation, PluginInvoker,
-    PluginOutcome,
+    DispatchPhase, FetchStep, MetadataFetchError, MetadataFetchOutcome, PluginError,
+    PluginInvocation, PluginInvoker, PluginOutcome,
 };
 
 use crate::dispatch_plan::RouteDispatchPlan;
@@ -522,7 +522,10 @@ where
         })
     }
 
-    async fn fetch_metadata(&self, step: &FetchStep) -> Result<MetadataFetchOutcome, PluginError> {
+    async fn fetch_metadata(
+        &self,
+        step: &FetchStep,
+    ) -> Result<MetadataFetchOutcome, MetadataFetchError> {
         let entry = self
             .plan
             .metadata_entries
@@ -547,7 +550,7 @@ where
                 || "source denied without a violation".to_owned(),
                 |v| v.reason.clone(),
             );
-            return Err(PluginError::Dispatch(message));
+            return Err(PluginError::Dispatch(message).into());
         }
         let facts = MetadataFetchRequest::from_pipeline_result(&result)
             .and_then(|request| request.facts())
@@ -559,12 +562,20 @@ where
                 ))
             })?;
 
+        facts
+            .validate()
+            .map_err(|error| PluginError::Dispatch(error.to_string()))?;
+
         if facts.outcome() == MetadataOutcome::Error && on_error != OnError::Ignore {
-            let code = facts.error_code().unwrap_or("metadata.source_error");
-            return Err(PluginError::Dispatch(format!(
-                "metadata source `{}` returned `{code}`",
-                step.plugin_name
-            )));
+            let Some(code) = facts.error_code() else {
+                return Err(PluginError::Dispatch(
+                    "validated metadata error record has no error code".to_owned(),
+                )
+                .into());
+            };
+            return Err(MetadataFetchError::Source {
+                code: code.to_owned(),
+            });
         }
 
         let mut updated = current_extensions;

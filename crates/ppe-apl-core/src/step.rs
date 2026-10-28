@@ -590,8 +590,11 @@ pub trait PluginInvoker: Send + Sync {
     ) -> Result<PluginOutcome, PluginError>;
 
     /// Acquire one named metadata record and return its APL projection.
-    async fn fetch_metadata(&self, step: &FetchStep) -> Result<MetadataFetchOutcome, PluginError> {
-        Err(PluginError::NotFound(step.plugin_name.clone()))
+    async fn fetch_metadata(
+        &self,
+        step: &FetchStep,
+    ) -> Result<MetadataFetchOutcome, MetadataFetchError> {
+        Err(PluginError::NotFound(step.plugin_name.clone()).into())
     }
 }
 
@@ -600,6 +603,33 @@ pub trait PluginInvoker: Send + Sync {
 pub struct MetadataFetchOutcome {
     /// Fresh `metadata.<instance>.*` attributes for subsequent effects.
     pub attributes: crate::attributes::AttributeBag,
+}
+
+/// Why one metadata acquisition did not publish a record.
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum MetadataFetchError {
+    /// The source completed normally with a normalized error outcome.
+    #[error("metadata source returned `{code}`")]
+    Source {
+        /// Stable source-owned error code used as the policy denial code.
+        code: String,
+    },
+    /// Dispatch or result validation failed before a trusted source outcome
+    /// could be applied.
+    #[error(transparent)]
+    Framework(#[from] PluginError),
+}
+
+impl MetadataFetchError {
+    /// Return the stable policy denial code for a normalized source error.
+    #[must_use]
+    pub fn source_code(&self) -> Option<&str> {
+        match self {
+            Self::Source { code } => Some(code),
+            Self::Framework(_) => None,
+        }
+    }
 }
 
 /// Delegation dispatch — invokes a `TokenDelegateHook` plugin to mint

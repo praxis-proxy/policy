@@ -136,6 +136,16 @@ impl AcquiredFacts {
         }
     }
 
+    /// Validate the source-owned record before provenance is stamped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataInstallError`] when outcome-specific fields or value
+    /// keys cannot form one atomic metadata record.
+    pub fn validate(&self) -> Result<(), MetadataInstallError> {
+        validate_record(self)
+    }
+
     /// Attach an upstream status that policy may inspect.
     #[must_use]
     pub const fn with_status(mut self, status: u16) -> Self {
