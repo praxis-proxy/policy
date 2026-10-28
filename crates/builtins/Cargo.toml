@@ -229,9 +229,12 @@ cel = { version = "0.15.0", optional = true, default-features = false, features 
 # `arc` is load-bearing: it switches regorus's internal reference counting to
 # atomic `Arc` so `Engine` is `Send`/`Sync` and the resolver can be shared
 # across worker threads behind `Arc<dyn PdpResolver>`.
+# `std` is omitted because regorus 0.13 enables msvc_spectre_libs 0.2 through
+# it, which requires a newer Rust version than this workspace's 1.92 MSRV.
+# The resolver reads files itself and uses regorus's core engine API. This also
+# leaves the std-only `rand.intn` builtin unavailable to policies.
 regorus = { version = "0.13", optional = true, default-features = false, features = [
   "arc",
-  "std",
   "rvm",
   "regex",
   "time",
