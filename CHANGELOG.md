@@ -158,6 +158,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   the load with the options listed, so an incomplete audit configuration no
   longer looks like a working one. `stderr` is still available and has to be
   named. ([#237](https://github.com/praxis-proxy/policy/issues/237))
+- **Breaking for Rust callers of `praxis-policy-plugin-ocsf-audit`:**
+  `OcsfAuditConfig.destination` and `.exporters` become one
+  `output: OutputSelection`, and the struct no longer implements `Default`;
+  build one with `OcsfAuditConfig::new`. YAML keys and serialized shape are
+  unchanged; a block that names no output, both, or an empty list now fails at
+  parse. ([#264](https://github.com/praxis-proxy/policy/issues/264))
 - **Breaking: CIBA config rejects unknown fields.** A misspelled key such as
   `stroe` now fails at load and names the field.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))

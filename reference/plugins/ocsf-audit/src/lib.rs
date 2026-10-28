@@ -42,6 +42,9 @@ pub mod factory;
 pub mod ocsf;
 pub mod sign;
 
-pub use config::{OcsfAuditConfig, OcsfDestination, SigningMode};
+pub use config::{
+    ExporterList, OcsfAuditConfig, OcsfDestination, OcsfExporterConfig, OutputSelection,
+    OutputSelectionError, SigningMode, TracingTag,
+};
 pub use emitter::OcsfAuditEmitter;
 pub use factory::{KIND, OcsfAuditFactory};

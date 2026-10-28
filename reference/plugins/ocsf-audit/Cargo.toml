@@ -43,6 +43,7 @@ ryu         = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 sha2        = { workspace = true }
+thiserror   = { workspace = true }
 # The audit destination runs on blocking workers so a stalled write cannot
 # pin the executor's async audit timeout.
 tokio       = { workspace = true }
