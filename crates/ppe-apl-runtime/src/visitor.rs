@@ -711,7 +711,8 @@ impl AplConfigVisitor {
     fn record_reached_layer_names(&self, route: &CompiledRoute) {
         let (pre, post) = crate::dispatch_plan::collect_plugin_names_by_half(route);
         let names: Vec<String> = pre.into_iter().chain(post).collect();
-        if names.is_empty() {
+        let family_fixed = crate::dispatch_plan::collect_family_fixed_plugin_hooks(route);
+        if names.is_empty() && family_fixed.is_empty() {
             return;
         }
         let mut state = self
@@ -719,6 +720,14 @@ impl AplConfigVisitor {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.reached_plugin_names.extend(names);
+        for (name, hook) in family_fixed {
+            state.reached_plugin_names.insert(name.clone());
+            state
+                .reached_plugin_hooks
+                .entry(name)
+                .or_default()
+                .insert(hook.to_owned());
+        }
     }
 
     /// Tally the plugins an `authentication:` block names. Those reach the
@@ -815,6 +824,27 @@ impl AplConfigVisitor {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for (name, reached) in &state.reached_plugin_hooks {
+            if !reached.contains(praxis_policy_core::metadata::HOOK_METADATA_FETCH) {
+                continue;
+            }
+            let Some(declared) = state.declared_plugin_hooks.get(name) else {
+                return Err(format!(
+                    "metadata source `{name}` is unreachable: no plugin with that name is declared"
+                )
+                .into());
+            };
+            if !declared
+                .iter()
+                .any(|hook| hook == praxis_policy_core::metadata::HOOK_METADATA_FETCH)
+            {
+                return Err(format!(
+                    "metadata source `{name}` is incompatible with `fetch(...)`: it must declare the `metadata.fetch` hook"
+                )
+                .into());
+            }
+        }
 
         let mut unreached: Vec<&str> = state
             .declared_plugin_hooks
@@ -1356,6 +1386,21 @@ impl ConfigVisitor for AplConfigVisitor {
                 }
             }
 
+            let mut fetches = Vec::new();
+            for effect in &effective.pre_invocation {
+                effect.collect_fetch_names(&mut fetches);
+            }
+            let mut seen_fetches = std::collections::HashSet::new();
+            if let Some(duplicate) = fetches
+                .into_iter()
+                .find(|name| !seen_fetches.insert(name.clone()))
+            {
+                return Err(format!(
+                    "route '{route_key}': metadata source `{duplicate}` is fetched more than once"
+                )
+                .into());
+            }
+
             // Each half installs only when the effective route declares steps
             // for it, the way the global catch-all already decides.
             let installs_pre = declares_pre_phase(&effective);
@@ -1542,6 +1587,7 @@ fn install_handler(
     // intrinsic like `read_headers`. It is a no-op when nothing is installed.
     // Plugins dispatched from the route still need their own `read_metadata`.
     capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
+    capabilities.insert(praxis_policy_core::extensions::CAP_FRAMEWORK_PUBLISH_METADATA.to_owned());
     // The APL engine emits the backend candidate constraint (the `restrict`
     // effect's output) into `Extensions.candidate_constraint`. That slot is
     // write-gated in the executor, so the synthetic handler holds the write
