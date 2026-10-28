@@ -62,6 +62,7 @@ fn plan_for(
         plugins,
         delegation_entries: Default::default(),
         elicitation_entries: Default::default(),
+        metadata_entries: Default::default(),
     })
 }
 
@@ -1078,6 +1079,7 @@ fn plan_with_narrowed_caps(
         plugins,
         delegation_entries: Default::default(),
         elicitation_entries: Default::default(),
+        metadata_entries: Default::default(),
     })
 }
 

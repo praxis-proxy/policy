@@ -57,6 +57,9 @@ pub(crate) enum Step {
     /// `PluginResult` decision becomes the step's outcome.
     Plugin { name: String },
 
+    /// `fetch(name)` — acquire and publish one named metadata record.
+    Fetch(FetchStep),
+
     /// `delegate: { plugin: ..., ... }` — mint a downstream delegation
     /// token via a `TokenDelegateHook` plugin. Populates
     /// `delegation.granted_*` attributes in the bag so subsequent
@@ -84,6 +87,15 @@ pub(crate) enum Step {
     /// analogue of `Delegate`; resolution is dispatched to an
     /// `ElicitationHandler` plugin via praxis-policy-apl-runtime.
     Elicit(ElicitStep),
+}
+
+/// One named metadata acquisition in `authorization.pre_invocation`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchStep {
+    /// Metadata source instance registered under `metadata.fetch`.
+    pub plugin_name: String,
+    /// Human-readable policy position used for failure attribution.
+    pub source: String,
 }
 
 /// One delegation invocation inside `pre_invocation:` or `post_invocation:`.
@@ -576,6 +588,18 @@ pub trait PluginInvoker: Send + Sync {
         bag: &crate::attributes::AttributeBag,
         invocation: PluginInvocation<'_>,
     ) -> Result<PluginOutcome, PluginError>;
+
+    /// Acquire one named metadata record and return its APL projection.
+    async fn fetch_metadata(&self, step: &FetchStep) -> Result<MetadataFetchOutcome, PluginError> {
+        Err(PluginError::NotFound(step.plugin_name.clone()))
+    }
+}
+
+/// Attributes published by one completed metadata acquisition.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataFetchOutcome {
+    /// Fresh `metadata.<instance>.*` attributes for subsequent effects.
+    pub attributes: crate::attributes::AttributeBag,
 }
 
 /// Delegation dispatch — invokes a `TokenDelegateHook` plugin to mint
