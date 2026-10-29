@@ -278,7 +278,7 @@ fn a_config_omitting_the_staleness_ceiling_fails_to_load() {
 fn a_ceiling_below_the_refresh_interval_fails_validation() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let mut config = config_for(file.path());
-    config.refresh_secs = Some(60);
+    config.refresh_secs = 60;
     config.max_staleness_secs = 30;
     let err = HtpasswdDirectory::new(config).expect_err("an incoherent ceiling must fail");
     assert!(err.contains("below"), "{err}");
@@ -334,7 +334,7 @@ async fn past_the_staleness_ceiling_lookups_report_unavailable_not_unknown() {
     let mut config = config_for(file.path());
     // A zero ceiling with a refresh interval it does not undercut: every
     // lookup is immediately past the ceiling.
-    config.refresh_secs = Some(0);
+    config.refresh_secs = 0;
     config.max_staleness_secs = 0;
     let dir = HtpasswdDirectory::new(config).expect("the file loads");
     let svc = services();
@@ -403,19 +403,31 @@ async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
 async fn a_burst_of_lookups_triggers_one_file_read() {
     // R12: the CAS-claimed refresh slot. Without it a burst past the due time
     // costs one file read each, which is a thundering herd on every interval.
+    //
+    // The non-zero interval is load-bearing. An earlier version used
+    // `refresh_secs = 0`, which makes every lookup immediately due, so the
+    // slot re-armed between lookups and the test would have passed even if all
+    // 16 had reloaded -- it asserted only that the records were visible, not
+    // the one-read property its name claims. The counter is what pins it.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let mut config = config_for(file.path());
-    config.refresh_secs = Some(0);
+    config.refresh_secs = 1;
     config.max_staleness_secs = 3600;
     let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
 
-    // Rewrite with a second user, then burst. Exactly one of the concurrent
-    // lookups should perform the read; all of them must then see the result.
+    assert_eq!(
+        dir.reload_attempts(),
+        0,
+        "no read happens before the first due time"
+    );
+
     file.rewrite(&format!(
         "{}\n{}\n",
         bcrypt_line("alice", "pw", 4),
         bcrypt_line("bob", "pw", 4),
     ));
+    // Past the interval, so the slot is due exactly once for the whole burst.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..16_u32 {
@@ -431,10 +443,16 @@ async fn a_burst_of_lookups_triggers_one_file_read() {
             "every lookup in the burst must see the record"
         );
     }
+
+    assert_eq!(
+        dir.reload_attempts(),
+        1,
+        "16 concurrent lookups past the due time must cost exactly one file read"
+    );
     assert_eq!(
         dir.len(),
         2,
-        "the burst must have picked up the rewritten file"
+        "and that one read must have picked up the rewritten file"
     );
 }
 
@@ -482,4 +500,181 @@ async fn lookup_cost_does_not_grow_with_the_record_count() {
             .is_some()
     );
     assert!(dir.lookup("nobody", &svc).await.expect("answers").is_none());
+}
+
+#[test]
+fn loading_an_argon2_record_does_not_mint_an_expensive_dummy() {
+    // A regression bound, not a benchmark. An earlier version derived a bcrypt
+    // cost from argon2's parameters and minted a dummy at it, conflating two
+    // scales that differ by orders of magnitude: bcrypt cost is a power-of-two
+    // exponent, argon2's `m` is already in KiB. An ordinary `m=19456,t=2`
+    // record -- the RFC-recommended default -- scaled to cost 16, and loading
+    // one took 7.9 seconds. The default argon2 ceiling scaled to 28, which is
+    // 2^12 times that again.
+    //
+    // The miss path now reuses the heaviest record already in the file, so a
+    // populated directory does no minting at all. The generous bound here is
+    // deliberate: the failure this guards against was measured in seconds, so
+    // a threshold in the hundreds of milliseconds catches it without being
+    // flaky on a loaded CI box.
+    let phc = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+               MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+    let file = HtpasswdFile::write(&format!("alice:{phc}\n"));
+
+    let start = std::time::Instant::now();
+    let dir = directory(&file).expect("an argon2 file loads");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "loading one argon2 record took {elapsed:?}; the miss-path hash must be \
+         reused from the file rather than minted from a scaled cost"
+    );
+    assert_eq!(dir.len(), 1, "the record is indexed");
+}
+
+#[tokio::test]
+async fn the_miss_path_hash_is_the_heaviest_record_not_a_synthesized_cost() {
+    // KTD9's requirement, restated as what the code now does: a miss is
+    // verified against the dearest *real* hash. That is exactly as expensive
+    // as the dearest hit by construction, where a synthesized cost could land
+    // either side of it -- and did land far above it.
+    let file = HtpasswdFile::write(&format!(
+        "{}\n{}\n",
+        bcrypt_line("cheap", "pw", 4),
+        bcrypt_line("dear", "pw", 12),
+    ));
+    let dir = directory(&file).expect("the file loads");
+
+    assert_eq!(
+        dir.miss_work_factor(),
+        crate::support::work_factor_of(&bcrypt_line("dear", "pw", 12)),
+        "the miss path must run at exactly the dearest record's work factor"
+    );
+}
+
+#[test]
+fn an_empty_directory_still_mints_a_floor_cost_miss_hash() {
+    // The one case that must mint: with no record to reuse, an empty file
+    // would otherwise be distinguishable from a populated one by timing.
+    let file = HtpasswdFile::write("# every line is a comment\n\n");
+    let dir = directory(&file).expect("an empty file is still a valid directory");
+
+    assert!(dir.is_empty(), "the file holds no records");
+    assert_eq!(
+        dir.miss_work_factor(),
+        praxis_policy_builtins::plugins::identity_basic::WorkFactor::FLOOR,
+        "an empty directory falls back to a minted floor-cost hash"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_request_does_not_release_its_verification_permit_early() {
+    // R24, against the failure mode that defeats it. Dropping a future does
+    // not cancel a `spawn_blocking` task, so a permit held by the async body
+    // is released while the CPU work it bounds carries on. A client that
+    // connects and disconnects could then start unbounded concurrent
+    // verifications -- measured at 8 against a cap of 1 before the fix.
+    //
+    // A high bcrypt cost so each verify is slow enough that the aborted tasks
+    // are provably still running when the final acquire is attempted.
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 12)));
+    let mut config = config_for(file.path());
+    config.max_concurrent_verifications = 1;
+    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
+    let svc = services();
+    let record = dir
+        .lookup("alice", &svc)
+        .await
+        .expect("the lookup answers")
+        .expect("alice exists");
+    let verifier = record.verifier.clone();
+
+    // Start a verification, then abort its future while the blocking work runs.
+    let aborted = {
+        let dir = std::sync::Arc::clone(&dir);
+        let verifier = verifier.clone();
+        tokio::spawn(async move {
+            let svc = services();
+            let rec = praxis_policy_builtins::plugins::identity_basic::UserRecord::verifier_only(
+                verifier,
+            );
+            dir.verify(Some(&rec), &crate::support::password("pw"), &svc)
+                .await
+        })
+    };
+    // Long enough to be inside the blocking verify, short enough that a cost-12
+    // bcrypt (~170ms) has not finished.
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    aborted.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // The permit must still be held by the blocking task, so this is refused.
+    let rec = praxis_policy_builtins::plugins::identity_basic::UserRecord::verifier_only(verifier);
+    let outcome = dir
+        .verify(Some(&rec), &crate::support::password("pw"), &svc)
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated)
+        ),
+        "an aborted request must not hand its permit back while its blocking \
+         verification is still running, got {outcome:?}"
+    );
+}
+
+#[test]
+fn an_unknown_key_fails_to_load_at_either_level() {
+    // The ceilings live in a nested `limits:` block rather than a flattened
+    // one, because serde does not support `flatten` with
+    // `deny_unknown_fields`. A silently accepted `max_bcrypt_cst: 20` would
+    // leave the real ceiling at its default while an operator believed a limit
+    // was in force -- a misconfiguration that reads as working.
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let base = format!(
+        "path: {}\nrefresh_secs: 30\nmax_staleness_secs: 300\n",
+        file.path()
+    );
+
+    for (label, extra) in [
+        ("a typo at the top level", "max_bcrypt_cst: 20\n".to_owned()),
+        ("an unknown top-level key", "wholly_bogus: 1\n".to_owned()),
+        (
+            "a typo inside the limits block",
+            "limits:\n  max_bcrypt_cst: 20\n".to_owned(),
+        ),
+    ] {
+        let err = serde_yaml::from_str::<HtpasswdConfig>(&format!("{base}{extra}"))
+            .expect_err("an unknown key must not deserialize");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "{label} should be refused by name, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn the_limits_block_parses_nested_and_defaults_when_absent() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let base = format!(
+        "path: {}\nrefresh_secs: 30\nmax_staleness_secs: 300\n",
+        file.path()
+    );
+
+    let defaulted = serde_yaml::from_str::<HtpasswdConfig>(&base)
+        .expect("a config with no limits block takes the defaults");
+    assert_eq!(
+        defaulted.limits.max_bcrypt_cost,
+        praxis_policy_builtins::plugins::identity_basic::Limits::default().max_bcrypt_cost,
+        "an absent limits block means the shared defaults"
+    );
+
+    let explicit =
+        serde_yaml::from_str::<HtpasswdConfig>(&format!("{base}limits:\n  max_bcrypt_cost: 11\n"))
+            .expect("a nested limits block parses");
+    assert_eq!(
+        explicit.limits.max_bcrypt_cost, 11,
+        "an explicit nested ceiling is the one that takes effect"
+    );
 }

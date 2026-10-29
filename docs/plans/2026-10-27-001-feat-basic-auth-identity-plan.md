@@ -88,7 +88,13 @@ Authorino-parity escape hatch.
   the stored-hash parse happens before the found/not-found branch so both paths
   pay it.
 - R8. The `.htpasswd` backend reads bcrypt (`$2a$`, `$2b$`, `$2y$`) and argon2.
-  apr1 (`$apr1$`) and `{SHA}` are read only when explicitly opted into.
+  apr1 (`$apr1$`) and `{SHA}` are recognised but **refused**, with a load error
+  naming the fix (re-hash with bcrypt or argon2). **Scope corrected
+  2026-10-29:** this originally said they load under an explicit opt-in. They
+  do not, and the opt-in has been removed rather than left inert — neither MD5
+  nor SHA-1 is in this dependency tree, and adding two crypto crates to serve
+  the schemes this plugin exists to migrate operators off is the wrong trade.
+  Revisit only if a real migration blocks on it.
   DES-crypt and plaintext are rejected at load.
 - R9. A username-indexed YAML backend carries a verifier, projectable fields,
   and
@@ -254,10 +260,14 @@ Authorino-parity escape hatch.
     where a JSON-RPC code belongs. Basic on an MCP route is not a sensible
     deployment, but the plugin should not pretend otherwise.
 
-- KTD5. **Weak hash schemes are refused unless opted into.** apr1 and `{SHA}`
+- KTD5. **Weak hash schemes are refused outright.** apr1 and `{SHA}`
   are
-  readable only under an explicit opt-in. Accepting MD5-grade verifiers silently
-  is worse than failing a drop-in migration loudly. Writing hashes is out of
+  are refused at load with a message naming the fix. Accepting MD5-grade
+  verifiers silently is worse than failing a drop-in migration loudly, and an
+  opt-in that cannot admit anything is worse still: a draft carried one, both
+  of its branches returned the same error, so it was a knob that changed
+  nothing. Removed rather than wired up, because wiring it up means taking on
+  MD5 and SHA-1 on a runtime authentication path. Writing hashes is out of
   scope entirely — PPE verifies, it does not mint. Startup warns with a count of
   weak-scheme records, since their verify cost is distinguishable from bcrypt's
   (see KTD9).
@@ -556,9 +566,10 @@ expect at that density.
   password
   and rejects a wrong one.
 - Covers R8. An argon2 record verifies and rejects.
-- Covers R8. apr1 and `{SHA}` records fail at load by default, and load when
-  opted in.
-- Covers R8. A DES-crypt or plaintext record fails at load even with the opt-in.
+- Covers R8. apr1 and `{SHA}` records fail at load, with a message naming the
+  fix rather than implying the record is corrupt.
+- Covers R8. A DES-crypt or plaintext record fails at load, distinctly from the
+  MD5/SHA-1 refusal, since the operator action differs.
 - Covers R8. A bcrypt record with a malformed cost fails at load.
 - Covers R7. A miss performs a dummy verification (assert via a test-only
   counter rather than timing).
@@ -630,8 +641,8 @@ the challenge on denial, and registration behind the feature.
 
 **Approach:** Config mirrors the api-key block — `credential`, `provider` as a
 `kind`-tagged non-exhaustive enum, `record_map`, `role`, `expiry` — plus a
-required `realm`, an optional `charset`, and the weak-hash opt-in as a typed
-enum rather than a bare bool. `validate()` returns the compiled mapper so it is
+required `realm` and an optional `charset`. There is no weak-hash opt-in: see
+KTD5. `validate()` returns the compiled mapper so it is
 not compiled twice, and rejects the incoherent combinations the sibling rejects.
 It does **not** reject the stacked-resolver case: R22 and KTD7 settle that as
 unsupported-but-loadable, because rejecting it needs either a builtin's `kind`
@@ -690,8 +701,10 @@ throughout; `crates/ppe/src/lib.rs:208-234` for the alias-plus-macro-row pair.
 - Covers R17. A `realm` containing a quote, a backslash or a newline fails at
   load rather than reaching the header.
 - Covers R25. A config naming a non-enforcing expiry mode fails to load.
-- Covers R27. After a successful resolve, the forwarded request carries no
-  `Authorization` header.
+- Covers R27. After a successful resolve, `raw_credentials` is unset, so no
+  downstream policy step can forward the caller's password. The forwarded
+  request still carries the inbound `Authorization` header: removing it is a
+  host obligation (see R27), and a test asserting otherwise could not pass.
 - Covers R28. Repeated failures for one user-id are bounded, and the limiter
   keys
   on the normalised user-id so encoding variants share a bucket.

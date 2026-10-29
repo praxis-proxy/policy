@@ -5,7 +5,7 @@
 //! a verify from leaking which users exist.
 
 use praxis_policy_builtins::plugins::identity_basic::verifier::{
-    BCRYPT_TRUNCATION_BYTES, HashError, Limits, Scheme, WorkFactor, dummy_hash, parse_hash,
+    BCRYPT_TRUNCATION_BYTES, HashError, Limits, Scheme, WorkFactor, floor_hash, parse_hash,
 };
 
 /// A bcrypt record at a given cost, minted rather than checked in.
@@ -113,10 +113,11 @@ fn a_bcrypt_cost_above_the_ceiling_fails_at_load() {
     let hot = bcrypt_at(12, "pw");
     assert_eq!(
         parse_hash(&hot, &limits).err(),
-        Some(HashError::ParametersTooHigh)
+        Some(HashError::ParametersTooHigh),
+        "a well-formed cost above the ceiling is an availability risk, not a \
+         parse problem, so it must be refused at load rather than at verify"
     );
-    // And the same record loads once the ceiling admits it.
-    parse_hash(&hot, &Limits::default()).expect("the same record loads under the default ceiling");
+    parse_hash(&hot, &Limits::default()).expect("the same record loads once the ceiling admits it");
 }
 
 #[test]
@@ -130,7 +131,8 @@ fn argon2_parameters_above_the_ceiling_fail_at_load() {
     };
     assert_eq!(
         parse_hash(phc, &tight).err(),
-        Some(HashError::ParametersTooHigh)
+        Some(HashError::ParametersTooHigh),
+        "argon2 memory above the ceiling is refused at load"
     );
 
     let tight_time = Limits {
@@ -139,7 +141,8 @@ fn argon2_parameters_above_the_ceiling_fail_at_load() {
     };
     assert_eq!(
         parse_hash(phc, &tight_time).err(),
-        Some(HashError::ParametersTooHigh)
+        Some(HashError::ParametersTooHigh),
+        "and so is an argon2 time cost above the ceiling"
     );
 }
 
@@ -173,11 +176,11 @@ fn the_work_factor_orders_records_so_a_directory_has_one_worst_case() {
 }
 
 #[test]
-fn the_dummy_is_a_real_hash_that_verifies_in_full() {
-    // KTD9: a malformed dummy would be rejected early and cost nothing, which
-    // is exactly the leak it exists to close. So it must be a valid record,
-    // and verifying a wrong password against it must do the work and say no.
-    let dummy = dummy_hash(WorkFactor::FLOOR).expect("the dummy mints");
+fn the_floor_hash_is_a_real_record_that_verifies_in_full() {
+    // KTD9: a malformed miss-path hash would be rejected early and cost
+    // nothing, which is exactly the leak it exists to close. So the fallback
+    // minted for an empty directory must be a valid record.
+    let dummy = floor_hash(WorkFactor::FLOOR).expect("the floor hash mints");
     assert_eq!(
         dummy.scheme(),
         Scheme::Bcrypt,
@@ -223,8 +226,14 @@ fn a_password_past_bcrypts_truncation_point_is_rejected() {
 #[test]
 fn a_correct_password_verifies_and_a_wrong_one_does_not() {
     let parsed = parse_hash(&bcrypt_at(4, "correct horse"), &Limits::default()).expect("loads");
-    assert!(crate::support::verify_password(&parsed, b"correct horse"));
-    assert!(!crate::support::verify_password(&parsed, b"wrong horse"));
+    assert!(
+        crate::support::verify_password(&parsed, b"correct horse"),
+        "the password the hash was minted from must verify"
+    );
+    assert!(
+        !crate::support::verify_password(&parsed, b"wrong horse"),
+        "and any other password must not"
+    );
 }
 
 #[test]

@@ -37,7 +37,7 @@ use praxis_policy_core::host::HostServices;
 
 use super::BasicCredential;
 use super::directory::{CredentialDirectory, DirectoryError, StoredVerifier, UserRecord};
-use super::verifier::{Limits, ParsedHash, WorkFactor, dummy_hash, parse_hash, verify_bytes};
+use super::verifier::{Limits, ParsedHash, WorkFactor, floor_hash, parse_hash, verify_bytes};
 
 /// The `kind:` string an operator writes under `provider:`.
 pub const KIND: &str = "htpasswd";
@@ -51,10 +51,16 @@ pub struct HtpasswdConfig {
 
     /// How often to re-read it, in seconds.
     ///
-    /// The revocation window. Omitted means read once at startup and never
-    /// again, which is only correct for a file that never changes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_secs: Option<u64>,
+    /// The revocation window, and **required**. An earlier shape made this
+    /// optional and documented omission as "read once at startup and never
+    /// again" -- but `validate()` then rejected `None` outright, so the
+    /// documented behaviour was unreachable and the `Option` only encoded a
+    /// state that could not load. A plain `u64` makes that unrepresentable
+    /// instead of rejected at runtime.
+    ///
+    /// Zero means re-read on every lookup, which is coherent (and what the
+    /// tests use) though rarely what a deployment wants.
+    pub refresh_secs: u64,
 
     /// How stale the index may get before lookups fail closed, in seconds.
     ///
@@ -70,7 +76,16 @@ pub struct HtpasswdConfig {
     pub max_staleness_secs: u64,
 
     /// Ceilings a stored hash's parameters must sit under.
-    #[serde(default, flatten)]
+    ///
+    /// A nested block rather than a flattened one. serde does not support
+    /// `flatten` together with `deny_unknown_fields`, and while the current
+    /// `yaml_serde` happens to reject an unknown key through a flattened
+    /// field, that is incidental rather than guaranteed -- a serde or backend
+    /// bump could start silently accepting `max_bcrypt_cst: 20`, leaving the
+    /// real ceiling at its default while an operator believes a limit is in
+    /// force. Nesting removes the reliance entirely and matches every other
+    /// config struct here.
+    #[serde(default)]
     pub limits: HtpasswdLimits,
 
     /// How many verifications may run at once.
@@ -151,26 +166,15 @@ impl HtpasswdConfig {
     /// # Errors
     ///
     /// A ceiling below the refresh interval, which would deny before the first
-    /// scheduled reload could run; a ceiling with no interval to measure
-    /// against; or a zero concurrency cap, which would deny every request.
+    /// scheduled reload could run, or a zero concurrency cap, which would deny
+    /// every request.
     pub fn validate(&self) -> Result<(), String> {
-        match self.refresh_secs {
-            Some(refresh) if self.max_staleness_secs < refresh => {
-                return Err(format!(
-                    "`max_staleness_secs` ({}) is below `refresh_secs` ({refresh}), so lookups \
-                     would fail closed before the first reload is even due",
-                    self.max_staleness_secs
-                ));
-            },
-            None => {
-                return Err(
-                    "`max_staleness_secs` needs `refresh_secs`: with no reloading, the index is \
-                     as old as the process and the ceiling would deny every request once it \
-                     passed"
-                        .to_owned(),
-                );
-            },
-            Some(_) => {},
+        if self.max_staleness_secs < self.refresh_secs {
+            return Err(format!(
+                "`max_staleness_secs` ({}) is below `refresh_secs` ({}), so lookups would fail \
+                 closed before the first reload is even due",
+                self.max_staleness_secs, self.refresh_secs
+            ));
         }
         if self.max_concurrent_verifications == 0 {
             return Err(
@@ -193,11 +197,25 @@ struct Entry {
 struct Index {
     users: HashMap<String, Entry>,
 
-    /// A valid hash at the maximum work factor present, for the miss path.
+    /// The hash a miss is verified against, so a miss costs what a hit costs.
     ///
-    /// Recomputed on every load, because the worst case changes when the file
-    /// does: a reload that raises the highest cost must raise the dummy with
-    /// it, or a miss becomes cheaper than the most expensive hit.
+    /// This is the *heaviest record actually in the file*, reused rather than
+    /// synthesized. An earlier version minted a fresh bcrypt hash at a cost
+    /// derived from the worst work factor, which was wrong twice over: minting
+    /// is itself expensive, and a work factor derived from argon2 parameters
+    /// is an ordering key on a different scale from a bcrypt cost. Feeding one
+    /// to `bcrypt::hash` made loading a single ordinary argon2 record take
+    /// 7.9s, and a miss then cost far *more* than any hit -- reversing the
+    /// very oracle KTD9 exists to close.
+    ///
+    /// Reusing a real record is strictly better: it costs nothing to obtain,
+    /// it is exactly as expensive as the dearest hit by construction, and it
+    /// stays correct across schemes without a conversion. A fresh floor-cost
+    /// hash is minted only when the directory has no record reaching the
+    /// floor, which is the empty-or-all-cheap case.
+    ///
+    /// Reselected on every load, because the heaviest record changes when the
+    /// file does.
     dummy: ParsedHash,
 }
 
@@ -233,6 +251,14 @@ pub struct HtpasswdDirectory {
     /// Permits for in-flight verifications, bounding CPU under load.
     verifications: Arc<tokio::sync::Semaphore>,
 
+    /// How many file reads the refresh path has attempted, for the tests.
+    ///
+    /// Counts attempts rather than successes, because the CAS-claimed slot is
+    /// what the burst case is asserting about: a thundering herd past the due
+    /// time must cost one read, not one per request, whether or not the read
+    /// then parses.
+    reload_attempts: AtomicU64,
+
     /// How many dummy verifications have run, for the tests.
     ///
     /// A miss is by design indistinguishable in its output, so a test cannot
@@ -259,7 +285,8 @@ fn read_index(config: &HtpasswdConfig) -> Result<Index, String> {
     let limits = Limits::from(config.limits);
 
     let mut users: HashMap<String, Entry> = HashMap::new();
-    let mut worst = WorkFactor::FLOOR;
+    // The heaviest record seen, kept to serve as the miss-path hash.
+    let mut heaviest: Option<ParsedHash> = None;
 
     for (number, raw) in text.lines().enumerate() {
         // Human-facing line numbers, since this lands in a config error.
@@ -293,7 +320,12 @@ fn read_index(config: &HtpasswdConfig) -> Result<Index, String> {
         // names the line and the scheme problem and nothing else.
         let hash = parse_hash(stored, &limits)
             .map_err(|e| format!("{} line {line_number}: {e}", config.path.display()))?;
-        worst = worst.max(hash.work_factor());
+        if heaviest
+            .as_ref()
+            .is_none_or(|h| hash.work_factor() > h.work_factor())
+        {
+            heaviest = Some(hash.clone());
+        }
 
         // Two records for one user have no coherent answer, and picking either
         // silently would hand one caller the other's identity. Real `.htpasswd`
@@ -310,17 +342,23 @@ fn read_index(config: &HtpasswdConfig) -> Result<Index, String> {
         users.insert(normalised, Entry { hash });
     }
 
-    // Built from the worst case actually present, not from a constant and not
-    // from the dominant scheme. A dummy at the dominant cost leaks in any mixed
-    // file: misses would cost the common parameters while hits on minority
-    // records run measurably faster or slower, which enumerates both which
-    // names exist and which users sit on the cheapest scheme.
-    let dummy = dummy_hash(worst).map_err(|e| {
-        format!(
-            "{}: could not build the miss-path hash: {e}",
-            config.path.display()
-        )
-    })?;
+    // The heaviest record actually present, not a constant and not the dominant
+    // scheme. A dummy at the dominant cost leaks in any mixed file: misses
+    // would cost the common parameters while hits on minority records run
+    // measurably faster or slower, which enumerates both which names exist and
+    // which users sit on the cheapest scheme.
+    //
+    // Reused rather than minted, so a populated file does no cryptographic
+    // work at load at all. Only an empty or all-cheap directory mints.
+    let dummy = match heaviest {
+        Some(hash) if hash.work_factor() >= WorkFactor::FLOOR => hash,
+        _ => floor_hash(WorkFactor::FLOOR).map_err(|e| {
+            format!(
+                "{}: could not build the miss-path hash: {e}",
+                config.path.display()
+            )
+        })?,
+    };
 
     Ok(Index { users, dummy })
 }
@@ -338,9 +376,7 @@ impl HtpasswdDirectory {
     pub fn new(config: HtpasswdConfig) -> Result<Self, String> {
         config.validate()?;
         let index = read_index(&config)?;
-        let first_attempt = config
-            .refresh_secs
-            .map_or(u64::MAX, |secs| secs.saturating_mul(1000));
+        let first_attempt = config.refresh_secs.saturating_mul(1000);
         let permits = config.max_concurrent_verifications;
         Ok(Self {
             config,
@@ -349,6 +385,7 @@ impl HtpasswdDirectory {
             next_attempt_ms: AtomicU64::new(first_attempt),
             loaded_at_ms: AtomicU64::new(0),
             verifications: Arc::new(tokio::sync::Semaphore::new(permits)),
+            reload_attempts: AtomicU64::new(0),
             dummy_runs: AtomicU64::new(0),
         })
     }
@@ -381,6 +418,11 @@ impl HtpasswdDirectory {
     /// How many dummy verifications have run, for the tests.
     pub fn dummy_runs(&self) -> u64 {
         self.dummy_runs.load(Ordering::Relaxed)
+    }
+
+    /// How many file reads the refresh path has attempted, for the tests.
+    pub fn reload_attempts(&self) -> u64 {
+        self.reload_attempts.load(Ordering::Relaxed)
     }
 
     /// The work factor the miss path currently runs at, for the tests.
@@ -416,9 +458,7 @@ impl HtpasswdDirectory {
     /// request, so the cost lands on one caller per interval. The alternative
     /// is a spawned task, and a spawned task does not survive every host.
     fn refresh_if_due(&self) {
-        let Some(interval) = self.config.refresh_secs else {
-            return;
-        };
+        let interval = self.config.refresh_secs;
         let now = self.now_ms();
         let due = self.next_attempt_ms.load(Ordering::Acquire);
         if now < due {
@@ -438,6 +478,7 @@ impl HtpasswdDirectory {
             return;
         }
 
+        self.reload_attempts.fetch_add(1, Ordering::Relaxed);
         if let Err(error) = self.reload() {
             // Rate limited by the refresh interval itself: this runs once per
             // interval, not once per request, because the slot was claimed
@@ -497,7 +538,16 @@ impl CredentialDirectory for HtpasswdDirectory {
         // bounded identically. Denying rather than waiting: a queue here is an
         // unauthenticated CPU exhaustion path, and a caller cannot tell a
         // saturation denial from a wrong password anyway.
-        let _permit = self
+        //
+        // Moved into the blocking closure below rather than held here, and that
+        // placement is the whole protection. A permit dropped with this future
+        // -- which happens on any client disconnect or upstream timeout -- would
+        // be released while the `spawn_blocking` work it was bounding carried
+        // on, because dropping a `JoinHandle` does not cancel a blocking task.
+        // A caller that connects and disconnects could then start unbounded
+        // concurrent verifications, limited only by the Tokio blocking pool.
+        // Measured: a cap of 1 admitted 8 concurrent verifies that way.
+        let permit = self
             .verifications
             .clone()
             .try_acquire_owned()
@@ -535,11 +585,18 @@ impl CredentialDirectory for HtpasswdDirectory {
         // milliseconds to seconds, and every syntactically valid header costs
         // one. Monopolizing a worker would starve every other request on it.
         let password_bytes = credential.to_zeroized_password();
-        let outcome = tokio::task::spawn_blocking(move || verify_bytes(&hash, &password_bytes))
-            .await
-            .map_err(|_join_failed| {
-                DirectoryError::Unavailable("the verification task did not complete".to_owned())
-            })?;
+        let outcome = tokio::task::spawn_blocking(move || {
+            // The permit lives and dies with the CPU work it bounds. Named
+            // `_permit` inside the closure so it is held for the whole body
+            // and released when the task ends, not when the caller's future
+            // does.
+            let _permit = permit;
+            verify_bytes(&hash, &password_bytes)
+        })
+        .await
+        .map_err(|_join_failed| {
+            DirectoryError::Unavailable("the verification task did not complete".to_owned())
+        })?;
 
         // The dummy's verdict is discarded: it exists to cost time, and
         // returning it would authenticate a miss whenever the dummy's throwaway

@@ -112,14 +112,18 @@ unicode-normalization = "0.1.26"
 # legacy DES and MD5-crypt family this plugin refuses at load anyway, and
 # carry no advisory policy worth inheriting on a runtime path.
 #
-# `bcrypt` is the one crate here that reads the `$2a$`/`$2b$`/`$2y$` variants
-# `.htpasswd` actually contains, and exposes the cost factor so a record above
-# the configured ceiling can be refused before it reaches a verify.
-argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
-bcrypt = { version = "0.19", default-features = false, features = ["std"] }
+# `bcrypt` is the one crate here that verifies the `$2a$`/`$2b$`/`$2y$` variants
+# `.htpasswd` actually contains. It exposes no public hash *parser* -- its
+# `split_hash` is private and `HashParts` cannot be built from a string -- so
+# the cost ceiling is enforced by reading bcrypt's fixed-width cost field
+# directly in `verifier.rs`. Its `non_truncating_verify` is likewise unusable
+# here: it errors on hashes it did not mint itself, so it rejects every file
+# Apache wrote.
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
+bcrypt = { version = "0.19.3", default-features = false, features = ["std"] }
 # Constant-time primitives for the verdict comparison. Already in the tree via
 # both hashing crates; named here because this plugin depends on it directly.
-subtle = "2.6"
+subtle = "2.6.1"
 jsonwebtoken = "11.1.0"
 # rsa 0.9 uses rand_core 0.6, which rand 0.8 implements.
 rand = "0.8.8"

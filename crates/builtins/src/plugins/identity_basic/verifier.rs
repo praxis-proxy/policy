@@ -98,6 +98,16 @@ pub enum HashError {
 /// bcrypt cost against argon2 memory, which are not the same unit -- because
 /// the requirement is only "not cheaper than the most expensive record", and
 /// erring upward is safe.
+///
+/// **This is an ordering key only, never a cost to synthesize from.** An
+/// earlier version fed it to `bcrypt::hash` as a cost, which conflated two
+/// scales that differ by orders of magnitude: bcrypt cost is a power-of-two
+/// exponent, while argon2's memory is already in KiB. An ordinary
+/// `m=19456,t=2` record scaled to 16, and minting one bcrypt hash at cost 16
+/// takes ~2.6s -- measured, not estimated. The default argon2 ceiling scaled
+/// to 28, which is 2^12 times that again. Directory construction took 7.9s for
+/// a single argon2 record. The miss path now reuses the heaviest *real* hash
+/// in the directory instead; see `Index::dummy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WorkFactor(u32);
 
@@ -213,9 +223,10 @@ pub fn parse_hash(stored: &str, limits: &Limits) -> Result<ParsedHash, HashError
     // not verifiable here in v1: neither MD5 nor SHA-1 is in this tree, and
     // adding two crypto crates to serve the schemes this plugin exists to move
     // operators off is the wrong trade. An operator hitting this needs to
-    // re-hash the file, which is the action they want anyway; `allow_weak`
-    // therefore does not admit them, and the message says so rather than
-    // pretending the opt-in is the missing piece.
+    // re-hash the file, which is the action they want anyway. There is
+    // deliberately no opt-in parameter: one existed in an earlier draft and
+    // could not admit anything, so it would have been a setting that changes
+    // nothing. The message names the fix instead.
     if weak_scheme(stored) {
         return Err(HashError::WeakSchemeUnsupported);
     }
@@ -297,7 +308,13 @@ fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
         .map_err(|_not_a_number| HashError::Malformed)
 }
 
-/// Mint a dummy hash at a given work factor, for the miss path.
+/// Mint a floor-cost bcrypt hash, for a directory with no heavier record.
+///
+/// The fallback for the miss path when the directory is empty, or when every
+/// record it holds is cheaper than [`WorkFactor::FLOOR`]. Where a heavier real
+/// record exists, the miss path reuses *that* hash instead of minting
+/// anything: minting is the expensive operation, and synthesizing a cost from
+/// a cross-scheme ordering key is what made it pathological.
 ///
 /// A *valid* bcrypt record, not a placeholder: the verifier has to run it in
 /// full, and a malformed record would be rejected early and cost nothing. The
@@ -309,7 +326,7 @@ fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
 /// Whatever bcrypt says when it cannot mint at this cost, which the caller
 /// turns into a load failure -- a directory that cannot build its dummy cannot
 /// serve misses safely, so it must not start.
-pub fn dummy_hash(work: WorkFactor) -> Result<ParsedHash, HashError> {
+pub fn floor_hash(work: WorkFactor) -> Result<ParsedHash, HashError> {
     let encoded = bcrypt::hash("ppe-basic-dummy-verification-target", work.as_bcrypt_cost())
         .map_err(|_cannot_mint| HashError::Malformed)?;
     Ok(ParsedHash {
