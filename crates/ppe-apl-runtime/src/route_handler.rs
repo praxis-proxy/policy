@@ -754,7 +754,12 @@ impl AplRouteHandler {
                 let v = if code == STORE_UNAVAILABLE_CODE {
                     unavailable_violation(reason, unavailable_id(&bag, &post_extensions))
                 } else {
-                    let mut v = PluginViolation::new(code, reason);
+                    let mut v = match invoker.denial_violation().await {
+                        Some(plugin_v) if plugin_v.code == code && plugin_v.reason == reason => {
+                            plugin_v
+                        },
+                        _ => PluginViolation::new(code, reason),
+                    };
                     decorate_denial_response(&mut v, self.route.response.as_ref());
                     v
                 };

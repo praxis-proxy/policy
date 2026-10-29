@@ -48,6 +48,26 @@ use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, register_apl};
 
+const CONCURRENT_OVERRIDE_POLICY: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: gate
+    kind: allowlist-gate
+    hooks: [cmf.tool_pre_invoke]
+    config:
+      allowlist: ["closed"]
+routes:
+  - tool: tool_b
+    plugins:
+      gate:
+        config:
+          allowlist: ["open"]
+    authorization:
+      pre_invocation:
+        - "run(gate)"
+"#;
+
 // =====================================================================
 // Fixtures
 // =====================================================================
@@ -82,6 +102,11 @@ impl AllowlistGate {
 impl Plugin for AllowlistGate {
     fn config(&self) -> &PluginConfig {
         &self.cfg
+    }
+
+    async fn initialize(&self) -> Result<(), Box<CoreError>> {
+        tokio::task::yield_now().await;
+        Ok(())
     }
 }
 
@@ -436,6 +461,43 @@ routes:
         "expected 3 factory calls (base + tool_a override + tool_b override); \
          a smaller count means overrides collapsed across routes",
     );
+}
+
+#[tokio::test]
+async fn concurrent_first_requests_share_one_override_per_generation() {
+    let (manager, instance_count) = build_manager(CONCURRENT_OVERRIDE_POLICY).await;
+    for generation in 0..2 {
+        if generation > 0 {
+            let previous = manager.config_generation();
+            manager.remove_route_annotation("tool", "unused", None, "cmf.tool_pre_invoke");
+            assert!(
+                manager.config_generation() > previous,
+                "route annotation changes must invalidate cached plans"
+            );
+        }
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..20 {
+            let manager = Arc::clone(&manager);
+            tasks.spawn(async move {
+                let extensions = Extensions {
+                    meta: Some(Arc::new(meta_for_tool("tool_b"))),
+                    ..Default::default()
+                };
+                let (result, _) = manager
+                    .invoke_named::<CmfHook>("cmf.tool_pre_invoke", cmf_payload(), extensions, None)
+                    .await;
+                assert!(result.continue_processing, "{:?}", result.violation);
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.expect("request task completes");
+        }
+        assert_eq!(
+            instance_count.load(std::sync::atomic::Ordering::SeqCst),
+            generation + 2,
+            "one base instance plus one shared override instance per generation"
+        );
+    }
 }
 
 /// Override changes `on_error` only — sanity-check that the override
