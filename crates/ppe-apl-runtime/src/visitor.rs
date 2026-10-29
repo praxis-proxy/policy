@@ -1393,15 +1393,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 }
             }
 
-            let mut fetches = Vec::new();
-            for effect in &effective.pre_invocation {
-                effect.collect_fetch_names(&mut fetches);
-            }
-            let mut seen_fetches = std::collections::HashSet::new();
-            if let Some(duplicate) = fetches
-                .into_iter()
-                .find(|name| !seen_fetches.insert(name.clone()))
-            {
+            if let Some(duplicate) = effective.duplicate_fetch_name() {
                 return Err(format!(
                     "route '{route_key}': metadata source `{duplicate}` is fetched more than once"
                 )
@@ -1696,6 +1688,7 @@ fn warn_unreferenced_plugin_overrides(route: &CompiledRoute) {
             .into_iter()
             .collect();
     referenced.extend(crate::dispatch_plan::collect_delegate_plugin_names(route));
+    referenced.extend(crate::dispatch_plan::collect_fetch_plugin_names(route));
     for name in route.plugin_overrides.keys() {
         if !referenced.contains(name) {
             tracing::warn!(

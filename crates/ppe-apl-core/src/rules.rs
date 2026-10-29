@@ -632,6 +632,16 @@ impl CompiledRoute {
         set
     }
 
+    /// Return the first metadata source fetched more than once in this route.
+    pub fn duplicate_fetch_name(&self) -> Option<String> {
+        let mut names = std::collections::HashSet::new();
+        let mut fetches = Vec::new();
+        for effect in &self.pre_invocation {
+            effect.collect_fetch_names(&mut fetches);
+        }
+        fetches.into_iter().find(|name| !names.insert(name.clone()))
+    }
+
     /// Apply a more-specific policy layer on top of this one. Used by
     /// orchestrators (praxis-policy-apl-runtime's visitor) to stack the unified-config
     /// hierarchy least-to-most-specific:

@@ -3294,12 +3294,7 @@ fn compile_apl_blocks(source: &str, raw: RouteYaml) -> Result<CompiledRoute, Par
     }
     route.plugin_overrides = raw.plugins;
 
-    let mut fetches = Vec::new();
-    for effect in &route.pre_invocation {
-        effect.collect_fetch_names(&mut fetches);
-    }
-    let mut seen = std::collections::HashSet::new();
-    if let Some(duplicate) = fetches.into_iter().find(|name| !seen.insert(name.clone())) {
+    if let Some(duplicate) = route.duplicate_fetch_name() {
         return Err(ParseError::Rule {
             rule: format!("{source}.pre_invocation"),
             msg: format!("metadata source `{duplicate}` is fetched more than once"),
