@@ -814,6 +814,13 @@ struct RuntimeSnapshot {
 
     /// Whether any named route uses a glob selector.
     declares_glob_named_routes: bool,
+
+    /// The secret store published with this snapshot.
+    ///
+    /// An invocation renders assertions from this store, not from whichever
+    /// store a later reload installed. A value whose reference was unchanged
+    /// still shares its cell, so a refresh rotates what this snapshot reads.
+    secrets: Option<Arc<crate::secrets::SecretStore>>,
 }
 
 impl RuntimeSnapshot {
@@ -1003,10 +1010,11 @@ pub struct PolicyEngine {
 
     /// Every declared value, resolved.
     ///
-    /// Populated by `initialize()` before any plugin initializes, so a plugin
-    /// that reads a secret finds one. Empty when the document declares none,
-    /// which costs nothing and keeps every read site free of an `Option`.
-    secrets: std::sync::OnceLock<Arc<crate::secrets::SecretStore>>,
+    /// Installed by `initialize` and replaced by [`Self::reload_config`].
+    /// Readers clone the `Arc`, so a reload publishes the next store without
+    /// waiting for a request that still holds the previous one. Empty until
+    /// the first document that declares a secret is resolved.
+    secrets: arc_swap::ArcSwapOption<crate::secrets::SecretStore>,
 }
 
 /// Fold top-level `groups:` into the internal bundle store and validate, the
@@ -1105,8 +1113,8 @@ fn refuse_changed_secrets(
         return Ok(());
     };
     let message = format!(
-        "the `secrets:` block changed after secret resolution: {change}. Secrets are resolved \
-         once, during initialize(), so applying this takes a restart"
+        "the `secrets:` block changed after secret resolution: {change}. Apply the change with \
+         reload_config(), or restart the process"
     );
     // Logged as well as returned: a host that reports a failed reload as one
     // line loses which declaration caused it.
@@ -1123,6 +1131,74 @@ fn config_load_during_initialization() -> Box<PluginError> {
     })
 }
 
+/// The document moved while an async reload was reading secrets.
+///
+/// Publishing anyway would replace that newer document with the one whose
+/// secrets were just read. The caller retries against whatever is current.
+fn config_changed_during_secret_resolution() -> Box<PluginError> {
+    Box::new(PluginError::Config {
+        message: "config changed while secrets were being resolved; retry the reload".to_owned(),
+    })
+}
+
+/// Whether two published stores are the same allocation.
+///
+/// Pointer equality, not declaration equality: a reload that resolved against
+/// one store must not publish over a store a concurrent reload already swapped
+/// in, even when both declare the same block.
+fn same_published_store(
+    left: Option<&Arc<crate::secrets::SecretStore>>,
+    right: Option<&Arc<crate::secrets::SecretStore>>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        _ => false,
+    }
+}
+
+/// Whether the content key the reloaded document names will be legal once
+/// pending cell writes land.
+///
+/// Checked before those writes. [`content_key_for`] reads the cell, so a key
+/// that the reload is about to shorten would still look valid, and one it is
+/// about to lengthen would be refused.
+fn reload_content_key_acceptable(
+    cfg: &PolicyConfig,
+    resolved: Option<&crate::secrets::store::ReloadedSecrets>,
+) -> Result<(), Box<PluginError>> {
+    use crate::config::ContentKeySource;
+
+    let Some(ContentKeySource::Secret(name)) = cfg.engine_settings.content_key_source() else {
+        return Ok(());
+    };
+    let Some(resolved) = resolved else {
+        return Err(missing_reloaded_content_key(name));
+    };
+    match resolved.len_after_publish(name) {
+        None => Err(missing_reloaded_content_key(name)),
+        Some(len) if len < crate::hooks::payload::MIN_CONTENT_KEY_BYTES => {
+            Err(Box::new(PluginError::Config {
+                message: format!(
+                    "engine_settings.content_provenance_key `{name}`: the content provenance key \
+                     is {len} bytes; it needs at least {}",
+                    crate::hooks::payload::MIN_CONTENT_KEY_BYTES
+                ),
+            }))
+        },
+        Some(_) => Ok(()),
+    }
+}
+
+fn missing_reloaded_content_key(name: &str) -> Box<PluginError> {
+    Box::new(PluginError::Config {
+        message: format!(
+            "engine_settings.content_provenance_key names `{name}`, which the reloaded \
+             `secrets:` block does not resolve"
+        ),
+    })
+}
+
 /// The content provenance key a config calls for, from the secrets resolved
 /// so far.
 ///
@@ -1131,8 +1207,8 @@ fn config_load_during_initialization() -> Box<PluginError> {
 ///
 /// The refusal for a key the store does not hold is a backstop. Validation
 /// rejects a key naming a value `secrets.values` does not declare, and
-/// [`refuse_changed_secrets`] keeps the block from changing after startup, so
-/// reaching it means those two checks disagree. Erroring rather than asserting
+/// [`refuse_changed_secrets`] keeps the block from changing on synchronous
+/// loads after startup, so reaching it means those two checks disagree. Erroring rather than asserting
 /// keeps a future edit to either one from digesting nothing with no sign.
 fn content_key_for(
     cfg: &PolicyConfig,
@@ -1152,9 +1228,9 @@ fn content_key_for(
     let Some(secret) = store.secret(name) else {
         return Err(Box::new(PluginError::Config {
             message: format!(
-                "engine_settings.content_provenance_key names `{name}`, which was not resolved \
-                 when the engine started. Secrets are read once, at startup, so adding or \
-                 renaming one takes a restart"
+                "engine_settings.content_provenance_key names `{name}`, which is not in the \
+                 installed secret store. Declare it under `secrets.values` and call \
+                 reload_config(), or restart the process"
             ),
         }));
     };
@@ -1372,6 +1448,7 @@ fn snapshot_from_config(
     content_key: Option<crate::hooks::payload::ContentKey>,
     factory_context: &crate::factory::FactoryContext,
     rate_limit_overrides: RateLimitOverrides,
+    secrets: Option<Arc<crate::secrets::SecretStore>>,
 ) -> RuntimeSnapshot {
     let mut executor = Executor::new(ExecutorConfig {
         timeout_seconds: policy_config.engine_settings.plugin_timeout,
@@ -1470,6 +1547,7 @@ fn snapshot_from_config(
         declares_assertions,
         http_routes_declaring_assertions,
         declares_glob_named_routes,
+        secrets,
     }
 }
 
@@ -1503,6 +1581,7 @@ impl PolicyEngine {
             declares_assertions: false,
             http_routes_declaring_assertions: Arc::from(Vec::new()),
             declares_glob_named_routes: false,
+            secrets: None,
         };
         Self {
             runtime: arc_swap::ArcSwap::from_pointee(snapshot),
@@ -1525,7 +1604,7 @@ impl PolicyEngine {
             visitors: RwLock::new(Vec::new()),
             http_transport: std::sync::OnceLock::new(),
             secret_providers: std::sync::OnceLock::new(),
-            secrets: std::sync::OnceLock::new(),
+            secrets: arc_swap::ArcSwapOption::empty(),
         }
     }
 
@@ -1775,12 +1854,42 @@ impl PolicyEngine {
     /// Returns `PluginError::Config` when the config fails validation, when a
     /// plugin's `kind` has no registered factory, when a factory rejects the
     /// plugin's config, when initialization is in progress, when the `secrets:`
-    /// block changes after secrets have resolved (which requires a restart), or
+    /// block changes after secrets have resolved (use [`Self::reload_config`];
+    /// this path refuses it), or
     /// when a registration conflicts with one already present. The existing
     /// snapshot is left in place, so a failed load does not disturb in-flight
     /// requests.
     pub fn load_config(&self, policy_config: PolicyConfig) -> Result<(), Box<PluginError>> {
         self.load_config_with(policy_config, &crate::factory::FactoryContext::default())
+    }
+
+    /// Load `policy_config`, resolving its `secrets:` block before the swap.
+    ///
+    /// [`Self::load_config`] is synchronous and refuses a `secrets:` block that
+    /// differs from the one already resolved, because reading a secret can call
+    /// the network. This applies the change. The incoming block is resolved
+    /// first, and a value that cannot be read refuses the reload, so the
+    /// running snapshot keeps serving.
+    ///
+    /// A value whose provider and reference are unchanged keeps its cell. A
+    /// [`crate::secrets::SecretRef`] a plugin already holds keeps working and
+    /// keeps its generation. A provider whose settings changed is built again,
+    /// and the values still bound to it are re-read into that same cell.
+    ///
+    /// Before [`Self::initialize`] has resolved anything, this installs the
+    /// document the way [`Self::load_config`] does. `initialize` resolves
+    /// whatever that installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PluginError::Config` when validation fails, when a secret
+    /// cannot be resolved, when initialization is in progress, when another
+    /// load wins while secrets are being read, or for the plugin registration
+    /// failures [`Self::load_config`] reports. A failed reload leaves the
+    /// running snapshot in place.
+    pub async fn reload_config(&self, policy_config: PolicyConfig) -> Result<(), Box<PluginError>> {
+        self.reload_config_with(policy_config, &crate::factory::FactoryContext::default())
+            .await
     }
 
     fn load_config_with(
@@ -1803,8 +1912,8 @@ impl PolicyEngine {
         if self.initializations_in_flight.load(Ordering::Acquire) != 0 {
             return Err(config_load_during_initialization());
         }
-        if self.initialized.load(Ordering::Acquire) || self.secrets.get().is_some() {
-            refuse_changed_secrets(self.secrets.get().map(Arc::as_ref), &policy_config)?;
+        if self.initialized.load(Ordering::Acquire) || self.installed_secrets().is_some() {
+            refuse_changed_secrets(self.installed_secrets().as_deref(), &policy_config)?;
         }
         warn_on_dropped_inherited_authentication(&policy_config);
         warn_on_dropped_inherited_rate_limits(&policy_config);
@@ -1844,15 +1953,16 @@ impl PolicyEngine {
         // with initialize() entering or completing while those factories ran.
         let lifecycle = if self.initializations_in_flight.load(Ordering::Acquire) != 0 {
             Err(config_load_during_initialization())
-        } else if self.initialized.load(Ordering::Acquire) || self.secrets.get().is_some() {
-            refuse_changed_secrets(self.secrets.get().map(Arc::as_ref), &policy_config)
+        } else if self.initialized.load(Ordering::Acquire) || self.installed_secrets().is_some() {
+            refuse_changed_secrets(self.installed_secrets().as_deref(), &policy_config)
         } else {
             Ok(())
         };
         let registered = lifecycle.and_then(|()| {
             let content_key = if self.initialized.load(Ordering::Acquire) {
                 let empty = crate::secrets::SecretStore::empty();
-                let store = self.secrets.get().map_or(&empty, |s| s.as_ref());
+                let installed = self.installed_secrets();
+                let store = installed.as_deref().unwrap_or(&empty);
                 content_key_for(&policy_config, Some(store))?
             } else {
                 content_key_for(&policy_config, None)?
@@ -1865,6 +1975,7 @@ impl PolicyEngine {
                 content_key,
                 context,
                 Arc::clone(&rate_limit_overrides),
+                self.installed_secrets(),
             )));
             // Same generation bump as mutate_runtime — load_config doesn't
             // go through that helper because it has to swap registry + executor
@@ -1887,6 +1998,139 @@ impl PolicyEngine {
         self.clear_routing_cache();
 
         Ok(())
+    }
+
+    async fn reload_config_with(
+        &self,
+        policy_config: PolicyConfig,
+        context: &crate::factory::FactoryContext,
+    ) -> Result<(), Box<PluginError>> {
+        warn_on_inactive_settings(&policy_config);
+        let has_visitor = !self
+            .visitors
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        let policy_config = normalize_and_validate(policy_config, has_visitor)?;
+        if self.initializations_in_flight.load(Ordering::Acquire) != 0 {
+            return Err(config_load_during_initialization());
+        }
+        // Nothing has been resolved. `initialize` reads whatever is installed,
+        // which is also why a secrets change is still legal on this path.
+        if !self.initialized.load(Ordering::Acquire) && self.installed_secrets().is_none() {
+            return self.load_config_with(policy_config, context);
+        }
+
+        warn_on_dropped_inherited_authentication(&policy_config);
+        warn_on_assertions_findings(&policy_config);
+
+        let seen_generation = self.generation.load(Ordering::Acquire);
+        let baseline = self.installed_secrets();
+        let mut resolved = self
+            .resolve_for_reload(&policy_config, baseline.as_deref())
+            .await?;
+
+        let factories = {
+            let registry = self
+                .factories
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            resolve_factories(&policy_config.plugins, &registry)?
+        };
+        let instances = create_plugin_instances(&policy_config.plugins, &factories, context)?;
+        let rate_limit_overrides =
+            create_rate_limit_overrides(&policy_config, &factories, context)?;
+
+        let refresh_guard = if let Some(baseline_store) = baseline.as_ref() {
+            Some(baseline_store.lock_refresh().await)
+        } else {
+            None
+        };
+
+        // Resolve finished before this lock, so a failure above never swaps
+        // the snapshot. The lock is only the publication, same as `load_config`.
+        // `new_registry` stays outside the closure so a rejected publication
+        // drops the plugins it just registered after the lock is released.
+        let writer = self.lock_runtime_writer();
+        let current = self.runtime.load_full();
+        let mut new_registry = current.registry.clone();
+        let registered = (|| -> Result<(), Box<PluginError>> {
+            if self.initializations_in_flight.load(Ordering::Acquire) != 0 {
+                return Err(config_load_during_initialization());
+            }
+            let current_store = self.installed_secrets();
+            if self.generation.load(Ordering::Acquire) != seen_generation
+                || !same_published_store(baseline.as_ref(), current_store.as_ref())
+            {
+                return Err(config_changed_during_secret_resolution());
+            }
+            reload_content_key_acceptable(&policy_config, resolved.as_ref())?;
+
+            register_instances_into(&mut new_registry, &policy_config.plugins, &instances)?;
+
+            let installed = resolved.take().map(|reloaded| Arc::new(reloaded.publish()));
+            let empty = crate::secrets::SecretStore::empty();
+            let key_store = installed.as_deref().unwrap_or(&empty);
+            // The length check above already accepted a named key against the
+            // bytes `publish` just wrote, so this builds the handle rather
+            // than deciding whether the key is legal.
+            let content_key = content_key_for(&policy_config, Some(key_store))?;
+            if let Some(baseline_store) = baseline.as_ref() {
+                baseline_store.retire();
+            }
+            self.secrets.store(installed.clone());
+            self.runtime.store(Arc::new(snapshot_from_config(
+                new_registry,
+                policy_config,
+                Some(current.as_ref()),
+                content_key,
+                context,
+                Arc::clone(&rate_limit_overrides),
+                installed,
+            )));
+            self.generation.fetch_add(1, Ordering::Release);
+            Ok(())
+        })();
+        drop(refresh_guard);
+        drop(writer);
+        drop(current);
+        registered?;
+
+        self.clear_routing_cache();
+        Ok(())
+    }
+
+    /// Resolve the incoming block against `baseline`, or `None` when the new
+    /// document declares no secrets.
+    ///
+    /// A failure leaves `baseline` untouched. Pending cell writes stay inside
+    /// the returned value until publication.
+    async fn resolve_for_reload(
+        &self,
+        policy_config: &PolicyConfig,
+        baseline: Option<&crate::secrets::SecretStore>,
+    ) -> Result<Option<crate::secrets::store::ReloadedSecrets>, Box<PluginError>> {
+        let config = &policy_config.secrets;
+        if config.is_empty() && config.providers.is_empty() {
+            return Ok(None);
+        }
+
+        let empty = crate::secrets::SecretProviderRegistry::new();
+        let registry = self.secret_providers.get().unwrap_or(&empty);
+        let reloaded = crate::secrets::SecretStore::resolve_replacing(config, registry, baseline)
+            .await
+            .map_err(|e| {
+                Box::new(PluginError::Config {
+                    message: format!("{e}"),
+                })
+            })?;
+        info!(
+            "Resolved {} secret(s) for reload ({} carried, {} re-read)",
+            reloaded.value_count(),
+            reloaded.carried(),
+            reloaded.reread()
+        );
+        Ok(Some(reloaded))
     }
 
     /// The dispatch mode the installed configuration selected.
@@ -2169,6 +2413,7 @@ impl PolicyEngine {
             content_key,
             &crate::factory::FactoryContext::default(),
             rate_limit_overrides,
+            None,
         )));
 
         Ok(engine)
@@ -2351,7 +2596,12 @@ impl PolicyEngine {
     /// declares, which [`Self::secrets_health`] tells apart.
     #[must_use]
     pub fn secrets_last_success(&self, provider: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.secrets.get()?.provider_last_success(provider)
+        self.installed_secrets()?.provider_last_success(provider)
+    }
+
+    /// The store currently published, if one has been resolved.
+    fn installed_secrets(&self) -> Option<Arc<crate::secrets::SecretStore>> {
+        self.secrets.load_full()
     }
 
     /// How `provider` is doing, distinguishing a failing provider from one
@@ -2363,7 +2613,7 @@ impl PolicyEngine {
     pub fn secrets_health(&self, provider: &str) -> crate::secrets::SecretsHealth {
         use crate::secrets::SecretsHealth;
 
-        let Some(store) = self.secrets.get() else {
+        let Some(store) = self.installed_secrets() else {
             return SecretsHealth::Uninitialized;
         };
         store
@@ -2383,7 +2633,7 @@ impl PolicyEngine {
     /// to none. The report names every failure for the host to log and alarm
     /// on.
     pub async fn refresh_secrets(&self) -> crate::secrets::RefreshReport {
-        match self.secrets.get() {
+        match self.installed_secrets() {
             Some(store) => store.refresh().await,
             None => crate::secrets::RefreshReport::default(),
         }
@@ -2403,10 +2653,10 @@ impl PolicyEngine {
         let config = policy_config.secrets.clone();
         // A later initialization attempt can arrive here after an earlier one
         // resolved secrets and then failed while attaching the content key or
-        // initializing a plugin. The OnceLock already fixes the active
+        // initializing a plugin. The published store already fixes the active
         // bindings in that case, even though `initialized` is still false.
-        if let Some(store) = self.secrets.get() {
-            refuse_changed_secrets(Some(store), policy_config)?;
+        if let Some(store) = self.installed_secrets() {
+            refuse_changed_secrets(Some(store.as_ref()), policy_config)?;
             return Ok(());
         }
         if config.is_empty() && config.providers.is_empty() {
@@ -2429,11 +2679,30 @@ impl PolicyEngine {
             })?;
 
         info!("Resolved {} secret(s)", store.names().len());
-        if self.secrets.set(Arc::new(store)).is_err() {
-            // Another initialize call won the race. Identical declarations are
-            // harmless; different ones must not be hidden behind OnceLock's
-            // rejected second write.
-            refuse_changed_secrets(self.secrets.get().map(Arc::as_ref), policy_config)?;
+        let store = Arc::new(store);
+        // Another initialize can be resolving the same document. Publishing
+        // under the writer makes the second one see the first's store instead
+        // of replacing it, which is what `OnceLock::set` used to guarantee.
+        // The snapshot an invocation already holds has to carry the same
+        // store, or assertions render against a later reload.
+        let conflict = {
+            let writer = self.lock_runtime_writer();
+            if let Some(existing) = self.installed_secrets() {
+                drop(writer);
+                Some(existing)
+            } else {
+                self.secrets.store(Some(Arc::clone(&store)));
+                let current = self.runtime.load_full();
+                let mut next = (*current).clone();
+                next.secrets = Some(store);
+                self.runtime.store(Arc::new(next));
+                drop(writer);
+                drop(current);
+                None
+            }
+        };
+        if let Some(existing) = conflict {
+            refuse_changed_secrets(Some(existing.as_ref()), policy_config)?;
         }
         Ok(())
     }
@@ -2448,7 +2717,8 @@ impl PolicyEngine {
             return Ok(());
         };
         let empty = crate::secrets::SecretStore::empty();
-        let store = self.secrets.get().map_or(&empty, |s| s.as_ref());
+        let installed = self.installed_secrets();
+        let store = installed.as_deref().unwrap_or(&empty);
         if let Some(key) = content_key_for(cfg, Some(store))? {
             self.mutate_runtime(|snap| snap.executor.set_content_key(key));
         }
@@ -3416,10 +3686,13 @@ impl PolicyEngine {
         }
 
         // Resolved at startup, so this is a synchronous load of what is already
-        // in memory. `None` is a host whose document declared no secrets; a
-        // contract reaching one cannot name a secret, because config load
-        // refuses a `secret.<name>` no `secrets.values` entry declares.
-        let secrets = self.secrets.get().map(std::convert::AsRef::as_ref);
+        // in memory. The store is the one published with this snapshot: a
+        // reload that gives a secret a new cell does not change an invocation
+        // already holding the previous snapshot. `None` is a host whose
+        // document declared no secrets; a contract reaching one cannot name a
+        // secret, because config load refuses a `secret.<name>` no
+        // `secrets.values` entry declares.
+        let secrets = snapshot.secrets.as_deref();
         let rendered = match result.modified_extensions.as_ref() {
             Some(extensions) => crate::assertions::render(&contract, extensions, secrets),
             None => return (result, None),
@@ -4641,6 +4914,34 @@ mod tests {
         }
     }
 
+    /// Pauses inside the pipeline so a reload can publish before assertions run.
+    struct BoundaryPause {
+        cfg: PluginConfig,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl_inert_plugin!(BoundaryPause);
+
+    #[async_trait]
+    impl AnyHookHandler for BoundaryPause {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            let result: PluginResult<TestPayload> = PluginResult::allow();
+            Ok(crate::executor::erase_result(result))
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            "test_hook"
+        }
+    }
+
     /// Plugin that denies everything.
     struct DenyPlugin {
         cfg: PluginConfig,
@@ -4848,7 +5149,7 @@ mod tests {
             assert!(!engine.is_initialized());
             assert_eq!(engine.initializations_in_flight.load(Ordering::Acquire), 0);
             assert!(
-                engine.secrets.get().is_none(),
+                engine.installed_secrets().is_none(),
                 "crypto fails before secret resolution"
             );
             assert_eq!(plugin.initializations.load(Ordering::Acquire), 0);
@@ -7676,6 +7977,9 @@ plugins:
     struct PausingSecretProviderFactory {
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
+        answer: Arc<std::sync::Mutex<String>>,
+        /// Pause once this many reads have reached the provider instance.
+        pause_from_read: u64,
     }
 
     impl crate::secrets::SecretProviderFactory for PausingSecretProviderFactory {
@@ -7690,6 +7994,9 @@ plugins:
             Ok(Arc::new(PausingSecretProvider {
                 entered: Arc::clone(&self.entered),
                 release: Arc::clone(&self.release),
+                answer: Arc::clone(&self.answer),
+                pause_from_read: self.pause_from_read,
+                reads: std::sync::atomic::AtomicU64::new(0),
             }))
         }
     }
@@ -7697,6 +8004,9 @@ plugins:
     struct PausingSecretProvider {
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
+        answer: Arc<std::sync::Mutex<String>>,
+        pause_from_read: u64,
+        reads: std::sync::atomic::AtomicU64,
     }
 
     #[async_trait]
@@ -7705,9 +8015,19 @@ plugins:
             &self,
             _reference: &str,
         ) -> Result<zeroize::Zeroizing<String>, crate::secrets::SecretError> {
-            self.entered.notify_one();
-            self.release.notified().await;
-            Ok(zeroize::Zeroizing::new("resolved".to_owned()))
+            let read = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
+            // Captured before the pause. A refresh that is already in flight
+            // must return this credential, not whatever a later reload stored.
+            let value = self
+                .answer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if read == self.pause_from_read {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(zeroize::Zeroizing::new(value))
         }
     }
 
@@ -7737,10 +8057,9 @@ secrets:
     /// declared value cannot re-check anything, so the only callers are the
     /// ones that read a single value they were pointed at.
     fn resolved_secrets(engine: &PolicyEngine) -> Arc<crate::secrets::SecretStore> {
-        engine.secrets.get().map_or_else(
-            || Arc::new(crate::secrets::SecretStore::empty()),
-            Arc::clone,
-        )
+        engine
+            .installed_secrets()
+            .unwrap_or_else(|| Arc::new(crate::secrets::SecretStore::empty()))
     }
 
     fn engine_reading_secrets(yaml: &str) -> PolicyEngine {
@@ -7795,10 +8114,13 @@ secrets:
         );
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
+        let answer = Arc::new(std::sync::Mutex::new("resolved".to_owned()));
         let mut providers = crate::secrets::SecretProviderRegistry::new();
         providers.register(Box::new(PausingSecretProviderFactory {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
+            answer: Arc::clone(&answer),
+            pause_from_read: 1,
         }));
         assert!(engine.set_secret_providers(providers));
 
@@ -7825,6 +8147,278 @@ secrets:
                 .expect("resolved")
                 .as_str(),
             "resolved"
+        );
+        let _ = answer;
+    }
+
+    /// A reload that rebuilds the provider publishes into a shared cell while
+    /// a refresh of the replaced store is still in flight. The refresh must not
+    /// overwrite the reload's value when it finishes.
+    #[tokio::test]
+    async fn a_provider_changing_reload_keeps_the_reload_value_after_an_old_refresh() {
+        let yaml = "
+engine_settings:
+  dispatch: hooks
+secrets:
+  providers:
+    local: { kind: pausing, tag: first }
+  values:
+    upstream_key: { provider: local, ref: key }
+";
+        let engine = Arc::new(
+            PolicyEngine::from_config(
+                parse_fixture_config(yaml).expect("config parses"),
+                &allow_factories(),
+            )
+            .expect("engine builds"),
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let answer = Arc::new(std::sync::Mutex::new("v1".to_owned()));
+        let mut providers = crate::secrets::SecretProviderRegistry::new();
+        providers.register(Box::new(PausingSecretProviderFactory {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            answer: Arc::clone(&answer),
+            pause_from_read: 2,
+        }));
+        assert!(engine.set_secret_providers(providers));
+
+        engine.initialize().await.expect("initializes");
+        let handle = resolved_secrets(&engine)
+            .secret("upstream_key")
+            .expect("declared");
+        assert_eq!(handle.get().as_str(), "v1");
+
+        *answer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = "old-backend".to_owned();
+        let refreshing = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move { engine.refresh_secrets().await })
+        };
+        entered.notified().await;
+
+        *answer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = "new-backend".to_owned();
+        let changed = yaml.replace("tag: first", "tag: second");
+        let reloading = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .reload_config(parse_fixture_config(&changed).unwrap())
+                    .await
+            })
+        };
+
+        reloading
+            .await
+            .expect("the reload task does not panic")
+            .expect("the provider is rebuilt and the value re-read");
+
+        release.notify_one();
+        refreshing.await.expect("the refresh task does not panic");
+
+        assert_eq!(
+            handle.get().as_str(),
+            "new-backend",
+            "the shared cell keeps the reload value after the old refresh finishes"
+        );
+        assert_eq!(handle.generation(), 1, "the late refresh must not write");
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("upstream_key")
+                .expect("declared")
+                .as_str(),
+            "new-backend"
+        );
+    }
+
+    /// An invocation that started before a reload keeps the secret store that
+    /// was published with its snapshot. A changed reference is a new cell, so
+    /// the in-flight assertion must not read it.
+    #[tokio::test]
+    async fn an_in_flight_invocation_keeps_its_snapshot_assertion_secret() {
+        register_hook_metadata(
+            "assertion_boundary",
+            HookMetadata {
+                family: None,
+                entity_type: None,
+                phase: crate::hooks::metadata::HookPhase::Pre,
+            },
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "ppe-engine-assertion-secret-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("first.key"), "original-secret\n").expect("write");
+        std::fs::write(dir.join("second.key"), "replaced-secret\n").expect("write");
+        let yaml = format!(
+            "
+engine_settings:
+  dispatch: policy
+secrets:
+  providers:
+    local: {{ kind: file, base_dir: {} }}
+  values:
+    api_key: {{ provider: local, ref: first.key }}
+global:
+  assertions:
+    request:
+      headers:
+        - name: X-API-Key
+          from: secret.api_key
+routes:
+  - tool: search
+",
+            dir.display()
+        );
+        let engine = Arc::new(engine_reading_secrets(&yaml));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        engine.initialize().await.expect("initializes");
+        engine.annotate_route(
+            "tool",
+            "search",
+            None,
+            "assertion_boundary",
+            Arc::new(BoundaryPause {
+                cfg: make_config("pause", 0, PluginMode::Sequential),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            make_config("pause", 0, PluginMode::Sequential),
+        );
+
+        let invoking = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                let payload: Box<dyn PluginPayload> = Box::new(TestPayload { value: "x".into() });
+                engine
+                    .invoke_by_name(
+                        "assertion_boundary",
+                        payload,
+                        Extensions {
+                            meta: Some(Arc::new(crate::hooks::payload::MetaExtension {
+                                entity_type: Some("tool".into()),
+                                entity_name: Some("search".into()),
+                                ..Default::default()
+                            })),
+                            http: Some(Arc::new(crate::extensions::HttpExtension::default())),
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                    .await
+            })
+        };
+        entered.notified().await;
+
+        let changed = yaml.replace("ref: first.key", "ref: second.key");
+        engine
+            .reload_config(parse_fixture_config(&changed).unwrap())
+            .await
+            .expect("the changed reference resolves");
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("api_key")
+                .expect("declared")
+                .as_str(),
+            "replaced-secret"
+        );
+
+        release.notify_one();
+        let (result, _tasks) = invoking.await.expect("the invocation does not panic");
+        let headers = result
+            .modified_extensions
+            .as_ref()
+            .and_then(|ext| ext.http.as_deref())
+            .expect("the request has headers")
+            .request_headers
+            .clone();
+        assert_eq!(
+            headers.get("X-API-Key").map(String::as_str),
+            Some("original-secret"),
+            "the invocation renders the secret from the snapshot it started with: {headers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Publication can still fail after secrets have been read. Retiring the
+    /// baseline before that failure would leave refresh unable to rotate it.
+    #[tokio::test]
+    async fn a_rejected_reload_leaves_the_baseline_able_to_refresh() {
+        let yaml = "
+engine_settings:
+  dispatch: hooks
+secrets:
+  providers:
+    local: { kind: pausing, tag: first }
+  values:
+    upstream_key: { provider: local, ref: key }
+";
+        let engine = Arc::new(
+            PolicyEngine::from_config(
+                parse_fixture_config(yaml).expect("config parses"),
+                &allow_factories(),
+            )
+            .expect("engine builds"),
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let answer = Arc::new(std::sync::Mutex::new("v1".to_owned()));
+        let mut providers = crate::secrets::SecretProviderRegistry::new();
+        providers.register(Box::new(PausingSecretProviderFactory {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            answer: Arc::clone(&answer),
+            pause_from_read: 1,
+        }));
+        assert!(engine.set_secret_providers(providers));
+
+        let initializing = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move { engine.initialize().await })
+        };
+        entered.notified().await;
+        release.notify_one();
+        initializing
+            .await
+            .expect("the initialization task does not panic")
+            .expect("initializes");
+        let handle = resolved_secrets(&engine)
+            .secret("upstream_key")
+            .expect("declared");
+
+        let changed = yaml.replace("tag: first", "tag: second");
+        let reloading = {
+            let engine = Arc::clone(&engine);
+            let changed = changed.clone();
+            tokio::spawn(async move {
+                engine
+                    .reload_config(parse_fixture_config(&changed).unwrap())
+                    .await
+            })
+        };
+        entered.notified().await;
+        engine.mutate_runtime(|_snap| ());
+        release.notify_one();
+        let err = reloading
+            .await
+            .expect("the reload task does not panic")
+            .expect_err("the document moved while secrets were being read");
+        assert!(format!("{err}").contains("config changed"), "{err}");
+
+        *answer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = "refreshed".to_owned();
+        engine.refresh_secrets().await;
+        assert_eq!(
+            handle.get().as_str(),
+            "refreshed",
+            "a rejected publication leaves the installed store able to refresh"
         );
     }
 
@@ -8040,6 +8634,192 @@ secrets:
             .load_config(parse_fixture_config(&yaml).unwrap())
             .expect("the resolved document still reloads");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An added value is read before the snapshot swaps. The value that was
+    /// already there keeps the cell its handle points at.
+    #[tokio::test]
+    async fn an_async_reload_resolves_an_added_secret_and_keeps_the_old_cell() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        std::fs::write(dir.join("second.key"), "second\n").expect("write");
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.expect("initializes");
+        let handle = resolved_secrets(&engine)
+            .secret("upstream_key")
+            .expect("declared");
+
+        std::fs::write(dir.join("upstream.key"), "not-yet\n").expect("rewrite");
+        let added = yaml.replace(
+            "upstream_key: { provider: local, ref: upstream.key }",
+            "upstream_key: { provider: local, ref: upstream.key }\n    \
+             second_key: { provider: local, ref: second.key }",
+        );
+        engine
+            .reload_config(parse_fixture_config(&added).unwrap())
+            .await
+            .expect("the added value resolves");
+
+        assert_eq!(
+            handle.get().as_str(),
+            "hunter2",
+            "an unchanged value is not re-read just because the block gained a name"
+        );
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("second_key")
+                .expect("added")
+                .as_str(),
+            "second"
+        );
+
+        let report = engine.refresh_secrets().await;
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(handle.get().as_str(), "not-yet");
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("upstream_key")
+                .expect("still declared")
+                .as_str(),
+            "not-yet",
+            "the handle and the published store share the cell"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One value that cannot be read refuses the reload. The running value
+    /// and the running document stay.
+    #[tokio::test]
+    async fn an_async_reload_refuses_when_a_new_secret_cannot_be_read() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.expect("initializes");
+        let handle = resolved_secrets(&engine)
+            .secret("upstream_key")
+            .expect("declared");
+
+        std::fs::write(dir.join("upstream.key"), "mutated\n").expect("rewrite");
+        let added = yaml.replace(
+            "upstream_key: { provider: local, ref: upstream.key }",
+            "upstream_key: { provider: local, ref: upstream.key }\n    \
+             second_key: { provider: local, ref: missing.key }",
+        );
+        let err = engine
+            .reload_config(parse_fixture_config(&added).unwrap())
+            .await
+            .expect_err("the new value was never read");
+        let msg = format!("{err}");
+        assert!(msg.contains("second_key"), "{msg}");
+        assert_eq!(handle.get().as_str(), "hunter2");
+        assert!(resolved_secrets(&engine).secret("second_key").is_none());
+        assert_eq!(
+            engine
+                .load_runtime()
+                .policy_config
+                .as_ref()
+                .expect("a document is installed")
+                .secrets
+                .values
+                .len(),
+            1,
+            "the running document is the one whose secrets resolved"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new `base_dir` is a different provider. The value's declaration is
+    /// unchanged, so the handle keeps its cell and the reload reads the new
+    /// directory into it.
+    #[tokio::test]
+    async fn an_async_reload_rebuilds_a_provider_whose_settings_changed() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.expect("initializes");
+        let handle = resolved_secrets(&engine)
+            .secret("upstream_key")
+            .expect("declared");
+
+        let dir2 =
+            std::env::temp_dir().join(format!("ppe-engine-secrets-moved-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir2).expect("temp dir");
+        std::fs::write(dir2.join("upstream.key"), "from-the-new-dir\n").expect("write");
+        let moved = yaml.replace(&dir.display().to_string(), &dir2.display().to_string());
+        engine
+            .reload_config(parse_fixture_config(&moved).unwrap())
+            .await
+            .expect("the provider is rebuilt and the value re-read");
+
+        assert_eq!(handle.get().as_str(), "from-the-new-dir");
+        assert_eq!(handle.generation(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    /// A changed reference is a different binding. The old handle keeps the
+    /// cell it had; later refreshes follow the new reference.
+    #[tokio::test]
+    async fn an_async_reload_gives_a_changed_reference_a_new_cell() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        std::fs::write(dir.join("other.key"), "other\n").expect("write");
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.expect("initializes");
+        let handle = resolved_secrets(&engine)
+            .secret("upstream_key")
+            .expect("declared");
+
+        let moved = yaml.replace("ref: upstream.key", "ref: other.key");
+        engine
+            .reload_config(parse_fixture_config(&moved).unwrap())
+            .await
+            .expect("the new reference resolves");
+        assert_eq!(handle.get().as_str(), "hunter2");
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("upstream_key")
+                .expect("declared")
+                .as_str(),
+            "other"
+        );
+
+        std::fs::write(dir.join("other.key"), "third\n").expect("rewrite");
+        engine.refresh_secrets().await;
+        assert_eq!(handle.get().as_str(), "hunter2");
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("upstream_key")
+                .expect("declared")
+                .as_str(),
+            "third"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Before `initialize`, nothing is resolved, so an async reload only
+    /// installs the document. `initialize` reads it.
+    #[tokio::test]
+    async fn an_async_reload_before_initialize_is_resolved_by_initialize() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        std::fs::write(dir.join("second.key"), "second\n").expect("write");
+        let engine = engine_reading_secrets(&yaml);
+        let added = yaml.replace(
+            "upstream_key: { provider: local, ref: upstream.key }",
+            "upstream_key: { provider: local, ref: upstream.key }\n    \
+             second_key: { provider: local, ref: second.key }",
+        );
+        engine
+            .reload_config(parse_fixture_config(&added).unwrap())
+            .await
+            .expect("nothing is resolved yet, so the load is the ordinary one");
+        assert!(
+            resolved_secrets(&engine).is_empty(),
+            "initialize is what resolves a document loaded before it"
+        );
+
+        engine.initialize().await.expect("initializes");
+        assert_eq!(
+            resolved_secrets(&engine).names(),
+            vec!["second_key", "upstream_key"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

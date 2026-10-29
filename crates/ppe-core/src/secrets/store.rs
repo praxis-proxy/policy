@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
@@ -255,6 +256,101 @@ impl RefreshReport {
     }
 }
 
+/// A store built for a reload, with writes to cells it shares with the
+/// previous one held back.
+///
+/// Applying those writes as each value is read would change a credential the
+/// running document still serves if a later value failed. [`Self::publish`]
+/// is the point the reload has decided to go out.
+pub(crate) struct ReloadedSecrets {
+    store: SecretStore,
+    /// `(name, cell, new bytes)`. The name is how a content-key check reads
+    /// the length it will have after publish, without writing the cell yet.
+    updates: Vec<(String, Arc<SecretCell>, Zeroizing<String>)>,
+    /// Values whose declaration was unchanged, so the cell an existing
+    /// [`SecretRef`] holds is the one in `store`.
+    carried: usize,
+}
+
+impl fmt::Debug for ReloadedSecrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReloadedSecrets")
+            .field("values", &self.store.names())
+            .field("carried", &self.carried)
+            .field("reread", &self.updates.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReloadedSecrets {
+    /// How many values kept the cell they had before this reload.
+    #[must_use]
+    pub(crate) fn carried(&self) -> usize {
+        self.carried
+    }
+
+    /// How many values the new block declares.
+    #[must_use]
+    pub(crate) fn value_count(&self) -> usize {
+        self.store.names().len()
+    }
+
+    /// How many carried cells have new bytes waiting for [`Self::publish`].
+    ///
+    /// A carried cell is re-read only when its provider was rebuilt. The
+    /// declaration was unchanged, but the backend behind it was not.
+    #[must_use]
+    pub(crate) fn reread(&self) -> usize {
+        self.updates.len()
+    }
+
+    /// The length `name` will have once this reload is published.
+    ///
+    /// `None` when the new block does not declare it. A pending write wins
+    /// over the bytes the cell still holds, because those bytes are what a
+    /// check has to accept or refuse.
+    #[must_use]
+    pub(crate) fn len_after_publish(&self, name: &str) -> Option<usize> {
+        if let Some((_, _, value)) = self.updates.iter().find(|(n, _, _)| n == name) {
+            return Some(value.len());
+        }
+        self.store.value(name).map(|value| value.len())
+    }
+
+    /// Write the pending bytes into the shared cells and return the store.
+    ///
+    /// After this, a [`SecretRef`] taken before the reload sees the new
+    /// bytes. Call it only when every value resolved and the reload is about
+    /// to be published.
+    pub(crate) fn publish(mut self) -> SecretStore {
+        for (_, cell, value) in self.updates.drain(..) {
+            cell.replace_if_changed(value);
+        }
+        self.store
+    }
+}
+
+/// Serializes refresh publication.
+///
+/// Shared by stores that share cells. The mutex is not held across a provider
+/// read. `applied` is the newest refresh that has written a value, so an older
+/// read that finishes later cannot replace it.
+struct RefreshGate {
+    lock: Mutex<()>,
+    next: AtomicU64,
+    applied: AtomicU64,
+}
+
+impl RefreshGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            lock: Mutex::new(()),
+            next: AtomicU64::new(0),
+            applied: AtomicU64::new(0),
+        })
+    }
+}
+
 /// Every declared value, resolved.
 pub struct SecretStore {
     /// The block these bindings were resolved from.
@@ -269,9 +365,14 @@ pub struct SecretStore {
     /// a host alarming on a name can tell "declared and idle" from "not
     /// declared".
     health: HashMap<String, ArcSwap<ProviderHealth>>,
-    /// Serializes refreshes so two callers cannot interleave reads against one
-    /// backend, and so a slow refresh does not overlap the next one.
-    refresh_lock: Mutex<()>,
+    /// Serializes refreshes so two callers cannot interleave publication, and
+    /// so a slow refresh does not overwrite a newer one. Stores that share
+    /// cells after a reload share one gate. The lock is not held across a
+    /// provider read.
+    gate: Arc<RefreshGate>,
+    /// Set when a reload replaces this store. A refresh that starts afterward
+    /// returns an empty report; one already in flight skips writing cells.
+    retired: Arc<AtomicBool>,
 }
 
 impl SecretStore {
@@ -294,6 +395,35 @@ impl SecretStore {
         config: &SecretsConfig,
         registry: &SecretProviderRegistry,
     ) -> Result<Self, SecretResolveError> {
+        Ok(Self::resolve_replacing(config, registry, None)
+            .await?
+            .publish())
+    }
+
+    /// Resolve `config`, keeping the cell of every value whose provider and
+    /// reference are unchanged from `previous`.
+    ///
+    /// A [`SecretRef`] a plugin already holds points at that cell, so it keeps
+    /// working and keeps its generation. A value that is new, or whose
+    /// provider or reference changed, is read into a new cell. A provider
+    /// whose settings changed is built again, and each value still bound to
+    /// it is re-read into the cell it already has; those bytes stay pending
+    /// until [`ReloadedSecrets::publish`], so one failed read leaves every
+    /// cell the running store shares untouched.
+    ///
+    /// An identical provider declaration reuses the provider itself. A Vault
+    /// session, or any other state the provider holds, survives the reload
+    /// instead of being logged in for again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecretResolveError`] naming the value and provider that
+    /// failed, as [`Self::resolve`] does. Nothing on `previous` is modified.
+    pub(crate) async fn resolve_replacing(
+        config: &SecretsConfig,
+        registry: &SecretProviderRegistry,
+        previous: Option<&Self>,
+    ) -> Result<ReloadedSecrets, SecretResolveError> {
         config.validate().map_err(|source| SecretResolveError {
             secret: String::new(),
             provider: String::new(),
@@ -301,20 +431,40 @@ impl SecretStore {
         })?;
 
         let mut providers: HashMap<String, Arc<dyn SecretProvider>> = HashMap::new();
+        let mut reused_provider: HashMap<String, bool> = HashMap::new();
         let mut declared_providers: Vec<_> = config.providers.iter().collect();
         declared_providers.sort_by(|a, b| a.0.cmp(b.0));
         for (name, declared) in declared_providers {
-            let provider = registry
-                .build(name, declared)
-                .map_err(|source| SecretResolveError {
-                    secret: String::new(),
-                    provider: name.clone(),
-                    source,
-                })?;
+            let reused = previous.and_then(|previous| {
+                if previous.declared.providers.get(name) != Some(declared) {
+                    return None;
+                }
+                // The provider lives on the bindings that use it. One with no
+                // values was never built into something that can be reused.
+                previous
+                    .values
+                    .values()
+                    .find(|binding| binding.provider_name == *name)
+                    .map(|binding| Arc::clone(&binding.provider))
+            });
+            let was_reused = reused.is_some();
+            let provider = match reused {
+                Some(provider) => provider,
+                None => registry
+                    .build(name, declared)
+                    .map_err(|source| SecretResolveError {
+                        secret: String::new(),
+                        provider: name.clone(),
+                        source,
+                    })?,
+            };
+            reused_provider.insert(name.clone(), was_reused);
             providers.insert(name.clone(), provider);
         }
 
         let mut values = HashMap::new();
+        let mut updates = Vec::new();
+        let mut carried = 0;
         let mut declared_values: Vec<_> = config.values.iter().collect();
         declared_values.sort_by(|a, b| a.0.cmp(b.0));
         for (name, declared) in declared_values {
@@ -332,47 +482,96 @@ impl SecretStore {
                     )),
                 });
             };
-            let value = provider
-                .get_secret(&declared.reference)
-                .await
-                .map_err(|source| SecretResolveError {
-                    secret: name.clone(),
-                    provider: declared.provider.clone(),
-                    source,
-                })?;
+            let carried_cell = previous.and_then(|previous| {
+                let binding = previous.values.get(name)?;
+                (binding.provider_name == declared.provider
+                    && binding.reference == declared.reference)
+                    .then(|| Arc::clone(&binding.cell))
+            });
+            let cell = if let Some(cell) = carried_cell {
+                carried += 1;
+                // The declaration is the same, but the provider behind it was
+                // rebuilt. Read the new backend now so a failure refuses the
+                // reload, and hold the bytes until publish so the shared cell
+                // stays on the previous value if a later read fails.
+                if !reused_provider
+                    .get(&declared.provider)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    let value =
+                        provider
+                            .get_secret(&declared.reference)
+                            .await
+                            .map_err(|source| SecretResolveError {
+                                secret: name.clone(),
+                                provider: declared.provider.clone(),
+                                source,
+                            })?;
+                    updates.push((name.clone(), Arc::clone(&cell), value));
+                }
+                cell
+            } else {
+                let value = provider
+                    .get_secret(&declared.reference)
+                    .await
+                    .map_err(|source| SecretResolveError {
+                        secret: name.clone(),
+                        provider: declared.provider.clone(),
+                        source,
+                    })?;
+                Arc::new(SecretCell::new(value))
+            };
             values.insert(
                 name.clone(),
                 Binding {
                     provider_name: declared.provider.clone(),
                     provider: Arc::clone(provider),
                     reference: declared.reference.clone(),
-                    cell: Arc::new(SecretCell::new(value)),
+                    cell,
                 },
             );
         }
 
-        // Every value read, so every provider has confirmed its credentials
-        // against its backend as of now.
+        // A reused provider was not necessarily re-read, so its health is the
+        // one the previous store already had. Copying the snapshot rather than
+        // sharing the slot keeps a refresh of the store being replaced from
+        // writing health into the one about to be published. A rebuilt
+        // provider has just confirmed its credentials, which is a fresh
+        // success.
         let resolved_at = Utc::now();
-        let health = providers
-            .keys()
-            .map(|name| {
-                (
-                    name.clone(),
-                    ArcSwap::from_pointee(ProviderHealth {
-                        last_success: Some(resolved_at),
-                        last_failure: None,
-                        failing: false,
-                    }),
-                )
-            })
-            .collect();
+        let mut health = HashMap::new();
+        for name in providers.keys() {
+            let reused = reused_provider.get(name).copied().unwrap_or(false);
+            let snapshot = if reused {
+                previous
+                    .and_then(|previous| previous.health.get(name))
+                    .map(|slot| ProviderHealth::clone(&slot.load()))
+            } else {
+                None
+            };
+            health.insert(
+                name.clone(),
+                ArcSwap::from_pointee(snapshot.unwrap_or(ProviderHealth {
+                    last_success: Some(resolved_at),
+                    last_failure: None,
+                    failing: false,
+                })),
+            );
+        }
 
-        Ok(Self {
-            declared: config.clone(),
-            values,
-            health,
-            refresh_lock: Mutex::new(()),
+        let gate = previous.map_or_else(RefreshGate::new, |previous| Arc::clone(&previous.gate));
+
+        Ok(ReloadedSecrets {
+            store: Self {
+                declared: config.clone(),
+                values,
+                health,
+                gate,
+                retired: Arc::new(AtomicBool::new(false)),
+            },
+            updates,
+            carried,
         })
     }
 
@@ -383,15 +582,26 @@ impl SecretStore {
             declared: SecretsConfig::default(),
             values: HashMap::new(),
             health: HashMap::new(),
-            refresh_lock: Mutex::new(()),
+            gate: RefreshGate::new(),
+            retired: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// The store is being replaced. Refreshes against it must not write cells
+    /// it may share with the replacement.
+    pub(crate) fn retire(&self) {
+        self.retired.store(true, AtomicOrdering::Release);
+    }
+
+    /// Hold the refresh lock until publication or a refresh finishes.
+    pub(crate) async fn lock_refresh(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gate.lock.lock().await
     }
 
     /// The `secrets:` block these values were resolved from.
     ///
-    /// What a reload compares against. Values are read once, during
-    /// `initialize`, so a document declaring anything else describes bindings
-    /// the process does not have.
+    /// What a synchronous reload compares against. A reload that re-resolves
+    /// publishes another store; this one still describes the values it holds.
     #[must_use]
     pub fn declared(&self) -> &SecretsConfig {
         &self.declared
@@ -477,29 +687,53 @@ impl SecretStore {
     /// Values are re-read a provider at a time, so one backend's reads stay
     /// together and a host can reason about the load it puts on each.
     pub async fn refresh(&self) -> RefreshReport {
-        let _guard = self.refresh_lock.lock().await;
+        let ticket = {
+            let _guard = self.gate.lock.lock().await;
+            if self.retired.load(AtomicOrdering::Acquire) {
+                return RefreshReport::default();
+            }
+            self.gate.next.fetch_add(1, AtomicOrdering::AcqRel) + 1
+        };
 
-        let mut by_provider: BTreeMap<&str, Vec<(&str, &Binding)>> = BTreeMap::new();
+        let mut by_provider: BTreeMap<
+            &str,
+            Vec<(&str, Arc<SecretCell>, Arc<dyn SecretProvider>, String)>,
+        > = BTreeMap::new();
         for (name, binding) in &self.values {
             by_provider
                 .entry(binding.provider_name.as_str())
                 .or_default()
-                .push((name.as_str(), binding));
+                .push((
+                    name.as_str(),
+                    Arc::clone(&binding.cell),
+                    Arc::clone(&binding.provider),
+                    binding.reference.clone(),
+                ));
         }
 
         let mut report = RefreshReport::default();
         for (provider_name, mut bound) in by_provider {
-            bound.sort_unstable_by_key(|(name, _)| *name);
+            bound.sort_unstable_by_key(|(name, _, _, _)| *name);
             // The first failure, since one is enough to make the provider's
             // values unconfirmed and the report carries them all anyway.
             let mut failure: Option<String> = None;
-            for (name, binding) in bound {
-                match binding.provider.get_secret(&binding.reference).await {
+            for (name, cell, provider, reference) in bound {
+                match provider.get_secret(&reference).await {
                     Ok(value) => {
-                        if binding.cell.replace_if_changed(value) {
+                        let _guard = self.gate.lock.lock().await;
+                        if self.retired.load(AtomicOrdering::Acquire)
+                            || ticket < self.gate.applied.load(AtomicOrdering::Acquire)
+                        {
+                            return RefreshReport::default();
+                        }
+                        if cell.replace_if_changed(value) {
                             report.updated.push(name.to_owned());
                         } else {
                             report.unchanged += 1;
+                        }
+                        let applied = self.gate.applied.load(AtomicOrdering::Acquire);
+                        if ticket > applied {
+                            self.gate.applied.store(ticket, AtomicOrdering::Release);
                         }
                     },
                     Err(source) => {
@@ -513,6 +747,12 @@ impl SecretStore {
                         });
                     },
                 }
+            }
+            let _guard = self.gate.lock.lock().await;
+            if self.retired.load(AtomicOrdering::Acquire)
+                || ticket < self.gate.applied.load(AtomicOrdering::Acquire)
+            {
+                return RefreshReport::default();
             }
             self.record_refresh(provider_name, failure);
         }
@@ -591,7 +831,8 @@ pub(crate) fn fixed(name: &str, value: &str) -> SecretStore {
         declared: SecretsConfig::default(),
         values,
         health: HashMap::new(),
-        refresh_lock: Mutex::new(()),
+        gate: RefreshGate::new(),
+        retired: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -604,10 +845,12 @@ pub(crate) fn fixed(name: &str, value: &str) -> SecretStore {
     reason = "tests"
 )]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::Ordering;
 
     use async_trait::async_trait;
 
+    use super::super::config::SecretProviderConfig;
+    use super::super::provider::SecretProviderFactory;
     use super::*;
 
     /// A provider whose answers the test controls.
@@ -684,8 +927,62 @@ mod tests {
             declared: SecretsConfig::default(),
             values,
             health,
-            refresh_lock: Mutex::new(()),
+            gate: RefreshGate::new(),
+            retired: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn scripted_config(values: &str) -> SecretsConfig {
+        scripted_config_with_tag("initial", values)
+    }
+
+    fn scripted_config_with_tag(tag: &str, values: &str) -> SecretsConfig {
+        serde_yaml::from_str(&format!(
+            "
+providers:
+  scripted: {{ kind: scripted, tag: {tag} }}
+values:
+{values}
+"
+        ))
+        .expect("valid yaml")
+    }
+
+    #[tokio::test]
+    async fn a_retired_stores_refresh_does_not_overwrite_a_shared_cell() {
+        let provider = Scripted::new("before-reload");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let first = SecretStore::resolve(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+        )
+        .await
+        .expect("resolves");
+        let handle = first.secret("api_key").expect("declared");
+
+        provider.set("after-reload");
+        let reloaded = SecretStore::resolve_replacing(
+            &scripted_config_with_tag("rebuilt", "  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+            Some(&first),
+        )
+        .await
+        .expect("the provider is rebuilt")
+        .publish();
+
+        first.retire();
+        provider.set("stale-from-old-refresh");
+        let report = first.refresh().await;
+        assert!(report.is_ok(), "{report:?}");
+        assert!(
+            report.updated.is_empty() && report.unchanged == 0 && report.failed.is_empty(),
+            "a retired store reports nothing: {report:?}"
+        );
+        assert_eq!(handle.get().as_str(), "after-reload");
+        assert_eq!(
+            reloaded.value("api_key").expect("declared").as_str(),
+            "after-reload"
+        );
     }
 
     #[tokio::test]
@@ -810,6 +1107,86 @@ mod tests {
         assert_eq!(provider.reads(), 2, "each refresh reads once, in turn");
     }
 
+    /// The first refresh captures its answer and waits. The second refresh
+    /// finishes first. The late completion must not put the older bytes back.
+    #[tokio::test]
+    async fn an_older_refresh_does_not_overwrite_a_newer_one() {
+        struct Suspending {
+            answer: std::sync::Mutex<String>,
+            reads: AtomicU64,
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+
+        #[async_trait]
+        impl SecretProvider for Suspending {
+            async fn get_secret(&self, _reference: &str) -> Result<Zeroizing<String>, SecretError> {
+                let read = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
+                let value = self.answer.lock().expect("not poisoned").clone();
+                if read == 1 {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Ok(Zeroizing::new(value))
+            }
+        }
+
+        let provider = Arc::new(Suspending {
+            answer: std::sync::Mutex::new("older".to_owned()),
+            reads: AtomicU64::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let provider_dyn: Arc<dyn SecretProvider> = provider.clone();
+        let mut values = HashMap::new();
+        values.insert(
+            "api_key".to_owned(),
+            Binding {
+                provider_name: "scripted".to_owned(),
+                provider: provider_dyn,
+                reference: "ignored".to_owned(),
+                cell: Arc::new(SecretCell::new(Zeroizing::new("base".to_owned()))),
+            },
+        );
+        let mut health = HashMap::new();
+        health.insert(
+            "scripted".to_owned(),
+            ArcSwap::from_pointee(ProviderHealth {
+                last_success: None,
+                last_failure: None,
+                failing: false,
+            }),
+        );
+        let store = Arc::new(SecretStore {
+            declared: SecretsConfig::default(),
+            values,
+            health,
+            gate: RefreshGate::new(),
+            retired: Arc::new(AtomicBool::new(false)),
+        });
+        let handle = store.secret("api_key").expect("declared");
+
+        let older = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.refresh().await })
+        };
+        provider.entered.notified().await;
+
+        *provider.answer.lock().expect("not poisoned") = "newer".to_owned();
+        let newer = store.refresh().await;
+        assert!(newer.is_ok(), "{newer:?}");
+        assert_eq!(handle.get().as_str(), "newer");
+
+        provider.release.notify_one();
+        let older = older.await.expect("the older refresh does not panic");
+        assert!(older.is_ok(), "{older:?}");
+        assert_eq!(
+            handle.get().as_str(),
+            "newer",
+            "the refresh that started first must not replace the newer credential"
+        );
+    }
+
     /// Refresh while a consumer reads. Every value the scripted provider
     /// returns names the generation it produces, so a snapshot pairing bytes
     /// with a generation from either side of a refresh fails the invariant.
@@ -885,5 +1262,132 @@ values:
         assert_eq!(err.secret, "absent_key");
         assert_eq!(err.provider, "shell");
         assert!(format!("{err}").contains("absent_key"), "{err}");
+    }
+
+    /// Hands back one scripted provider, ignoring the declared settings.
+    struct ScriptedFactory {
+        provider: Arc<Scripted>,
+    }
+
+    impl SecretProviderFactory for ScriptedFactory {
+        fn kind(&self) -> &str {
+            "scripted"
+        }
+
+        fn build(
+            &self,
+            _config: &SecretProviderConfig,
+        ) -> Result<Arc<dyn SecretProvider>, SecretError> {
+            let provider = Arc::clone(&self.provider);
+            Ok(provider)
+        }
+    }
+
+    fn scripted_registry(provider: Arc<Scripted>) -> SecretProviderRegistry {
+        let mut registry = SecretProviderRegistry::new();
+        registry.register(Box::new(ScriptedFactory { provider }));
+        registry
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_value_keeps_its_cell_when_another_is_added() {
+        let provider = Scripted::new("hunter2");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let first = SecretStore::resolve(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+        )
+        .await
+        .expect("resolves");
+        let handle = first.secret("api_key").expect("declared");
+
+        let replaced = SecretStore::resolve_replacing(
+            &scripted_config(
+                "  api_key: { provider: scripted, ref: first }\n  \
+                 second_key: { provider: scripted, ref: second }\n",
+            ),
+            &registry,
+            Some(&first),
+        )
+        .await
+        .expect("the added value resolves")
+        .publish();
+
+        provider.set("rotated");
+        let report = replaced.refresh().await;
+        assert!(report.is_ok(), "{report:?}");
+        assert_eq!(
+            handle.get().as_str(),
+            "rotated",
+            "the handle from before the reload reads the cell the new store refreshes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_reference_gets_a_new_cell() {
+        let provider = Scripted::new("hunter2");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let first = SecretStore::resolve(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+        )
+        .await
+        .expect("resolves");
+        let handle = first.secret("api_key").expect("declared");
+
+        provider.set("other");
+        let replaced = SecretStore::resolve_replacing(
+            &scripted_config("  api_key: { provider: scripted, ref: second }\n"),
+            &registry,
+            Some(&first),
+        )
+        .await
+        .expect("the new reference resolves")
+        .publish();
+
+        assert_eq!(
+            handle.get().as_str(),
+            "hunter2",
+            "a changed reference does not write the cell the old handle holds"
+        );
+        assert_eq!(
+            replaced.value("api_key").expect("declared").as_str(),
+            "other"
+        );
+
+        provider.set("third");
+        replaced.refresh().await;
+        assert_eq!(handle.get().as_str(), "hunter2");
+        assert_eq!(
+            replaced.value("api_key").expect("declared").as_str(),
+            "third"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_replacement_does_not_touch_the_previous_cell() {
+        let provider = Scripted::new("hunter2");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let first = SecretStore::resolve(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+        )
+        .await
+        .expect("resolves");
+        let handle = first.secret("api_key").expect("declared");
+
+        provider.fail();
+        let err = SecretStore::resolve_replacing(
+            &scripted_config(
+                "  api_key: { provider: scripted, ref: first }\n  \
+                 second_key: { provider: scripted, ref: missing }\n",
+            ),
+            &registry,
+            Some(&first),
+        )
+        .await
+        .expect_err("the added value cannot be read");
+        assert_eq!(err.secret, "second_key");
+        assert_eq!(handle.get().as_str(), "hunter2");
     }
 }
