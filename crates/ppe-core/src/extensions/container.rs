@@ -335,6 +335,16 @@ impl Extensions {
     /// Arc pointers, or when the original is `None` but modified is
     /// `Some` (the plugin fabricated a slot it shouldn't have).
     pub fn validate_immutable(&self, modified: &OwnedExtensions) -> bool {
+        self.validate_immutable_with_metadata(modified, false)
+    }
+
+    /// Validate immutable slots while optionally permitting framework metadata
+    /// publication after typed acquisition.
+    pub(crate) fn validate_immutable_with_metadata(
+        &self,
+        modified: &OwnedExtensions,
+        allow_metadata: bool,
+    ) -> bool {
         fn ptr_eq_opt<T>(a: Option<&Arc<T>>, b: Option<&Arc<T>>) -> bool {
             match (a, b) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -357,7 +367,7 @@ impl Extensions {
             }
             && ptr_eq_opt(self.framework.as_ref(), modified.framework.as_ref())
             && ptr_eq_opt(self.meta.as_ref(), modified.meta.as_ref())
-            && ptr_eq_opt(self.metadata.as_ref(), modified.metadata.as_ref())
+            && (allow_metadata || ptr_eq_opt(self.metadata.as_ref(), modified.metadata.as_ref()))
         // NOTE: `raw_credentials` is INTENTIONALLY excluded from the
         // immutable check. Framework orchestrators (praxis-policy-apl-runtime's
         // DelegationPluginInvoker) legitimately write

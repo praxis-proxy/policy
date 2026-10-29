@@ -71,16 +71,20 @@ use tokio::sync::Mutex;
 
 use praxis_policy_core::cmf::CmfHook;
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::extensions::MetadataOutcome;
 use praxis_policy_core::hooks::HookPhase;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::HookTypeDef;
 use praxis_policy_core::http_hook::HttpHook;
+use praxis_policy_core::metadata::{MetadataFetchHook, MetadataFetchRequest};
+use praxis_policy_core::plugin::OnError;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::pipeline::{TaintEvent, TaintScope};
 use praxis_policy_apl_core::step::{
-    DispatchPhase, PluginError, PluginInvocation, PluginInvoker, PluginOutcome,
+    DispatchPhase, FetchStep, MetadataFetchError, MetadataFetchOutcome, PluginError,
+    PluginInvocation, PluginInvoker, PluginOutcome,
 };
 
 use crate::dispatch_plan::RouteDispatchPlan;
@@ -514,6 +518,74 @@ where
             taints,
             modified_value,
         })
+    }
+
+    async fn fetch_metadata(
+        &self,
+        step: &FetchStep,
+    ) -> Result<MetadataFetchOutcome, MetadataFetchError> {
+        let entry = self
+            .plan
+            .metadata_entries
+            .get(&step.plugin_name)
+            .ok_or_else(|| PluginError::NotFound(step.plugin_name.clone()))?;
+        let trusted = entry.plugin_ref.trusted_config();
+        let source_kind = trusted.kind.clone();
+        let on_error = trusted.on_error;
+        let current_extensions = self.extensions.lock().await.clone();
+        let (result, _background) = self
+            .engine
+            .invoke_entries::<MetadataFetchHook>(
+                std::slice::from_ref(entry),
+                MetadataFetchRequest::new(&step.plugin_name),
+                current_extensions.clone(),
+                None,
+            )
+            .await;
+
+        if result.is_denied() {
+            let message = result.violation.as_ref().map_or_else(
+                || "source denied without a violation".to_owned(),
+                |v| v.reason.clone(),
+            );
+            return Err(PluginError::Dispatch(message).into());
+        }
+        let facts = MetadataFetchRequest::from_pipeline_result(&result)
+            .and_then(|request| request.facts())
+            .cloned()
+            .ok_or_else(|| {
+                PluginError::Dispatch(format!(
+                    "metadata source `{}` returned no AcquiredFacts record",
+                    step.plugin_name
+                ))
+            })?;
+
+        facts
+            .validate()
+            .map_err(|error| PluginError::Dispatch(error.to_string()))?;
+
+        if facts.outcome() == MetadataOutcome::Error && on_error != OnError::Ignore {
+            let Some(code) = facts.error_code() else {
+                return Err(PluginError::Dispatch(
+                    "validated metadata error record has no error code".to_owned(),
+                )
+                .into());
+            };
+            return Err(MetadataFetchError::Source {
+                code: code.to_owned(),
+            });
+        }
+
+        let mut updated = current_extensions;
+        updated
+            .install_metadata(&step.plugin_name, &source_kind, facts)
+            .map_err(|error| PluginError::Dispatch(error.to_string()))?;
+        let mut attributes = AttributeBag::new();
+        if let Some(metadata) = updated.metadata.as_deref() {
+            praxis_policy_apl_cmf::extract_metadata(metadata, &mut attributes);
+        }
+        *self.extensions.lock().await = updated;
+        Ok(MetadataFetchOutcome { attributes })
     }
 }
 

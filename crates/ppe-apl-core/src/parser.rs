@@ -1161,6 +1161,26 @@ pub fn parse_step(value: &serde_yaml::Value, source: &str) -> Result<Step, Parse
 fn parse_step_string(line: &str, source: &str) -> Result<Step, ParseError> {
     let trimmed = line.trim();
 
+    if trimmed.starts_with("fetch(") {
+        let inside = extract_call_args(trimmed, "fetch").ok_or_else(|| ParseError::Rule {
+            rule: trimmed.to_owned(),
+            msg: "malformed `fetch(...)`".into(),
+        })?;
+        let name = inside.trim();
+        if !is_valid_metadata_instance_name(name) {
+            return Err(ParseError::Rule {
+                rule: trimmed.to_owned(),
+                msg: "`fetch(...)`: metadata source name must match \
+                      `[A-Za-z_][A-Za-z0-9_]*`"
+                    .into(),
+            });
+        }
+        return Ok(Step::Fetch(crate::step::FetchStep {
+            plugin_name: name.to_owned(),
+            source: source.to_owned(),
+        }));
+    }
+
     // taint(...) — emit as Step::Taint, reusing the pipeline parser's logic
     // so the shape stays consistent with field-level taint.
     if trimmed.starts_with("taint(") {
@@ -1256,6 +1276,14 @@ fn parse_step_string(line: &str, source: &str) -> Result<Step, ParseError> {
     // Otherwise fall through to the rule parser — predicate-and-action.
     let rule = parse_rule(trimmed, source)?;
     Ok(Step::Rule(rule))
+}
+
+fn is_valid_metadata_instance_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 /// Intermediate shape produced by [`parse_delegate_call_args`]. The
@@ -2469,6 +2497,7 @@ pub(crate) fn step_to_top_level_effect(step: Step) -> Result<Effect, ParseError>
             })
         },
         Step::Plugin { name } => Ok(Effect::Plugin { name }),
+        Step::Fetch(fetch) => Ok(Effect::Fetch(fetch)),
         Step::Delegate(d) => Ok(Effect::Delegate(d)),
         Step::Elicit(e) => Ok(Effect::Elicit(e)),
         Step::Taint { label, scopes } => Ok(Effect::Taint { label, scopes }),
@@ -2479,6 +2508,7 @@ pub(crate) fn step_to_top_level_effect(step: Step) -> Result<Effect, ParseError>
 fn step_to_effect(step: Step, source: &str) -> Result<Effect, ParseError> {
     match step {
         Step::Plugin { name } => Ok(Effect::Plugin { name }),
+        Step::Fetch(fetch) => Ok(Effect::Fetch(fetch)),
         Step::Delegate(d) => Ok(Effect::Delegate(d)),
         Step::Elicit(e) => Ok(Effect::Elicit(e)),
         Step::Taint { label, scopes } => Ok(Effect::Taint { label, scopes }),
@@ -3238,7 +3268,16 @@ fn compile_apl_blocks(source: &str, raw: RouteYaml) -> Result<CompiledRoute, Par
     }
     for (i, entry) in auth_post.iter().enumerate() {
         let step = parse_step(entry, &format!("{source}.post_invocation[{i}]"))?;
-        route.post_invocation.push(step_to_top_level_effect(step)?);
+        let effect = step_to_top_level_effect(step)?;
+        let mut fetches = Vec::new();
+        effect.collect_fetch_names(&mut fetches);
+        if !fetches.is_empty() {
+            return Err(ParseError::Rule {
+                rule: format!("{source}.post_invocation[{i}]"),
+                msg: "`fetch(...)` is allowed only in authorization.pre_invocation".into(),
+            });
+        }
+        route.post_invocation.push(effect);
     }
     for (half, entries, out) in [
         ("args", &raw.args, &mut route.args),
@@ -3254,6 +3293,13 @@ fn compile_apl_blocks(source: &str, raw: RouteYaml) -> Result<CompiledRoute, Par
         }
     }
     route.plugin_overrides = raw.plugins;
+
+    if let Some(duplicate) = route.duplicate_fetch_name() {
+        return Err(ParseError::Rule {
+            rule: format!("{source}.pre_invocation"),
+            msg: format!("metadata source `{duplicate}` is fetched more than once"),
+        });
+    }
 
     // Elicitations within a phase share one id. Cross-layer duplicates are
     // checked again by the visitor after route stacking.
@@ -4967,6 +5013,83 @@ route:
             format!("{err}").contains("run("),
             "error should name `run(...)`: {err}"
         );
+    }
+
+    #[test]
+    fn fetch_compiles_to_dedicated_effect() {
+        let yaml = r#"
+route:
+  authorization:
+    pre_invocation:
+      - "fetch(account)"
+"#;
+        let route = compile_test_route("metadata", yaml).unwrap();
+        match &route.pre_invocation[0] {
+            Effect::Fetch(step) => {
+                assert_eq!(step.plugin_name, "account");
+                assert!(step.source.contains("pre_invocation[0]"));
+            },
+            other => panic!("expected Effect::Fetch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_is_rejected_after_invocation() {
+        let yaml = r#"
+route:
+  authorization:
+    post_invocation:
+      - "fetch(account)"
+"#;
+        let error = compile_test_route("metadata", yaml).unwrap_err();
+        assert_rejected(error, "allowed only in authorization.pre_invocation");
+    }
+
+    #[test]
+    fn fetch_rejects_ambiguous_metadata_instance_name() {
+        let yaml = r#"
+route:
+  authorization:
+    pre_invocation:
+      - "fetch(account.v2)"
+"#;
+        let error = compile_test_route("metadata", yaml).unwrap_err();
+        assert_rejected(error, "[A-Za-z_][A-Za-z0-9_]*");
+    }
+
+    #[test]
+    fn duplicate_fetches_across_conditional_branches_are_rejected() {
+        let yaml = r#"
+route:
+  authorization:
+    pre_invocation:
+      - when: subject.admin
+        do: "fetch(account)"
+      - when: "!subject.admin"
+        do: "fetch(account)"
+"#;
+        let error = compile_test_route("metadata", yaml).unwrap_err();
+        assert_rejected(error, "fetched more than once");
+    }
+
+    #[test]
+    fn distinct_fetches_are_accepted() {
+        let yaml = r#"
+route:
+  authorization:
+    pre_invocation:
+      - "fetch(account)"
+      - "fetch(risk)"
+"#;
+        let route = compile_test_route("metadata", yaml).unwrap();
+        assert_eq!(route.pre_invocation.len(), 2);
+    }
+
+    #[test]
+    fn parallel_rejects_fetch() {
+        let error =
+            parse_step_yaml("parallel:\n  - \"fetch(account)\"\n  - \"run(audit)\"").unwrap_err();
+        assert_rejected(error, "mutation");
     }
 
     #[test]

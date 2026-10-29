@@ -85,12 +85,12 @@ use praxis_policy_core::config::{
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
 use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
-use praxis_policy_core::plugin::PluginConfig;
+use praxis_policy_core::plugin::{PluginConfig, PluginMode};
 use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
 
 use praxis_policy_apl_core::attribute_source::{AttributeSource as _, AttributeTree};
 use praxis_policy_apl_core::parser::compile_policy_block_value;
-use praxis_policy_apl_core::plugin_decl::{PluginDeclaration, PluginRegistry};
+use praxis_policy_apl_core::plugin_decl::{EffectivePlugin, PluginDeclaration, PluginRegistry};
 use praxis_policy_apl_core::rules::{CompiledRoute, DenyResponse, Effect};
 use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
@@ -692,7 +692,8 @@ impl AplConfigVisitor {
     fn record_reached_layer_names(&self, route: &CompiledRoute) {
         let (pre, post) = crate::dispatch_plan::collect_plugin_names_by_half(route);
         let names: Vec<String> = pre.into_iter().chain(post).collect();
-        if names.is_empty() {
+        let family_fixed = crate::dispatch_plan::collect_family_fixed_plugin_hooks(route);
+        if names.is_empty() && family_fixed.is_empty() {
             return;
         }
         let mut state = self
@@ -700,6 +701,14 @@ impl AplConfigVisitor {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.reached_plugin_names.extend(names);
+        for (name, hook) in family_fixed {
+            state.reached_plugin_names.insert(name.clone());
+            state
+                .reached_plugin_hooks
+                .entry(name)
+                .or_default()
+                .insert(hook.to_owned());
+        }
     }
 
     /// Tally the plugins an `authentication:` block names. Those reach the
@@ -732,6 +741,27 @@ impl AplConfigVisitor {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for (name, reached) in &state.reached_plugin_hooks {
+            if !reached.contains(praxis_policy_core::metadata::HOOK_METADATA_FETCH) {
+                continue;
+            }
+            let Some(declared) = state.declared_plugin_hooks.get(name) else {
+                return Err(format!(
+                    "metadata source `{name}` is unreachable: no plugin with that name is declared"
+                )
+                .into());
+            };
+            if !declared
+                .iter()
+                .any(|hook| hook == praxis_policy_core::metadata::HOOK_METADATA_FETCH)
+            {
+                return Err(format!(
+                    "metadata source `{name}` is incompatible with `fetch(...)`: it must declare the `metadata.fetch` hook"
+                )
+                .into());
+            }
+        }
 
         let mut unreached: Vec<&str> = state
             .declared_plugin_hooks
@@ -908,6 +938,13 @@ impl ConfigVisitor for AplConfigVisitor {
         )?;
         // A `response:` block at the global scope is the catch-all denyWith.
         compiled.response = response_subblock(yaml, "global");
+        let plugin_registry = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .plugin_registry
+            .clone();
+        validate_metadata_fetch_sources("global", &compiled, &plugin_registry, mgr)?;
 
         // Install catch-all handlers so the global policy also evaluates for
         // generic (non-MCP/A2A) HTTP requests, which carry no entity.
@@ -1265,6 +1302,14 @@ impl ConfigVisitor for AplConfigVisitor {
                 }
             }
 
+            if let Some(duplicate) = effective.duplicate_fetch_name() {
+                return Err(format!(
+                    "route '{route_key}': metadata source `{duplicate}` is fetched more than once"
+                )
+                .into());
+            }
+            validate_metadata_fetch_sources(&route_key, &effective, plugin_registry.as_ref(), mgr)?;
+
             // Each half installs only when the effective route declares steps
             // for it, the way the global catch-all already decides.
             let installs_pre = declares_pre_phase(&effective);
@@ -1451,6 +1496,7 @@ fn install_handler(
     // intrinsic like `read_headers`. It is a no-op when nothing is installed.
     // Plugins dispatched from the route still need their own `read_metadata`.
     capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
+    capabilities.insert(praxis_policy_core::extensions::CAP_FRAMEWORK_PUBLISH_METADATA.to_owned());
     // The APL engine emits the backend candidate constraint (the `restrict`
     // effect's output) into `Extensions.candidate_constraint`. That slot is
     // write-gated in the executor, so the synthetic handler holds the write
@@ -1551,6 +1597,7 @@ fn warn_unreferenced_plugin_overrides(route: &CompiledRoute) {
             .into_iter()
             .collect();
     referenced.extend(crate::dispatch_plan::collect_delegate_plugin_names(route));
+    referenced.extend(crate::dispatch_plan::collect_fetch_plugin_names(route));
     for name in route.plugin_overrides.keys() {
         if !referenced.contains(name) {
             tracing::warn!(
@@ -1593,6 +1640,48 @@ fn plugin_config_to_yaml(cfg: Option<&serde_json::Value>) -> Option<serde_yaml::
 /// APL spec also allows custom orchestrator-defined error modes).
 fn on_error_to_string(on_err: &praxis_policy_core::plugin::OnError) -> String {
     on_err.to_string()
+}
+
+fn validate_metadata_fetch_sources(
+    location: &str,
+    route: &CompiledRoute,
+    registry: &PluginRegistry,
+    engine: &PolicyEngine,
+) -> Result<(), VisitorError> {
+    let mut names = Vec::new();
+    for effect in &route.pre_invocation {
+        effect.collect_fetch_names(&mut names);
+    }
+    names.sort_unstable();
+    names.dedup();
+
+    for name in names {
+        let Some(effective) = EffectivePlugin::resolve(&name, registry, &route.plugin_overrides)
+        else {
+            continue;
+        };
+        let on_error = effective.on_error.unwrap_or("fail");
+        if !on_error.eq_ignore_ascii_case("fail") && !on_error.eq_ignore_ascii_case("ignore") {
+            return Err(format!(
+                "{location}: metadata source `{name}` uses unsupported on_error `{on_error}`; \
+                 fetch sources support only `fail` or `ignore`"
+            )
+            .into());
+        }
+
+        let Some(plugin) = engine.get_plugin(&name) else {
+            continue;
+        };
+        let mode = plugin.mode();
+        if mode != PluginMode::Sequential {
+            return Err(format!(
+                "{location}: metadata source `{name}` uses mode `{mode}`; fetch sources must use \
+                 `sequential` so their AcquiredFacts result can be awaited and published"
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Assemble a section's APL block from the terms written directly on it.

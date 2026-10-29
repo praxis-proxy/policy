@@ -25,6 +25,13 @@ The hook names a plugin declares in `hooks:` come from a fixed table:
 | Identity | `identity.resolve` |
 | Delegation | `token.delegate` |
 | Elicitation | `elicit` |
+| Metadata | `metadata.fetch` |
+
+`metadata.fetch` is an unphased PPE policy operation, not an HTTP request or
+response lifecycle hook. Its typed request selects one configured source by
+plugin instance name. The source receives the ordinary capability-filtered
+extension view and returns an acquired-facts record; framework code owns
+validation, provenance stamping, and installation of that record.
 
 `http.response` is the return half of the generic HTTP path, installed
 when a global `result:` or `post_invocation:` block exists. Response

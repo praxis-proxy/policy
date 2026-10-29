@@ -27,6 +27,7 @@
 //                     minting for downstream calls)
 // - [`elicitation`] — Elicitation hook family (human-in-the-loop:
 //                     approval, confirmation, step-up, …)
+// - [`metadata`] — named policy-information source dispatch
 // - [`error`] — Error types, violations, and result types
 
 //! The plugin runtime: engine, executor, hook registry, and config parser.
@@ -90,6 +91,8 @@ pub mod http_retry;
 pub mod http_testing;
 /// The identity resolution hook and its payload.
 pub mod identity;
+/// Typed metadata-source hook and request/result contract.
+pub mod metadata;
 /// The `Plugin` trait and its trusted configuration.
 pub mod plugin;
 /// Curated re-exports for plugin authors.

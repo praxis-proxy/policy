@@ -100,6 +100,11 @@ impl AttributeBag {
         self.attrs.insert(key.into(), value.into());
     }
 
+    /// Merge all attributes from `other`, replacing keys already present.
+    pub fn extend(&mut self, other: Self) {
+        self.attrs.extend(other.attrs);
+    }
+
     /// The value at `key`, if present.
     pub fn get(&self, key: &str) -> Option<&AttributeValue> {
         self.attrs.get(key)

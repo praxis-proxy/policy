@@ -203,6 +203,8 @@ pub enum Effect {
         /// The plugin to invoke, as registered.
         name: String,
     },
+    /// Acquire one named metadata record and refresh the policy bag.
+    Fetch(crate::step::FetchStep),
     /// Mint a downstream credential for a target audience.
     Delegate(crate::step::DelegateStep),
     /// Elicitation effect — dispatch a question to a human (approval,
@@ -310,7 +312,9 @@ impl Effect {
             // `Elicit` has an external side effect (posts to a channel,
             // registers an intent) — like `Delegate` it must not sit in
             // a `Parallel` branch that could be silently discarded.
-            Effect::FieldOp { .. } | Effect::Delegate(_) | Effect::Elicit(_) => true,
+            Effect::FieldOp { .. } | Effect::Delegate(_) | Effect::Elicit(_) | Effect::Fetch(_) => {
+                true
+            },
             Effect::Sequential(effects) | Effect::Parallel(effects) => {
                 effects.iter().any(Effect::contains_mutation)
             },
@@ -358,7 +362,33 @@ impl Effect {
             | Effect::Taint { .. }
             | Effect::Restrict { .. }
             | Effect::FieldOp { .. }
-            | Effect::Delegate(_) => 0,
+            | Effect::Delegate(_)
+            | Effect::Fetch(_) => 0,
+        }
+    }
+
+    /// Append every syntactic metadata source name in this subtree.
+    pub fn collect_fetch_names(&self, names: &mut Vec<String>) {
+        match self {
+            Effect::Fetch(step) => names.push(step.plugin_name.clone()),
+            Effect::Sequential(effects) | Effect::Parallel(effects) => {
+                for effect in effects {
+                    effect.collect_fetch_names(names);
+                }
+            },
+            Effect::When { body, .. } => {
+                for effect in body {
+                    effect.collect_fetch_names(names);
+                }
+            },
+            Effect::Pdp {
+                on_allow, on_deny, ..
+            } => {
+                for effect in on_allow.iter().chain(on_deny) {
+                    effect.collect_fetch_names(names);
+                }
+            },
+            _ => {},
         }
     }
 
@@ -600,6 +630,16 @@ impl CompiledRoute {
             set.insert(Phase::PostInvocation);
         }
         set
+    }
+
+    /// Return the first metadata source fetched more than once in this route.
+    pub fn duplicate_fetch_name(&self) -> Option<String> {
+        let mut names = std::collections::HashSet::new();
+        let mut fetches = Vec::new();
+        for effect in &self.pre_invocation {
+            effect.collect_fetch_names(&mut fetches);
+        }
+        fetches.into_iter().find(|name| !names.insert(name.clone()))
     }
 
     /// Apply a more-specific policy layer on top of this one. Used by

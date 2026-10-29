@@ -886,6 +886,11 @@ fn decorate_denial_response(violation: &mut PluginViolation, response: Option<&D
 /// the executor would care about. False positives (claiming a change
 /// when there isn't one) are cheap — the executor re-validates anyway.
 fn extensions_changed(before: &Extensions, after: &Extensions) -> bool {
+    let metadata_changed = match (before.metadata.as_ref(), after.metadata.as_ref()) {
+        (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+        (None, None) => false,
+        _ => true,
+    };
     let security_changed = match (before.security.as_ref(), after.security.as_ref()) {
         (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
         (None, None) => false,
@@ -922,7 +927,12 @@ fn extensions_changed(before: &Extensions, after: &Extensions) -> bool {
         (None, None) => false,
         _ => true,
     };
-    security_changed || delegation_changed || raw_creds_changed || http_changed || custom_changed
+    metadata_changed
+        || security_changed
+        || delegation_changed
+        || raw_creds_changed
+        || http_changed
+        || custom_changed
 }
 
 /// Extract the elicitation id an agent echoes on retry from the

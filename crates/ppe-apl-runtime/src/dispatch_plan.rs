@@ -7,9 +7,7 @@
 //
 // # Why pre-resolve?
 //
-// praxis-policy-core's `invoke_named(hook_name, ...)` resolves the lineup on
-// every call: hook lookup → route/condition filter → group by mode →
-// dispatch. APL routes are already authoritative lineups (the YAML's
+// APL routes are already authoritative lineups (the YAML's
 // `routes.<r>.pre_invocation: [run(x), run(y)]` IS the plan). Re-resolving
 // per call wastes work and lets praxis-policy-core's parallel routing model
 // (entity-based conditions) override APL's intent.
@@ -45,6 +43,7 @@ use praxis_policy_core::delegation::HOOK_TOKEN_DELEGATE;
 use praxis_policy_core::elicitation::HOOK_ELICIT;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::hooks::{HookMetadata, HookPhase, lookup_hook_metadata};
+use praxis_policy_core::metadata::HOOK_METADATA_FETCH;
 use praxis_policy_core::plugin::OnError;
 use praxis_policy_core::registry::HookEntry;
 
@@ -132,6 +131,8 @@ pub struct RouteDispatchPlan {
     /// by plugin name, not by `(kind, channel)`. Empty when the route has
     /// no elicitation.
     pub elicitation_entries: HashMap<String, HookEntry>,
+    /// Metadata source name → resolved `metadata.fetch` entry.
+    pub metadata_entries: HashMap<String, HookEntry>,
 }
 
 impl RouteDispatchPlan {
@@ -269,6 +270,44 @@ impl RouteDispatchPlan {
                     "APL route references elicitation plugin not registered under \
                      elicit hook — `require_approval(...)`/`confirm(...)` step will \
                      fail at dispatch",
+                );
+            }
+        }
+
+        for name in collect_fetch_plugin_names(route) {
+            let Some(effective) =
+                EffectivePlugin::resolve(&name, registry, &route.plugin_overrides)
+            else {
+                continue;
+            };
+            let override_block = route.plugin_overrides.get(&name);
+            let config_override = override_block.and_then(|override_| override_.config.as_ref());
+            let caps_override: Option<std::collections::HashSet<String>> = matches!(
+                effective.capabilities,
+                praxis_policy_apl_core::plugin_decl::CapsView::Override(_)
+            )
+            .then(|| effective.capabilities.as_slice().iter().cloned().collect());
+            let on_error_override = override_block
+                .and_then(|override_| override_.on_error.as_deref())
+                .and_then(parse_on_error);
+            let entries = engine
+                .build_override_entries(
+                    &name,
+                    config_override,
+                    caps_override.as_ref(),
+                    on_error_override,
+                )
+                .await;
+            if let Some((_, entry)) = entries
+                .into_iter()
+                .find(|(hook_name, _)| hook_name == HOOK_METADATA_FETCH)
+            {
+                plan.metadata_entries.insert(name, entry);
+            } else {
+                tracing::warn!(
+                    plugin = %name,
+                    route = %route.route_key,
+                    "APL route references metadata source not registered under metadata.fetch",
                 );
             }
         }
@@ -550,6 +589,21 @@ pub(crate) fn collect_elicit_plugin_names(route: &CompiledRoute) -> Vec<String> 
     out
 }
 
+/// Return unique metadata source names reached by `fetch(name)`.
+pub(crate) fn collect_fetch_plugin_names(route: &CompiledRoute) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut visit = |effect: &Effect| {
+        if let Effect::Fetch(step) = effect
+            && seen.insert(step.plugin_name.clone())
+        {
+            out.push(step.plugin_name.clone());
+        }
+    };
+    walk_effects(&route.pre_invocation, &mut visit);
+    out
+}
+
 /// Walk a `CompiledRoute` and return the unique plugin names referenced
 /// by any `Effect::Plugin` anywhere in `pre_invocation` / `post_invocation` (including
 /// nested) or `Stage::Plugin` (in `args` / `result` pipelines).
@@ -598,6 +652,7 @@ pub(crate) fn collect_plugin_names_by_half(route: &CompiledRoute) -> (Vec<String
                 Effect::Plugin { name } => name,
                 Effect::Delegate(ds) => &ds.plugin_name,
                 Effect::Elicit(es) => &es.plugin_name,
+                Effect::Fetch(step) => &step.plugin_name,
                 _ => return,
             };
             if seen.insert(name.clone()) {
@@ -649,6 +704,7 @@ pub(crate) fn collect_family_fixed_plugin_hooks(
         let pair = match e {
             Effect::Delegate(ds) => (ds.plugin_name.clone(), HOOK_TOKEN_DELEGATE),
             Effect::Elicit(es) => (es.plugin_name.clone(), HOOK_ELICIT),
+            Effect::Fetch(step) => (step.plugin_name.clone(), HOOK_METADATA_FETCH),
             _ => return,
         };
         if !out.contains(&pair) {
@@ -712,6 +768,13 @@ pub(crate) fn route_capability_union(
     let elicit_plugins = collect_elicit_plugin_names(route);
     for name in &elicit_plugins {
         if let Some(eff) = EffectivePlugin::resolve(name, registry, &route.plugin_overrides) {
+            for cap in eff.capabilities.as_slice() {
+                caps.insert(cap.clone());
+            }
+        }
+    }
+    for name in collect_fetch_plugin_names(route) {
+        if let Some(eff) = EffectivePlugin::resolve(&name, registry, &route.plugin_overrides) {
             for cap in eff.capabilities.as_slice() {
                 caps.insert(cap.clone());
             }

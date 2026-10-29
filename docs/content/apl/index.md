@@ -17,6 +17,8 @@ pipelines:
   predicates read.
 - [Static Attributes](attributes.md): operator-maintained config facts in the
   `data.*` namespace.
+- [Fetched Metadata](metadata.md): acquire request-time facts before later
+  predicates and PDP calls.
 - [Delegation](delegation.md): mint scoped downstream credentials via token
   exchange.
 - [Elicitation](elicitation.md): pause an operation for human approval and
