@@ -85,6 +85,7 @@ use crate::delegation::hook::DELEGATION_HOOK_METADATA;
 use crate::elicitation::hook::ELICITATION_HOOK_METADATA;
 use crate::http_hook::HTTP_HOOK_METADATA;
 use crate::identity::hook::IDENTITY_HOOK_METADATA;
+use crate::metadata::METADATA_HOOK_METADATA;
 
 /// Lifecycle position a hook occupies for dispatcher purposes.
 ///
@@ -190,6 +191,7 @@ const HOOK_TABLES: &[&[(&str, HookMetadata)]] = &[
     IDENTITY_HOOK_METADATA,
     DELEGATION_HOOK_METADATA,
     ELICITATION_HOOK_METADATA,
+    METADATA_HOOK_METADATA,
 ];
 
 /// How many rows the per-module tables hold between them, so the flat
@@ -311,6 +313,7 @@ mod tests {
     use crate::hooks::trait_def::HookTypeDef as _;
     use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook};
     use crate::identity::{HOOK_IDENTITY_RESOLVE, IdentityHook};
+    use crate::metadata::{HOOK_METADATA_FETCH, MetadataFetchHook};
 
     #[test]
     fn cmf_tool_pre_invoke_is_pre_phase_for_tool_entity() {
@@ -347,10 +350,15 @@ mod tests {
 
     #[test]
     fn an_unphased_hook_is_distinguishable_from_an_absent_one() {
-        // The three unphased hooks used to be indistinguishable from a
+        // The unphased hooks used to be indistinguishable from a
         // name nobody registered, which is how a missing row read as a
         // deliberate choice.
-        for name in [HOOK_IDENTITY_RESOLVE, HOOK_TOKEN_DELEGATE, HOOK_ELICIT] {
+        for name in [
+            HOOK_IDENTITY_RESOLVE,
+            HOOK_TOKEN_DELEGATE,
+            HOOK_ELICIT,
+            HOOK_METADATA_FETCH,
+        ] {
             let meta = lookup(name).expect("registered");
             assert_eq!(meta.phase, HookPhase::Unphased, "{name}");
         }
@@ -482,7 +490,8 @@ mod tests {
         assert_eq!(IDENTITY_HOOK_METADATA.len(), 1);
         assert_eq!(DELEGATION_HOOK_METADATA.len(), 1);
         assert_eq!(ELICITATION_HOOK_METADATA.len(), 1);
-        assert_eq!(BUILTIN_HOOK_METADATA.len(), 13);
+        assert_eq!(METADATA_HOOK_METADATA.len(), 1);
+        assert_eq!(BUILTIN_HOOK_METADATA.len(), 14);
         for table in HOOK_TABLES {
             for (name, _) in *table {
                 assert!(
@@ -543,6 +552,7 @@ mod tests {
         use crate::elicitation::HOOK_ELICIT;
         use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
         use crate::identity::HOOK_IDENTITY_RESOLVE;
+        use crate::metadata::HOOK_METADATA_FETCH;
 
         for name in [
             HOOK_CMF_TOOL_PRE_INVOKE,
@@ -558,6 +568,7 @@ mod tests {
             HOOK_IDENTITY_RESOLVE,
             HOOK_TOKEN_DELEGATE,
             HOOK_ELICIT,
+            HOOK_METADATA_FETCH,
         ] {
             assert!(
                 BUILTIN_HOOK_METADATA.iter().any(|(n, _)| *n == name),
@@ -577,6 +588,7 @@ mod tests {
             (IDENTITY_HOOK_METADATA, IdentityHook::NAME),
             (DELEGATION_HOOK_METADATA, TokenDelegateHook::NAME),
             (ELICITATION_HOOK_METADATA, ElicitationHook::NAME),
+            (METADATA_HOOK_METADATA, MetadataFetchHook::NAME),
         ] {
             for (name, meta) in table {
                 assert_eq!(meta.family, Some(family), "{name}");

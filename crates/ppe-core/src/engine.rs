@@ -22,6 +22,7 @@
 // config. Trust flows:
 //   config loader → engine → PluginRef → executor
 
+use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -64,6 +65,28 @@ pub const VIOLATION_ASSERTION_MISSING: &str = "auth.assertion_missing";
 /// it without matching on the reason text, and distinct from a policy's own
 /// deny: the request never reached a rule.
 pub const VIOLATION_UNIDENTIFIED_REQUEST: &str = "unidentified_request";
+
+fn entries_for_target<'a>(
+    entries: &'a [crate::registry::HookEntry],
+    payload: &dyn PluginPayload,
+) -> Cow<'a, [crate::registry::HookEntry]> {
+    let target = payload
+        .as_any()
+        .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+        .map(crate::metadata::MetadataFetchRequest::instance);
+    target.map_or_else(
+        || Cow::Borrowed(entries),
+        |target| {
+            Cow::Owned(
+                entries
+                    .iter()
+                    .filter(|entry| entry.plugin_ref.name() == target)
+                    .cloned()
+                    .collect(),
+            )
+        },
+    )
+}
 
 /// Why a request could not be resolved against the route table.
 ///
@@ -2266,13 +2289,46 @@ impl PolicyEngine {
         // change our view mid-pipeline.
         let snapshot = self.load_runtime();
         let hook_type = HookType::new(hook_name);
-        let all_entries = snapshot.registry.entries_for_hook(&hook_type);
+        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
+        let targeted_entries = entries_for_target(hook_entries, payload.as_ref());
+
+        if targeted_entries.is_empty()
+            && payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .is_some()
+        {
+            let target = payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .map(crate::metadata::MetadataFetchRequest::instance)
+                .unwrap_or_default();
+            let violation = crate::error::PluginViolation::new(
+                "plugin.not_found",
+                format!("hook '{hook_name}' has no registered plugin instance named '{target}'"),
+            );
+            return (
+                self.finish(
+                    &snapshot,
+                    Some(hook_name),
+                    None,
+                    Some(payload),
+                    PipelineResult::denied(
+                        violation,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                )
+                .await,
+                BackgroundTasks::empty(),
+            );
+        }
 
         // Same caveat as `invoke_named`: route annotations can produce a
         // dispatch entry without any plugin being registered on the
         // hook directly, so we can only short-circuit when both the
         // registry and the annotation map are empty.
-        if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
+        if targeted_entries.is_empty() && snapshot.route_annotations.is_empty() {
             // Route filtering has not run, so the route is resolved here: a
             // contract written on a route holds whether or not this hook has a
             // plugin on it.
@@ -2294,27 +2350,43 @@ impl PolicyEngine {
             );
         }
 
-        let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
-            .await
-        {
-            Ok(resolved) => resolved,
-            Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(hook_name),
-                        None,
-                        Some(payload),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
+        let (entries, matched) = match targeted_entries {
+            Cow::Owned(owned) => (
+                Arc::new(
+                    owned
+                        .into_iter()
+                        .filter(|entry| {
+                            entry
+                                .plugin_ref
+                                .trusted_config()
+                                .passes_conditions(&extensions)
+                        })
+                        .collect(),
+                ),
+                None,
+            ),
+            Cow::Borrowed(all_entries) => match self
+                .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(cause) => {
+                    return (
+                        self.finish(
+                            &snapshot,
+                            Some(hook_name),
+                            None,
+                            Some(payload),
+                            PipelineResult::denied(
+                                cause.violation(),
+                                extensions,
+                                context_table.unwrap_or_default(),
+                            ),
+                        )
+                        .await,
+                        BackgroundTasks::empty(),
+                    );
+                },
             },
         };
         if entries.is_empty() {
@@ -2396,12 +2468,48 @@ impl PolicyEngine {
     ) -> (PipelineResult, BackgroundTasks) {
         let snapshot = self.load_runtime();
         let hook_type = HookType::new(H::NAME);
-        let all_entries = snapshot.registry.entries_for_hook(&hook_type);
+        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
+        let targeted_entries = entries_for_target(hook_entries, &payload);
+
+        if targeted_entries.is_empty()
+            && payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .is_some()
+        {
+            let target = payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .map(crate::metadata::MetadataFetchRequest::instance)
+                .unwrap_or_default();
+            let violation = crate::error::PluginViolation::new(
+                "plugin.not_found",
+                format!(
+                    "hook '{}' has no registered plugin instance named '{target}'",
+                    H::NAME
+                ),
+            );
+            return (
+                self.finish(
+                    &snapshot,
+                    Some(H::NAME),
+                    None,
+                    Some(Box::new(payload)),
+                    PipelineResult::denied(
+                        violation,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                )
+                .await,
+                BackgroundTasks::empty(),
+            );
+        }
 
         // See `invoke_named` for why we don't short-circuit on
-        // `all_entries.is_empty()` alone — route annotations can fire
+        // `entries_for_hook.is_empty()` alone — route annotations can fire
         // without a directly-registered plugin.
-        if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
+        if targeted_entries.is_empty() && snapshot.route_annotations.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             let matched = resolve_contract_route(&snapshot, &extensions);
             return (
@@ -2421,27 +2529,43 @@ impl PolicyEngine {
             );
         }
 
-        let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, all_entries, &extensions, H::NAME)
-            .await
-        {
-            Ok(resolved) => resolved,
-            Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(H::NAME),
-                        None,
-                        Some(Box::new(payload)),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
+        let (entries, matched) = match targeted_entries {
+            Cow::Owned(owned) => (
+                Arc::new(
+                    owned
+                        .into_iter()
+                        .filter(|entry| {
+                            entry
+                                .plugin_ref
+                                .trusted_config()
+                                .passes_conditions(&extensions)
+                        })
+                        .collect(),
+                ),
+                None,
+            ),
+            Cow::Borrowed(all_entries) => match self
+                .filter_entries_by_route(&snapshot, all_entries, &extensions, H::NAME)
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(cause) => {
+                    return (
+                        self.finish(
+                            &snapshot,
+                            Some(H::NAME),
+                            None,
+                            Some(Box::new(payload)),
+                            PipelineResult::denied(
+                                cause.violation(),
+                                extensions,
+                                context_table.unwrap_or_default(),
+                            ),
+                        )
+                        .await,
+                        BackgroundTasks::empty(),
+                    );
+                },
             },
         };
         if entries.is_empty() {
@@ -2522,11 +2646,44 @@ impl PolicyEngine {
     ) -> (PipelineResult, BackgroundTasks) {
         let snapshot = self.load_runtime();
         let hook_type = HookType::new(hook_name);
-        let all_entries = snapshot.registry.entries_for_hook(&hook_type);
+        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
+        let targeted_entries = entries_for_target(hook_entries, &payload);
+
+        if targeted_entries.is_empty()
+            && payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .is_some()
+        {
+            let target = payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .map(crate::metadata::MetadataFetchRequest::instance)
+                .unwrap_or_default();
+            let violation = crate::error::PluginViolation::new(
+                "plugin.not_found",
+                format!("hook '{hook_name}' has no registered plugin instance named '{target}'"),
+            );
+            return (
+                self.finish(
+                    &snapshot,
+                    Some(hook_name),
+                    None,
+                    Some(Box::new(payload)),
+                    PipelineResult::denied(
+                        violation,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                )
+                .await,
+                BackgroundTasks::empty(),
+            );
+        }
 
         // No registered entries AND no route annotations → nothing to
         // do. Allow-and-pass-through. We can't short-circuit on
-        // `all_entries.is_empty()` alone, because route annotations
+        // `entries_for_hook.is_empty()` alone, because route annotations
         // (external-orchestrator handlers from APL / future Rego /
         // Cedar-direct) can produce a single-entry dispatch even when
         // no plugin was registered on the hook directly.
@@ -2534,7 +2691,7 @@ impl PolicyEngine {
         // Returning here also means a request whose path cannot be read is
         // allowed rather than denied on such a hook. Nothing would have
         // enforced on it either way.
-        if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
+        if targeted_entries.is_empty() && snapshot.route_annotations.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             let matched = resolve_contract_route(&snapshot, &extensions);
             return (
@@ -2554,27 +2711,43 @@ impl PolicyEngine {
             );
         }
 
-        let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
-            .await
-        {
-            Ok(resolved) => resolved,
-            Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(hook_name),
-                        None,
-                        Some(Box::new(payload)),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
+        let (entries, matched) = match targeted_entries {
+            Cow::Owned(owned) => (
+                Arc::new(
+                    owned
+                        .into_iter()
+                        .filter(|entry| {
+                            entry
+                                .plugin_ref
+                                .trusted_config()
+                                .passes_conditions(&extensions)
+                        })
+                        .collect(),
+                ),
+                None,
+            ),
+            Cow::Borrowed(all_entries) => match self
+                .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(cause) => {
+                    return (
+                        self.finish(
+                            &snapshot,
+                            Some(hook_name),
+                            None,
+                            Some(Box::new(payload)),
+                            PipelineResult::denied(
+                                cause.violation(),
+                                extensions,
+                                context_table.unwrap_or_default(),
+                            ),
+                        )
+                        .await,
+                        BackgroundTasks::empty(),
+                    );
+                },
             },
         };
         if entries.is_empty() {
