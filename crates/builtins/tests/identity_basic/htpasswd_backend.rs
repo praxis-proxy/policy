@@ -294,7 +294,10 @@ async fn a_revoked_user_stops_authenticating_after_a_reload() {
     ));
     let dir = directory(&file).expect("the file loads");
     let svc = services();
-    assert!(dir.lookup("bob", &svc).await.expect("answers").is_some());
+    assert!(
+        dir.lookup("bob", &svc).await.expect("answers").is_some(),
+        "bob is in the file before the revocation"
+    );
 
     file.rewrite(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     dir.reload().expect("the rewritten file loads");
@@ -303,7 +306,10 @@ async fn a_revoked_user_stops_authenticating_after_a_reload() {
         dir.lookup("bob", &svc).await.expect("answers").is_none(),
         "a record removed from the file must stop authenticating once reloaded"
     );
-    assert!(dir.lookup("alice", &svc).await.expect("answers").is_some());
+    assert!(
+        dir.lookup("alice", &svc).await.expect("answers").is_some(),
+        "and a record left in the file keeps authenticating"
+    );
 }
 
 #[tokio::test]
@@ -492,14 +498,21 @@ async fn lookup_cost_does_not_grow_with_the_record_count() {
     let svc = services();
 
     assert_eq!(dir.len(), 500, "every record in a large file is indexed");
-    assert!(dir.lookup("user0", &svc).await.expect("answers").is_some());
+    assert!(
+        dir.lookup("user0", &svc).await.expect("answers").is_some(),
+        "the first record is reachable"
+    );
     assert!(
         dir.lookup("user499", &svc)
             .await
             .expect("answers")
-            .is_some()
+            .is_some(),
+        "so is the last, without a scan"
     );
-    assert!(dir.lookup("nobody", &svc).await.expect("answers").is_none());
+    assert!(
+        dir.lookup("nobody", &svc).await.expect("answers").is_none(),
+        "and a miss in a large file is still a miss"
+    );
 }
 
 #[test]
