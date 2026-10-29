@@ -87,7 +87,18 @@ Authorino-parity escape hatch.
   and
   the stored-hash parse happens before the found/not-found branch so both paths
   pay it.
-- R8. The `.htpasswd` backend reads bcrypt (`$2a$`, `$2b$`, `$2y$`) and argon2.
+- R8. The `.htpasswd` backend reads bcrypt (`$2a$`, `$2b$`, `$2y$`) and argon2,
+  but **not both in one file** -- a mixed file is a load error. **Added
+  2026-10-29:** the two schemes' cost parameters are not comparable (bcrypt
+  cost is a CPU exponent; argon2's dominant term is memory bandwidth), so a
+  mixed directory has no well-defined dearest record to use as its miss-path
+  hash. Measured, a `m=4096,t=3` argon2 record scored *above* `bcrypt cost=12`
+  on the within-scheme work factor while verifying 28x faster -- which made a
+  miss cheaper than a hit and reopened the enumeration oracle R7 and KTD9
+  exist to close. A calibrated cross-scheme estimate was rejected: the ratio
+  moves with hardware, so a baked-in constant would mis-rank silently on
+  machines it was not measured on. Refusing to mix is checkable; a fudge
+  factor is not.
   apr1 (`$apr1$`) and `{SHA}` are recognised but **refused**, with a load error
   naming the fix (re-hash with bcrypt or argon2). **Scope corrected
   2026-10-29:** this originally said they load under an explicit opt-in. They
@@ -297,7 +308,12 @@ Authorino-parity escape hatch.
   on every request. Extracting a shared helper across two plugins is deferred
   until the second backend exists to generalise from.
 
-- KTD9. **The dummy verify is worst-case, not dominant-case.** An earlier draft
+- KTD9. **The dummy verify is worst-case, not dominant-case, within one
+  scheme.** The scheme qualifier is load-bearing and was added after
+  implementation: see R8. Across schemes the work factor is meaningless, so
+  the backend refuses a mixed file rather than ordering across them, and the
+  miss path reuses the dearest record's own hash rather than synthesizing one
+  from a number. An earlier draft
   had the miss path copy the file's *dominant* scheme and cost. That leaks: in a
   file mixing bcrypt costs, or mixing bcrypt with argon2 or an opted-in legacy
   scheme, a miss costs the dominant parameters while hits on minority records

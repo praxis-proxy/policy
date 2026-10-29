@@ -37,7 +37,9 @@ use praxis_policy_core::host::HostServices;
 
 use super::BasicCredential;
 use super::directory::{CredentialDirectory, DirectoryError, StoredVerifier, UserRecord};
-use super::verifier::{Limits, ParsedHash, WorkFactor, floor_hash, parse_hash, verify_bytes};
+use super::verifier::{
+    Limits, ParsedHash, Scheme, WorkFactor, floor_hash, parse_hash, verify_bytes,
+};
 
 /// The `kind:` string an operator writes under `provider:`.
 pub const KIND: &str = "htpasswd";
@@ -251,6 +253,13 @@ pub struct HtpasswdDirectory {
     /// Permits for in-flight verifications, bounding CPU under load.
     verifications: Arc<tokio::sync::Semaphore>,
 
+    /// The fallback miss-path hash, for an empty or all-cheap directory.
+    ///
+    /// Built once at construction. It does not depend on file content, and
+    /// minting one is a cost-10 bcrypt hash -- tens of milliseconds that would
+    /// otherwise land on whichever request claims the reload slot.
+    floor: ParsedHash,
+
     /// How many file reads the refresh path has attempted, for the tests.
     ///
     /// Counts attempts rather than successes, because the CAS-claimed slot is
@@ -279,14 +288,16 @@ pub struct HtpasswdDirectory {
 /// hostile line. A password file is operator-authored but also machine-written,
 /// and a generator that emits one bad line must fail the load rather than
 /// drop a user silently.
-fn read_index(config: &HtpasswdConfig) -> Result<Index, String> {
+fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, String> {
     let text = std::fs::read_to_string(&config.path)
         .map_err(|e| format!("reading {}: {e}", config.path.display()))?;
     let limits = Limits::from(config.limits);
 
     let mut users: HashMap<String, Entry> = HashMap::new();
-    // The heaviest record seen, kept to serve as the miss-path hash.
+    // The heaviest record seen, kept to serve as the miss-path hash, plus the
+    // scheme every record must share for that comparison to mean anything.
     let mut heaviest: Option<ParsedHash> = None;
+    let mut scheme: Option<(Scheme, usize)> = None;
 
     for (number, raw) in text.lines().enumerate() {
         // Human-facing line numbers, since this lands in a config error.
@@ -320,6 +331,36 @@ fn read_index(config: &HtpasswdConfig) -> Result<Index, String> {
         // names the line and the scheme problem and nothing else.
         let hash = parse_hash(stored, &limits)
             .map_err(|e| format!("{} line {line_number}: {e}", config.path.display()))?;
+        // One scheme per file. A `WorkFactor` orders records within a scheme
+        // and is meaningless across them -- bcrypt cost is a CPU exponent,
+        // argon2's dominant term is memory bandwidth -- so a mixed file has no
+        // well-defined dearest record to serve as the miss-path hash. Picking
+        // one anyway inverted the real cost by 28x in measurement (a
+        // `m=4096,t=3` argon2 record scored above `bcrypt cost=12` while
+        // verifying 28 times faster), which made a miss far cheaper than a hit
+        // and re-opened the user-enumeration oracle KTD9 exists to close.
+        //
+        // Refused at load, naming both lines, because re-hashing onto one
+        // scheme is a file-level decision only an operator can make. A
+        // calibrated cross-scheme estimate was considered and rejected: the
+        // ratio moves with memory bandwidth and core speed, so a constant here
+        // would silently mis-rank on hardware it was not measured on.
+        match scheme {
+            None => scheme = Some((hash.scheme(), line_number)),
+            Some((seen, first_line)) if seen != hash.scheme() => {
+                return Err(format!(
+                    "{} line {line_number}: this record uses {:?} but line {first_line} uses \
+                     {seen:?}. One hash scheme per file: their cost parameters are not \
+                     comparable, so a directory mixing them cannot make an unknown user cost \
+                     the same as a known one -- which is what stops the file from revealing \
+                     which usernames exist. Re-hash onto a single scheme.",
+                    config.path.display(),
+                    hash.scheme(),
+                ));
+            },
+            Some(_) => {},
+        }
+
         if heaviest
             .as_ref()
             .is_none_or(|h| hash.work_factor() > h.work_factor())
@@ -350,14 +391,17 @@ fn read_index(config: &HtpasswdConfig) -> Result<Index, String> {
     //
     // Reused rather than minted, so a populated file does no cryptographic
     // work at load at all. Only an empty or all-cheap directory mints.
+    // Within one scheme the dearest record is well defined, so it is reused as
+    // the miss-path hash: exactly as expensive as the dearest hit, and free to
+    // obtain. The floor hash is only the fallback for an empty or all-cheap
+    // directory, and is built once in the constructor rather than minted here
+    // -- `reload` runs from `refresh_if_due` on the request path, and a
+    // cost-10 bcrypt mint would block an executor worker for tens of
+    // milliseconds once per refresh interval. It does not depend on file
+    // content, so there is nothing to recompute.
     let dummy = match heaviest {
         Some(hash) if hash.work_factor() >= WorkFactor::FLOOR => hash,
-        _ => floor_hash(WorkFactor::FLOOR).map_err(|e| {
-            format!(
-                "{}: could not build the miss-path hash: {e}",
-                config.path.display()
-            )
-        })?,
+        _ => floor.clone(),
     };
 
     Ok(Index { users, dummy })
@@ -375,11 +419,18 @@ impl HtpasswdDirectory {
     /// it is.
     pub fn new(config: HtpasswdConfig) -> Result<Self, String> {
         config.validate()?;
-        let index = read_index(&config)?;
+        let floor = floor_hash(WorkFactor::FLOOR).map_err(|e| {
+            format!(
+                "{}: could not build the miss-path hash: {e}",
+                config.path.display()
+            )
+        })?;
+        let index = read_index(&config, &floor)?;
         let first_attempt = config.refresh_secs.saturating_mul(1000);
         let permits = config.max_concurrent_verifications;
         Ok(Self {
             config,
+            floor,
             index: ArcSwap::from_pointee(index),
             started: Instant::now(),
             next_attempt_ms: AtomicU64::new(first_attempt),
@@ -439,7 +490,7 @@ impl HtpasswdDirectory {
     pub fn reload(&self) -> Result<(), String> {
         // The whole next index is built before anything is published, so a read
         // or parse that fails leaves the running index serving.
-        let index = read_index(&self.config)?;
+        let index = read_index(&self.config, &self.floor)?;
         // Records first, then the timestamp, and not the other way round. The
         // two are not published together, so a lookup can land between them:
         // this order shows it a new index under an old timestamp, which reads

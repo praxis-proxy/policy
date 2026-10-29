@@ -147,9 +147,10 @@ fn argon2_parameters_above_the_ceiling_fail_at_load() {
 }
 
 #[test]
-fn the_work_factor_orders_records_so_a_directory_has_one_worst_case() {
-    // KTD9: the miss path must run at the maximum present, not the dominant
-    // one, so a `WorkFactor` from either scheme has to be comparable.
+fn the_work_factor_orders_records_within_one_scheme() {
+    // KTD9, scoped to what the factor can actually support. Within bcrypt a
+    // higher cost orders above a lower one, which is what lets the backend
+    // pick the dearest record as its miss-path hash.
     let cheap = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
     let dear = parse_hash(&bcrypt_at(8, "pw"), &Limits::default()).expect("loads");
     assert!(
@@ -157,21 +158,33 @@ fn the_work_factor_orders_records_so_a_directory_has_one_worst_case() {
         "a higher bcrypt cost must order above a lower one"
     );
 
-    let argon = parse_hash(
-        "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+    // Across schemes it is explicitly NOT comparable, and an earlier version
+    // of this test asserted the opposite -- that a `max()` over a mixed
+    // directory was meaningful. It was not: `m=4096,t=3` scores 15 against
+    // `bcrypt cost=12`, while verifying in 5.8ms against 160ms. Treating that
+    // as an ordering made a miss 28x cheaper than a hit.
+    //
+    // So the guarantee is the scheme tag travelling with the factor, and the
+    // backend refusing to mix. This pins that the two schemes really do
+    // produce incomparable numbers, so nothing re-derives the old claim.
+    let weak_argon2 = parse_hash(
+        "$argon2id$v=19$m=4096,t=3,p=1$c2FsdHNhbHRzYWx0$\
          MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI",
         &Limits::default(),
     )
     .expect("loads");
-    // The point is only that they are on one axis, so a max() across a mixed
-    // directory is meaningful. Which is larger is not a guarantee this makes.
-    let worst = [cheap.work_factor(), dear.work_factor(), argon.work_factor()]
-        .into_iter()
-        .max()
-        .expect("three factors");
+    let strong_bcrypt = parse_hash(&bcrypt_at(12, "pw"), &Limits::default()).expect("loads");
+
+    assert_ne!(
+        weak_argon2.scheme(),
+        strong_bcrypt.scheme(),
+        "the two records are of different schemes"
+    );
     assert!(
-        worst >= dear.work_factor() && worst >= argon.work_factor(),
-        "a max() across a mixed directory must dominate every record in it"
+        weak_argon2.work_factor() > strong_bcrypt.work_factor(),
+        "the cheap argon2 record still *scores* above the expensive bcrypt one, \
+         which is exactly why the factor must not be compared across schemes \
+         and why the backend refuses a mixed file"
     );
 }
 

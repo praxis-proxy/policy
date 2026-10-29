@@ -691,3 +691,108 @@ fn the_limits_block_parses_nested_and_defaults_when_absent() {
         "an explicit nested ceiling is the one that takes effect"
     );
 }
+
+/// A weak argon2 record: cheap to verify, but scoring high on the within-scheme
+/// work factor. The exact shape that inverted the miss/hit cost ordering.
+const WEAK_ARGON2: &str = "$argon2id$v=19$m=4096,t=3,p=1$c2FsdHNhbHRzYWx0$\
+                           MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+
+#[test]
+fn a_file_mixing_hash_schemes_fails_at_load() {
+    // KTD9, at the boundary the work factor cannot defend. `WorkFactor` orders
+    // records inside one scheme; across schemes it is meaningless, because
+    // bcrypt cost is a CPU exponent and argon2's dominant term is memory
+    // bandwidth. Measured: `m=4096,t=3` verifies in 5.8ms and `bcrypt cost=12`
+    // in 160ms, yet the factor ranks the argon2 record *higher* (15 vs 12).
+    //
+    // A mixed file would therefore pick the cheap record as its miss-path
+    // hash, making an unknown user 28x faster to reject than a known one --
+    // the enumeration oracle KTD9 exists to close, reopened from the other
+    // direction. Refusing the file is the honest fix; a calibrated constant
+    // would be a guess that degrades on untested hardware.
+    for (label, body) in [
+        (
+            "bcrypt first",
+            format!("{}\nweak:{WEAK_ARGON2}\n", bcrypt_line("strong", "pw", 12)),
+        ),
+        (
+            "argon2 first",
+            format!("weak:{WEAK_ARGON2}\n{}\n", bcrypt_line("strong", "pw", 12)),
+        ),
+    ] {
+        let file = HtpasswdFile::write(&body);
+        let err = directory(&file).expect_err("a file mixing bcrypt and argon2 must not load");
+        assert!(
+            err.contains("One hash scheme per file"),
+            "{label}: the error should name the constraint, got: {err}"
+        );
+        assert!(
+            err.contains("Re-hash"),
+            "{label}: and it should name the fix, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_single_scheme_file_of_either_scheme_still_loads() {
+    // The constraint is "one scheme per file", not "bcrypt only" -- an
+    // all-argon2 directory is a supported deployment.
+    let bcrypt_only = HtpasswdFile::write(&format!(
+        "{}\n{}\n",
+        bcrypt_line("a", "pw", 4),
+        bcrypt_line("b", "pw", 10),
+    ));
+    let dir = directory(&bcrypt_only).expect("an all-bcrypt file loads");
+    assert_eq!(dir.len(), 2, "both bcrypt records are indexed");
+
+    let argon2_only = HtpasswdFile::write(&format!("a:{WEAK_ARGON2}\nb:{WEAK_ARGON2}\n"));
+    let dir = directory(&argon2_only).expect("an all-argon2 file loads");
+    assert_eq!(dir.len(), 2, "both argon2 records are indexed");
+}
+
+#[tokio::test]
+async fn the_miss_path_is_never_cheaper_than_the_dearest_hit_within_a_scheme() {
+    // With mixing refused, the dearest record is well defined, so this is the
+    // whole of KTD9's requirement: a miss runs the dearest hit's own hash.
+    let file = HtpasswdFile::write(&format!(
+        "{}\n{}\n{}\n",
+        bcrypt_line("cheap", "pw", 4),
+        bcrypt_line("mid", "pw", 6),
+        bcrypt_line("dear", "pw", 11),
+    ));
+    let dir = directory(&file).expect("the file loads");
+
+    assert_eq!(
+        dir.miss_work_factor(),
+        crate::support::work_factor_of(&bcrypt_line("dear", "pw", 11)),
+        "the miss path must run at exactly the dearest record's work factor, \
+         not the dominant or the cheapest"
+    );
+}
+
+#[test]
+fn reloading_an_all_cheap_directory_does_not_remint_the_floor_hash() {
+    // The floor hash does not depend on file content, so it is built once in
+    // the constructor. `reload` runs from `refresh_if_due` on the request
+    // path, and minting a cost-10 bcrypt hash there would block an executor
+    // worker for tens of milliseconds once per refresh interval -- paid by
+    // whichever request happened to claim the slot.
+    //
+    // A timing bound rather than a counter, because the mint has no other
+    // observable: 20 reloads at ~40ms each would be ~800ms, where reusing the
+    // prebuilt hash is a file read.
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let dir = directory(&file).expect("the file loads");
+
+    let start = std::time::Instant::now();
+    for _ in 0..20_u32 {
+        dir.reload().expect("the reload succeeds");
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(300),
+        "20 reloads of an all-cheap directory took {elapsed:?}; the floor hash \
+         must be reused from the constructor rather than minted per reload"
+    );
+}

@@ -90,14 +90,33 @@ pub enum HashError {
     ParametersTooHigh,
 }
 
-/// How much work a verify against a record costs.
+/// How much work a verify against a record costs, **within one scheme**.
 ///
-/// Comparable across schemes, which is the whole point: a directory mixing
-/// bcrypt and argon2 needs *one* worst case, so the dummy a miss runs is never
-/// cheaper than any hit. The comparison is deliberately coarse -- it orders
-/// bcrypt cost against argon2 memory, which are not the same unit -- because
-/// the requirement is only "not cheaper than the most expensive record", and
-/// erring upward is safe.
+/// Explicitly *not* comparable across schemes, and the type cannot enforce
+/// that on its own -- so [`Scheme`] travels with it everywhere it is compared,
+/// and the backend refuses a directory that mixes schemes rather than ordering
+/// across them.
+///
+/// An earlier version claimed cross-scheme comparability on the reasoning that
+/// the requirement was only "not cheaper than the dearest record" and erring
+/// upward was safe. Both halves were wrong. The scales are unrelated: bcrypt
+/// cost is a power-of-two CPU exponent, while argon2's dominant term is memory
+/// bandwidth. Measured on one machine:
+///
+/// | record              | this factor | real verify |
+/// |---------------------|-------------|-------------|
+/// | `argon2 m=4096,t=3` | 15          | 5.8ms       |
+/// | `bcrypt cost=12`    | 12          | 160ms       |
+///
+/// So the ordering inverted the real cost by 28x, and a mixed file would pick
+/// the *cheap* argon2 record as its miss-path hash -- making a miss far faster
+/// than a bcrypt hit and handing back exactly the user-enumeration oracle KTD9
+/// exists to close.
+///
+/// A calibrated cross-scheme model was considered and rejected: the ratio
+/// moves with memory bandwidth and core speed, so any constant baked in here
+/// would be a guess that silently degrades on hardware it was not measured
+/// on. Refusing to mix is honest and checkable; a fudge factor is neither.
 ///
 /// **This is an ordering key only, never a cost to synthesize from.** An
 /// earlier version fed it to `bcrypt::hash` as a cost, which conflated two
