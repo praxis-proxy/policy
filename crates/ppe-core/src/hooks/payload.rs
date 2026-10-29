@@ -83,18 +83,6 @@ pub trait PluginPayload: Send + Sync + 'static {
     /// Downcast to a concrete type via `&mut dyn Any`.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
-    /// Name of the one plugin instance this payload targets, when dispatch
-    /// must select an instance rather than run every handler on the hook.
-    ///
-    /// Most hook payloads return `None` and use ordinary hook-wide dispatch.
-    /// Semantic operations such as metadata acquisition override this so
-    /// [`PolicyEngine::invoke_named`](crate::engine::PolicyEngine::invoke_named)
-    /// can resolve a configured source by instance name while retaining the
-    /// normal typed hook, capability filtering, and executor behavior.
-    fn target_plugin(&self) -> Option<&str> {
-        None
-    }
-
     /// Canonical bytes of this payload for content-addressed audit
     /// provenance, or `None` for a payload that cannot or should not be
     /// serialized, which is the default.

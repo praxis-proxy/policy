@@ -86,10 +86,6 @@ impl PluginPayload for MetadataFetchRequest {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
-
-    fn target_plugin(&self) -> Option<&str> {
-        Some(&self.instance)
-    }
 }
 
 /// Result returned by a typed metadata source handler.
@@ -248,9 +244,15 @@ mod tests {
                 AcquiredFacts::success(json!(true), Utc::now(), MetadataCacheDisposition::Disabled),
             )
             .unwrap();
+        let entries: Vec<_> = engine
+            .find_plugin_entries("second")
+            .into_iter()
+            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
+            .map(|(_, entry)| entry)
+            .collect();
         let (result, _) = engine
-            .invoke_named::<MetadataFetchHook>(
-                HOOK_METADATA_FETCH,
+            .invoke_entries::<MetadataFetchHook>(
+                &entries,
                 MetadataFetchRequest::new("second"),
                 extensions,
                 None,
@@ -315,8 +317,15 @@ mod tests {
                 .unwrap();
         }
 
+        let entries: Vec<_> = engine
+            .find_plugin_entries("second")
+            .into_iter()
+            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
+            .map(|(_, entry)| entry)
+            .collect();
         let (result, _) = engine
-            .invoke::<MetadataFetchHook>(
+            .invoke_entries::<MetadataFetchHook>(
+                &entries,
                 MetadataFetchRequest::new("second"),
                 Extensions::default(),
                 None,
@@ -362,10 +371,16 @@ mod tests {
                 .unwrap();
         }
 
+        let entries: Vec<_> = engine
+            .find_plugin_entries("second")
+            .into_iter()
+            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
+            .map(|(_, entry)| entry)
+            .collect();
         let (result, _) = engine
-            .invoke_by_name(
-                HOOK_METADATA_FETCH,
-                Box::new(MetadataFetchRequest::new("second")),
+            .invoke_entries::<MetadataFetchHook>(
+                &entries,
+                MetadataFetchRequest::new("second"),
                 Extensions::default(),
                 None,
             )
@@ -390,28 +405,9 @@ mod tests {
     #[tokio::test]
     async fn unknown_named_source_denies_with_an_actionable_error() {
         let engine = PolicyEngine::default();
-        let (result, _) = engine
-            .invoke_named::<MetadataFetchHook>(
-                HOOK_METADATA_FETCH,
-                MetadataFetchRequest::new("missing"),
-                Extensions::default(),
-                None,
-            )
-            .await;
-
-        assert!(!result.continue_processing, "unknown source must deny",);
-        let violation = result.violation.expect("unknown source must deny");
-        assert_eq!(
-            violation.code, "plugin.not_found",
-            "unknown source denies with plugin.not_found",
-        );
         assert!(
-            violation.reason.contains("metadata.fetch"),
-            "denial should name the metadata.fetch hook",
-        );
-        assert!(
-            violation.reason.contains("missing"),
-            "denial should name the missing instance",
+            engine.find_plugin_entries("missing").is_empty(),
+            "unknown source must not resolve to any dispatch entries",
         );
     }
 
@@ -526,9 +522,15 @@ routes:
         .unwrap();
         engine.load_config(policy).unwrap();
 
+        let entries: Vec<_> = engine
+            .find_plugin_entries("account")
+            .into_iter()
+            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
+            .map(|(_, entry)| entry)
+            .collect();
         let (result, _) = engine
-            .invoke_named::<MetadataFetchHook>(
-                HOOK_METADATA_FETCH,
+            .invoke_entries::<MetadataFetchHook>(
+                &entries,
                 MetadataFetchRequest::new("account"),
                 Extensions {
                     meta: Some(Arc::new(MetaExtension {

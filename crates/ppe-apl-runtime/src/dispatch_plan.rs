@@ -7,9 +7,7 @@
 //
 // # Why pre-resolve?
 //
-// praxis-policy-core's `invoke_named(hook_name, ...)` resolves the lineup on
-// every call: hook lookup → route/condition filter → group by mode →
-// dispatch. APL routes are already authoritative lineups (the YAML's
+// APL routes are already authoritative lineups (the YAML's
 // `routes.<r>.pre_invocation: [run(x), run(y)]` IS the plan). Re-resolving
 // per call wastes work and lets praxis-policy-core's parallel routing model
 // (entity-based conditions) override APL's intent.
