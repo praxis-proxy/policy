@@ -15,6 +15,10 @@ fn directory(file: &HtpasswdFile) -> Result<HtpasswdDirectory, String> {
     HtpasswdDirectory::new(config_for(file.path()))
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[tokio::test]
 async fn a_known_user_authenticates_and_a_wrong_password_does_not() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
@@ -47,9 +51,6 @@ async fn a_known_user_authenticates_and_a_wrong_password_does_not() {
 
 #[tokio::test]
 async fn an_unknown_user_runs_a_dummy_verification() {
-    // R7: asserted via a counter rather than timing, which would be flaky in
-    // CI. This proves a dummy *ran*; that it costs the same is the work-factor
-    // assertion below, not this one.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let dir = directory(&file).expect("the file loads");
     let svc = services();
@@ -78,10 +79,6 @@ async fn an_unknown_user_runs_a_dummy_verification() {
 
 #[tokio::test]
 async fn the_miss_path_runs_at_the_maximum_cost_present_not_the_dominant_one() {
-    // KTD9. Three cheap records and one expensive one: a dummy at the
-    // *dominant* cost would make the expensive user's hit measurably slower
-    // than a miss, which enumerates both which names exist and which users sit
-    // on the cheapest scheme.
     let file = HtpasswdFile::write(&format!(
         "{}\n{}\n{}\n{}\n",
         bcrypt_line("a", "pw", 4),
@@ -101,11 +98,6 @@ async fn the_miss_path_runs_at_the_maximum_cost_present_not_the_dominant_one() {
 
 #[tokio::test]
 async fn the_dummy_tracks_a_reload_that_raises_the_maximum_cost() {
-    // KTD9: recomputed on every load, not fixed at startup. Otherwise adding a
-    // more expensive record makes that user's hit slower than every miss.
-    // Costs straddle `WorkFactor::FLOOR`: below it the dummy is pinned at the
-    // floor by design (a cheap directory still pays a floor-cost miss), so a
-    // reload only moves the dummy once the file's worst case clears it.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("a", "pw", 4)));
     let dir = directory(&file).expect("the file loads");
     let before = dir.miss_work_factor();
@@ -130,10 +122,6 @@ async fn the_dummy_tracks_a_reload_that_raises_the_maximum_cost() {
 
 #[tokio::test]
 async fn a_directory_of_cheap_records_still_pays_a_floor_cost_miss() {
-    // The complement of KTD9, and the reason the previous case has to straddle
-    // the floor: a file of cheap records would otherwise make every miss cheap
-    // too, so an empty or low-cost directory stays distinguishable from a
-    // populated one by timing alone. The floor is what stops that.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("a", "pw", 4)));
     let dir = directory(&file).expect("the file loads");
     let cheap = crate::support::work_factor_of(&bcrypt_line("a", "pw", 4));
@@ -145,7 +133,6 @@ async fn a_directory_of_cheap_records_still_pays_a_floor_cost_miss() {
 
 #[test]
 fn a_duplicate_user_id_fails_at_load() {
-    // R11: picking either silently would hand one caller the other's identity.
     let file = HtpasswdFile::write(&format!(
         "{}\n{}\n",
         bcrypt_line("alice", "one", 4),
@@ -160,8 +147,6 @@ fn a_duplicate_user_id_fails_at_load() {
 
 #[test]
 fn two_encodings_of_one_user_id_are_caught_as_duplicates() {
-    // R11 + R4: the duplicate check runs *after* normalisation, so the two
-    // spellings cannot silently collapse onto one key.
     let file = HtpasswdFile::write(&format!(
         "{}\n{}\n",
         bcrypt_line("José", "one", 4),
@@ -176,8 +161,6 @@ fn two_encodings_of_one_user_id_are_caught_as_duplicates() {
 
 #[tokio::test]
 async fn a_non_nfc_stored_user_id_is_reachable_by_either_encoding() {
-    // R4: stored user-ids are normalised identically to inbound ones, so a
-    // file written with a decomposed name stays reachable.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("Jose\u{0301}", "pw", 4)));
     let dir = directory(&file).expect("the file loads");
     let svc = services();
@@ -213,8 +196,6 @@ fn comments_blank_lines_and_trailing_whitespace_parse() {
 
 #[test]
 fn a_malformed_line_and_an_unreadable_path_both_fail_at_construction() {
-    // R13: a bad file is a configuration mistake, and failing at load reads as
-    // one. Failing at request time reads as an outage.
     let no_separator = HtpasswdFile::write("alicenohash\n");
     let err = directory(&no_separator).expect_err("a line with no separator must fail");
     assert!(err.contains("separator"), "{err}");
@@ -223,8 +204,6 @@ fn a_malformed_line_and_an_unreadable_path_both_fail_at_construction() {
     let err = directory(&empty_half).expect_err("an empty hash must fail");
     assert!(err.contains("empty"), "{err}");
 
-    // The unreadable-path case: delete the file while the guard still owns the
-    // path, so the directory is built against something that is not there.
     let gone = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     gone.unlink();
     let err = directory(&gone).expect_err("an unreadable path must fail");
@@ -233,8 +212,6 @@ fn a_malformed_line_and_an_unreadable_path_both_fail_at_construction() {
 
 #[test]
 fn a_refused_scheme_fails_at_load_naming_the_line() {
-    // R8. The message has to name the line, because a password file is often
-    // machine-written and the operator needs to find the record.
     let file = HtpasswdFile::write(&format!(
         "{}\nlegacy:$apr1$abcdefgh$1234567890123456789012\n",
         bcrypt_line("alice", "pw", 4),
@@ -252,7 +229,6 @@ fn a_refused_scheme_fails_at_load_naming_the_line() {
 
 #[test]
 fn a_cost_above_the_ceiling_fails_at_load() {
-    // R23, at the backend boundary rather than the verifier's.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 12)));
     let mut config = config_for(file.path());
     config.limits.max_bcrypt_cost = 10;
@@ -262,8 +238,6 @@ fn a_cost_above_the_ceiling_fails_at_load() {
 
 #[test]
 fn a_config_omitting_the_staleness_ceiling_fails_to_load() {
-    // R12: required here, unlike the api-key backend. A reload that keeps
-    // failing would otherwise keep serving a revoked user forever.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let yaml = format!("path: {}\nrefresh_secs: 30\n", file.path());
     let err = serde_yaml::from_str::<HtpasswdConfig>(&yaml)
@@ -286,7 +260,6 @@ fn a_ceiling_below_the_refresh_interval_fails_validation() {
 
 #[tokio::test]
 async fn a_revoked_user_stops_authenticating_after_a_reload() {
-    // R12: the refresh interval *is* the revocation window on this backend.
     let file = HtpasswdFile::write(&format!(
         "{}\n{}\n",
         bcrypt_line("alice", "pw", 4),
@@ -314,9 +287,6 @@ async fn a_revoked_user_stops_authenticating_after_a_reload() {
 
 #[tokio::test]
 async fn a_failed_reload_keeps_the_previous_index_serving() {
-    // R12: emptying the index on a transient read error would turn a blip into
-    // a total authentication outage, and the loaded records are still the best
-    // answer available.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let dir = directory(&file).expect("the file loads");
     let svc = services();
@@ -333,21 +303,14 @@ async fn a_failed_reload_keeps_the_previous_index_serving() {
 
 #[tokio::test]
 async fn past_the_staleness_ceiling_lookups_report_unavailable_not_unknown() {
-    // R12 + R13: the distinction matters to an operator. "Stale" is an outage;
-    // "no such user" is a wave of bad passwords. Conflating them hides the
-    // former behind the latter.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let mut config = config_for(file.path());
-    // A zero ceiling with a refresh interval it does not undercut: every
-    // lookup is immediately past the ceiling.
     config.refresh_secs = 0;
     config.max_staleness_secs = 0;
     let dir = HtpasswdDirectory::new(config).expect("the file loads");
     let svc = services();
 
-    // Make the index un-reloadable, so staleness cannot be reset by a refresh.
     file.unlink();
-    // Let the monotonic clock advance past zero.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
     let outcome = dir.lookup("alice", &svc).await;
@@ -362,8 +325,6 @@ async fn past_the_staleness_ceiling_lookups_report_unavailable_not_unknown() {
 
 #[tokio::test]
 async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
-    // R24: every syntactically valid header costs a full verify, including a
-    // miss, so an unbounded queue is an unauthenticated CPU exhaustion path.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 10)));
     let mut config = config_for(file.path());
     config.max_concurrent_verifications = 1;
@@ -375,8 +336,6 @@ async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
         .expect("answers")
         .expect("alice exists");
 
-    // Enough concurrent verifications that at least one must be refused a
-    // permit while another holds the only one.
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..8_u32 {
         let dir = std::sync::Arc::clone(&dir);
@@ -407,14 +366,6 @@ async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
 
 #[tokio::test]
 async fn a_burst_of_lookups_triggers_one_file_read() {
-    // R12: the CAS-claimed refresh slot. Without it a burst past the due time
-    // costs one file read each, which is a thundering herd on every interval.
-    //
-    // The non-zero interval is load-bearing. An earlier version used
-    // `refresh_secs = 0`, which makes every lookup immediately due, so the
-    // slot re-armed between lookups and the test would have passed even if all
-    // 16 had reloaded -- it asserted only that the records were visible, not
-    // the one-read property its name claims. The counter is what pins it.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let mut config = config_for(file.path());
     config.refresh_secs = 1;
@@ -432,7 +383,6 @@ async fn a_burst_of_lookups_triggers_one_file_read() {
         bcrypt_line("alice", "pw", 4),
         bcrypt_line("bob", "pw", 4),
     ));
-    // Past the interval, so the slot is due exactly once for the whole burst.
     tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
     let mut set = tokio::task::JoinSet::new();
@@ -464,8 +414,6 @@ async fn a_burst_of_lookups_triggers_one_file_read() {
 
 #[tokio::test]
 async fn the_stored_hash_never_reaches_the_projected_fields() {
-    // R15: `subject.claim.<name>` is a legal assertion source, so a hash left
-    // in the projectable bag could be rendered into an upstream header.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let dir = directory(&file).expect("the file loads");
     let svc = services();
@@ -484,10 +432,6 @@ async fn the_stored_hash_never_reaches_the_projected_fields() {
 
 #[tokio::test]
 async fn lookup_cost_does_not_grow_with_the_record_count() {
-    // R6: a directory that scans is a directory that times out under the user
-    // population it was bought for. Asserted structurally -- the index is a
-    // hash map and a lookup is one probe -- by showing a large file still
-    // answers a miss and a hit without the file size appearing anywhere.
     let mut lines = String::new();
     for n in 0..500_u32 {
         lines.push_str(&bcrypt_line(&format!("user{n}"), "pw", 4));
@@ -517,19 +461,6 @@ async fn lookup_cost_does_not_grow_with_the_record_count() {
 
 #[test]
 fn loading_an_argon2_record_does_not_mint_an_expensive_dummy() {
-    // A regression bound, not a benchmark. An earlier version derived a bcrypt
-    // cost from argon2's parameters and minted a dummy at it, conflating two
-    // scales that differ by orders of magnitude: bcrypt cost is a power-of-two
-    // exponent, argon2's `m` is already in KiB. An ordinary `m=19456,t=2`
-    // record -- the RFC-recommended default -- scaled to cost 16, and loading
-    // one took 7.9 seconds. The default argon2 ceiling scaled to 28, which is
-    // 2^12 times that again.
-    //
-    // The miss path now reuses the heaviest record already in the file, so a
-    // populated directory does no minting at all. The generous bound here is
-    // deliberate: the failure this guards against was measured in seconds, so
-    // a threshold in the hundreds of milliseconds catches it without being
-    // flaky on a loaded CI box.
     let phc = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
                MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
     let file = HtpasswdFile::write(&format!("alice:{phc}\n"));
@@ -548,10 +479,6 @@ fn loading_an_argon2_record_does_not_mint_an_expensive_dummy() {
 
 #[tokio::test]
 async fn the_miss_path_hash_is_the_heaviest_record_not_a_synthesized_cost() {
-    // KTD9's requirement, restated as what the code now does: a miss is
-    // verified against the dearest *real* hash. That is exactly as expensive
-    // as the dearest hit by construction, where a synthesized cost could land
-    // either side of it -- and did land far above it.
     let file = HtpasswdFile::write(&format!(
         "{}\n{}\n",
         bcrypt_line("cheap", "pw", 4),
@@ -568,8 +495,6 @@ async fn the_miss_path_hash_is_the_heaviest_record_not_a_synthesized_cost() {
 
 #[test]
 fn an_empty_directory_still_mints_a_floor_cost_miss_hash() {
-    // The one case that must mint: with no record to reuse, an empty file
-    // would otherwise be distinguishable from a populated one by timing.
     let file = HtpasswdFile::write("# every line is a comment\n\n");
     let dir = directory(&file).expect("an empty file is still a valid directory");
 
@@ -583,14 +508,6 @@ fn an_empty_directory_still_mints_a_floor_cost_miss_hash() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_dropped_request_does_not_release_its_verification_permit_early() {
-    // R24, against the failure mode that defeats it. Dropping a future does
-    // not cancel a `spawn_blocking` task, so a permit held by the async body
-    // is released while the CPU work it bounds carries on. A client that
-    // connects and disconnects could then start unbounded concurrent
-    // verifications -- measured at 8 against a cap of 1 before the fix.
-    //
-    // A high bcrypt cost so each verify is slow enough that the aborted tasks
-    // are provably still running when the final acquire is attempted.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 12)));
     let mut config = config_for(file.path());
     config.max_concurrent_verifications = 1;
@@ -603,7 +520,6 @@ async fn a_dropped_request_does_not_release_its_verification_permit_early() {
         .expect("alice exists");
     let verifier = record.verifier.clone();
 
-    // Start a verification, then abort its future while the blocking work runs.
     let aborted = {
         let dir = std::sync::Arc::clone(&dir);
         let verifier = verifier.clone();
@@ -616,13 +532,10 @@ async fn a_dropped_request_does_not_release_its_verification_permit_early() {
                 .await
         })
     };
-    // Long enough to be inside the blocking verify, short enough that a cost-12
-    // bcrypt (~170ms) has not finished.
     tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     aborted.abort();
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-    // The permit must still be held by the blocking task, so this is refused.
     let rec = praxis_policy_builtins::plugins::identity_basic::UserRecord::verifier_only(verifier);
     let outcome = dir
         .verify(Some(&rec), &crate::support::password("pw"), &svc)
@@ -639,11 +552,6 @@ async fn a_dropped_request_does_not_release_its_verification_permit_early() {
 
 #[test]
 fn an_unknown_key_fails_to_load_at_either_level() {
-    // The ceilings live in a nested `limits:` block rather than a flattened
-    // one, because serde does not support `flatten` with
-    // `deny_unknown_fields`. A silently accepted `max_bcrypt_cst: 20` would
-    // leave the real ceiling at its default while an operator believed a limit
-    // was in force -- a misconfiguration that reads as working.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let base = format!(
         "path: {}\nrefresh_secs: 30\nmax_staleness_secs: 300\n",
@@ -692,24 +600,12 @@ fn the_limits_block_parses_nested_and_defaults_when_absent() {
     );
 }
 
-/// A weak argon2 record: cheap to verify, but scoring high on the within-scheme
-/// work factor. The exact shape that inverted the miss/hit cost ordering.
+/// A low-cost argon2 fixture for scheme and work-factor regression tests.
 const WEAK_ARGON2: &str = "$argon2id$v=19$m=4096,t=3,p=1$c2FsdHNhbHRzYWx0$\
                            MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
 
 #[test]
 fn a_file_mixing_hash_schemes_fails_at_load() {
-    // KTD9, at the boundary the work factor cannot defend. `WorkFactor` orders
-    // records inside one scheme; across schemes it is meaningless, because
-    // bcrypt cost is a CPU exponent and argon2's dominant term is memory
-    // bandwidth. Measured: `m=4096,t=3` verifies in 5.8ms and `bcrypt cost=12`
-    // in 160ms, yet the factor ranks the argon2 record *higher* (15 vs 12).
-    //
-    // A mixed file would therefore pick the cheap record as its miss-path
-    // hash, making an unknown user 28x faster to reject than a known one --
-    // the enumeration oracle KTD9 exists to close, reopened from the other
-    // direction. Refusing the file is the honest fix; a calibrated constant
-    // would be a guess that degrades on untested hardware.
     for (label, body) in [
         (
             "bcrypt first",
@@ -735,8 +631,6 @@ fn a_file_mixing_hash_schemes_fails_at_load() {
 
 #[test]
 fn a_single_scheme_file_of_either_scheme_still_loads() {
-    // The constraint is "one scheme per file", not "bcrypt only" -- an
-    // all-argon2 directory is a supported deployment.
     let bcrypt_only = HtpasswdFile::write(&format!(
         "{}\n{}\n",
         bcrypt_line("a", "pw", 4),
@@ -752,8 +646,6 @@ fn a_single_scheme_file_of_either_scheme_still_loads() {
 
 #[tokio::test]
 async fn the_miss_path_is_never_cheaper_than_the_dearest_hit_within_a_scheme() {
-    // With mixing refused, the dearest record is well defined, so this is the
-    // whole of KTD9's requirement: a miss runs the dearest hit's own hash.
     let file = HtpasswdFile::write(&format!(
         "{}\n{}\n{}\n",
         bcrypt_line("cheap", "pw", 4),
@@ -772,15 +664,6 @@ async fn the_miss_path_is_never_cheaper_than_the_dearest_hit_within_a_scheme() {
 
 #[test]
 fn reloading_an_all_cheap_directory_does_not_remint_the_floor_hash() {
-    // The floor hash does not depend on file content, so it is built once in
-    // the constructor. `reload` runs from `refresh_if_due` on the request
-    // path, and minting a cost-10 bcrypt hash there would block an executor
-    // worker for tens of milliseconds once per refresh interval -- paid by
-    // whichever request happened to claim the slot.
-    //
-    // A timing bound rather than a counter, because the mint has no other
-    // observable: 20 reloads at ~40ms each would be ~800ms, where reusing the
-    // prebuilt hash is a file read.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let dir = directory(&file).expect("the file loads");
 

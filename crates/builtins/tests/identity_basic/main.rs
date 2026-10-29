@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! End to end behaviour of the Basic identity resolver, from a config block
-//! and a credential directory through to a populated identity slot.
-//!
-//! One harness rather than a binary per concern: cargo links one executable
-//! per `tests/*.rs`, and these cases share their fixtures.
+//! Basic credential decoding, hash verification, and directory regression tests.
 
 #![allow(
     missing_docs,
@@ -24,4 +20,5 @@ mod decoding;
 mod htpasswd_backend;
 mod verifying;
 
+/// Shared test utilities for Basic authentication cases.
 pub mod support;

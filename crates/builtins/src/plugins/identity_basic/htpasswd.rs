@@ -51,51 +51,24 @@ pub struct HtpasswdConfig {
     /// Where the file lives.
     pub path: PathBuf,
 
-    /// How often to re-read it, in seconds.
+    /// The required refresh interval, in seconds.
     ///
-    /// The revocation window, and **required**. An earlier shape made this
-    /// optional and documented omission as "read once at startup and never
-    /// again" -- but `validate()` then rejected `None` outright, so the
-    /// documented behaviour was unreachable and the `Option` only encoded a
-    /// state that could not load. A plain `u64` makes that unrepresentable
-    /// instead of rejected at runtime.
-    ///
-    /// Zero means re-read on every lookup, which is coherent (and what the
-    /// tests use) though rarely what a deployment wants.
+    /// Zero requests a reload on every lookup. Removed records may remain usable
+    /// until a successful reload.
     pub refresh_secs: u64,
 
-    /// How stale the index may get before lookups fail closed, in seconds.
+    /// The required maximum index age, in seconds.
     ///
-    /// **Required**, which is this backend's one deliberate divergence from the
-    /// api-key file backend, where it is optional. The reason is the failure
-    /// this bounds: a reload that keeps failing -- a syntax error introduced
-    /// while deleting a user, a file replaced by a broken generator -- would
-    /// otherwise keep serving the previous index forever, which makes a
-    /// revocation silently not happen. Passwords are long-lived and reused, so
-    /// "the revocation did not take and nobody was told" is a worse default
-    /// than a visible outage. An operator who genuinely wants unbounded
-    /// staleness sets a very large value and has said so.
+    /// Lookups fail closed after this ceiling, including when reloads keep failing.
     pub max_staleness_secs: u64,
 
-    /// Ceilings a stored hash's parameters must sit under.
-    ///
-    /// A nested block rather than a flattened one. serde does not support
-    /// `flatten` together with `deny_unknown_fields`, and while the current
-    /// `yaml_serde` happens to reject an unknown key through a flattened
-    /// field, that is incidental rather than guaranteed -- a serde or backend
-    /// bump could start silently accepting `max_bcrypt_cst: 20`, leaving the
-    /// real ceiling at its default while an operator believes a limit is in
-    /// force. Nesting removes the reliance entirely and matches every other
-    /// config struct here.
+    /// Parameter ceilings for hashes admitted at load.
     #[serde(default)]
     pub limits: HtpasswdLimits,
 
-    /// How many verifications may run at once.
+    /// The maximum number of concurrent verifications.
     ///
-    /// Beyond this, lookups deny rather than queueing. Every syntactically
-    /// valid header costs a full hash verify -- including a miss, by design --
-    /// so an unbounded queue here is an unauthenticated CPU and memory
-    /// exhaustion path.
+    /// Requests beyond this limit are rejected rather than queued.
     #[serde(default = "default_max_concurrent_verifications")]
     pub max_concurrent_verifications: usize,
 }
@@ -163,13 +136,12 @@ impl HtpasswdConfig {
         Duration::from_secs(self.max_staleness_secs)
     }
 
-    /// Reject settings that cannot mean what they say.
+    /// Validate refresh, staleness, and verification capacity settings.
     ///
     /// # Errors
     ///
-    /// A ceiling below the refresh interval, which would deny before the first
-    /// scheduled reload could run, or a zero concurrency cap, which would deny
-    /// every request.
+    /// Returns an error if the staleness ceiling is below the refresh interval
+    /// or the verification capacity is zero.
     pub fn validate(&self) -> Result<(), String> {
         if self.max_staleness_secs < self.refresh_secs {
             return Err(format!(
@@ -199,25 +171,7 @@ struct Entry {
 struct Index {
     users: HashMap<String, Entry>,
 
-    /// The hash a miss is verified against, so a miss costs what a hit costs.
-    ///
-    /// This is the *heaviest record actually in the file*, reused rather than
-    /// synthesized. An earlier version minted a fresh bcrypt hash at a cost
-    /// derived from the worst work factor, which was wrong twice over: minting
-    /// is itself expensive, and a work factor derived from argon2 parameters
-    /// is an ordering key on a different scale from a bcrypt cost. Feeding one
-    /// to `bcrypt::hash` made loading a single ordinary argon2 record take
-    /// 7.9s, and a miss then cost far *more* than any hit -- reversing the
-    /// very oracle KTD9 exists to close.
-    ///
-    /// Reusing a real record is strictly better: it costs nothing to obtain,
-    /// it is exactly as expensive as the dearest hit by construction, and it
-    /// stays correct across schemes without a conversion. A fresh floor-cost
-    /// hash is minted only when the directory has no record reaching the
-    /// floor, which is the empty-or-all-cheap case.
-    ///
-    /// Reselected on every load, because the heaviest record changes when the
-    /// file does.
+    /// The dummy hash used to verify unknown-user credentials.
     dummy: ParsedHash,
 }
 
@@ -226,68 +180,32 @@ struct Index {
 pub struct HtpasswdDirectory {
     config: HtpasswdConfig,
 
-    /// The current index.
-    ///
-    /// Replaced wholesale on a successful reload and left alone on a failed
-    /// one. A reload that emptied the index on a transient read error would
-    /// turn a blip into a total authentication outage, and the records already
-    /// loaded are still the best answer available.
+    /// The most recently loaded valid index.
     index: ArcSwap<Index>,
 
-    /// The clock both timers below are read against.
-    ///
-    /// Monotonic, so a wall-clock adjustment cannot make the index look fresh
-    /// when it is stale, or expire a ceiling that has not passed.
+    /// The origin for refresh and staleness timers.
     started: Instant,
 
     /// When the next reload becomes due, in milliseconds since `started`.
-    ///
-    /// Claimed by one lookup at a time. Whoever moves it forward does the read;
-    /// everyone else answers from the index already loaded, so a burst of
-    /// requests costs one file read rather than one each.
     next_attempt_ms: AtomicU64,
 
-    /// When the index last loaded successfully. What the ceiling measures.
+    /// The last successful load time, in milliseconds since `started`.
     loaded_at_ms: AtomicU64,
 
-    /// Permits for in-flight verifications, bounding CPU under load.
+    /// The capacity limit for in-flight verifications.
     verifications: Arc<tokio::sync::Semaphore>,
 
-    /// The fallback miss-path hash, for an empty or all-cheap directory.
-    ///
-    /// Built once at construction. It does not depend on file content, and
-    /// minting one is a cost-10 bcrypt hash -- tens of milliseconds that would
-    /// otherwise land on whichever request claims the reload slot.
+    /// The fallback dummy hash for an empty or all-cheap directory.
     floor: ParsedHash,
 
-    /// How many file reads the refresh path has attempted, for the tests.
-    ///
-    /// Counts attempts rather than successes, because the CAS-claimed slot is
-    /// what the burst case is asserting about: a thundering herd past the due
-    /// time must cost one read, not one per request, whether or not the read
-    /// then parses.
+    /// The number of refresh-path file-read attempts, for regression tests.
     reload_attempts: AtomicU64,
 
-    /// How many dummy verifications have run, for the tests.
-    ///
-    /// A miss is by design indistinguishable in its output, so a test cannot
-    /// observe the dummy through the result. Timing would be flaky in CI. A
-    /// counter is the only honest assertion available, and it proves a dummy
-    /// *ran* -- not that it cost the same, which the work-factor assertion
-    /// covers separately.
+    /// The number of dummy verification attempts, for regression tests.
     dummy_runs: AtomicU64,
 }
 
-/// Parse a `.htpasswd` file into an index.
-///
-/// Free rather than a method so a reload can build the whole next index before
-/// anything is published, which is what makes a failed reload leave the running
-/// one untouched.
-///
-/// Fully fallible by construction: no slicing, no unwrap, no panic on a
-/// hostile line. A password file is operator-authored but also machine-written,
-/// and a generator that emits one bad line must fail the load rather than
-/// drop a user silently.
+/// Load and validate a `.htpasswd` index.
 fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, String> {
     let text = std::fs::read_to_string(&config.path)
         .map_err(|e| format!("reading {}: {e}", config.path.display()))?;
@@ -408,15 +326,12 @@ fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, Stri
 }
 
 impl HtpasswdDirectory {
-    /// Read the file once and build the index.
+    /// Open a `.htpasswd` directory with the supplied configuration.
     ///
     /// # Errors
     ///
-    /// The file is unreadable, holds a malformed line, carries a duplicate
-    /// user-id, or holds a hash whose scheme or parameters this plugin
-    /// refuses. A bad file fails here rather than denying every request at
-    /// runtime, which reads as an outage instead of the configuration mistake
-    /// it is.
+    /// Returns an error for invalid configuration, an unreadable file, malformed
+    /// records, duplicate user-ids, mixed hashing schemes, or refused hash parameters.
     pub fn new(config: HtpasswdConfig) -> Result<Self, String> {
         config.validate()?;
         let floor = floor_hash(WorkFactor::FLOOR).map_err(|e| {
@@ -466,12 +381,12 @@ impl HtpasswdDirectory {
         self.len() == 0
     }
 
-    /// How many dummy verifications have run, for the tests.
+    /// The number of dummy verification attempts, for regression tests.
     pub fn dummy_runs(&self) -> u64 {
         self.dummy_runs.load(Ordering::Relaxed)
     }
 
-    /// How many file reads the refresh path has attempted, for the tests.
+    /// The number of refresh-path file-read attempts, for regression tests.
     pub fn reload_attempts(&self) -> u64 {
         self.reload_attempts.load(Ordering::Relaxed)
     }
@@ -481,12 +396,11 @@ impl HtpasswdDirectory {
         self.index.load().dummy.work_factor()
     }
 
-    /// Re-read the file, keeping the previous index if it fails.
+    /// Reload the file, retaining the previous index on failure.
     ///
     /// # Errors
     ///
-    /// Whatever made the read or the parse fail. The caller signals it; the
-    /// index is unchanged either way.
+    /// Returns an error if the file cannot be read or its records fail validation.
     pub fn reload(&self) -> Result<(), String> {
         // The whole next index is built before anything is published, so a read
         // or parse that fails leaves the running index serving.
@@ -502,12 +416,7 @@ impl HtpasswdDirectory {
         Ok(())
     }
 
-    /// Reload if the index is due, at most once per interval.
-    ///
-    /// Blocking, on the request path, and deliberately so. The read is of a
-    /// local file and happens once per `refresh_secs` rather than once per
-    /// request, so the cost lands on one caller per interval. The alternative
-    /// is a spawned task, and a spawned task does not survive every host.
+    /// Attempt a reload when the refresh interval has elapsed.
     fn refresh_if_due(&self) {
         let interval = self.config.refresh_secs;
         let now = self.now_ms();
@@ -546,9 +455,7 @@ impl HtpasswdDirectory {
 
 #[async_trait::async_trait]
 impl CredentialDirectory for HtpasswdDirectory {
-    /// The file index needs no egress, so `services` goes unread: a deployment
-    /// on a password file must not be made to declare `perform_http` for a call
-    /// this backend never makes.
+    /// Look up a user in the file index without requiring host egress capabilities.
     async fn lookup(
         &self,
         user_id: &str,

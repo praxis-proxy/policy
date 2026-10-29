@@ -30,11 +30,7 @@ use subtle::ConstantTimeEq as _;
 
 use super::credential::Password;
 
-/// Which hashing scheme a stored record uses.
-///
-/// The set is closed by what `.htpasswd` and the YAML backend can hold, and
-/// the ordering of the variants is not meaningful -- [`WorkFactor`] carries the
-/// comparison.
+/// The hashing scheme of a stored record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Scheme {
@@ -45,32 +41,17 @@ pub enum Scheme {
     Argon2,
 }
 
-/// Why a stored hash is not one this plugin will verify.
+/// Why a stored hash cannot be admitted for verification.
 ///
-/// Field-free for the same reason [`DecodeError`] is: these are surfaced at
-/// config load, where a message naming the offending record is useful, but the
-/// hash itself is an offline-crackable verifier and must not travel in an error
-/// string that may be logged.
-///
-/// [`DecodeError`]: super::credential::DecodeError
+/// Errors contain no stored hash material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum HashError {
-    /// The scheme prefix is one this plugin refuses outright.
-    ///
-    /// DES-crypt and plaintext, which are refused even with the weak-scheme
-    /// opt-in: a 13-character DES hash has an effective keyspace a laptop
-    /// exhausts, and a plaintext "hash" is not a verifier at all.
+    /// The record uses a refused scheme, including DES-crypt or plaintext.
     #[error("the stored hash uses a scheme this plugin refuses")]
     RefusedScheme,
 
-    /// The scheme is MD5/SHA-1-grade, which this plugin does not verify.
-    ///
-    /// Distinct from [`RefusedScheme`] so the load error can tell an operator
-    /// that re-hashing the file is the fix, rather than implying the record is
-    /// corrupt.
-    ///
-    /// [`RefusedScheme`]: HashError::RefusedScheme
+    /// The record uses an unsupported MD5 or SHA-1 scheme and must be re-hashed.
     #[error(
         "the stored hash uses an MD5 or SHA-1 grade scheme (`$apr1$`, `{{SHA}}`) that this \
          plugin does not verify; re-hash the file with bcrypt or argon2"
@@ -81,78 +62,31 @@ pub enum HashError {
     #[error("the stored hash is malformed for its scheme")]
     Malformed,
 
-    /// The parameters are above the configured ceiling.
-    ///
-    /// A well-formed hash with an extreme cost factor is a denial of service
-    /// with a valid signature: one login at bcrypt cost 20 is seconds of CPU,
-    /// and the caller does not have to authenticate to spend it.
+    /// The hash parameters exceed the configured ceiling.
     #[error("the stored hash's parameters exceed the configured ceiling")]
     ParametersTooHigh,
 }
 
-/// How much work a verify against a record costs, **within one scheme**.
+/// An ordering key for verification work within one hashing scheme.
 ///
-/// Explicitly *not* comparable across schemes, and the type cannot enforce
-/// that on its own -- so [`Scheme`] travels with it everywhere it is compared,
-/// and the backend refuses a directory that mixes schemes rather than ordering
-/// across them.
+/// Only compare factors belonging to the same [`Scheme`]. Values are not bcrypt
+/// cost parameters and must not be used to synthesize hashes.
 ///
-/// An earlier version claimed cross-scheme comparability on the reasoning that
-/// the requirement was only "not cheaper than the dearest record" and erring
-/// upward was safe. Both halves were wrong. The scales are unrelated: bcrypt
-/// cost is a power-of-two CPU exponent, while argon2's dominant term is memory
-/// bandwidth. Measured on one machine:
-///
-/// | record              | this factor | real verify |
-/// |---------------------|-------------|-------------|
-/// | `argon2 m=4096,t=3` | 15          | 5.8ms       |
-/// | `bcrypt cost=12`    | 12          | 160ms       |
-///
-/// So the ordering inverted the real cost by 28x, and a mixed file would pick
-/// the *cheap* argon2 record as its miss-path hash -- making a miss far faster
-/// than a bcrypt hit and handing back exactly the user-enumeration oracle KTD9
-/// exists to close.
-///
-/// A calibrated cross-scheme model was considered and rejected: the ratio
-/// moves with memory bandwidth and core speed, so any constant baked in here
-/// would be a guess that silently degrades on hardware it was not measured
-/// on. Refusing to mix is honest and checkable; a fudge factor is neither.
-///
-/// **This is an ordering key only, never a cost to synthesize from.** An
-/// earlier version fed it to `bcrypt::hash` as a cost, which conflated two
-/// scales that differ by orders of magnitude: bcrypt cost is a power-of-two
-/// exponent, while argon2's memory is already in KiB. An ordinary
-/// `m=19456,t=2` record scaled to 16, and minting one bcrypt hash at cost 16
-/// takes ~2.6s -- measured, not estimated. The default argon2 ceiling scaled
-/// to 28, which is 2^12 times that again. Directory construction took 7.9s for
-/// a single argon2 record. The miss path now reuses the heaviest *real* hash
-/// in the directory instead; see `Index::dummy`.
+/// [`Scheme`]: Scheme
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WorkFactor(u32);
 
 impl WorkFactor {
     /// The floor used when a directory holds no records at all.
-    ///
-    /// An empty directory still has to pay for a miss, or an empty file is
-    /// distinguishable from a populated one by timing alone.
     pub const FLOOR: Self = Self(10);
 
-    /// The work factor as a bcrypt cost, for minting the dummy.
-    ///
-    /// Clamped to bcrypt's own accepted range. The dummy has to be a *valid*
-    /// hash the verifier runs in full: some implementations return early on a
-    /// malformed record, which would make the dummy free and defeat its
-    /// purpose.
+    /// A bcrypt cost clamped to the range accepted by the hashing library.
     fn as_bcrypt_cost(self) -> u32 {
         self.0.clamp(4, 31)
     }
 }
 
-/// A stored hash that has been checked at load and may be verified against.
-///
-/// Parsing happens at load so a malformed record fails config rather than a
-/// request, and so the per-request path does no validation that could branch
-/// on record contents.
+/// A stored hash admitted for password verification.
 #[derive(Debug, Clone)]
 pub struct ParsedHash {
     scheme: Scheme,
@@ -172,18 +106,15 @@ impl ParsedHash {
         self.scheme
     }
 
-    /// The record as stored.
+    /// The encoded stored hash, for a backend to carry in a verifier slot.
     ///
-    /// A hash, not a password, so this is not a credential leak -- but it *is*
-    /// an offline-crackable verifier, so it must never be logged or projected.
-    /// Exposed only so a backend can carry it in a `UserRecord`'s verifier
-    /// slot, which is the field the projection cannot reach.
+    /// Do not log or project this offline-crackable verifier.
     pub fn encoded(&self) -> &str {
         &self.encoded
     }
 }
 
-/// Ceilings a stored hash must sit under, and which weak schemes are readable.
+/// Parameter ceilings for stored password hashes.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     /// The highest bcrypt cost this directory will load.
@@ -210,28 +141,19 @@ impl Default for Limits {
     }
 }
 
-/// bcrypt truncates a password at this many bytes.
-///
-/// Load-bearing for R26 rather than trivia. bcrypt feeds at most 72 bytes to
-/// the KDF, so a 92-byte password verifies against a hash minted from its
-/// first 72 -- two different passwords, one accepted. The crate does offer a
-/// `non_truncating_verify`, but it errors on hashes it did not mint itself, so
-/// it cannot be used against a `.htpasswd` file written by Apache. The guard
-/// is therefore ours: refuse the credential before it reaches the KDF.
+/// The maximum password length accepted by the bcrypt verifier, in bytes.
 pub const BCRYPT_TRUNCATION_BYTES: usize = 72;
 
-/// Read a stored hash, refusing anything this plugin will not verify.
+/// Admit a stored bcrypt or argon2 hash under the configured parameter ceilings.
 ///
-/// There is deliberately no weak-scheme opt-in parameter. An earlier shape had
-/// one, but with no MD5 or SHA-1 primitive in this tree it could not actually
-/// admit anything -- a flag an operator can set that changes nothing is worse
-/// than its absence, so the refusal is unconditional and the error says what
-/// to do instead.
+/// DES-crypt, plaintext, MD5, and SHA-1 records are refused.
 ///
 /// # Errors
 ///
-/// A [`HashError`] for a refused scheme, an MD5/SHA-1-grade scheme, a
-/// malformed record, or parameters above `limits`.
+/// Returns a [`HashError`] for a refused or malformed record, or parameters above
+/// `limits`.
+///
+/// [`HashError`]: HashError
 pub fn parse_hash(stored: &str, limits: &Limits) -> Result<ParsedHash, HashError> {
     // Order matters: the refused schemes are checked before anything else, so
     // a DES or plaintext record cannot be admitted by the weak-scheme opt-in.
@@ -281,7 +203,7 @@ pub fn parse_hash(stored: &str, limits: &Limits) -> Result<ParsedHash, HashError
     Err(HashError::Malformed)
 }
 
-/// Whether a record uses a scheme refused even with the weak-hash opt-in.
+/// Whether a record uses DES-crypt or plaintext.
 fn is_refused_outright(stored: &str) -> bool {
     // A bare 13-character DES-crypt record carries no `$` marker at all, which
     // is also what a plaintext password looks like. Both are refused, and
@@ -294,19 +216,15 @@ fn weak_scheme(stored: &str) -> bool {
     stored.starts_with("$apr1$") || stored.starts_with("{SHA}")
 }
 
-/// bcrypt's cost, read from the fixed-width prefix.
+/// Read a bcrypt cost from its fixed-width prefix.
 ///
-/// Hand-parsed because the crate exposes no public hash parser: `split_hash`
-/// is private and `HashParts` cannot be built from a string. The format is
-/// fixed by the scheme -- `$2y$NN$` then 53 characters of salt and digest --
-/// so this reads bytes 4..6 after confirming the shape.
-///
-/// Returns `Ok(None)` when the record is not bcrypt at all, so the caller can
-/// go on to try argon2.
+/// Returns `Ok(None)` for a non-bcrypt record.
 ///
 /// # Errors
 ///
-/// [`HashError::Malformed`] when the prefix says bcrypt but the rest does not.
+/// Returns [`HashError::Malformed`] when a bcrypt prefix has an invalid shape.
+///
+/// [`HashError::Malformed`]: HashError::Malformed
 fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
     let variant = stored.get(..4);
     if !matches!(variant, Some("$2a$" | "$2b$" | "$2y$")) {
@@ -327,24 +245,16 @@ fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
         .map_err(|_not_a_number| HashError::Malformed)
 }
 
-/// Mint a floor-cost bcrypt hash, for a directory with no heavier record.
+/// Create a bcrypt hash for dummy verification at the requested work factor.
 ///
-/// The fallback for the miss path when the directory is empty, or when every
-/// record it holds is cheaper than [`WorkFactor::FLOOR`]. Where a heavier real
-/// record exists, the miss path reuses *that* hash instead of minting
-/// anything: minting is the expensive operation, and synthesizing a cost from
-/// a cross-scheme ordering key is what made it pathological.
-///
-/// A *valid* bcrypt record, not a placeholder: the verifier has to run it in
-/// full, and a malformed record would be rejected early and cost nothing. The
-/// password hashed is irrelevant and never matches a real credential, because
-/// the miss path discards the verdict.
+/// Use when a directory has no record at or above its verification floor.
+/// Always discard the verification verdict for an unknown user.
 ///
 /// # Errors
 ///
-/// Whatever bcrypt says when it cannot mint at this cost, which the caller
-/// turns into a load failure -- a directory that cannot build its dummy cannot
-/// serve misses safely, so it must not start.
+/// Returns [`HashError::Malformed`] if the hash cannot be created.
+///
+/// [`HashError::Malformed`]: HashError::Malformed
 pub fn floor_hash(work: WorkFactor) -> Result<ParsedHash, HashError> {
     let encoded = bcrypt::hash("ppe-basic-dummy-verification-target", work.as_bcrypt_cost())
         .map_err(|_cannot_mint| HashError::Malformed)?;
@@ -355,38 +265,24 @@ pub fn floor_hash(work: WorkFactor) -> Result<ParsedHash, HashError> {
     })
 }
 
-/// Check a decoded credential's password against a parsed stored hash.
+/// Verify a decoded credential against an admitted stored hash.
 ///
-/// The public entry point. [`verify`] takes the plugin-private password type,
-/// which only [`decode_basic`] can build, so this is how a caller outside this
-/// module tree — the resolver, and the tests — reaches a verification without
-/// that type having to become public API.
-///
-/// [`decode_basic`]: super::credential::decode_basic
+/// This call is blocking and CPU-bound; run it off the async worker.
 pub fn verify_credential(hash: &ParsedHash, credential: &super::BasicCredential) -> bool {
     verify(hash, credential.password())
 }
 
-/// Check a password against a parsed stored hash.
+/// Verify a password against an admitted stored hash.
 ///
-/// Blocking and CPU-bound by nature; callers run it off the async worker.
-///
-/// The verdict is folded through a constant-time equality rather than returned
-/// as the library's `bool` directly. That is belt-and-braces -- both crates
-/// already compare in constant time -- but it keeps the final branch in this
-/// function uniform, so a future edit cannot turn the verdict into an early
-/// return.
+/// This call is blocking and CPU-bound; run it off the async worker.
 pub fn verify(hash: &ParsedHash, password: &Password) -> bool {
     password.verify_with(|bytes| verify_bytes(hash, bytes))
 }
 
-/// Check raw password bytes against a parsed stored hash.
+/// Verify password bytes against an admitted stored hash.
 ///
-/// The bytes-level core. Separate from [`verify`] because a verification has to
-/// run off the async worker, and `spawn_blocking` needs an owned value that
-/// outlives the `Password`'s closure -- so the closure cannot wrap the whole
-/// call. Callers are responsible for keeping the bytes in a zeroizing buffer;
-/// within this plugin the only caller does.
+/// This call is blocking and CPU-bound; run it off the async worker.
+/// Callers should keep the password bytes in a zeroizing buffer.
 pub fn verify_bytes(hash: &ParsedHash, bytes: &[u8]) -> bool {
     let matched = (|| match hash.scheme {
         Scheme::Bcrypt => {

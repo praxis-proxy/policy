@@ -13,10 +13,12 @@ fn bcrypt_at(cost: u32, password: &str) -> String {
     bcrypt::hash(password, cost).expect("bcrypt mints at a legal cost")
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[test]
 fn bcrypt_records_load_in_every_spelling() {
-    // R8: `.htpasswd` in the wild carries all three variant markers, and they
-    // differ only in which historical bug the writer was avoiding.
     let minted = bcrypt_at(4, "pw");
     for variant in ["$2a$", "$2b$", "$2y$"] {
         let tail = minted
@@ -35,7 +37,6 @@ fn bcrypt_records_load_in_every_spelling() {
 
 #[test]
 fn an_argon2_record_loads() {
-    // R8. A PHC string with explicit parameters, which is how argon2 is stored.
     let phc = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
                MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
     let parsed = parse_hash(phc, &Limits::default()).expect("an argon2 record loads");
@@ -48,9 +49,6 @@ fn an_argon2_record_loads() {
 
 #[test]
 fn des_crypt_and_plaintext_are_refused() {
-    // R8: refused outright, not gated behind an opt-in. A 13-character DES
-    // record has a keyspace a laptop exhausts, and a plaintext "hash" is not a
-    // verifier at all.
     for stored in ["abJnggxhB/yWI", "hunter2", ""] {
         assert_eq!(
             parse_hash(stored, &Limits::default()).err(),
@@ -62,9 +60,6 @@ fn des_crypt_and_plaintext_are_refused() {
 
 #[test]
 fn md5_and_sha1_grade_schemes_are_refused_with_an_actionable_reason() {
-    // R8. These are recognised rather than lumped in with corruption, so the
-    // load error can tell an operator to re-hash rather than suggesting the
-    // file is damaged.
     for stored in [
         "$apr1$abcdefgh$1234567890123456789012",
         "{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=",
@@ -86,26 +81,27 @@ fn md5_and_sha1_grade_schemes_are_refused_with_an_actionable_reason() {
 
 #[test]
 fn a_malformed_bcrypt_record_fails_at_load() {
-    // R8. The prefix says bcrypt, so this is corruption rather than another
-    // scheme, and it must not reach a request.
-    for stored in [
-        "$2y$ZZ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // cost not a number
-        "$2y$04$tooshort",                                               // wrong length
-        "$2y$04$aaaaaaaaaaaaaaaaaaaaa£aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",   // non-ASCII
+    for (stored, reason) in [
+        (
+            "$2y$ZZ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "nonnumeric cost",
+        ),
+        ("$2y$04$tooshort", "incorrect length"),
+        (
+            "$2y$04$aaaaaaaaaaaaaaaaaaaaa£aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "non-ASCII bytes",
+        ),
     ] {
         assert_eq!(
             parse_hash(stored, &Limits::default()).err(),
             Some(HashError::Malformed),
-            "{stored:?} must fail at load"
+            "a bcrypt record with {reason} must fail at load"
         );
     }
 }
 
 #[test]
 fn a_bcrypt_cost_above_the_ceiling_fails_at_load() {
-    // R23: well-formed but extreme. One login at cost 20 is seconds of CPU the
-    // caller does not have to authenticate to spend, so this is an availability
-    // control, not a hygiene one.
     let limits = Limits {
         max_bcrypt_cost: 10,
         ..Limits::default()
@@ -122,7 +118,6 @@ fn a_bcrypt_cost_above_the_ceiling_fails_at_load() {
 
 #[test]
 fn argon2_parameters_above_the_ceiling_fail_at_load() {
-    // R23, the other scheme's axes: memory and passes.
     let phc = "$argon2id$v=19$m=1048576,t=8,p=1$c2FsdHNhbHRzYWx0$\
                MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
     let tight = Limits {
@@ -148,9 +143,6 @@ fn argon2_parameters_above_the_ceiling_fail_at_load() {
 
 #[test]
 fn the_work_factor_orders_records_within_one_scheme() {
-    // KTD9, scoped to what the factor can actually support. Within bcrypt a
-    // higher cost orders above a lower one, which is what lets the backend
-    // pick the dearest record as its miss-path hash.
     let cheap = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
     let dear = parse_hash(&bcrypt_at(8, "pw"), &Limits::default()).expect("loads");
     assert!(
@@ -158,15 +150,6 @@ fn the_work_factor_orders_records_within_one_scheme() {
         "a higher bcrypt cost must order above a lower one"
     );
 
-    // Across schemes it is explicitly NOT comparable, and an earlier version
-    // of this test asserted the opposite -- that a `max()` over a mixed
-    // directory was meaningful. It was not: `m=4096,t=3` scores 15 against
-    // `bcrypt cost=12`, while verifying in 5.8ms against 160ms. Treating that
-    // as an ordering made a miss 28x cheaper than a hit.
-    //
-    // So the guarantee is the scheme tag travelling with the factor, and the
-    // backend refusing to mix. This pins that the two schemes really do
-    // produce incomparable numbers, so nothing re-derives the old claim.
     let weak_argon2 = parse_hash(
         "$argon2id$v=19$m=4096,t=3,p=1$c2FsdHNhbHRzYWx0$\
          MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI",
@@ -190,9 +173,6 @@ fn the_work_factor_orders_records_within_one_scheme() {
 
 #[test]
 fn the_floor_hash_is_a_real_record_that_verifies_in_full() {
-    // KTD9: a malformed miss-path hash would be rejected early and cost
-    // nothing, which is exactly the leak it exists to close. So the fallback
-    // minted for an empty directory must be a valid record.
     let dummy = floor_hash(WorkFactor::FLOOR).expect("the floor hash mints");
     assert_eq!(
         dummy.scheme(),
@@ -208,15 +188,9 @@ fn the_floor_hash_is_a_real_record_that_verifies_in_full() {
 
 #[test]
 fn a_password_past_bcrypts_truncation_point_is_rejected() {
-    // R26, and this is a real vulnerability rather than a hygiene rule: bcrypt
-    // feeds at most 72 bytes to the KDF, so without this guard a 92-byte
-    // password authenticates against a hash minted from its first 72 -- two
-    // different passwords, one accepted.
     let seventy_two = "A".repeat(BCRYPT_TRUNCATION_BYTES);
     let longer = format!("{seventy_two}COMPLETELY-DIFFERENT-TAIL");
 
-    // Proof the underlying library really does collide, so this test is
-    // guarding something that happens rather than something theoretical.
     let stored = bcrypt_at(4, &seventy_two);
     assert_eq!(
         bcrypt::verify(&longer, &stored).ok(),
@@ -224,7 +198,6 @@ fn a_password_past_bcrypts_truncation_point_is_rejected() {
         "precondition: bcrypt itself accepts the over-length password"
     );
 
-    // And the plugin refuses it.
     let parsed = parse_hash(&stored, &Limits::default()).expect("loads");
     assert!(
         !crate::support::verify_password(&parsed, longer.as_bytes()),
@@ -251,11 +224,6 @@ fn a_correct_password_verifies_and_a_wrong_one_does_not() {
 
 #[test]
 fn a_debug_formatted_record_redacts_the_stored_hash() {
-    // A stored hash is an offline-crackable verifier, and `UserRecord` derives
-    // `Debug` over its verifier, so a derived `Debug` here would write the
-    // scheme, cost and salt into the log at the first `debug!("{record:?}")`
-    // or failed `unwrap()`. The field doc claims "never logged"; this is what
-    // keeps that claim true.
     use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
 
     let stored = "$2y$04$UNIQUE.SALT.AND.DIGEST.MATERIAL.THAT.MUST.NOT.PRINT";
@@ -275,8 +243,6 @@ fn a_debug_formatted_record_redacts_the_stored_hash() {
         "and it should say the value was withheld rather than look absent, got: {printed}"
     );
 
-    // The delegated verdict is a boolean and stays readable: a diagnostic that
-    // cannot show whether a service said yes or no is not worth having.
     let delegated = UserRecord::verifier_only(StoredVerifier::Delegated { valid: true });
     assert!(
         format!("{delegated:?}").contains("true"),
@@ -285,12 +251,6 @@ fn a_debug_formatted_record_redacts_the_stored_hash() {
 }
 
 /// An out-of-tree backend, implemented from outside the plugin's module tree.
-///
-/// This type exists to pin the trait's usability rather than to test behaviour:
-/// `CredentialDirectory` is public, so a host adapter — the Kubernetes `Secret`
-/// backend the plan defers, for one — must be able to implement it using only
-/// public API. An earlier draft took the plugin-private password type, which
-/// made that impossible; this is what stops that regressing.
 #[derive(Debug)]
 struct OutOfTreeDirectory {
     expected_user: String,
@@ -318,8 +278,6 @@ impl praxis_policy_builtins::plugins::identity_basic::CredentialDirectory for Ou
         credential: &praxis_policy_builtins::plugins::identity_basic::BasicCredential,
         _services: &dyn praxis_policy_core::host::HostServices,
     ) -> Result<bool, praxis_policy_builtins::plugins::identity_basic::DirectoryError> {
-        // Reaches the password through public API only. The owned copy is
-        // zeroizing, which is the contract the plugin's own backends use.
         let presented = credential.to_zeroized_password();
         Ok(record.is_some() && presented.as_slice() == self.expected_password.as_slice())
     }

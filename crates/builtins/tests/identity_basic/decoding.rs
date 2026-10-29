@@ -4,8 +4,7 @@
 //! RFC 7617 credential decoding: the gate, the base64 step, the split, and the
 //! normalisation — plus every shape that must not reach a directory lookup.
 //!
-//! Conformance cases cite the clause they pin, per the repo's RFC-citation
-//! convention. The scheme and `1*SP` rules are [RFC 7235 Section 2.1]; the
+//! The scheme and `1*SP` rules follow [RFC 7235 Section 2.1]; the
 //! `user-id:password` construction and its `B64token` encoding are
 //! [RFC 7617 Section 2].
 //!
@@ -21,6 +20,17 @@ use crate::support::{Failure, b64, decode_failure, decode_failure_with, extract_
 /// variation on.
 const ALADDIN: &str = "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// RFC 7617 Section 2
+// -----------------------------------------------------------------------------
+
+/// Decode the worked example per [RFC 7617 Section 2].
+///
+/// [RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
 #[test]
 fn rfc_7617_example_round_trips() {
     let got = extract_and_decode(ALADDIN).expect("the RFC example decodes");
@@ -31,9 +41,15 @@ fn rfc_7617_example_round_trips() {
     );
 }
 
+// -----------------------------------------------------------------------------
+// RFC 7235 Section 2.1
+// -----------------------------------------------------------------------------
+
+/// Match authentication schemes case-insensitively per [RFC 7235 Section 2.1].
+///
+/// [RFC 7235 Section 2.1]: https://datatracker.ietf.org/doc/html/rfc7235#section-2.1
 #[test]
 fn scheme_matching_ignores_case() {
-    // RFC 7235 Section 2.1: the scheme is case-insensitive.
     for header in [
         "basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
         "BASIC QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
@@ -44,10 +60,15 @@ fn scheme_matching_ignores_case() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// RFC 7235 Section 2.1
+// -----------------------------------------------------------------------------
+
+/// Accept one or more spaces after the authentication scheme per [RFC 7235 Section 2.1].
+///
+/// [RFC 7235 Section 2.1]: https://datatracker.ietf.org/doc/html/rfc7235#section-2.1
 #[test]
 fn multiple_spaces_after_the_scheme_are_consumed() {
-    // RFC 7235 Section 2.1 separates the scheme from the parameters with
-    // `1*SP`, so more than one space is legal.
     let got = extract_and_decode("Basic   QWxhZGRpbjpvcGVuIHNlc2FtZQ==")
         .expect("1*SP allows more than one space");
     assert_eq!(got.user_id(), "Aladdin");
@@ -55,8 +76,6 @@ fn multiple_spaces_after_the_scheme_are_consumed() {
 
 #[test]
 fn trailing_whitespace_after_the_token_still_decodes() {
-    // The shared gate strips only the leading separator, so a legal header
-    // with trailing OWS would otherwise fail strict base64 padding.
     let got = extract_and_decode("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==  ")
         .expect("trailing OWS is trimmed before decoding");
     assert_eq!(got.user_id(), "Aladdin");
@@ -64,9 +83,6 @@ fn trailing_whitespace_after_the_token_still_decodes() {
 
 #[test]
 fn another_scheme_declines_rather_than_denying() {
-    // A Bearer credential is not this resolver's. The gate reports
-    // `WrongPrefix`, which the resolver turns into a decline so a second
-    // resolver on the same header can serve it.
     assert_eq!(
         decode_failure("Bearer QWxhZGRpbjpvcGVuIHNlc2FtZQ=="),
         Failure::Extraction(ExtractionError::WrongPrefix),
@@ -74,10 +90,15 @@ fn another_scheme_declines_rather_than_denying() {
     );
 }
 
+// -----------------------------------------------------------------------------
+// RFC 7617 Section 2
+// -----------------------------------------------------------------------------
+
+/// Treat colons after the user-id separator as password bytes per [RFC 7617 Section 2].
+///
+/// [RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
 #[test]
 fn the_password_keeps_every_colon_after_the_first() {
-    // RFC 7617 Section 2: the user-id cannot contain a colon, so the split is
-    // on the *first* one and the rest belong to the password.
     let got = extract_and_decode(&format!("Basic {}", b64(b"user:pa:ss:word")))
         .expect("a colon-bearing password decodes");
     assert_eq!(got.user_id(), "user");
@@ -107,8 +128,6 @@ fn non_base64_input_is_malformed() {
 
 #[test]
 fn non_canonical_padding_is_malformed() {
-    // Strict padding: `QWxhZGRpbjpvcGVuIHNlc2FtZQ` is the example without its
-    // `==`, which a lenient decoder would accept.
     assert_eq!(
         decode_failure("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ"),
         Failure::Decode(DecodeError::NotBase64),
@@ -118,8 +137,6 @@ fn non_canonical_padding_is_malformed() {
 
 #[test]
 fn invalid_utf8_is_malformed() {
-    // A lone 0x80 continuation byte is not UTF-8. RFC 7617 Section 2.1 expects
-    // UTF-8 where a charset is in play, and a user-id reaches `subject.id`.
     assert_eq!(
         decode_failure(&format!("Basic {}", b64(&[0x80, b':', b'p']))),
         Failure::Decode(DecodeError::NotUtf8),
@@ -139,10 +156,15 @@ fn an_empty_user_id_or_password_is_rejected() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// RFC 7617 Section 2
+// -----------------------------------------------------------------------------
+
+/// Reject control characters in credentials per [RFC 7617 Section 2].
+///
+/// [RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
 #[test]
 fn control_characters_in_either_half_are_rejected() {
-    // Cc, plus the line and paragraph separators. A user-id reaches logs and
-    // `subject.id`, so a newline there is a log-injection primitive.
     for raw in [
         &b"us\ner:password"[..],
         b"user:pass\nword",
@@ -162,8 +184,6 @@ fn control_characters_in_either_half_are_rejected() {
 
 #[test]
 fn bidi_overrides_and_isolates_in_the_user_id_are_rejected() {
-    // A user-id is rendered in audit UIs. An RLO turns `admin` into something
-    // that reads as another name, so the Cf bidi controls are refused too.
     for marker in [
         "\u{202e}", "\u{202d}", "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}",
     ] {
@@ -178,8 +198,6 @@ fn bidi_overrides_and_isolates_in_the_user_id_are_rejected() {
 
 #[test]
 fn decomposed_and_precomposed_user_ids_normalise_to_one_key() {
-    // R4: without NFC the same name in two encodings is two index keys, which
-    // splits one user's records and slips past a duplicate check.
     let precomposed = extract_and_decode(&format!("Basic {}", b64("José:pw".as_bytes())))
         .expect("the precomposed form decodes");
     let decomposed = extract_and_decode(&format!("Basic {}", b64("Jose\u{0301}:pw".as_bytes())))
@@ -194,8 +212,6 @@ fn decomposed_and_precomposed_user_ids_normalise_to_one_key() {
 
 #[test]
 fn the_password_is_not_normalised() {
-    // R4: stored hashes are over raw bytes, so normalising the password would
-    // stop a legitimately decomposed password from ever matching its hash.
     let decomposed = "pa\u{0301}ssword";
     let got = extract_and_decode(&format!(
         "Basic {}",
@@ -214,8 +230,6 @@ fn the_password_is_not_normalised() {
 
 #[test]
 fn a_user_id_or_password_past_the_ceiling_is_rejected() {
-    // R26: rejected before any verification, so an oversized credential never
-    // reaches a hash function.
     let long = "u".repeat(40);
     assert_eq!(
         decode_failure_with(
@@ -240,8 +254,6 @@ fn a_user_id_or_password_past_the_ceiling_is_rejected() {
 
 #[test]
 fn a_decode_failure_message_carries_no_credential_bytes() {
-    // R5: no byte, offset or buffer from the credential may reach a message,
-    // because these strings land in denial reasons and log lines.
     let secret = "s3cr3t-paSSw0rd";
     for raw in [
         format!("nocolon{secret}"),
@@ -257,8 +269,6 @@ fn a_decode_failure_message_carries_no_credential_bytes() {
             "a decode error leaked credential material: {rendered}"
         );
     }
-    // And the same for a base64 failure, whose upstream error type is happy to
-    // quote the offending byte and its offset.
     let rendered = format!("{:?}", decode_failure(&format!("Basic !!{secret}!!")));
     assert!(
         !rendered.contains(secret),
@@ -268,7 +278,6 @@ fn a_decode_failure_message_carries_no_credential_bytes() {
 
 #[test]
 fn extraction_phase_outcomes_reuse_the_established_errors() {
-    // R19: these are the shared gate's codes, not new ones.
     assert_eq!(
         crate::support::gate()
             .raw(&std::collections::HashMap::new(), None)

@@ -1,18 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! RFC 7617 credential decoding: what happens after the shared gate has
-//! matched the scheme and before a directory is asked anything.
+//! Decode extracted HTTP Basic credentials per [RFC 7617 Section 2].
 //!
-//! Extraction itself is not reimplemented here. [`CredentialLocation`][cl] with
-//! `prefix: Some("Basic ")` already does case-insensitive scheme matching and
-//! consumes `1*SP` per [RFC 7235 Section 2.1], returning the `token68` payload
-//! verbatim. Re-deriving that would re-open a class of conformance bugs the
-//! shared gate has already closed and tested. This module owns only the steps
-//! the gate cannot know about: base64, the split, and normalisation.
-//!
-//! [cl]: praxis_policy_core::identity::credential::CredentialLocation
-//! [RFC 7235 Section 2.1]: https://datatracker.ietf.org/doc/html/rfc7235#section-2.1
+//! [RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
 
 use base64::Engine as _;
 use unicode_normalization::UnicodeNormalization as _;
@@ -20,19 +11,9 @@ use zeroize::Zeroizing;
 
 pub use praxis_policy_core::identity::credential::{CredentialLocation, ExtractionError};
 
-/// Why a syntactically extracted credential is not a usable RFC 7617 one.
+/// Why an extracted credential cannot be decoded as Basic authentication.
 ///
-/// Deliberately field-free. Every variant is a shape, never a value: these
-/// reach denial reasons and log lines, and a variant carrying the offending
-/// byte, its offset, or the buffer it came from would publish the password one
-/// `{e}` at a time. The upstream base64 and UTF-8 error types do carry exactly
-/// that, which is why neither is wrapped and both are discarded at the call
-/// site.
-///
-/// All of these map onto one external denial code. An attacker learns which
-/// *shape* their own header was, which they already know; they must not learn
-/// anything that distinguishes a wrong password from an unknown user, and
-/// nothing here is reachable once a lookup has happened.
+/// Errors contain no credential bytes and are safe to include in diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum DecodeError {
@@ -48,7 +29,7 @@ pub enum DecodeError {
     #[error("the decoded credential carries no user-id separator")]
     NoSeparator,
 
-    /// One half is empty. RFC 7617 gives no meaning to either.
+    /// The user-id or password is empty.
     #[error("the credential carries an empty user-id or password")]
     EmptyHalf,
 
@@ -61,41 +42,11 @@ pub enum DecodeError {
     TooLong,
 }
 
-/// A password, held so that it is hard to leak by accident.
-///
-/// No `Debug`, no `Display`, no `Serialize`, and no accessor returning the
-/// bytes: the only reader is [`verify_with`], which hands them to a closure
-/// that must consume them in place. A password reaching a log line or a
-/// serialized payload is the failure this type exists to make impossible, and
-/// unlike an API key a password is also a credential *the user chose*, so a
-/// leak compromises every other service they reused it on.
-///
-/// Scoped to this plugin rather than `pub(crate)`: `pub(crate)` now reaches all
-/// ten builtins, and nothing outside this module tree has any business holding
-/// one.
-///
-/// Zeroizing here is partial, and honestly so, exactly as [`PresentedKey`] is.
-/// The host hands the engine its headers as `HashMap<String, String>` and the
-/// shared gate returns an owned `String`, so unzeroized copies of the
-/// credential already exist for the life of the request. Clearing this one
-/// shortens the exposure rather than ending it.
-///
-/// The absence of `Debug`, `Display` and `Serialize` is pinned by the
-/// `compile_fail` doctests on [`BasicCredential`], which is the public carrier
-/// a caller can actually reach. Rustdoc does not run doctests on a private
-/// item, so a guard written here would silently never execute.
-///
-/// [`PresentedKey`]: crate::plugins::identity_api_key::PresentedKey
-/// [`verify_with`]: Password::verify_with
+/// A password that cannot be formatted or serialized.
 pub(in crate::plugins::identity_basic) struct Password(Zeroizing<Vec<u8>>);
 
 impl Password {
-    /// The octets, for a verifier to consume within the calling expression.
-    ///
-    /// The only reader, and it takes a closure rather than returning a slice so
-    /// that a caller cannot bind the bytes to a longer-lived value: copying
-    /// them into an owned `Vec` would take the password out from under the
-    /// zeroizing buffer, and that copy is not cleared.
+    /// Pass the password bytes to a verifier.
     pub(in crate::plugins::identity_basic) fn verify_with<T>(
         &self,
         verify: impl FnOnce(&[u8]) -> T,
@@ -103,46 +54,21 @@ impl Password {
         verify(&self.0)
     }
 
-    /// An owned, zeroizing copy, for crossing a thread boundary.
-    ///
-    /// This is the one documented hole in the closure-only discipline above,
-    /// and it exists for a reason that cannot be designed away: a password
-    /// verification is CPU-bound for milliseconds to seconds, so it must run
-    /// on a blocking pool, and `spawn_blocking` requires a value that outlives
-    /// the closure borrowing `self`. The alternatives are worse -- holding the
-    /// async worker through a bcrypt verify starves every other request on it,
-    /// and `unsafe` lifetime extension to avoid one copy of a secret that
-    /// already exists in three places is not a trade worth making.
-    ///
-    /// The copy is `Zeroizing`, so it is cleared when the blocking task drops
-    /// it. What this does not do is make the exposure zero: the host's header
-    /// map and the extraction `String` still hold the credential for the life
-    /// of the request. This shortens the exposure rather than ending it, the
-    /// same honesty `PresentedKey` applies to itself.
+    /// Copy the password into a zeroizing buffer for a blocking task.
     pub(in crate::plugins::identity_basic) fn to_zeroized_vec(&self) -> Zeroizing<Vec<u8>> {
         Zeroizing::new(self.0.to_vec())
     }
 }
 
-/// A decoded RFC 7617 credential: an index key and a secret.
+/// A decoded Basic credential with an NFC-normalised user-id and unchanged password.
 ///
-/// The halves are deliberately different types. The user-id is text because it
-/// *is* an index key and must be normalised and compared as text; the password
-/// is opaque octets because every text operation on it — case folding,
-/// trimming, normalising — would map two different passwords onto one hash
-/// lookup, and because `==` on `str` is not constant time.
-///
-/// This type deliberately implements no `Debug`, `Display` or `Serialize`,
-/// because it holds a password. That absence is load-bearing, so it is pinned
-/// by the compiler rather than by a runtime assertion — a test that merely
-/// *looks* for a missing trait impl tends to pass whatever it finds.
+/// Credentials cannot be formatted or serialized.
 ///
 /// Formatting a credential does not compile:
 ///
 /// ```compile_fail
 /// use praxis_policy_builtins::plugins::identity_basic::decode_basic;
 /// let credential = decode_basic("dXNlcjpwdw==".to_owned(), 255, 255).unwrap();
-/// // `BasicCredential` implements no `Debug`, so this is rejected.
 /// println!("{credential:?}");
 /// ```
 ///
@@ -169,30 +95,14 @@ impl BasicCredential {
         &self.password
     }
 
-    /// An owned, zeroizing copy of the password, for a blocking verification.
+    /// Copy the password into a zeroizing buffer for a blocking verification.
     ///
-    /// On the credential rather than on the password type, because that type
-    /// is private to this plugin and a backend outside this module could not
-    /// name it.
-    ///
-    /// The copy exists because a verification is CPU-bound for milliseconds to
-    /// seconds and so must run on a blocking pool, and `spawn_blocking` needs
-    /// a value that outlives the closure borrowing `self`. It is `Zeroizing`,
-    /// so it clears when the blocking task drops it — which shortens the
-    /// exposure rather than ending it: the host's header map and the
-    /// extraction string still hold the credential for the life of the
-    /// request.
+    /// The host header map may still retain the original credential.
     pub fn to_zeroized_password(&self) -> Zeroizing<Vec<u8>> {
         self.password.to_zeroized_vec()
     }
 
-    /// Whether the password is exactly these bytes.
-    ///
-    /// Test-facing: the production path verifies against a stored hash, never
-    /// against a known plaintext. Exposed so the decoding cases can pin that
-    /// the password survives as the bytes the client sent — without that, no
-    /// test could observe the password half at all. Constant-time so this
-    /// cannot become a timing oracle if it is ever reached from a request path.
+    /// Compare the password with expected bytes for decoding tests.
     pub fn password_matches(&self, expected: &[u8]) -> bool {
         self.password.verify_with(|actual| {
             if actual.len() != expected.len() {
@@ -209,30 +119,18 @@ impl BasicCredential {
     }
 }
 
-/// Decode what the gate extracted into a user-id and a password.
+/// Decode an extracted Basic payload into an NFC-normalised user-id and a password.
 ///
-/// The steps, in the order RFC 7617 Section 2 implies and with the reasons the
-/// order matters:
-///
-/// 1. Trim trailing OWS. The shared gate consumes the separator *before* the
-///    token but nothing after it, and a legal `Authorization: Basic dG9r `
-///    would otherwise fail strict padding.
-/// 2. STANDARD base64 with strict padding. Not URL-safe (RFC 7617 says
-///    `B64token`), and not lenient: accepting unpadded or non-canonical input
-///    means two distinct header values decode to one credential.
-/// 3. UTF-8, because the user-id reaches `subject.id` and the logs.
-/// 4. Split on the **first** colon. The user-id cannot contain one, so every
-///    later colon belongs to the password.
-/// 5. Reject an empty half, control characters, and anything past the ceiling —
-///    all before NFC, so normalisation never runs on hostile length.
-/// 6. NFC the user-id only. The password is hashed as raw bytes, so
-///    normalising it would stop a legitimately decomposed password from ever
-///    matching its stored hash.
+/// Accepts canonical STANDARD base64 with trailing HTTP whitespace. The decoded
+/// credential must be UTF-8, contain a colon, and have nonempty halves without
+/// disallowed control characters. Length ceilings are measured in bytes before
+/// normalisation. Password bytes are preserved.
 ///
 /// # Errors
 ///
-/// Returns a [`DecodeError`] for any shape that is not a usable credential.
-/// Every variant is a shape rather than a value; see that type.
+/// Returns a [`DecodeError`] for malformed or overlong credentials.
+///
+/// [`DecodeError`]: DecodeError
 pub fn decode_basic(
     extracted: String,
     max_user_id: usize,
@@ -282,24 +180,7 @@ pub fn decode_basic(
     })
 }
 
-/// Whether a half carries a character that must not reach a log, a header, or
-/// `subject.id`.
-///
-/// Three groups, for three different reasons:
-///
-/// - **Cc** (C0 and C1). A newline in a user-id is a log-injection primitive,
-///   and a CR or LF reaching a `WWW-Authenticate` realm would split the header.
-/// - **U+2028 / U+2029**, the line and paragraph separators. Not Cc, but they
-///   terminate a line in a JavaScript string literal, so an audit UI rendering
-///   a user-id into JSON inherits the same injection.
-/// - **The bidi overrides and isolates in Cf**. These re-order rendered text
-///   without changing the bytes, so `ad\u{202e}min` can display as another
-///   user's name in exactly the audit trail an operator trusts.
-///
-/// Deliberately not "all of Cf": ZWJ and the variation selectors appear in
-/// legitimate names, and refusing them would lock out real users for no
-/// security gain. The bidi controls are singled out because their *only*
-/// effect is on rendering order.
+/// Whether a credential half contains a disallowed control character.
 fn contains_disallowed(half: &str) -> bool {
     half.chars().any(|c| {
         c.is_control()
