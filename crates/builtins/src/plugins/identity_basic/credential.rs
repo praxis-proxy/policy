@@ -4,13 +4,14 @@
 //! RFC 7617 credential decoding: what happens after the shared gate has
 //! matched the scheme and before a directory is asked anything.
 //!
-//! Extraction itself is not reimplemented here. [`CredentialLocation`] with
+//! Extraction itself is not reimplemented here. [`CredentialLocation`][cl] with
 //! `prefix: Some("Basic ")` already does case-insensitive scheme matching and
 //! consumes `1*SP` per [RFC 7235 Section 2.1], returning the `token68` payload
 //! verbatim. Re-deriving that would re-open a class of conformance bugs the
 //! shared gate has already closed and tested. This module owns only the steps
 //! the gate cannot know about: base64, the split, and normalisation.
 //!
+//! [cl]: praxis_policy_core::identity::credential::CredentialLocation
 //! [RFC 7235 Section 2.1]: https://datatracker.ietf.org/doc/html/rfc7235#section-2.1
 
 use base64::Engine as _;
@@ -79,28 +80,13 @@ pub enum DecodeError {
 /// credential already exist for the life of the request. Clearing this one
 /// shortens the exposure rather than ending it.
 ///
+/// The absence of `Debug`, `Display` and `Serialize` is pinned by the
+/// `compile_fail` doctests on [`BasicCredential`], which is the public carrier
+/// a caller can actually reach. Rustdoc does not run doctests on a private
+/// item, so a guard written here would silently never execute.
+///
 /// [`PresentedKey`]: crate::plugins::identity_api_key::PresentedKey
 /// [`verify_with`]: Password::verify_with
-///
-/// The absence of those traits is load-bearing, so it is pinned by the
-/// compiler rather than by a runtime assertion — a test that merely *looks*
-/// for a missing trait impl tends to pass whatever it finds. Formatting a
-/// credential does not compile:
-///
-/// ```compile_fail
-/// # use praxis_policy_builtins::plugins::identity_basic::decode_basic;
-/// let credential = decode_basic("dXNlcjpwdw==".to_owned(), 255, 255).unwrap();
-/// // `BasicCredential` implements no `Debug`, so this is rejected.
-/// println!("{credential:?}");
-/// ```
-///
-/// Nor does serializing one:
-///
-/// ```compile_fail
-/// # use praxis_policy_builtins::plugins::identity_basic::decode_basic;
-/// let credential = decode_basic("dXNlcjpwdw==".to_owned(), 255, 255).unwrap();
-/// let _ = serde_json::to_string(&credential);
-/// ```
 pub(in crate::plugins::identity_basic) struct Password(Zeroizing<Vec<u8>>);
 
 impl Password {
@@ -125,6 +111,28 @@ impl Password {
 /// is opaque octets because every text operation on it — case folding,
 /// trimming, normalising — would map two different passwords onto one hash
 /// lookup, and because `==` on `str` is not constant time.
+///
+/// This type deliberately implements no `Debug`, `Display` or `Serialize`,
+/// because it holds a password. That absence is load-bearing, so it is pinned
+/// by the compiler rather than by a runtime assertion — a test that merely
+/// *looks* for a missing trait impl tends to pass whatever it finds.
+///
+/// Formatting a credential does not compile:
+///
+/// ```compile_fail
+/// use praxis_policy_builtins::plugins::identity_basic::decode_basic;
+/// let credential = decode_basic("dXNlcjpwdw==".to_owned(), 255, 255).unwrap();
+/// // `BasicCredential` implements no `Debug`, so this is rejected.
+/// println!("{credential:?}");
+/// ```
+///
+/// Nor does serializing one:
+///
+/// ```compile_fail
+/// use praxis_policy_builtins::plugins::identity_basic::decode_basic;
+/// let credential = decode_basic("dXNlcjpwdw==".to_owned(), 255, 255).unwrap();
+/// let _ = serde_json::to_string(&credential);
+/// ```
 pub struct BasicCredential {
     user_id: String,
     password: Password,
