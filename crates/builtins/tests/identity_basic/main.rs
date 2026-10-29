@@ -21,5 +21,7 @@
 )]
 
 mod decoding;
+mod htpasswd_backend;
+mod verifying;
 
 pub mod support;

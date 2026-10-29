@@ -41,6 +41,12 @@
 pub mod credential;
 /// The directory contract every Basic backend implements.
 pub mod directory;
+/// The `.htpasswd` backend.
+pub mod htpasswd;
+/// Stored-hash admission and password verification.
+pub mod verifier;
 
 pub use credential::{BasicCredential, DecodeError, decode_basic};
 pub use directory::{CredentialDirectory, DirectoryError, StoredVerifier, UserRecord};
+pub use htpasswd::{HtpasswdConfig, HtpasswdDirectory};
+pub use verifier::{HashError, Limits, ParsedHash, Scheme, WorkFactor};

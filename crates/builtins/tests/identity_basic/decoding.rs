@@ -12,7 +12,10 @@
 //! [RFC 7235 Section 2.1]: https://datatracker.ietf.org/doc/html/rfc7235#section-2.1
 //! [RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
 
-use crate::support::{b64, decode_failure, decode_failure_with, extract_and_decode, is_malformed};
+use praxis_policy_builtins::plugins::identity_basic::credential::DecodeError;
+use praxis_policy_core::identity::credential::ExtractionError;
+
+use crate::support::{Failure, b64, decode_failure, decode_failure_with, extract_and_decode};
 
 /// The RFC 7617 Section 2 worked example, which every other case is a
 /// variation on.
@@ -22,7 +25,10 @@ const ALADDIN: &str = "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
 fn rfc_7617_example_round_trips() {
     let got = extract_and_decode(ALADDIN).expect("the RFC example decodes");
     assert_eq!(got.user_id(), "Aladdin");
-    assert!(got.password_matches(b"open sesame"));
+    assert!(
+        got.password_matches(b"open sesame"),
+        "the RFC 7617 Section 2 example password"
+    );
 }
 
 #[test]
@@ -61,8 +67,11 @@ fn another_scheme_declines_rather_than_denying() {
     // A Bearer credential is not this resolver's. The gate reports
     // `WrongPrefix`, which the resolver turns into a decline so a second
     // resolver on the same header can serve it.
-    let err = decode_failure("Bearer QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
-    assert!(err.contains("WrongPrefix"), "expected a decline, got {err}");
+    assert_eq!(
+        decode_failure("Bearer QWxhZGRpbjpvcGVuIHNlc2FtZQ=="),
+        Failure::Extraction(ExtractionError::WrongPrefix),
+        "a Bearer credential must decline so another resolver can serve it, not deny"
+    );
 }
 
 #[test]
@@ -72,44 +81,60 @@ fn the_password_keeps_every_colon_after_the_first() {
     let got = extract_and_decode(&format!("Basic {}", b64(b"user:pa:ss:word")))
         .expect("a colon-bearing password decodes");
     assert_eq!(got.user_id(), "user");
-    assert!(got.password_matches(b"pa:ss:word"));
+    assert!(
+        got.password_matches(b"pa:ss:word"),
+        "every colon after the first belongs to the password"
+    );
 }
 
 #[test]
 fn a_credential_with_no_colon_is_malformed() {
-    let err = decode_failure(&format!("Basic {}", b64(b"nocolonhere")));
-    assert!(is_malformed(&err), "expected malformed, got {err}");
+    assert_eq!(
+        decode_failure(&format!("Basic {}", b64(b"nocolonhere"))),
+        Failure::Decode(DecodeError::NoSeparator),
+        "a credential with no colon has no user-id/password boundary"
+    );
 }
 
 #[test]
 fn non_base64_input_is_malformed() {
-    let err = decode_failure("Basic not!valid!base64!");
-    assert!(is_malformed(&err), "expected malformed, got {err}");
+    assert_eq!(
+        decode_failure("Basic not!valid!base64!"),
+        Failure::Decode(DecodeError::NotBase64),
+        "the payload must be base64"
+    );
 }
 
 #[test]
 fn non_canonical_padding_is_malformed() {
     // Strict padding: `QWxhZGRpbjpvcGVuIHNlc2FtZQ` is the example without its
     // `==`, which a lenient decoder would accept.
-    let err = decode_failure("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ");
-    assert!(is_malformed(&err), "expected malformed, got {err}");
+    assert_eq!(
+        decode_failure("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ"),
+        Failure::Decode(DecodeError::NotBase64),
+        "padding is strict, so the RFC example without its `==` is refused"
+    );
 }
 
 #[test]
 fn invalid_utf8_is_malformed() {
     // A lone 0x80 continuation byte is not UTF-8. RFC 7617 Section 2.1 expects
     // UTF-8 where a charset is in play, and a user-id reaches `subject.id`.
-    let err = decode_failure(&format!("Basic {}", b64(&[0x80, b':', b'p'])));
-    assert!(is_malformed(&err), "expected malformed, got {err}");
+    assert_eq!(
+        decode_failure(&format!("Basic {}", b64(&[0x80, b':', b'p']))),
+        Failure::Decode(DecodeError::NotUtf8),
+        "a lone continuation byte is not UTF-8"
+    );
 }
 
 #[test]
 fn an_empty_user_id_or_password_is_rejected() {
     for raw in [&b":password"[..], b"user:", b":"] {
-        let err = decode_failure(&format!("Basic {}", b64(raw)));
-        assert!(
-            is_malformed(&err),
-            "expected malformed for {raw:?}, got {err}"
+        assert_eq!(
+            decode_failure(&format!("Basic {}", b64(raw))),
+            Failure::Decode(DecodeError::EmptyHalf),
+            "neither half may be empty, and this is the decode phase's \
+             `EmptyHalf`, not the extraction phase's `Empty`: {raw:?}"
         );
     }
 }
@@ -126,10 +151,11 @@ fn control_characters_in_either_half_are_rejected() {
         "us\u{2028}er:password".as_bytes(),
         "user:pass\u{2029}word".as_bytes(),
     ] {
-        let err = decode_failure(&format!("Basic {}", b64(raw)));
-        assert!(
-            is_malformed(&err),
-            "expected malformed for {raw:?}, got {err}"
+        assert_eq!(
+            decode_failure(&format!("Basic {}", b64(raw))),
+            Failure::Decode(DecodeError::ControlCharacter),
+            "a control character must be rejected as one rather than as some \
+             other malformed shape: {raw:?}"
         );
     }
 }
@@ -142,10 +168,10 @@ fn bidi_overrides_and_isolates_in_the_user_id_are_rejected() {
         "\u{202e}", "\u{202d}", "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}",
     ] {
         let raw = format!("ad{marker}min:password");
-        let err = decode_failure(&format!("Basic {}", b64(raw.as_bytes())));
-        assert!(
-            is_malformed(&err),
-            "expected malformed for {marker:?}, got {err}"
+        assert_eq!(
+            decode_failure(&format!("Basic {}", b64(raw.as_bytes()))),
+            Failure::Decode(DecodeError::ControlCharacter),
+            "a bidi control must be rejected as a control character: {marker:?}"
         );
     }
 }
@@ -158,7 +184,11 @@ fn decomposed_and_precomposed_user_ids_normalise_to_one_key() {
         .expect("the precomposed form decodes");
     let decomposed = extract_and_decode(&format!("Basic {}", b64("Jose\u{0301}:pw".as_bytes())))
         .expect("the decomposed form decodes");
-    assert_eq!(precomposed.user_id(), decomposed.user_id());
+    assert_eq!(
+        precomposed.user_id(),
+        decomposed.user_id(),
+        "both encodings of one name must normalise to a single index key"
+    );
     assert_eq!(precomposed.user_id(), "José");
 }
 
@@ -187,19 +217,25 @@ fn a_user_id_or_password_past_the_ceiling_is_rejected() {
     // R26: rejected before any verification, so an oversized credential never
     // reaches a hash function.
     let long = "u".repeat(40);
-    let err = decode_failure_with(
-        &format!("Basic {}", b64(format!("{long}:pw").as_bytes())),
-        16,
-        16,
+    assert_eq!(
+        decode_failure_with(
+            &format!("Basic {}", b64(format!("{long}:pw").as_bytes())),
+            16,
+            16
+        ),
+        Failure::Decode(DecodeError::TooLong),
+        "an over-ceiling user-id is rejected before any verification"
     );
-    assert!(is_malformed(&err), "expected malformed, got {err}");
 
-    let err = decode_failure_with(
-        &format!("Basic {}", b64(format!("user:{long}").as_bytes())),
-        16,
-        16,
+    assert_eq!(
+        decode_failure_with(
+            &format!("Basic {}", b64(format!("user:{long}").as_bytes())),
+            16,
+            16
+        ),
+        Failure::Decode(DecodeError::TooLong),
+        "an over-ceiling password is rejected before any verification"
     );
-    assert!(is_malformed(&err), "expected malformed, got {err}");
 }
 
 #[test]
@@ -212,38 +248,45 @@ fn a_decode_failure_message_carries_no_credential_bytes() {
         format!("user:{secret}\n"),
         format!(":{secret}"),
     ] {
-        let err = decode_failure(&format!("Basic {}", b64(raw.as_bytes())));
+        let rendered = format!(
+            "{:?}",
+            decode_failure(&format!("Basic {}", b64(raw.as_bytes())))
+        );
         assert!(
-            !err.contains(secret) && !err.contains("s3cr3t"),
-            "a decode error leaked credential material: {err}"
+            !rendered.contains(secret) && !rendered.contains("s3cr3t"),
+            "a decode error leaked credential material: {rendered}"
         );
     }
     // And the same for a base64 failure, whose upstream error type is happy to
     // quote the offending byte and its offset.
-    let err = decode_failure(&format!("Basic !!{secret}!!"));
+    let rendered = format!("{:?}", decode_failure(&format!("Basic !!{secret}!!")));
     assert!(
-        !err.contains(secret),
-        "a base64 error leaked credential material: {err}"
+        !rendered.contains(secret),
+        "a base64 error leaked credential material: {rendered}"
     );
 }
 
 #[test]
 fn extraction_phase_outcomes_reuse_the_established_errors() {
     // R19: these are the shared gate's codes, not new ones.
-    let missing = crate::support::gate()
-        .raw(&std::collections::HashMap::new(), None)
-        .expect_err("nothing at the location");
-    assert!(format!("{missing:?}").contains("Missing"));
-
-    let err = decode_failure("Basic ");
-    assert!(
-        err.contains("Empty"),
-        "expected the empty-credential code, got {err}"
+    assert_eq!(
+        crate::support::gate()
+            .raw(&std::collections::HashMap::new(), None)
+            .expect_err("nothing at the location"),
+        ExtractionError::Missing,
+        "an absent header is the gate's `Missing`"
     );
 
-    let err = decode_failure("");
-    assert!(
-        err.contains("Empty"),
-        "expected the empty-credential code, got {err}"
+    assert_eq!(
+        decode_failure("Basic "),
+        Failure::Extraction(ExtractionError::Empty),
+        "a scheme with no credential is the extraction phase's `Empty`, which must \
+         stay distinct from the decode phase's `EmptyHalf`"
+    );
+
+    assert_eq!(
+        decode_failure(""),
+        Failure::Extraction(ExtractionError::Empty),
+        "an empty header value is likewise an extraction-phase `Empty`"
     );
 }

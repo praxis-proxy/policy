@@ -38,6 +38,9 @@ basic = [
   "_plugins",
   "dep:base64",
   "dep:unicode-normalization",
+  "dep:argon2",
+  "dep:bcrypt",
+  "dep:subtle",
 ]
 oauth = [
   "_engine-core",
@@ -141,6 +144,21 @@ base64 = { workspace = true, optional = true }
 # NFC normalisation for the Basic user-id. See the workspace manifest for why
 # this is a declared edge rather than a transitive, and why not ICU.
 unicode-normalization = { workspace = true, optional = true }
+
+# Password-hash verification for the Basic directory. Verify only: this plugin
+# checks a stored hash and never mints one, so the minting halves of both APIs
+# are unused outside tests.
+#
+# Two crates rather than one because `.htpasswd` in the wild is bcrypt and the
+# modern alternative is argon2, and no single crate reads both well. Neither
+# exposes a public hash *parser*, so the cost ceiling in R23 is enforced by
+# reading bcrypt's fixed-width cost field and argon2's PHC params directly.
+argon2 = { workspace = true, optional = true }
+bcrypt = { workspace = true, optional = true }
+
+# Constant-time equality for the verdict, so a verify result cannot be probed
+# by timing. Already in the tree through both hashing crates.
+subtle = { workspace = true, optional = true }
 
 # --- api-key, oauth, valkey --------------------------------------------------
 

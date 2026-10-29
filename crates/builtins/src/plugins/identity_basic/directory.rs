@@ -30,7 +30,7 @@ use chrono::{DateTime, Utc};
 use praxis_policy_core::host::HostServices;
 use serde_json::Value;
 
-use super::credential::Password;
+use super::BasicCredential;
 
 /// What a directory returned for a user-id it recognized.
 ///
@@ -62,12 +62,28 @@ pub struct UserRecord {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+impl UserRecord {
+    /// A record with no projectable fields and no expiry.
+    ///
+    /// The shape a format carrying only a user-id and a hash produces, which
+    /// is what `.htpasswd` is. A constructor rather than a struct literal
+    /// because the type is `#[non_exhaustive]`: a field added later must not
+    /// break every backend, and the compiler cannot help a literal.
+    pub fn verifier_only(verifier: StoredVerifier) -> Self {
+        Self {
+            fields: HashMap::new(),
+            verifier,
+            expires_at: None,
+        }
+    }
+}
+
 /// How a backend checks a presented password.
 ///
 /// An enum rather than a trait object because the set is closed by what the
 /// storage formats can express, and because a `Box<dyn Fn>` here would be a
 /// place to accidentally capture the plaintext.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum StoredVerifier {
     /// A password hash in its storage encoding, checked locally.
@@ -87,6 +103,30 @@ pub enum StoredVerifier {
         /// The service's verdict for the credential it was sent.
         valid: bool,
     },
+}
+
+impl std::fmt::Debug for StoredVerifier {
+    /// Redacts the stored hash.
+    ///
+    /// Hand-written rather than derived, and that is the whole point: a
+    /// derived `Debug` prints the full modular-crypt record — scheme, cost and
+    /// salt — and `UserRecord` derives `Debug` over this type, so a single
+    /// `tracing::debug!("{record:?}")` or a failed `unwrap()` message would
+    /// write an offline-crackable verifier into the log. The field doc says
+    /// "never logged"; a derive would make that doc a lie at the first
+    /// diagnostic someone adds.
+    ///
+    /// `Delegated` keeps its `valid` flag, which is a boolean verdict and
+    /// carries nothing crackable.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Deliberately not the length or the scheme prefix either: the
+            // scheme narrows an offline attack, and the length distinguishes
+            // one scheme from another.
+            Self::Hash(_) => f.write_str("Hash(<redacted>)"),
+            Self::Delegated { valid } => f.debug_struct("Delegated").field("valid", valid).finish(),
+        }
+    }
 }
 
 /// Why a directory could not answer.
@@ -161,6 +201,12 @@ pub trait CredentialDirectory: std::fmt::Debug + Send + Sync {
     /// factor *present in this directory* — which only the directory can know,
     /// and which changes on every reload.
     ///
+    /// Takes the decoded [`BasicCredential`] rather than a bare password: the
+    /// password type is private to this plugin, and a trait method with an
+    /// unnameable parameter could not be implemented or called from anywhere
+    /// else -- which would make the trait pointless. The credential is the
+    /// public carrier, and the backend reaches the secret through it.
+    ///
     /// Takes the whole [`UserRecord`] option rather than a verifier so the
     /// not-found case is this method's business too: `None` must still perform
     /// a full dummy verification, or the absence of a user is measurable from
@@ -168,7 +214,7 @@ pub trait CredentialDirectory: std::fmt::Debug + Send + Sync {
     async fn verify(
         &self,
         record: Option<&UserRecord>,
-        password: &Password,
+        credential: &BasicCredential,
         services: &dyn HostServices,
     ) -> Result<bool, DirectoryError>;
 

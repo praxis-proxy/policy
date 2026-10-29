@@ -102,6 +102,26 @@ impl Password {
     ) -> T {
         verify(&self.0)
     }
+
+    /// An owned, zeroizing copy, for crossing a thread boundary.
+    ///
+    /// This is the one documented hole in the closure-only discipline above,
+    /// and it exists for a reason that cannot be designed away: a password
+    /// verification is CPU-bound for milliseconds to seconds, so it must run
+    /// on a blocking pool, and `spawn_blocking` requires a value that outlives
+    /// the closure borrowing `self`. The alternatives are worse -- holding the
+    /// async worker through a bcrypt verify starves every other request on it,
+    /// and `unsafe` lifetime extension to avoid one copy of a secret that
+    /// already exists in three places is not a trade worth making.
+    ///
+    /// The copy is `Zeroizing`, so it is cleared when the blocking task drops
+    /// it. What this does not do is make the exposure zero: the host's header
+    /// map and the extraction `String` still hold the credential for the life
+    /// of the request. This shortens the exposure rather than ending it, the
+    /// same honesty `PresentedKey` applies to itself.
+    pub(in crate::plugins::identity_basic) fn to_zeroized_vec(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(self.0.to_vec())
+    }
 }
 
 /// A decoded RFC 7617 credential: an index key and a secret.
@@ -142,6 +162,28 @@ impl BasicCredential {
     /// The NFC-normalised user-id, as the directory indexes it.
     pub fn user_id(&self) -> &str {
         &self.user_id
+    }
+
+    /// The password, for a verifier in this plugin.
+    pub(in crate::plugins::identity_basic) fn password(&self) -> &Password {
+        &self.password
+    }
+
+    /// An owned, zeroizing copy of the password, for a blocking verification.
+    ///
+    /// On the credential rather than on the password type, because that type
+    /// is private to this plugin and a backend outside this module could not
+    /// name it.
+    ///
+    /// The copy exists because a verification is CPU-bound for milliseconds to
+    /// seconds and so must run on a blocking pool, and `spawn_blocking` needs
+    /// a value that outlives the closure borrowing `self`. It is `Zeroizing`,
+    /// so it clears when the blocking task drops it — which shortens the
+    /// exposure rather than ending it: the host's header map and the
+    /// extraction string still hold the credential for the life of the
+    /// request.
+    pub fn to_zeroized_password(&self) -> Zeroizing<Vec<u8>> {
+        self.password.to_zeroized_vec()
     }
 
     /// Whether the password is exactly these bytes.
