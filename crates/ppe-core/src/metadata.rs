@@ -244,15 +244,9 @@ mod tests {
                 AcquiredFacts::success(json!(true), Utc::now(), MetadataCacheDisposition::Disabled),
             )
             .unwrap();
-        let entries: Vec<_> = engine
-            .find_plugin_entries("second")
-            .into_iter()
-            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
-            .map(|(_, entry)| entry)
-            .collect();
         let (result, _) = engine
-            .invoke_entries::<MetadataFetchHook>(
-                &entries,
+            .invoke_named::<MetadataFetchHook>(
+                HOOK_METADATA_FETCH,
                 MetadataFetchRequest::new("second"),
                 extensions,
                 None,
@@ -317,15 +311,8 @@ mod tests {
                 .unwrap();
         }
 
-        let entries: Vec<_> = engine
-            .find_plugin_entries("second")
-            .into_iter()
-            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
-            .map(|(_, entry)| entry)
-            .collect();
         let (result, _) = engine
-            .invoke_entries::<MetadataFetchHook>(
-                &entries,
+            .invoke::<MetadataFetchHook>(
                 MetadataFetchRequest::new("second"),
                 Extensions::default(),
                 None,
@@ -371,16 +358,10 @@ mod tests {
                 .unwrap();
         }
 
-        let entries: Vec<_> = engine
-            .find_plugin_entries("second")
-            .into_iter()
-            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
-            .map(|(_, entry)| entry)
-            .collect();
         let (result, _) = engine
-            .invoke_entries::<MetadataFetchHook>(
-                &entries,
-                MetadataFetchRequest::new("second"),
+            .invoke_by_name(
+                HOOK_METADATA_FETCH,
+                Box::new(MetadataFetchRequest::new("second")),
                 Extensions::default(),
                 None,
             )
@@ -405,10 +386,19 @@ mod tests {
     #[tokio::test]
     async fn unknown_named_source_denies_with_an_actionable_error() {
         let engine = PolicyEngine::default();
-        assert!(
-            engine.find_plugin_entries("missing").is_empty(),
-            "unknown source must not resolve to any dispatch entries",
-        );
+        let (result, _) = engine
+            .invoke_named::<MetadataFetchHook>(
+                HOOK_METADATA_FETCH,
+                MetadataFetchRequest::new("missing"),
+                Extensions::default(),
+                None,
+            )
+            .await;
+        assert!(!result.continue_processing, "unknown source must deny");
+        let violation = result.violation.expect("unknown source must deny");
+        assert_eq!(violation.code, "plugin.not_found");
+        assert!(violation.reason.contains("metadata.fetch"));
+        assert!(violation.reason.contains("missing"));
     }
 
     #[tokio::test]
@@ -522,15 +512,9 @@ routes:
         .unwrap();
         engine.load_config(policy).unwrap();
 
-        let entries: Vec<_> = engine
-            .find_plugin_entries("account")
-            .into_iter()
-            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
-            .map(|(_, entry)| entry)
-            .collect();
         let (result, _) = engine
-            .invoke_entries::<MetadataFetchHook>(
-                &entries,
+            .invoke_named::<MetadataFetchHook>(
+                HOOK_METADATA_FETCH,
                 MetadataFetchRequest::new("account"),
                 Extensions {
                     meta: Some(Arc::new(MetaExtension {

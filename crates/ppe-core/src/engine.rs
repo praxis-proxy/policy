@@ -78,7 +78,11 @@ fn entries_for_target<'a>(
     entries: &'a [crate::registry::HookEntry],
     payload: &dyn PluginPayload,
 ) -> Cow<'a, [crate::registry::HookEntry]> {
-    payload.target_plugin().map_or_else(
+    let target = payload
+        .as_any()
+        .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+        .map(crate::metadata::MetadataFetchRequest::instance);
+    target.map_or_else(
         || Cow::Borrowed(entries),
         |target| {
             Cow::Owned(
@@ -2744,8 +2748,16 @@ impl PolicyEngine {
         let targeted_entries = entries_for_target(hook_entries, payload.as_ref());
 
         if targeted_entries.is_empty()
-            && let Some(target) = payload.target_plugin().map(ToOwned::to_owned)
+            && payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .is_some()
         {
+            let target = payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .map(crate::metadata::MetadataFetchRequest::instance)
+                .unwrap_or_default();
             let violation = crate::error::PluginViolation::new(
                 "plugin.not_found",
                 format!("hook '{hook_name}' has no registered plugin instance named '{target}'"),
@@ -2797,7 +2809,20 @@ impl PolicyEngine {
             // The caller already selected this semantic operation's one source.
             // Policy-mode route resolution deliberately returns no ordinary
             // plugin chain, so applying it here would discard the target.
-            Cow::Owned(owned) => (Arc::new(owned), None),
+            Cow::Owned(owned) => (
+                Arc::new(
+                    owned
+                        .into_iter()
+                        .filter(|entry| {
+                            entry
+                                .plugin_ref
+                                .trusted_config()
+                                .passes_conditions(&extensions)
+                        })
+                        .collect(),
+                ),
+                None,
+            ),
             Cow::Borrowed(all_entries) => {
                 match self
                     .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
@@ -2909,8 +2934,16 @@ impl PolicyEngine {
         let targeted_entries = entries_for_target(hook_entries, &payload);
 
         if targeted_entries.is_empty()
-            && let Some(target) = payload.target_plugin().map(ToOwned::to_owned)
+            && payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .is_some()
         {
+            let target = payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .map(crate::metadata::MetadataFetchRequest::instance)
+                .unwrap_or_default();
             let violation = crate::error::PluginViolation::new(
                 "plugin.not_found",
                 format!(
@@ -2962,7 +2995,20 @@ impl PolicyEngine {
             // A targeted semantic operation is already fully resolved by its
             // payload and must not be replaced by a route annotation or the
             // policy mode's intentionally empty ordinary plugin chain.
-            Cow::Owned(owned) => (Arc::new(owned), None),
+            Cow::Owned(owned) => (
+                Arc::new(
+                    owned
+                        .into_iter()
+                        .filter(|entry| {
+                            entry
+                                .plugin_ref
+                                .trusted_config()
+                                .passes_conditions(&extensions)
+                        })
+                        .collect(),
+                ),
+                None,
+            ),
             Cow::Borrowed(all_entries) => {
                 match self
                     .filter_entries_by_route(&snapshot, all_entries, &extensions, H::NAME)
@@ -3073,8 +3119,16 @@ impl PolicyEngine {
         let targeted_entries = entries_for_target(hook_entries, &payload);
 
         if targeted_entries.is_empty()
-            && let Some(target) = payload.target_plugin().map(ToOwned::to_owned)
+            && payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .is_some()
         {
+            let target = payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .map(crate::metadata::MetadataFetchRequest::instance)
+                .unwrap_or_default();
             let violation = crate::error::PluginViolation::new(
                 "plugin.not_found",
                 format!("hook '{hook_name}' has no registered plugin instance named '{target}'"),
@@ -3130,7 +3184,20 @@ impl PolicyEngine {
             // The policy evaluator chose this source by instance name. Route
             // filtering governs lifecycle hooks; it must not erase or replace
             // an already-resolved semantic operation.
-            Cow::Owned(owned) => (Arc::new(owned), None),
+            Cow::Owned(owned) => (
+                Arc::new(
+                    owned
+                        .into_iter()
+                        .filter(|entry| {
+                            entry
+                                .plugin_ref
+                                .trusted_config()
+                                .passes_conditions(&extensions)
+                        })
+                        .collect(),
+                ),
+                None,
+            ),
             Cow::Borrowed(all_entries) => {
                 match self
                     .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)

@@ -85,8 +85,8 @@ use crate::delegation::hook::DELEGATION_HOOK_METADATA;
 use crate::elicitation::hook::ELICITATION_HOOK_METADATA;
 use crate::http_hook::HTTP_HOOK_METADATA;
 use crate::identity::hook::IDENTITY_HOOK_METADATA;
-use crate::ratelimit_hook::RATELIMIT_HOOK_METADATA;
 use crate::metadata::METADATA_HOOK_METADATA;
+use crate::ratelimit_hook::RATELIMIT_HOOK_METADATA;
 
 /// Lifecycle position a hook occupies for dispatcher purposes.
 ///
@@ -315,8 +315,8 @@ mod tests {
     use crate::hooks::trait_def::HookTypeDef as _;
     use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook};
     use crate::identity::{HOOK_IDENTITY_RESOLVE, IdentityHook};
-    use crate::ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY};
     use crate::metadata::{HOOK_METADATA_FETCH, MetadataFetchHook};
+    use crate::ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY};
 
     #[test]
     fn cmf_tool_pre_invoke_is_pre_phase_for_tool_entity() {
@@ -582,8 +582,8 @@ mod tests {
         use crate::elicitation::HOOK_ELICIT;
         use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
         use crate::identity::HOOK_IDENTITY_RESOLVE;
-        use crate::ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY};
         use crate::metadata::HOOK_METADATA_FETCH;
+        use crate::ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY};
 
         for name in [
             HOOK_CMF_TOOL_PRE_INVOKE,
