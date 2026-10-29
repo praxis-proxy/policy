@@ -312,3 +312,50 @@ async fn the_directory_trait_is_implementable_from_outside_the_plugin() {
         "and rejects a wrong password"
     );
 }
+
+#[test]
+fn a_debug_formatted_parsed_hash_redacts_the_stored_record() {
+    let stored = bcrypt_at(4, "pw");
+    let parsed = parse_hash(&stored, &Limits::default()).expect("loads");
+
+    let printed = format!("{parsed:?}");
+    assert!(
+        !printed.contains(&stored),
+        "the stored record must not appear in Debug output, got: {printed}"
+    );
+    assert!(
+        !printed.contains("$2"),
+        "nor any part of the modular-crypt record, got: {printed}"
+    );
+    assert!(
+        printed.contains("redacted"),
+        "and the field should read as withheld rather than absent, got: {printed}"
+    );
+    assert!(
+        printed.contains("Bcrypt"),
+        "the scheme stays visible for diagnostics, got: {printed}"
+    );
+}
+
+#[test]
+fn work_factors_do_not_compare_across_schemes() {
+    let bcrypt = parse_hash(&bcrypt_at(12, "pw"), &Limits::default()).expect("loads");
+    let argon2 = parse_hash(
+        "$argon2id$v=19$m=4096,t=3,p=1$c2FsdHNhbHRzYWx0$\
+         MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI",
+        &Limits::default(),
+    )
+    .expect("loads");
+
+    assert_eq!(
+        bcrypt.try_cmp_work(&argon2),
+        None,
+        "ordering across schemes has no meaning and must not produce an answer"
+    );
+    let cheaper = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
+    assert_eq!(
+        bcrypt.try_cmp_work(&cheaper),
+        Some(std::cmp::Ordering::Greater),
+        "within one scheme the comparison is meaningful"
+    );
+}

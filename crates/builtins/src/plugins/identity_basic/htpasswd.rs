@@ -141,7 +141,7 @@ impl HtpasswdConfig {
     /// # Errors
     ///
     /// Returns an error if the staleness ceiling is below the refresh interval
-    /// or the verification capacity is zero.
+    /// or the verification capacity is outside the supported range.
     pub fn validate(&self) -> Result<(), String> {
         if self.max_staleness_secs < self.refresh_secs {
             return Err(format!(
@@ -155,6 +155,20 @@ impl HtpasswdConfig {
                 "`max_concurrent_verifications` must be at least 1, or every request denies"
                     .to_owned(),
             );
+        }
+        // The upper bound is the semaphore's, not a policy choice:
+        // `Semaphore::new` panics above `MAX_PERMITS`, and a panic in a
+        // library takes the host's process down over what is only a
+        // configuration mistake. `new` already promises an `Err` for bad
+        // config, so this keeps that promise.
+        if self.max_concurrent_verifications > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(format!(
+                "`max_concurrent_verifications` ({}) exceeds the maximum this runtime \
+                 supports ({}); a value this large is not a meaningful limit anyway, since \
+                 the blocking pool bounds concurrency well below it",
+                self.max_concurrent_verifications,
+                tokio::sync::Semaphore::MAX_PERMITS,
+            ));
         }
         Ok(())
     }
@@ -195,7 +209,7 @@ pub struct HtpasswdDirectory {
     /// The capacity limit for in-flight verifications.
     verifications: Arc<tokio::sync::Semaphore>,
 
-    /// The fallback dummy hash for an empty or all-cheap directory.
+    /// The fallback dummy hash for an empty directory.
     floor: ParsedHash,
 
     /// The number of refresh-path file-read attempts, for regression tests.
@@ -252,7 +266,7 @@ fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, Stri
         // One scheme per file. A `WorkFactor` orders records within a scheme
         // and is meaningless across them -- bcrypt cost is a CPU exponent,
         // argon2's dominant term is memory bandwidth -- so a mixed file has no
-        // well-defined dearest record to serve as the miss-path hash. Picking
+        // well-defined most-expensive record to serve as the miss-path hash. Picking
         // one anyway inverted the real cost by 28x in measurement (a
         // `m=4096,t=3` argon2 record scored above `bcrypt cost=12` while
         // verifying 28 times faster), which made a miss far cheaper than a hit
@@ -279,10 +293,15 @@ fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, Stri
             Some(_) => {},
         }
 
-        if heaviest
+        // Compared through `try_cmp_work`, which refuses to order across
+        // schemes. The mixed-file check above already guarantees one scheme
+        // per file, so `None` here is unreachable -- but going through the
+        // checked comparison means a future change that relaxes the file
+        // constraint cannot silently reintroduce a cross-scheme ordering.
+        let is_heavier = heaviest
             .as_ref()
-            .is_none_or(|h| hash.work_factor() > h.work_factor())
-        {
+            .is_none_or(|h| hash.try_cmp_work(h) == Some(std::cmp::Ordering::Greater));
+        if is_heavier {
             heaviest = Some(hash.clone());
         }
 
@@ -308,19 +327,21 @@ fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, Stri
     // which users sit on the cheapest scheme.
     //
     // Reused rather than minted, so a populated file does no cryptographic
-    // work at load at all. Only an empty or all-cheap directory mints.
-    // Within one scheme the dearest record is well defined, so it is reused as
-    // the miss-path hash: exactly as expensive as the dearest hit, and free to
-    // obtain. The floor hash is only the fallback for an empty or all-cheap
-    // directory, and is built once in the constructor rather than minted here
-    // -- `reload` runs from `refresh_if_due` on the request path, and a
-    // cost-10 bcrypt mint would block an executor worker for tens of
-    // milliseconds once per refresh interval. It does not depend on file
-    // content, so there is nothing to recompute.
-    let dummy = match heaviest {
-        Some(hash) if hash.work_factor() >= WorkFactor::FLOOR => hash,
-        _ => floor.clone(),
-    };
+    // work at load at all.
+    // The most expensive record in the file, whenever the file has one. Within a
+    // single scheme -- which is all a file may hold -- that is exact: a miss
+    // runs the same hash the slowest hit runs, so the two cost the same by
+    // construction rather than by estimate.
+    //
+    // The floor hash applies only to a directory with no records at all. An
+    // earlier version also substituted it whenever every record scored below
+    // the floor, which was a mistake in the other direction: Apache's
+    // `htpasswd -B` defaults to cost 5, so an ordinary generated file got a
+    // cost-10 miss against cost-5 hits -- 40ms against 2.7ms measured, a 15x
+    // gap a client can time to enumerate which user-ids exist. The floor was
+    // meant to stop an empty file being distinguishable from a populated one;
+    // it must not make a populated file worse than no protection at all.
+    let dummy = heaviest.unwrap_or_else(|| floor.clone());
 
     Ok(Index { users, dummy })
 }

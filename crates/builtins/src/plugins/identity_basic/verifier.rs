@@ -87,7 +87,9 @@ impl WorkFactor {
 }
 
 /// A stored hash admitted for password verification.
-#[derive(Debug, Clone)]
+///
+/// Its `Debug` output redacts the encoded hash.
+#[derive(Clone)]
 pub struct ParsedHash {
     scheme: Scheme,
     work: WorkFactor,
@@ -111,6 +113,24 @@ impl ParsedHash {
     /// Do not log or project this offline-crackable verifier.
     pub fn encoded(&self) -> &str {
         &self.encoded
+    }
+
+    /// Compares verification work within a hashing scheme.
+    ///
+    /// Returns `None` when the records use different schemes, whose work
+    /// factors are not comparable.
+    pub fn try_cmp_work(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (self.scheme == other.scheme).then(|| self.work.cmp(&other.work))
+    }
+}
+
+impl std::fmt::Debug for ParsedHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedHash")
+            .field("scheme", &self.scheme)
+            .field("work", &self.work)
+            .field("encoded", &"<redacted>")
+            .finish()
     }
 }
 
@@ -140,6 +160,9 @@ impl Default for Limits {
         }
     }
 }
+
+/// Number of floor-hash mint attempts in this process, exposed for integration tests.
+pub static FLOOR_HASH_MINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The maximum password length accepted by the bcrypt verifier, in bytes.
 pub const BCRYPT_TRUNCATION_BYTES: usize = 72;
@@ -256,6 +279,7 @@ fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
 ///
 /// [`HashError::Malformed`]: HashError::Malformed
 pub fn floor_hash(work: WorkFactor) -> Result<ParsedHash, HashError> {
+    FLOOR_HASH_MINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let encoded = bcrypt::hash("ppe-basic-dummy-verification-target", work.as_bcrypt_cost())
         .map_err(|_cannot_mint| HashError::Malformed)?;
     Ok(ParsedHash {

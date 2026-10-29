@@ -6,7 +6,9 @@
 //! than a hit.
 
 use praxis_policy_builtins::plugins::identity_basic::directory::CredentialDirectory as _;
+use praxis_policy_builtins::plugins::identity_basic::verifier::FLOOR_HASH_MINTS;
 use praxis_policy_builtins::plugins::identity_basic::{HtpasswdConfig, HtpasswdDirectory};
+use std::sync::atomic::Ordering;
 
 use crate::support::{HtpasswdFile, bcrypt_line, config_for, services};
 
@@ -89,10 +91,11 @@ async fn the_miss_path_runs_at_the_maximum_cost_present_not_the_dominant_one() {
     let dir = directory(&file).expect("the file loads");
 
     let miss = dir.miss_work_factor();
-    let dearest = crate::support::work_factor_of(&bcrypt_line("expensive", "pw", 8));
+    let costliest = crate::support::work_factor_of(&bcrypt_line("expensive", "pw", 8));
     assert!(
-        miss >= dearest,
-        "the miss path ({miss:?}) must not be cheaper than the dearest record ({dearest:?})"
+        miss >= costliest,
+        "the miss path ({miss:?}) must not be cheaper than the most expensive record \
+         ({costliest:?})"
     );
 }
 
@@ -116,18 +119,20 @@ async fn the_dummy_tracks_a_reload_that_raises_the_maximum_cost() {
     );
     assert!(
         after >= crate::support::work_factor_of(&bcrypt_line("b", "pw", 12)),
-        "and must reach at least the new dearest record"
+        "and must reach at least the new most expensive record"
     );
 }
 
 #[tokio::test]
-async fn a_directory_of_cheap_records_still_pays_a_floor_cost_miss() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("a", "pw", 4)));
+async fn a_directory_of_cheap_records_uses_its_own_costliest_record_for_a_miss() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
     let dir = directory(&file).expect("the file loads");
-    let cheap = crate::support::work_factor_of(&bcrypt_line("a", "pw", 4));
-    assert!(
-        dir.miss_work_factor() > cheap,
-        "the miss path must not drop to the cost of the cheapest record"
+
+    assert_eq!(
+        dir.miss_work_factor(),
+        crate::support::work_factor_of(&bcrypt_line("alice", "pw", 5)),
+        "a miss must run the most expensive record's own hash, so it costs what a hit \
+         costs -- not a floor-cost hash the file never contained"
     );
 }
 
@@ -489,7 +494,7 @@ async fn the_miss_path_hash_is_the_heaviest_record_not_a_synthesized_cost() {
     assert_eq!(
         dir.miss_work_factor(),
         crate::support::work_factor_of(&bcrypt_line("dear", "pw", 12)),
-        "the miss path must run at exactly the dearest record's work factor"
+        "the miss path must run at exactly the most expensive record's work factor"
     );
 }
 
@@ -645,7 +650,7 @@ fn a_single_scheme_file_of_either_scheme_still_loads() {
 }
 
 #[tokio::test]
-async fn the_miss_path_is_never_cheaper_than_the_dearest_hit_within_a_scheme() {
+async fn the_miss_path_is_never_cheaper_than_the_costliest_hit_within_a_scheme() {
     let file = HtpasswdFile::write(&format!(
         "{}\n{}\n{}\n",
         bcrypt_line("cheap", "pw", 4),
@@ -657,25 +662,43 @@ async fn the_miss_path_is_never_cheaper_than_the_dearest_hit_within_a_scheme() {
     assert_eq!(
         dir.miss_work_factor(),
         crate::support::work_factor_of(&bcrypt_line("dear", "pw", 11)),
-        "the miss path must run at exactly the dearest record's work factor, \
+        "the miss path must run at exactly the most expensive record's work factor, \
          not the dominant or the cheapest"
     );
 }
 
 #[test]
-fn reloading_an_all_cheap_directory_does_not_remint_the_floor_hash() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+fn reloading_a_directory_does_not_remint_the_floor_hash() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
     let dir = directory(&file).expect("the file loads");
 
-    let start = std::time::Instant::now();
+    let before_reloads = FLOOR_HASH_MINTS.load(Ordering::Relaxed);
     for _ in 0..20_u32 {
         dir.reload().expect("the reload succeeds");
     }
-    let elapsed = start.elapsed();
+    let after_reloads = FLOOR_HASH_MINTS.load(Ordering::Relaxed);
 
+    assert_eq!(
+        after_reloads, before_reloads,
+        "20 reloads must not remint the floor hash: it does not depend on file \
+         content, and minting one on the request path blocks an executor worker"
+    );
+}
+
+#[test]
+fn a_concurrency_cap_above_the_semaphore_maximum_fails_to_load() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let mut config = config_for(file.path());
+    config.max_concurrent_verifications = usize::MAX;
+
+    let err = HtpasswdDirectory::new(config)
+        .expect_err("a cap above the semaphore maximum must fail the load");
     assert!(
-        elapsed < std::time::Duration::from_millis(300),
-        "20 reloads of an all-cheap directory took {elapsed:?}; the floor hash \
-         must be reused from the constructor rather than minted per reload"
+        err.contains("max_concurrent_verifications"),
+        "the error should name the field, got: {err}"
+    );
+    assert!(
+        !err.is_empty(),
+        "and it must be an error rather than a panic"
     );
 }

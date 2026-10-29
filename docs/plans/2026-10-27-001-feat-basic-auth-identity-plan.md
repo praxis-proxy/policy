@@ -78,20 +78,24 @@ Authorino-parity escape hatch.
 
 - R6. Lookup is O(1) in directory size, keyed by a hash index on the normalised
   user-id.
-- R7. Password verification is constant-time, and a user-id miss performs a
-  dummy
-  verification whose work factor is at least that of the most expensive record
-  in
-  the directory, so a miss is never cheaper than any hit. The dummy hash is
-  derived from the directory's actual parameters at load and on every reload,
-  and
-  the stored-hash parse happens before the found/not-found branch so both paths
-  pay it.
+- R7. Password verification is constant-time, and a user-id miss verifies
+  against **the most expensive record in the directory**, so a miss costs
+  exactly what the slowest hit costs. The stored-hash parse happens before the
+  found/not-found branch so both paths pay it. **Corrected 2026-10-29:** an
+  earlier design substituted a synthesized floor-cost hash whenever every
+  record scored below a floor. That was a leak, not a safeguard: Apache's
+  `htpasswd -B` defaults to cost 5, so an ordinary generated file got a
+  cost-10 miss against cost-5 hits -- 40ms against 2.7ms measured, a 15x gap a
+  client can time to enumerate user-ids. Reusing that record is exact
+  rather than estimated, and costs nothing to obtain. A floor-cost hash is
+  minted only for a directory with **no records at all**, where there is
+  nothing to reuse and an empty file would otherwise be distinguishable from a
+  populated one.
 - R8. The `.htpasswd` backend reads bcrypt (`$2a$`, `$2b$`, `$2y$`) and argon2,
   but **not both in one file** -- a mixed file is a load error. **Added
   2026-10-29:** the two schemes' cost parameters are not comparable (bcrypt
   cost is a CPU exponent; argon2's dominant term is memory bandwidth), so a
-  mixed directory has no well-defined dearest record to use as its miss-path
+  mixed directory has no well-defined most-expensive record to use as its miss-path
   hash. Measured, a `m=4096,t=3` argon2 record scored *above* `bcrypt cost=12`
   on the within-scheme work factor while verifying 28x faster -- which made a
   miss cheaper than a hit and reopened the enumeration oracle R7 and KTD9
@@ -312,7 +316,7 @@ Authorino-parity escape hatch.
   scheme.** The scheme qualifier is load-bearing and was added after
   implementation: see R8. Across schemes the work factor is meaningless, so
   the backend refuses a mixed file rather than ordering across them, and the
-  miss path reuses the dearest record's own hash rather than synthesizing one
+  miss path reuses the costliest record's own hash rather than synthesizing one
   from a number. An earlier draft
   had the miss path copy the file's *dominant* scheme and cost. That leaks: in a
   file mixing bcrypt costs, or mixing bcrypt with argon2 or an opted-in legacy
