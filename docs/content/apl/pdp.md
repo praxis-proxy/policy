@@ -81,6 +81,12 @@ provided so you can start without writing one. For AuthZEN or NeMo, implement
 the resolver trait and register it; the APL `authzen:` / `nemo:` call forms then
 work unchanged.
 
+OPA package and import paths may contain at most 32 components. A module with
+a longer path fails when the PDP config loads. Query paths must preserve any
+literal package component: for `package graph["1.0.0"]`, use
+`data.graph["1.0.0"].allow`, rather than splitting the version at its dots.
+The bundled resolver does not expose regorus's `rand.intn` builtin.
+
 CEL is the lightest option for inline boolean policy:
 
 <!-- validate: route-body -->

@@ -105,10 +105,9 @@ pub struct OpaResolver {
     /// The base engine, prepared once with all global modules + data. Cloned
     /// per request (cheap — compiled policy/data is `Arc`-shared).
     base_engine: Engine,
-    /// Rego package paths declared by the global modules (e.g. `data.authz`),
-    /// captured at build. A route-step inline module whose package is in this
-    /// set is rejected fail-closed so it cannot override operator policy.
-    global_packages: HashSet<String>,
+    /// Decoded Rego package components declared by the global modules,
+    /// captured at build. Inline modules may not share their subtrees.
+    global_packages: HashSet<Vec<String>>,
     /// Policy source names that may safely appear in evaluation diagnostics.
     policy_sources: Arc<HashSet<String>>,
     /// Cache of prepared engines for inline modules, keyed by module source.
@@ -197,9 +196,6 @@ impl OpaResolver {
         let decision_field = read_string(map, "decision_field")?.unwrap_or_else(|| "allow".into());
 
         let mut engine = Engine::new();
-        // Track each global module's Rego package (the path `add_policy`
-        // returns) so an inline step module can be rejected if it collides.
-        let mut global_packages = HashSet::new();
         let mut policy_sources = HashSet::from([INLINE_MODULE_NAME.to_owned()]);
 
         // 1. Global modules — inline texts first, then files. Each gets a
@@ -207,31 +203,38 @@ impl OpaResolver {
         //    semantics) rather than one overwriting another by filename.
         for (module_index, text) in read_string_seq(map, "modules")?.into_iter().enumerate() {
             let name = format!("global-{module_index}.rego");
-            let package =
-                engine
-                    .add_policy(name.clone(), text)
-                    .map_err(|e| BuildError::ModuleParse {
-                        name: name.clone(),
-                        cause: e.to_string(),
-                    })?;
+            engine
+                .add_policy(name.clone(), text)
+                .map_err(|e| BuildError::ModuleParse {
+                    name: name.clone(),
+                    cause: e.to_string(),
+                })?;
             policy_sources.insert(name);
-            global_packages.insert(package);
         }
         for path in read_string_seq(map, "module_files")? {
             let text = std::fs::read_to_string(&path).map_err(|source| BuildError::ModuleFile {
                 path: path.clone(),
                 source,
             })?;
-            let package =
-                engine
-                    .add_policy(path.clone(), text)
-                    .map_err(|e| BuildError::ModuleParse {
-                        name: path.clone(),
-                        cause: e.to_string(),
-                    })?;
+            engine
+                .add_policy(path.clone(), text)
+                .map_err(|e| BuildError::ModuleParse {
+                    name: path.clone(),
+                    cause: e.to_string(),
+                })?;
             policy_sources.insert(path);
-            global_packages.insert(package);
         }
+        // `add_policy` returns a lossy dot-joined string, so compare decoded
+        // components when enforcing the inline/global package boundary.
+        let global_packages = engine
+            .get_policy_package_components()
+            .map_err(|e| BuildError::ModuleParse {
+                name: "global modules".to_owned(),
+                cause: e.to_string(),
+            })?
+            .into_iter()
+            .map(|package| package.components)
+            .collect();
 
         // 2. Data documents — inline mapping first, then files. Both are
         //    normalized to JSON (serde_yaml parses JSON too, so a `.json` or
@@ -314,9 +317,16 @@ impl OpaResolver {
         // the `contains_key` guard keeps a same-key racer from being rejected
         // once the cache is full.
         let mut engine = self.base_engine.clone();
-        let package = engine
+        let package_label = engine
             .add_policy(INLINE_MODULE_NAME.to_owned(), src.to_owned())
             .map_err(|e| EngineError::Compile(e.to_string()))?;
+        let package = engine
+            .get_policy_package_components()
+            .map_err(|e| EngineError::Compile(e.to_string()))?
+            .into_iter()
+            .last()
+            .ok_or_else(|| EngineError::Compile("inline module package missing".to_owned()))?
+            .components;
 
         // Inline modules may add packages but may not share a global package subtree.
         if self
@@ -324,7 +334,7 @@ impl OpaResolver {
             .iter()
             .any(|g| packages_share_subtree(&package, g))
         {
-            return Err(EngineError::PackageCollision(package));
+            return Err(EngineError::PackageCollision(package_label));
         }
 
         // Insert under the cap — reject past it, never evict (workspace cache
@@ -395,13 +405,9 @@ impl OpaResolver {
     }
 }
 
-/// Whether two dotted Rego package paths are equal or one contains the other.
-/// Path-separator boundaries keep siblings such as `data.authz` and
-/// `data.authznext` distinct.
-fn packages_share_subtree(a: &str, b: &str) -> bool {
-    a == b
-        || a.strip_prefix(b).is_some_and(|rest| rest.starts_with('.'))
-        || b.strip_prefix(a).is_some_and(|rest| rest.starts_with('.'))
+/// Whether either decoded Rego package is in the other's subtree.
+fn packages_share_subtree(a: &[String], b: &[String]) -> bool {
+    a.starts_with(b) || b.starts_with(a)
 }
 
 /// Internal — failure shapes from preparing a per-step engine. All three
@@ -723,6 +729,27 @@ data:
     }
 
     #[test]
+    fn package_path_limit_is_enforced_at_build() {
+        for depth in [32, 33] {
+            let path = (0..depth)
+                .map(|i| format!("p{i}"))
+                .collect::<Vec<_>>()
+                .join(".");
+            let module = format!("package {path}\nallow := true");
+            let config = serde_yaml::to_value(serde_json::json!({
+                "kind": "opa",
+                "modules": [module],
+            }))
+            .unwrap();
+            let result = OpaResolver::from_config(&config);
+            match (depth, result) {
+                (32, Ok(_)) | (33, Err(BuildError::ModuleParse { .. })) => {},
+                (_, other) => panic!("unexpected result at depth {depth}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn missing_module_file_names_the_path() {
         let err = cfg("kind: opa\nmodule_files:\n  - /no/such/authz.rego\n").unwrap_err();
         match err {
@@ -1039,6 +1066,44 @@ msg := "not a decision"
     }
 
     #[tokio::test]
+    async fn escaped_inline_package_alias_cannot_override_global_package() {
+        let global = "package authz.foo\ndefault allow := false\n";
+        let inline = "package authz[\"f\\u006fo\"]\nallow := true\n";
+        let r = resolver(&[global], OnError::Allow);
+        let out = r
+            .evaluate(&call("data.authz.foo.allow", Some(inline)), &bag("alice"))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&out.decision, Decision::Deny { reason: Some(reason), .. } if reason.contains("collides")),
+            "escaped alias must be rejected even with on_error=allow; got {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn literal_dot_package_does_not_collide_with_nested_package() {
+        let global = "package graph[\"a.b\"]\ndefault allow := false\n";
+        let inline = "package graph.a.b\nallow := true\n";
+        let r = resolver(&[global], OnError::Deny);
+        let out = r
+            .evaluate(&call("data.graph.a.b.allow", Some(inline)), &bag("alice"))
+            .await
+            .unwrap();
+        assert_eq!(out.decision, Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn literal_dot_package_uses_bracketed_query_path() {
+        let module = "package graph[\"a.b\"]\nallow := true\n";
+        let r = resolver(&[module], OnError::Deny);
+        let out = r
+            .evaluate(&call("data.graph[\"a.b\"].allow", None), &bag("alice"))
+            .await
+            .unwrap();
+        assert_eq!(out.decision, Decision::Allow);
+    }
+
+    #[tokio::test]
     async fn inline_module_cannot_override_global_subpackage() {
         let global = "package authz\ndefault allow := false\nallow if data.authz.exceptions[input.subject.id]\n";
         let r = resolver(&[global], OnError::Allow);
@@ -1296,6 +1361,20 @@ modules:
         assert!(
             matches!(out.decision, Decision::Deny { .. }),
             "http.send must be unavailable and deny, not allow",
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_rand_builtin_cannot_allow() {
+        let r = resolver(&[], OnError::Deny);
+        let inline = "package random\nallow if rand.intn(\"seed\", 1) == 0\n";
+        let out = r
+            .evaluate(&call("data.random.allow", Some(inline)), &bag("alice"))
+            .await
+            .unwrap();
+        assert!(
+            matches!(out.decision, Decision::Deny { .. }),
+            "rand.intn must be unavailable and deny"
         );
     }
 
