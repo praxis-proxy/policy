@@ -314,6 +314,47 @@ async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
 }
 
 #[tokio::test]
+async fn dropping_a_verify_future_does_not_release_its_permit_early() {
+    // A permit held in the async body rather than inside the blocking closure
+    // would be released the instant this future is dropped, while the hashing
+    // it was bounding ran on. That is the unauthenticated CPU-exhaustion path:
+    // a caller that connects and disconnects repeatedly would start as many
+    // concurrent verifies as the Tokio blocking pool allows, whatever the cap.
+    // Cost 12 keeps the work in flight long enough for the drop to land first.
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 12)));
+    let mut config = config_for(file.path());
+    config.max_concurrent_verifications = 1;
+    let dir = HtpasswdDirectory::new(config).expect("the file loads");
+    let svc = services();
+    let record = dir
+        .lookup("alice", &svc)
+        .await
+        .expect("the lookup answers")
+        .expect("alice is in the file");
+
+    // Polled once so the permit is taken and the blocking task is spawned,
+    // then dropped while that task is still hashing.
+    let credential = crate::support::password("pw");
+    let mut in_flight = Box::pin(dir.verify(Some(&record), &credential, &svc));
+    assert!(
+        futures::poll!(&mut in_flight).is_pending(),
+        "a cost-12 verify must still be in flight after a single poll"
+    );
+    drop(in_flight);
+
+    // The dropped future cannot have returned the permit, because the hashing
+    // it paid for is still running.
+    assert!(
+        matches!(
+            dir.verify(Some(&record), &credential, &svc).await,
+            Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated)
+        ),
+        "a cap of 1 must stay saturated while the dropped future's blocking \
+         verification is still running"
+    );
+}
+
+#[tokio::test]
 async fn a_burst_of_lookups_triggers_one_file_read() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let mut config = config_for(file.path());
@@ -566,6 +607,42 @@ async fn a_reload_onto_a_new_uniform_cost_is_accepted_and_tracked() {
         "and tracks the new cost after the re-hash: re-hashing a whole file \
          onto a new cost is legitimate, so the miss path must follow it rather \
          than keep the old one"
+    );
+}
+
+#[tokio::test]
+async fn a_reload_onto_mixed_costs_is_refused_and_the_uniform_index_keeps_serving() {
+    // Uniformity is a property of whatever is being served, not of the first
+    // read, so the refresh path has to enforce it too. A rewrite that mixed
+    // costs and was accepted here would reintroduce the enumeration oracle at
+    // runtime, on a file that loaded clean.
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
+    let dir = directory(&file).expect("the file loads");
+    let svc = services();
+
+    file.rewrite(&format!(
+        "{}\n{}\n",
+        bcrypt_line("alice", "pw", 5),
+        bcrypt_line("bob", "pw", 12),
+    ));
+    let err = dir
+        .reload()
+        .expect_err("a rewrite mixing two bcrypt costs must fail the reload");
+    assert!(
+        err.contains("One cost profile per file"),
+        "the refresh path must refuse mixed costs for the same reason the load \
+         path does, and say so, got: {err}"
+    );
+
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&bcrypt_line("alice", "pw", 5)),
+        "the refused reload must leave the uniform index in place rather than \
+         publish a half-applied one"
+    );
+    assert!(
+        dir.lookup("bob", &svc).await.expect("answers").is_none(),
+        "and the record from the refused file must not be reachable"
     );
 }
 
