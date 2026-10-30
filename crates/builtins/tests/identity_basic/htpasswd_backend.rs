@@ -427,28 +427,26 @@ fn loading_an_argon2_record_does_not_mint_an_expensive_dummy() {
 }
 
 #[test]
-fn reloading_a_directory_does_not_remint_its_empty_directory_hash() {
+fn reloading_a_populated_directory_does_no_hashing_work() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
     let dir = directory(&file).expect("the file loads");
 
-    assert_eq!(
-        dir.empty_mints(),
-        1,
-        "construction mints the empty-directory hash exactly once; the counter \
-         is directory-local because a process-wide one is incremented by any \
-         concurrent test that builds a directory"
-    );
-
+    let start = std::time::Instant::now();
     for _ in 0..20_u32 {
         dir.reload().expect("the reload succeeds");
     }
+    let elapsed = start.elapsed();
 
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "20 reloads took {elapsed:?}; a reload must reuse a record from the file \
+         as its miss-path hash rather than minting one, because reload runs on \
+         the request path where a bcrypt mint would block an executor worker"
+    );
     assert_eq!(
-        dir.empty_mints(),
+        dir.len(),
         1,
-        "20 reloads must not remint it: the hash does not depend on file \
-         content, and reload runs on the request path where a bcrypt mint \
-         would block an executor worker"
+        "the record is still indexed after the reloads"
     );
 }
 

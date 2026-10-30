@@ -212,13 +212,6 @@ pub struct HtpasswdDirectory {
     /// The fallback dummy hash for an empty directory.
     empty: ParsedHash,
 
-    /// How many times this directory minted its empty-directory hash.
-    ///
-    /// Directory-local rather than process-wide: the hash is built once at
-    /// construction, and a process-wide counter cannot prove that, because a
-    /// concurrent test constructing another directory increments it too.
-    empty_mints: AtomicU64,
-
     /// The number of refresh-path file-read attempts, for regression tests.
     reload_attempts: AtomicU64,
 
@@ -321,27 +314,11 @@ fn read_index(config: &HtpasswdConfig, empty: &ParsedHash) -> Result<Index, Stri
         users.insert(normalised, Entry { hash });
     }
 
-    // The heaviest record actually present, not a constant and not the dominant
-    // scheme. A dummy at the dominant cost leaks in any mixed file: misses
-    // would cost the common parameters while hits on minority records run
-    // measurably faster or slower, which enumerates both which names exist and
-    // which users sit on the cheapest scheme.
-    //
-    // Reused rather than minted, so a populated file does no cryptographic
-    // work at load at all.
-    // The most expensive record in the file, whenever the file has one. Within a
-    // single scheme -- which is all a file may hold -- that is exact: a miss
-    // runs the same hash the slowest hit runs, so the two cost the same by
-    // construction rather than by estimate.
-    //
-    // The floor hash applies only to a directory with no records at all. An
-    // earlier version also substituted it whenever every record scored below
-    // the floor, which was a mistake in the other direction: Apache's
-    // `htpasswd -B` defaults to cost 5, so an ordinary generated file got a
-    // cost-10 miss against cost-5 hits -- 40ms against 2.7ms measured, a 15x
-    // gap a client can time to enumerate which user-ids exist. The floor was
-    // meant to stop an empty file being distinguishable from a populated one;
-    // it must not make a populated file worse than no protection at all.
+    // Any record in the file costs what every other one does, so reusing one
+    // of them makes a miss cost exactly what a hit costs -- by construction
+    // rather than by estimate. The synthesized hash is for a file with no
+    // records at all, which otherwise answers in nanoseconds and is
+    // distinguishable from a populated one by timing alone.
     let dummy = reference.unwrap_or_else(|| empty.clone());
 
     Ok(Index { users, dummy })
@@ -368,7 +345,6 @@ impl HtpasswdDirectory {
         Ok(Self {
             config,
             empty,
-            empty_mints: AtomicU64::new(1),
             index: ArcSwap::from_pointee(index),
             started: Instant::now(),
             next_attempt_ms: AtomicU64::new(first_attempt),
@@ -407,11 +383,6 @@ impl HtpasswdDirectory {
     /// The number of dummy verification attempts, for regression tests.
     pub fn dummy_runs(&self) -> u64 {
         self.dummy_runs.load(Ordering::Relaxed)
-    }
-
-    /// How many times this directory minted its empty-directory hash.
-    pub fn empty_mints(&self) -> u64 {
-        self.empty_mints.load(Ordering::Relaxed)
     }
 
     /// The number of refresh-path file-read attempts, for regression tests.
