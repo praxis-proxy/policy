@@ -97,23 +97,47 @@ fn a_malformed_bcrypt_record_fails_at_load() {
 }
 
 #[test]
-fn a_bcrypt_record_outside_the_radix64_alphabet_fails_at_load() {
+fn a_bcrypt_record_the_verifier_cannot_decode_fails_at_load() {
     let minted = bcrypt_at(4, "pw");
     let prefix = minted
         .get(..7)
         .expect("a bcrypt record is longer than its cost prefix");
+    let salt = minted.get(7..29).expect("a bcrypt salt is 22 characters");
+    let digest = minted.get(29..).expect("a bcrypt digest is 31 characters");
+    let salt_head = salt
+        .get(..21)
+        .expect("the salt is longer than one character");
+    let digest_head = digest
+        .get(..30)
+        .expect("the digest is longer than one character");
 
-    for (filler, reason) in [
-        ('!', "a character in no base alphabet"),
-        ('+', "a standard-base64 character bcrypt does not use"),
-        ('=', "base64 padding, which bcrypt never emits"),
+    for (forged, reason) in [
+        (
+            format!("{prefix}{}", "!".repeat(53)),
+            "a character in no base alphabet",
+        ),
+        (
+            format!("{prefix}{}", "+".repeat(53)),
+            "a standard-base64 character bcrypt does not use",
+        ),
+        (
+            format!("{prefix}{}", "=".repeat(53)),
+            "base64 padding, which bcrypt never emits",
+        ),
+        (
+            format!("{prefix}{salt_head}z{digest}"),
+            "an in-alphabet salt character whose spare bits are not zero",
+        ),
+        (
+            format!("{prefix}{salt}{digest_head}z"),
+            "an in-alphabet digest character whose spare bits are not zero",
+        ),
     ] {
-        let forged = format!("{prefix}{}", String::from(filler).repeat(53));
         assert_eq!(
             forged.len(),
             60,
-            "the forged record must be the right length, so only the alphabet \
-             check can reject it"
+            "the forged record carrying {reason} must be the right length, so \
+             only the encoding check can reject it"
         );
         assert!(
             bcrypt::verify("pw", &forged).is_err(),

@@ -27,6 +27,7 @@
 
 use argon2::password_hash::phc::PasswordHash;
 use argon2::{Argon2, PasswordVerifier as _};
+use base64::Engine as _;
 use subtle::ConstantTimeEq as _;
 
 use super::credential::Password;
@@ -350,27 +351,46 @@ fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
         return Err(HashError::Malformed);
     }
 
-    // The shape is not enough: `bcrypt::verify` rejects an out-of-alphabet
-    // salt or digest *before* running the KDF, so admitting one here makes
-    // that user-id answer in 50ns against 42ms for a real cost-10 record --
-    // measured, a factor of 800,000 -- which is the user-enumeration oracle
-    // the dummy-verification path exists to close. Validated at load so a
-    // record that is admitted is one the verifier will run in full.
-    let encoded = stored.get(7..).ok_or(HashError::Malformed)?;
-    if !encoded.bytes().all(is_bcrypt_radix64) {
-        return Err(HashError::Malformed);
-    }
+    // The shape is not enough: `bcrypt::verify` decodes both fields and fails
+    // *before* running the KDF when either is undecodable, so admitting such
+    // a record makes that user-id answer in 25ns against 41ms for a real
+    // cost-10 one -- measured -- which is the user-enumeration oracle the
+    // dummy-verification path exists to close. A correct alphabet does not
+    // imply a decodable field: 22 characters carry 132 bits for a 128-bit
+    // salt, so the final character's spare bits must be zero, and `z` in that
+    // position is in the alphabet yet still rejected.
+    //
+    // Decoded with the verifier's own engine and field widths rather than a
+    // reimplementation of that rule, so the two cannot disagree about which
+    // records are decodable.
+    decode_bcrypt_field(stored.get(7..29), &mut [0_u8; 16])?;
+    decode_bcrypt_field(stored.get(29..), &mut [0_u8; 23])?;
 
     cost.parse::<u32>()
         .map(Some)
         .map_err(|_not_a_number| HashError::Malformed)
 }
 
-/// Whether a byte is in bcrypt's radix-64 alphabet.
-fn is_bcrypt_radix64(byte: u8) -> bool {
-    // bcrypt's own alphabet, which is not standard base64: `.` and `/` lead,
-    // and neither `+` nor `=` appears at all.
-    byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'/'
+/// Decode one bcrypt field into a buffer sized for its plaintext width.
+///
+/// # Errors
+///
+/// Returns [`HashError::Malformed`] when the field is absent or does not decode
+/// to exactly the buffer's width.
+///
+/// [`HashError::Malformed`]: HashError::Malformed
+fn decode_bcrypt_field(field: Option<&str>, buffer: &mut [u8]) -> Result<(), HashError> {
+    let field = field.ok_or(HashError::Malformed)?;
+    let written = bcrypt::BASE_64
+        .decode_slice(field.as_bytes(), buffer)
+        .map_err(|_undecodable_field| HashError::Malformed)?;
+    // `decode_slice` is content with a short field, which would leave the tail
+    // of the buffer unwritten; the verifier's fixed-width arrays would then
+    // read bytes the record never carried.
+    if written != buffer.len() {
+        return Err(HashError::Malformed);
+    }
+    Ok(())
 }
 
 /// Create a bcrypt hash for dummy verification at the requested work factor.
