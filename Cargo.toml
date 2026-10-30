@@ -93,6 +93,37 @@ readme = "README.md"
 
 [workspace.dependencies]
 base64 = "0.23.1"
+# NFC normalisation of a Basic user-id before it is used as an index key, so
+# one name in two encodings cannot split into two directory entries (or slip
+# past a duplicate check). The Unicode-maintained reference implementation and
+# the crate the `unicode-*` family is built around; it is already in the
+# lockfile as a transitive of the Cedar stack, but a transitive is not a
+# declared edge, so a `--features basic` build would not resolve it.
+# Deliberately not `icu`/`icu_normalizer`: a full ICU data pipeline for one
+# normalisation form is a new dependency tree for no additional capability.
+unicode-normalization = "0.1.26"
+# bcrypt and argon2 verification for the Basic identity directory. Verify only:
+# PPE checks a stored hash, it never mints one.
+#
+# Both are RustCrypto-adjacent and share this tree's existing `digest`,
+# `getrandom`, `base64ct`, `subtle` and `zeroize`, so between them they add
+# `blowfish`, `cipher`, `blake2`, `phc` and `password-hash` and nothing with a
+# C toolchain step. Deliberately not `rust-crypt`/`pwhash`: those cover the
+# legacy DES and MD5-crypt family this plugin refuses at load anyway, and
+# carry no advisory policy worth inheriting on a runtime path.
+#
+# `bcrypt` is the one crate here that verifies the `$2a$`/`$2b$`/`$2y$` variants
+# `.htpasswd` actually contains. It exposes no public hash *parser* -- its
+# `split_hash` is private and `HashParts` cannot be built from a string -- so
+# the cost ceiling is enforced by reading bcrypt's fixed-width cost field
+# directly in `verifier.rs`. Its `non_truncating_verify` is likewise unusable
+# here: it errors on hashes it did not mint itself, so it rejects every file
+# Apache wrote.
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
+bcrypt = { version = "0.19.3", default-features = false, features = ["std"] }
+# Constant-time primitives for the verdict comparison. Already in the tree via
+# both hashing crates; named here because this plugin depends on it directly.
+subtle = "2.6.1"
 jsonwebtoken = "11.1.0"
 # rsa 0.9 uses rand_core 0.6, which rand 0.8 implements.
 rand = "0.8.8"

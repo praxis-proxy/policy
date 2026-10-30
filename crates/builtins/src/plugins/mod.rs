@@ -8,6 +8,7 @@
 //!
 //! - `identity_jwt` (`jwt`) — kind `identity/jwt`
 //! - `identity_api_key` (`api-key`) — kind `identity/api-key`
+//! - `identity_basic` (`basic`) — kind `identity/basic`
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `delegator_vault` (`delegator-vault`) — kind `delegator/vault`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
@@ -18,6 +19,9 @@ pub mod identity_jwt;
 
 #[cfg(feature = "api-key")]
 pub mod identity_api_key;
+
+#[cfg(feature = "basic")]
+pub mod identity_basic;
 
 #[cfg(feature = "oauth")]
 pub mod delegator_oauth;
