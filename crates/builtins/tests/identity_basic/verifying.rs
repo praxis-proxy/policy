@@ -97,6 +97,40 @@ fn a_malformed_bcrypt_record_fails_at_load() {
 }
 
 #[test]
+fn a_bcrypt_record_outside_the_radix64_alphabet_fails_at_load() {
+    let minted = bcrypt_at(4, "pw");
+    let prefix = minted
+        .get(..7)
+        .expect("a bcrypt record is longer than its cost prefix");
+
+    for (filler, reason) in [
+        ('!', "a character in no base alphabet"),
+        ('+', "a standard-base64 character bcrypt does not use"),
+        ('=', "base64 padding, which bcrypt never emits"),
+    ] {
+        let forged = format!("{prefix}{}", String::from(filler).repeat(53));
+        assert_eq!(
+            forged.len(),
+            60,
+            "the forged record must be the right length, so only the alphabet \
+             check can reject it"
+        );
+        assert!(
+            bcrypt::verify("pw", &forged).is_err(),
+            "precondition: bcrypt itself refuses {reason} before running the KDF"
+        );
+        assert_eq!(
+            parse_hash(&forged, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a bcrypt record carrying {reason} must fail at load: the verifier \
+             rejects it before the KDF, so admitting it would answer in \
+             nanoseconds where a real record takes milliseconds and reveal \
+             that the user-id exists"
+        );
+    }
+}
+
+#[test]
 fn a_bcrypt_cost_above_the_ceiling_fails_at_load() {
     let limits = Limits {
         max_bcrypt_cost: 10,

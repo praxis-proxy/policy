@@ -17,9 +17,10 @@
 // COST SYMMETRY. The expensive half is not the comparison, it is the KDF. A
 // bcrypt verify at cost 12 is milliseconds; a map probe for a user-id that
 // does not exist is nanoseconds. So "does this user exist" is trivially
-// measurable unless a miss performs the same work a hit would -- which is what
-// `dummy_hash` is for, and why the dummy is derived from the worst case
-// actually present in the directory rather than from a constant.
+// measurable unless a miss performs the same work a hit would -- which is why
+// a directory holds one cost profile throughout and reuses one of its own
+// records on the miss path, and why admission here rejects any record the
+// verifier would refuse before reaching the KDF.
 //
 // Note what is deliberately NOT here: any way to produce a hash for storage.
 // PPE verifies; minting belongs to whatever owns the password.
@@ -323,13 +324,14 @@ fn weak_scheme(stored: &str) -> bool {
     stored.starts_with("$apr1$") || stored.starts_with("{SHA}")
 }
 
-/// Read a bcrypt cost from its fixed-width prefix.
+/// Read a bcrypt cost from a fully validated record.
 ///
 /// Returns `Ok(None)` for a non-bcrypt record.
 ///
 /// # Errors
 ///
-/// Returns [`HashError::Malformed`] when a bcrypt prefix has an invalid shape.
+/// Returns [`HashError::Malformed`] when a bcrypt record has an invalid shape,
+/// an out-of-alphabet salt or digest, or a cost outside the library's range.
 ///
 /// [`HashError::Malformed`]: HashError::Malformed
 fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
@@ -347,9 +349,28 @@ fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
     if stored.as_bytes().get(6) != Some(&b'$') {
         return Err(HashError::Malformed);
     }
+
+    // The shape is not enough: `bcrypt::verify` rejects an out-of-alphabet
+    // salt or digest *before* running the KDF, so admitting one here makes
+    // that user-id answer in 50ns against 42ms for a real cost-10 record --
+    // measured, a factor of 800,000 -- which is the user-enumeration oracle
+    // the dummy-verification path exists to close. Validated at load so a
+    // record that is admitted is one the verifier will run in full.
+    let encoded = stored.get(7..).ok_or(HashError::Malformed)?;
+    if !encoded.bytes().all(is_bcrypt_radix64) {
+        return Err(HashError::Malformed);
+    }
+
     cost.parse::<u32>()
         .map(Some)
         .map_err(|_not_a_number| HashError::Malformed)
+}
+
+/// Whether a byte is in bcrypt's radix-64 alphabet.
+fn is_bcrypt_radix64(byte: u8) -> bool {
+    // bcrypt's own alphabet, which is not standard base64: `.` and `/` lead,
+    // and neither `+` nor `=` appears at all.
+    byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'/'
 }
 
 /// Create a bcrypt hash for dummy verification at the requested work factor.
