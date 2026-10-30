@@ -78,31 +78,19 @@ Authorino-parity escape hatch.
 
 - R6. Lookup is O(1) in directory size, keyed by a hash index on the normalised
   user-id.
-- R7. Password verification is constant-time, and a user-id miss verifies
-  against **the most expensive record in the directory**, so a miss costs
-  exactly what the slowest hit costs. The stored-hash parse happens before the
-  found/not-found branch so both paths pay it. **Corrected 2026-10-29:** an
-  earlier design substituted a synthesized floor-cost hash whenever every
-  record scored below a floor. That was a leak, not a safeguard: Apache's
-  `htpasswd -B` defaults to cost 5, so an ordinary generated file got a
-  cost-10 miss against cost-5 hits -- 40ms against 2.7ms measured, a 15x gap a
-  client can time to enumerate user-ids. Reusing that record is exact
-  rather than estimated, and costs nothing to obtain. A floor-cost hash is
-  minted only for a directory with **no records at all**, where there is
-  nothing to reuse and an empty file would otherwise be distinguishable from a
-  populated one.
+- R7. Password verification uses a constant-time verifier. Every local record
+  in one directory has the **same hash scheme and cost parameters**: bcrypt
+  cost, or argon2 variant, version, memory, time and parallelism. A mismatched
+  record fails at load. A user-id miss verifies against one stored hash, so a
+  miss and a wrong-password hit perform the same kind of work. A valid floor
+  hash is used only for an empty directory. Merely choosing the most expensive
+  record is insufficient: a miss would still be slower than a hit on a cheaper
+  record, revealing that the cheaper user-id exists. The test asserts the
+  uniform-parameter invariant and a dummy verify, not wall-clock timing.
 - R8. The `.htpasswd` backend reads bcrypt (`$2a$`, `$2b$`, `$2y$`) and argon2,
-  but **not both in one file** -- a mixed file is a load error. **Added
-  2026-10-29:** the two schemes' cost parameters are not comparable (bcrypt
-  cost is a CPU exponent; argon2's dominant term is memory bandwidth), so a
-  mixed directory has no well-defined most-expensive record to use as its miss-path
-  hash. Measured, a `m=4096,t=3` argon2 record scored *above* `bcrypt cost=12`
-  on the within-scheme work factor while verifying 28x faster -- which made a
-  miss cheaper than a hit and reopened the enumeration oracle R7 and KTD9
-  exist to close. A calibrated cross-scheme estimate was rejected: the ratio
-  moves with hardware, so a baked-in constant would mis-rank silently on
-  machines it was not measured on. Refusing to mix is checkable; a fudge
-  factor is not.
+  but rejects files mixing schemes or cost parameters. Across schemes the cost
+  parameters cannot be compared; within a scheme, mixed costs still expose
+  user-id existence through a faster hit than miss (R7, KTD9).
   apr1 (`$apr1$`) and `{SHA}` are recognised but **refused**, with a load error
   naming the fix (re-hash with bcrypt or argon2). **Scope corrected
   2026-10-29:** this originally said they load under an explicit opt-in. They
@@ -116,7 +104,9 @@ Authorino-parity escape hatch.
   an optional `expires_at`.
 - R10. An HTTP backend delegates verification to a service, over HTTPS only
   unless cleartext is explicitly opted into, sending the user-id and password as
-  separate fields and following no redirects.
+  separate fields and following no redirects. The service must apply an
+  equivalent unknown-user dummy verification and uniform hash-cost policy;
+  PPE cannot enforce its response timing across the transport boundary.
 - R11. A duplicate user-id in any file backend is a config-load error, not
   last-wins. The check runs **after** normalisation, so two differently-encoded
   spellings of one name are caught rather than silently collapsing.
@@ -133,8 +123,8 @@ Authorino-parity escape hatch.
 - R24. Password verification runs off the async worker, with a bounded
   concurrency limit that denies when saturated.
 - R25. Expiry enforcement is mandatory; there is no mode that delegates it to
-  the
-  directory. An unparseable `expires_at` is a load error.
+  the directory. An unparseable file `expires_at` fails load or refresh. A
+  malformed HTTP response expiry is directory-unavailable, never "no expiry".
 
 **Identity projection**
 
@@ -147,11 +137,13 @@ Authorino-parity escape hatch.
 
 **Brute-force resistance**
 
-- R28. Repeated failures for one user-id are bounded, by a per-user-id failure
-  limiter keyed on the normalised user-id. Where the engine cannot own this, the
-  plan states plainly that the host or a quota plugin must supply it, and the
-  operator documentation says so rather than leaving hash cost as the only
-  brake.
+- R28. Repeated failures for one user-id are bounded by a plugin-local limiter
+  keyed on the normalised user-id. Its state has a fixed capacity; when full,
+  new user-ids deny rather than evicting counters and bypassing the limit.
+  Entries expire after a bounded window and saturation is observable without
+  logging user-ids. The limiter is per process; operators need a shared or
+  edge-level limit for multi-replica deployments and password spray across
+  many user-ids.
 - R29. Failure logging is rate-limited, the user-id is logged only at debug
   level
   and sanitised, and no metric carries the user-id as a label.
@@ -163,15 +155,14 @@ Authorino-parity escape hatch.
   appended when configured. `realm` is required in config and validated at load
   to printable ASCII excluding `"` and `\`, so it cannot break the quoted string
   or inject a header. The scope limit is deliberate and is not the whole of what
-  RFC 7235 wants — see R30 and the Open Question it points to.
+  RFC 7235 wants — see R30 and the challenge discussion in KTD4.
 - R30. Where a credential is declined by every resolver rather than denied by
   this one, the challenge is **not** emitted, because the engine synthesizes
   that
   denial itself with no channel for a declining plugin to contribute
-  (`crates/ppe-core/src/executor.rs:970-973`). A single-resolver route therefore
-  satisfies RFC 7235; a route pairing Basic with another scheme does not. v1
-  ships the single-resolver case and documents the gap. Closing it needs an
-  engine change, scoped as its own work.
+  (`crates/ppe-core/src/executor.rs:970-973`). This also occurs with a single
+  Basic resolver when it declines a non-Basic scheme. v1 documents the gap;
+  closing it needs an engine change scoped as separate work.
 - R18. Unknown-user and bad-password produce the **same** denial code, so a
   client cannot distinguish them. Directory-unavailable stays a distinct code.
 - R19. Extraction-phase denial codes are reused verbatim from the existing
@@ -182,6 +173,8 @@ Authorino-parity escape hatch.
 - R20. `kind: identity/basic` registers behind a `basic` Cargo feature, through
   the facade re-export and the registration macro, and resolves via
   `install_builtins`.
+- R31. `TokenSource::Basic` identifies a Basic credential in the shared
+  identity payload and round-trips through serialization.
 - R21. A credential presented under another scheme declines without denying, so
   a Basic resolver and a Bearer resolver coexist on one `Authorization` header.
 - R22. Two `identity/basic` resolvers on one route are a documented unsupported
@@ -202,7 +195,9 @@ Authorino-parity escape hatch.
   payload verbatim — see `crates/ppe-core/src/identity/credential.rs:187`
   (`strip_gate`), where a prefix with an empty leader after the space is exactly
   the scheme-only case. Decoding and splitting happen after extraction returns.
-  This removes a whole class of RFC-conformance risk from the new plugin.
+  The scheme is fixed to `Basic`; the issue's optional-looking `scheme: Basic`
+  example does not create a configurable alternate scheme. This removes a
+  whole class of RFC-conformance risk from the new plugin.
 
 - KTD2. **A separate `CredentialDirectory` trait, not an extension of
   `KeyDirectory`.** The epic recommends adding a `verify(user_id, password)`
@@ -275,24 +270,24 @@ Authorino-parity escape hatch.
     where a JSON-RPC code belongs. Basic on an MCP route is not a sensible
     deployment, but the plugin should not pretend otherwise.
 
-- KTD5. **Weak hash schemes are refused outright.** apr1 and `{SHA}`
-  are
-  are refused at load with a message naming the fix. Accepting MD5-grade
+- KTD5. **Weak hash schemes are refused outright.** apr1 and `{SHA}` are
+  refused at load with a message naming the fix. Accepting MD5-grade
   verifiers silently is worse than failing a drop-in migration loudly, and an
   opt-in that cannot admit anything is worse still: a draft carried one, both
   of its branches returned the same error, so it was a knob that changed
   nothing. Removed rather than wired up, because wiring it up means taking on
   MD5 and SHA-1 on a runtime authentication path. Writing hashes is out of
-  scope entirely — PPE verifies, it does not mint. Startup warns with a count of
-  weak-scheme records, since their verify cost is distinguishable from bcrypt's
-  (see KTD9).
+  scope entirely — PPE verifies, it does not mint.
 
 - KTD6. **Pragmatic PRECIS, not full profile enforcement.** UTF-8 decoding, NFC
   normalisation, and rejection of control characters and a colon in the user-id.
   Full `UsernameCasePreserved`/`OpaqueString` enforcement can lock out real
   users
   for no security gain here, and under-normalising would split one user across
-  two index keys — NFC addresses that.
+  two index keys — NFC addresses that. Password bytes remain unchanged to
+  verify existing `.htpasswd` hashes. This narrows the issue's `charset: UTF-8`
+  example, which says "user-pass as UTF-8 + NFC": the challenge advertises the
+  client expectation, while the server verifies the bytes it receives.
 
 - KTD7. **One Basic resolver per route in v1, enforced by documentation.**
   API-key splits populations by the leader after the scheme; Basic has no
@@ -312,23 +307,16 @@ Authorino-parity escape hatch.
   on every request. Extracting a shared helper across two plugins is deferred
   until the second backend exists to generalise from.
 
-- KTD9. **The dummy verify is worst-case, not dominant-case, within one
-  scheme.** The scheme qualifier is load-bearing and was added after
-  implementation: see R8. Across schemes the work factor is meaningless, so
-  the backend refuses a mixed file rather than ordering across them, and the
-  miss path reuses the costliest record's own hash rather than synthesizing one
-  from a number. An earlier draft
-  had the miss path copy the file's *dominant* scheme and cost. That leaks: in a
-  file mixing bcrypt costs, or mixing bcrypt with argon2 or an opted-in legacy
-  scheme, a miss costs the dominant parameters while hits on minority records
-  are
-  measurably faster or slower — which enumerates both which names exist and
-  which
-  users sit on a weak scheme, a ready-made target list. The miss path instead
-  runs at the maximum work factor present in the directory, recomputed on every
-  reload, so a miss is never cheaper than any hit. A counter test proves a dummy
-  ran; it cannot prove it cost the same, so the test asserts the work factor
-  rather than timing, which would be flaky in CI.
+- KTD9. **One cost profile per local directory.** A dummy verify with the
+  costliest stored hash still leaks user-id existence when another record is
+  cheaper: a wrong-password hit on that record is measurably faster than a
+  miss. Require one scheme and one cost-parameter set per file, then use any
+  stored hash for a full dummy verify on a miss. Reject mismatches at load and
+  on refresh. The empty directory alone uses a minted floor hash. This reduces
+  `.htpasswd` compatibility for files created across hash-cost changes; the
+  operator fix is to re-hash those records before loading. A test-only counter
+  proves the miss path verifies, while load tests prove the uniform profile.
+  Wall-clock timing assertions would be flaky in CI.
 
 - KTD10. **Verification runs off the async worker, under a concurrency cap.** A
   bcrypt or argon2 verify is CPU-bound for milliseconds to seconds, and every
@@ -419,8 +407,9 @@ flowchart TB
   O --> Q[subject / client / workload populated]
 ```
 
-Both denial paths at `L` carry one code. Every deny node attaches 401 plus the
-realm challenge.
+Both denial paths at `L` carry one code. Denials raised by this resolver attach
+401 and the realm challenge. If every resolver declines at `C`, the engine's
+synthesized denial has no challenge (R30).
 
 Backend composition — the caching and HTTP layers are reused from the api-key
 plugin's design by implementing the new trait, not by widening the old one:
@@ -438,15 +427,16 @@ flowchart TB
 
 ## Implementation Units
 
-Sliced to respect the per-PR added-production-line cap in `CONTRIBUTING.md`.
-U1-U3 form the first PR, U4 the second, U5 the third, U6-U7 the fourth.
+Each unit is independently reviewable. A PR may cover multiple units when its
+description names them and it respects the production-line cap in
+`CONTRIBUTING.md`; the unit boundaries do not prescribe PR boundaries.
 
 ### U1. Credential decoding and the directory contract
 
 **Goal:** The RFC 7617 decode/split/normalise step and the trait every backend
 implements, with no backend yet.
 
-**Requirements:** R1, R2, R3, R4, R5, R18, R19, R26
+**Requirements:** R1 (extraction), R2, R3, R4, R5, R19, R26
 
 **Dependencies:** none
 
@@ -532,16 +522,16 @@ decode/split cases test-first.
 - Empty header, header present with only the scheme, and a duplicated
   `Authorization` header each produce their established extraction code.
 
-**Verification:** The decode step round-trips the RFC 7617 example, every
-malformed shape denies with a shared extraction code, and no test can print a
-password.
+**Verification:** The decode step round-trips the RFC 7617 example, malformed
+shapes return field-free errors for U3 to map to denial codes, and no test can
+print a password.
 
 ### U2. The `.htpasswd` backend
 
 **Goal:** Parse `.htpasswd`, index by user-id, verify bcrypt and argon2 in
 constant time with dummy-verify-on-miss, and carry the refresh window.
 
-**Requirements:** R6, R7, R8, R11, R12, R13, R15, R23, R24, R26, R29
+**Requirements:** R6, R7, R8, R11, R12, R13, R15, R23, R24, R26
 
 **Dependencies:** U1
 
@@ -553,13 +543,14 @@ constant time with dummy-verify-on-miss, and carry the refresh window.
 - `crates/builtins/tests/identity_basic/htpasswd_backend.rs` (create)
 
 **Approach:** `verifier.rs` owns hash-scheme detection by prefix, the verify
-call, the parameter ceiling (R23) and the worst-case dummy (KTD9), so the
-resolver never holds a verifier and only the backend knows the scheme. The
-backend tracks the maximum work factor across the loaded index and regenerates
-the dummy hash from it on every reload; the dummy must be a *valid* hash the
-verifier runs in full, since some libraries return early on a malformed one.
+call, the parameter ceiling (R23) and the dummy verify (KTD9), so the resolver
+never holds a verifier and only the backend knows the scheme. The backend
+rejects mixed cost profiles and reuses one stored hash for dummy verification.
+A floor hash is used only when the directory is empty.
 Parse the stored hash before branching on found/not-found so both paths pay it.
 Verification goes through a blocking pool under a concurrency cap (KTD10, R24).
+Check that each selected hash library compares derived values in constant time;
+applying `ct_eq` only to the final boolean cannot establish that property.
 Rejected schemes and over-ceiling parameters fail at load, not at verify. The
 index and refresh machinery follow KTD8, including the records-then-timestamp
 store order and the CAS-claimed refresh slot, with the staleness ceiling now
@@ -593,13 +584,13 @@ expect at that density.
 - Covers R8. A bcrypt record with a malformed cost fails at load.
 - Covers R7. A miss performs a dummy verification (assert via a test-only
   counter rather than timing).
-- Covers R7, KTD9. In a file mixing bcrypt costs, the miss-path work factor is
-  at
-  least the maximum present, not the dominant one.
-- Covers R7, KTD9. In a file mixing bcrypt and argon2, the miss path still runs
-  at the worst case.
-- Covers R7. After a reload that raises the maximum cost, the dummy tracks the
-  new maximum.
+- Covers R7, KTD9. A file mixing bcrypt costs fails at load, in either record
+  order; equal-cost records load and a miss verifies against one of them.
+- Covers R8, KTD9. A file mixing bcrypt and argon2 fails at load, since their
+  work factors cannot be compared.
+- Covers R7, KTD9. Argon2 records with different parameters fail at load.
+- Covers R7. A refresh that introduces another cost profile fails and retains
+  the previous index only until the staleness ceiling.
 - Covers R23. A bcrypt cost above the ceiling fails at load even though it is
   well-formed; likewise argon2 with over-ceiling memory or time parameters.
 - Covers R24. Concurrent verifications beyond the cap deny rather than queueing
@@ -628,7 +619,6 @@ expect at that density.
 - Covers R12. A burst of concurrent lookups triggers one file read.
 - Covers R15. The hash never appears in the projected claims.
 - Covers R6. Lookup cost does not grow with record count (large-file case).
-- Covers R29. A burst of failures does not emit one log line per attempt.
 
 **Verification:** A loaded `.htpasswd` authenticates a known user, rejects a
 wrong password identically to an unknown user, and revokes within the refresh
@@ -640,7 +630,8 @@ window.
 together,
 the challenge on denial, and registration behind the feature.
 
-**Requirements:** R14, R16, R17, R18, R20, R21, R22, R25, R27, R28, R29
+**Requirements:** R1 (location validation), R14, R16, R17, R18, R20, R21,
+R22, R25, R27, R28, R29, R31
 
 **Dependencies:** U1, U2
 
@@ -651,6 +642,7 @@ the challenge on denial, and registration behind the feature.
 - `crates/builtins/src/plugins/identity_basic/factory.rs` (create)
 - `crates/builtins/src/lib.rs` (feature-to-module doc table)
 - `crates/ppe/Cargo.toml` (forward feature, `builtins` umbrella entry)
+- `crates/ppe-core/src/identity/payload.rs` (add `TokenSource::Basic`)
 - `crates/ppe/src/lib.rs` (factory re-export, module alias, macro row, docs
   list, **and the `every_enabled_builtin_resolves_its_kind` table** — the one
   omission that fails silently, since the test passes whether or not the kind is
@@ -688,10 +680,9 @@ The resolver owns the failure limiter and the rate-limited, sanitised failure
 logging (R28, R29). `record_map.rs` is the
 13-line glue: a Basic attestor, and reserved fields left empty so a directory
 field is never silently dropped — backends strip their own storage fields
-instead. Registration is the nine-file checklist; the module-group marker and
-the
-`dep:` edges are the two silent-failure points, which is why `Makefile` is in
-this unit.
+instead. Registration follows the facade checklist. The module-group marker
+and `dep:` edges are silent-failure points, so the per-feature check is added
+in U1.
 
 **Patterns to follow:**
 `crates/builtins/src/plugins/identity_api_key/{config,resolver,record_map,fact
@@ -700,6 +691,8 @@ throughout; `crates/ppe/src/lib.rs:208-234` for the alias-plus-macro-row pair.
 
 **Test scenarios:**
 - Covers R20. The kind resolves through `install_builtins` with the feature on.
+- Covers R1. Cookie and query-param credential locations fail at config load.
+- Covers R31. `TokenSource::Basic` round-trips through serialization.
 - Covers R17. A denial carries 401 and `WWW-Authenticate: Basic realm="..."`.
 - Covers R17. With `charset: UTF-8` configured, the challenge appends it.
 - Covers R17. A config with no `realm` fails to load.
@@ -728,7 +721,10 @@ throughout; `crates/ppe/src/lib.rs:208-234` for the alias-plus-macro-row pair.
 - Covers R28. Repeated failures for one user-id are bounded, and the limiter
   keys
   on the normalised user-id so encoding variants share a bucket.
+- Covers R28. Limiter capacity is bounded, and filling it does not evict a
+  blocked user-id or admit a fresh one; expired entries free capacity.
 - Covers R29. No metric carries a user-id label.
+- Covers R29. A burst of failures does not emit one log line per attempt.
 - Covers R21, R30. A route with only `identity/basic` denies a `Bearer`
   credential rather than continuing anonymously — but the denial is the
   engine's synthesized `auth.unrecognized_credential`, which carries **no**
@@ -766,11 +762,13 @@ optional expiry.
   variant)
 - `crates/builtins/tests/identity_basic/user_file_backend.rs` (create)
 
-**Approach:** A `deny_unknown_fields` record with typed `username`,
-`password_hash` and `expires_at` fields plus flattened remaining fields, indexed
-by username, reusing the same refresh machinery and verifier as U2. This is the
-backend that gives Basic the identity fields `.htpasswd` structurally cannot
-carry, and the only one with native expiry.
+**Approach:** Use a strict top-level `users` envelope and records with typed
+`username`, `password_hash` and `expires_at` fields plus flattened projectable
+fields. The record intentionally accepts arbitrary field names, so it cannot
+also use `deny_unknown_fields`; required storage fields and duplicate user-ids
+still fail at load. Index by username and reuse U2's verifier, uniform-cost
+rule and refresh machinery. This backend carries identity fields `.htpasswd`
+cannot express, and is the only one with native expiry.
 
 **Patterns to follow:** `identity_api_key/file_directory.rs` record and
 index types; U2's verifier and refresh code.
@@ -782,7 +780,9 @@ index types; U2's verifier and refresh code.
   becoming "no expiry".
 - Covers R11. A duplicate username fails at load.
 - Covers R11, R4. Usernames are normalised before the duplicate check here too.
-- Covers R13. A malformed YAML file and an unknown key each fail at load.
+- Covers R13. Malformed YAML, an unknown top-level key, or a missing required
+  storage field fails at load. Arbitrary projectable record fields are accepted.
+- Covers R7. Mixed schemes or cost parameters fail at load and on refresh.
 - Covers R15. Neither `password_hash` nor the username index field reaches the
   projected claims.
 - Covers R12. Refresh, failed-reload and staleness-ceiling behaviour match U2.
@@ -795,7 +795,7 @@ index types; U2's verifier and refresh code.
 **Goal:** Delegate verification to a service, with positive and negative
 caching.
 
-**Requirements:** R10, R15
+**Requirements:** R10, R15, R25
 
 **Dependencies:** U1, U3
 
@@ -829,7 +829,9 @@ fields, never concatenated, built in a zeroized buffer — and document the
 residual copies `serde_json` leaves as partial, the way `PresentedKey` is honest
 about the host's header map. Failures and timeouts are always unavailable, never
 "invalid", and must not vary by user-id or they become an existence oracle. The
-cache keys on a keyed MAC per KTD12.
+verification service must also equalize unknown-user and wrong-password work;
+PPE cannot establish that property from a fake transport. The cache keys on a
+keyed MAC per KTD12.
 
 Note on what the cache does **not** buy: an earlier draft claimed negative
 caching limits password spray. It does not. The cache keys on the whole
@@ -869,6 +871,8 @@ above; capability declaration is operator-side via
   with a message that does not vary by user-id.
 - Covers R15. Envelope fields are stripped from the projected claims, including
   the service's own `reason` field, which must not reach a denial message.
+- Covers R25. A positive verdict with past `expires_at` denies as expired;
+  malformed expiry is unavailable rather than treated as absent.
 - Covers KTD12. The cache key is a keyed MAC, and length-prefixed, so
   user/password pairs that concatenate identically do not collide.
 - A response exceeding the size cap is rejected.
@@ -921,7 +925,7 @@ documentation cites a figure rather than a guess.
 
 **Goal:** An operator-facing recipe, the catalog entries, and the TLS guidance.
 
-**Requirements:** R17, R20, and the TLS warning the RFC demands
+**Requirements:** R17, R20, R22, R27, R28, R30, and the RFC's TLS warning
 
 **Dependencies:** U3, U4, U5
 
@@ -938,11 +942,17 @@ the RFC 7617 §4 warning that Basic ships the password in cleartext and base64 i
 not encryption, so TLS is required. The operator guidance must also state: the
 hash file is an offline-crackable verifier and should not be world-readable; the
 positive verify-cache TTL is a revocation window during which a rotated password
-still works; brute-force protection is required and where it comes from (per the
-Open Question on R28); and that access logs and request dumps must redact the
-`Authorization` header. Pin the example against the doc-example regression
-harness so it cannot drift. Keep planning identifiers out of the changelog and
-the docs.
+still works; the in-process failure limiter needs an edge or shared counterpart
+for multi-replica deployments and username spray; the HTTP verifier must
+equalize unknown-user and wrong-password work; and access logs and request
+dumps must redact the `Authorization` header. Pin the example against the
+doc-example regression harness so it cannot drift. Keep planning identifiers
+out of the changelog and the docs. Explain that only one Basic resolver is
+supported per route, MCP routes are unsupported, a route's `response:` block
+does not decorate an identity denial, and a wrong-scheme decline has no
+challenge. State the host's duties:
+render the challenge from violation details and remove the inbound
+`Authorization` header before forwarding to an upstream.
 
 **Patterns to follow:** `docs/content/identity-delegation.md` Recipe 7 for
 shape; `crates/ppe/tests/docs_examples/` for the regression hook.
@@ -950,6 +960,9 @@ shape; `crates/ppe/tests/docs_examples/` for the regression hook.
 **Test scenarios:**
 - The recipe's YAML loads through the doc-example harness.
 - The minimal `.htpasswd` example resolves an identity with no `record_map`.
+- An HTTP host integration check confirms 401 and `WWW-Authenticate` reach the
+  client, and the Basic header does not reach an unrelated upstream. If that
+  host is out of tree, track this as an external epic exit gate.
 
 **Verification:** The docs build clean, the example is exercised by a test, and
 the TLS requirement is stated where an operator will read it.
@@ -975,6 +988,29 @@ the TLS requirement is stated where an operator will read it.
 
 ---
 
+## Alignment with issue #189
+
+The plan differs from the epic in these ways; reconcile the accepted scope
+before closing it:
+
+- The epic favors extending `KeyDirectory` and reusing its HTTP/cache types;
+  KTD2 defines a separate trait and parallel backends to keep password
+  verification inside each Basic directory.
+- The epic offers opt-in apr1 and `{SHA}` reads; R8 and KTD5 refuse both.
+- The epic describes `.htpasswd` interoperability without a cost-profile
+  restriction; R7 now rejects mixed parameters to avoid a timing oracle.
+- The epic's `charset: UTF-8` example says NFC for user and password; R4
+  normalises only the user-id to preserve existing password hashes.
+- The epic expects a 401 challenge on denial. R17 covers resolver denials, but
+  R30 identifies a wrong-scheme gap, and KTD4 leaves wire delivery to the host.
+  Verify host rendering, then either close the wrong-scheme gap or narrow the
+  epic's acceptance criterion explicitly.
+- The epic says an empty `raw_credentials` prevents upstream forwarding. R27
+  explains that the inbound `Authorization` header remains for the host to
+  remove before forwarding; verify that host behavior before closing the epic.
+
+---
+
 ## Risks & Dependencies
 
 - **New dependency class.** A password-hashing crate and a constant-time
@@ -993,11 +1029,14 @@ the TLS requirement is stated where an operator will read it.
   mitigations;
   U6 measures what remains. A deployment choosing a high cost factor is choosing
   a per-request latency floor and a lower saturation threshold.
-- **Brute-force resistance is not yet owned.** R28 requires a bounded per-user
-  failure limiter but leaves open whether the engine owns it or the host must
-  supply one (see Open Questions). Until that is settled, hash cost is the only
-  brake on a password spray against guessable usernames. This is the single
-  largest residual risk in the design.
+- **Brute-force resistance across replicas is still a deployment risk.** R28's
+  plugin-local limiter bounds repeated failures for one user-id in one process.
+  It does not coordinate replicas or stop attempts spread across many user-ids;
+  operators need a shared or edge-level limit for those cases.
+- **HTTP timing depends on the verification service.** R10 requires the remote
+  service to equalize unknown-user and wrong-password work. A fake transport
+  can test PPE's request and response handling, but cannot prove that external
+  timing contract; deployment validation must cover it.
 - **Divergence from the sibling backend's security posture.** KTD11 and KTD12
   deliberately depart from the api-key HTTP backend and cache on TLS,
   service authentication and cache keying. Those choices were sound for
@@ -1014,11 +1053,11 @@ the TLS requirement is stated where an operator will read it.
 - **Dummy-verify is hard to test directly.** It is by design indistinguishable
   in
   output, so the test asserts a test-only counter rather than timing. Timing
-  assertions would be flaky in CI.
-- **PR size cap.** CI enforces a maximum added production-line count, which is
-  why the units are sliced into four PRs. Expect to split further if a unit
-  grows
-  — U5 most likely, per its size warning.
+  assertions would be flaky in CI. Uniform hash parameters remove the obvious
+  cost-tier oracle, but do not prove end-to-end constant-time HTTP responses.
+- **PR size cap.** `CONTRIBUTING.md` limits added production code to 500 lines
+  per PR. Units may be combined when that limit and reviewability allow it; U5
+  may need separate HTTP and cache PRs.
 - **The per-feature check is not exhaustive today.** `BUILTIN_FEATURES` in the
   `Makefile` already omits two existing features, so a green per-feature check
   proves this feature is self-sufficient, not that every feature is. Do not read
@@ -1028,7 +1067,7 @@ the TLS requirement is stated where an operator will read it.
 
 ---
 
-## Open Questions
+## Decisions and Remaining Questions
 
 - **Challenge precedence is already decided by the code; pin it with a test.**
   An identity denial never reaches `decorate_denial_response` — the route
@@ -1055,28 +1094,12 @@ the TLS requirement is stated where an operator will read it.
   duplicates, so failing closed may block a migration. Failing is the default;
   revisit if it blocks adoption.
 - **RESOLVED (2026-10-29): a plugin-local failure limiter for v1.** An
-  in-process limiter keyed on the normalised user-id, owned by this plugin,
-  with the multi-replica gap documented as a known limitation in U7. Extending
-  the quota plugin was rejected on a concrete ground rather than taste: quota
-  is marked experimental and is explicitly excluded from the `builtins`
-  umbrella (`docs/content/builtins.md:22`), so routing identity through it
-  would pull an experimental feature into a stable one. Leaving it wholly to
-  the host was rejected because it leaves the default configuration with hash
-  cost as its only brake. The original three-way framing is kept below for the
-  reasoning, since the multi-replica weakness is real and will come back.
-
-  **Original framing.** Three options, and the choice is
-  architectural rather than incidental. The engine could own a per-user-id
-  limiter inside this plugin, which is self-contained but duplicates state that
-  a multi-replica deployment would want shared. The existing quota plugin could
-  be extended, which fits the repo's layering but couples identity to an
-  experimental feature. Or it stays a host responsibility, documented as a
-  deployment requirement, which is honest but leaves the default configuration
-  weak. Resolve before U3, since R28's wording depends on it. My inclination
-  is a
-  plugin-local limiter for v1 with the multi-replica case documented as a known
-  limitation, but this is a design decision worth a second opinion rather than a
-  default.
+  in-process limiter keyed on the normalised user-id is owned by this plugin.
+  The multi-replica and username-spray gaps are documented in U7. The quota
+  plugin is experimental and excluded from the `builtins` umbrella
+  (`docs/content/builtins.md:22`); relying on it would make Basic depend on an
+  experimental feature. Relying only on the host would leave the default
+  configuration with hash cost as its sole brake.
 
 ---
 
