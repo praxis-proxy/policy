@@ -30,8 +30,22 @@ use subtle::ConstantTimeEq as _;
 
 use super::credential::Password;
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// The bcrypt cost used for a directory that holds no records at all.
+///
+/// An empty file still has to answer a lookup, and must cost what a populated
+/// one would, or an empty directory is distinguishable by timing alone. This
+/// is the only case where a hash is synthesized rather than reused.
+pub const EMPTY_DIRECTORY_COST: u32 = 10;
+
+/// The maximum password length accepted by the bcrypt verifier, in bytes.
+pub const BCRYPT_TRUNCATION_BYTES: usize = 72;
+
 /// The hashing scheme of a stored record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Scheme {
     /// bcrypt, in any of the `$2a$` / `$2b$` / `$2y$` spellings.
@@ -44,7 +58,7 @@ pub enum Scheme {
 /// Why a stored hash cannot be admitted for verification.
 ///
 /// Errors contain no stored hash material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum HashError {
     /// The record uses a refused scheme, including DES-crypt or plaintext.
@@ -67,22 +81,75 @@ pub enum HashError {
     ParametersTooHigh,
 }
 
-/// An ordering key for verification work within one hashing scheme.
+/// The full cost parameters of a stored hash.
 ///
-/// Only compare factors belonging to the same [`Scheme`]. Values are not bcrypt
-/// cost parameters and must not be used to synthesize hashes.
+/// Compared by **equality**, not by order. Ranking verification cost is not
+/// something this type offers, because no ranking is sound: argon2's two
+/// dimensions (memory blocks and passes) trade off against each other per
+/// RFC 9106, and bcrypt's exponential cost shares no scale with either. A
+/// directory must therefore hold one cost profile throughout, and the backend
+/// enforces that at load.
 ///
-/// [`Scheme`]: Scheme
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WorkFactor(u32);
+/// Why uniformity rather than a careful choice of miss-path hash: with bcrypt
+/// costs 4 and 12 in one file, a wrong password for the cost-4 user returns in
+/// 0.7ms while a miss runs the cost-12 hash in 160ms -- so the cheap user is
+/// distinguishable from a non-existent one by a factor of 245, measured. That
+/// is a user-enumeration oracle no dummy-selection rule can close, because the
+/// *hits* differ from each other. Equal cost for every record is the only
+/// shape in which a miss can cost what a hit costs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CostProfile {
+    /// A bcrypt cost factor.
+    Bcrypt {
+        /// The `$2?$NN$` cost exponent.
+        cost: u32,
+    },
 
-impl WorkFactor {
-    /// The floor used when a directory holds no records at all.
-    pub const FLOOR: Self = Self(10);
+    /// Argon2 parameters, all of which affect the verify cost.
+    Argon2 {
+        /// Which argon2 variant (`i`, `d`, `id`): they differ in work pattern.
+        variant: argon2::Algorithm,
+        /// The version field, since v0x10 and v0x13 are different functions.
+        version: argon2::Version,
+        /// Memory cost in KiB.
+        memory_kib: u32,
+        /// Passes over memory.
+        time_cost: u32,
+        /// Degree of parallelism.
+        parallelism: u32,
+    },
+}
 
-    /// A bcrypt cost clamped to the range accepted by the hashing library.
-    fn as_bcrypt_cost(self) -> u32 {
-        self.0.clamp(4, 31)
+impl CostProfile {
+    /// The scheme this profile belongs to.
+    pub fn scheme(self) -> Scheme {
+        match self {
+            Self::Bcrypt { .. } => Scheme::Bcrypt,
+            Self::Argon2 { .. } => Scheme::Argon2,
+        }
+    }
+
+    /// A short operator-facing description, for a load error.
+    ///
+    /// Carries parameters only. These are not secret -- they are recoverable
+    /// from any hash in the file -- and an operator reconciling two records
+    /// needs to see which differ.
+    pub fn describe(self) -> String {
+        match self {
+            Self::Bcrypt { cost } => format!("bcrypt cost {cost}"),
+            Self::Argon2 {
+                variant,
+                version,
+                memory_kib,
+                time_cost,
+                parallelism,
+            } => format!(
+                "{}(v={:#x}) m={memory_kib},t={time_cost},p={parallelism}",
+                variant.as_str(),
+                u32::from(version),
+            ),
+        }
     }
 }
 
@@ -91,21 +158,20 @@ impl WorkFactor {
 /// Its `Debug` output redacts the encoded hash.
 #[derive(Clone)]
 pub struct ParsedHash {
-    scheme: Scheme,
-    work: WorkFactor,
+    profile: CostProfile,
     /// The record as stored. Never logged, never projected.
     encoded: String,
 }
 
 impl ParsedHash {
-    /// How expensive this record is to verify.
-    pub fn work_factor(&self) -> WorkFactor {
-        self.work
+    /// The full cost parameters of this record.
+    pub fn profile(&self) -> CostProfile {
+        self.profile
     }
 
     /// Which scheme this record uses.
     pub fn scheme(&self) -> Scheme {
-        self.scheme
+        self.profile.scheme()
     }
 
     /// The encoded stored hash, for a backend to carry in a verifier slot.
@@ -114,28 +180,19 @@ impl ParsedHash {
     pub fn encoded(&self) -> &str {
         &self.encoded
     }
-
-    /// Compares verification work within a hashing scheme.
-    ///
-    /// Returns `None` when the records use different schemes, whose work
-    /// factors are not comparable.
-    pub fn try_cmp_work(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        (self.scheme == other.scheme).then(|| self.work.cmp(&other.work))
-    }
 }
 
 impl std::fmt::Debug for ParsedHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParsedHash")
-            .field("scheme", &self.scheme)
-            .field("work", &self.work)
+            .field("profile", &self.profile)
             .field("encoded", &"<redacted>")
             .finish()
     }
 }
 
 /// Parameter ceilings for stored password hashes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// The highest bcrypt cost this directory will load.
     pub max_bcrypt_cost: u32,
@@ -155,17 +212,11 @@ impl Default for Limits {
         // ceiling rather than the target.
         Self {
             max_bcrypt_cost: 15,
-            max_argon2_memory_kib: 256 * 1024,
+            max_argon2_memory_kib: 262_144, // 256 MiB
             max_argon2_time_cost: 10,
         }
     }
 }
-
-/// Number of floor-hash mint attempts in this process, exposed for integration tests.
-pub static FLOOR_HASH_MINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// The maximum password length accepted by the bcrypt verifier, in bytes.
-pub const BCRYPT_TRUNCATION_BYTES: usize = 72;
 
 /// Admit a stored bcrypt or argon2 hash under the configured parameter ceilings.
 ///
@@ -196,29 +247,62 @@ pub fn parse_hash(stored: &str, limits: &Limits) -> Result<ParsedHash, HashError
     }
 
     if let Some(cost) = bcrypt_cost(stored)? {
+        // The library's own accepted range. A record outside it is rejected
+        // before the KDF, which would make that user-id measurably faster to
+        // probe than an unknown one.
+        if !(4..=31).contains(&cost) {
+            return Err(HashError::Malformed);
+        }
         if cost > limits.max_bcrypt_cost {
             return Err(HashError::ParametersTooHigh);
         }
         return Ok(ParsedHash {
-            scheme: Scheme::Bcrypt,
-            work: WorkFactor(cost),
+            profile: CostProfile::Bcrypt { cost },
             encoded: stored.to_owned(),
         });
     }
 
     if stored.starts_with("$argon2") {
         let parsed = PasswordHash::new(stored).map_err(|_phc_error| HashError::Malformed)?;
-        let memory = parsed.params.get_decimal("m").ok_or(HashError::Malformed)?;
-        let time = parsed.params.get_decimal("t").ok_or(HashError::Malformed)?;
-        if memory > limits.max_argon2_memory_kib || time > limits.max_argon2_time_cost {
+
+        // PHC parsing alone is not admission. It accepts records argon2
+        // cannot verify -- an `$argon2x$` variant, or `p=0` -- which then fail
+        // before the KDF runs, making that user-id much faster to probe than
+        // an unknown one. `Params::try_from` applies the algorithm's own
+        // validation, so a record that loads here is one the verifier will
+        // run in full.
+        let variant = argon2::Algorithm::try_from(parsed.algorithm.as_str())
+            .map_err(|_unsupported_variant| HashError::Malformed)?;
+        let version = match parsed.version {
+            Some(v) => {
+                argon2::Version::try_from(v).map_err(|_unsupported_version| HashError::Malformed)?
+            },
+            None => argon2::Version::default(),
+        };
+        let params = argon2::Params::try_from(&parsed)
+            .map_err(|_invalid_parameters| HashError::Malformed)?;
+        // The salt and digest must be present too: argon2 errors out before
+        // the KDF without them, which is the same timing signal.
+        if parsed.salt.is_none() || parsed.hash.is_none() {
+            return Err(HashError::Malformed);
+        }
+
+        let memory_kib = params.m_cost();
+        let time_cost = params.t_cost();
+        let parallelism = params.p_cost();
+
+        if memory_kib > limits.max_argon2_memory_kib || time_cost > limits.max_argon2_time_cost {
             return Err(HashError::ParametersTooHigh);
         }
-        // Scaled onto the bcrypt cost axis so one `WorkFactor` orders both
-        // schemes. Coarse by design; see `WorkFactor`.
-        let work = WorkFactor(memory.max(1).ilog2().saturating_add(time));
+
         return Ok(ParsedHash {
-            scheme: Scheme::Argon2,
-            work,
+            profile: CostProfile::Argon2 {
+                variant,
+                version,
+                memory_kib,
+                time_cost,
+                parallelism,
+            },
             encoded: stored.to_owned(),
         });
     }
@@ -270,21 +354,23 @@ fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
 
 /// Create a bcrypt hash for dummy verification at the requested work factor.
 ///
-/// Use when a directory has no record at or above its verification floor.
-/// Always discard the verification verdict for an unknown user.
+/// Use only when a directory holds no records at all. A populated directory
+/// reuses one of its own records, which costs the same as every other record
+/// in it by the uniformity rule. Always discard the verification verdict for
+/// an unknown user.
 ///
 /// # Errors
 ///
 /// Returns [`HashError::Malformed`] if the hash cannot be created.
 ///
 /// [`HashError::Malformed`]: HashError::Malformed
-pub fn floor_hash(work: WorkFactor) -> Result<ParsedHash, HashError> {
-    FLOOR_HASH_MINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let encoded = bcrypt::hash("ppe-basic-dummy-verification-target", work.as_bcrypt_cost())
+pub fn empty_directory_hash() -> Result<ParsedHash, HashError> {
+    let encoded = bcrypt::hash("ppe-basic-dummy-verification-target", EMPTY_DIRECTORY_COST)
         .map_err(|_cannot_mint| HashError::Malformed)?;
     Ok(ParsedHash {
-        scheme: Scheme::Bcrypt,
-        work,
+        profile: CostProfile::Bcrypt {
+            cost: EMPTY_DIRECTORY_COST,
+        },
         encoded,
     })
 }
@@ -308,7 +394,7 @@ pub fn verify(hash: &ParsedHash, password: &Password) -> bool {
 /// This call is blocking and CPU-bound; run it off the async worker.
 /// Callers should keep the password bytes in a zeroizing buffer.
 pub fn verify_bytes(hash: &ParsedHash, bytes: &[u8]) -> bool {
-    let matched = (|| match hash.scheme {
+    let matched = (|| match hash.scheme() {
         Scheme::Bcrypt => {
             // R26: bcrypt would otherwise accept any password sharing the
             // stored one's first 72 bytes. Refusing here rather than

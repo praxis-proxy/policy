@@ -38,14 +38,14 @@ use praxis_policy_core::host::HostServices;
 use super::BasicCredential;
 use super::directory::{CredentialDirectory, DirectoryError, StoredVerifier, UserRecord};
 use super::verifier::{
-    Limits, ParsedHash, Scheme, WorkFactor, floor_hash, parse_hash, verify_bytes,
+    CostProfile, Limits, ParsedHash, empty_directory_hash, parse_hash, verify_bytes,
 };
 
 /// The `kind:` string an operator writes under `provider:`.
 pub const KIND: &str = "htpasswd";
 
 /// How a `.htpasswd` directory is configured.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HtpasswdConfig {
     /// Where the file lives.
@@ -74,7 +74,7 @@ pub struct HtpasswdConfig {
 }
 
 /// Parameter ceilings, as an operator writes them.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HtpasswdLimits {
     /// The highest bcrypt cost this directory will load.
@@ -210,7 +210,14 @@ pub struct HtpasswdDirectory {
     verifications: Arc<tokio::sync::Semaphore>,
 
     /// The fallback dummy hash for an empty directory.
-    floor: ParsedHash,
+    empty: ParsedHash,
+
+    /// How many times this directory minted its empty-directory hash.
+    ///
+    /// Directory-local rather than process-wide: the hash is built once at
+    /// construction, and a process-wide counter cannot prove that, because a
+    /// concurrent test constructing another directory increments it too.
+    empty_mints: AtomicU64,
 
     /// The number of refresh-path file-read attempts, for regression tests.
     reload_attempts: AtomicU64,
@@ -220,16 +227,17 @@ pub struct HtpasswdDirectory {
 }
 
 /// Load and validate a `.htpasswd` index.
-fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, String> {
+fn read_index(config: &HtpasswdConfig, empty: &ParsedHash) -> Result<Index, String> {
     let text = std::fs::read_to_string(&config.path)
         .map_err(|e| format!("reading {}: {e}", config.path.display()))?;
     let limits = Limits::from(config.limits);
 
     let mut users: HashMap<String, Entry> = HashMap::new();
-    // The heaviest record seen, kept to serve as the miss-path hash, plus the
-    // scheme every record must share for that comparison to mean anything.
-    let mut heaviest: Option<ParsedHash> = None;
-    let mut scheme: Option<(Scheme, usize)> = None;
+    // Any record serves as the miss-path hash once uniformity is enforced, so
+    // the first admitted one is kept. `profile` carries the parameters every
+    // later record must match, with the line that established them.
+    let mut reference: Option<ParsedHash> = None;
+    let mut profile: Option<(CostProfile, usize)> = None;
 
     for (number, raw) in text.lines().enumerate() {
         // Human-facing line numbers, since this lands in a config error.
@@ -263,46 +271,39 @@ fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, Stri
         // names the line and the scheme problem and nothing else.
         let hash = parse_hash(stored, &limits)
             .map_err(|e| format!("{} line {line_number}: {e}", config.path.display()))?;
-        // One scheme per file. A `WorkFactor` orders records within a scheme
-        // and is meaningless across them -- bcrypt cost is a CPU exponent,
-        // argon2's dominant term is memory bandwidth -- so a mixed file has no
-        // well-defined most-expensive record to serve as the miss-path hash. Picking
-        // one anyway inverted the real cost by 28x in measurement (a
-        // `m=4096,t=3` argon2 record scored above `bcrypt cost=12` while
-        // verifying 28 times faster), which made a miss far cheaper than a hit
-        // and re-opened the user-enumeration oracle KTD9 exists to close.
+        // One cost profile per file, not merely one scheme. Differing costs
+        // within a directory are a user-enumeration oracle on their own: with
+        // bcrypt costs 4 and 12 present, a wrong password for the cost-4 user
+        // returns in 0.7ms while an unknown user runs the cost-12 hash in
+        // 160ms -- a 245x difference, measured. No choice of miss-path hash
+        // closes that, because it is the *hits* that differ from each other.
         //
-        // Refused at load, naming both lines, because re-hashing onto one
-        // scheme is a file-level decision only an operator can make. A
-        // calibrated cross-scheme estimate was considered and rejected: the
-        // ratio moves with memory bandwidth and core speed, so a constant here
-        // would silently mis-rank on hardware it was not measured on.
-        match scheme {
-            None => scheme = Some((hash.scheme(), line_number)),
-            Some((seen, first_line)) if seen != hash.scheme() => {
+        // Ranking cost is not an option either. Argon2 trades memory against
+        // passes per RFC 9106, so `m=4096,t=10` and `m=65536,t=2` cannot be
+        // ordered by any single number: measured, the second costs 37ms
+        // against the first's 14ms while scoring lower on a memory-log-plus-
+        // passes formula. Equality is checkable; ordering is not.
+        match profile {
+            None => profile = Some((hash.profile(), line_number)),
+            Some((seen, first_line)) if seen != hash.profile() => {
                 return Err(format!(
-                    "{} line {line_number}: this record uses {:?} but line {first_line} uses \
-                     {seen:?}. One hash scheme per file: their cost parameters are not \
-                     comparable, so a directory mixing them cannot make an unknown user cost \
-                     the same as a known one -- which is what stops the file from revealing \
-                     which usernames exist. Re-hash onto a single scheme.",
+                    "{} line {line_number}: this record is {} but line {first_line} is {}. \
+                     One cost profile per file: a directory whose records cost different \
+                     amounts to verify reveals which user-ids exist, because a wrong \
+                     password for a cheap record returns sooner than a lookup for a user \
+                     that does not exist. Re-hash the file with one set of parameters.",
                     config.path.display(),
-                    hash.scheme(),
+                    hash.profile().describe(),
+                    seen.describe(),
                 ));
             },
             Some(_) => {},
         }
 
-        // Compared through `try_cmp_work`, which refuses to order across
-        // schemes. The mixed-file check above already guarantees one scheme
-        // per file, so `None` here is unreachable -- but going through the
-        // checked comparison means a future change that relaxes the file
-        // constraint cannot silently reintroduce a cross-scheme ordering.
-        let is_heavier = heaviest
-            .as_ref()
-            .is_none_or(|h| hash.try_cmp_work(h) == Some(std::cmp::Ordering::Greater));
-        if is_heavier {
-            heaviest = Some(hash.clone());
+        // Uniform cost means any record serves as the miss-path hash, so the
+        // first is kept and the rest need no comparison.
+        if reference.is_none() {
+            reference = Some(hash.clone());
         }
 
         // Two records for one user have no coherent answer, and picking either
@@ -341,7 +342,7 @@ fn read_index(config: &HtpasswdConfig, floor: &ParsedHash) -> Result<Index, Stri
     // gap a client can time to enumerate which user-ids exist. The floor was
     // meant to stop an empty file being distinguishable from a populated one;
     // it must not make a populated file worse than no protection at all.
-    let dummy = heaviest.unwrap_or_else(|| floor.clone());
+    let dummy = reference.unwrap_or_else(|| empty.clone());
 
     Ok(Index { users, dummy })
 }
@@ -355,18 +356,19 @@ impl HtpasswdDirectory {
     /// records, duplicate user-ids, mixed hashing schemes, or refused hash parameters.
     pub fn new(config: HtpasswdConfig) -> Result<Self, String> {
         config.validate()?;
-        let floor = floor_hash(WorkFactor::FLOOR).map_err(|e| {
+        let empty = empty_directory_hash().map_err(|e| {
             format!(
                 "{}: could not build the miss-path hash: {e}",
                 config.path.display()
             )
         })?;
-        let index = read_index(&config, &floor)?;
+        let index = read_index(&config, &empty)?;
         let first_attempt = config.refresh_secs.saturating_mul(1000);
         let permits = config.max_concurrent_verifications;
         Ok(Self {
             config,
-            floor,
+            empty,
+            empty_mints: AtomicU64::new(1),
             index: ArcSwap::from_pointee(index),
             started: Instant::now(),
             next_attempt_ms: AtomicU64::new(first_attempt),
@@ -407,14 +409,19 @@ impl HtpasswdDirectory {
         self.dummy_runs.load(Ordering::Relaxed)
     }
 
+    /// How many times this directory minted its empty-directory hash.
+    pub fn empty_mints(&self) -> u64 {
+        self.empty_mints.load(Ordering::Relaxed)
+    }
+
     /// The number of refresh-path file-read attempts, for regression tests.
     pub fn reload_attempts(&self) -> u64 {
         self.reload_attempts.load(Ordering::Relaxed)
     }
 
     /// The work factor the miss path currently runs at, for the tests.
-    pub fn miss_work_factor(&self) -> WorkFactor {
-        self.index.load().dummy.work_factor()
+    pub fn miss_cost_profile(&self) -> CostProfile {
+        self.index.load().dummy.profile()
     }
 
     /// Reload the file, retaining the previous index on failure.
@@ -425,7 +432,7 @@ impl HtpasswdDirectory {
     pub fn reload(&self) -> Result<(), String> {
         // The whole next index is built before anything is published, so a read
         // or parse that fails leaves the running index serving.
-        let index = read_index(&self.config, &self.floor)?;
+        let index = read_index(&self.config, &self.empty)?;
         // Records first, then the timestamp, and not the other way round. The
         // two are not published together, so a lookup can land between them:
         // this order shows it a new index under an old timestamp, which reads

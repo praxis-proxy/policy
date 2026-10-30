@@ -14,7 +14,10 @@
 use praxis_policy_builtins::plugins::identity_basic::credential::DecodeError;
 use praxis_policy_core::identity::credential::ExtractionError;
 
-use crate::support::{Failure, b64, decode_failure, decode_failure_with, extract_and_decode};
+use crate::support::{
+    Failure, b64, decode_failure, decode_failure_with, extract_and_decode, extract_and_decode_with,
+    password,
+};
 
 /// The RFC 7617 Section 2 worked example, which every other case is a
 /// variation on.
@@ -297,5 +300,134 @@ fn extraction_phase_outcomes_reuse_the_established_errors() {
         decode_failure(""),
         Failure::Extraction(ExtractionError::Empty),
         "an empty header value is likewise an extraction-phase `Empty`"
+    );
+}
+
+#[test]
+fn an_oversized_header_is_rejected_before_any_buffer_is_allocated() {
+    let huge = "A".repeat(1_048_576); // 1 MiB
+    assert_eq!(
+        decode_failure_with(&format!("Basic {huge}"), 16, 16),
+        Failure::Decode(DecodeError::TooLong),
+        "a 1 MiB payload under 16-byte ceilings must be refused on length as \
+         TooLong; the decode buffer is sized from the header, so a NotBase64 or \
+         NotUtf8 verdict here would mean the allocation already happened"
+    );
+
+    let fits = b64(b"user:password123");
+    extract_and_decode_with(&format!("Basic {fits}"), 16, 16)
+        .expect("a credential within both ceilings still decodes, so the bound is not too tight");
+}
+
+#[test]
+fn a_credential_exactly_at_the_length_ceiling_is_accepted() {
+    let at_limit = "u".repeat(16);
+    let password = "p".repeat(16);
+    let encoded = b64(format!("{at_limit}:{password}").as_bytes());
+
+    let got = extract_and_decode_with(&format!("Basic {encoded}"), 16, 16)
+        .expect("a credential exactly at both ceilings is within them, not over");
+    assert_eq!(
+        got.user_id(),
+        at_limit,
+        "the boundary is inclusive, so a 16-byte user-id under a 16-byte ceiling decodes"
+    );
+}
+
+#[test]
+fn a_credential_one_byte_over_the_ceiling_is_rejected() {
+    let over = "u".repeat(17);
+    let encoded_user = b64(format!("{over}:pw").as_bytes());
+    assert_eq!(
+        decode_failure_with(&format!("Basic {encoded_user}"), 16, 16),
+        Failure::Decode(DecodeError::TooLong),
+        "17 bytes under a 16-byte user-id ceiling is over the limit"
+    );
+
+    let encoded_password = b64(format!("user:{over}").as_bytes());
+    assert_eq!(
+        decode_failure_with(&format!("Basic {encoded_password}"), 16, 16),
+        Failure::Decode(DecodeError::TooLong),
+        "and 17 bytes under a 16-byte password ceiling is too"
+    );
+}
+
+#[test]
+fn each_half_is_measured_against_its_own_ceiling() {
+    let long = "x".repeat(40);
+    let within_user_only = b64(format!("{long}:pw").as_bytes());
+    extract_and_decode_with(&format!("Basic {within_user_only}"), 64, 8)
+        .expect("a long user-id under a generous user ceiling passes a tight password ceiling");
+
+    let within_password_only = b64(format!("u:{long}").as_bytes());
+    extract_and_decode_with(&format!("Basic {within_password_only}"), 8, 64)
+        .expect("and the reverse, so the two ceilings are not conflated");
+
+    assert_eq!(
+        decode_failure_with(&format!("Basic {within_user_only}"), 8, 64),
+        Failure::Decode(DecodeError::TooLong),
+        "a user-id over its own ceiling is rejected even when the password ceiling is generous"
+    );
+}
+
+#[test]
+fn an_encoded_payload_exactly_at_the_derived_bound_is_accepted() {
+    let user_id = "u".repeat(8);
+    let password = "p".repeat(8);
+    let encoded = b64(format!("{user_id}:{password}").as_bytes());
+
+    extract_and_decode_with(&format!("Basic {encoded}"), 8, 8).expect(
+        "the pre-decode length bound is derived from the ceilings plus the \
+         separator, so a credential that fits them must not be refused by it",
+    );
+}
+
+#[test]
+fn password_matching_rejects_a_single_differing_byte() {
+    let credential = password("correct horse battery staple");
+
+    assert!(
+        credential.password_matches(b"correct horse battery staple"),
+        "the exact password matches"
+    );
+    assert!(
+        !credential.password_matches(b"correct horse battery stapleX"),
+        "a longer password must not match"
+    );
+    assert!(
+        !credential.password_matches(b"correct horse battery stapl"),
+        "nor a shorter one"
+    );
+    assert!(
+        !credential.password_matches(b"Correct horse battery staple"),
+        "a difference in the first byte must not match, which an accumulator \
+         folded with the wrong operator would miss"
+    );
+    assert!(
+        !credential.password_matches(b"correct horse battery stapla"),
+        "nor a difference in the last byte, so every byte reaches the verdict"
+    );
+    assert!(
+        !credential.password_matches(b"correct hcrse battery staple"),
+        "nor one in the middle"
+    );
+}
+
+#[test]
+fn password_matching_rejects_differences_that_cancel_pairwise() {
+    let credential = password("ab");
+
+    assert!(
+        !credential.password_matches(b"ba"),
+        "a transposition must not match: the per-byte differences are equal, so \
+         an accumulator folded with XOR instead of OR would cancel them to zero \
+         and report a match"
+    );
+
+    let repeated_delta = password("cc");
+    assert!(
+        !repeated_delta.password_matches(b"aa"),
+        "nor two bytes differing by the same amount, which is the minimal case \
+         where an XOR fold disagrees with an OR fold"
     );
 }

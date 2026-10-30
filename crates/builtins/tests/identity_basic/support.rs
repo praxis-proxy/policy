@@ -151,7 +151,7 @@ pub fn bcrypt_line(user_id: &str, password: &str, cost: u32) -> String {
 }
 
 /// The work factor a `.htpasswd` line's hash parses to.
-pub fn work_factor_of(line: &str) -> praxis_policy_builtins::plugins::identity_basic::WorkFactor {
+pub fn cost_profile_of(line: &str) -> praxis_policy_builtins::plugins::identity_basic::CostProfile {
     let (_, stored) = line
         .split_once(':')
         .expect("the fixture line has a separator");
@@ -160,7 +160,7 @@ pub fn work_factor_of(line: &str) -> praxis_policy_builtins::plugins::identity_b
         &praxis_policy_builtins::plugins::identity_basic::Limits::default(),
     )
     .expect("the fixture hash parses")
-    .work_factor()
+    .profile()
 }
 
 /// A credential carrying `plaintext` as its password.

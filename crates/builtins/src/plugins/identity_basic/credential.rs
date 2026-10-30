@@ -14,7 +14,7 @@ pub use praxis_policy_core::identity::credential::{CredentialLocation, Extractio
 /// Why an extracted credential cannot be decoded as Basic authentication.
 ///
 /// Errors contain no credential bytes and are safe to include in diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum DecodeError {
     /// The payload is not canonical, strictly padded STANDARD base64.
@@ -141,6 +141,19 @@ pub fn decode_basic(
     // this copy is cleared even on the error paths below.
     let extracted = Zeroizing::new(extracted);
     let payload = extracted.trim_end_matches([' ', '\t']);
+
+    // Bound the *encoded* length before allocating anything. The ceilings below
+    // apply to the decoded halves, so checking them after the decode would
+    // still let a caller choose the allocation size: a megabyte of base64 in
+    // one header buys a megabyte of zeroizing buffer, per request, before the
+    // first ceiling is consulted. Base64 carries 3 bytes per 4 characters, and
+    // the decoded form is `user-id:password`, so the largest legal payload is
+    // the two ceilings plus the separator, rounded up to the next quantum.
+    let max_decoded = max_user_id.saturating_add(max_password).saturating_add(1);
+    let max_encoded = max_decoded.div_ceil(3).saturating_mul(4);
+    if payload.len() > max_encoded {
+        return Err(DecodeError::TooLong);
+    }
 
     // Pre-sized so the decoded plaintext is written once, into a buffer that is
     // cleared on drop, rather than into a `Vec` that may reallocate and leave

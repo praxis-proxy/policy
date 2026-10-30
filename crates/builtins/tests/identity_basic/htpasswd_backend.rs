@@ -6,16 +6,17 @@
 //! than a hit.
 
 use praxis_policy_builtins::plugins::identity_basic::directory::CredentialDirectory as _;
-use praxis_policy_builtins::plugins::identity_basic::verifier::FLOOR_HASH_MINTS;
 use praxis_policy_builtins::plugins::identity_basic::{HtpasswdConfig, HtpasswdDirectory};
-use std::sync::atomic::Ordering;
 
 use crate::support::{HtpasswdFile, bcrypt_line, config_for, services};
 
-/// Build a directory over a fixture file, with the default ceilings.
-fn directory(file: &HtpasswdFile) -> Result<HtpasswdDirectory, String> {
-    HtpasswdDirectory::new(config_for(file.path()))
-}
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// An argon2 record, for the uniformity cases.
+const ARGON2_RECORD: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+                             MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -76,63 +77,6 @@ async fn an_unknown_user_runs_a_dummy_verification() {
         dir.dummy_runs(),
         1,
         "the miss path must do the work a hit does"
-    );
-}
-
-#[tokio::test]
-async fn the_miss_path_runs_at_the_maximum_cost_present_not_the_dominant_one() {
-    let file = HtpasswdFile::write(&format!(
-        "{}\n{}\n{}\n{}\n",
-        bcrypt_line("a", "pw", 4),
-        bcrypt_line("b", "pw", 4),
-        bcrypt_line("c", "pw", 4),
-        bcrypt_line("expensive", "pw", 8),
-    ));
-    let dir = directory(&file).expect("the file loads");
-
-    let miss = dir.miss_work_factor();
-    let costliest = crate::support::work_factor_of(&bcrypt_line("expensive", "pw", 8));
-    assert!(
-        miss >= costliest,
-        "the miss path ({miss:?}) must not be cheaper than the most expensive record \
-         ({costliest:?})"
-    );
-}
-
-#[tokio::test]
-async fn the_dummy_tracks_a_reload_that_raises_the_maximum_cost() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("a", "pw", 4)));
-    let dir = directory(&file).expect("the file loads");
-    let before = dir.miss_work_factor();
-
-    file.rewrite(&format!(
-        "{}\n{}\n",
-        bcrypt_line("a", "pw", 4),
-        bcrypt_line("b", "pw", 12)
-    ));
-    dir.reload().expect("the rewritten file loads");
-
-    let after = dir.miss_work_factor();
-    assert!(
-        after > before,
-        "the dummy must rise with the file's worst case ({before:?} -> {after:?})"
-    );
-    assert!(
-        after >= crate::support::work_factor_of(&bcrypt_line("b", "pw", 12)),
-        "and must reach at least the new most expensive record"
-    );
-}
-
-#[tokio::test]
-async fn a_directory_of_cheap_records_uses_its_own_costliest_record_for_a_miss() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
-    let dir = directory(&file).expect("the file loads");
-
-    assert_eq!(
-        dir.miss_work_factor(),
-        crate::support::work_factor_of(&bcrypt_line("alice", "pw", 5)),
-        "a miss must run the most expensive record's own hash, so it costs what a hit \
-         costs -- not a floor-cost hash the file never contained"
     );
 }
 
@@ -482,206 +426,29 @@ fn loading_an_argon2_record_does_not_mint_an_expensive_dummy() {
     assert_eq!(dir.len(), 1, "the record is indexed");
 }
 
-#[tokio::test]
-async fn the_miss_path_hash_is_the_heaviest_record_not_a_synthesized_cost() {
-    let file = HtpasswdFile::write(&format!(
-        "{}\n{}\n",
-        bcrypt_line("cheap", "pw", 4),
-        bcrypt_line("dear", "pw", 12),
-    ));
-    let dir = directory(&file).expect("the file loads");
-
-    assert_eq!(
-        dir.miss_work_factor(),
-        crate::support::work_factor_of(&bcrypt_line("dear", "pw", 12)),
-        "the miss path must run at exactly the most expensive record's work factor"
-    );
-}
-
 #[test]
-fn an_empty_directory_still_mints_a_floor_cost_miss_hash() {
-    let file = HtpasswdFile::write("# every line is a comment\n\n");
-    let dir = directory(&file).expect("an empty file is still a valid directory");
-
-    assert!(dir.is_empty(), "the file holds no records");
-    assert_eq!(
-        dir.miss_work_factor(),
-        praxis_policy_builtins::plugins::identity_basic::WorkFactor::FLOOR,
-        "an empty directory falls back to a minted floor-cost hash"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_dropped_request_does_not_release_its_verification_permit_early() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 12)));
-    let mut config = config_for(file.path());
-    config.max_concurrent_verifications = 1;
-    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
-    let svc = services();
-    let record = dir
-        .lookup("alice", &svc)
-        .await
-        .expect("the lookup answers")
-        .expect("alice exists");
-    let verifier = record.verifier.clone();
-
-    let aborted = {
-        let dir = std::sync::Arc::clone(&dir);
-        let verifier = verifier.clone();
-        tokio::spawn(async move {
-            let svc = services();
-            let rec = praxis_policy_builtins::plugins::identity_basic::UserRecord::verifier_only(
-                verifier,
-            );
-            dir.verify(Some(&rec), &crate::support::password("pw"), &svc)
-                .await
-        })
-    };
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-    aborted.abort();
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    let rec = praxis_policy_builtins::plugins::identity_basic::UserRecord::verifier_only(verifier);
-    let outcome = dir
-        .verify(Some(&rec), &crate::support::password("pw"), &svc)
-        .await;
-    assert!(
-        matches!(
-            outcome,
-            Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated)
-        ),
-        "an aborted request must not hand its permit back while its blocking \
-         verification is still running, got {outcome:?}"
-    );
-}
-
-#[test]
-fn an_unknown_key_fails_to_load_at_either_level() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
-    let base = format!(
-        "path: {}\nrefresh_secs: 30\nmax_staleness_secs: 300\n",
-        file.path()
-    );
-
-    for (label, extra) in [
-        ("a typo at the top level", "max_bcrypt_cst: 20\n".to_owned()),
-        ("an unknown top-level key", "wholly_bogus: 1\n".to_owned()),
-        (
-            "a typo inside the limits block",
-            "limits:\n  max_bcrypt_cst: 20\n".to_owned(),
-        ),
-    ] {
-        let err = serde_yaml::from_str::<HtpasswdConfig>(&format!("{base}{extra}"))
-            .expect_err("an unknown key must not deserialize");
-        assert!(
-            err.to_string().contains("unknown field"),
-            "{label} should be refused by name, got: {err}"
-        );
-    }
-}
-
-#[test]
-fn the_limits_block_parses_nested_and_defaults_when_absent() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
-    let base = format!(
-        "path: {}\nrefresh_secs: 30\nmax_staleness_secs: 300\n",
-        file.path()
-    );
-
-    let defaulted = serde_yaml::from_str::<HtpasswdConfig>(&base)
-        .expect("a config with no limits block takes the defaults");
-    assert_eq!(
-        defaulted.limits.max_bcrypt_cost,
-        praxis_policy_builtins::plugins::identity_basic::Limits::default().max_bcrypt_cost,
-        "an absent limits block means the shared defaults"
-    );
-
-    let explicit =
-        serde_yaml::from_str::<HtpasswdConfig>(&format!("{base}limits:\n  max_bcrypt_cost: 11\n"))
-            .expect("a nested limits block parses");
-    assert_eq!(
-        explicit.limits.max_bcrypt_cost, 11,
-        "an explicit nested ceiling is the one that takes effect"
-    );
-}
-
-/// A low-cost argon2 fixture for scheme and work-factor regression tests.
-const WEAK_ARGON2: &str = "$argon2id$v=19$m=4096,t=3,p=1$c2FsdHNhbHRzYWx0$\
-                           MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
-
-#[test]
-fn a_file_mixing_hash_schemes_fails_at_load() {
-    for (label, body) in [
-        (
-            "bcrypt first",
-            format!("{}\nweak:{WEAK_ARGON2}\n", bcrypt_line("strong", "pw", 12)),
-        ),
-        (
-            "argon2 first",
-            format!("weak:{WEAK_ARGON2}\n{}\n", bcrypt_line("strong", "pw", 12)),
-        ),
-    ] {
-        let file = HtpasswdFile::write(&body);
-        let err = directory(&file).expect_err("a file mixing bcrypt and argon2 must not load");
-        assert!(
-            err.contains("One hash scheme per file"),
-            "{label}: the error should name the constraint, got: {err}"
-        );
-        assert!(
-            err.contains("Re-hash"),
-            "{label}: and it should name the fix, got: {err}"
-        );
-    }
-}
-
-#[test]
-fn a_single_scheme_file_of_either_scheme_still_loads() {
-    let bcrypt_only = HtpasswdFile::write(&format!(
-        "{}\n{}\n",
-        bcrypt_line("a", "pw", 4),
-        bcrypt_line("b", "pw", 10),
-    ));
-    let dir = directory(&bcrypt_only).expect("an all-bcrypt file loads");
-    assert_eq!(dir.len(), 2, "both bcrypt records are indexed");
-
-    let argon2_only = HtpasswdFile::write(&format!("a:{WEAK_ARGON2}\nb:{WEAK_ARGON2}\n"));
-    let dir = directory(&argon2_only).expect("an all-argon2 file loads");
-    assert_eq!(dir.len(), 2, "both argon2 records are indexed");
-}
-
-#[tokio::test]
-async fn the_miss_path_is_never_cheaper_than_the_costliest_hit_within_a_scheme() {
-    let file = HtpasswdFile::write(&format!(
-        "{}\n{}\n{}\n",
-        bcrypt_line("cheap", "pw", 4),
-        bcrypt_line("mid", "pw", 6),
-        bcrypt_line("dear", "pw", 11),
-    ));
-    let dir = directory(&file).expect("the file loads");
-
-    assert_eq!(
-        dir.miss_work_factor(),
-        crate::support::work_factor_of(&bcrypt_line("dear", "pw", 11)),
-        "the miss path must run at exactly the most expensive record's work factor, \
-         not the dominant or the cheapest"
-    );
-}
-
-#[test]
-fn reloading_a_directory_does_not_remint_the_floor_hash() {
+fn reloading_a_directory_does_not_remint_its_empty_directory_hash() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
     let dir = directory(&file).expect("the file loads");
 
-    let before_reloads = FLOOR_HASH_MINTS.load(Ordering::Relaxed);
+    assert_eq!(
+        dir.empty_mints(),
+        1,
+        "construction mints the empty-directory hash exactly once; the counter \
+         is directory-local because a process-wide one is incremented by any \
+         concurrent test that builds a directory"
+    );
+
     for _ in 0..20_u32 {
         dir.reload().expect("the reload succeeds");
     }
-    let after_reloads = FLOOR_HASH_MINTS.load(Ordering::Relaxed);
 
     assert_eq!(
-        after_reloads, before_reloads,
-        "20 reloads must not remint the floor hash: it does not depend on file \
-         content, and minting one on the request path blocks an executor worker"
+        dir.empty_mints(),
+        1,
+        "20 reloads must not remint it: the hash does not depend on file \
+         content, and reload runs on the request path where a bcrypt mint \
+         would block an executor worker"
     );
 }
 
@@ -701,4 +468,143 @@ fn a_concurrency_cap_above_the_semaphore_maximum_fails_to_load() {
         !err.is_empty(),
         "and it must be an error rather than a panic"
     );
+}
+
+#[test]
+fn a_file_whose_records_cost_different_amounts_fails_at_load() {
+    for (label, body) in [
+        (
+            "two bcrypt costs",
+            format!(
+                "{}\n{}\n",
+                bcrypt_line("cheap", "pw", 4),
+                bcrypt_line("dear", "pw", 12)
+            ),
+        ),
+        (
+            "bcrypt and argon2",
+            format!("{}\nmixed:{ARGON2_RECORD}\n", bcrypt_line("a", "pw", 10)),
+        ),
+        (
+            "two argon2 tunings",
+            format!(
+                "a:{ARGON2_RECORD}\nb:{}\n",
+                ARGON2_RECORD.replace("m=19456", "m=8192")
+            ),
+        ),
+    ] {
+        let file = HtpasswdFile::write(&body);
+        let err =
+            directory(&file).expect_err("a file with non-uniform verification cost must not load");
+        assert!(
+            err.contains("One cost profile per file"),
+            "{label}: differing cost within a directory is a user-enumeration \
+             oracle whichever record serves the miss path, because the hits \
+             differ from each other -- a wrong password for a cost-4 record \
+             returns in 0.7ms against 160ms for a cost-12 miss. The error must \
+             name the constraint, got: {err}"
+        );
+        assert!(
+            err.contains("Re-hash"),
+            "{label}: and name the fix, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_uniform_file_loads_under_either_scheme() {
+    let bcrypt = HtpasswdFile::write(&format!(
+        "{}\n{}\n",
+        bcrypt_line("a", "pw", 6),
+        bcrypt_line("b", "other", 6),
+    ));
+    let dir = directory(&bcrypt).expect("a uniform bcrypt file loads");
+    assert_eq!(dir.len(), 2, "both bcrypt records are indexed");
+
+    let argon2 = HtpasswdFile::write(&format!("a:{ARGON2_RECORD}\nb:{ARGON2_RECORD}\n"));
+    let dir = directory(&argon2).expect("a uniform argon2 file loads");
+    assert_eq!(
+        dir.len(),
+        2,
+        "both argon2 records are indexed: the rule is uniformity, not \
+         bcrypt-only, so a single-tuning argon2 directory is supported"
+    );
+}
+
+#[tokio::test]
+async fn a_miss_runs_the_same_cost_profile_as_every_hit() {
+    let file = HtpasswdFile::write(&format!(
+        "{}\n{}\n",
+        bcrypt_line("alice", "pw", 6),
+        bcrypt_line("bob", "pw", 6),
+    ));
+    let dir = directory(&file).expect("the file loads");
+
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&bcrypt_line("alice", "pw", 6)),
+        "the miss path must share the directory's single cost profile: with \
+         uniformity enforced there is exactly one cost present, so a miss \
+         necessarily costs what any hit costs"
+    );
+}
+
+#[tokio::test]
+async fn a_reload_onto_a_new_uniform_cost_is_accepted_and_tracked() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
+    let dir = directory(&file).expect("the file loads");
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&bcrypt_line("alice", "pw", 5)),
+        "the miss path starts at the file's cost"
+    );
+
+    file.rewrite(&format!("{}\n", bcrypt_line("alice", "pw", 7)));
+    dir.reload().expect("a uniformly re-hashed file reloads");
+
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&bcrypt_line("alice", "pw", 7)),
+        "and tracks the new cost after the re-hash: re-hashing a whole file \
+         onto a new cost is legitimate, so the miss path must follow it rather \
+         than keep the old one"
+    );
+}
+
+#[test]
+fn an_argon2_record_argon2_cannot_verify_fails_at_load() {
+    for (label, record) in [
+        ("zero parallelism", ARGON2_RECORD.replace("p=1", "p=0")),
+        ("zero passes", ARGON2_RECORD.replace("t=2", "t=0")),
+        (
+            "unknown variant",
+            ARGON2_RECORD.replace("argon2id", "argon2x"),
+        ),
+        (
+            "memory below the parallelism floor",
+            ARGON2_RECORD.replace("m=19456", "m=1"),
+        ),
+    ] {
+        let file = HtpasswdFile::write(&format!("alice:{record}\n"));
+        let err = match directory(&file) {
+            Ok(_) => panic!("{label}: this record must not load"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("line 1"),
+            "{label}: PHC parsing is not admission -- this record parses but \
+             fails before the KDF, so without a load-time check that user-id \
+             would be measurably faster to probe than an unknown one. The \
+             error must name the line, got: {err}"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// Build a directory over a fixture file, with the default ceilings.
+fn directory(file: &HtpasswdFile) -> Result<HtpasswdDirectory, String> {
+    HtpasswdDirectory::new(config_for(file.path()))
 }

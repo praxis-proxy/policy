@@ -78,15 +78,22 @@ Authorino-parity escape hatch.
 
 - R6. Lookup is O(1) in directory size, keyed by a hash index on the normalised
   user-id.
-- R7. Password verification uses a constant-time verifier. Every local record
-  in one directory has the **same hash scheme and cost parameters**: bcrypt
-  cost, or argon2 variant, version, memory, time and parallelism. A mismatched
-  record fails at load. A user-id miss verifies against one stored hash, so a
-  miss and a wrong-password hit perform the same kind of work. A valid floor
-  hash is used only for an empty directory. Merely choosing the most expensive
-  record is insufficient: a miss would still be slower than a hit on a cheaper
-  record, revealing that the cheaper user-id exists. The test asserts the
-  uniform-parameter invariant and a dummy verify, not wall-clock timing.
+- R7. Password verification is constant-time, and **every record in a
+  directory shares one cost profile**, so a user-id miss costs exactly what any
+  hit costs. The stored-hash parse happens before the found/not-found branch so
+  both paths pay it. **Corrected 2026-10-30:** earlier designs tried to make a
+  miss expensive enough by choosing a dummy -- first the dominant cost, then a
+  synthesized floor, then the most expensive record. All three were wrong,
+  because the leak is not in the miss path: with bcrypt costs 4 and 12 in one
+  file, a wrong password for the cost-4 user returns in 0.7ms while a miss runs
+  the cost-12 hash in 160ms, so the *cheap user* is distinguishable from a
+  non-existent one by 245x, measured. No choice of dummy closes that, since it
+  is the hits that differ from each other. Uniform cost is the only shape in
+  which the requirement holds, so a file whose records differ in any cost
+  parameter is a load error. Ranking cost is also not available: argon2 trades
+  memory against passes per RFC 9106, and `m=4096,t=10` (14ms) scores above
+  `m=65536,t=2` (37ms) on any single-number formula. A hash is synthesized only
+  for a directory with no records at all.
 - R8. The `.htpasswd` backend reads bcrypt (`$2a$`, `$2b$`, `$2y$`) and argon2,
   but rejects files mixing schemes or cost parameters. Across schemes the cost
   parameters cannot be compared; within a scheme, mixed costs still expose
@@ -939,7 +946,13 @@ documentation cites a figure rather than a guess.
 **Approach:** A recipe in the established numbered style with an `.htpasswd`
 block as the common minimal case and the YAML and HTTP variants alongside, plus
 the RFC 7617 §4 warning that Basic ships the password in cleartext and base64 is
-not encryption, so TLS is required. The operator guidance must also state: the
+not encryption, so TLS is required. The guidance must say so **without
+overstating it**: R10 and KTD11 do permit an `http://` HTTP-backend URL behind
+an explicit cleartext opt-in, so U7 names that exception and what it costs --
+the password crosses the network in the clear to the verification service, and
+anything on that path can read every credential it carries. The opt-in exists
+for a loopback or mesh-encrypted deployment and nowhere else. The operator
+guidance must also state: the
 hash file is an offline-crackable verifier and should not be world-readable; the
 positive verify-cache TTL is a revocation window during which a rotated password
 still works; the in-process failure limiter needs an edge or shared counterpart

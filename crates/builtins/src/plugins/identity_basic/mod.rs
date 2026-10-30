@@ -21,4 +21,4 @@ pub mod verifier;
 pub use credential::{BasicCredential, DecodeError, decode_basic};
 pub use directory::{CredentialDirectory, DirectoryError, StoredVerifier, UserRecord};
 pub use htpasswd::{HtpasswdConfig, HtpasswdDirectory};
-pub use verifier::{HashError, Limits, ParsedHash, Scheme, WorkFactor};
+pub use verifier::{CostProfile, HashError, Limits, ParsedHash, Scheme};

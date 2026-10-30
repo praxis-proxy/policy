@@ -92,7 +92,7 @@ impl std::fmt::Debug for StoredVerifier {
 ///
 /// Callers should distinguish outages in diagnostics while returning the same
 /// external rejection for an unknown user and an incorrect password.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DirectoryError {
     /// The directory was unreachable, timed out, or refused the query.

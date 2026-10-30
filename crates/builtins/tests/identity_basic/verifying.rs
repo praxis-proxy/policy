@@ -5,13 +5,9 @@
 //! a verify from leaking which users exist.
 
 use praxis_policy_builtins::plugins::identity_basic::verifier::{
-    BCRYPT_TRUNCATION_BYTES, HashError, Limits, Scheme, WorkFactor, floor_hash, parse_hash,
+    BCRYPT_TRUNCATION_BYTES, CostProfile, HashError, Limits, Scheme, empty_directory_hash,
+    parse_hash,
 };
-
-/// A bcrypt record at a given cost, minted rather than checked in.
-fn bcrypt_at(cost: u32, password: &str) -> String {
-    bcrypt::hash(password, cost).expect("bcrypt mints at a legal cost")
-}
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -142,46 +138,16 @@ fn argon2_parameters_above_the_ceiling_fail_at_load() {
 }
 
 #[test]
-fn the_work_factor_orders_records_within_one_scheme() {
-    let cheap = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
-    let dear = parse_hash(&bcrypt_at(8, "pw"), &Limits::default()).expect("loads");
-    assert!(
-        dear.work_factor() > cheap.work_factor(),
-        "a higher bcrypt cost must order above a lower one"
-    );
-
-    let weak_argon2 = parse_hash(
-        "$argon2id$v=19$m=4096,t=3,p=1$c2FsdHNhbHRzYWx0$\
-         MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI",
-        &Limits::default(),
-    )
-    .expect("loads");
-    let strong_bcrypt = parse_hash(&bcrypt_at(12, "pw"), &Limits::default()).expect("loads");
-
-    assert_ne!(
-        weak_argon2.scheme(),
-        strong_bcrypt.scheme(),
-        "the two records are of different schemes"
-    );
-    assert!(
-        weak_argon2.work_factor() > strong_bcrypt.work_factor(),
-        "the cheap argon2 record still *scores* above the expensive bcrypt one, \
-         which is exactly why the factor must not be compared across schemes \
-         and why the backend refuses a mixed file"
-    );
-}
-
-#[test]
-fn the_floor_hash_is_a_real_record_that_verifies_in_full() {
-    let dummy = floor_hash(WorkFactor::FLOOR).expect("the floor hash mints");
+fn the_empty_directory_hash_is_a_real_record_that_verifies_in_full() {
+    let dummy = empty_directory_hash().expect("the empty-directory hash mints");
     assert_eq!(
         dummy.scheme(),
         Scheme::Bcrypt,
         "the dummy is a real bcrypt record the verifier runs in full"
     );
     assert_eq!(
-        dummy.work_factor(),
-        WorkFactor::FLOOR,
+        dummy.profile(),
+        CostProfile::Bcrypt { cost: 10 },
         "and it carries the work factor it was asked for"
     );
 }
@@ -338,24 +304,175 @@ fn a_debug_formatted_parsed_hash_redacts_the_stored_record() {
 }
 
 #[test]
-fn work_factors_do_not_compare_across_schemes() {
-    let bcrypt = parse_hash(&bcrypt_at(12, "pw"), &Limits::default()).expect("loads");
+fn a_cost_profile_compares_by_equality_not_by_order() {
+    let four = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
+    let four_again = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
+    let twelve = parse_hash(&bcrypt_at(12, "pw"), &Limits::default()).expect("loads");
+
+    assert_eq!(
+        four.profile(),
+        four_again.profile(),
+        "two records minted at the same cost share a profile"
+    );
+    assert_ne!(
+        four.profile(),
+        twelve.profile(),
+        "records at different costs must not share a profile, since that is \
+         what the load-time uniformity check compares; CostProfile offers no \
+         ordering because argon2 trades memory against passes, so m=4096,t=10 \
+         (14ms) would rank above m=65536,t=2 (37ms) on any single number"
+    );
+}
+
+#[test]
+fn argon2_records_differing_in_any_parameter_have_different_profiles() {
+    let base = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+                MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+    let reference = parse_hash(base, &Limits::default()).expect("the base record loads");
+
+    for (label, variant) in [
+        ("memory", base.replace("m=19456", "m=8192")),
+        ("passes", base.replace("t=2", "t=3")),
+        ("parallelism", base.replace("p=1", "p=2")),
+        ("variant", base.replace("argon2id", "argon2i")),
+    ] {
+        let other = parse_hash(&variant, &Limits::default())
+            .unwrap_or_else(|e| panic!("the {label} variant should load: {e}"));
+        assert_ne!(
+            reference.profile(),
+            other.profile(),
+            "a record differing in {label} must not share the base profile: \
+             every parameter affects verify cost, and the variant and version \
+             change the function rather than only its tuning"
+        );
+    }
+}
+
+#[test]
+fn a_hash_exactly_at_the_parameter_ceiling_is_accepted() {
+    let at_limit = Limits {
+        max_bcrypt_cost: 6,
+        ..Limits::default()
+    };
+    parse_hash(&bcrypt_at(6, "pw"), &at_limit)
+        .expect("a cost equal to the ceiling is within it, not over");
+
+    assert_eq!(
+        parse_hash(&bcrypt_at(7, "pw"), &at_limit).err(),
+        Some(HashError::ParametersTooHigh),
+        "one above the ceiling is refused, so the boundary is inclusive"
+    );
+}
+
+#[test]
+fn argon2_parameters_exactly_at_each_ceiling_are_accepted() {
+    let base = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+                MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+    let at_limit = Limits {
+        max_argon2_memory_kib: 19_456,
+        max_argon2_time_cost: 2,
+        ..Limits::default()
+    };
+    parse_hash(base, &at_limit).expect("memory and passes equal to their ceilings are within them");
+
+    let over_memory = Limits {
+        max_argon2_memory_kib: 19_455,
+        ..at_limit
+    };
+    assert_eq!(
+        parse_hash(base, &over_memory).err(),
+        Some(HashError::ParametersTooHigh),
+        "one KiB above the memory ceiling is refused"
+    );
+
+    let over_time = Limits {
+        max_argon2_time_cost: 1,
+        ..at_limit
+    };
+    assert_eq!(
+        parse_hash(base, &over_time).err(),
+        Some(HashError::ParametersTooHigh),
+        "and one pass above the time ceiling is refused, so each dimension is \
+         checked against its own limit rather than the pair being conflated"
+    );
+}
+
+#[test]
+fn a_bcrypt_cost_outside_the_library_range_fails_at_load() {
+    let minted = bcrypt_at(4, "pw");
+    let tail = minted
+        .get(7..)
+        .expect("a bcrypt record is longer than its cost prefix");
+
+    for (label, cost) in [("below the minimum", "03"), ("above the maximum", "32")] {
+        let record = format!("$2b${cost}${tail}");
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a cost {label} of the library's accepted range must fail at load, \
+             since the verifier would otherwise reject it before the KDF and \
+             make that user-id faster to probe"
+        );
+    }
+}
+
+#[test]
+fn an_argon2_record_missing_its_salt_or_digest_fails_at_load() {
+    for (label, record) in [
+        (
+            "no digest",
+            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0".to_owned(),
+        ),
+        (
+            "no salt or digest",
+            "$argon2id$v=19$m=19456,t=2,p=1".to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a record with {label} must fail at load: argon2 errors out before \
+             the KDF without them, which is the same timing signal as any other \
+             early rejection"
+        );
+    }
+}
+
+#[test]
+fn a_cost_profile_describes_its_own_parameters() {
+    let bcrypt = parse_hash(&bcrypt_at(9, "pw"), &Limits::default()).expect("loads");
+    let described = bcrypt.profile().describe();
+    assert!(
+        described.contains('9'),
+        "a bcrypt description names its cost, which an operator reconciling two \
+         records needs to see: {described}"
+    );
+    assert!(
+        described.contains("bcrypt"),
+        "and names the scheme: {described}"
+    );
+
     let argon2 = parse_hash(
-        "$argon2id$v=19$m=4096,t=3,p=1$c2FsdHNhbHRzYWx0$\
+        "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
          MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI",
         &Limits::default(),
     )
     .expect("loads");
+    let described = argon2.profile().describe();
+    for expected in ["19456", "t=2", "p=1", "argon2id"] {
+        assert!(
+            described.contains(expected),
+            "an argon2 description names {expected}, since every parameter is \
+             part of what the uniformity check compares: {described}"
+        );
+    }
+}
 
-    assert_eq!(
-        bcrypt.try_cmp_work(&argon2),
-        None,
-        "ordering across schemes has no meaning and must not produce an answer"
-    );
-    let cheaper = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
-    assert_eq!(
-        bcrypt.try_cmp_work(&cheaper),
-        Some(std::cmp::Ordering::Greater),
-        "within one scheme the comparison is meaningful"
-    );
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// A bcrypt record at a given cost, minted rather than checked in.
+fn bcrypt_at(cost: u32, password: &str) -> String {
+    bcrypt::hash(password, cost).expect("bcrypt mints at a legal cost")
 }
