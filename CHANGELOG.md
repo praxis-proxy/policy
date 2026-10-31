@@ -25,22 +25,31 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `global.defaults.<entity>`, `groups.<name>` and `routes[]` selects the
   plugins they run, with the forms and inheritance of `authentication:`. A
   step's `config:` override gets its own instance, built once per loaded
-  config. The engine denies with `ratelimit.unavailable` (503) when that
-  instance is missing, and raises alarm `rate_limit_stage_skipped` when a host
-  resolves identity without the pre-identity call.
+  config. A base limiter listed at two layers runs once per request, and the
+  load warns with alarm `rate_limit_listed_twice`. A step's `config:` must be a
+  mapping. The engine denies with `ratelimit.unavailable` (503, `http.status`
+  in `details`) when a step's limiter is missing, including after the plugin
+  is unregistered, and raises alarm `rate_limit_stage_skipped`, naming the
+  route, when a host resolves identity without the pre-identity call.
 - **Host-supplied client address.** `HttpExtension::set_client_address` sets a
   trusted address, read back with `HttpExtension::client_address` and exposed
   to `read_headers` plugins as `http.client_address`. `ClientAddress`
   normalizes it: the port is stripped, IPv4-mapped IPv6 becomes IPv4, other
-  IPv6 becomes its /64 prefix, and an invalid value is dropped. `Debug` output
-  hides it.
+  IPv6 becomes its /64 prefix, and an invalid value is dropped. The /64 form
+  parses back, so a serialized address round-trips. `Debug` output hides it,
+  but serialized `HttpExtension` output, which audit sinks read, includes the
+  normalized address.
 - **Experimental in-process request rate limiting.** The
   `ratelimit/limitador` plugin, behind the `experimental-ratelimit` feature,
   runs at the one rate-limit hook its `hooks:` declares, from `rate_limits:`.
   It counts requests against embedded Limitador limits and denies with
   `ratelimit.exceeded`, status 429 and client-safe `details`. It requires
   `on_error: fail` and `mode: sequential`, rejects identity bindings before
-  identity, and refuses to load in a `panic = "abort"` build. Counters are per
+  identity and pre-identity counters keyed on caller-influenced attributes
+  (`http.request_headers.*`, `http.query`, `http.path`, `http.host`,
+  `agent.*`, `args.*`, `custom.*`, `llm.input.*`, `meta.properties.*`,
+  `provenance.*`, `request.*`), and refuses to load in a `panic = "abort"`
+  build. Counters are per
   instance and reset on restart or reload. It is excluded from `builtins`.
 - **Unavailable CIBA approval state returns `-32122`.** A store read or write
   failure denies with `elicitation.store_unavailable` and JSON-RPC `-32122`.
@@ -153,9 +162,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - A `run(name)` step whose plugin has no hook for the request's context
   fails with a `PluginError::Dispatch` message that now names the remedy:
   move the step, or use a plugin with a hook for that context.
-- **New `ConfigScope` variants.** `ConfigScope::RateLimits` and
+- **Breaking: new `ConfigScope` variants.** `ConfigScope::RateLimits` and
   `ConfigScope::RateLimitsStep` cover the `rate_limits:` block and its steps.
-  An exhaustive match on `ConfigScope` outside this crate needs the two arms.
+  An exhaustive match on `ConfigScope` outside this crate needs the two arms,
+  and `ConfigScope::ALL` grows from 11 to 13 entries.
+- **Breaking:** `HttpExtension` adds `client_address`, and `GlobalConfig`,
+  `PolicyGroup` and `RouteEntry` add `rate_limits`. Hosts using exhaustive
+  struct literals must initialize them or use `..Default::default()`.
+- **Breaking:** `PluginContextTable` adds a private field, so it can no longer
+  be built with a struct literal outside this crate, even with
+  `..Default::default()`. Use `PluginContextTable::new()` or `Default`, then
+  set `global_state` and `local_states`.
 
 - **Breaking Rust API for embedders:** `RawInboundToken.source_header: String`
   becomes `RawInboundToken.source: Credential`; its constructor now takes a

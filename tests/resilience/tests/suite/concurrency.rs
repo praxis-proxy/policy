@@ -912,9 +912,6 @@ fn concurrent_reads_overlap_their_dependency_calls() {
 // Rate limits
 // -----------------------------------------------------------------------------
 
-/// Concurrent calls from one subject, each from its own address so only the
-/// per-user counter binds. Exactly the limit gets through, end to end, and
-/// every other call stops at the post-identity limit before the upstream.
 #[cfg(feature = "experimental-ratelimit")]
 #[test]
 fn concurrent_calls_from_one_subject_never_exceed_its_limit() {
@@ -964,7 +961,8 @@ fn concurrent_calls_from_one_subject_never_exceed_its_limit() {
         let limit = usize::try_from(USER_LIMIT).expect("fits usize");
         assert_eq!(
             allowed, limit,
-            "seed={}: exactly the per-user limit was allowed",
+            "seed={}: with one address per call only the per-user counter binds, so exactly its \
+             limit was allowed",
             k.seed
         );
         assert_eq!(

@@ -595,25 +595,25 @@ pub type RouteRateLimitStep = crate::identity::RouteIdentityStep;
 struct StepListBlock {
     /// The block's key, as error messages name it.
     key: &'static str,
-    /// How an error names one step.
-    step_label: &'static str,
     /// The object form's key table.
     scope: ConfigScope,
+    /// How an error names one step.
+    step_label: &'static str,
     /// The map-form step's key table.
     step_scope: ConfigScope,
 }
 
 const AUTHENTICATION_BLOCK: StepListBlock = StepListBlock {
     key: "authentication",
-    step_label: "authentication step",
     scope: ConfigScope::Authentication,
+    step_label: "authentication step",
     step_scope: ConfigScope::AuthenticationStep,
 };
 
 const RATE_LIMITS_BLOCK: StepListBlock = StepListBlock {
     key: "rate_limits",
-    step_label: "rate_limits step",
     scope: ConfigScope::RateLimits,
+    step_label: "rate_limits step",
     step_scope: ConfigScope::RateLimitsStep,
 };
 
@@ -2744,13 +2744,10 @@ fn validate_rate_limits(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
         .iter()
         .map(|p| (p.name.as_str(), p))
         .collect();
-    let check = |block: Option<&RouteRateLimitConfig>,
+    let check = |block: &RouteRateLimitConfig,
                  context: &str,
                  non_http_entity: Option<&str>|
      -> Result<(), Box<PluginError>> {
-        let Some(block) = block else {
-            return Ok(());
-        };
         for step in &block.steps {
             let Some(plugin) = plugins.get(step.name.as_str()) else {
                 return Err(config_error(format!(
@@ -2781,47 +2778,57 @@ fn validate_rate_limits(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
         Ok(())
     };
 
-    check(config.global.rate_limits.as_ref(), "global", None)?;
-    for (entity_type, default) in &config.global.defaults {
-        let non_http = (entity_type != ENTITY_HTTP).then_some(entity_type.as_str());
-        check(
-            default.rate_limits.as_ref(),
-            &format!("global.defaults.{entity_type}"),
-            non_http,
-        )?;
-    }
-    for (group_name, group) in &config.global.bundles {
-        check(
-            group.rate_limits.as_ref(),
-            &format!("policy group '{group_name}'"),
-            group_only_entity_type(config, group_name),
-        )?;
-    }
-    for (i, route) in config.routes.iter().enumerate() {
-        let non_http = route_entity_identity(route)
-            .map(|(entity_type, _)| entity_type)
-            .filter(|entity_type| *entity_type != ENTITY_HTTP);
-        check(route.rate_limits.as_ref(), &format!("route {i}"), non_http)?;
+    for (scope, block) in rate_limit_blocks(config) {
+        let (context, non_http) = match scope {
+            RateLimitScope::Global => ("global".to_owned(), None),
+            RateLimitScope::EntityDefault(entity_type) => (
+                format!("global.defaults.{entity_type}"),
+                (entity_type != ENTITY_HTTP).then(|| entity_type.to_owned()),
+            ),
+            RateLimitScope::Group(group_name) => (
+                format!("policy group '{group_name}'"),
+                group_only_entity_types(config, group_name),
+            ),
+            RateLimitScope::Route(i, route) => (
+                format!("route {i}"),
+                route_entity_identity(route)
+                    .map(|(entity_type, _)| entity_type)
+                    .filter(|entity_type| *entity_type != ENTITY_HTTP)
+                    .map(str::to_owned),
+            ),
+        };
+        check(block, &context, non_http.as_deref())?;
     }
     Ok(())
 }
 
-/// The one non-HTTP entity type every route joining `group_name` selects, or
-/// `None` when an HTTP route joins it, no route does, or the types are mixed.
+/// The non-HTTP entity types of the routes joining `group_name`, or `None`
+/// when an HTTP route joins it or no route does.
 ///
 /// Narrow on purpose: a group that some HTTP route joins can still run a
 /// pre-identity step there, so only a group no HTTP request can reach is wrong.
-fn group_only_entity_type<'a>(config: &'a PolicyConfig, group_name: &str) -> Option<&'a str> {
-    let mut joined = config
+fn group_only_entity_types(config: &PolicyConfig, group_name: &str) -> Option<String> {
+    let mut types: Vec<&str> = Vec::new();
+    for route in config
         .routes
         .iter()
         .filter(|route| route_static_tags(route).any(|tag| tag == group_name))
-        .map(|route| route_entity_identity(route).map(|(entity_type, _)| entity_type));
-    let first = joined.next()??;
-    (first != ENTITY_HTTP && joined.all(|entity_type| entity_type == Some(first))).then_some(first)
+    {
+        let Some((entity_type, _)) = route_entity_identity(route) else {
+            continue;
+        };
+        if entity_type == ENTITY_HTTP {
+            return None;
+        }
+        if !types.contains(&entity_type) {
+            types.push(entity_type);
+        }
+    }
+    (!types.is_empty()).then(|| types.join(" or "))
 }
 
-fn config_error(message: String) -> Box<PluginError> {
+/// A load-time refusal.
+pub(crate) fn config_error(message: String) -> Box<PluginError> {
     Box::new(PluginError::Config { message })
 }
 
@@ -3585,31 +3592,16 @@ pub fn resolve_identity_plugins_for_route(
     fold_step_layers(authentication_layers(config, matched.map(|m| m.route)))
 }
 
-/// Resolve the `rate_limits:` dispatch list for a matched route: global, entity
-/// default, tag bundles, then the route, folded the way
-/// [`resolve_identity_plugins_for_route`] folds `authentication:`.
-///
-/// One list feeds both rate-limit hooks. The caller filters it by the hook it
-/// dispatches, since a plugin's stage is the rate-limit hook its `hooks:`
-/// declares. A step's `config:` is surfaced as `config_overrides` under the
-/// `config` key, as for identity.
-pub fn resolve_rate_limit_plugins_for_route(
-    config: &PolicyConfig,
-    matched: Option<&MatchedRoute<'_>>,
-) -> Vec<ResolvedPlugin> {
-    fold_step_layers(rate_limits_layers(config, matched.map(|m| m.route), None))
-}
-
 /// Where a `rate_limits:` step is declared. A step's override instance is keyed
 /// by it, so every route inheriting the step shares one instance.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RateLimitStepSite {
+    /// The step's position in that section's list.
+    pub(crate) index: usize,
+
     /// The section: `global`, `global.defaults.<entity>`, `groups.<name>` or
     /// `routes[<index>]`.
     pub(crate) section: String,
-
-    /// The step's position in that section's list.
-    pub(crate) index: usize,
 }
 
 /// The `rate_limits:` steps in force for a request, in dispatch order, each
@@ -3622,7 +3614,14 @@ pub(crate) fn rate_limit_steps_for_route<'a>(
     matched: Option<&MatchedRoute<'a>>,
     request_entity_type: Option<&'a str>,
 ) -> Vec<(RateLimitStepSite, &'a RouteRateLimitStep)> {
-    let route = matched.map(|m| m.route);
+    rate_limit_steps(config, matched.map(|m| m.route), request_entity_type)
+}
+
+fn rate_limit_steps<'a>(
+    config: &'a PolicyConfig,
+    route: Option<&'a RouteEntry>,
+    request_entity_type: Option<&'a str>,
+) -> Vec<(RateLimitStepSite, &'a RouteRateLimitStep)> {
     let route_index = route.and_then(|route| {
         config
             .routes
@@ -3638,8 +3637,8 @@ pub(crate) fn rate_limit_steps_for_route<'a>(
         steps.extend(layer.config.steps.iter().enumerate().map(|(index, step)| {
             (
                 RateLimitStepSite {
-                    section: section.clone(),
                     index,
+                    section: section.clone(),
                 },
                 step,
             )
@@ -3653,28 +3652,10 @@ pub(crate) fn rate_limit_steps_for_route<'a>(
 pub(crate) fn rate_limit_override_steps(
     config: &PolicyConfig,
 ) -> Vec<(RateLimitStepSite, &RouteRateLimitStep)> {
-    let mut sections: Vec<(String, &RouteRateLimitConfig)> = Vec::new();
-    if let Some(block) = config.global.rate_limits.as_ref() {
-        sections.push(("global".to_owned(), block));
-    }
-    for (entity_type, default) in &config.global.defaults {
-        if let Some(block) = default.rate_limits.as_ref() {
-            sections.push((format!("global.defaults.{entity_type}"), block));
-        }
-    }
-    for (name, group) in &config.global.bundles {
-        if let Some(block) = group.rate_limits.as_ref() {
-            sections.push((format!("groups.{name}"), block));
-        }
-    }
-    for (i, route) in config.routes.iter().enumerate() {
-        if let Some(block) = route.rate_limits.as_ref() {
-            sections.push((format!("routes[{i}]"), block));
-        }
-    }
-    sections
+    rate_limit_blocks(config)
         .into_iter()
-        .flat_map(|(section, block)| {
+        .flat_map(|(scope, block)| {
+            let section = scope.site_label();
             block
                 .steps
                 .iter()
@@ -3683,8 +3664,8 @@ pub(crate) fn rate_limit_override_steps(
                 .map(move |(index, step)| {
                     (
                         RateLimitStepSite {
-                            section: section.clone(),
                             index,
+                            section: section.clone(),
                         },
                         step,
                     )
@@ -3693,46 +3674,79 @@ pub(crate) fn rate_limit_override_steps(
         .collect()
 }
 
-/// Whether any `rate_limits:` block lists a plugin declaring
-/// `ratelimit.pre_identity`.
-pub(crate) fn declares_pre_identity_rate_limits(config: &PolicyConfig) -> bool {
-    let pre_identity: HashSet<&str> = config
+/// Whether any `rate_limits:` block lists a plugin declaring `hook`.
+pub(crate) fn declares_rate_limits_at(config: &PolicyConfig, hook: &str) -> bool {
+    let at_hook: HashSet<&str> = config
         .plugins
         .iter()
-        .filter(|plugin| {
-            plugin
-                .hooks
-                .iter()
-                .any(|hook| hook == crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY)
-        })
+        .filter(|plugin| plugin.hooks.iter().any(|declared| declared == hook))
         .map(|plugin| plugin.name.as_str())
         .collect();
-    if pre_identity.is_empty() {
-        return false;
-    }
-    let lists = |block: Option<&RouteRateLimitConfig>| {
-        block.is_some_and(|block| {
+    !at_hook.is_empty()
+        && rate_limit_blocks(config).into_iter().any(|(_, block)| {
             block
                 .steps
                 .iter()
-                .any(|step| pre_identity.contains(step.name.as_str()))
+                .any(|step| at_hook.contains(step.name.as_str()))
         })
-    };
-    lists(config.global.rate_limits.as_ref())
-        || config
-            .global
-            .defaults
-            .values()
-            .any(|section| lists(section.rate_limits.as_ref()))
-        || config
-            .global
-            .bundles
-            .values()
-            .any(|section| lists(section.rate_limits.as_ref()))
-        || config
-            .routes
-            .iter()
-            .any(|route| lists(route.rate_limits.as_ref()))
+}
+
+/// A section that can carry a `rate_limits:` block.
+#[derive(Clone, Copy, Debug)]
+enum RateLimitScope<'a> {
+    EntityDefault(&'a str),
+    Global,
+    Group(&'a str),
+    Route(usize, &'a RouteEntry),
+}
+
+impl RateLimitScope<'_> {
+    /// How a [`RateLimitStepSite`] names the section.
+    fn site_label(self) -> String {
+        match self {
+            Self::EntityDefault(entity_type) => format!("global.defaults.{entity_type}"),
+            Self::Global => "global".to_owned(),
+            Self::Group(name) => format!("groups.{name}"),
+            Self::Route(i, _) => format!("routes[{i}]"),
+        }
+    }
+}
+
+/// Every `rate_limits:` block in the config, at every scope, whether or not a
+/// route inherits it.
+fn rate_limit_blocks(config: &PolicyConfig) -> Vec<(RateLimitScope<'_>, &RouteRateLimitConfig)> {
+    let global = config
+        .global
+        .rate_limits
+        .as_ref()
+        .map(|block| (RateLimitScope::Global, block));
+    let defaults = config
+        .global
+        .defaults
+        .iter()
+        .filter_map(|(entity_type, d)| {
+            d.rate_limits
+                .as_ref()
+                .map(|block| (RateLimitScope::EntityDefault(entity_type.as_str()), block))
+        });
+    let groups = config.global.bundles.iter().filter_map(|(name, group)| {
+        group
+            .rate_limits
+            .as_ref()
+            .map(|block| (RateLimitScope::Group(name.as_str()), block))
+    });
+    let routes = config.routes.iter().enumerate().filter_map(|(i, route)| {
+        route
+            .rate_limits
+            .as_ref()
+            .map(|block| (RateLimitScope::Route(i, route), block))
+    });
+    global
+        .into_iter()
+        .chain(defaults)
+        .chain(groups)
+        .chain(routes)
+        .collect()
 }
 
 /// How a [`RateLimitStepSite`] names a layer. The route is named by its index
@@ -3883,12 +3897,12 @@ pub(crate) fn dropped_inherited_rate_limits(config: &PolicyConfig) -> Vec<Droppe
 }
 
 /// A route that runs post-identity limiters but resolves no authentication.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UnauthenticatedRateLimits {
-    /// The affected route, named by the entity it selects.
-    pub route: String,
     /// The post-identity limiters in force on it, in dispatch order.
     pub limiters: Vec<String>,
+    /// The affected route, named by the entity it selects.
+    pub route: String,
 }
 
 /// Every route whose effective `rate_limits:` runs a post-identity plugin while
@@ -3928,11 +3942,70 @@ pub(crate) fn rate_limits_without_authentication(
                     .filter(|name| post_identity.contains(name.as_str()))
                     .collect();
             (!limiters.is_empty()).then(|| UnauthenticatedRateLimits {
-                route: route_display_name(route, i),
                 limiters,
+                route: route_display_name(route, i),
             })
         })
         .collect()
+}
+
+/// A request path that lists one base limiter more than once.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepeatedRateLimits {
+    /// The limiters listed more than once without a `config:`, in first-seen
+    /// order.
+    pub limiters: Vec<String>,
+    /// The affected route, or the `global` fallback a request matching no
+    /// route reads.
+    pub route: String,
+}
+
+/// Every route, and every no-route fallback, whose folded `rate_limits:` lists
+/// one base limiter more than once.
+///
+/// Dispatch runs a base limiter once per request however often it is listed,
+/// so a repeat is never a second count; it is reported because the author
+/// likely meant something else.
+pub(crate) fn rate_limits_listed_twice(config: &PolicyConfig) -> Vec<RepeatedRateLimits> {
+    let repeated = |steps: Vec<(RateLimitStepSite, &RouteRateLimitStep)>| {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut repeats: Vec<String> = Vec::new();
+        for (_, step) in steps.iter().filter(|(_, s)| s.config_override.is_none()) {
+            if seen.contains(&step.name.as_str()) {
+                if !repeats.contains(&step.name) {
+                    repeats.push(step.name.clone());
+                }
+            } else {
+                seen.push(step.name.as_str());
+            }
+        }
+        repeats
+    };
+    let global = repeated(rate_limit_steps(config, None, None));
+    let mut findings: Vec<RepeatedRateLimits> = Vec::new();
+    if !global.is_empty() {
+        findings.push(RepeatedRateLimits {
+            limiters: global.clone(),
+            route: "global".to_owned(),
+        });
+    }
+    let mut entity_types: Vec<&String> = config.global.defaults.keys().collect();
+    entity_types.sort();
+    findings.extend(entity_types.into_iter().filter_map(|entity_type| {
+        let limiters = repeated(rate_limit_steps(config, None, Some(entity_type.as_str())));
+        (!limiters.is_empty() && limiters != global).then(|| RepeatedRateLimits {
+            limiters,
+            route: format!("global.defaults.{entity_type}"),
+        })
+    }));
+    findings.extend(config.routes.iter().enumerate().filter_map(|(i, route)| {
+        let limiters = repeated(rate_limit_steps(config, Some(route), None));
+        (!limiters.is_empty()).then(|| RepeatedRateLimits {
+            limiters,
+            route: route_display_name(route, i),
+        })
+    }));
+    findings
 }
 
 /// The `assertions:` contract in force for a request, in one direction.
@@ -4422,9 +4495,9 @@ mod tests {
     /// The rate-limit counterpart of `identity_for`, as step names.
     fn rate_limits_for(config: &PolicyConfig, entity_type: &str, entity_name: &str) -> Vec<String> {
         let matched = resolve_route(config, RouteQuery::named(entity_type, entity_name));
-        resolve_rate_limit_plugins_for_route(config, matched.as_ref())
+        rate_limit_steps_for_route(config, matched.as_ref(), None)
             .into_iter()
-            .map(|plugin| plugin.name)
+            .map(|(_, step)| step.name.clone())
             .collect()
     }
 
@@ -5773,12 +5846,20 @@ routes:
         )
         .expect("a step with a config override loads");
         let matched = resolve_route(&cfg, RouteQuery::named("tool", "t"));
-        let resolved = resolve_rate_limit_plugins_for_route(&cfg, matched.as_ref());
+        let resolved = rate_limit_steps_for_route(&cfg, matched.as_ref(), None);
         assert_eq!(resolved.len(), 1, "one step resolves to one plugin");
         assert_eq!(
-            resolved[0].config_overrides,
-            Some(serde_json::json!({ "config": { "limit": 5 } })),
-            "the step's config is wrapped under `config`, as for identity",
+            resolved[0].0,
+            RateLimitStepSite {
+                index: 0,
+                section: "routes[0]".to_owned(),
+            },
+            "the step is keyed by the route section and its position",
+        );
+        assert_eq!(
+            resolved[0].1.config_override,
+            Some(serde_json::json!({ "limit": 5 })),
+            "the step's config reaches the dispatch list unchanged",
         );
     }
 
@@ -5859,6 +5940,11 @@ routes:
                 "groups:\n  tools:\n    rate_limits: [edge]\nroutes:\n  - tool: t\n    groups: \
                  tools\n",
             ),
+            (
+                "policy group 'mixed'",
+                "groups:\n  mixed:\n    rate_limits: [edge]\nroutes:\n  - tool: t\n    groups: \
+                 mixed\n  - llm: m\n    groups: mixed\n",
+            ),
         ] {
             let err = rate_limit_error(body);
             assert!(
@@ -5910,8 +5996,8 @@ routes:
         assert_eq!(
             rate_limits_without_authentication(&cfg),
             vec![UnauthenticatedRateLimits {
-                route: "tool:healthcheck".to_owned(),
                 limiters: vec!["per-user".to_owned()],
+                route: "tool:healthcheck".to_owned(),
             }],
             "only the anonymous route that inherits a post-identity limiter is reported",
         );

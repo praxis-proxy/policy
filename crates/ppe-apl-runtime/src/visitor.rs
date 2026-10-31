@@ -86,9 +86,7 @@ use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
 use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
 use praxis_policy_core::plugin::PluginConfig;
-use praxis_policy_core::ratelimit_hook::{
-    HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY,
-};
+use praxis_policy_core::ratelimit_hook::RATELIMIT_HOOK_METADATA;
 use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
 
 use praxis_policy_apl_core::attribute_source::{AttributeSource as _, AttributeTree};
@@ -606,9 +604,11 @@ fn step_list_names(yaml: &serde_yaml::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `hook` is one of the two rate-limit hooks.
+/// Whether `hook` is one of the rate-limit hooks.
 fn is_rate_limit_hook(hook: &str) -> bool {
-    hook == HOOK_RATELIMIT_PRE_IDENTITY || hook == HOOK_RATELIMIT_POST_IDENTITY
+    RATELIMIT_HOOK_METADATA
+        .iter()
+        .any(|(name, _)| *name == hook)
 }
 
 /// Read-only baseline for APL predicates: enough to make

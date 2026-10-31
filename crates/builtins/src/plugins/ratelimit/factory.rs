@@ -41,10 +41,15 @@ impl PluginFactory for RateLimitFactory {
 /// The stage `config` runs at, once settings that could admit an unchecked
 /// request are refused.
 fn check_dispatch(config: &PluginConfig) -> Result<Stage, Box<PluginError>> {
+    check_dispatch_with(config, cfg!(panic = "abort"))
+}
+
+/// [`check_dispatch`] for a build that `aborts` on panic or unwinds.
+fn check_dispatch_with(config: &PluginConfig, aborts: bool) -> Result<Stage, Box<PluginError>> {
     let name = config.name.as_str();
     // Limitador 0.14 panics on a condition evaluation error. The handler
     // contains that panic as a denial, which an aborting build cannot do.
-    if cfg!(panic = "abort") {
+    if aborts {
         return Err(config_error(
             name,
             "this build aborts on panic, and Limitador panics on a condition evaluation \
@@ -72,4 +77,40 @@ fn check_dispatch(config: &PluginConfig) -> Result<Stage, Box<PluginError>> {
         ));
     }
     Ok(stage)
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use praxis_policy_core::plugin::PluginConfig;
+    use praxis_policy_core::ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY;
+
+    use super::{KIND, check_dispatch_with};
+    use crate::plugins::ratelimit::config::Stage;
+
+    #[test]
+    fn an_aborting_build_refuses_to_load() {
+        let config = PluginConfig {
+            name: "app-ratelimit".to_owned(),
+            kind: KIND.to_owned(),
+            hooks: vec![HOOK_RATELIMIT_POST_IDENTITY.to_owned()],
+            ..Default::default()
+        };
+
+        let aborting = check_dispatch_with(&config, true).map_err(|error| error.to_string());
+        assert!(
+            matches!(&aborting, Err(error) if error.contains("app-ratelimit")
+                && error.contains("panic = \"unwind\"")),
+            "an aborting build cannot contain a Limitador panic: {aborting:?}"
+        );
+        let unwinding = check_dispatch_with(&config, false).map_err(|error| error.to_string());
+        assert_eq!(
+            unwinding,
+            Ok(Stage::PostIdentity),
+            "an unwinding build loads at the declared stage"
+        );
+    }
 }

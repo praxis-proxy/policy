@@ -117,13 +117,17 @@ The load rejects:
 - `on_error` other than `fail`, and `mode` other than `sequential`;
 - a pre-identity binding to an identity attribute, since none is set before
   identity runs;
-- a pre-identity counter keyed on an attribute the caller picks
-  (`http.request_headers.*`, `http.query`, `http.path`), since a caller would
-  reset it by changing the value. Those attributes are fine in `conditions`,
-  and a post-identity counter keyed on one loads with a warning;
+- a pre-identity counter keyed on an attribute the caller picks, or that a
+  host commonly fills from caller input (`http.request_headers.*`,
+  `http.query`, `http.path`, `http.host`, `agent.*`, `args.*`, `custom.*`,
+  `llm.input.*`, `meta.properties.*`, `provenance.*`, `request.*`), since a
+  caller would reset it by changing the value. Those attributes are fine in
+  `conditions`, and a post-identity counter keyed on one loads with a
+  warning;
 - a pre-identity plugin listed under a `tool:`, `llm:`, `resource:` or
-  `prompt:` route's `rate_limits:`, since that hook runs before the request is
-  classified;
+  `prompt:` route's `rate_limits:`, or under a group only such routes join,
+  since that hook runs before the request is classified;
+- a step `config:` that is not a mapping;
 - a `run(name)` step naming the plugin. List it under `rate_limits:` instead.
 
 A post-identity limit counts before APL policy runs, so a request that policy
@@ -164,14 +168,29 @@ in conditions only.
 | `ratelimit.unsupported_attribute` | 400 | a bound attribute is not a string | bind a string-valued attribute |
 | `ratelimit.unavailable` | 503 | the engine has no instance for a `rate_limits:` step with a `config:` override | reload the configuration |
 
-`ratelimit.unavailable` comes from the engine, not the plugin. A Limitador
-condition that fails at runtime, such as `int(subject_id)` on a non-numeric
-value, makes Limitador panic. The plugin contains the panic and denies with
-`ratelimit.check_failed`, and logs the cause at most once a minute.
+`ratelimit.unavailable` comes from the engine, not the plugin. It covers a
+step whose limiter the running snapshot lacks, including a base plugin that
+was unregistered after the load. A Limitador condition that fails at runtime,
+such as `int(subject_id)` on a non-numeric value, makes Limitador panic. The
+plugin contains the panic and denies with `ratelimit.check_failed`, and logs
+the cause at most once a minute.
 
 No reason text names a binding, attribute, capability, limit or namespace.
-For the attribute codes, the plugin logs at debug which binding failed and
-which capability would expose it.
+For the attribute codes, the plugin warns at most once a minute with which
+binding failed, which capability would expose it, and how many denials it
+held back in `suppressed`.
+
+## Alarms
+
+| Alarm | Raised | Trigger | Fix |
+| --- | --- | --- | --- |
+| `rate_limits_replaced_inherited` | at load | a `replace_inherited: true` drops limiters a route inherited | remove the flag if the block meant to add limits |
+| `rate_limit_without_authentication` | at load | a route runs a post-identity limiter but resolves no authentication | add an `authentication:` step, or drop the limiter on that route |
+| `rate_limit_listed_twice` | at load | a route inherits one base limiter from more than one section; it runs once | remove the repeat, or give one listing its own `config:` for a separate limit |
+| `rate_limit_stage_skipped` | once per cycle | `identity.resolve` ran on a context table that never reached `ratelimit.pre_identity` while a pre-identity limit is in force | call `ratelimit.pre_identity` first and pass its context table on |
+
+Each alarm is a `tracing` warning with an `alarm` field and a `route` field
+naming the affected route.
 
 ## The 429 details
 
@@ -207,10 +226,20 @@ check and update, so concurrent requests to one instance cannot exceed a
 limit.
 
 A `rate_limits:` step with a `config:` override gets its own instance and
-counters. The override is merged key by key over the plugin's `config`, and
-the engine builds that instance once per loaded configuration. Every route
-inheriting the step shares it. A factory that rejects the merged config fails
-the load.
+counters. The override, which must be a mapping, is merged key by key over
+the plugin's `config`, and the engine builds that instance once per loaded
+configuration. Every route inheriting the step shares it. A factory that
+rejects the merged config fails the load.
+
+A limiter listed at two layers without a `config:`, say at `global` and on a
+route, runs once per request. An override step is its own limiter and counts
+beside the base one.
+
+`initialize()` initializes override instances with the base plugins. A
+configuration loaded into an already initialized engine builds new override
+instances without initializing them, so a rate-limit kind that needs
+`initialize` must be loaded into a new engine. No in-tree rate-limit kind
+needs it.
 
 Counters restart at zero when the process restarts and on every configuration
 load, including a load that changes nothing about the limiter.
@@ -241,6 +270,15 @@ per replica.
 - A host built with `panic = "abort"` cannot contain a Limitador panic, so the
   factory refuses to load there. This holds until Limitador returns condition
   errors instead of panicking.
+- A contained Limitador panic still runs the process panic hook, once per
+  request that triggers it, which writes to stderr and captures a backtrace
+  when `RUST_BACKTRACE` is set. The once-a-minute log limit does not cover
+  that output. Install a throttling panic hook in the host, and avoid
+  conditions that can fail on request data, such as `int(...)` on a caller
+  value.
+- Each IPv6 /64 is its own `http.client_address` key, so a holder of a larger
+  allocation can rotate keys. Pair a per-address limit with a coarser one. See
+  [HTTP Routing](../../../../../docs/content/http-routing.md#rate-limit-hooks).
 - Counters are per process. Replicas do not share them, and nothing persists
   them.
 - There is no shared or Redis-backed counter storage.

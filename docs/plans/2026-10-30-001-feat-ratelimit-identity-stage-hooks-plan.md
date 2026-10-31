@@ -1,7 +1,7 @@
 ---
 title: "feat: Pre- and post-identity rate-limit hooks"
 type: feat
-status: active
+status: completed
 date: 2026-10-30
 deepened: 2026-10-31
 ---

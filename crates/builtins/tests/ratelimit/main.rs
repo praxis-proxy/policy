@@ -834,6 +834,44 @@ async fn a_429_describes_the_most_restrictive_matched_counter() {
 }
 
 #[tokio::test]
+async fn a_429_on_two_exhausted_counters_waits_for_the_longer_window() {
+    let policy = PER_USER_POLICY
+        .replace(
+            "- max: 2\n          seconds: 60",
+            "- max: 1\n          seconds: 3600",
+        )
+        .replace(
+            "- max: 1\n          seconds: 60\n          conditions: [\"plan == 'free'\", \
+             \"http_method == 'POST'\"]",
+            "- max: 1\n          seconds: 1",
+        );
+    let manager = engine_with(&policy).await;
+    let alice = || request_with_plan(Some("alice"), Some("GET"), Some("free"));
+    assert!(
+        verdict_request(&manager, alice()).await.0,
+        "the first request is within both limits"
+    );
+
+    let violation = violation_at(&manager, HOOK_RATELIMIT_POST_IDENTITY, alice())
+        .await
+        .expect("the second request exhausts both counters");
+
+    assert_eq!(
+        violation.details[DETAIL_WINDOW_SECONDS],
+        serde_json::json!(3600),
+        "the hour counter is the one a client waits on: {:?}",
+        violation.details
+    );
+    let retry_after = violation.details[DETAIL_RETRY_AFTER_SECONDS]
+        .as_u64()
+        .expect("retry_after_seconds is a whole number");
+    assert!(
+        retry_after > 1,
+        "retrying after the one-second window would be denied again: {retry_after}"
+    );
+}
+
+#[tokio::test]
 async fn a_lowercase_method_matches_an_uppercase_limit() {
     let manager = engine_with(&POLICY.replace("max: 5", "max: 1")).await;
     assert!(
@@ -864,7 +902,16 @@ async fn a_missing_binding_logs_its_hint_and_keeps_it_out_of_the_response() {
     )
     .await
     .expect("an unreadable client address denies");
-    let logged = finish_capture(tracing::Level::DEBUG);
+    for _ in 0..5 {
+        assert_eq!(
+            pre_identity_verdict(&manager, edge_request(Some(FIRST_CLIENT)))
+                .await
+                .1,
+            Some((CODE_MISSING_ATTRIBUTE.to_owned(), Some(400))),
+            "every request lacking the attribute is denied"
+        );
+    }
+    let logged = finish_capture(tracing::Level::WARN);
 
     assert_eq!(
         violation.code, CODE_MISSING_ATTRIBUTE,
@@ -891,13 +938,19 @@ async fn a_missing_binding_logs_its_hint_and_keeps_it_out_of_the_response() {
         .iter()
         .filter(|event| event.contains(CODE_MISSING_ATTRIBUTE))
         .collect();
-    assert_eq!(hints.len(), 1, "the denial logs one hint: {logged:?}");
+    assert_eq!(
+        hints.len(),
+        1,
+        "six denials inside one interval warn once, so a host fault is visible at default \
+         levels without flooding: {logged:?}"
+    );
     for needle in [
         "edge-limits",
         "\"client\"",
         "http.client_address",
         "read_headers",
         "capabilities",
+        "suppressed",
     ] {
         assert!(
             hints[0].contains(needle),
@@ -1098,7 +1151,16 @@ fn on_error_other_than_fail_and_non_sequential_modes_fail_to_load() {
 
 #[test]
 fn a_pre_identity_counter_keyed_on_a_caller_header_fails_to_load() {
-    for attribute in ["http.request_headers.x-user", "http.query", "http.path"] {
+    for attribute in [
+        "http.request_headers.x-user",
+        "http.query",
+        "http.path",
+        "http.host",
+        "agent.session_id",
+        "custom.tenant",
+        "meta.properties.owner",
+        "request.trace_id",
+    ] {
         let policy = EDGE_POLICY.replace("http.client_address", attribute);
         let error = load_error(&policy);
         for needle in [
@@ -1134,26 +1196,32 @@ fn a_pre_identity_condition_on_a_caller_header_loads() {
 
 #[test]
 fn a_post_identity_counter_keyed_on_a_caller_header_loads_with_one_warning() {
-    let config = plugin_config(
-        &[HOOK_RATELIMIT_POST_IDENTITY],
-        serde_json::json!({
-            "namespace": "user",
-            "bindings": {"user": "http.request_headers.x-user"},
-            "limits": [{"max": 1, "seconds": 60, "variables": ["user"]}],
-        }),
-    );
-    let (built, warnings) = warnings_while(|| RateLimitFactory.create(&config).is_ok());
-    assert!(built, "a post-identity header counter still loads");
-    assert_eq!(
-        warnings.len(),
-        1,
-        "construction warns exactly once: {warnings:?}"
-    );
-    for needle in ["app-ratelimit", "user", "http.request_headers.x-user"] {
-        assert!(
-            warnings[0].contains(needle),
-            "the warning must name `{needle}`: {warnings:?}"
+    for attribute in [
+        "http.request_headers.x-user",
+        "agent.session_id",
+        "request.request_id",
+    ] {
+        let config = plugin_config(
+            &[HOOK_RATELIMIT_POST_IDENTITY],
+            serde_json::json!({
+                "namespace": "user",
+                "bindings": {"user": attribute},
+                "limits": [{"max": 1, "seconds": 60, "variables": ["user"]}],
+            }),
         );
+        let (built, warnings) = warnings_while(|| RateLimitFactory.create(&config).is_ok());
+        assert!(built, "a post-identity counter on {attribute} still loads");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "construction warns exactly once for {attribute}: {warnings:?}"
+        );
+        for needle in ["app-ratelimit", "user", attribute] {
+            assert!(
+                warnings[0].contains(needle),
+                "the warning must name `{needle}`: {warnings:?}"
+            );
+        }
     }
 }
 
@@ -1319,19 +1387,6 @@ fn invalid_configs_fail_during_plugin_construction() {
         );
         assert!(message.contains(expected), "{label}: {message}");
     }
-}
-
-#[cfg(panic = "abort")]
-#[test]
-fn an_aborting_build_refuses_to_load() {
-    let error = construction_error(&plugin_config(
-        &[HOOK_RATELIMIT_POST_IDENTITY],
-        minimal_config(),
-    ));
-    assert!(
-        error.contains("app-ratelimit") && error.contains("panic = \"unwind\""),
-        "an aborting build cannot contain a Limitador panic: {error}"
-    );
 }
 
 // -----------------------------------------------------------------------------

@@ -219,7 +219,7 @@ async fn a_conforming_host_raises_no_stage_alarm() {
 }
 
 // -----------------------------------------------------------------------------
-// Utilities
+// Test Utilities
 // -----------------------------------------------------------------------------
 
 async fn start(yaml: &str) -> RefHost {

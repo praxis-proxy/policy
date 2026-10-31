@@ -141,11 +141,25 @@ limit that binds it then denies. A host that rebuilds the extensions for
 `http.client_address` with `read_headers` and cannot change it. `Debug`
 output hides it; serialized output, which audit sinks read, includes it.
 
+One /64 is one key. A client holding a larger IPv6 allocation, such as a /48,
+can rotate across its /64s and get a fresh counter for each, and enough keys
+fill the counter store. Pair a per-address limit with a coarser one, for
+example a counter keyed on a /48 the host derives and supplies, or a limit
+with no `variables` shared by every caller.
+
 Denials. A rate-limit denial comes back as `PipelineResult.violation`, with
 the HTTP status in `proto_error_code`. Stop the request there: before identity
 for a pre-identity denial, before policy for a post-identity one. For a 429,
 map only the `details` keys `http.status`, `limit`, `remaining`,
 `retry_after_seconds` and `window_seconds` into the response.
+
+| Code | Status | Raised by | Meaning |
+| --- | --- | --- | --- |
+| `ratelimit.exceeded` | 429 | the plugin | the request is over a limit |
+| `ratelimit.unavailable` | 503 | the engine | a `rate_limits:` step has no limiter in the running configuration, such as after the plugin is unregistered; reload the configuration or register the plugin again |
+
+Every rate-limit denial carries its status in `details` as `http.status`. See
+the plugin's denial codes for the rest.
 
 ## Reading the response status
 

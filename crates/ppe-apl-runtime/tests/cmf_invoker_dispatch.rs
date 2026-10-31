@@ -1569,13 +1569,6 @@ async fn a_payload_of_another_family_is_dropped_and_not_reported_as_a_mutation()
     );
 }
 
-// ---------------------------------------------------------------------
-// A step whose plugin serves another context
-// ---------------------------------------------------------------------
-
-/// The plugin's only hook is `cmf.tool_pre_invoke`, so a step on an llm
-/// request or in the post phase finds no entry. The route must fail closed,
-/// and the reason must tell the operator what to change.
 #[tokio::test]
 async fn a_step_whose_plugin_serves_another_context_denies_with_the_remedy() {
     use praxis_policy_apl_core::fault_testing::{FaultPdp, InjectedFailure};
@@ -1641,7 +1634,10 @@ async fn a_step_whose_plugin_serves_another_context_denies_with_the_remedy() {
         .decision;
 
         let Decision::Deny { reason, .. } = decision else {
-            panic!("a {entity} {phase} step with no matching hook must deny, got {decision:?}");
+            panic!(
+                "the plugin serves only cmf.tool_pre_invoke, so a {entity} {phase} step must fail \
+                 closed, got {decision:?}"
+            );
         };
         let reason = reason.expect("the denial carries a reason");
         for fragment in [
@@ -1653,7 +1649,8 @@ async fn a_step_whose_plugin_serves_another_context_denies_with_the_remedy() {
         ] {
             assert!(
                 reason.contains(fragment),
-                "the {entity} {phase} denial must name `{fragment}`, got: {reason}"
+                "the {entity} {phase} denial must tell the operator what to change by naming \
+                 `{fragment}`, got: {reason}"
             );
         }
     }

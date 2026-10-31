@@ -33,6 +33,10 @@ use praxis_policy_core::ratelimit_hook::{
 };
 use tokio::runtime::Runtime;
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// High enough that no allow case reaches it during a run.
 const ALLOW_MAX: u64 = 1_000_000_000_000; // requests per window
 

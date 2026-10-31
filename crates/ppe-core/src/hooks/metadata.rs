@@ -503,8 +503,16 @@ mod tests {
         assert_eq!(IDENTITY_HOOK_METADATA.len(), 1);
         assert_eq!(DELEGATION_HOOK_METADATA.len(), 1);
         assert_eq!(ELICITATION_HOOK_METADATA.len(), 1);
-        assert_eq!(RATELIMIT_HOOK_METADATA.len(), 2);
-        assert_eq!(BUILTIN_HOOK_METADATA.len(), 15);
+        assert_eq!(
+            RATELIMIT_HOOK_METADATA.len(),
+            2,
+            "the rate-limit family declares a hook per stage"
+        );
+        assert_eq!(
+            BUILTIN_HOOK_METADATA.len(),
+            15,
+            "every family's hooks reach the built-in table"
+        );
         for table in HOOK_TABLES {
             for (name, _) in *table {
                 assert!(

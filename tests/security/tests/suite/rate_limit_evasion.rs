@@ -197,7 +197,7 @@ async fn addresses_in_one_ipv6_slash_64_share_a_counter() {
 }
 
 // -----------------------------------------------------------------------------
-// Utilities
+// Test Utilities
 // -----------------------------------------------------------------------------
 
 async fn start(yaml: &str) -> RefHost {

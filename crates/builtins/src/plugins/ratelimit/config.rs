@@ -4,9 +4,10 @@
 use std::collections::BTreeMap;
 
 use praxis_policy_apl_cmf::constants::{
-    BAG_AUTHENTICATED, BAG_CALLER_WORKLOAD_PREFIX, BAG_CLAIM_PREFIX, BAG_CLIENT_PREFIX,
-    BAG_DELEGATED, BAG_DELEGATION_PREFIX, BAG_HTTP_PATH, BAG_HTTP_QUERY,
-    BAG_HTTP_REQUEST_HEADERS_PREFIX, BAG_PERM_PREFIX, BAG_ROLE_PREFIX, BAG_TEAM_PREFIX,
+    BAG_AGENT_PREFIX, BAG_ARGS_PREFIX, BAG_AUTHENTICATED, BAG_CALLER_WORKLOAD_PREFIX,
+    BAG_CLAIM_PREFIX, BAG_CLIENT_PREFIX, BAG_CUSTOM_PREFIX, BAG_DELEGATED, BAG_DELEGATION_PREFIX,
+    BAG_HTTP_HOST, BAG_HTTP_PATH, BAG_HTTP_QUERY, BAG_HTTP_REQUEST_HEADERS_PREFIX, BAG_PERM_PREFIX,
+    BAG_ROLE_PREFIX, BAG_TEAM_PREFIX,
 };
 use praxis_policy_core::ratelimit_hook::{
     HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY,
@@ -36,12 +37,21 @@ const IDENTITY_DERIVED_ATTRIBUTES: &[&str] = &[
 /// on an unbounded attribute warns at load.
 pub(super) const DEFAULT_COUNTER_CAPACITY: u64 = 10_000; // qualified counters
 
-/// Bag attributes the caller picks freely, so a counter keyed on one can be
-/// reset by changing it. An entry ending in `.` matches every key under it.
+/// Bag attributes the caller picks freely, or a host commonly fills from
+/// caller input, so a counter keyed on one can be reset by changing it. An
+/// entry ending in `.` matches every key under it.
 const CALLER_CONTROLLED_ATTRIBUTES: &[&str] = &[
     BAG_HTTP_REQUEST_HEADERS_PREFIX,
     BAG_HTTP_QUERY,
     BAG_HTTP_PATH,
+    BAG_HTTP_HOST,
+    BAG_AGENT_PREFIX,
+    BAG_ARGS_PREFIX,
+    BAG_CUSTOM_PREFIX,
+    "llm.input.",
+    "meta.properties.",
+    "provenance.",
+    "request.",
 ];
 
 // -----------------------------------------------------------------------------
@@ -395,8 +405,22 @@ mod tests {
     }
 
     #[test]
-    fn caller_controlled_attributes_are_headers_query_and_path() {
-        for attribute in ["http.request_headers.x-user", "http.query", "http.path"] {
+    fn caller_controlled_attributes_cover_every_caller_influenced_family() {
+        for attribute in [
+            "http.request_headers.x-user",
+            "http.query",
+            "http.path",
+            "http.host",
+            "agent.session_id",
+            "agent.conversation_id",
+            "args.repo",
+            "custom.tenant.id",
+            "llm.input.max_tokens",
+            "meta.properties.owner",
+            "provenance.message_id",
+            "request.request_id",
+            "request.trace_id",
+        ] {
             assert!(
                 is_caller_controlled(attribute),
                 "{attribute} is chosen by the caller"
@@ -405,8 +429,12 @@ mod tests {
         for attribute in [
             "http.client_address",
             "http.method",
+            "http.scheme",
             "subject.id",
             "http.paths",
+            "http.hosts",
+            "meta.entity_name",
+            "requests.id",
         ] {
             assert!(
                 !is_caller_controlled(attribute),

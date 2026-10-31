@@ -32,7 +32,9 @@ pub struct SecretHeaderProvenance {
 /// [`ClientAddress::parse`]. An IPv4 address, or an IPv4-mapped IPv6 address,
 /// becomes its dotted form. Any other IPv6 address becomes its /64 prefix, as
 /// in `2001:db8:1:2::/64`, because one subscriber usually holds a whole /64.
-/// A port is stripped. An empty or unparseable value leaves the address unset.
+/// A port is stripped, and the `<prefix>/64` form is accepted so a serialized
+/// address reads back unchanged. An empty or unparseable value, or any other
+/// prefix length, leaves the address unset.
 /// `Debug` shows only whether an address is present.
 ///
 /// ```
@@ -355,6 +357,13 @@ fn parse_ip(raw: &str) -> Option<IpAddr> {
     }
     if let Ok(socket) = raw.parse::<SocketAddr>() {
         return Some(socket.ip());
+    }
+    if let Some(prefix) = raw.strip_suffix("/64") {
+        return prefix
+            .parse::<Ipv6Addr>()
+            .ok()
+            .filter(|v6| v6.to_ipv4_mapped().is_none())
+            .map(IpAddr::V6);
     }
     raw.strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
@@ -686,7 +695,11 @@ mod tests {
             "203.0.113.7:",
             "203.0.113.7:99999",
             "[203.0.113.7]",
-            "2001:db8:1:2::/64",
+            "2001:db8:1:2::/48",
+            "2001:db8:1:2::/128",
+            "203.0.113.0/64",
+            "::ffff:203.0.113.7/64",
+            "[2001:db8:1:2::]/64",
             "fe80::1%eth0",
         ] {
             assert!(
@@ -700,7 +713,11 @@ mod tests {
     fn setting_an_unparseable_address_clears_a_previous_one() {
         let mut http = HttpExtension::default();
         http.set_client_address("203.0.113.7");
-        assert_eq!(http.client_address(), Some("203.0.113.7"));
+        assert_eq!(
+            http.client_address(),
+            Some("203.0.113.7"),
+            "a valid address is set"
+        );
 
         http.set_client_address("garbage");
         assert_eq!(
@@ -731,7 +748,34 @@ mod tests {
             "the serialized view audit sinks read keeps the address: {json}"
         );
         let back: HttpExtension = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.client_address(), Some("203.0.113.7"));
+        assert_eq!(
+            back.client_address(),
+            Some("203.0.113.7"),
+            "an IPv4 address must survive a serde round trip"
+        );
+    }
+
+    #[test]
+    fn ipv6_client_address_survives_a_serde_round_trip() {
+        let mut http = HttpExtension::default();
+        http.set_client_address("[2001:db8:1:2::5]:443");
+
+        let json = serde_json::to_string(&http).unwrap();
+        assert!(
+            json.contains(r#""client_address":"2001:db8:1:2::/64""#),
+            "the serialized form is the normalized /64 prefix: {json}"
+        );
+        let back: HttpExtension = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.client_address(),
+            Some("2001:db8:1:2::/64"),
+            "the serialized /64 prefix must read back unchanged"
+        );
+        assert_eq!(
+            ClientAddress::parse("2001:db8:1:2:aaaa::1/64").as_str(),
+            Some("2001:db8:1:2::/64"),
+            "a /64 with host bits set re-normalizes to its prefix"
+        );
     }
 
     #[test]
@@ -746,7 +790,11 @@ mod tests {
             r#"{"request_headers":{},"response_headers":{},"client_address":"[2001:db8:1:2::5]:443"}"#,
         )
         .unwrap();
-        assert_eq!(back.client_address(), Some("2001:db8:1:2::/64"));
+        assert_eq!(
+            back.client_address(),
+            Some("2001:db8:1:2::/64"),
+            "a deserialized address is normalized like host input"
+        );
 
         let bad: HttpExtension = serde_json::from_str(
             r#"{"request_headers":{},"response_headers":{},"client_address":"garbage"}"#,

@@ -141,8 +141,16 @@ mod tests {
     fn limit_can_be_a_macro_local_without_being_a_free_reference()
     -> Result<(), limitador_cel::ParseErrors> {
         let variables = Variables::parse("['alice'].exists(limit, limit == subject_id)")?;
-        assert_eq!(variables.free, ["subject_id".to_owned()].into());
-        assert_eq!(variables.local, ["limit".to_owned()].into());
+        assert_eq!(
+            variables.free,
+            ["subject_id".to_owned()].into(),
+            "only the bound name is a free reference"
+        );
+        assert_eq!(
+            variables.local,
+            ["limit".to_owned()].into(),
+            "a macro may shadow `limit` as a local"
+        );
         Ok(())
     }
 }

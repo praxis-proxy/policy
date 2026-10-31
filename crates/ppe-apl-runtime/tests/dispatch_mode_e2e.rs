@@ -256,6 +256,16 @@ fn a_run_step_naming_a_rate_limit_only_plugin_fails_the_load() {
             "routes:\n  - tool: t\n    authorization:\n      pre_invocation:\n        - \
              \"run(per-user)\"\n",
         ),
+        (
+            "global.defaults.tool",
+            "global:\n  defaults:\n    tool:\n      authorization:\n        pre_invocation:\n          \
+             - \"run(per-user)\"\nroutes:\n  - tool: t\n",
+        ),
+        (
+            "groups.g",
+            "groups:\n  g:\n    authorization:\n      pre_invocation:\n        - \
+             \"run(per-user)\"\nroutes:\n  - tool: t\n    groups: g\n",
+        ),
     ] {
         let err = load_err(&format!(
             "plugins:\n  - name: per-user\n    kind: builtin\n    hooks: \

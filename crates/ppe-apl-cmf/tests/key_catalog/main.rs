@@ -892,11 +892,13 @@ fn raw_http_query_reaches_pdps_and_only_plugins_with_read_query() {
 fn client_address_reaches_pdps_and_only_plugins_with_read_headers() {
     assert_eq!(
         bag_unfiltered().get_string("http.client_address"),
-        Some("203.0.113.7")
+        Some("203.0.113.7"),
+        "a PDP sees the client address"
     );
     assert_eq!(
         bag_visible_to(&[CAP_READ_HEADERS]).get_string("http.client_address"),
-        Some("203.0.113.7")
+        Some("203.0.113.7"),
+        "a plugin with read_headers sees the client address"
     );
     assert!(
         !bag_visible_to(&[CAP_READ_QUERY]).contains("http.client_address"),

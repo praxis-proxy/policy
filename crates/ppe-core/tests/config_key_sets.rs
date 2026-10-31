@@ -771,8 +771,6 @@ fn an_authentication_step_with_a_name_and_a_config_loads() {
     );
 }
 
-/// `rate_limits:` sits beside `authentication:` at all four levels and nowhere
-/// else.
 #[test]
 fn every_section_scope_accepts_the_rate_limits_block() {
     for scope in [
@@ -783,7 +781,7 @@ fn every_section_scope_accepts_the_rate_limits_block() {
     ] {
         assert!(
             names(scope).contains(&"rate_limits"),
-            "`rate_limits` is missing from the `{}` table",
+            "`rate_limits` sits beside `authentication` in the `{}` table",
             scope.label()
         );
     }
@@ -796,24 +794,20 @@ fn every_section_scope_accepts_the_rate_limits_block() {
     }
 }
 
-/// A `rate_limits:` block and its map-form steps accept what `authentication:`
-/// does, so neither can carry a key the other refuses.
 #[test]
 fn the_rate_limits_tables_are_the_accept_sets() {
     assert_eq!(
         names(ConfigScope::RateLimits),
         vec!["steps", "replace_inherited"],
-        "a rate_limits block's accept set changed"
+        "a rate_limits block accepts what an authentication block does"
     );
     assert_eq!(
         names(ConfigScope::RateLimitsStep),
         vec!["name", "config"],
-        "a rate_limits step's accept set changed"
+        "a rate_limits step accepts what an authentication step does"
     );
 }
 
-/// A misspelled object key fails at every level, naming the key it was meant
-/// to be.
 #[test]
 fn a_misspelled_rate_limits_object_key_is_rejected() {
     for (path, yaml) in [

@@ -71,19 +71,51 @@ const STATUS_UNAUTHORIZED: i64 = 401;
 
 const STATUS_BAD_REQUEST: i64 = 400;
 
-/// A failing Limitador fails every request, so its error is logged at most
-/// once per interval with a count of the ones held back.
-const CHECK_FAILURE_LOG_INTERVAL_SECS: u64 = 60; // 1 minute
+/// A failing Limitador, or a host that never sets a bound attribute, fails
+/// every request, so each is logged at most once per interval with a count of
+/// the ones held back.
+const FAILURE_LOG_INTERVAL_SECS: u64 = 60; // 1 minute
 
 pub(super) struct RateLimit {
     bindings: BTreeMap<String, String>,
+    check_failure_log: IntervalLog,
     check_lock: Mutex<()>,
     config: PluginConfig,
-    failures_since_log: AtomicU64,
     limiter: RateLimiter,
     macro_locals: BTreeSet<String>,
     namespace: Namespace,
-    next_failure_log_at: AtomicU64,
+    unbound_log: IntervalLog,
+}
+
+/// Admits one log line per interval and counts the ones it holds back.
+#[derive(Default)]
+struct IntervalLog {
+    next_at: AtomicU64,
+    suppressed: AtomicU64,
+}
+
+impl IntervalLog {
+    /// The count held back since the last admitted line, when a line is due.
+    fn admit(&self) -> Option<u64> {
+        let now = unix_seconds();
+        let next = self.next_at.load(Ordering::Relaxed);
+        let due = now >= next
+            && self
+                .next_at
+                .compare_exchange(
+                    next,
+                    now.saturating_add(FAILURE_LOG_INTERVAL_SECS),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok();
+        if due {
+            Some(self.suppressed.swap(0, Ordering::Relaxed))
+        } else {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
 }
 
 impl RateLimit {
@@ -179,18 +211,18 @@ impl RateLimit {
 
         Ok(Self {
             bindings: typed.bindings,
+            check_failure_log: IntervalLog::default(),
             check_lock: Mutex::new(()),
             config,
-            failures_since_log: AtomicU64::new(0),
             limiter,
             macro_locals,
             namespace,
-            next_failure_log_at: AtomicU64::new(0),
+            unbound_log: IntervalLog::default(),
         })
     }
 
     /// Deny a request lacking a bound attribute, telling the operator which
-    /// binding failed and what would supply it.
+    /// binding failed and what would supply it at most once per interval.
     fn deny_unbound(
         &self,
         bag_has_it: bool,
@@ -222,56 +254,47 @@ impl RateLimit {
                 ),
             }
         };
-        let granting = granting_capabilities(attribute);
-        let declared = granting
-            .iter()
-            .any(|capability| self.config.capabilities.contains(*capability));
-        let hint = if bag_has_it {
-            "bind an attribute with a string value"
-        } else if granting.is_empty() || declared {
-            "the request did not carry it; check the host or the identity step that sets it"
-        } else {
-            "the plugin cannot read it; add a capability listed in `grant` to its `capabilities:`"
-        };
-        tracing::debug!(
-            plugin = %self.config.name,
-            code,
-            binding = variable,
-            attribute,
-            grant = ?granting,
-            hint,
-            "ratelimit: a bound attribute is unavailable, so the request is denied",
-        );
+        if let Some(suppressed) = self.unbound_log.admit() {
+            let granting = granting_capabilities(attribute);
+            let declared = granting
+                .iter()
+                .any(|capability| self.config.capabilities.contains(*capability));
+            let hint = if bag_has_it {
+                "bind an attribute with a string value"
+            } else if granting.is_empty() || declared {
+                "the request did not carry it; check the host or the identity step that sets it"
+            } else {
+                "the plugin cannot read it; add a capability listed in `grant` to its \
+                 `capabilities:`"
+            };
+            tracing::warn!(
+                plugin = %self.config.name,
+                code,
+                binding = variable,
+                attribute,
+                grant = ?granting,
+                hint,
+                suppressed,
+                interval_seconds = FAILURE_LOG_INTERVAL_SECS,
+                "ratelimit: a bound attribute is unavailable, so the request is denied; repeats \
+                 are counted in `suppressed` and logged once per interval",
+            );
+        }
         PluginResult::deny(with_status(PluginViolation::new(code, reason), status))
     }
 
     /// Deny a request Limitador could not check, logging the cause at most
     /// once per interval.
     fn deny_check_failed(&self, cause: &dyn Display) -> PluginResult<HttpPayload> {
-        let now = unix_seconds();
-        let next = self.next_failure_log_at.load(Ordering::Relaxed);
-        let due = now >= next
-            && self
-                .next_failure_log_at
-                .compare_exchange(
-                    next,
-                    now.saturating_add(CHECK_FAILURE_LOG_INTERVAL_SECS),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok();
-        if due {
-            let suppressed = self.failures_since_log.swap(0, Ordering::Relaxed);
+        if let Some(suppressed) = self.check_failure_log.admit() {
             tracing::error!(
                 plugin = %self.config.name,
                 error = %cause,
                 suppressed,
-                interval_seconds = CHECK_FAILURE_LOG_INTERVAL_SECS,
+                interval_seconds = FAILURE_LOG_INTERVAL_SECS,
                 "ratelimit: Limitador check failed, so the request is denied; repeats are \
                  counted in `suppressed` and logged once per interval",
             );
-        } else {
-            self.failures_since_log.fetch_add(1, Ordering::Relaxed);
         }
         PluginResult::deny(with_status(
             PluginViolation::new(CODE_CHECK_FAILED, "request rate limit check failed"),
@@ -396,12 +419,13 @@ fn with_status(violation: PluginViolation, status: i64) -> PluginViolation {
         .with_proto_error_code(status)
 }
 
-/// The counter a client waits longest on: least remaining, then soonest reset.
+/// The counter a client waits longest on: least remaining, then latest reset,
+/// so `retry_after_seconds` is when every exhausted counter allows again.
 fn most_restrictive(counters: &[Counter]) -> Option<&Counter> {
     counters.iter().min_by_key(|counter| {
         (
             counter.remaining().unwrap_or_else(|| counter.max_value()),
-            counter.expires_in().unwrap_or_else(|| counter.window()),
+            std::cmp::Reverse(counter.expires_in().unwrap_or_else(|| counter.window())),
         )
     })
 }

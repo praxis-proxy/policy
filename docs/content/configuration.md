@@ -308,9 +308,11 @@ One list feeds both rate-limit hooks. Each plugin runs at the hook its own
 a step only chooses where a limiter applies. A listed plugin that declares
 neither hook, or an unknown name, fails the load. A pre-identity plugin under
 a `tool:`, `llm:`, `resource:` or `prompt:` route fails it too, because that
-hook runs before the request is classified.
+hook runs before the request is classified, and so does one under a group
+that only such routes join.
 
-A step's `config:` is merged key by key over the plugin's own `config`. The
+A step's `config:`, which must be a mapping, is merged key by key over the
+plugin's own `config`. The
 engine builds one instance per such step when the configuration loads, so
 its counters last until the next load. A merged config the plugin rejects
 fails the load.
@@ -319,7 +321,9 @@ fails the load.
 reports each affected route with alarm `rate_limits_replaced_inherited`, at a
 group as well as at the route. A route that runs a post-identity limiter but
 resolves no `authentication:` steps raises alarm
-`rate_limit_without_authentication`.
+`rate_limit_without_authentication`. A limiter listed at more than one layer
+without a `config:` runs once per request, and the load warns with alarm
+`rate_limit_listed_twice`.
 
 A plugin whose only hooks are the rate-limit hooks cannot be named in a
 `run(name)` step. Under `dispatch: hooks`, `rate_limits:` is a load error
