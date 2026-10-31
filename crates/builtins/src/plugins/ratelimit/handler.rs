@@ -17,7 +17,7 @@ use serde::Deserialize as _;
 use tokio::sync::Mutex;
 
 use super::cel::Variables;
-use super::config::RateLimitConfig;
+use super::config::{RateLimitConfig, Stage, is_caller_controlled, is_identity_derived};
 
 pub(super) struct RateLimit {
     bindings: BTreeMap<String, String>,
@@ -29,7 +29,7 @@ pub(super) struct RateLimit {
 }
 
 impl RateLimit {
-    pub(super) fn new(config: PluginConfig) -> Result<Self, Box<PluginError>> {
+    pub(super) fn new(config: PluginConfig, stage: Stage) -> Result<Self, Box<PluginError>> {
         let name = config.name.as_str();
         let raw = config
             .config
@@ -45,6 +45,7 @@ impl RateLimit {
         let limiter = RateLimiter::new(typed.counter_capacity);
         let mut macro_locals = BTreeSet::new();
         let mut referenced = BTreeSet::new();
+        let mut counter_keys = BTreeSet::new();
         for (index, entry) in typed.limits.iter().enumerate() {
             for (source, is_condition) in entry
                 .conditions
@@ -74,6 +75,9 @@ impl RateLimit {
                             name,
                             format!("limits[{index}] references unbound CEL variable '{variable}'"),
                         ));
+                    }
+                    if !is_condition {
+                        counter_keys.insert(variable.clone());
                     }
                     referenced.insert(variable);
                 }
@@ -112,6 +116,7 @@ impl RateLimit {
         typed
             .bindings
             .retain(|variable, _| referenced.contains(variable));
+        check_stage_bindings(name, stage, &typed.bindings, &counter_keys)?;
 
         Ok(Self {
             bindings: typed.bindings,
@@ -210,7 +215,53 @@ fn check_failed() -> PluginResult<HttpPayload> {
     ))
 }
 
-fn config_error(name: &str, message: impl Display) -> Box<PluginError> {
+/// Refuse a binding the stage cannot read, and a pre-identity counter a caller
+/// could reset by changing a value it controls.
+fn check_stage_bindings(
+    name: &str,
+    stage: Stage,
+    bindings: &BTreeMap<String, String>,
+    counter_keys: &BTreeSet<String>,
+) -> Result<(), Box<PluginError>> {
+    for (variable, attribute) in bindings {
+        if stage == Stage::PreIdentity && is_identity_derived(attribute) {
+            return Err(config_error(
+                name,
+                format!(
+                    "binding '{variable}' reads `{attribute}`, which identity resolution sets, \
+                     so it is never present at `{}`; declare `hooks: [{}]` or bind an \
+                     attribute present before identity, such as `http.client_address`",
+                    Stage::PreIdentity.hook(),
+                    Stage::PostIdentity.hook(),
+                ),
+            ));
+        }
+        if !counter_keys.contains(variable) || !is_caller_controlled(attribute) {
+            continue;
+        }
+        if stage == Stage::PreIdentity {
+            return Err(config_error(
+                name,
+                format!(
+                    "binding '{variable}' keys a counter on `{attribute}`, which the caller \
+                     chooses, so at `{}` a caller resets its counter by changing it; key the \
+                     counter on `http.client_address`, or use the binding only in `conditions`",
+                    Stage::PreIdentity.hook(),
+                ),
+            ));
+        }
+        tracing::warn!(
+            plugin = name,
+            binding = %variable,
+            attribute = %attribute,
+            "ratelimit: a counter is keyed on a caller-chosen attribute, so a caller can \
+             start a fresh counter by changing it; prefer `subject.id`",
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn config_error(name: &str, message: impl Display) -> Box<PluginError> {
     PluginError::Config {
         message: format!("plugin '{name}': {message}"),
     }

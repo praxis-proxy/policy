@@ -3,12 +3,14 @@
 
 //! Experimental in-process request rate limiting with Limitador.
 //!
-//! This plugin evaluates `subject_id` and `http_method` from capability-filtered
-//! PPE extensions. It does not implement the Kuadrant attribute vocabulary.
-//! Counters are local to this plugin instance and reset on restart and on
-//! every config reload. A route `config:` override builds its own instance,
-//! rebuilt with fresh counters on any config generation bump, including a route
-//! annotation change.
+//! An instance runs at the one rate-limit hook its `hooks:` declares,
+//! `ratelimit.pre_identity` or `ratelimit.post_identity`, for the routes whose
+//! `rate_limits:` list it. Limits read flat CEL variables bound to attributes
+//! of the capability-filtered PPE extensions, by default `subject_id` and
+//! `http_method`. It does not implement the Kuadrant attribute vocabulary.
+//! Counters are local to the instance and reset on restart and on every config
+//! load. A `rate_limits:` step with a `config:` override has its own instance
+//! and counters, built once per loaded config.
 
 mod cel;
 mod config;
