@@ -4144,6 +4144,46 @@ plugins:
     }
 
     #[test]
+    fn a_plugin_declaring_the_pre_identity_ratelimit_hook_loads() {
+        let yaml = format!(
+            r#"
+plugins:
+  - name: edge-limits
+    kind: builtin
+    hooks: [{}]
+"#,
+            crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY
+        );
+        let config = parse_config(&yaml).expect("the pre-identity hook is a builtin");
+        assert_eq!(
+            config.plugins[0].hooks,
+            vec![crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY.to_owned()],
+            "the declared hook must survive validation unchanged",
+        );
+    }
+
+    #[test]
+    fn a_misspelled_ratelimit_hook_suggests_the_dispatched_one() {
+        let yaml = r#"
+plugins:
+  - name: edge-limits
+    kind: builtin
+    hooks: [ratelimit.preidentity]
+"#;
+        let err = parse_config(yaml)
+            .expect_err("a misspelled hook must not load")
+            .to_string();
+        assert!(
+            err.contains("unknown hook 'ratelimit.preidentity'"),
+            "the error must name the misspelling: {err}",
+        );
+        assert!(
+            err.contains("did you mean 'ratelimit.pre_identity'?"),
+            "the suggestion must land on the dispatched name: {err}",
+        );
+    }
+
+    #[test]
     fn a_name_close_to_nothing_gets_no_suggestion() {
         let yaml = r#"
 plugins:
