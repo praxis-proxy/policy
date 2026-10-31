@@ -16,6 +16,8 @@ use std::sync::Arc;
 use praxis_policy_apl_runtime::{AplOptions, register_apl};
 use praxis_policy_builtins::plugins::ratelimit::{KIND, RateLimitFactory};
 use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
+use praxis_policy_core::cmf::enums::Role;
+use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::PluginError;
 use praxis_policy_core::extensions::{
@@ -292,10 +294,12 @@ fn show_verdict(label: &str, (allowed, violation): &(bool, Option<(String, Optio
 async fn counts_alice_and_bob_independently_and_returns_429() {
     let manager = engine().await;
 
-    // POST does not match either GET limit and must leave Alice's balance alone.
     let post = verdict(&manager, Some("alice"), Some("POST")).await;
     show_verdict("alice POST", &post);
-    assert!(post.0);
+    assert!(
+        post.0,
+        "POST does not match either GET limit and must leave Alice's balance alone"
+    );
     for number in 1..=5 {
         let result = verdict(&manager, Some("alice"), Some("GET")).await;
         show_verdict(&format!("alice GET #{number}"), &result);
@@ -441,10 +445,13 @@ async fn missing_identity_or_http_method_denies_before_the_counter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_requests_do_not_exceed_the_in_memory_limit() {
     let manager = engine().await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(20));
     let mut tasks = Vec::new();
     for _ in 0..20 {
         let manager = Arc::clone(&manager);
+        let barrier = Arc::clone(&barrier);
         tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
             verdict(&manager, Some("alice"), Some("GET")).await.0
         }));
     }
@@ -662,23 +669,126 @@ async fn limit_metadata_conditions_select_and_enforce_a_limit() {
     assert!(verdict(&manager, Some("alice"), Some("POST")).await.0);
 }
 
+#[tokio::test]
+async fn http_only_global_limiter_fails_closed_on_a_tool_route() {
+    let policy = format!("{HEADER_POLICY}  - tool: get_toys\n");
+    let manager = engine_with(&policy).await;
+    let meta = MetaExtension {
+        entity_type: Some("tool".to_owned()),
+        entity_name: Some("get_toys".to_owned()),
+        ..Default::default()
+    };
+    let extensions = Extensions {
+        meta: Some(Arc::new(meta)),
+        ..Default::default()
+    };
+    let payload = MessagePayload {
+        message: Message::text(Role::User, "x"),
+    };
+    let (result, _) = manager
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload, extensions, None)
+        .await;
+    assert!(
+        !result.continue_processing,
+        "an inherited HTTP-only limiter must deny a tool call, not skip it"
+    );
+}
+
+#[tokio::test]
+async fn a_condition_evaluation_error_denies_as_check_failed() {
+    for on_error in ["fail", "ignore"] {
+        let policy = POLICY
+            .replace(
+                "mode: sequential",
+                &format!("mode: sequential\n    on_error: {on_error}"),
+            )
+            .replace("subject_id == 'alice'", "int(subject_id) > 1");
+        let manager = engine_with(&policy).await;
+        assert_eq!(
+            verdict(&manager, Some("alice"), Some("GET")).await,
+            (false, Some(("ratelimit.check_failed".to_owned(), None))),
+            "a non-numeric subject must deny under on_error: {on_error}"
+        );
+        assert!(
+            verdict(&manager, Some("7"), Some("GET")).await.0,
+            "the limiter must keep serving after a contained evaluation panic"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unreferenced_binding_does_not_require_its_attribute() {
+    let manager = engine_with(&CLAIM_POLICY.replace(", \"plan == 'free'\"", "")).await;
+    assert!(
+        verdict(&manager, Some("alice"), Some("GET")).await.0,
+        "no limit references `plan`, so a request without the claim must pass"
+    );
+    assert_eq!(
+        verdict(&manager, Some("alice"), Some("GET")).await.1,
+        Some(("ratelimit.exceeded".to_owned(), Some(429))),
+        "the referenced bindings must still select the limit"
+    );
+}
+
+#[tokio::test]
+async fn a_numeric_claim_is_an_unsupported_attribute() {
+    let manager = engine_with(CLAIM_POLICY).await;
+    let mut extensions = request(Some("alice"), Some("GET"));
+    let security = Arc::make_mut(extensions.security.as_mut().expect("security fixture"));
+    security
+        .subject
+        .as_mut()
+        .expect("subject fixture")
+        .claims
+        .insert("plan".to_owned(), serde_json::json!(3));
+    assert_eq!(
+        verdict_request(&manager, extensions).await.1,
+        Some(("ratelimit.unsupported_attribute".to_owned(), None)),
+        "a bound attribute present with a non-string value must deny"
+    );
+}
+
 #[test]
-fn http_only_global_limiter_rejects_entity_routes_at_startup() {
-    for (route, route_key) in [
-        ("tool: get_toys", "tool:get_toys"),
-        ("llm: demo-model", "llm:demo-model"),
+fn invalid_configs_fail_during_plugin_construction() {
+    for (label, config, expected) in [
+        ("missing config", None, "ratelimit config is required"),
+        (
+            "unknown field",
+            Some(serde_json::json!({
+                "namespace": "toystore",
+                "limits": [{"max": 1, "seconds": 60}],
+                "store": "redis",
+            })),
+            "unknown field `store`",
+        ),
+        (
+            "duplicate limits",
+            Some(serde_json::json!({
+                "namespace": "toystore",
+                "limits": [
+                    {"max": 1, "seconds": 60, "conditions": ["subject_id == 'alice'"]},
+                    {"max": 1, "seconds": 60, "conditions": ["subject_id == 'alice'"]},
+                ],
+            })),
+            "limits[1] duplicates an earlier limit",
+        ),
     ] {
-        let manager = Arc::new(PolicyEngine::default());
-        manager.register_factory(KIND, Box::new(RateLimitFactory));
-        register_apl(&manager, AplOptions::in_process());
-        let policy = format!("{HEADER_POLICY}  - {route}\n");
-        let error = manager
-            .load_config_yaml(&policy)
-            .expect_err("HTTP-only limiter cannot run in an entity route")
-            .to_string();
-        assert!(error.contains(route_key), "{error}");
-        assert!(error.contains("global-ratelimit"), "{error}");
-        assert!(error.contains("http.request"), "{error}");
-        assert!(error.contains("no matching registered handler"), "{error}");
+        let config = PluginConfig {
+            name: "app-ratelimit".to_owned(),
+            kind: KIND.to_owned(),
+            config,
+            ..Default::default()
+        };
+        let error = RateLimitFactory
+            .create(&config)
+            .err()
+            .expect("invalid config must fail at construction");
+        assert!(matches!(*error, PluginError::Config { .. }), "{label}");
+        let message = error.to_string();
+        assert!(
+            message.contains("plugin 'app-ratelimit':"),
+            "{label}: {message}"
+        );
+        assert!(message.contains(expected), "{label}: {message}");
     }
 }

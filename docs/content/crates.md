@@ -43,8 +43,12 @@ than named directly. See [Builtins](builtins.md).
 | `secrets-vault` | `secrets::vault` | `vault` |
 
 The experimental `quota` policy plugin lives in
-`plugins::quota` behind the `experimental-quota` feature. It is excluded from
-the facade's `builtins` feature.
+`plugins::quota` behind the `experimental-quota` feature. The experimental
+`ratelimit` plugin lives in `plugins::ratelimit` behind the
+`experimental-ratelimit` feature. Both are excluded from the facade's
+`builtins` feature. `quota` debits a token budget held by a standalone
+Limitador service; `ratelimit` counts requests in process, so its counters are
+per instance and reset on reload.
 
 ### Migrating from a per-extension crate
 

@@ -5,7 +5,10 @@
 //!
 //! This plugin evaluates `subject_id` and `http_method` from capability-filtered
 //! PPE extensions. It does not implement the Kuadrant attribute vocabulary.
-//! Counters are local to this plugin instance and disappear on restart.
+//! Counters are local to this plugin instance and reset on restart and on
+//! every config reload. A route `config:` override builds its own instance,
+//! rebuilt with fresh counters on any config generation bump, including a route
+//! annotation change.
 
 mod cel;
 mod config;

@@ -12,7 +12,7 @@
 //! - `delegator_vault` (`delegator-vault`) — kind `delegator/vault`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
 //! - `quota` (`experimental-quota`) — kind `quota/limitador`
-//! - `ratelimit` (`experimental-ratelimit`) — kind `ratelimit/limitador`
+//! - `ratelimit` (`experimental-ratelimit`): kind `ratelimit/limitador`
 
 #[cfg(feature = "jwt")]
 pub mod identity_jwt;

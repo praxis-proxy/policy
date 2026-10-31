@@ -2,9 +2,14 @@
 
 `ratelimit/limitador` runs at `http.request` and keeps counters in the
 process. It is available only with the `experimental-ratelimit` Cargo feature.
-Each plugin instance owns one Limitador limiter, so counters reset on restart
-and are not shared across replicas. The plugin serializes each in-memory
-check/update across concurrent requests to that instance.
+Each plugin instance owns one Limitador limiter, so counters are not shared
+across replicas. The plugin serializes each in-memory check/update across
+concurrent requests to that instance.
+
+Counters reset on restart and on every config reload. A route that overrides
+the plugin's `config:` gets its own instance, which is rebuilt, with fresh
+counters, whenever the engine's config generation changes. That includes
+changes that look unrelated, such as a route annotation update.
 
 The plugin builds a PPE attribute bag from the capability-filtered Extensions
 it receives. `bindings` select string-valued bag attributes for Limitador's
@@ -18,8 +23,9 @@ flat CEL context. These bindings are the defaults:
 An explicit `bindings` map replaces the defaults. For example, add
 `plan: claim.plan` along with the two defaults, grant `read_claims`, and use
 `plan == 'free'` in a limit condition. The integration test proves this claim
-selects a limit without hardcoding `claim.plan` in the handler. A missing or
-non-string bound attribute denies the request.
+selects a limit without hardcoding `claim.plan` in the handler. Only bindings
+that some limit references are resolved per request. A missing or non-string
+referenced attribute denies the request; an unreferenced binding is ignored.
 
 Limitador's `limit` metadata is supported in `conditions` only. References
 such as `limit.name` or `limit.id` in counter `variables` are rejected at
@@ -37,7 +43,11 @@ policy's `auth.identity.userid` claim.
 The plugin-local bag contains attributes extracted from its Extensions. APL's
 route-only attributes such as `route.key` and `data.*` are not supplied to it.
 Missing identity or HTTP method denies the request before updating a counter.
-A Limitador evaluation error also denies. An exceeded limit sets both
+A storage error denies with `ratelimit.check_failed`. A CEL condition that
+fails at runtime, such as `int(subject_id)` on a non-numeric value, makes
+Limitador 0.14 panic; the plugin catches that panic and denies with the same
+code, regardless of `on_error`. A host built with `panic = "abort"` cannot
+catch it, and the process aborts instead. An exceeded limit sets both
 `proto_error_code: 429` and `details["http.status"]: 429`; the current
 gateway policy filter reads the latter for a plain HTTP 429 response.
 
@@ -75,7 +85,7 @@ The `run` step is required under policy dispatch. The `hooks` list declares
 the hook for config validation; the factory registers the handler in code.
 Authentication must resolve the subject before the `http.request` invocation.
 
-Demo the in-process decision sequence from this worktree with:
+Demo the in-process decision sequence with:
 
 ```console
 cargo test -p praxis-policy-builtins --features experimental-ratelimit --test ratelimit counts_alice_and_bob_independently_and_returns_429 -- --exact --nocapture
@@ -170,8 +180,9 @@ This plugin has an `http.request` handler only. APL inherits
 routes. The current gateway switches to CMF dispatch for those routes and does
 not run its pure-HTTP authorization path. A single policy document that puts
 `run(global-ratelimit)` under `global` and also declares an MCP or LLM route
-would invoke the HTTP-only plugin in CMF context. PPE now rejects that policy
-at startup with the route, plugin, and registered hooks in the error.
+would invoke the HTTP-only plugin in CMF context. That policy loads, but every
+MCP or LLM request then fails closed with a `PluginError::Dispatch` naming the
+plugin and its hooks.
 
 For the current gateway, put request admission in a **first, HTTP-only policy
 filter** and the entity routes in a **second policy filter**. The first

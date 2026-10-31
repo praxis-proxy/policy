@@ -45,10 +45,10 @@ experimental-quota = ["_engine-core", "_plugins"]
 # Embedded request limiter. The PoC uses only Limitador's in-memory store.
 experimental-ratelimit = [
   "_engine-core",
+  "_engine-apl-cmf",
   "_plugins",
   "dep:limitador",
   "dep:limitador-cel",
-  "dep:praxis-policy-apl-cmf",
 ]
 cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
@@ -70,6 +70,7 @@ secrets-vault = ["_engine-core", "_secrets"]
 # place, so changing how an edge is declared is a one-line edit rather than five.
 _engine-core = ["dep:praxis-policy-core"]
 _engine-apl-core = ["dep:praxis-policy-apl-core"]
+_engine-apl-cmf = ["dep:praxis-policy-apl-cmf"]
 _engine-apl-runtime = ["dep:praxis-policy-apl-runtime"]
 
 # Private module-group markers. Each group's `cfg` gate names one predicate

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Praxis Contributors
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Display;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use limitador::RateLimiter;
 use limitador::limit::{Context, Expression, Limit, Namespace, Predicate};
@@ -28,28 +30,21 @@ pub(super) struct RateLimit {
 
 impl RateLimit {
     pub(super) fn new(config: PluginConfig) -> Result<Self, Box<PluginError>> {
-        let raw = config.config.as_ref().ok_or_else(|| {
-            PluginError::Config {
-                message: format!("plugin '{}': ratelimit config is required", config.name),
-            }
-            .boxed()
-        })?;
-        let typed = RateLimitConfig::deserialize(raw).map_err(|error| {
-            PluginError::Config {
-                message: format!(
-                    "plugin '{}': invalid ratelimit config: {error}",
-                    config.name
-                ),
-            }
-            .boxed()
-        })?;
+        let name = config.name.as_str();
+        let raw = config
+            .config
+            .as_ref()
+            .ok_or_else(|| config_error(name, "ratelimit config is required"))?;
+        let mut typed = RateLimitConfig::deserialize(raw)
+            .map_err(|error| config_error(name, format!("invalid ratelimit config: {error}")))?;
         typed
             .validate()
-            .map_err(|message| PluginError::Config { message }.boxed())?;
+            .map_err(|message| config_error(name, message))?;
 
         let namespace: Namespace = typed.namespace.into();
         let limiter = RateLimiter::new(typed.counter_capacity);
         let mut macro_locals = BTreeSet::new();
+        let mut referenced = BTreeSet::new();
         for (index, entry) in typed.limits.iter().enumerate() {
             for (source, is_condition) in entry
                 .conditions
@@ -58,30 +53,29 @@ impl RateLimit {
                 .chain(entry.variables.iter().map(|source| (source, false)))
             {
                 let variables = Variables::parse(source).map_err(|error| {
-                    PluginError::Config {
-                        message: format!("ratelimit: limits[{index}] invalid CEL: {error}"),
-                    }
-                    .boxed()
+                    config_error(name, format!("limits[{index}] invalid CEL: {error}"))
                 })?;
                 macro_locals.extend(variables.local);
                 for variable in variables.free {
-                    if variable == "limit" && !is_condition {
-                        return Err(PluginError::Config {
-                            message: format!(
-                                "ratelimit: limits[{index}] 'limit' is supported only in conditions, \
-                                 not counter expressions"
-                            ),
+                    if variable == "limit" {
+                        if !is_condition {
+                            return Err(config_error(
+                                name,
+                                format!(
+                                    "limits[{index}] 'limit' is supported only in conditions, \
+                                     not counter expressions"
+                                ),
+                            ));
                         }
-                        .boxed());
+                        continue;
                     }
-                    if variable != "limit" && !typed.bindings.contains_key(&variable) {
-                        return Err(PluginError::Config {
-                            message: format!(
-                                "ratelimit: limits[{index}] references unbound CEL variable '{variable}'"
-                            ),
-                        }
-                        .boxed());
+                    if !typed.bindings.contains_key(&variable) {
+                        return Err(config_error(
+                            name,
+                            format!("limits[{index}] references unbound CEL variable '{variable}'"),
+                        ));
                     }
+                    referenced.insert(variable);
                 }
             }
             let conditions: Vec<Predicate> = entry
@@ -90,10 +84,7 @@ impl RateLimit {
                 .map(|condition| condition.as_str().try_into())
                 .collect::<Result<_, _>>()
                 .map_err(|error| {
-                    PluginError::Config {
-                        message: format!("ratelimit: limits[{index}] invalid condition: {error}"),
-                    }
-                    .boxed()
+                    config_error(name, format!("limits[{index}] invalid condition: {error}"))
                 })?;
             let variables: Vec<Expression> = entry
                 .variables
@@ -101,10 +92,7 @@ impl RateLimit {
                 .map(|variable| variable.as_str().try_into())
                 .collect::<Result<_, _>>()
                 .map_err(|error| {
-                    PluginError::Config {
-                        message: format!("ratelimit: limits[{index}] invalid variable: {error}"),
-                    }
-                    .boxed()
+                    config_error(name, format!("limits[{index}] invalid variable: {error}"))
                 })?;
             if !limiter.add_limit(Limit::new(
                 namespace.clone(),
@@ -113,12 +101,17 @@ impl RateLimit {
                 conditions,
                 variables,
             )) {
-                return Err(PluginError::Config {
-                    message: format!("ratelimit: limits[{index}] duplicates an earlier limit"),
-                }
-                .boxed());
+                return Err(config_error(
+                    name,
+                    format!("limits[{index}] duplicates an earlier limit"),
+                ));
             }
         }
+        // An unreferenced binding is allowed but never resolved, so a request
+        // lacking its attribute is not denied for it.
+        typed
+            .bindings
+            .retain(|variable, _| referenced.contains(variable));
 
         Ok(Self {
             bindings: typed.bindings,
@@ -144,9 +137,8 @@ impl HookHandler<HttpHook> for RateLimit {
         extensions: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<HttpPayload> {
-        // Build the same PPE attribute vocabulary as APL, using this plugin's
-        // capability-filtered view of Extensions. Limitador's public Context
-        // accepts flat string variables, so config binds CEL names to bag keys.
+        // Limitador's Context takes only flat string variables, so each CEL
+        // name is bound to one bag attribute.
         let bag = BagBuilder::new().with_extensions(extensions).build();
         let mut values = HashMap::with_capacity(self.bindings.len());
         for (variable, attribute) in &self.bindings {
@@ -177,11 +169,16 @@ impl HookHandler<HttpHook> for RateLimit {
         // Limitador's in-memory check and update are separate operations. Serialize them
         // across this plugin instance so concurrent requests cannot exceed the limit.
         let _guard = self.check_lock.lock().await;
-        match self
-            .limiter
-            .check_rate_limited_and_update(&self.namespace, &context, 1)
-        {
-            Ok(result) if result.limited => PluginResult::deny(
+        // Limitador 0.14 unwraps condition evaluation errors. Contain that panic
+        // here so it denies instead of reaching the executor, where `on_error:
+        // ignore` would admit the request. The limiter's locks are released
+        // before conditions run, so no state is left poisoned.
+        let checked = catch_unwind(AssertUnwindSafe(|| {
+            self.limiter
+                .check_rate_limited_and_update(&self.namespace, &context, 1)
+        }));
+        match checked {
+            Ok(Ok(result)) if result.limited => PluginResult::deny(
                 PluginViolation::new("ratelimit.exceeded", "request rate limit exceeded")
                     .with_details(HashMap::from([(
                         "http.status".to_owned(),
@@ -189,14 +186,33 @@ impl HookHandler<HttpHook> for RateLimit {
                     )]))
                     .with_proto_error_code(429),
             ),
-            Ok(_) => PluginResult::allow(),
-            Err(error) => {
+            Ok(Ok(_)) => PluginResult::allow(),
+            Ok(Err(error)) => {
                 tracing::error!(%error, "ratelimit: Limitador check failed");
-                PluginResult::deny(PluginViolation::new(
-                    "ratelimit.check_failed",
-                    "request rate limit check failed",
-                ))
+                check_failed()
+            },
+            Err(_) => {
+                tracing::error!("ratelimit: Limitador condition evaluation panicked");
+                check_failed()
             },
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Private Utilities
+// -----------------------------------------------------------------------------
+
+fn check_failed() -> PluginResult<HttpPayload> {
+    PluginResult::deny(PluginViolation::new(
+        "ratelimit.check_failed",
+        "request rate limit check failed",
+    ))
+}
+
+fn config_error(name: &str, message: impl Display) -> Box<PluginError> {
+    PluginError::Config {
+        message: format!("plugin '{name}': {message}"),
+    }
+    .boxed()
 }

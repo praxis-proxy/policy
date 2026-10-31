@@ -1,5 +1,4 @@
 ---
-issue: https://github.com/praxis-proxy/policy/issues/152
 discussion: >-
   Experimental embedded Limitador plugin for HTTP requests, tool calls,
   and LLM tokens, initially using per-instance in-memory storage.
@@ -34,9 +33,9 @@ stakeholders:
 ## Decision and scope
 
 This proposal extends the existing HTTP request-count prototype into one
-Limitador plugin for HTTP requests, tool calls, and LLM tokens. The initial
-HTTP PR adds `ratelimit/limitador` and `experimental-ratelimit`; the unified
-design below is follow-on work.
+Limitador plugin for HTTP requests, tool calls, and LLM tokens. The HTTP
+prototype is `ratelimit/limitador` behind `experimental-ratelimit`; the
+unified design below is follow-on work.
 
 Add one experimental `kind: limitador` builtin, gated by
 `experimental-limitador` in builtins and the facade. Embed the Limitador
@@ -71,6 +70,19 @@ throttling and request-flood protection are also outside scope.
 Keep `quota/limitador` and `experimental-quota` available during the
 experiment. That plugin uses remote check/report and the service deployment's
 storage. Retiring it is a graduation goal.
+
+The HTTP prototype is `ratelimit/limitador` behind
+`experimental-ratelimit`. Its configuration maps to the proposed contract as
+follows:
+
+| Current prototype | Proposed |
+| --- | --- |
+| `kind: ratelimit/limitador` | `kind: limitador` with `target: http_request` |
+| `experimental-ratelimit` | `experimental-limitador` |
+| `max`, `seconds` | `limit.count`, `limit.window` |
+| No limit `id` | Required stable `id` |
+| `counter_capacity` at the top level | `backend.counter_capacity` |
+| Evaluation errors always deny | `failure_mode`, default `allow` |
 
 The HTTP prototype has in-process tests; real-gateway verification with
 authenticated identity remains outstanding. The
@@ -200,7 +212,7 @@ substitute for verified identity. Token usage remains numeric and comes
 from the host's trusted completion extension, not these string bindings.
 
 The examples describe the proposed unified contract, including `read_limit`;
-they are not configurations for the existing HTTP-only PR.
+they are not configurations for the HTTP prototype.
 
 ### HTTP example and placement
 
@@ -363,7 +375,7 @@ routes:
 
 Require paired input/output steps, a positive `missing_usage_charge`, and
 a fixed positive reservation amount at least `missing_usage_charge` and no
-greater than any configured token maximum. Initially accept TTLs of 1–60
+greater than any configured token maximum. Initially accept TTLs of 1 to 60
 seconds. These are PPE configuration choices; Limitador manages expiry.
 
 - **Input:** call Limitador with the estimate and filtered attributes. Deny
@@ -432,13 +444,7 @@ Other follow-up work:
 - Dynamic token estimates and typed non-string attribute bindings.
 - Remaining-budget policy actions and usage notifications.
 
-## Review basis
-
-Reviewed against this worktree and the cached published Limitador 0.14.0
-source, plus the local Praxis and AI checkouts and Obsidian notes
-“Limitador (Rate Limiting)”, “Token Rate Limiting Reconciliation”, and
-“PPE Rate Limiting”. Gateway behavior must be reverified against the version
-used for the demo.
+## References
 
 - [PPE principles](../content/vision.md),
   [safety invariants](../dev/safety-invariants.md), and

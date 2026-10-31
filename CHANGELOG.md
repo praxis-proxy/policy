@@ -19,6 +19,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Experimental in-process request rate limiting.** The
+  `ratelimit/limitador` plugin, behind the `experimental-ratelimit` feature,
+  counts `http.request` admissions against embedded Limitador limits and
+  denies with `ratelimit.exceeded` and status 429. Counters are per instance
+  and reset on restart or reload. It is excluded from `builtins`.
 - **Unavailable CIBA approval state returns `-32122`.** A store read or write
   failure denies with `elicitation.store_unavailable` and JSON-RPC `-32122`.
   Check and validate responses include the elicitation id to identify the
