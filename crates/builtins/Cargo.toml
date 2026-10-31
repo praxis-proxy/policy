@@ -113,10 +113,9 @@ zeroize = { workspace = true }
 
 # --- experimental-ratelimit --------------------------------------------------
 
-# Limitador's default feature enables Redis; this PoC needs only memory.
-limitador = { version = "0.14.0", default-features = false, optional = true }
-# Match Limitador's parser for scope-aware validation of its CEL expressions.
-limitador-cel = { package = "cel", version = "0.12.0", optional = true }
+# Versions and the in-memory-only feature set live in the workspace table.
+limitador = { workspace = true, optional = true }
+limitador-cel = { workspace = true, optional = true }
 
 # --- jwt ---------------------------------------------------------------------
 
