@@ -104,6 +104,49 @@ absent for a request carrying no entity.
 Response bodies are not modeled. The response half covers headers and
 extensions.
 
+## Rate-limit hooks
+
+A configuration with a `rate_limits:` list needs the host to call the two
+rate-limit hooks. See [Configuration](configuration.md#rate-limits).
+
+Order and count. Call `ratelimit.pre_identity` before the first
+`identity.resolve` of a request, and `ratelimit.post_identity` after the last.
+Call each once per inbound request, even when identity is resolved more than
+once, as a tool call resolving at the HTTP route and again at the tool does.
+Identity can run twice without side effects; a counter cannot. A host may skip
+a hook when `PolicyEngine::has_hooks_for` reports nothing on it.
+
+Request context. At both calls, set the entity metadata (`entity_type` and
+`entity_name`) and the request line (method and path) on the extensions, as
+for `identity.resolve`. Pre-identity runs before the request is classified,
+so it uses the HTTP coordinates: `entity_type: http`, `entity_name: "*"`.
+Post-identity uses the route the request resolved to, with the resolved
+identity attached.
+
+One context table. Pass the `PipelineResult.context_table` each call returns
+into the next hook of the same request, starting with the pre-identity call.
+That is how the engine knows the pre-identity stage ran. When
+`identity.resolve` runs on a table that never reached
+`ratelimit.pre_identity`, while a pre-identity limit is in force for the
+request, the engine warns once with alarm `rate_limit_stage_skipped`.
+
+Client address. Set it with `HttpExtension::set_client_address`, from the TCP
+peer, or from the rightmost untrusted hop of a proxy header you configured as
+trusted. Never take it from a header the caller controls, such as an
+unverified `X-Forwarded-For`. The engine normalizes the value: a port is
+stripped, an IPv4-mapped IPv6 address becomes IPv4, and other IPv6 addresses
+become their /64 prefix. An empty or unparseable value leaves it unset, and a
+limit that binds it then denies. A host that rebuilds the extensions for
+`ratelimit.post_identity` sets the address again. Plugins read it as
+`http.client_address` with `read_headers` and cannot change it. `Debug`
+output hides it; serialized output, which audit sinks read, includes it.
+
+Denials. A rate-limit denial comes back as `PipelineResult.violation`, with
+the HTTP status in `proto_error_code`. Stop the request there: before identity
+for a pre-identity denial, before policy for a post-identity one. For a 429,
+map only the `details` keys `http.status`, `limit`, `remaining`,
+`retry_after_seconds` and `window_seconds` into the response.
+
 ## Reading the response status
 
 `http.status` carries the response status to post-phase policy. The

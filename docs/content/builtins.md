@@ -20,7 +20,7 @@ name it by `kind`.
 | `valkey` | session store | `valkey` | Persist Session Taint labels across processes. CIBA can use the same server for approvals. See [Session Taint](apl/tainting.md). |
 | `vault` | secret provider | `secrets-vault` | Resolve `secret:` references from Vault KV v2. Not auto-registered: it needs an `HttpTransport` the host supplies. |
 | `quota` | policy plugin | `experimental-quota` | Enforce a per-principal token budget through Limitador. Experimental and excluded from `builtins`. |
-| `ratelimit/limitador` | policy plugin | `experimental-ratelimit` | Count `http.request` admissions against in-process Limitador limits and deny with 429. Experimental and excluded from `builtins`. |
+| `ratelimit/limitador` | rate-limit plugin | `experimental-ratelimit` | Count requests against in-process Limitador limits at `ratelimit.pre_identity` or `ratelimit.post_identity`, listed under `rate_limits:`, and deny with 429. Experimental and excluded from `builtins`. See [its README](../../crates/builtins/src/plugins/ratelimit/README.md). |
 
 The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
@@ -74,7 +74,7 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 | `valkey` | the Valkey session store, and the redis and TLS stack it carries |
 | `secrets-vault` | the Vault KV v2 secret provider. Not auto-registered: it needs an `HttpTransport` the host supplies |
 | `experimental-quota` | the opt-in Limitador-backed token quota plugin; excluded from `builtins` |
-| `experimental-ratelimit` | the opt-in in-process Limitador request rate limit plugin; excluded from `builtins` |
+| `experimental-ratelimit` | the opt-in in-process Limitador request rate limit plugin for the rate-limit hooks; excluded from `builtins` |
 | `http-hyper` | a default outbound HTTP transport, off by default |
 
 The default build is the engine alone, so a host that needs only the

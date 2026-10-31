@@ -37,6 +37,28 @@ Limitador plugin for HTTP requests, tool calls, and LLM tokens. The HTTP
 prototype is `ratelimit/limitador` behind `experimental-ratelimit`; the
 unified design below is follow-on work.
 
+HTTP request counting runs at two engine hooks, not at an APL step:
+
+- `ratelimit.pre_identity`, which the host calls once per request before the
+  first `identity.resolve`. A limit here protects token verification and can
+  key on the host-supplied `http.client_address`.
+- `ratelimit.post_identity`, which the host calls once per request after the
+  last `identity.resolve`. A limit here can key on the resolved subject and
+  its claims.
+
+Both hooks carry no entity and no phase, like `identity.resolve`. A
+structural `rate_limits:` list selects the limiters for a route, the way
+`authentication:` selects identity plugins. It is accepted at `global`,
+`global.defaults.<entity>`, `groups.<name>` and `routes[]`, with the same
+list and `{steps, replace_inherited}` forms and per-step `config:` overrides.
+A plugin's stage comes from the one rate-limit hook its `hooks:` declares, so
+a step only chooses where a limiter applies.
+
+This placement keeps the limiter's 429 and its details on the violation the
+hook returns, and reaches `tool:` and `llm:` routes without inheriting an
+HTTP-only APL step into CMF dispatch. A `run(name)` step cannot name a
+plugin whose only hooks are rate-limit hooks.
+
 Add one experimental `kind: limitador` builtin, gated by
 `experimental-limitador` in builtins and the facade. Embed the Limitador
 crate with in-memory storage, extending the existing module at
@@ -46,7 +68,8 @@ The plugin uses resolved identity and request attributes without a separate
 Limitador service call. `target` identifies what is limited; PPE's existing
 `mode` continues to control execution:
 
-- `http_request`: count one admitted request at `http.request`.
+- `http_request`: count one request at `ratelimit.pre_identity` or
+  `ratelimit.post_identity`, listed under `rate_limits:`.
 - `tool_call`: count one admitted tool invocation at `cmf.tool_pre_invoke`.
 - `llm_tokens`: reserve an estimate at `cmf.llm_input`; record actual total
   tokens or `missing_usage_charge` at `cmf.llm_output`. The initial token
@@ -56,36 +79,37 @@ Limits use expiring counters within configured time windows. Durable usage
 metering and billing are outside scope. Token "charges" and "settlement"
 below mean updating those counters and releasing reservations.
 
-Each instance has one target, immutable rules, and its own counters. APL
-`run(name)` controls placement. Authentication resolves identity before the
-limiter, whose handlers receive capability-filtered PPE extensions. The host
-supplies trusted usage and applies protocol responses.
+Each instance has one target, immutable rules, and its own counters.
+`rate_limits:` places `http_request` instances; APL `run(name)` places the
+`tool_call` and `llm_tokens` instances. Handlers receive capability-filtered
+PPE extensions. The host supplies trusted usage and applies protocol
+responses.
 
 Matching the existing AI `token_rate_limit` filter's accounting behavior is
 outside this initial work. Cancellation, interrupted-stream recovery, and
 unconditional settlement remain follow-up work; see
-[callback limitations](#callback-limitations). Pre-authentication IP
-throttling and request-flood protection are also outside scope.
+[callback limitations](#callback-limitations). Request-flood protection
+beyond a pre-identity limit is also outside scope.
 
 Keep `quota/limitador` and `experimental-quota` available during the
 experiment. That plugin uses remote check/report and the service deployment's
 storage. Retiring it is a graduation goal.
 
-The HTTP prototype is `ratelimit/limitador` behind
-`experimental-ratelimit`. Its configuration maps to the proposed contract as
-follows:
+The HTTP prototype's configuration maps to the proposed contract as follows:
 
 | Current prototype | Proposed |
 | --- | --- |
 | `kind: ratelimit/limitador` | `kind: limitador` with `target: http_request` |
 | `experimental-ratelimit` | `experimental-limitador` |
+| `hooks: [ratelimit.pre_identity]` or `[ratelimit.post_identity]` | Unchanged |
+| Placed by `rate_limits:` | Unchanged |
 | `max`, `seconds` | `limit.count`, `limit.window` |
 | No limit `id` | Required stable `id` |
 | `counter_capacity` at the top level | `backend.counter_capacity` |
-| Evaluation errors always deny | `failure_mode`, default `allow` |
+| Evaluation errors always deny; `on_error` must be `fail` | `failure_mode`, default `allow` |
 
-The HTTP prototype has in-process tests; real-gateway verification with
-authenticated identity remains outstanding. The
+The HTTP prototype has in-process and reference-host tests; real-gateway
+verification remains outstanding. The
 [prototype README](../../crates/builtins/src/plugins/ratelimit/README.md)
 documents the current implementation.
 
@@ -216,17 +240,13 @@ they are not configurations for the HTTP prototype.
 
 ### HTTP example and placement
 
-This example assumes the host resolves identity before `http.request`.
-Alice gets five GETs per ten seconds and Bob two.
+Alice gets five GETs per ten seconds and Bob two, counted after identity.
 
 ```yaml
-engine_settings:
-  dispatch: policy
 plugins:
   - name: app-ratelimit
     kind: limitador
-    hooks: [http.request]
-    mode: sequential
+    hooks: [ratelimit.post_identity]
     capabilities: [read_limit, read_subject, read_headers]
     config:
       target: http_request
@@ -242,18 +262,14 @@ plugins:
           conditions: ["subject_id == 'bob'", "http_method == 'GET'"]
           limit: { count: 2, window: 10s }
 global:
-  authorization:
-    pre_invocation:
-      - "run(app-ratelimit)"
+  rate_limits: [app-ratelimit]
 ```
 
-HTTP-only steps inherited into `tool:` or `llm:` routes remain invalid,
-because those routes dispatch CMF hooks. The initial gateway arrangement uses
-two policy filters: authenticated HTTP admission first, then entity policy.
-Each filter resolves identity independently, so this arrangement duplicates
-authentication work. A future single-filter admission stage would let HTTP
-limiting and entity policy reuse one resolved identity. In the current
-arrangement, header/body callbacks must count each HTTP request only once.
+The host calls each rate-limit hook once per inbound request, so a request
+counts once even when identity resolves more than once. A post-identity
+limiter under `global` applies to every route, including `tool:` and `llm:`
+routes. A pre-identity limiter reads the HTTP route list only, because it
+runs before the request is classified.
 
 ### Tool example
 
@@ -298,20 +314,20 @@ all matching counters and updates them only when admission succeeds.
 
 A later policy denial does not refund an earlier admitted count. Separate
 global and route instances intentionally maintain independent counters.
-Duplicate placements of the same count instance on one executable request
-or tool-invocation path are rejected:
+Duplicate placements of the same count instance on one tool-invocation path
+are rejected:
 
 ```yaml
 global:
   authorization:
     pre_invocation:
-      - "run(app-ratelimit)"
+      - "run(tool-limits)"
 
 routes:
-  - http: /toys
+  - tool: search
     authorization:
       pre_invocation:
-        - "run(app-ratelimit)"
+        - "run(tool-limits)"
 ```
 
 ## Failure policy
@@ -440,7 +456,7 @@ Other follow-up work:
 
 - Guaranteed token finalization when policy steps are skipped or requests
   encounter errors, cancellation, or interrupted streams.
-- Single-filter HTTP admission for gateways with entity policies.
+- Gateway wiring of both rate-limit hooks and `http.client_address`.
 - Dynamic token estimates and typed non-string attribute bindings.
 - Remaining-budget policy actions and usage notifications.
 

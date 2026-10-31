@@ -47,8 +47,8 @@ The experimental `quota` policy plugin lives in
 `ratelimit` plugin lives in `plugins::ratelimit` behind the
 `experimental-ratelimit` feature. Both are excluded from the facade's
 `builtins` feature. `quota` debits a token budget held by a standalone
-Limitador service; `ratelimit` counts requests in process, so its counters are
-per instance and reset on reload.
+Limitador service; `ratelimit` counts requests in process at the two
+rate-limit hooks, so its counters are per instance and reset on reload.
 
 ### Migrating from a per-extension crate
 

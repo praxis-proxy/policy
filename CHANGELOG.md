@@ -19,11 +19,29 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Pre- and post-identity rate-limit hooks.** `ratelimit.pre_identity` runs
+  before the first `identity.resolve` and `ratelimit.post_identity` after the
+  last, once per request. A `rate_limits:` list at `global`,
+  `global.defaults.<entity>`, `groups.<name>` and `routes[]` selects the
+  plugins they run, with the forms and inheritance of `authentication:`. A
+  step's `config:` override gets its own instance, built once per loaded
+  config. The engine denies with `ratelimit.unavailable` (503) when that
+  instance is missing, and raises alarm `rate_limit_stage_skipped` when a host
+  resolves identity without the pre-identity call.
+- **Host-supplied client address.** `HttpExtension::set_client_address` sets a
+  trusted address, read back with `HttpExtension::client_address` and exposed
+  to `read_headers` plugins as `http.client_address`. `ClientAddress`
+  normalizes it: the port is stripped, IPv4-mapped IPv6 becomes IPv4, other
+  IPv6 becomes its /64 prefix, and an invalid value is dropped. `Debug` output
+  hides it.
 - **Experimental in-process request rate limiting.** The
   `ratelimit/limitador` plugin, behind the `experimental-ratelimit` feature,
-  counts `http.request` admissions against embedded Limitador limits and
-  denies with `ratelimit.exceeded` and status 429. Counters are per instance
-  and reset on restart or reload. It is excluded from `builtins`.
+  runs at the one rate-limit hook its `hooks:` declares, from `rate_limits:`.
+  It counts requests against embedded Limitador limits and denies with
+  `ratelimit.exceeded`, status 429 and client-safe `details`. It requires
+  `on_error: fail` and `mode: sequential`, rejects identity bindings before
+  identity, and refuses to load in a `panic = "abort"` build. Counters are per
+  instance and reset on restart or reload. It is excluded from `builtins`.
 - **Unavailable CIBA approval state returns `-32122`.** A store read or write
   failure denies with `elicitation.store_unavailable` and JSON-RPC `-32122`.
   Check and validate responses include the elicitation id to identify the
@@ -131,6 +149,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#64](https://github.com/praxis-proxy/policy/issues/64))
 
 ### Changed
+
+- A `run(name)` step whose plugin has no hook for the request's context
+  fails with a `PluginError::Dispatch` message that now names the remedy:
+  move the step, or use a plugin with a hook for that context.
+- **New `ConfigScope` variants.** `ConfigScope::RateLimits` and
+  `ConfigScope::RateLimitsStep` cover the `rate_limits:` block and its steps.
+  An exhaustive match on `ConfigScope` outside this crate needs the two arms.
 
 - **Breaking Rust API for embedders:** `RawInboundToken.source_header: String`
   becomes `RawInboundToken.source: Credential`; its constructor now takes a
