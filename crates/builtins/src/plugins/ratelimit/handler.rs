@@ -4,10 +4,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use limitador::RateLimiter;
+use limitador::counter::Counter;
 use limitador::limit::{Context, Expression, Limit, Namespace, Predicate};
-use praxis_policy_apl_cmf::BagBuilder;
+use praxis_policy_apl_cmf::constants::{
+    BAG_HTTP_CLIENT_ADDRESS, BAG_HTTP_METHOD, BAG_SUBJECT_ID, DETAIL_HTTP_STATUS,
+};
+use praxis_policy_apl_cmf::{BagBuilder, capability_namespaces, known_read_capabilities};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
@@ -17,15 +23,67 @@ use serde::Deserialize as _;
 use tokio::sync::Mutex;
 
 use super::cel::Variables;
-use super::config::{RateLimitConfig, Stage, is_caller_controlled, is_identity_derived};
+use super::config::{
+    DEFAULT_COUNTER_CAPACITY, RateLimitConfig, Stage, is_caller_controlled, is_identity_derived,
+};
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// The request exceeded a limit. HTTP 429, with `retry_after_seconds`,
+/// `limit`, `remaining` and `window_seconds` in `details`.
+pub const CODE_EXCEEDED: &str = "ratelimit.exceeded";
+
+/// Limitador could not check the request. HTTP 503.
+pub const CODE_CHECK_FAILED: &str = "ratelimit.check_failed";
+
+/// A limit binds `subject.id` and the request has no resolved subject. HTTP 401.
+pub const CODE_NO_IDENTITY: &str = "ratelimit.no_identity";
+
+/// A limit binds `http.method` and the request has none. HTTP 400.
+pub const CODE_NO_HTTP_METHOD: &str = "ratelimit.no_http_method";
+
+/// A limit binds an attribute the request lacks, or the plugin cannot read.
+/// HTTP 400.
+pub const CODE_MISSING_ATTRIBUTE: &str = "ratelimit.missing_attribute";
+
+/// A limit binds an attribute whose value is not a string. HTTP 400.
+pub const CODE_UNSUPPORTED_ATTRIBUTE: &str = "ratelimit.unsupported_attribute";
+
+/// Details key: whole seconds until the limiting counter resets.
+pub const DETAIL_RETRY_AFTER_SECONDS: &str = "retry_after_seconds";
+
+/// Details key: the limiting counter's maximum per window.
+pub const DETAIL_LIMIT: &str = "limit";
+
+/// Details key: what the limiting counter has left in this window.
+pub const DETAIL_REMAINING: &str = "remaining";
+
+/// Details key: the limiting counter's window length in seconds.
+pub const DETAIL_WINDOW_SECONDS: &str = "window_seconds";
+
+const STATUS_TOO_MANY_REQUESTS: i64 = 429;
+
+const STATUS_SERVICE_UNAVAILABLE: i64 = 503;
+
+const STATUS_UNAUTHORIZED: i64 = 401;
+
+const STATUS_BAD_REQUEST: i64 = 400;
+
+/// A failing Limitador fails every request, so its error is logged at most
+/// once per interval with a count of the ones held back.
+const CHECK_FAILURE_LOG_INTERVAL_SECS: u64 = 60; // 1 minute
 
 pub(super) struct RateLimit {
     bindings: BTreeMap<String, String>,
     check_lock: Mutex<()>,
     config: PluginConfig,
+    failures_since_log: AtomicU64,
     limiter: RateLimiter,
     macro_locals: BTreeSet<String>,
     namespace: Namespace,
+    next_failure_log_at: AtomicU64,
 }
 
 impl RateLimit {
@@ -117,15 +175,152 @@ impl RateLimit {
             .bindings
             .retain(|variable, _| referenced.contains(variable));
         check_stage_bindings(name, stage, &typed.bindings, &counter_keys)?;
+        warn_on_small_capacity(name, typed.counter_capacity, &typed.bindings, &counter_keys);
 
         Ok(Self {
             bindings: typed.bindings,
             check_lock: Mutex::new(()),
             config,
+            failures_since_log: AtomicU64::new(0),
             limiter,
             macro_locals,
             namespace,
+            next_failure_log_at: AtomicU64::new(0),
         })
+    }
+
+    /// Deny a request lacking a bound attribute, telling the operator which
+    /// binding failed and what would supply it.
+    fn deny_unbound(
+        &self,
+        bag_has_it: bool,
+        variable: &str,
+        attribute: &str,
+    ) -> PluginResult<HttpPayload> {
+        let (code, status, reason) = if bag_has_it {
+            (
+                CODE_UNSUPPORTED_ATTRIBUTE,
+                STATUS_BAD_REQUEST,
+                "a request attribute a rate limit requires is not a string",
+            )
+        } else {
+            match attribute {
+                BAG_SUBJECT_ID => (
+                    CODE_NO_IDENTITY,
+                    STATUS_UNAUTHORIZED,
+                    "the request has no identity, which a rate limit requires",
+                ),
+                BAG_HTTP_METHOD => (
+                    CODE_NO_HTTP_METHOD,
+                    STATUS_BAD_REQUEST,
+                    "the request has no HTTP method, which a rate limit requires",
+                ),
+                _ => (
+                    CODE_MISSING_ATTRIBUTE,
+                    STATUS_BAD_REQUEST,
+                    "the request lacks an attribute a rate limit requires",
+                ),
+            }
+        };
+        let granting = granting_capabilities(attribute);
+        let declared = granting
+            .iter()
+            .any(|capability| self.config.capabilities.contains(*capability));
+        let hint = if bag_has_it {
+            "bind an attribute with a string value"
+        } else if granting.is_empty() || declared {
+            "the request did not carry it; check the host or the identity step that sets it"
+        } else {
+            "the plugin cannot read it; add a capability listed in `grant` to its `capabilities:`"
+        };
+        tracing::debug!(
+            plugin = %self.config.name,
+            code,
+            binding = variable,
+            attribute,
+            grant = ?granting,
+            hint,
+            "ratelimit: a bound attribute is unavailable, so the request is denied",
+        );
+        PluginResult::deny(with_status(PluginViolation::new(code, reason), status))
+    }
+
+    /// Deny a request Limitador could not check, logging the cause at most
+    /// once per interval.
+    fn deny_check_failed(&self, cause: &dyn Display) -> PluginResult<HttpPayload> {
+        let now = unix_seconds();
+        let next = self.next_failure_log_at.load(Ordering::Relaxed);
+        let due = now >= next
+            && self
+                .next_failure_log_at
+                .compare_exchange(
+                    next,
+                    now.saturating_add(CHECK_FAILURE_LOG_INTERVAL_SECS),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok();
+        if due {
+            let suppressed = self.failures_since_log.swap(0, Ordering::Relaxed);
+            tracing::error!(
+                plugin = %self.config.name,
+                error = %cause,
+                suppressed,
+                interval_seconds = CHECK_FAILURE_LOG_INTERVAL_SECS,
+                "ratelimit: Limitador check failed, so the request is denied; repeats are \
+                 counted in `suppressed` and logged once per interval",
+            );
+        } else {
+            self.failures_since_log.fetch_add(1, Ordering::Relaxed);
+        }
+        PluginResult::deny(with_status(
+            PluginViolation::new(CODE_CHECK_FAILED, "request rate limit check failed"),
+            STATUS_SERVICE_UNAVAILABLE,
+        ))
+    }
+
+    /// Deny an over-limit request with the client-safe view of its most
+    /// restrictive counter, keeping the limit's identity in the log.
+    fn deny_exceeded(
+        &self,
+        counters: &[Counter],
+        limit_name: Option<&str>,
+    ) -> PluginResult<HttpPayload> {
+        let mut details = HashMap::from([(
+            DETAIL_HTTP_STATUS.to_owned(),
+            serde_json::json!(STATUS_TOO_MANY_REQUESTS),
+        )]);
+        if let Some(counter) = most_restrictive(counters) {
+            let window = counter.limit().seconds();
+            let remaining = counter.remaining().unwrap_or_else(|| counter.max_value());
+            let retry_after = counter
+                .expires_in()
+                .map_or(window, ceil_seconds)
+                .clamp(1, window.max(1));
+            details.extend([
+                (
+                    DETAIL_RETRY_AFTER_SECONDS.to_owned(),
+                    serde_json::json!(retry_after),
+                ),
+                (
+                    DETAIL_LIMIT.to_owned(),
+                    serde_json::json!(counter.max_value()),
+                ),
+                (DETAIL_REMAINING.to_owned(), serde_json::json!(remaining)),
+                (DETAIL_WINDOW_SECONDS.to_owned(), serde_json::json!(window)),
+            ]);
+        }
+        tracing::debug!(
+            plugin = %self.config.name,
+            namespace = self.namespace.as_ref(),
+            limit_name,
+            "ratelimit: request exceeded a limit",
+        );
+        PluginResult::deny(
+            PluginViolation::new(CODE_EXCEEDED, "request rate limit exceeded")
+                .with_details(details)
+                .with_proto_error_code(STATUS_TOO_MANY_REQUESTS),
+        )
     }
 }
 
@@ -148,21 +343,16 @@ impl HookHandler<HttpHook> for RateLimit {
         let mut values = HashMap::with_capacity(self.bindings.len());
         for (variable, attribute) in &self.bindings {
             let Some(value) = bag.get_string(attribute) else {
-                let code = if bag.contains(attribute) {
-                    "ratelimit.unsupported_attribute"
-                } else {
-                    match attribute.as_str() {
-                        "subject.id" => "ratelimit.no_identity",
-                        "http.method" => "ratelimit.no_http_method",
-                        _ => "ratelimit.missing_attribute",
-                    }
-                };
-                return PluginResult::deny(PluginViolation::new(
-                    code,
-                    format!("PPE attribute '{attribute}' is unavailable as a string"),
-                ));
+                return self.deny_unbound(bag.contains(attribute), variable, attribute);
             };
-            values.insert(variable.clone(), value.to_owned());
+            // HTTP methods are case-sensitive, but limits are written in the
+            // canonical uppercase form, and a lowercase method must not skip them.
+            let value = if attribute == BAG_HTTP_METHOD {
+                value.to_ascii_uppercase()
+            } else {
+                value.to_owned()
+            };
+            values.insert(variable.clone(), value);
         }
         // Limitador's presence checks include macro locals. Validation above
         // rejects unbound free names; these placeholders satisfy only those
@@ -183,23 +373,12 @@ impl HookHandler<HttpHook> for RateLimit {
                 .check_rate_limited_and_update(&self.namespace, &context, 1)
         }));
         match checked {
-            Ok(Ok(result)) if result.limited => PluginResult::deny(
-                PluginViolation::new("ratelimit.exceeded", "request rate limit exceeded")
-                    .with_details(HashMap::from([(
-                        "http.status".to_owned(),
-                        serde_json::json!(429),
-                    )]))
-                    .with_proto_error_code(429),
-            ),
+            Ok(Ok(result)) if result.limited => {
+                self.deny_exceeded(&result.counters, result.limit_name.as_deref())
+            },
             Ok(Ok(_)) => PluginResult::allow(),
-            Ok(Err(error)) => {
-                tracing::error!(%error, "ratelimit: Limitador check failed");
-                check_failed()
-            },
-            Err(_) => {
-                tracing::error!("ratelimit: Limitador condition evaluation panicked");
-                check_failed()
-            },
+            Ok(Err(error)) => self.deny_check_failed(&error),
+            Err(_) => self.deny_check_failed(&"Limitador condition evaluation panicked"),
         }
     }
 }
@@ -208,11 +387,80 @@ impl HookHandler<HttpHook> for RateLimit {
 // Private Utilities
 // -----------------------------------------------------------------------------
 
-fn check_failed() -> PluginResult<HttpPayload> {
-    PluginResult::deny(PluginViolation::new(
-        "ratelimit.check_failed",
-        "request rate limit check failed",
-    ))
+fn with_status(violation: PluginViolation, status: i64) -> PluginViolation {
+    violation
+        .with_details(HashMap::from([(
+            DETAIL_HTTP_STATUS.to_owned(),
+            serde_json::json!(status),
+        )]))
+        .with_proto_error_code(status)
+}
+
+/// The counter a client waits longest on: least remaining, then soonest reset.
+fn most_restrictive(counters: &[Counter]) -> Option<&Counter> {
+    counters.iter().min_by_key(|counter| {
+        (
+            counter.remaining().unwrap_or_else(|| counter.max_value()),
+            counter.expires_in().unwrap_or_else(|| counter.window()),
+        )
+    })
+}
+
+fn ceil_seconds(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The read capabilities that expose `attribute` in the bag.
+fn granting_capabilities(attribute: &str) -> Vec<&'static str> {
+    known_read_capabilities()
+        .filter(|capability| {
+            capability_namespaces(capability).iter().any(|prefix| {
+                if prefix.ends_with('.') {
+                    attribute.starts_with(prefix)
+                } else {
+                    attribute == *prefix
+                }
+            })
+        })
+        .collect()
+}
+
+/// Warn when a counter keyed on a value with no natural bound shares a small
+/// store, where a full store resets counters.
+fn warn_on_small_capacity(
+    name: &str,
+    capacity: u64,
+    bindings: &BTreeMap<String, String>,
+    counter_keys: &BTreeSet<String>,
+) {
+    if capacity >= DEFAULT_COUNTER_CAPACITY {
+        return;
+    }
+    for (variable, attribute) in bindings {
+        if !counter_keys.contains(variable)
+            || (attribute != BAG_HTTP_CLIENT_ADDRESS && !is_caller_controlled(attribute))
+        {
+            continue;
+        }
+        tracing::warn!(
+            plugin = name,
+            binding = %variable,
+            attribute = %attribute,
+            counter_capacity = capacity,
+            recommended = DEFAULT_COUNTER_CAPACITY,
+            "ratelimit: a counter is keyed on an unbounded attribute but `counter_capacity` is \
+             small; once the store is full, a new key evicts a counter or is kept out, and \
+             that counter restarts at zero, so raise `counter_capacity`",
+        );
+    }
 }
 
 /// Refuse a binding the stage cannot read, and a pre-identity counter a caller

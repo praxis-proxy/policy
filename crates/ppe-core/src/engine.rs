@@ -1167,6 +1167,21 @@ fn warn_on_dropped_inherited_rate_limits(cfg: &PolicyConfig) {
     }
 }
 
+/// Report every route that runs a post-identity limiter but resolves no
+/// authentication. Called beside [`warn_on_dropped_inherited_rate_limits`].
+fn warn_on_rate_limits_without_authentication(cfg: &PolicyConfig) {
+    for finding in crate::config::rate_limits_without_authentication(cfg) {
+        warn!(
+            alarm = "rate_limit_without_authentication",
+            route = %finding.route,
+            limiters = ?finding.limiters,
+            "this route runs a post-identity limiter but resolves no authentication, so a \
+             limiter keyed on identity denies every request here. Add an `authentication:` step \
+             the route inherits, or drop the limiter with `rate_limits.replace_inherited: true`.",
+        );
+    }
+}
+
 /// Look up the factory for every entry in `plugin_configs`, in config
 /// order. Returns on the first `kind` with no registered factory.
 ///
@@ -1699,6 +1714,7 @@ impl PolicyEngine {
         }
         warn_on_dropped_inherited_authentication(&policy_config);
         warn_on_dropped_inherited_rate_limits(&policy_config);
+        warn_on_rate_limits_without_authentication(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
         // Resolve under the factories read lock, then drop it and
@@ -2026,6 +2042,7 @@ impl PolicyEngine {
         let policy_config = normalize_and_validate(policy_config, false)?;
         warn_on_dropped_inherited_authentication(&policy_config);
         warn_on_dropped_inherited_rate_limits(&policy_config);
+        warn_on_rate_limits_without_authentication(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
         let engine = Self::new(PolicyEngineConfig {
@@ -12404,6 +12421,33 @@ mod rate_limit_dispatch_tests {
                 .route_authentication_unreachable_warned
                 .load(Ordering::Acquire),
             "the rate-limit warning does not spend the authentication latch"
+        );
+        drop(sink);
+    }
+
+    #[test]
+    fn a_post_identity_limiter_on_a_route_without_authentication_warns_at_load() {
+        let yaml = format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a, user-a]\nroutes:\n  - tool: anonymous\n"
+        );
+        let (engine, _) = limiter_engine_unloaded();
+        let (events, sink) = capturing();
+
+        engine
+            .load_config(crate::config::parse_config(&yaml).expect("the config parses"))
+            .expect("the warning does not refuse the load");
+
+        let alarms = events.matching("rate_limit_without_authentication");
+        assert_eq!(alarms.len(), 1, "one route, one warning: {alarms:?}");
+        for needle in ["tool:anonymous", "user-a"] {
+            assert!(
+                alarms[0].contains(needle),
+                "the warning names `{needle}`: {alarms:?}"
+            );
+        }
+        assert!(
+            !alarms[0].contains("edge-a"),
+            "a pre-identity limiter needs no authentication: {alarms:?}"
         );
         drop(sink);
     }

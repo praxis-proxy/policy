@@ -3882,6 +3882,59 @@ pub(crate) fn dropped_inherited_rate_limits(config: &PolicyConfig) -> Vec<Droppe
     findings
 }
 
+/// A route that runs post-identity limiters but resolves no authentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnauthenticatedRateLimits {
+    /// The affected route, named by the entity it selects.
+    pub route: String,
+    /// The post-identity limiters in force on it, in dispatch order.
+    pub limiters: Vec<String>,
+}
+
+/// Every route whose effective `rate_limits:` runs a post-identity plugin while
+/// its effective `authentication:` is empty, one finding per route.
+///
+/// A limiter keyed on identity denies every request on such a route, and one
+/// that is not still counts every caller as the same anonymous client.
+pub(crate) fn rate_limits_without_authentication(
+    config: &PolicyConfig,
+) -> Vec<UnauthenticatedRateLimits> {
+    let post_identity: HashSet<&str> = config
+        .plugins
+        .iter()
+        .filter(|plugin| {
+            plugin
+                .hooks
+                .iter()
+                .any(|hook| hook == crate::ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY)
+        })
+        .map(|plugin| plugin.name.as_str())
+        .collect();
+    if post_identity.is_empty() {
+        return Vec::new();
+    }
+    config
+        .routes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, route)| {
+            if !fold_step_layers(authentication_layers(config, Some(route))).is_empty() {
+                return None;
+            }
+            let limiters: Vec<String> =
+                fold_step_layers(rate_limits_layers(config, Some(route), None))
+                    .into_iter()
+                    .map(|step| step.name)
+                    .filter(|name| post_identity.contains(name.as_str()))
+                    .collect();
+            (!limiters.is_empty()).then(|| UnauthenticatedRateLimits {
+                route: route_display_name(route, i),
+                limiters,
+            })
+        })
+        .collect()
+}
+
 /// The `assertions:` contract in force for a request, in one direction.
 ///
 /// Accumulates over the four levels in the order they stack: global, the
@@ -5829,6 +5882,39 @@ routes:
             rate_limit_config(body)
                 .unwrap_or_else(|e| panic!("`{body}` places each stage where it runs: {e}"));
         }
+    }
+
+    #[test]
+    fn a_post_identity_limiter_on_a_route_without_authentication_is_reported() {
+        let body = r#"
+  - { name: corp-jwt, kind: builtin, hooks: [identity.resolve] }
+global:
+  authentication: [corp-jwt]
+  rate_limits: [edge, per-user]
+groups:
+  public:
+    authentication:
+      replace_inherited: true
+      steps: []
+routes:
+  - tool: healthcheck
+    groups: public
+  - tool: signed_in
+  - tool: unlimited
+    groups: public
+    rate_limits:
+      replace_inherited: true
+      steps: []
+"#;
+        let cfg = rate_limit_config(body).expect("the config loads");
+        assert_eq!(
+            rate_limits_without_authentication(&cfg),
+            vec![UnauthenticatedRateLimits {
+                route: "tool:healthcheck".to_owned(),
+                limiters: vec!["per-user".to_owned()],
+            }],
+            "only the anonymous route that inherits a post-identity limiter is reported",
+        );
     }
 
     #[test]

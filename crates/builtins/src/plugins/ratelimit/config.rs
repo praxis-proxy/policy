@@ -32,6 +32,10 @@ const IDENTITY_DERIVED_ATTRIBUTES: &[&str] = &[
     BAG_DELEGATED,
 ];
 
+/// The default `counter_capacity`, and the floor below which a counter keyed
+/// on an unbounded attribute warns at load.
+pub(super) const DEFAULT_COUNTER_CAPACITY: u64 = 10_000; // qualified counters
+
 /// Bag attributes the caller picks freely, so a counter keyed on one can be
 /// reset by changing it. An entry ending in `.` matches every key under it.
 const CALLER_CONTROLLED_ATTRIBUTES: &[&str] = &[
@@ -130,7 +134,7 @@ pub(super) struct LimitConfig {
 }
 
 const fn default_counter_capacity() -> u64 {
-    10_000
+    DEFAULT_COUNTER_CAPACITY
 }
 
 fn default_bindings() -> BTreeMap<String, String> {

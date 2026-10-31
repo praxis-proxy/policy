@@ -15,10 +15,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use praxis_policy_builtins::plugins::ratelimit::{KIND, RateLimitFactory};
+use praxis_policy_apl_cmf::constants::DETAIL_HTTP_STATUS;
+use praxis_policy_builtins::plugins::ratelimit::{
+    CODE_CHECK_FAILED, CODE_EXCEEDED, CODE_MISSING_ATTRIBUTE, CODE_NO_HTTP_METHOD,
+    CODE_NO_IDENTITY, CODE_UNSUPPORTED_ATTRIBUTE, DETAIL_LIMIT, DETAIL_REMAINING,
+    DETAIL_RETRY_AFTER_SECONDS, DETAIL_WINDOW_SECONDS, KIND, RateLimitFactory,
+};
 use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL, ENTITY_TOOL};
 use praxis_policy_core::engine::PolicyEngine;
-use praxis_policy_core::error::PluginError;
+use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::extensions::{
     Extensions, HttpExtension, MetaExtension, SecurityExtension, SubjectExtension,
 };
@@ -232,8 +237,6 @@ global:
   rate_limits: [edge-limits]
 ";
 
-const EXCEEDED: &str = "ratelimit.exceeded";
-
 const FIRST_CLIENT: &str = "203.0.113.7";
 
 const SECOND_CLIENT: &str = "198.51.100.4";
@@ -265,13 +268,13 @@ async fn counts_alice_and_bob_independently_and_returns_429() {
     let alice_denied = verdict(&manager, Some("alice"), Some("GET")).await;
     assert_eq!(
         alice_denied,
-        (false, Some(("ratelimit.exceeded".to_owned(), Some(429)))),
+        (false, Some((CODE_EXCEEDED.to_owned(), Some(429)))),
         "Alice's sixth GET exceeds her limit with a 429"
     );
     let bob_denied = verdict(&manager, Some("bob"), Some("GET")).await;
     assert_eq!(
         bob_denied,
-        (false, Some(("ratelimit.exceeded".to_owned(), Some(429)))),
+        (false, Some((CODE_EXCEEDED.to_owned(), Some(429)))),
         "Bob's third GET exceeds his limit with a 429"
     );
 }
@@ -288,7 +291,7 @@ async fn a_string_claim_from_the_ppe_bag_selects_a_limit() {
     );
     assert_eq!(
         verdict_request(&manager, free()).await,
-        (false, Some(("ratelimit.exceeded".to_owned(), Some(429)))),
+        (false, Some((CODE_EXCEEDED.to_owned(), Some(429)))),
         "the second free-plan GET exceeds the limit of 1"
     );
     assert!(
@@ -299,7 +302,7 @@ async fn a_string_claim_from_the_ppe_bag_selects_a_limit() {
         verdict_request(&manager, request(Some("alice"), Some("GET")))
             .await
             .1,
-        Some(("ratelimit.missing_attribute".to_owned(), None)),
+        Some((CODE_MISSING_ATTRIBUTE.to_owned(), Some(400))),
         "a request without the bound claim denies"
     );
 }
@@ -315,7 +318,7 @@ async fn demo_global_and_route_scoped_rate_limits() {
     let global_denied = verdict_request(&manager, request_at_path("alice", "GET", "/other")).await;
     assert_eq!(
         global_denied,
-        (false, Some(("ratelimit.exceeded".to_owned(), Some(429)))),
+        (false, Some((CODE_EXCEEDED.to_owned(), Some(429)))),
         "Alice's sixth GET exceeds the global limit"
     );
 
@@ -329,7 +332,7 @@ async fn demo_global_and_route_scoped_rate_limits() {
     let route_denied = verdict_request(&manager, request_at_path("bob", "GET", "/toys")).await;
     assert_eq!(
         route_denied,
-        (false, Some(("ratelimit.exceeded".to_owned(), Some(429)))),
+        (false, Some((CODE_EXCEEDED.to_owned(), Some(429)))),
         "Bob's third /toys GET exceeds the route limit"
     );
 
@@ -368,7 +371,7 @@ async fn header_binding_sets_http_429() {
         .violation
         .expect("Alice exceeds the global rate limit");
     assert_eq!(
-        violation.code, "ratelimit.exceeded",
+        violation.code, CODE_EXCEEDED,
         "the denial is a rate-limit excess"
     );
     assert_eq!(
@@ -377,7 +380,7 @@ async fn header_binding_sets_http_429() {
         "the denial carries HTTP 429"
     );
     assert_eq!(
-        violation.details.get("http.status"),
+        violation.details.get(DETAIL_HTTP_STATUS),
         Some(&serde_json::json!(429)),
         "the details carry the HTTP status"
     );
@@ -394,7 +397,7 @@ async fn header_binding_sets_http_429() {
         verdict_request(&manager, gateway_request("bob", "/toys"))
             .await
             .1,
-        Some(("ratelimit.exceeded".to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "Bob's third /toys request exceeds the route limit"
     );
     assert!(
@@ -410,12 +413,12 @@ async fn missing_identity_or_http_method_denies_before_the_counter() {
     let manager = engine().await;
     assert_eq!(
         verdict(&manager, None, Some("GET")).await.1,
-        Some(("ratelimit.no_identity".to_owned(), None)),
+        Some((CODE_NO_IDENTITY.to_owned(), Some(401))),
         "a request without a subject denies"
     );
     assert_eq!(
         verdict(&manager, Some("alice"), None).await.1,
-        Some(("ratelimit.no_http_method".to_owned(), None)),
+        Some((CODE_NO_HTTP_METHOD.to_owned(), Some(400))),
         "a request without a method denies"
     );
     assert!(
@@ -465,7 +468,7 @@ async fn concurrent_first_requests_share_the_route_override_counter() {
         } else {
             assert_eq!(
                 verdict.1,
-                Some(("ratelimit.exceeded".to_owned(), Some(429))),
+                Some((CODE_EXCEEDED.to_owned(), Some(429))),
                 "every refused first request is a rate-limit excess"
             );
         }
@@ -476,7 +479,7 @@ async fn concurrent_first_requests_share_the_route_override_counter() {
     );
     assert_eq!(
         verdict(&manager, Some("alice"), Some("GET")).await.1,
-        Some(("ratelimit.exceeded".to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "later requests must retain the installed counter"
     );
 }
@@ -503,7 +506,7 @@ async fn cel_macros_select_limits_and_partition_counters() {
             verdict_request(&manager, request_at_path(subject, "GET", "/api/toys"))
                 .await
                 .1,
-            Some(("ratelimit.exceeded".to_owned(), Some(429))),
+            Some((CODE_EXCEEDED.to_owned(), Some(429))),
             "matching macro conditions must enforce the counter for {subject}"
         );
     }
@@ -522,7 +525,7 @@ async fn limit_metadata_conditions_select_and_enforce_a_limit() {
     );
     assert_eq!(
         verdict(&manager, Some("alice"), Some("GET")).await.1,
-        Some(("ratelimit.exceeded".to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "the limit metadata condition selects the limit of 1"
     );
     assert!(
@@ -552,7 +555,7 @@ async fn a_global_limiter_applies_after_identity_on_a_tool_route() {
     }
     assert_eq!(
         verdict_request(&manager, tool_request()).await.1,
-        Some((EXCEEDED.to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "the inherited global limit counts tool calls"
     );
 
@@ -560,7 +563,7 @@ async fn a_global_limiter_applies_after_identity_on_a_tool_route() {
     without_http.http = None;
     assert_eq!(
         verdict_request(&manager, without_http).await.1,
-        Some(("ratelimit.missing_attribute".to_owned(), None)),
+        Some((CODE_MISSING_ATTRIBUTE.to_owned(), Some(400))),
         "a tool call without its HTTP request fails closed"
     );
 }
@@ -571,7 +574,7 @@ async fn a_condition_evaluation_error_denies_as_check_failed() {
     let manager = engine_with(&policy).await;
     assert_eq!(
         verdict(&manager, Some("alice"), Some("GET")).await,
-        (false, Some(("ratelimit.check_failed".to_owned(), None))),
+        (false, Some((CODE_CHECK_FAILED.to_owned(), Some(503)))),
         "a non-numeric subject must deny"
     );
     assert!(
@@ -589,7 +592,7 @@ async fn an_unreferenced_binding_does_not_require_its_attribute() {
     );
     assert_eq!(
         verdict(&manager, Some("alice"), Some("GET")).await.1,
-        Some(("ratelimit.exceeded".to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "the referenced bindings must still select the limit"
     );
 }
@@ -607,7 +610,7 @@ async fn a_numeric_claim_is_an_unsupported_attribute() {
         .insert("plan".to_owned(), serde_json::json!(3));
     assert_eq!(
         verdict_request(&manager, extensions).await.1,
-        Some(("ratelimit.unsupported_attribute".to_owned(), None)),
+        Some((CODE_UNSUPPORTED_ATTRIBUTE.to_owned(), Some(400))),
         "a bound attribute present with a non-string value must deny"
     );
 }
@@ -624,7 +627,7 @@ async fn a_per_user_limit_counts_each_subject_and_a_free_post_counts_twice() {
     );
     assert_eq!(
         verdict_request(&manager, alice("POST")).await.1,
-        Some((EXCEEDED.to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "the free-plan POST limit of 1 is spent"
     );
     assert!(
@@ -633,7 +636,7 @@ async fn a_per_user_limit_counts_each_subject_and_a_free_post_counts_twice() {
     );
     assert_eq!(
         verdict_request(&manager, alice("GET")).await.1,
-        Some((EXCEEDED.to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "the first POST and one GET spent Alice's per-user limit of 2"
     );
     for number in 1..=2 {
@@ -644,7 +647,7 @@ async fn a_per_user_limit_counts_each_subject_and_a_free_post_counts_twice() {
     }
     assert_eq!(
         verdict_request(&manager, bob()).await.1,
-        Some((EXCEEDED.to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "Bob's third GET exceeds his own per-user limit"
     );
 }
@@ -664,7 +667,7 @@ async fn a_pre_identity_limit_counts_each_client_address() {
         pre_identity_verdict(&manager, edge_request(Some(FIRST_CLIENT)))
             .await
             .1,
-        Some((EXCEEDED.to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "the first address exceeds its limit of 5"
     );
     assert!(
@@ -677,7 +680,7 @@ async fn a_pre_identity_limit_counts_each_client_address() {
         pre_identity_verdict(&manager, edge_request(Some("[::ffff:203.0.113.7]:4431")))
             .await
             .1,
-        Some((EXCEEDED.to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "a mapped, port-bearing form of the first address shares its counter"
     );
 }
@@ -689,7 +692,7 @@ async fn the_client_address_needs_read_headers() {
         pre_identity_verdict(&manager, edge_request(Some(FIRST_CLIENT)))
             .await
             .1,
-        Some(("ratelimit.missing_attribute".to_owned(), None)),
+        Some((CODE_MISSING_ATTRIBUTE.to_owned(), Some(400))),
         "without read_headers the address is filtered out and the limiter fails closed"
     );
 }
@@ -700,7 +703,7 @@ async fn a_missing_client_address_denies_before_any_counter_changes() {
     for _ in 0..3 {
         assert_eq!(
             pre_identity_verdict(&manager, edge_request(None)).await.1,
-            Some(("ratelimit.missing_attribute".to_owned(), None)),
+            Some((CODE_MISSING_ATTRIBUTE.to_owned(), Some(400))),
             "a request without a client address denies"
         );
     }
@@ -716,7 +719,7 @@ async fn a_missing_client_address_denies_before_any_counter_changes() {
         pre_identity_verdict(&manager, edge_request(Some(SECOND_CLIENT)))
             .await
             .1,
-        Some((EXCEEDED.to_owned(), Some(429))),
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
         "the shared limit of 2 is spent by addressed requests only"
     );
 }
@@ -735,6 +738,270 @@ async fn a_post_identity_limiter_does_not_run_at_pre_identity() {
     assert!(
         verdict(&manager, Some("alice"), Some("GET")).await.0,
         "the pre-identity calls spent none of the post-identity balance"
+    );
+}
+
+#[tokio::test]
+async fn a_429_carries_only_client_safe_details() {
+    let manager = engine_with(&POLICY.replace("max: 5", "max: 1")).await;
+    assert!(
+        verdict(&manager, Some("alice"), Some("GET")).await.0,
+        "the first GET is within the limit of 1"
+    );
+
+    let violation = violation_at(
+        &manager,
+        HOOK_RATELIMIT_POST_IDENTITY,
+        request(Some("alice"), Some("GET")),
+    )
+    .await
+    .expect("the second GET exceeds the limit");
+
+    assert_eq!(violation.code, CODE_EXCEEDED, "the denial is an excess");
+    assert_eq!(violation.proto_error_code, Some(429), "the status is 429");
+    let mut keys: Vec<&str> = violation.details.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            DETAIL_HTTP_STATUS,
+            DETAIL_LIMIT,
+            DETAIL_REMAINING,
+            DETAIL_RETRY_AFTER_SECONDS,
+            DETAIL_WINDOW_SECONDS,
+        ],
+        "the details hold the client-safe fields and nothing else"
+    );
+    assert_eq!(
+        violation.details[DETAIL_HTTP_STATUS],
+        serde_json::json!(429),
+        "the details carry the HTTP status"
+    );
+    assert_eq!(
+        violation.details[DETAIL_REMAINING],
+        serde_json::json!(0),
+        "nothing remains"
+    );
+    assert_eq!(
+        violation.details[DETAIL_LIMIT],
+        serde_json::json!(1),
+        "the limit is the configured max"
+    );
+    assert_eq!(
+        violation.details[DETAIL_WINDOW_SECONDS],
+        serde_json::json!(60),
+        "the window is the configured seconds"
+    );
+    let retry_after = violation.details[DETAIL_RETRY_AFTER_SECONDS]
+        .as_u64()
+        .expect("retry_after_seconds is a whole number");
+    assert!(
+        (1..=60).contains(&retry_after),
+        "retry_after_seconds is positive and within the window: {retry_after}"
+    );
+    let rendered = format!("{} {:?}", violation.reason, violation.details);
+    for leaked in ["toystore", "subject_id", "read_subject", "read_headers"] {
+        assert!(
+            !rendered.contains(leaked),
+            "the response must not reveal `{leaked}`: {rendered}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_429_describes_the_most_restrictive_matched_counter() {
+    let manager = engine_with(PER_USER_POLICY).await;
+    let alice_post = || request_with_plan(Some("alice"), Some("POST"), Some("free"));
+    assert!(
+        verdict_request(&manager, alice_post()).await.0,
+        "the first POST is within both limits"
+    );
+
+    let violation = violation_at(&manager, HOOK_RATELIMIT_POST_IDENTITY, alice_post())
+        .await
+        .expect("the second POST exceeds the free-plan limit");
+
+    assert_eq!(
+        violation.details[DETAIL_LIMIT],
+        serde_json::json!(1),
+        "the free-plan limit of 1 has less left than the per-user limit of 2"
+    );
+    assert_eq!(
+        violation.details[DETAIL_REMAINING],
+        serde_json::json!(0),
+        "the most restrictive counter has nothing left"
+    );
+}
+
+#[tokio::test]
+async fn a_lowercase_method_matches_an_uppercase_limit() {
+    let manager = engine_with(&POLICY.replace("max: 5", "max: 1")).await;
+    assert!(
+        verdict(&manager, Some("alice"), Some("get")).await.0,
+        "the first lowercase GET is within the limit"
+    );
+    assert_eq!(
+        verdict(&manager, Some("alice"), Some("get")).await,
+        (false, Some((CODE_EXCEEDED.to_owned(), Some(429)))),
+        "a lowercase `get` counts against the `http_method == 'GET'` limit"
+    );
+    assert_eq!(
+        verdict(&manager, Some("alice"), Some("GET")).await.1,
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
+        "both spellings share one counter"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_binding_logs_its_hint_and_keeps_it_out_of_the_response() {
+    let manager = engine_with(&EDGE_POLICY.replace("[read_headers]", "[read_query]")).await;
+
+    start_capture();
+    let violation = violation_at(
+        &manager,
+        HOOK_RATELIMIT_PRE_IDENTITY,
+        edge_request(Some(FIRST_CLIENT)),
+    )
+    .await
+    .expect("an unreadable client address denies");
+    let logged = finish_capture(tracing::Level::DEBUG);
+
+    assert_eq!(
+        violation.code, CODE_MISSING_ATTRIBUTE,
+        "the denial is a missing attribute"
+    );
+    assert_eq!(
+        violation.proto_error_code,
+        Some(400),
+        "a request lacking what the limit needs is a bad request"
+    );
+    assert_eq!(
+        violation.details.get(DETAIL_HTTP_STATUS),
+        Some(&serde_json::json!(400)),
+        "the details carry the HTTP status"
+    );
+    let rendered = format!("{} {:?}", violation.reason, violation.details);
+    for leaked in ["client", "http.client_address", "read_headers", "edge"] {
+        assert!(
+            !rendered.contains(leaked),
+            "the response must not reveal `{leaked}`: {rendered}"
+        );
+    }
+    let hints: Vec<&String> = logged
+        .iter()
+        .filter(|event| event.contains(CODE_MISSING_ATTRIBUTE))
+        .collect();
+    assert_eq!(hints.len(), 1, "the denial logs one hint: {logged:?}");
+    for needle in [
+        "edge-limits",
+        "\"client\"",
+        "http.client_address",
+        "read_headers",
+        "capabilities",
+    ] {
+        assert!(
+            hints[0].contains(needle),
+            "the operator hint names `{needle}`: {hints:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_check_failure_is_a_503_without_the_raw_error() {
+    let policy = POLICY.replace("subject_id == 'alice'", "int(subject_id) > 1");
+    let manager = engine_with(&policy).await;
+
+    let violation = violation_at(
+        &manager,
+        HOOK_RATELIMIT_POST_IDENTITY,
+        request(Some("alice"), Some("GET")),
+    )
+    .await
+    .expect("a condition evaluation error denies");
+
+    assert_eq!(violation.code, CODE_CHECK_FAILED, "the check failed");
+    assert_eq!(
+        violation.proto_error_code,
+        Some(503),
+        "a limiter that cannot check is unavailable"
+    );
+    let rendered = format!("{} {:?}", violation.reason, violation.details);
+    for leaked in ["int(", "subject_id", "panic", "Limitador", "toystore"] {
+        assert!(
+            !rendered.contains(leaked),
+            "the response must not reveal `{leaked}`: {rendered}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_persistent_check_failure_logs_once_per_interval() {
+    let policy = POLICY.replace("subject_id == 'alice'", "int(subject_id) > 1");
+    let manager = engine_with(&policy).await;
+
+    start_capture();
+    for number in 1..=20 {
+        assert_eq!(
+            verdict(&manager, Some("alice"), Some("GET")).await.1,
+            Some((CODE_CHECK_FAILED.to_owned(), Some(503))),
+            "request #{number} fails closed"
+        );
+    }
+    let errors = finish_capture(tracing::Level::ERROR);
+
+    let failures: Vec<&String> = errors
+        .iter()
+        .filter(|event| event.contains("Limitador check failed"))
+        .collect();
+    assert_eq!(
+        failures.len(),
+        1,
+        "twenty failures inside one interval log once: {errors:?}"
+    );
+    assert!(
+        failures[0].contains("app-ratelimit") && failures[0].contains("panicked"),
+        "the one log names the plugin and the cause: {failures:?}"
+    );
+}
+
+#[test]
+fn a_small_capacity_for_a_client_address_counter_warns_at_load() {
+    let config = |capacity: u64| {
+        plugin_config(
+            &[HOOK_RATELIMIT_PRE_IDENTITY],
+            serde_json::json!({
+                "namespace": "edge",
+                "counter_capacity": capacity,
+                "bindings": {"client": "http.client_address"},
+                "limits": [{"max": 5, "seconds": 60, "variables": ["client"]}],
+            }),
+        )
+    };
+
+    let (built, warnings) = warnings_while(|| RateLimitFactory.create(&config(100)).is_ok());
+
+    assert!(built, "a small capacity still loads");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one unbounded counter key warns once: {warnings:?}"
+    );
+    for needle in [
+        "app-ratelimit",
+        "client",
+        "http.client_address",
+        "counter_capacity=100",
+    ] {
+        assert!(
+            warnings[0].contains(needle),
+            "the warning names `{needle}`: {warnings:?}"
+        );
+    }
+    let (built, warnings) = warnings_while(|| RateLimitFactory.create(&config(10_000)).is_ok());
+    assert!(built, "the default capacity loads");
+    assert!(
+        warnings.is_empty(),
+        "the default capacity does not warn: {warnings:?}"
     );
 }
 
@@ -1196,6 +1463,17 @@ async fn verdict_at(manager: &PolicyEngine, hook: &str, extensions: Extensions) 
     )
 }
 
+async fn violation_at(
+    manager: &PolicyEngine,
+    hook: &str,
+    extensions: Extensions,
+) -> Option<PluginViolation> {
+    let (result, _background) = manager
+        .invoke_named::<HttpHook>(hook, HttpPayload, extensions, None)
+        .await;
+    result.violation
+}
+
 async fn verdict_request(manager: &PolicyEngine, extensions: Extensions) -> Verdict {
     verdict_at(manager, HOOK_RATELIMIT_POST_IDENTITY, extensions).await
 }
@@ -1213,12 +1491,12 @@ async fn verdict(
 }
 
 thread_local! {
-    static WARNINGS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    static EVENTS: RefCell<Option<Vec<(tracing::Level, String)>>> = const { RefCell::new(None) };
 }
 
 /// Installed once for the whole binary, because callsite interest is cached
 /// process-wide; the thread-local sink keeps each test's events its own.
-struct WarningCapture;
+struct EventCapture;
 
 struct Render(String);
 
@@ -1228,9 +1506,13 @@ impl tracing::field::Visit for Render {
     }
 }
 
-impl tracing::Subscriber for WarningCapture {
+impl tracing::Subscriber for EventCapture {
     fn register_callsite(&self, _: &tracing::Metadata<'_>) -> tracing::subscriber::Interest {
         tracing::subscriber::Interest::always()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
     }
 
     fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
@@ -1246,14 +1528,11 @@ impl tracing::Subscriber for WarningCapture {
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        if *event.metadata().level() != tracing::Level::WARN {
-            return;
-        }
         let mut render = Render(String::new());
         event.record(&mut render);
-        WARNINGS.with_borrow_mut(|sink| {
-            if let Some(warnings) = sink.as_mut() {
-                warnings.push(render.0);
+        EVENTS.with_borrow_mut(|sink| {
+            if let Some(events) = sink.as_mut() {
+                events.push((*event.metadata().level(), render.0));
             }
         });
     }
@@ -1263,14 +1542,29 @@ impl tracing::Subscriber for WarningCapture {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
-fn warnings_while<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+/// Start collecting this thread's events, dropping any left from before.
+fn start_capture() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
-        tracing::subscriber::set_global_default(WarningCapture)
+        tracing::subscriber::set_global_default(EventCapture)
             .expect("no other subscriber is installed in this test binary");
     });
-    WARNINGS.with_borrow_mut(|sink| *sink = Some(Vec::new()));
+    EVENTS.with_borrow_mut(|sink| *sink = Some(Vec::new()));
+}
+
+/// Stop collecting and return the events at `level` since [`start_capture`].
+fn finish_capture(level: tracing::Level) -> Vec<String> {
+    EVENTS
+        .with_borrow_mut(Option::take)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(event_level, _)| *event_level == level)
+        .map(|(_, event)| event)
+        .collect()
+}
+
+fn warnings_while<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+    start_capture();
     let value = body();
-    let warnings = WARNINGS.with_borrow_mut(Option::take).unwrap_or_default();
-    (value, warnings)
+    (value, finish_capture(tracing::Level::WARN))
 }
