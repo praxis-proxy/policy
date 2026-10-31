@@ -409,6 +409,12 @@ path = "benches/quota_hot_path.rs"
 harness = false
 required-features = ["experimental-quota"]
 
+[[bench]]
+name = "ratelimit_hot_path"
+path = "benches/ratelimit_hot_path.rs"
+harness = false
+required-features = ["experimental-ratelimit"]
+
 # Cache hit/miss against a real CEL resolver. Kept here so
 # apl-runtime does not depend back on this crate: that cycle makes
 # `cargo package` reject the published runtime checksum.
