@@ -128,6 +128,11 @@ pub struct PluginContextTable {
     /// Per-plugin local state, indexed by plugin ID (`Uuid`).
     #[serde(default)]
     pub local_states: HashMap<Uuid, HashMap<String, Value>>,
+
+    /// Whether this request has reached `ratelimit.pre_identity`. Set by the
+    /// engine and out of plugin reach, so a plugin cannot hide a skipped stage.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pre_identity_rate_limited: bool,
 }
 
 impl PluginContextTable {
@@ -181,5 +186,15 @@ impl PluginContextTable {
     /// Whether the table holds no per-plugin `local_state`.
     pub fn is_empty(&self) -> bool {
         self.local_states.is_empty()
+    }
+
+    /// Whether `ratelimit.pre_identity` was dispatched with this table.
+    pub(crate) fn pre_identity_rate_limited(&self) -> bool {
+        self.pre_identity_rate_limited
+    }
+
+    /// Record that `ratelimit.pre_identity` was dispatched with this table.
+    pub(crate) fn mark_pre_identity_rate_limited(&mut self) {
+        self.pre_identity_rate_limited = true;
     }
 }

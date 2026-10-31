@@ -71,6 +71,7 @@ fn the_route_table_is_the_accept_set() {
             "groups",
             "plugins",
             "authentication",
+            "rate_limits",
             "assertions",
             "response",
             "authorization",
@@ -333,6 +334,7 @@ fn the_route_table_records_who_reads_each_key() {
             "meta",
             "groups",
             "authentication",
+            "rate_limits",
             "assertions",
         ],
         "the route keys praxis-policy-core reads are its typed fields"
@@ -767,6 +769,82 @@ fn an_authentication_step_with_a_name_and_a_config_loads() {
         steps[0].config_override.is_some(),
         "the step must carry its config override"
     );
+}
+
+/// `rate_limits:` sits beside `authentication:` at all four levels and nowhere
+/// else.
+#[test]
+fn every_section_scope_accepts_the_rate_limits_block() {
+    for scope in [
+        ConfigScope::Global,
+        ConfigScope::EntityDefault,
+        ConfigScope::Group,
+        ConfigScope::Route,
+    ] {
+        assert!(
+            names(scope).contains(&"rate_limits"),
+            "`rate_limits` is missing from the `{}` table",
+            scope.label()
+        );
+    }
+    for scope in [ConfigScope::Document, ConfigScope::EngineSettings] {
+        assert!(
+            !names(scope).contains(&"rate_limits"),
+            "`rate_limits` must not be accepted at `{}`",
+            scope.label()
+        );
+    }
+}
+
+/// A `rate_limits:` block and its map-form steps accept what `authentication:`
+/// does, so neither can carry a key the other refuses.
+#[test]
+fn the_rate_limits_tables_are_the_accept_sets() {
+    assert_eq!(
+        names(ConfigScope::RateLimits),
+        vec!["steps", "replace_inherited"],
+        "a rate_limits block's accept set changed"
+    );
+    assert_eq!(
+        names(ConfigScope::RateLimitsStep),
+        vec!["name", "config"],
+        "a rate_limits step's accept set changed"
+    );
+}
+
+/// A misspelled object key fails at every level, naming the key it was meant
+/// to be.
+#[test]
+fn a_misspelled_rate_limits_object_key_is_rejected() {
+    for (path, yaml) in [
+        (
+            "routes[]",
+            "routes:\n  - tool: get_weather\n    rate_limits:\n      replace_inherted: true\n      \
+             steps: [edge]\n",
+        ),
+        (
+            "global",
+            "global:\n  rate_limits:\n    replace_inherted: true\n    steps: [edge]\n",
+        ),
+        (
+            "global.defaults.http",
+            "global:\n  defaults:\n    http:\n      rate_limits:\n        replace_inherted: \
+             true\n        steps: [edge]\n",
+        ),
+        (
+            "groups.hr",
+            "groups:\n  hr:\n    rate_limits:\n      replace_inherted: true\n      steps: \
+             [edge]\n",
+        ),
+    ] {
+        let err = praxis_policy_core::config::parse_config(yaml)
+            .expect_err("a misspelled rate_limits key must be rejected")
+            .to_string();
+        assert!(
+            err.contains("replace_inherted") && err.contains("replace_inherited"),
+            "the error at {path} must name the key and its accepted spelling: {err}"
+        );
+    }
 }
 
 /// `assertions:` sits beside `authentication:` at all four levels, so a
