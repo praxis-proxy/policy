@@ -18,6 +18,8 @@ mod delegation_abuse;
 mod elicitation_abuse;
 mod match_evasion;
 mod payloads;
+#[cfg(feature = "experimental-ratelimit")]
+mod rate_limit_evasion;
 mod redaction;
 mod smoke;
 mod support;
