@@ -115,6 +115,9 @@ The load rejects:
 
 - `hooks:` that is not exactly one of the two rate-limit hooks;
 - `on_error` other than `fail`, and `mode` other than `sequential`;
+- a limit `seconds` above 9,223,372,036,854. Limitador stores expiry as a
+  `u64` Unix timestamp in microseconds; this cap reserves half its range for
+  the current timestamp, so an oversized window fails at load;
 - a pre-identity binding to an identity attribute, since none is set before
   identity runs;
 - a pre-identity counter keyed on an attribute the caller picks, or that a

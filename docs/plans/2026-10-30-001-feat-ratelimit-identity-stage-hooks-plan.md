@@ -45,6 +45,7 @@ The engine already has one structural dispatch list in policy mode, `authenticat
   closed.
 - R7. Load-time safety:
   - reject `on_error` other than `fail`, and any `mode` other than `sequential`, for `ratelimit/limitador`;
+  - reject limit windows above 9,223,372,036,854 seconds, leaving half of Limitador's `u64` microsecond expiry range for the Unix timestamp;
   - refuse to load `ratelimit/limitador` when the build uses `panic = "abort"`, until Limitador returns condition errors instead of panicking;
   - at `pre_identity`, reject counter variables bound to caller-controlled attributes (`http.request_headers.*`, `http.query*`, `http.path`); at `post_identity`, warn instead;
   - validate every `rate_limits:` step's merged override config through the factory at load, and reject the load if it fails;

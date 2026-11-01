@@ -37,6 +37,10 @@ const IDENTITY_DERIVED_ATTRIBUTES: &[&str] = &[
 /// on an unbounded attribute warns at load.
 pub(super) const DEFAULT_COUNTER_CAPACITY: u64 = 10_000; // qualified counters
 
+/// Limitador stores expiry as a u64 Unix timestamp in microseconds. Keeping
+/// windows within half that range leaves room to add the current timestamp.
+const MAX_WINDOW_SECONDS: u64 = 9_223_372_036_854; // half the u64 microsecond range
+
 /// Bag attributes the caller picks freely, or a host commonly fills from
 /// caller input, so a counter keyed on one can be reset by changing it. An
 /// entry ending in `.` matches every key under it.
@@ -191,6 +195,11 @@ impl RateLimitConfig {
                     "limits[{index}] max and seconds must be greater than zero"
                 ));
             }
+            if limit.seconds > MAX_WINDOW_SECONDS {
+                return Err(format!(
+                    "limits[{index}] seconds must be at most {MAX_WINDOW_SECONDS}"
+                ));
+            }
         }
         Ok(())
     }
@@ -216,7 +225,9 @@ fn matches_any(attribute: &str, entries: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{RateLimitConfig, Stage, is_caller_controlled, is_identity_derived};
+    use super::{
+        MAX_WINDOW_SECONDS, RateLimitConfig, Stage, is_caller_controlled, is_identity_derived,
+    };
 
     #[test]
     fn validate_rejects_each_invalid_field() -> Result<(), serde_json::Error> {
@@ -316,6 +327,33 @@ mod tests {
             "limits": [{"max": 1, "seconds": 1}],
         }))?;
         assert_eq!(config.validate(), Ok(()), "a minimal config must validate");
+        Ok(())
+    }
+
+    #[test]
+    fn validate_bounds_windows_to_safe_expiry_range() -> Result<(), serde_json::Error> {
+        for (seconds, accepted) in [
+            (MAX_WINDOW_SECONDS, true),
+            (MAX_WINDOW_SECONDS + 1, false),
+            (u64::MAX, false),
+        ] {
+            let config: RateLimitConfig = serde_json::from_value(serde_json::json!({
+                "namespace": "n",
+                "limits": [{"max": 1, "seconds": seconds}],
+            }))?;
+            let result = config.validate();
+            if accepted {
+                assert_eq!(result, Ok(()), "{seconds} seconds must be accepted");
+            } else {
+                assert_eq!(
+                    result,
+                    Err(format!(
+                        "limits[0] seconds must be at most {MAX_WINDOW_SECONDS}"
+                    )),
+                    "{seconds} seconds must be rejected"
+                );
+            }
+        }
         Ok(())
     }
 

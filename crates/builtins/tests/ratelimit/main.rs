@@ -1460,6 +1460,36 @@ fn invalid_configs_fail_during_plugin_construction() {
     }
 }
 
+#[tokio::test]
+async fn maximum_safe_window_loads_and_checks_a_request() {
+    let policy = POLICY.replace("seconds: 60", "seconds: 9223372036854");
+    let manager = engine_with(&policy).await;
+
+    let result = verdict_request(&manager, request_at_path("alice", "GET", "/other")).await;
+    assert!(
+        result.0,
+        "the maximum safe window must count a matching request: {result:?}"
+    );
+}
+
+#[test]
+fn oversized_windows_fail_to_load_in_base_and_route_override_configs() {
+    let base = POLICY.replacen("seconds: 60", "seconds: 9223372036855", 1);
+    let override_policy = ROUTE_OVERRIDE_POLICY.replacen(
+        "                seconds: 60",
+        "                seconds: 9223372036855",
+        1,
+    );
+
+    for (label, policy) in [("base", base), ("route override", override_policy)] {
+        let error = load_error(&policy);
+        assert!(
+            error.contains("limits[0] seconds must be at most 9223372036854"),
+            "{label} config must fail at load: {error}"
+        );
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

@@ -51,6 +51,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `provenance.*`, `request.*`), and refuses to load in a `panic = "abort"`
   build. A matching limit whose computed counter key cannot resolve denies
   with `ratelimit.check_failed` (503) before this limiter changes its counters.
+  Windows above 9,223,372,036,854 seconds fail at load, before Limitador
+  could overflow its microsecond expiry timestamp during a request.
   Counters are per instance and reset on restart or reload. It is excluded
   from `builtins`.
 - **Unavailable CIBA approval state returns `-32122`.** A store read or write

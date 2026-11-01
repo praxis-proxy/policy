@@ -111,7 +111,9 @@ The HTTP prototype's configuration maps to the proposed contract as follows:
 The HTTP prototype has in-process and reference-host tests; real-gateway
 verification remains outstanding. The
 [prototype README](../../crates/builtins/src/plugins/ratelimit/README.md)
-documents the current implementation.
+documents the current implementation. Its `seconds` field is capped at
+9,223,372,036,854 so the in-memory store can add the current Unix timestamp
+to the window after converting both to microseconds.
 
 ## Responsibilities
 
