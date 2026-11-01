@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use limitador::RateLimiter;
 use limitador::counter::Counter;
 use limitador::limit::{Context, Expression, Limit, Namespace, Predicate};
+use limitador_cel::{Context as CelContext, ExecutionError, Value};
 use praxis_policy_apl_cmf::constants::{
     BAG_HTTP_CLIENT_ADDRESS, BAG_HTTP_METHOD, BAG_SUBJECT_ID, DETAIL_HTTP_STATUS,
 };
@@ -81,7 +82,9 @@ pub(super) struct RateLimit {
     check_failure_log: IntervalLog,
     check_lock: Mutex<()>,
     config: PluginConfig,
+    condition_rules: Vec<Vec<ConditionCheck>>,
     computed_rules: Vec<ComputedCounterRule>,
+    has_limit_conditions: bool,
     limiter: RateLimiter,
     macro_locals: BTreeSet<String>,
     namespace: Namespace,
@@ -91,8 +94,12 @@ pub(super) struct RateLimit {
 /// A rule with counter expressions that can fail to produce a key at runtime.
 struct ComputedCounterRule {
     index: usize,
-    limit: Limit,
     variables: Vec<Expression>,
+}
+
+struct ConditionCheck {
+    predicate: Predicate,
+    with_limit: Option<limitador_cel::IdedExpr>,
 }
 
 /// Admits one log line per interval and counts the ones it holds back.
@@ -141,7 +148,9 @@ impl RateLimit {
 
         let namespace: Namespace = typed.namespace.into();
         let limiter = RateLimiter::new(typed.counter_capacity);
+        let mut condition_rules = Vec::with_capacity(typed.limits.len());
         let mut computed_rules = Vec::new();
+        let mut has_limit_conditions = false;
         let mut macro_locals = BTreeSet::new();
         let mut referenced = BTreeSet::new();
         let mut counter_keys = BTreeSet::new();
@@ -189,6 +198,31 @@ impl RateLimit {
                 .map_err(|error| {
                     config_error(name, format!("limits[{index}] invalid condition: {error}"))
                 })?;
+            let mut checks = BTreeMap::new();
+            for (source, predicate) in entry.conditions.iter().zip(&conditions) {
+                let references_limit = Variables::parse(source)
+                    .map_err(|error| config_error(name, error.to_string()))?
+                    .free
+                    .contains("limit");
+                has_limit_conditions |= references_limit;
+                let with_limit = if references_limit {
+                    Some(
+                        limitador_cel::parser::Parser::new()
+                            .parse(source)
+                            .map_err(|error| config_error(name, error.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+                checks.insert(
+                    source.as_str(),
+                    ConditionCheck {
+                        predicate: predicate.clone(),
+                        with_limit,
+                    },
+                );
+            }
+            condition_rules.push(checks.into_values().collect());
             let variables: Vec<Expression> = entry
                 .variables
                 .iter()
@@ -220,7 +254,6 @@ impl RateLimit {
             if !computed_variables.is_empty() {
                 computed_rules.push(ComputedCounterRule {
                     index,
-                    limit,
                     variables: computed_variables,
                 });
             }
@@ -238,7 +271,9 @@ impl RateLimit {
             check_failure_log: IntervalLog::default(),
             check_lock: Mutex::new(()),
             config,
+            condition_rules,
             computed_rules,
+            has_limit_conditions,
             limiter,
             macro_locals,
             namespace,
@@ -247,9 +282,70 @@ impl RateLimit {
     }
 
     /// Refuse a matching rule that cannot form every configured counter key.
-    fn check_computed_counter_keys(&self, context: &Context<'_>) -> Result<(), String> {
+    fn matching_conditions(
+        &self,
+        context: &Context<'_>,
+        values: Option<&HashMap<String, String>>,
+    ) -> Result<Vec<bool>, String> {
+        let mut cel_context = None;
+        let mut matches = Vec::with_capacity(self.condition_rules.len());
+        for (index, conditions) in self.condition_rules.iter().enumerate() {
+            let mut matched = true;
+            for condition in conditions {
+                let result = if let Some(expression) = &condition.with_limit {
+                    let Some(values) = values else {
+                        return Err("limit condition context is unavailable".to_owned());
+                    };
+                    let scoped = cel_context.get_or_insert_with(|| {
+                        let mut scoped = CelContext::default();
+                        for (name, value) in values {
+                            scoped.add_variable_from_value(name.clone(), value.clone());
+                        }
+                        scoped.add_variable_from_value(
+                            "limit",
+                            Value::Map(limitador_cel::objects::Map::from(HashMap::from([
+                                ("name", Value::Null),
+                                ("id", Value::Null),
+                            ]))),
+                        );
+                        scoped
+                    });
+                    match scoped.resolve(expression) {
+                        Ok(Value::Bool(value)) => Ok(value),
+                        Ok(value) => Err(format!("unexpected condition value: {value:?}")),
+                        Err(ExecutionError::NoSuchKey(_)) => Ok(false),
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    condition
+                        .predicate
+                        .test(context)
+                        .map_err(|error| error.to_string())
+                };
+                match result {
+                    Ok(true) => {},
+                    Ok(false) => {
+                        matched = false;
+                        break;
+                    },
+                    Err(error) => return Err(format!("limits[{index}] condition failed: {error}")),
+                }
+            }
+            matches.push(matched);
+        }
+        Ok(matches)
+    }
+
+    fn check_computed_counter_keys(
+        &self,
+        context: &Context<'_>,
+        matching_conditions: &[bool],
+    ) -> Result<(), String> {
         for rule in &self.computed_rules {
-            if !rule.limit.applies(context) {
+            let matches = matching_conditions
+                .get(rule.index)
+                .ok_or_else(|| format!("limits[{}] condition result is missing", rule.index))?;
+            if !matches {
                 continue;
             }
             for variable in &rule.variables {
@@ -437,13 +533,18 @@ impl HookHandler<HttpHook> for RateLimit {
         for local in &self.macro_locals {
             values.entry(local.clone()).or_default();
         }
+        let cel_values = self.has_limit_conditions.then(|| values.clone());
         let context: Context<'_> = values.into();
+        let matching_conditions = match self.matching_conditions(&context, cel_values.as_ref()) {
+            Ok(matched) => matched,
+            Err(error) => return self.deny_check_failed(&error),
+        };
         // Limitador treats a missing key inside a counter expression as no
         // counter, even when the rule's conditions match. Deny before any
         // counter changes, including when another matching rule has a key.
         if !self.computed_rules.is_empty() {
             let resolved = catch_unwind(AssertUnwindSafe(|| {
-                self.check_computed_counter_keys(&context)
+                self.check_computed_counter_keys(&context, &matching_conditions)
             }));
             match resolved {
                 Ok(Ok(())) => {},

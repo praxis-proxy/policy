@@ -3605,11 +3605,77 @@ pub(crate) struct RateLimitStepSite {
     pub(crate) section: String,
 }
 
+/// A request-time step keeps its source borrowed until an override lookup or
+/// error needs an owned site.
+pub(crate) struct RateLimitStepRef<'a> {
+    source: SectionSource<'a>,
+    index: usize,
+    pub(crate) step: &'a RouteRateLimitStep,
+}
+
+impl RateLimitStepRef<'_> {
+    pub(crate) fn site(
+        &self,
+        config: &PolicyConfig,
+        route: Option<&RouteEntry>,
+    ) -> RateLimitStepSite {
+        let route_index = if self.source == SectionSource::Route {
+            route.and_then(|route| {
+                config
+                    .routes
+                    .iter()
+                    .position(|candidate| std::ptr::eq(candidate, route))
+            })
+        } else {
+            None
+        };
+        RateLimitStepSite {
+            index: self.index,
+            section: rate_limit_section_label(self.source, route_index),
+        }
+    }
+}
+
+pub(crate) fn rate_limit_step_refs_for_route<'a>(
+    config: &'a PolicyConfig,
+    matched: Option<&MatchedRoute<'a>>,
+    request_entity_type: Option<&'a str>,
+) -> Vec<RateLimitStepRef<'a>> {
+    rate_limit_step_refs(config, matched.map(|m| m.route), request_entity_type)
+}
+
+fn rate_limit_step_refs<'a>(
+    config: &'a PolicyConfig,
+    route: Option<&'a RouteEntry>,
+    request_entity_type: Option<&'a str>,
+) -> Vec<RateLimitStepRef<'a>> {
+    let mut steps = Vec::new();
+    for layer in rate_limits_layers(config, route, request_entity_type) {
+        if layer.config.replace_inherited {
+            steps.clear();
+        }
+        steps.extend(
+            layer
+                .config
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| RateLimitStepRef {
+                    source: layer.source,
+                    index,
+                    step,
+                }),
+        );
+    }
+    steps
+}
+
 /// The `rate_limits:` steps in force for a request, in dispatch order, each
 /// with the site it is declared at.
 ///
 /// `request_entity_type` lets `global.defaults.<entity>` apply to a request
 /// that matched no route.
+#[cfg(test)]
 pub(crate) fn rate_limit_steps_for_route<'a>(
     config: &'a PolicyConfig,
     matched: Option<&MatchedRoute<'a>>,
@@ -3623,29 +3689,10 @@ fn rate_limit_steps<'a>(
     route: Option<&'a RouteEntry>,
     request_entity_type: Option<&'a str>,
 ) -> Vec<(RateLimitStepSite, &'a RouteRateLimitStep)> {
-    let route_index = route.and_then(|route| {
-        config
-            .routes
-            .iter()
-            .position(|candidate| std::ptr::eq(candidate, route))
-    });
-    let mut steps: Vec<(RateLimitStepSite, &RouteRateLimitStep)> = Vec::new();
-    for layer in rate_limits_layers(config, route, request_entity_type) {
-        if layer.config.replace_inherited {
-            steps.clear();
-        }
-        let section = rate_limit_section_label(layer.source, route_index);
-        steps.extend(layer.config.steps.iter().enumerate().map(|(index, step)| {
-            (
-                RateLimitStepSite {
-                    index,
-                    section: section.clone(),
-                },
-                step,
-            )
-        }));
-    }
-    steps
+    rate_limit_step_refs(config, route, request_entity_type)
+        .into_iter()
+        .map(|resolved| (resolved.site(config, route), resolved.step))
+        .collect()
 }
 
 /// Every `rate_limits:` step that carries a `config:` override, at every scope,

@@ -581,9 +581,10 @@ fn rate_limit_entries(
     unavailable_warned: &AtomicBool,
 ) -> Result<Vec<crate::registry::HookEntry>, RouteResolutionError> {
     let mut selected: Vec<crate::registry::HookEntry> = Vec::new();
-    for (site, step) in
-        config::rate_limit_steps_for_route(policy_config, matched, request_entity_type)
+    for resolved in
+        config::rate_limit_step_refs_for_route(policy_config, matched, request_entity_type)
     {
+        let step = resolved.step;
         let declares_this_stage = policy_config
             .plugins
             .iter()
@@ -593,6 +594,7 @@ fn rate_limit_entries(
             continue;
         }
         let entry = if step.config_override.is_some() {
+            let site = resolved.site(policy_config, matched.map(|m| m.route));
             snapshot
                 .rate_limit_overrides
                 .get(&site)
@@ -610,6 +612,7 @@ fn rate_limit_entries(
         };
         let Some(entry) = entry else {
             if !unavailable_warned.swap(true, Ordering::AcqRel) {
+                let site = resolved.site(policy_config, matched.map(|m| m.route));
                 error!(
                     plugin = %step.name,
                     section = %site.section,
@@ -4031,13 +4034,13 @@ impl PolicyEngine {
             .then(|| resolve_http_route(policy_config, extensions))
             .flatten();
         let pre_identity = crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY;
-        let skipped: Vec<&str> = config::rate_limit_steps_for_route(
+        let skipped: Vec<&str> = config::rate_limit_step_refs_for_route(
             policy_config,
             http_matched.as_ref(),
             Some(ENTITY_HTTP),
         )
         .into_iter()
-        .map(|(_, step)| step.name.as_str())
+        .map(|resolved| resolved.step.name.as_str())
         .filter(|name| {
             policy_config
                 .plugins

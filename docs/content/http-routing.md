@@ -145,8 +145,7 @@ output hides it; serialized output, which audit sinks read, includes it.
 One /64 is one key. A client holding a larger IPv6 allocation, such as a /48,
 can rotate across its /64s and get a fresh counter for each, and enough keys
 fill the counter store. Pair a per-address limit with a coarser one, for
-example a counter keyed on a /48 the host derives and supplies, or a limit
-with no `variables` shared by every caller.
+example a limit with no `variables` shared by every caller.
 
 Denials. A rate-limit denial comes back as `PipelineResult.violation`, with
 the HTTP status in `proto_error_code`. Stop the request there: before identity

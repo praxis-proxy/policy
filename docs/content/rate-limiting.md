@@ -245,15 +245,14 @@ attribute raises a load-time warning.
 
 Each IPv6 /64 gets its own address key. A client with a larger allocation
 can rotate among /64s. Pair a per-address rule with a coarser rule, such
-as a counter on a host-provided /48 or one with no `variables`.
+as one with no `variables`.
 
 Limitador can panic on a condition that fails at request time, such as
-`int(subject_id)` for a non-numeric subject. The plugin catches the panic
-and denies with `ratelimit.check_failed`, but the process panic hook still
-runs for each triggering request. Its output is outside the plugin's
-once-per-minute log limit. Avoid conditions that can fail on request data;
-hosts may install a throttling panic hook. A build with `panic = "abort"`
-cannot contain the panic, so the plugin refuses to load in that build.
+`int(subject_id)` for a non-numeric subject. The plugin checks conditions
+before calling Limitador and denies evaluation errors with
+`ratelimit.check_failed`. A `catch_unwind` guard contains unexpected
+Limitador panics, which still invoke the host's panic hook. A build with
+`panic = "abort"` cannot contain a panic, so the plugin refuses to load.
 
 `quota/limitador` serves a different purpose: it checks and reports token
 budgets at `cmf.llm_input` and `cmf.llm_output` against a remote Limitador

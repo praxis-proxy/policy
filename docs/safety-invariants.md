@@ -155,8 +155,9 @@ dispatch mode:
 
 `ratelimit/limitador` refuses `on_error` other than `fail` and `mode` other
 than `sequential` at load, in both modes, so no I4 configured default can
-admit a request the limiter did not check. Its contained Limitador panic
-denies with `ratelimit.check_failed`, and the factory refuses to load in a
+admit a request the limiter did not check. Condition errors deny with
+`ratelimit.check_failed` before Limitador can panic; its remaining panic guard
+also denies, and the factory refuses to load in a
 `panic = "abort"` build, where that panic could not be contained.
 Tests: `a_rate_limit_denial_returns_the_plugin_violation_unchanged` and
 `an_override_config_the_factory_rejects_fails_the_load` in
@@ -164,9 +165,10 @@ Tests: `a_rate_limit_denial_returns_the_plugin_violation_unchanged` and
 in `crates/ppe-core/src/config.rs`;
 `on_error_other_than_fail_and_non_sequential_modes_fail_to_load`,
 `a_condition_evaluation_error_denies_as_check_failed`,
-`a_missing_client_address_denies_before_any_counter_changes` and
+`a_missing_client_address_denies_before_any_counter_changes` in
+`crates/builtins/tests/ratelimit/main.rs`; and
 `an_aborting_build_refuses_to_load` in
-`crates/builtins/tests/ratelimit/main.rs`.
+`crates/builtins/src/plugins/ratelimit/factory.rs`.
 
 ## Catalog
 

@@ -579,7 +579,18 @@ async fn a_condition_evaluation_error_denies_as_check_failed() {
     );
     assert!(
         verdict(&manager, Some("7"), Some("GET")).await.0,
-        "the limiter must keep serving after a contained evaluation panic"
+        "the limiter must keep serving after a condition evaluation error"
+    );
+
+    let with_metadata = POLICY.replace(
+        "subject_id == 'alice'",
+        "limit.name == null && int(subject_id) > 1",
+    );
+    let manager = engine_with(&with_metadata).await;
+    assert_eq!(
+        verdict(&manager, Some("alice"), Some("GET")).await,
+        (false, Some((CODE_CHECK_FAILED.to_owned(), Some(503)))),
+        "a condition using limit metadata must fail before Limitador unwraps the error"
     );
 }
 
@@ -1170,7 +1181,9 @@ async fn a_persistent_check_failure_logs_once_per_interval() {
         "twenty failures inside one interval log once: {errors:?}"
     );
     assert!(
-        failures[0].contains("app-ratelimit") && failures[0].contains("panicked"),
+        failures[0].contains("app-ratelimit")
+            && failures[0].contains("condition failed")
+            && !failures[0].contains("panicked"),
         "the one log names the plugin and the cause: {failures:?}"
     );
 }
