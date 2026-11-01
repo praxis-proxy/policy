@@ -98,16 +98,22 @@ pub fn vault(transport: FakeTransport, api_key: &str) -> FakeTransport {
 
 /// Calls one client address may make through the edge limiter of
 /// [`rate_limit`], with or without a valid token.
+///
+/// [`rate_limit`]: rate_limit
 #[cfg(feature = "experimental-ratelimit")]
 pub const EDGE_LIMIT: u64 = 5; // requests per client address per minute
 
 /// Calls one subject may make through the per-user limiter of
 /// [`rate_limit`].
+///
+/// [`rate_limit`]: rate_limit
 #[cfg(feature = "experimental-ratelimit")]
 pub const USER_LIMIT: u64 = 3; // requests per subject per minute
 
 /// Calls one subject may make to `get_directory`, whose route stacks its own
 /// limiter on the global ones in [`rate_limit`].
+///
+/// [`rate_limit`]: rate_limit
 #[cfg(feature = "experimental-ratelimit")]
 pub const DIRECTORY_LIMIT: u64 = 1; // requests per subject per minute
 
@@ -126,6 +132,9 @@ pub fn rate_limit() -> String {
 /// counts per `subject.id`. A `tool: get_directory` route adds
 /// `directory-limits` at [`DIRECTORY_LIMIT`]. Every other tool matches no
 /// route and runs on global policy, which allows it.
+///
+/// [`rate_limit`]: rate_limit
+/// [`DIRECTORY_LIMIT`]: DIRECTORY_LIMIT
 #[cfg(feature = "experimental-ratelimit")]
 #[must_use]
 pub fn rate_limit_with(edge_limit: u64, user_limit: u64) -> String {

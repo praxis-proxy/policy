@@ -44,7 +44,7 @@ fn check_dispatch(config: &PluginConfig) -> Result<Stage, Box<PluginError>> {
     check_dispatch_with(config, cfg!(panic = "abort"))
 }
 
-/// [`check_dispatch`] for a build that `aborts` on panic or unwinds.
+/// Validate the stage using the supplied panic behavior.
 fn check_dispatch_with(config: &PluginConfig, aborts: bool) -> Result<Stage, Box<PluginError>> {
     let name = config.name.as_str();
     // Limitador 0.14 panics on a condition evaluation error. The handler

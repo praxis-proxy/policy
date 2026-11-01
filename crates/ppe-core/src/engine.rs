@@ -378,7 +378,7 @@ fn http_routes_declaring_authentication(config: &PolicyConfig) -> Arc<[String]> 
 }
 
 /// The names of the `http:` routes that declare `rate_limits:`, for the same
-/// warning [`http_routes_declaring_authentication`] feeds.
+/// missing-path warning as authentication.
 fn http_routes_declaring_rate_limits(config: &PolicyConfig) -> Arc<[String]> {
     http_routes_declaring(config, |route| route.rate_limits.is_some())
 }
@@ -438,20 +438,15 @@ enum RateLimitStage {
     PostIdentity,
 }
 
-/// A `rate_limits:` step's own plugin instance, built once per config so its
-/// state lasts the whole config generation.
-///
-/// Built at load rather than on a route-cache miss: the cache is per entity
-/// name, skips memoization when full and is cleared on every registration, so a
-/// per-miss instance would let a caller reset or split a limiter's counters.
+// A route-cache miss must not rebuild an override and reset its counters: the
+// cache is bounded and is cleared on registration changes.
 struct RateLimitOverride {
     handlers: Vec<(&'static str, Arc<dyn AnyHookHandler>)>,
     plugin_ref: Arc<PluginRef>,
 }
 
 impl RateLimitOverride {
-    /// The entry serving `hook_name`, matched on the hook name rather than
-    /// the handler's family, which is `http` for both rate-limit hooks.
+    /// The handler entry for `hook_name`, if this override serves it.
     fn entry_for(&self, hook_name: &str) -> Option<crate::registry::HookEntry> {
         self.handlers
             .iter()
@@ -487,8 +482,7 @@ fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Valu
 /// override, through the plugin's own factory.
 ///
 /// Must run with no engine lock held, for the reason
-/// [`create_plugin_instances`] gives. `factories` is the slice
-/// [`resolve_factories`] returned for `config.plugins`.
+/// [`create_plugin_instances`] gives.
 ///
 /// # Errors
 ///
@@ -496,6 +490,8 @@ fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Valu
 /// rejects the merged config, or an instance with no handler for a rate-limit
 /// hook the plugin declares: falling back to the base instance would run the
 /// limiter with a config nobody wrote.
+///
+/// [`create_plugin_instances`]: create_plugin_instances
 fn create_rate_limit_overrides(
     config: &PolicyConfig,
     factories: &[Arc<dyn crate::factory::PluginFactory>],
@@ -573,6 +569,8 @@ fn create_rate_limit_overrides(
 /// [`RouteResolutionError::RateLimitUnavailable`] when a step's plugin declares
 /// this stage but the snapshot has no instance for it, as after the plugin is
 /// unregistered: skipping it would admit unlimited traffic.
+///
+/// [`RouteResolutionError::RateLimitUnavailable`]: RouteResolutionError::RateLimitUnavailable
 fn rate_limit_entries(
     snapshot: &RuntimeSnapshot,
     policy_config: &PolicyConfig,
@@ -793,18 +791,12 @@ struct RuntimeSnapshot {
     /// hooks' counterpart of the warning above.
     http_routes_declaring_rate_limits: Arc<[String]>,
 
-    /// Whether any `rate_limits:` block lists a pre-identity plugin. Gates the
-    /// host conformance check, so a config without one pays nothing for it.
+    // Keep configured hook presence after unregistration so the empty-registry
+    // path cannot allow unchecked requests.
     declares_pre_identity_rate_limits: bool,
-
-    /// Whether any `rate_limits:` block lists a post-identity plugin. With its
-    /// pre-identity counterpart, keeps a hook whose limiter was unregistered
-    /// from allowing on the empty-registry fast path.
     declares_post_identity_rate_limits: bool,
 
-    /// One instance per `rate_limits:` step that carries a `config:` override.
-    /// Built with the config and carried by every snapshot cloned from it, so
-    /// a registration or a cache clear never replaces a limiter's state.
+    // Snapshot ownership keeps counters across route-cache and registry changes.
     rate_limit_overrides: RateLimitOverrides,
 
     /// Whether any level declares an `assertions:` block. False for every
@@ -1223,7 +1215,6 @@ fn warn_on_dropped_inherited_authentication(cfg: &PolicyConfig) {
 
 /// Report every route whose inherited `rate_limits:` steps a
 /// `replace_inherited: true` drops, at a section or on the route itself.
-/// Called beside [`warn_on_dropped_inherited_authentication`].
 fn warn_on_dropped_inherited_rate_limits(cfg: &PolicyConfig) {
     for finding in crate::config::dropped_inherited_rate_limits(cfg) {
         warn!(
@@ -1239,7 +1230,7 @@ fn warn_on_dropped_inherited_rate_limits(cfg: &PolicyConfig) {
 }
 
 /// Report every route whose folded `rate_limits:` names one base limiter more
-/// than once. Called beside [`warn_on_dropped_inherited_rate_limits`].
+/// than once.
 fn warn_on_rate_limits_listed_twice(cfg: &PolicyConfig) {
     for finding in crate::config::rate_limits_listed_twice(cfg) {
         warn!(
@@ -1254,7 +1245,7 @@ fn warn_on_rate_limits_listed_twice(cfg: &PolicyConfig) {
 }
 
 /// Report every route that runs a post-identity limiter but resolves no
-/// authentication. Called beside [`warn_on_dropped_inherited_rate_limits`].
+/// authentication.
 fn warn_on_rate_limits_without_authentication(cfg: &PolicyConfig) {
     for finding in crate::config::rate_limits_without_authentication(cfg) {
         warn!(

@@ -583,15 +583,14 @@ pub struct RouteEntry {
     pub assertions: Option<crate::assertions::AssertionsConfig>,
 }
 
-/// A parsed `rate_limits:` block. It shares the `authentication:` shape, so
-/// the two blocks parse, stack and report through the same code.
+/// A parsed `rate_limits:` block, with the same list and object forms as
+/// `authentication:`.
 pub type RouteRateLimitConfig = crate::identity::RouteIdentityConfig;
 
 /// One `rate_limits:` step: a plugin name and an optional `config:` override.
 pub type RouteRateLimitStep = crate::identity::RouteIdentityStep;
 
-/// The YAML spelling of one step-list block, which is all that differs between
-/// `authentication:` and `rate_limits:`.
+/// Key names and an error label for a structural step-list block.
 struct StepListBlock {
     /// The block's key, as error messages name it.
     key: &'static str,
@@ -3509,6 +3508,8 @@ fn authentication_layers<'a>(
 /// The `rate_limits:` layers that apply to a route, stacked the way
 /// [`authentication_layers`] stacks. `request_entity_type` lets an entity
 /// default reach a request that matched no route, as for `assertions:`.
+///
+/// [`authentication_layers`]: authentication_layers
 fn rate_limits_layers<'a>(
     config: &'a PolicyConfig,
     route: Option<&'a RouteEntry>,
@@ -3701,7 +3702,7 @@ enum RateLimitScope<'a> {
 }
 
 impl RateLimitScope<'_> {
-    /// How a [`RateLimitStepSite`] names the section.
+    /// Name the section for a rate-limit step.
     fn site_label(self) -> String {
         match self {
             Self::EntityDefault(entity_type) => format!("global.defaults.{entity_type}"),
@@ -3749,8 +3750,8 @@ fn rate_limit_blocks(config: &PolicyConfig) -> Vec<(RateLimitScope<'_>, &RouteRa
         .collect()
 }
 
-/// How a [`RateLimitStepSite`] names a layer. The route is named by its index
-/// rather than its selector, since two routes may share one.
+/// Name a rate-limit step's layer. A route uses its index because two routes
+/// may share one selector.
 fn rate_limit_section_label(source: SectionSource<'_>, route_index: Option<usize>) -> String {
     match (source, route_index) {
         (SectionSource::Route, Some(i)) => format!("routes[{i}]"),
@@ -3860,10 +3861,9 @@ pub(crate) type DroppedRateLimits = DroppedAuthentication;
 /// Every route that loses inherited `rate_limits:` steps to a
 /// `replace_inherited: true`, one finding per route.
 ///
-/// Unlike [`dropped_inherited_authentication`], a route's own flag is reported
-/// too: a dropped limiter removes protection the sections above meant every
-/// route to keep, so it is worth hearing about wherever it was written. When
-/// the route replaces, the finding names the route, since its flag decides
+/// A route's own flag is reported too: dropping inherited limits removes
+/// protection the sections above intended for every route. When the route
+/// replaces, the finding names the route, since its flag decides
 /// what survives; otherwise it names the first section that dropped steps.
 pub(crate) fn dropped_inherited_rate_limits(config: &PolicyConfig) -> Vec<DroppedRateLimits> {
     let mut findings: Vec<DroppedRateLimits> = Vec::new();

@@ -37,8 +37,8 @@ const IDENTITY_DERIVED_ATTRIBUTES: &[&str] = &[
 /// on an unbounded attribute warns at load.
 pub(super) const DEFAULT_COUNTER_CAPACITY: u64 = 10_000; // qualified counters
 
-/// Limitador stores expiry as a u64 Unix timestamp in microseconds. Keeping
-/// windows within half that range leaves room to add the current timestamp.
+// Limitador adds the window to a u64 Unix timestamp in microseconds. Reserving
+// half the range for the timestamp keeps that addition representable.
 const MAX_WINDOW_SECONDS: u64 = 9_223_372_036_854; // half the u64 microsecond range
 
 /// Bag attributes the caller picks freely, or a host commonly fills from

@@ -1708,7 +1708,7 @@ fn start_capture() {
     EVENTS.with_borrow_mut(|sink| *sink = Some(Vec::new()));
 }
 
-/// Stop collecting and return the events at `level` since [`start_capture`].
+/// Stop collecting and return the events at `level` since capture began.
 fn finish_capture(level: tracing::Level) -> Vec<String> {
     EVENTS
         .with_borrow_mut(Option::take)

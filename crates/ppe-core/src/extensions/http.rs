@@ -28,10 +28,9 @@ pub struct SecretHeaderProvenance {
 
 /// The trusted client address a host supplies, normalized on construction.
 ///
-/// The inner value is private so every address passes through
-/// [`ClientAddress::parse`]. An IPv4 address, or an IPv4-mapped IPv6 address,
-/// becomes its dotted form. Any other IPv6 address becomes its /64 prefix, as
-/// in `2001:db8:1:2::/64`, because one subscriber usually holds a whole /64.
+/// An IPv4 address, or an IPv4-mapped IPv6 address, becomes its dotted form.
+/// Any other IPv6 address becomes its /64 prefix, such as
+/// `2001:db8:1:2::/64`, because one subscriber usually holds a whole /64.
 /// A port is stripped, and the `<prefix>/64` form is accepted so a serialized
 /// address reads back unchanged. An empty or unparseable value, or any other
 /// prefix length, leaves the address unset.
@@ -260,6 +259,8 @@ impl HttpExtension {
     ///
     /// The value is normalized as [`ClientAddress::parse`] describes, and an
     /// unparseable one clears the address.
+    ///
+    /// [`ClientAddress::parse`]: ClientAddress::parse
     pub fn set_client_address(&mut self, raw: &str) {
         self.client_address = ClientAddress::parse(raw);
     }
