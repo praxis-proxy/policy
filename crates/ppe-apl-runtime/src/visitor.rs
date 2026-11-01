@@ -1763,6 +1763,16 @@ fn validate_metadata_fetch_sources(
         let Some(plugin) = engine.get_plugin(&name) else {
             continue;
         };
+        if !engine
+            .find_plugin_entries(&name)
+            .iter()
+            .any(|(hook_name, _)| hook_name == praxis_policy_core::metadata::HOOK_METADATA_FETCH)
+        {
+            return Err(format!(
+                "{location}: metadata source `{name}` declares `metadata.fetch` but has no registered handler"
+            )
+            .into());
+        }
         let mode = plugin.mode();
         if mode != PluginMode::Sequential {
             return Err(format!(
