@@ -655,6 +655,93 @@ global:
 }
 
 #[tokio::test]
+async fn a_computed_key_that_fails_to_evaluate_denies_as_check_failed() {
+    let policy = r#"
+plugins:
+  - name: app-ratelimit
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: computed-key-error
+      bindings:
+        subject_id: subject.id
+      limits:
+        - max: 5
+          seconds: 60
+          variables: ["[subject_id]"]
+global:
+  rate_limits: [app-ratelimit]
+"#;
+    let manager = engine_with(policy).await;
+
+    start_capture();
+    let violation = violation_at(
+        &manager,
+        HOOK_RATELIMIT_POST_IDENTITY,
+        request(Some("alice"), Some("GET")),
+    )
+    .await
+    .expect("a counter expression that cannot form a key denies");
+    let errors = finish_capture(tracing::Level::ERROR);
+    assert_eq!(
+        (violation.code.as_str(), violation.proto_error_code),
+        (CODE_CHECK_FAILED, Some(503)),
+        "an expression evaluating to a list cannot key a counter"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|event| event.contains("limits[0]") && event.contains("failed")),
+        "the operator log names the failing expression: {errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_panicking_condition_on_a_computed_key_rule_denies_as_check_failed() {
+    let policy = r#"
+plugins:
+  - name: app-ratelimit
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: computed-key-panic
+      bindings:
+        subject_id: subject.id
+      limits:
+        - max: 5
+          seconds: 60
+          conditions: ["int(subject_id) > 1"]
+          variables: ["{'7': 'known'}[subject_id]"]
+global:
+  rate_limits: [app-ratelimit]
+"#;
+    let manager = engine_with(policy).await;
+
+    assert_eq!(
+        verdict_at(
+            &manager,
+            HOOK_RATELIMIT_POST_IDENTITY,
+            request(Some("alice"), Some("GET")),
+        )
+        .await,
+        (false, Some((CODE_CHECK_FAILED.to_owned(), Some(503)))),
+        "a condition that panics while checking computed keys denies"
+    );
+    assert!(
+        verdict_at(
+            &manager,
+            HOOK_RATELIMIT_POST_IDENTITY,
+            request(Some("7"), Some("GET")),
+        )
+        .await
+        .0,
+        "the limiter keeps serving requests whose condition evaluates"
+    );
+}
+
+#[tokio::test]
 async fn an_unreferenced_binding_does_not_require_its_attribute() {
     let manager = engine_with(&CLAIM_POLICY.replace(", \"plan == 'free'\"", "")).await;
     assert!(

@@ -85,11 +85,68 @@ fn check_dispatch_with(config: &PluginConfig, aborts: bool) -> Result<Stage, Box
 
 #[cfg(test)]
 mod tests {
+    use praxis_policy_core::factory::PluginFactory as _;
     use praxis_policy_core::plugin::PluginConfig;
-    use praxis_policy_core::ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY;
+    use praxis_policy_core::ratelimit_hook::{
+        HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY,
+    };
 
-    use super::{KIND, check_dispatch_with};
+    use super::{KIND, RateLimitFactory, check_dispatch_with};
     use crate::plugins::ratelimit::config::Stage;
+
+    #[test]
+    fn create_registers_one_handler_on_the_declared_stage() {
+        for hook in [HOOK_RATELIMIT_PRE_IDENTITY, HOOK_RATELIMIT_POST_IDENTITY] {
+            let config = PluginConfig {
+                name: "app-ratelimit".to_owned(),
+                kind: KIND.to_owned(),
+                hooks: vec![hook.to_owned()],
+                config: Some(serde_json::json!({
+                    "namespace": "factory-unit",
+                    "bindings": {"http_method": "http.method"},
+                    "limits": [{"max": 1, "seconds": 60, "conditions": ["http_method == 'GET'"]}],
+                })),
+                ..Default::default()
+            };
+
+            let instance = RateLimitFactory.create(&config);
+            assert!(instance.is_ok(), "{hook}: a valid config builds");
+            let Ok(instance) = instance else { return };
+            let hooks: Vec<&str> = instance.handlers.iter().map(|(name, _)| *name).collect();
+            assert_eq!(
+                hooks,
+                [hook],
+                "{hook}: one handler on the declared stage only"
+            );
+            assert_eq!(
+                instance.plugin.config().name,
+                "app-ratelimit",
+                "{hook}: the instance reports the config it was built from"
+            );
+        }
+    }
+
+    #[test]
+    fn create_refuses_an_invalid_limit_config() {
+        let config = PluginConfig {
+            name: "app-ratelimit".to_owned(),
+            kind: KIND.to_owned(),
+            hooks: vec![HOOK_RATELIMIT_POST_IDENTITY.to_owned()],
+            config: Some(serde_json::json!({"namespace": "factory-unit", "limits": []})),
+            ..Default::default()
+        };
+
+        let error = RateLimitFactory
+            .create(&config)
+            .err()
+            .map(|error| error.to_string());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("app-ratelimit")),
+            "a config with no limits is refused, naming the plugin: {error:?}"
+        );
+    }
 
     #[test]
     fn an_aborting_build_refuses_to_load() {
