@@ -107,7 +107,8 @@ extensions.
 ## Rate-limit hooks
 
 A configuration with a `rate_limits:` list needs the host to call the two
-rate-limit hooks. See [Configuration](configuration.md#rate-limits).
+rate-limit hooks. See [Configuration](configuration.md#rate-limits) for list
+syntax and [Rate Limiting](rate-limiting.md) for plugin behavior.
 
 Order and count. Call `ratelimit.pre_identity` before the first
 `identity.resolve` of a request, and `ratelimit.post_identity` after the last.

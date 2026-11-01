@@ -110,7 +110,7 @@ The HTTP prototype's configuration maps to the proposed contract as follows:
 
 The HTTP prototype has in-process and reference-host tests; real-gateway
 verification remains outstanding. The
-[prototype README](../../crates/builtins/src/plugins/ratelimit/README.md)
+[rate-limiting guide](../content/rate-limiting.md)
 documents the current implementation. Its `seconds` field is capped at
 9,223,372,036,854 so the in-memory store can add the current Unix timestamp
 to the window after converting both to microseconds.
@@ -469,7 +469,7 @@ Other follow-up work:
 - [PPE principles](../content/vision.md),
   [safety invariants](../dev/safety-invariants.md), and
   [conventions](../dev/conventions.md).
-- [HTTP prototype](../../crates/builtins/src/plugins/ratelimit/README.md) and
+- [HTTP prototype](../content/rate-limiting.md) and
   [remote quota](../../crates/builtins/src/plugins/quota/README.md).
 - [Context contract](../../crates/ppe-core/src/context.rs),
   [extension filtering](../../crates/ppe-core/src/extensions/filter.rs),

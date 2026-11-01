@@ -328,7 +328,8 @@ without a `config:` runs once per request, and the load warns with alarm
 A plugin whose only hooks are the rate-limit hooks cannot be named in a
 `run(name)` step. Under `dispatch: hooks`, `rate_limits:` is a load error
 like the other policy scopes. See
-[HTTP Routing](http-routing.md#rate-limit-hooks) for what the host must do.
+[HTTP Routing](http-routing.md#rate-limit-hooks) for what the host must do,
+and [Rate Limiting](rate-limiting.md) for plugin settings and counter behavior.
 
 ## Requests with no entity
 

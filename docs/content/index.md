@@ -59,9 +59,11 @@ history.
 ## Configuring and operating
 
 - [Configuration](configuration.md):
-  the config document, its five top-level keys, and both dispatch modes
+  the config document, its six top-level keys, and both dispatch modes
 - [HTTP Routing](http-routing.md):
   the `http:` route selector, precedence, and the catch-all report
+- [Rate Limiting](rate-limiting.md):
+  request limits before or after identity, counters, and denials
 - [LLM Routes](llm-routes.md):
   what an `llm:` route can read before and after the call, with a worked config
 - [Identity and Delegation](identity-delegation.md):

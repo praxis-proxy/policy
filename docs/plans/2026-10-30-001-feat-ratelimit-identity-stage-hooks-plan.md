@@ -67,10 +67,10 @@ The engine already has one structural dispatch list in policy mode, `authenticat
   - a hot-path bench;
   - a clearer request-time `PluginError::Dispatch` message;
   - override limiter instances built once per config snapshot, so counters are stable for a whole config generation (see Key Technical Decisions);
-  - a documented eviction policy: Limitador's bounded counter store evicts on capacity, eviction resets that counter, and evictions are logged at a rate-limited level.
+  - a documented eviction policy: Limitador's bounded counter store can evict on capacity, which resets the affected counter; Limitador reports no eviction event, so small capacity with an unbounded key warns at load instead.
 - R9. Docs:
-  - the README rewritten around `rate_limits:`, with the per-user (post-identity) and edge (pre-identity) examples, omitting default keys;
-  - `docs/content` updated: configuration scope table, pipeline hook table, http-routing host obligations, builtins, crates, cmf-extensions and extensions attribute rows, upgrade notes;
+  - `docs/content/rate-limiting.md` is the operator guide, with per-user (post-identity) and edge (pre-identity) examples that omit default keys; the plugin README is a short source-level entry point linking to it;
+  - `docs/content` updated: index, configuration scope table, pipeline hook table, http-routing host obligations, builtins, crates, cmf-extensions and extensions attribute rows, upgrade notes;
   - the CHANGELOG updated;
   - safety-invariants catalog rows;
   - the proposal reworked, with its number settled;
@@ -176,7 +176,7 @@ The engine already has one structural dispatch list in policy mode, `authenticat
   - set `client_address` only from the TCP peer or a configured trusted-proxy hop (rightmost untrusted hop), normalized per R6;
   - map only the client-safe `details` fields into the HTTP response.
 - **Host conformance alarm:** when `identity.resolve` runs for a request on a route whose effective `rate_limits:` has `pre_identity` entries, and the pre-identity hook was not invoked for that request, raise an alarm in the style of `plugin_narrowed_by_policy`. The request carries a marker in its context table for this.
-- **Eviction:** Limitador's in-memory store is bounded by `counter_capacity` and evicts when full, which resets the evicted counter. The plugin documents it, logs evictions at a rate-limited level, and warns at load when an unbounded key is paired with a small capacity. It doesn't add reject-at-capacity storage.
+- **Eviction:** Limitador's in-memory store is bounded by `counter_capacity`. When full, it can evict a counter or leave a new key out; either way the affected counter resets. Limitador reports no eviction event, so the plugin warns at load when an unbounded key is paired with a small capacity. It doesn't add reject-at-capacity storage.
 - **Post-identity counting precedes APL policy:** requests that policy later denies still count against the user. This is intended, because counting after policy would let denied traffic go unlimited.
 
 ---
@@ -456,7 +456,7 @@ graph TD
 - Error path: a missing binding denies with a status. The hint that names the variable, the attribute and the capability to grant goes to the operator log, not the response.
 - Error path: `check_failed` carries a status and no raw error text.
 - Integration: a post-identity header-bound counter variable logs one load-time warning, and the config still loads.
-- Integration: filling the counter store past `counter_capacity` with distinct keys logs a rate-limited eviction message, and the documented reset behavior holds.
+- Integration: filling the counter store past `counter_capacity` with distinct keys exercises the documented reset behavior; a small capacity with an unbounded key warns at load.
 - Integration: a global per-user limiter with an anonymous route that inherits it logs the load-time warning.
 
 **Verification:** each new detail is asserted, and the denial-code constants are used in the tests.
@@ -591,6 +591,7 @@ graph TD
 **Files:**
 - Modify:
   - `crates/builtins/src/plugins/ratelimit/README.md`
+  - `docs/content/index.md`
   - `docs/content/configuration.md`, `pipeline.md`, `http-routing.md`
   - `docs/content/builtins.md`, `crates.md`
   - `docs/content/cmf-extensions.md`, `extensions.md`
@@ -598,9 +599,10 @@ graph TD
   - `docs/safety-invariants.md`
   - `docs/proposals/00134_limitador-rate-limit-plugin.md`
   - `CHANGELOG.md`
+- Add: `docs/content/rate-limiting.md`
 
 **Approach:**
-- **README:** rebuild it around `rate_limits:`. Document that a route that skips authentication but inherits a per-user limiter needs `rate_limits: {replace_inherited: true}`, and that the edge example needs a host that sets `client_address`. Lead with the per-user post-identity example and the edge pre-identity example, both omitting default keys (`mode`, `on_error`, `engine_settings.dispatch`, `counter_capacity`). Keep `capabilities` and explain why it is needed.
+- **Rate-limiting guide:** document that a route that skips authentication but inherits a per-user limiter needs `rate_limits: {replace_inherited: true}`, and that the edge example needs a host that sets `client_address`. Include per-user post-identity and edge pre-identity examples, both omitting default keys (`mode`, `on_error`, `engine_settings.dispatch`, `counter_capacity`). Keep `capabilities` and explain why it is needed.
   - Add a stage-to-attributes table: pre-identity binds route, method, path and `http.client_address`; post-identity adds `subject.*` and `claim.*`.
   - Add a note on the Limitador CEL dialect: flat names, cel 0.12, not the `cel:` PDP dialect.
   - Add the denial-code table.
@@ -608,6 +610,8 @@ graph TD
   - Add a quota-versus-ratelimit note.
   - Note the upstream panic issue for `panic = "abort"` hosts.
   - Remove the `run()` examples and the two-filter workaround.
+- **README:** keep a short source-level entry point that links to the guide.
+- **Index:** link the guide under configuring and operating.
 - **Configuration:** add the scope-table rows and a prose section for `rate_limits:`.
 - **Pipeline:** add the two hooks to the hook table and the call order.
 - **http-routing:** describe the host contract from Key Technical Decisions: call order, once per request, meta and request line at both calls, the `client_address` source and format, the client-safe `details` set, and the conformance alarm.
@@ -617,11 +621,11 @@ graph TD
 - **Proposal:** rework the Decision section around the two hooks and the structural list. Update the mapping table, and settle the number. Drop the `issue:` front-matter link and replace the three "this PR" / "HTTP PR" passages with release-neutral wording.
 - **CHANGELOG:** an Added entry for the hooks, `rate_limits:` and `http.client_address`. Change the existing plugin entry so it describes the hook-based plugin, and remove its issue link. New entries carry no issue or PR links.
 
-**Test expectation:** none. These are docs only; check that every YAML example in the README is also exercised by a test policy in U5.
+**Test expectation:** the docs examples test parses the guide's YAML blocks; no new runtime test is needed for this documentation move.
 
 **Verification:**
 - Every changed doc names the hooks consistently.
-- The README examples parse, either as tests or by being copied verbatim into a test policy.
+- The guide's YAML examples parse under both default and all-feature builds.
 - The advisory markdown lint is no worse than before.
 
 ---
@@ -678,7 +682,7 @@ graph TD
 | The host calls a rate-limit hook more than once per request and double counts | The host contract and the reference host require one call per request; the Praxis issue repeats it |
 | The host never calls a stage, so the limiter silently does not run | Conformance alarm when identity runs on a route with pre-identity limits and no pre-identity call was made; documented in the host contract and the upgrade note |
 | `panic = "abort"` hosts crash on a Limitador condition panic | The factory refuses to load under that profile until Limitador is fixed upstream |
-| Callers mint fresh counters by varying keys or filling the route cache | Override instances live in the config snapshot, not the route cache; counter keys on caller-controlled attributes are rejected pre-identity; eviction is documented and logged |
+| Callers mint fresh counters by varying keys or filling the route cache | Override instances live in the config snapshot, not the route cache; counter keys on caller-controlled attributes are rejected pre-identity; eviction is documented and low capacity warns at load |
 | Hosts populate `client_address` from `X-Forwarded-For` without trusting it | Doc the trust contract in http-routing and the Praxis issue; warn on header-bound counters |
 | The new `ConfigScope` variants break out-of-tree visitors | Additive variants; an upgrade note |
 | A new test binary adds link time | Extend the existing binaries (ratelimit, engine inline, `dispatch_mode_e2e`); add none unless unavoidable |

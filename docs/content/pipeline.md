@@ -40,7 +40,8 @@ The two rate-limit hooks carry no entity and no phase, like
 `ratelimit.post_identity` after the last. Under `dispatch: policy` they run
 the plugins a route's `rate_limits:` list names, not `run(name)` steps, and
 each plugin runs at the one hook its `hooks:` declares. See
-[Configuration](configuration.md#rate-limits) and
+[Configuration](configuration.md#rate-limits),
+[Rate Limiting](rate-limiting.md), and
 [HTTP Routing](http-routing.md#rate-limit-hooks).
 
 A host may declare hooks of its own with the `define_hooks!` macro,
