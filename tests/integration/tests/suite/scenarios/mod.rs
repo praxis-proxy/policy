@@ -22,6 +22,8 @@ mod ciba_approval;
 mod eve_redact;
 mod live;
 mod pii;
+#[cfg(feature = "experimental-ratelimit")]
+mod rate_limit;
 mod repo_access;
 mod taint;
 

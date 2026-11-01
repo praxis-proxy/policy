@@ -43,6 +43,9 @@ suite = [
   "dep:tokio",
   "dep:tracing",
 ]
+# The experimental rate limiter, which `builtins` leaves out. Only
+# `--all-features` turns it on, as with `suite`.
+experimental-ratelimit = ["suite", "praxis-policy/experimental-ratelimit"]
 
 [dependencies]
 praxis-policy = { workspace = true }

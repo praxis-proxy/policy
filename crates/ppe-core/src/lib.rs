@@ -97,6 +97,8 @@ pub mod metadata;
 pub mod plugin;
 /// Curated re-exports for plugin authors.
 pub mod prelude;
+/// The two rate-limit hook names, called before and after identity resolution.
+pub mod ratelimit_hook;
 /// Plugin instance and hook registries.
 pub mod registry;
 /// Secret material: providers, the declared values bound to them, and the

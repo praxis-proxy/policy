@@ -95,3 +95,150 @@ pub fn vault(transport: FakeTransport, api_key: &str) -> FakeTransport {
             &kv.to_string(),
         )
 }
+
+/// Calls one client address may make through the edge limiter of
+/// [`rate_limit`], with or without a valid token.
+///
+/// [`rate_limit`]: rate_limit
+#[cfg(feature = "experimental-ratelimit")]
+pub const EDGE_LIMIT: u64 = 5; // requests per client address per minute
+
+/// Calls one subject may make through the per-user limiter of
+/// [`rate_limit`].
+///
+/// [`rate_limit`]: rate_limit
+#[cfg(feature = "experimental-ratelimit")]
+pub const USER_LIMIT: u64 = 3; // requests per subject per minute
+
+/// Calls one subject may make to `get_directory`, whose route stacks its own
+/// limiter on the global ones in [`rate_limit`].
+///
+/// [`rate_limit`]: rate_limit
+#[cfg(feature = "experimental-ratelimit")]
+pub const DIRECTORY_LIMIT: u64 = 1; // requests per subject per minute
+
+/// The demo identity plugins under a global `rate_limits:` list, at the
+/// default limits.
+#[cfg(feature = "experimental-ratelimit")]
+#[must_use]
+pub fn rate_limit() -> String {
+    rate_limit_with(EDGE_LIMIT, USER_LIMIT)
+}
+
+/// [`rate_limit`] with its edge and per-user limits replaced.
+///
+/// `edge-limits` runs at `ratelimit.pre_identity` and counts per
+/// `http.client_address`; `user-limits` runs at `ratelimit.post_identity` and
+/// counts per `subject.id`. A `tool: get_directory` route adds
+/// `directory-limits` at [`DIRECTORY_LIMIT`]. Every other tool matches no
+/// route and runs on global policy, which allows it.
+///
+/// [`rate_limit`]: rate_limit
+/// [`DIRECTORY_LIMIT`]: DIRECTORY_LIMIT
+#[cfg(feature = "experimental-ratelimit")]
+#[must_use]
+pub fn rate_limit_with(edge_limit: u64, user_limit: u64) -> String {
+    format!(
+        r#"
+engine_settings:
+  dispatch: policy
+
+plugins:
+  - name: jwt-user
+    capabilities: [perform_http]
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    config:
+      role: user
+      credential:
+        kind: header
+        name: X-User-Token
+      trusted_issuers:
+        - issuer: "{issuer}"
+          audiences: ["{audience}"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "{jwks}"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  - name: jwt-client
+    capabilities: [perform_http]
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    config:
+      role: client
+      credential:
+        kind: header
+        name: Authorization
+      trusted_issuers:
+        - issuer: "{issuer}"
+          audiences: ["{audience}"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "{jwks}"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  - name: edge-limits
+    kind: ratelimit/limitador
+    hooks: [ratelimit.pre_identity]
+    capabilities: [read_headers]
+    config:
+      namespace: edge-namespace
+      bindings:
+        client: http.client_address
+      limits:
+        - max: {edge_limit}
+          seconds: 60
+          variables: [client]
+
+  - name: user-limits
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject]
+    config:
+      namespace: user-namespace
+      bindings:
+        subject_id: subject.id
+      limits:
+        - max: {user_limit}
+          seconds: 60
+          variables: [subject_id]
+
+  - name: directory-limits
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject]
+    config:
+      namespace: directory-namespace
+      bindings:
+        subject_id: subject.id
+      limits:
+        - max: {DIRECTORY_LIMIT}
+          seconds: 60
+          variables: [subject_id]
+
+global:
+  authentication:
+    - jwt-user
+    - jwt-client
+  rate_limits:
+    - edge-limits
+    - user-limits
+
+routes:
+  - tool: get_directory
+    rate_limits: [directory-limits]
+"#,
+        issuer = crate::idp::ISSUER,
+        audience = crate::idp::GATEWAY_AUDIENCE,
+        jwks = crate::idp::JWKS_URL,
+    )
+}

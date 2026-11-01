@@ -23,6 +23,7 @@ The hook names a plugin declares in `hooks:` come from a fixed table:
 | CMF | `cmf.tool_pre_invoke`, `cmf.tool_post_invoke`, `cmf.llm_input`, `cmf.llm_output`, `cmf.prompt_pre_invoke`, `cmf.prompt_post_invoke`, `cmf.resource_pre_fetch`, `cmf.resource_post_fetch` |
 | HTTP | `http.request`, `http.response` |
 | Identity | `identity.resolve` |
+| Rate limit | `ratelimit.pre_identity`, `ratelimit.post_identity` |
 | Delegation | `token.delegate` |
 | Elicitation | `elicit` |
 | Metadata | `metadata.fetch` |
@@ -39,6 +40,16 @@ bodies are not modeled; the hook covers response headers and extensions,
 and the host fires it explicitly. Before doing so, review global post
 steps: previously inert HTTP steps become active, and `result.*` is
 absent for a request carrying no entity.
+
+The two rate-limit hooks carry no entity and no phase, like
+`identity.resolve`. The host calls each once per request:
+`ratelimit.pre_identity` before the first `identity.resolve`, and
+`ratelimit.post_identity` after the last. Under `dispatch: policy` they run
+the plugins a route's `rate_limits:` list names, not `run(name)` steps, and
+each plugin runs at the one hook its `hooks:` declares. See
+[Configuration](configuration.md#rate-limits),
+[Rate Limiting](rate-limiting.md), and
+[HTTP Routing](http-routing.md#rate-limit-hooks).
 
 A host may declare hooks of its own with the `define_hooks!` macro,
 which emits a hook's name and its routing metadata together so a name

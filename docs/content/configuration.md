@@ -56,13 +56,15 @@ its scope's set is a load error naming the scope and the set.
 | Scope | Keys |
 |---|---|
 | the document | `global`, `plugins`, `groups`, `routes`, `secrets`, `engine_settings` |
-| `global:` | `defaults`, `authentication`, `assertions`, `response`, `authorization`, `pdp`, `session_store`, `attribute_files` |
-| `global.defaults.<entity>:` | `description`, `metadata`, `plugins`, `authentication`, `assertions`, `response`, `authorization`, `args`, `result` |
+| `global:` | `defaults`, `authentication`, `rate_limits`, `assertions`, `response`, `authorization`, `pdp`, `session_store`, `attribute_files` |
+| `global.defaults.<entity>:` | `description`, `metadata`, `plugins`, `authentication`, `rate_limits`, `assertions`, `response`, `authorization`, `args`, `result` |
 | `groups.<name>:` | the same set as `global.defaults.<entity>:` |
-| `routes[]` | `tool`, `resource`, `prompt`, `llm`, `http`, `meta`, `groups`, `plugins`, `authentication`, `assertions`, `response`, `authorization`, `args`, `result` |
+| `routes[]` | `tool`, `resource`, `prompt`, `llm`, `http`, `meta`, `groups`, `plugins`, `authentication`, `rate_limits`, `assertions`, `response`, `authorization`, `args`, `result` |
 | `engine_settings:` | `dispatch`, `plugin_timeout`, `audit_timeout_milliseconds`, `short_circuit_on_deny`, `route_cache_max_entries`, `effect_log_path`, `effect_log_compaction_threshold`, `capture_content_provenance`, `content_provenance_key`, `audit_stream_namespace` |
 | an `authentication:` block | `steps`, `replace_inherited` |
 | an `authentication:` step | `name`, `config` |
+| a `rate_limits:` block | `steps`, `replace_inherited` |
+| a `rate_limits:` step | `name`, `config` |
 | an `assertions:` block | `request`, `response` |
 | an `assertions:` direction | `headers`, `strip`, `replace_inherited` |
 | an `assertions:` header entry | `name`, `from`, `members`, `on_missing`, `encode` |
@@ -264,6 +266,70 @@ routes:
 tags: `meta: { tags: [hr-tools] }` is exactly equivalent, and a
 host-injected runtime tag joins a group the same way when its name
 matches one.
+
+## Rate limits
+
+`rate_limits:` lists the rate-limit plugins that run for a route. It is
+accepted at `global:`, `global.defaults.<entity>:`, `groups.<name>:` and
+`routes[]`, takes the same two forms as `authentication:`, and stacks the
+same way: global, then the entity default, then each group, then the route.
+
+```yaml
+plugins:
+  - name: edge-limits
+    kind: ratelimit/limitador
+    hooks: [ratelimit.pre_identity]
+    capabilities: [read_headers]
+    config:
+      namespace: edge
+      bindings: { client: http.client_address }
+      limits: [{ max: 50, seconds: 1, variables: [client] }]
+  - name: per-user-limits
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject]
+    config:
+      namespace: per-user
+      limits: [{ max: 100, seconds: 60, variables: [subject_id] }]
+
+global:
+  rate_limits: [edge-limits, per-user-limits]
+
+routes:
+  - tool: search
+    rate_limits:
+      - name: per-user-limits
+        config:
+          limits: [{ max: 5, seconds: 60, variables: [subject_id] }]
+```
+
+One list feeds both rate-limit hooks. Each plugin runs at the hook its own
+`hooks:` declares, `ratelimit.pre_identity` or `ratelimit.post_identity`, so
+a step only chooses where a limiter applies. A listed plugin that declares
+neither hook, or an unknown name, fails the load. A pre-identity plugin under
+a `tool:`, `llm:`, `resource:` or `prompt:` route fails it too, because that
+hook runs before the request is classified, and so does one under a group
+that only such routes join.
+
+A step's `config:`, which must be a mapping, is merged key by key over the
+plugin's own `config`. The
+engine builds one instance per such step when the configuration loads, so
+its counters last until the next load. A merged config the plugin rejects
+fails the load.
+
+`replace_inherited: true` drops the steps inherited from above. The load
+reports each affected route with alarm `rate_limits_replaced_inherited`, at a
+group as well as at the route. A route that runs a post-identity limiter but
+resolves no `authentication:` steps raises alarm
+`rate_limit_without_authentication`. A limiter listed at more than one layer
+without a `config:` runs once per request, and the load warns with alarm
+`rate_limit_listed_twice`.
+
+A plugin whose only hooks are the rate-limit hooks cannot be named in a
+`run(name)` step. Under `dispatch: hooks`, `rate_limits:` is a load error
+like the other policy scopes. See
+[HTTP Routing](http-routing.md#rate-limit-hooks) for what the host must do,
+and [Rate Limiting](rate-limiting.md) for plugin settings and counter behavior.
 
 ## Requests with no entity
 

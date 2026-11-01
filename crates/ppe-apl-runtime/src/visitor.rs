@@ -86,6 +86,7 @@ use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
 use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
 use praxis_policy_core::plugin::PluginConfig;
+use praxis_policy_core::ratelimit_hook::RATELIMIT_HOOK_METADATA;
 use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
 
 use praxis_policy_apl_core::attribute_source::{AttributeSource as _, AttributeTree};
@@ -568,7 +569,18 @@ impl AplConfigVisitor {
 /// parsed, and the worst case is naming a plugin as unreached that something
 /// does reach. The tests below pin both shapes for that reason.
 fn authentication_step_names(yaml: &serde_yaml::Value) -> Vec<String> {
-    let Some(block) = yaml.get("authentication") else {
+    step_list_names(yaml, "authentication")
+}
+
+/// The plugin names a `rate_limits:` block on a section lists. The block has
+/// the `authentication:` shape, so it is read the same way.
+fn rate_limit_step_names(yaml: &serde_yaml::Value) -> Vec<String> {
+    step_list_names(yaml, "rate_limits")
+}
+
+/// The plugin names a step-list block under `key` lists.
+fn step_list_names(yaml: &serde_yaml::Value, key: &str) -> Vec<String> {
+    let Some(block) = yaml.get(key) else {
         return Vec::new();
     };
     let steps = match block {
@@ -590,6 +602,13 @@ fn authentication_step_names(yaml: &serde_yaml::Value) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Whether `hook` is one of the rate-limit hooks.
+fn is_rate_limit_hook(hook: &str) -> bool {
+    RATELIMIT_HOOK_METADATA
+        .iter()
+        .any(|(name, _)| *name == hook)
 }
 
 /// Read-only baseline for APL predicates: enough to make
@@ -722,6 +741,70 @@ impl AplConfigVisitor {
         }
     }
 
+    /// Tally the plugins a `rate_limits:` block names, under the rate-limit
+    /// hooks each declares. Those reach a rate-limit hook, which no policy step
+    /// installs under.
+    fn record_rate_limit_names(&self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for name in names {
+            state.reached_plugin_names.insert(name.clone());
+            let stages: Vec<String> = state
+                .declared_plugin_hooks
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|hook| is_rate_limit_hook(hook))
+                .cloned()
+                .collect();
+            state
+                .reached_plugin_hooks
+                .entry(name.clone())
+                .or_default()
+                .extend(stages);
+        }
+    }
+
+    /// Refuse a `run(name)` step naming a plugin whose only hooks are rate-limit
+    /// hooks. A policy step cannot dispatch one: the plugin runs from
+    /// `rate_limits:` or not at all.
+    fn reject_rate_limit_only_runs(
+        &self,
+        source: &str,
+        layer: &CompiledRoute,
+    ) -> Result<(), VisitorError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rate_limit_only = crate::dispatch_plan::collect_plugin_names(layer)
+            .into_iter()
+            .find(|name| {
+                state.declared_plugin_hooks.get(name).is_some_and(|hooks| {
+                    !hooks.is_empty() && hooks.iter().all(|hook| is_rate_limit_hook(hook))
+                })
+            });
+        match rate_limit_only {
+            Some(name) => Err(format!(
+                "{source}: a policy step names plugin '{name}', which declares only rate-limit \
+                 hooks, so no policy step can run it. List it under `rate_limits:` instead"
+            )
+            .into()),
+            None => Ok(()),
+        }
+    }
+
+    /// Tally a section's structural lists, `authentication:` and `rate_limits:`.
+    fn record_structural_names(&self, yaml: &serde_yaml::Value) {
+        self.record_authentication_names(&authentication_step_names(yaml));
+        self.record_rate_limit_names(&rate_limit_step_names(yaml));
+    }
+
     /// In policy dispatch, reject unreachable plugins and warn about unused hooks.
     /// Enabled audit sinks need no policy step but remain subject to hook warnings.
     fn report_unreachable_plugins(&self, mgr: &Arc<PolicyEngine>) -> Result<(), VisitorError> {
@@ -745,8 +828,8 @@ impl AplConfigVisitor {
             return Err(format!(
                 "`engine_settings.dispatch: policy` reaches a plugin only from a step that names \
                  it, and no step names `{}`, so it can never run. Add a `run(name)` step under an \
-                 `authorization:` block, name it in an `authentication:` list, or drop the \
-                 declaration",
+                 `authorization:` block, name it in an `authentication:` or `rate_limits:` \
+                 list, or drop the declaration",
                 unreached.join("`, `")
             )
             .into());
@@ -834,7 +917,7 @@ impl ConfigVisitor for AplConfigVisitor {
         mgr: &Arc<PolicyEngine>,
         yaml: &serde_yaml::Value,
     ) -> Result<(), VisitorError> {
-        self.record_authentication_names(&authentication_step_names(yaml));
+        self.record_structural_names(yaml);
         let Some(apl_block) = apl_subblock(yaml) else {
             // No policy term, so this load declares no PDPs. Drop config-owned
             // resolvers from the previous load; code-supplied ones stay.
@@ -896,6 +979,7 @@ impl ConfigVisitor for AplConfigVisitor {
         let mut compiled = compile_policy_block_value("global", &policy_only)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
         self.validate_pdp_steps("global", &compiled)?;
+        self.reject_rate_limit_only_runs("global", &compiled)?;
         // The global policy also runs as an entity-less HTTP catch-all.
         // Validate that path here; visit_route only covers named routes.
         self.validate_pdp_input(
@@ -1002,7 +1086,7 @@ impl ConfigVisitor for AplConfigVisitor {
         // Before the early return, the way a bundle and a route both do: an
         // entity default's `authentication:` list reaches its plugins whether
         // or not the block carries a policy body.
-        self.record_authentication_names(&authentication_step_names(yaml));
+        self.record_structural_names(yaml);
         warn_if_response_at_unsupported_scope(yaml, &source);
         let Some(apl_block) = apl_subblock(yaml) else {
             return Ok(());
@@ -1010,6 +1094,7 @@ impl ConfigVisitor for AplConfigVisitor {
         let compiled = compile_policy_block_value(&source, &apl_block)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
         self.validate_pdp_steps(&source, &compiled)?;
+        self.reject_rate_limit_only_runs(&source, &compiled)?;
         // A default layer reaches only its own entity type, so a field stage
         // declared here for `http` is as unreadable as one on the route.
         reject_field_stages_without_fields(entity_type, &source, &compiled)?;
@@ -1032,7 +1117,7 @@ impl ConfigVisitor for AplConfigVisitor {
         yaml: &serde_yaml::Value,
     ) -> Result<(), VisitorError> {
         let source = format!("groups.{tag}");
-        self.record_authentication_names(&authentication_step_names(yaml));
+        self.record_structural_names(yaml);
         warn_if_response_at_unsupported_scope(yaml, &source);
         let Some(apl_block) = apl_subblock(yaml) else {
             return Ok(());
@@ -1040,6 +1125,7 @@ impl ConfigVisitor for AplConfigVisitor {
         let compiled = compile_policy_block_value(&source, &apl_block)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
         self.validate_pdp_steps(&source, &compiled)?;
+        self.reject_rate_limit_only_runs(&source, &compiled)?;
         // No reachability tally here, for the reason in `visit_default`. A group
         // installs no handler and matches no request on its own: a route has to
         // carry its name. Recording at compile time meant an orphan group nothing
@@ -1067,6 +1153,10 @@ impl ConfigVisitor for AplConfigVisitor {
         if let Some(identity) = parsed.authentication.as_ref() {
             let names: Vec<String> = identity.steps.iter().map(|s| s.name.clone()).collect();
             self.record_authentication_names(&names);
+        }
+        if let Some(rate_limits) = parsed.rate_limits.as_ref() {
+            let names: Vec<String> = rate_limits.steps.iter().map(|s| s.name.clone()).collect();
+            self.record_rate_limit_names(&names);
         }
 
         // Extract the route's APL block (if any) and the entity identity
@@ -1142,6 +1232,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 let route_layer = compile_policy_block_value(&source, block)
                     .map_err(|e| -> VisitorError { Box::new(e) })?;
                 self.validate_pdp_steps(&source, &route_layer)?;
+                self.reject_rate_limit_only_runs(&source, &route_layer)?;
                 reject_field_stages_without_fields(
                     entity_type,
                     &format!("route '{route_key}'"),

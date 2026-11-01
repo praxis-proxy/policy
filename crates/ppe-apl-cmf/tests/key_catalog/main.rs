@@ -41,12 +41,13 @@ use praxis_policy_apl_cmf::extract_extensions;
 use praxis_policy_apl_core::{AttributeBag, AttributeValue};
 use praxis_policy_core::cmf::{Message, Role};
 use praxis_policy_core::extensions::{
-    AgentExtension, ClientExtension, ClientTrustLevel, CompletionExtension, ConversationContext,
-    DelegationExtension, DelegationHop, Extensions, FrameworkExtension, HttpExtension, KeyBinding,
-    LLMExtension, LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestParts, MCPExtension,
-    MetaExtension, MetadataCacheDisposition, MonotonicSet, PromptMetadata, ProvenanceExtension,
-    RequestExtension, ResourceMetadata, SecurityExtension, StopReason, SubjectExtension,
-    SubjectType, TokenUsage, ToolChoice, ToolMetadata, WorkloadIdentity,
+    AgentExtension, ClientAddress, ClientExtension, ClientTrustLevel, CompletionExtension,
+    ConversationContext, DelegationExtension, DelegationHop, Extensions, FrameworkExtension,
+    HttpExtension, KeyBinding, LLMExtension, LlmInstruction, LlmInstructionRole, LlmRequest,
+    LlmRequestParts, MCPExtension, MetaExtension, MetadataCacheDisposition, MonotonicSet,
+    PromptMetadata, ProvenanceExtension, RequestExtension, ResourceMetadata, SecurityExtension,
+    StopReason, SubjectExtension, SubjectType, TokenUsage, ToolChoice, ToolMetadata,
+    WorkloadIdentity,
 };
 
 /// One of every slot, with every field carrying a value.
@@ -167,6 +168,7 @@ fn fully_populated() -> Extensions {
         query: Some("service=git-upload-pack".to_owned()),
         host: Some("h".to_owned()),
         scheme: Some("https".to_owned()),
+        client_address: ClientAddress::parse("203.0.113.7"),
         // The one field this fixture cannot populate: the engine owns this
         // provenance and its marker map is crate-private to the core, so no
         // out-of-crate caller can write one. Nothing bridges it either, which
@@ -884,6 +886,24 @@ fn raw_http_query_reaches_pdps_and_only_plugins_with_read_query() {
         Some("service=git-upload-pack")
     );
     assert!(!bag_visible_to(&[CAP_READ_HEADERS]).contains("http.query"));
+}
+
+#[test]
+fn client_address_reaches_pdps_and_only_plugins_with_read_headers() {
+    assert_eq!(
+        bag_unfiltered().get_string("http.client_address"),
+        Some("203.0.113.7"),
+        "a PDP sees the client address"
+    );
+    assert_eq!(
+        bag_visible_to(&[CAP_READ_HEADERS]).get_string("http.client_address"),
+        Some("203.0.113.7"),
+        "a plugin with read_headers sees the client address"
+    );
+    assert!(
+        !bag_visible_to(&[CAP_READ_QUERY]).contains("http.client_address"),
+        "read_query alone must not reveal the client address"
+    );
 }
 
 /// Every capability against every gated key, not just the declared pair.
