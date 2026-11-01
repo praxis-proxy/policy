@@ -86,6 +86,20 @@ impl PluginFactory for SourceFactory {
     }
 }
 
+struct NoHandlerFactory;
+
+impl PluginFactory for NoHandlerFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        Ok(PluginInstance {
+            plugin: Arc::new(Source {
+                config: config.clone(),
+                result: SourceResult::Success,
+            }),
+            handlers: Vec::new(),
+        })
+    }
+}
+
 fn payload(fetch: bool) -> MessagePayload {
     MessagePayload {
         message: Message {
@@ -326,7 +340,11 @@ routes:
     let (result, _) = engine
         .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(false), extensions(), None)
         .await;
-    assert!(result.continue_processing);
+    assert!(
+        result.continue_processing,
+        "conditional fetch should be skipped: {:?}",
+        result.violation
+    );
     assert!(
         result
             .modified_extensions
@@ -383,6 +401,33 @@ routes:
         )
         .expect_err("a source without metadata.fetch must fail the load");
     assert!(error.to_string().contains("metadata.fetch"), "{error}");
+}
+
+#[test]
+fn metadata_source_without_registered_handler_is_rejected_at_load() {
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory("test-source", Box::new(NoHandlerFactory));
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        )
+        .expect_err("a declared metadata.fetch source needs a registered handler");
+    assert!(
+        error.to_string().contains("no registered handler"),
+        "{error}"
+    );
 }
 
 #[test]

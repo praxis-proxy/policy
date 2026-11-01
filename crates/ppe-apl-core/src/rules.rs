@@ -388,7 +388,14 @@ impl Effect {
                     effect.collect_fetch_names(names);
                 }
             },
-            _ => {},
+            Effect::Allow
+            | Effect::Deny { .. }
+            | Effect::Plugin { .. }
+            | Effect::Delegate(_)
+            | Effect::Elicit(_)
+            | Effect::Taint { .. }
+            | Effect::Restrict { .. }
+            | Effect::FieldOp { .. } => {},
         }
     }
 
