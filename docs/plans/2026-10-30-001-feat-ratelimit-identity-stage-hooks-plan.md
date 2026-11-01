@@ -33,7 +33,16 @@ The engine already has one structural dispatch list in policy mode, `authenticat
 - R3. Under `dispatch: policy`, the engine dispatches each rate-limit hook to the plugins in the effective route's `rate_limits:` whose declared `hooks:` include that hook, in resolution order. A plugin's stage comes from its declared hook.
 - R4. A rate-limit denial returns the plugin's `PluginViolation` unchanged through `PipelineResult.violation`, including `proto_error_code` 429 and `details`. The 8 failing ratelimit acceptance tests pass again without being weakened.
 - R5. `ratelimit/limitador` registers only on the rate-limit hook its config declares, exactly one of the two. A pre-identity instance that binds an identity-derived attribute family (`subject.*`, `claim.*`, and any other family populated by identity, such as delegation or agent attributes) is rejected at load. `run()` steps naming a plugin whose only hooks are rate-limit hooks are rejected at load, with a pointer to `rate_limits:`.
-- R6. `HttpExtension` gains an optional, host-supplied `client_address`, exposed as bag attribute `http.client_address`. Plugins cannot write it, and capability filtering gates it. Its format is a bare IP literal with no port. IPv4-mapped IPv6 is canonicalized to IPv4, and IPv6 is collapsed to its /64 prefix. A value that is empty, unparseable or carries a port is dropped at the extension boundary, so it is treated as absent and fails closed.
+- R6. `HttpExtension` gains an optional, host-supplied
+  `client_address`, exposed as bag attribute `http.client_address`.
+  Plugins cannot write it, and capability filtering gates it. The input
+  may be a bare IP literal, a bracketed IPv6 literal, an IP socket address
+  with a port, or an IPv6 /64 prefix form for serialized round trips.
+  The port is stripped before the address becomes a counter key.
+  IPv4-mapped IPv6 is canonicalized to IPv4, and other IPv6 addresses
+  collapse to their /64 prefix. An empty or unparseable value is dropped
+  at the extension boundary, so it is treated as absent and fails
+  closed.
 - R7. Load-time safety:
   - reject `on_error` other than `fail`, and any `mode` other than `sequential`, for `ratelimit/limitador`;
   - refuse to load `ratelimit/limitador` when the build uses `panic = "abort"`, until Limitador returns condition errors instead of panicking;
