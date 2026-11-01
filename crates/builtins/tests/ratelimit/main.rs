@@ -584,6 +584,77 @@ async fn a_condition_evaluation_error_denies_as_check_failed() {
 }
 
 #[tokio::test]
+async fn an_unresolved_computed_key_denies_before_other_counters_change() {
+    let policy = r#"
+plugins:
+  - name: app-ratelimit
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: computed-key
+      bindings:
+        subject_id: subject.id
+        http_method: http.method
+      limits:
+        - max: 1
+          seconds: 60
+          variables: [subject_id]
+        - max: 1
+          seconds: 60
+          conditions: ["http_method == 'GET'"]
+          variables: [subject_id, "{'alice': 'known'}[subject_id]"]
+global:
+  rate_limits: [app-ratelimit]
+"#;
+    let manager = engine_with(policy).await;
+
+    start_capture();
+    let violation = violation_at(
+        &manager,
+        HOOK_RATELIMIT_POST_IDENTITY,
+        request(Some("charlie"), Some("GET")),
+    )
+    .await
+    .expect("a matching rule with no computed key denies");
+    let errors = finish_capture(tracing::Level::ERROR);
+    assert_eq!(
+        (violation.code.as_str(), violation.proto_error_code),
+        (CODE_CHECK_FAILED, Some(503)),
+        "a missing computed key denies even when another rule has a counter"
+    );
+    assert_eq!(
+        violation.details.len(),
+        1,
+        "the client sees only the status, not the rule or expression"
+    );
+    assert!(
+        errors.iter().any(|event| {
+            event.contains("limits[1]") && event.contains("{'alice': 'known'}[subject_id]")
+        }),
+        "the operator log names the unresolved expression: {errors:?}"
+    );
+    assert!(
+        verdict(&manager, Some("charlie"), Some("POST")).await.0,
+        "the failed GET must leave the other rule's counter untouched"
+    );
+    assert_eq!(
+        verdict(&manager, Some("charlie"), Some("POST")).await.1,
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
+        "the other rule must still enforce its own counter"
+    );
+    assert!(
+        verdict(&manager, Some("alice"), Some("GET")).await.0,
+        "a computed key that resolves must count normally"
+    );
+    assert_eq!(
+        verdict(&manager, Some("alice"), Some("GET")).await.1,
+        Some((CODE_EXCEEDED.to_owned(), Some(429))),
+        "resolved computed keys must enforce their limit"
+    );
+}
+
+#[tokio::test]
 async fn an_unreferenced_binding_does_not_require_its_attribute() {
     let manager = engine_with(&CLAIM_POLICY.replace(", \"plan == 'free'\"", "")).await;
     assert!(

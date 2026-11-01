@@ -148,6 +148,15 @@ changes.
 counter per distinct value. A limit with no `variables` is one counter shared
 by every matching request.
 
+Every counter expression in a matching limit must resolve to a key. A
+computed expression such as `{'alice': 'known'}[subject_id]` has no key for
+Charlie. If the limit's conditions match Charlie, the plugin denies with
+`ratelimit.check_failed` (503) before this limiter changes its counters,
+even when another matching limit has a valid key. To limit only Alice, put
+`subject_id == 'alice'` in `conditions`. To give every subject a counter,
+use `variables: [subject_id]`. The operator log names the failing limit
+and expression; the client response does not.
+
 Conditions and variables are Limitador CEL, parsed with `cel` 0.12, over the
 bound variable names. This is not the `cel:` PDP dialect, which reads the PPE
 attribute bag. Macros such as `exists`, `all`, `map` and `filter` may
@@ -161,7 +170,7 @@ in conditions only.
 | Code | Status | Meaning | Remedy |
 | --- | --- | --- | --- |
 | `ratelimit.exceeded` | 429 | the request is over a limit | retry after `retry_after_seconds` |
-| `ratelimit.check_failed` | 503 | Limitador could not check the request | read the operator log and fix the condition that fails to evaluate |
+| `ratelimit.check_failed` | 503 | a matching counter expression has no key, or Limitador could not check the request | read the operator log and fix the expression or evaluation error |
 | `ratelimit.no_identity` | 401 | a limit binds `subject.id` and the request has no subject | authenticate the route, or drop the limiter there |
 | `ratelimit.no_http_method` | 400 | a limit binds `http.method` and the request has none | have the host set the request line |
 | `ratelimit.missing_attribute` | 400 | a bound attribute is absent, or the plugin cannot read it | have the host set it, or grant the capability that exposes it |

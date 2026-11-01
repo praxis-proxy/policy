@@ -35,7 +35,7 @@ use super::config::{
 /// `limit`, `remaining` and `window_seconds` in `details`.
 pub const CODE_EXCEEDED: &str = "ratelimit.exceeded";
 
-/// Limitador could not check the request. HTTP 503.
+/// The limiter could not check the request. HTTP 503.
 pub const CODE_CHECK_FAILED: &str = "ratelimit.check_failed";
 
 /// A limit binds `subject.id` and the request has no resolved subject. HTTP 401.
@@ -81,10 +81,18 @@ pub(super) struct RateLimit {
     check_failure_log: IntervalLog,
     check_lock: Mutex<()>,
     config: PluginConfig,
+    computed_rules: Vec<ComputedCounterRule>,
     limiter: RateLimiter,
     macro_locals: BTreeSet<String>,
     namespace: Namespace,
     unbound_log: IntervalLog,
+}
+
+/// A rule with counter expressions that can fail to produce a key at runtime.
+struct ComputedCounterRule {
+    index: usize,
+    limit: Limit,
+    variables: Vec<Expression>,
 }
 
 /// Admits one log line per interval and counts the ones it holds back.
@@ -133,6 +141,7 @@ impl RateLimit {
 
         let namespace: Namespace = typed.namespace.into();
         let limiter = RateLimiter::new(typed.counter_capacity);
+        let mut computed_rules = Vec::new();
         let mut macro_locals = BTreeSet::new();
         let mut referenced = BTreeSet::new();
         let mut counter_keys = BTreeSet::new();
@@ -188,17 +197,32 @@ impl RateLimit {
                 .map_err(|error| {
                     config_error(name, format!("limits[{index}] invalid variable: {error}"))
                 })?;
-            if !limiter.add_limit(Limit::new(
+            // A direct bound name is present in every checked context. CEL
+            // expressions can still fail to resolve even when all bindings exist.
+            let computed_variables: Vec<Expression> = variables
+                .iter()
+                .filter(|variable| !typed.bindings.contains_key(variable.source().trim()))
+                .cloned()
+                .collect();
+            let limit = Limit::new(
                 namespace.clone(),
                 entry.max,
                 entry.seconds,
                 conditions,
                 variables,
-            )) {
+            );
+            if !limiter.add_limit(limit.clone()) {
                 return Err(config_error(
                     name,
                     format!("limits[{index}] duplicates an earlier limit"),
                 ));
+            }
+            if !computed_variables.is_empty() {
+                computed_rules.push(ComputedCounterRule {
+                    index,
+                    limit,
+                    variables: computed_variables,
+                });
             }
         }
         // An unreferenced binding is allowed but never resolved, so a request
@@ -214,11 +238,41 @@ impl RateLimit {
             check_failure_log: IntervalLog::default(),
             check_lock: Mutex::new(()),
             config,
+            computed_rules,
             limiter,
             macro_locals,
             namespace,
             unbound_log: IntervalLog::default(),
         })
+    }
+
+    /// Refuse a matching rule that cannot form every configured counter key.
+    fn check_computed_counter_keys(&self, context: &Context<'_>) -> Result<(), String> {
+        for rule in &self.computed_rules {
+            if !rule.limit.applies(context) {
+                continue;
+            }
+            for variable in &rule.variables {
+                match variable.eval(context) {
+                    Ok(Some(_)) => {},
+                    Ok(None) => {
+                        return Err(format!(
+                            "limits[{}] counter expression '{}' resolved to no key",
+                            rule.index,
+                            variable.source()
+                        ));
+                    },
+                    Err(error) => {
+                        return Err(format!(
+                            "limits[{}] counter expression '{}' failed: {error}",
+                            rule.index,
+                            variable.source()
+                        ));
+                    },
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Deny a request lacking a bound attribute, telling the operator which
@@ -283,8 +337,8 @@ impl RateLimit {
         PluginResult::deny(with_status(PluginViolation::new(code, reason), status))
     }
 
-    /// Deny a request Limitador could not check, logging the cause at most
-    /// once per interval.
+    /// Deny a request whose rate limit could not be checked, logging the
+    /// cause at most once per interval.
     fn deny_check_failed(&self, cause: &dyn Display) -> PluginResult<HttpPayload> {
         if let Some(suppressed) = self.check_failure_log.admit() {
             tracing::error!(
@@ -384,6 +438,21 @@ impl HookHandler<HttpHook> for RateLimit {
             values.entry(local.clone()).or_default();
         }
         let context: Context<'_> = values.into();
+        // Limitador treats a missing key inside a counter expression as no
+        // counter, even when the rule's conditions match. Deny before any
+        // counter changes, including when another matching rule has a key.
+        if !self.computed_rules.is_empty() {
+            let resolved = catch_unwind(AssertUnwindSafe(|| {
+                self.check_computed_counter_keys(&context)
+            }));
+            match resolved {
+                Ok(Ok(())) => {},
+                Ok(Err(error)) => return self.deny_check_failed(&error),
+                Err(_) => {
+                    return self.deny_check_failed(&"Limitador condition evaluation panicked");
+                },
+            }
+        }
         // Limitador's in-memory check and update are separate operations. Serialize them
         // across this plugin instance so concurrent requests cannot exceed the limit.
         let _guard = self.check_lock.lock().await;

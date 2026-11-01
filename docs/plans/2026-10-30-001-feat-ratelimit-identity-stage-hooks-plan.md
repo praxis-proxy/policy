@@ -58,6 +58,8 @@ The engine already has one structural dispatch list in policy mode, `authenticat
   - a 429 split into client-safe fields (`retry_after_seconds`, `limit`, `remaining`, `window_seconds`) in `details`, and operator-only fields (limit name, namespace, binding and capability hints) sent to logs, not to the client;
   - exported denial-code constants;
   - a status and a fix hint on attribute-missing and `check_failed` denials;
+  - deny with `check_failed` before updating counters when a matching
+    limit has a computed counter expression that resolves to no key;
   - method normalization;
   - a rate-limited log for repeated Limitador errors;
   - limitador dependencies moved to `[workspace.dependencies]`, with `cargo deny` advisories checked and justified ignores added;
@@ -418,6 +420,9 @@ graph TD
 - Error path: under a `panic = "abort"` build the factory refuses to load (a cfg-gated test).
 - Error path: a missing `http.client_address` on a pre-identity limiter that binds it denies before any counter changes.
 - Integration: the existing panic test (`int(subject_id) > 1`) still denies with `check_failed`, now through the hook.
+- Error path: a matching limit with an unresolved computed counter key
+  denies before another matching limit updates its counter; a rule whose
+  conditions do not match is unaffected.
 - Integration: the concurrency test still never exceeds the limit.
 
 **Verification:** all ratelimit tests pass, including the 8 previously failing ones, with no assertion weakened.

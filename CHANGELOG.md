@@ -49,8 +49,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   (`http.request_headers.*`, `http.query`, `http.path`, `http.host`,
   `agent.*`, `args.*`, `custom.*`, `llm.input.*`, `meta.properties.*`,
   `provenance.*`, `request.*`), and refuses to load in a `panic = "abort"`
-  build. Counters are per
-  instance and reset on restart or reload. It is excluded from `builtins`.
+  build. A matching limit whose computed counter key cannot resolve denies
+  with `ratelimit.check_failed` (503) before this limiter changes its counters.
+  Counters are per instance and reset on restart or reload. It is excluded
+  from `builtins`.
 - **Unavailable CIBA approval state returns `-32122`.** A store read or write
   failure denies with `elicitation.store_unavailable` and JSON-RPC `-32122`.
   Check and validate responses include the elicitation id to identify the

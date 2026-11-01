@@ -8,6 +8,7 @@
 //! binding and the in-memory Limitador check. Allow and deny take different
 //! paths through Limitador, and the limit count scales the per-request work,
 //! so each hook is measured for both verdicts with one limit and with eight.
+//! A computed-key case measures the preflight needed to deny unresolved keys.
 //!
 //! Run with `cargo bench -p praxis-policy-builtins --features experimental-ratelimit
 //! --bench ratelimit_hot_path`.
@@ -149,9 +150,25 @@ async fn verdict(engine: &PolicyEngine, hook: &str) -> Option<String> {
     result.violation.map(|violation| violation.code)
 }
 
-fn bench_case(c: &mut Criterion, rt: &Runtime, stage: Stage, limits: usize, deny: bool) {
+fn bench_case(
+    c: &mut Criterion,
+    rt: &Runtime,
+    stage: Stage,
+    limits: usize,
+    deny: bool,
+    computed_key: bool,
+) {
     let max = if deny { DENY_MAX } else { ALLOW_MAX };
-    let engine = rt.block_on(engine(&policy(stage, limits, max)));
+    let config = policy(stage, limits, max);
+    let config = if computed_key {
+        config.replace(
+            "variables: [subject_id]",
+            "variables: [\"subject_id + '-bucket'\"]",
+        )
+    } else {
+        config
+    };
+    let engine = rt.block_on(engine(&config));
     let hook = stage.hook();
     if deny {
         rt.block_on(verdict(&engine, hook));
@@ -166,8 +183,9 @@ fn bench_case(c: &mut Criterion, rt: &Runtime, stage: Stage, limits: usize, deny
     );
 
     let verdict_label = if deny { "deny" } else { "allow" };
+    let key_label = if computed_key { "_computed" } else { "" };
     let name = format!(
-        "ratelimit_{}/{verdict_label}/{limits}_limits",
+        "ratelimit_{}/{verdict_label}/{limits}_limits{key_label}",
         stage.label()
     );
     c.bench_function(&name, |b| {
@@ -189,9 +207,12 @@ fn ratelimit_hooks(c: &mut Criterion) {
     for stage in [Stage::PreIdentity, Stage::PostIdentity] {
         for limits in [1, MANY_LIMITS] {
             for deny in [false, true] {
-                bench_case(c, &rt, stage, limits, deny);
+                bench_case(c, &rt, stage, limits, deny, false);
             }
         }
+    }
+    for deny in [false, true] {
+        bench_case(c, &rt, Stage::PostIdentity, 1, deny, true);
     }
 }
 

@@ -216,7 +216,9 @@ Token-only settings are rejected for count targets.
 `conditions` select rules; `variables` partition counters. No variables
 means a shared counter for every request matching that rule. No matching
 rules means allow without charging. These are Limitador's existing rule
-semantics. PPE adopts its fixed-window counters.
+semantics, except that PPE denies when a matching rule's counter expression
+resolves to no key. A rule that should exclude a request must say so in its
+conditions. PPE adopts Limitador's fixed-window counters.
 
 Bindings map flat CEL variable names to native PPE attributes from the
 handler's capability-filtered extensions:
