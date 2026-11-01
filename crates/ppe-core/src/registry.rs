@@ -249,7 +249,7 @@ pub struct PluginRegistry {
 /// A row with `family: None`, and a name with no row at all, accept any
 /// family. The hook registry is open by design and a host declares its own
 /// hooks, so neither absence is treated as a refusal.
-fn check_handler_family(
+pub(crate) fn check_handler_family(
     plugin_name: &str,
     hook_name: &str,
     handler: &dyn AnyHookHandler,

@@ -14,9 +14,9 @@
 [advisories]
 unmaintained = "all"
 maximum-db-staleness = "P30D"
-# Every entry is on a dev-only or build-time path. None ships in a published
-# library crate's runtime graph. Revisit when the upstream test dependencies
-# release fixes.
+# Every entry is on a dev-only or build-time path, or behind an opt-in
+# experimental feature that no default or bundled feature set enables. Revisit
+# when the upstream dependencies release fixes.
 #
 # Praxis's two ignores are deliberately not carried: one covers a proxy
 # transitive dependency that does not exist here, and the other is the
@@ -28,6 +28,14 @@ ignore = [
     # aws-lc backend, not the pure-Rust backend that would pull `rsa` into the
     # shipped tree, so it never reaches consumers.
     "RUSTSEC-2023-0071",
+    # --- Opt-in: Limitador under the experimental-ratelimit feature ---
+    # `paste` is unmaintained. It is a proc macro in Limitador's `cel` 0.12, so
+    # it runs at build time only, and no `cel` 0.12 release drops it.
+    "RUSTSEC-2024-0436",
+    # `atomic-polyfill` is unmaintained. Limitador enables postcard's default
+    # `heapless-cas`, which pulls it in; on targets with native atomics it
+    # re-exports `core` atomics, and Limitador gives no way to turn it off.
+    "RUSTSEC-2023-0089",
 ]
 
 [licenses]

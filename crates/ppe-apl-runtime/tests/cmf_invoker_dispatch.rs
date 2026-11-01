@@ -1568,3 +1568,90 @@ async fn a_payload_of_another_family_is_dropped_and_not_reported_as_a_mutation()
         "the request's own payload is untouched"
     );
 }
+
+#[tokio::test]
+async fn a_step_whose_plugin_serves_another_context_denies_with_the_remedy() {
+    use praxis_policy_apl_core::fault_testing::{FaultPdp, InjectedFailure};
+    use praxis_policy_apl_core::test_util::compile_test_policy;
+    use praxis_policy_apl_core::{
+        DelegationInvoker, ElicitationInvoker, NoopDelegationInvoker, NoopElicitationInvoker,
+        PdpDialect, PdpResolver, PluginInvoker, RoutePayload, evaluate_route,
+    };
+    use praxis_policy_apl_runtime::DispatchCache;
+    use praxis_policy_core::cmf::constants::{ENTITY_LLM, ENTITY_TOOL};
+    use praxis_policy_core::extensions::MetaExtension;
+
+    for (entity, phase, expected_context) in [
+        (
+            ENTITY_LLM,
+            "pre_invocation",
+            "entity_type=Some(\"llm\"), phase=Pre",
+        ),
+        (
+            ENTITY_TOOL,
+            "post_invocation",
+            "entity_type=Some(\"tool\"), phase=Post",
+        ),
+    ] {
+        let yaml = format!(
+            "plugins:\n  - name: tool-gate\n    kind: tool-gate\n    \
+             hooks: [cmf.tool_pre_invoke]\nroute:\n  authorization:\n    \
+             {phase}:\n      - \"run(tool-gate)\"\n"
+        );
+        let mgr = build_manager("tool-gate", Box::new(AllowPluginFactory)).await;
+        let cfg = compile_test_policy("get_weather", &yaml).expect("compile_test_policy");
+        let plan = DispatchCache::new()
+            .get_or_build(&cfg.route, &cfg.plugins, &mgr)
+            .await;
+        let extensions = Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(entity.to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let invoker = CmfPluginInvoker::for_request(
+            mgr,
+            extensions,
+            payload_with_text("hello"),
+            plan,
+            Arc::new(MemorySessionStore::new()),
+        )
+        .await
+        .expect("for_request");
+
+        let decision = evaluate_route(
+            &cfg.route,
+            &mut empty_bag(),
+            &mut RoutePayload::new(serde_json::json!({})),
+            &(Arc::new(FaultPdp::new(PdpDialect::Cedar, InjectedFailure::None))
+                as Arc<dyn PdpResolver>),
+            &(Arc::new(invoker) as Arc<dyn PluginInvoker>),
+            &(Arc::new(NoopDelegationInvoker) as Arc<dyn DelegationInvoker>),
+            &(Arc::new(NoopElicitationInvoker) as Arc<dyn ElicitationInvoker>),
+        )
+        .await
+        .decision;
+
+        let Decision::Deny { reason, .. } = decision else {
+            panic!(
+                "the plugin serves only cmf.tool_pre_invoke, so a {entity} {phase} step must fail \
+                 closed, got {decision:?}"
+            );
+        };
+        let reason = reason.expect("the denial carries a reason");
+        for fragment in [
+            "plugin 'tool-gate'",
+            expected_context,
+            "cmf.tool_pre_invoke",
+            "move the step to a route whose context the plugin serves",
+            "or use a plugin with a hook for this context",
+        ] {
+            assert!(
+                reason.contains(fragment),
+                "the {entity} {phase} denial must tell the operator what to change by naming \
+                 `{fragment}`, got: {reason}"
+            );
+        }
+    }
+}

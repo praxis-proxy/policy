@@ -22,11 +22,14 @@ rust-version.workspace = true
 [features]
 default = []
 suite = ["praxis-policy-test-utils/suite"]
+# Scenarios for the experimental rate limiter, gated on this feature.
+experimental-ratelimit = ["suite", "praxis-policy-test-utils/experimental-ratelimit"]
 
 # No features here: test-utils' `suite` turns on what these need.
 [dev-dependencies]
 praxis-policy-test-utils = { workspace = true }
 praxis-policy = { workspace = true }
+praxis-policy-builtins = { workspace = true }
 praxis-policy-core = { workspace = true }
 praxis-policy-plugin-audit-logger = { workspace = true }
 praxis-policy-plugin-pii-scanner = { workspace = true }
