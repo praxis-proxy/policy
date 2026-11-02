@@ -65,7 +65,7 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 | `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
 | `jwt` | `identity/jwt` |
 | `api-key` | `identity/api-key` |
-| `fips` | OpenSSL FIPS SHA-256 for API-key hashing. Select with `default-features = false`; only API-key is supported in this profile. |
+| `fips` | OpenSSL FIPS SHA-256 and HMAC for API-key and always-enabled Policy hashing. Select with `default-features = false`; other crypto-using builtins are reported and make the API-key profile unsafe. |
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
 | `elicitation-ciba` | `elicitation/ciba` |
@@ -81,24 +81,31 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 The default build is the engine alone, so a host that needs only the
 runtime and its own plugins compiles nothing extra.
 
-API-key builds with default features use RustCrypto SHA-256. A host building the supported
-FIPS slice selects only API-key and OpenSSL FIPS hashing, then checks the
-capability before serving traffic:
+API-key builds with default features use RustCrypto SHA-256. A host building the
+API-key FIPS slice selects API-key plus OpenSSL FIPS hashing, then checks
+the whole-graph capability report and independently checks that the FIPS
+provider is available before serving traffic:
 
 ```toml
 praxis-policy = { version = "0.5", default-features = false, features = ["fips", "api-key"] }
 ```
 
 ```rust,ignore
-use praxis_policy::{api_key_crypto_backend, validate_api_key_crypto};
+use praxis_policy::{crypto_capability_report, validate_api_key_crypto};
 
+let report = crypto_capability_report();
+if !report.fips_profile_is_safe() {
+    anyhow::bail!("Policy crypto graph is not API-key-only FIPS safe: {report:?}");
+}
 validate_api_key_crypto()?;
-tracing::info!(backend = ?api_key_crypto_backend(), "API-key crypto backend ready");
+tracing::info!(crypto = ?report, "Policy crypto providers are ready");
 ```
 
-The check only covers API-key SHA-256. The host must verify its final image
-and runtime separately. Other crypto-using builtins are not supported by this
-FIPS feature yet.
+The capability report reflects the unified builtin features, including direct
+dependency feature unification. It lists JWT,
+OAuth, Vault delegation, and Valkey when enabled because those builtins retain
+RustCrypto operations. The independent startup check verifies OpenSSL can
+fetch FIPS SHA-256. The host must verify its final image and runtime separately.
 
 ### The HTTP transport
 

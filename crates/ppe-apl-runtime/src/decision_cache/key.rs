@@ -9,11 +9,10 @@
 // mapping iteration order cannot change the digest: YAML maps, JSON
 // objects, and the bag are hashed in sorted-key order.
 
-use sha2::{Digest as _, Sha256};
-
 use praxis_policy_apl_core::attributes::{AttributeBag, AttributeValue};
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect};
+use praxis_policy_core::crypto::{CryptoError, sha256};
 
 /// 32-byte digest used as the map key. Copyable, comparable, and opaque.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -26,27 +25,35 @@ impl CacheKey {
     /// caller has no request JSON. Test-only: production code goes through
     /// [`Self::for_evaluation`].
     #[cfg(test)]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only helper uses the selected backend in unit tests"
+    )]
     pub(crate) fn for_call(call: &PdpCall, bag: &AttributeBag) -> Self {
         Self::for_evaluation(call, bag, &StructuredInput::default())
+            .expect("selected SHA-256 backend is available")
     }
 
     /// Digest of one `evaluate_structured` inputs. Request JSON is part of
     /// the preimage, so two calls that differ only there cannot share an entry.
+    ///
+    /// # Errors
+    /// Returns an error if the selected SHA-256 provider cannot hash the key.
     pub(crate) fn for_evaluation(
         call: &PdpCall,
         bag: &AttributeBag,
         structured: &StructuredInput,
-    ) -> Self {
-        let mut hasher = Sha256::new();
+    ) -> Result<Self, CryptoError> {
+        let mut hasher = Preimage::default();
         hash_dialect(&mut hasher, &call.dialect);
         hash_yaml(&mut hasher, &call.args);
         hash_bag(&mut hasher, bag);
         hash_structured(&mut hasher, structured);
-        Self(hasher.finalize().into())
+        Ok(Self(sha256(&hasher.0)?))
     }
 }
 
-fn hash_dialect(hasher: &mut Sha256, dialect: &PdpDialect) {
+fn hash_dialect(hasher: &mut Preimage, dialect: &PdpDialect) {
     match dialect {
         PdpDialect::Cedar => hasher.update([0_u8]),
         PdpDialect::Opa => hasher.update([1_u8]),
@@ -69,7 +76,7 @@ fn hash_dialect(hasher: &mut Sha256, dialect: &PdpDialect) {
     }
 }
 
-fn hash_bag(hasher: &mut Sha256, bag: &AttributeBag) {
+fn hash_bag(hasher: &mut Preimage, bag: &AttributeBag) {
     let mut entries: Vec<(&str, &AttributeValue)> = bag.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     hash_len(hasher, entries.len());
@@ -79,7 +86,7 @@ fn hash_bag(hasher: &mut Sha256, bag: &AttributeBag) {
     }
 }
 
-fn hash_attr(hasher: &mut Sha256, value: &AttributeValue) {
+fn hash_attr(hasher: &mut Preimage, value: &AttributeValue) {
     match value {
         AttributeValue::Bool(v) => {
             hasher.update([0_u8]);
@@ -110,7 +117,7 @@ fn hash_attr(hasher: &mut Sha256, value: &AttributeValue) {
     }
 }
 
-fn hash_yaml(hasher: &mut Sha256, value: &serde_yaml::Value) {
+fn hash_yaml(hasher: &mut Preimage, value: &serde_yaml::Value) {
     match value {
         serde_yaml::Value::Null => hasher.update([0_u8]),
         serde_yaml::Value::Bool(v) => {
@@ -164,12 +171,12 @@ fn hash_yaml(hasher: &mut Sha256, value: &serde_yaml::Value) {
 }
 
 fn canonical_yaml_bytes(value: &serde_yaml::Value) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hash_yaml(&mut hasher, value);
-    hasher.finalize().to_vec()
+    let mut preimage = Preimage::default();
+    hash_yaml(&mut preimage, value);
+    preimage.0
 }
 
-fn hash_structured(hasher: &mut Sha256, structured: &StructuredInput) {
+fn hash_structured(hasher: &mut Preimage, structured: &StructuredInput) {
     hasher.update([u8::from(structured.too_deep())]);
     hash_optional_json(
         hasher,
@@ -178,7 +185,7 @@ fn hash_structured(hasher: &mut Sha256, structured: &StructuredInput) {
     hash_optional_json(hasher, structured.args().map(std::convert::AsRef::as_ref));
 }
 
-fn hash_optional_json(hasher: &mut Sha256, value: Option<&serde_json::Value>) {
+fn hash_optional_json(hasher: &mut Preimage, value: Option<&serde_json::Value>) {
     match value {
         None => hasher.update([0_u8]),
         Some(value) => {
@@ -188,7 +195,7 @@ fn hash_optional_json(hasher: &mut Sha256, value: Option<&serde_json::Value>) {
     }
 }
 
-fn hash_json(hasher: &mut Sha256, value: &serde_json::Value) {
+fn hash_json(hasher: &mut Preimage, value: &serde_json::Value) {
     match value {
         serde_json::Value::Null => hasher.update([0_u8]),
         serde_json::Value::Bool(v) => {
@@ -234,13 +241,22 @@ fn hash_json(hasher: &mut Sha256, value: &serde_json::Value) {
     }
 }
 
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+fn hash_bytes(hasher: &mut Preimage, bytes: &[u8]) {
     hash_len(hasher, bytes.len());
     hasher.update(bytes);
 }
 
-fn hash_len(hasher: &mut Sha256, len: usize) {
+fn hash_len(hasher: &mut Preimage, len: usize) {
     hasher.update(u64::try_from(len).unwrap_or(u64::MAX).to_be_bytes());
+}
+
+#[derive(Default)]
+struct Preimage(Vec<u8>);
+
+impl Preimage {
+    fn update(&mut self, bytes: impl AsRef<[u8]>) {
+        self.0.extend_from_slice(bytes.as_ref());
+    }
 }
 
 #[cfg(test)]
@@ -380,12 +396,14 @@ mod tests {
             &call,
             &bag,
             &StructuredInput::new(None, Some(Arc::new(serde_json::json!({"z": 1, "a": 2})))),
-        );
+        )
+        .unwrap();
         let reordered = CacheKey::for_evaluation(
             &call,
             &bag,
             &StructuredInput::new(None, Some(Arc::new(serde_json::json!({"a": 2, "z": 1})))),
-        );
+        )
+        .unwrap();
         assert_ne!(empty, with_args);
         assert_eq!(with_args, reordered);
     }

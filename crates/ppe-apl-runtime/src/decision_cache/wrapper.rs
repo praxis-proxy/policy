@@ -181,7 +181,9 @@ impl PdpResolver for CachedPdpResolver {
         bag: &AttributeBag,
         structured: &StructuredInput,
     ) -> Result<PdpDecision, PdpError> {
-        let key = CacheKey::for_evaluation(call, bag, structured);
+        let key = CacheKey::for_evaluation(call, bag, structured).map_err(|error| {
+            PdpError::Dispatch(format!("PDP cache key hashing failed: {error}"))
+        })?;
         let (lookup, generation) = self.lookup(&key);
         match lookup {
             Lookup::Hit(decision) => {

@@ -176,8 +176,11 @@ where
         // header → identity-derived → none). Snapshotted before
         // hydration so the lookup is independent of the COW write
         // that hydration performs.
-        let session_id: Option<String> =
-            crate::session_resolver::resolve_session(&extensions).map(|(sid, _src)| sid);
+        let session_id: Option<String> = crate::session_resolver::resolve_session(&extensions)
+            .map_err(|error| {
+                SessionStoreError::Backend(format!("session id hashing failed: {error}"))
+            })?
+            .map(|(sid, _src)| sid);
 
         // Hydration: union the session's accumulated labels into the
         // request's security labels. Skipped when there's no session_id

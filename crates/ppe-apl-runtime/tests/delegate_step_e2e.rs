@@ -365,6 +365,7 @@ route:
 
     let mut bag = praxis_policy_apl_cmf::BagBuilder::new()
         .with_extensions(&invoker.current_extensions().await)
+        .expect("selected SHA-256 backend is available")
         .with_route_key(&route.route_key)
         .build();
     let mut payload = RoutePayload::new(serde_json::Value::Null);
@@ -495,6 +496,7 @@ route:
 
     let mut bag = praxis_policy_apl_cmf::BagBuilder::new()
         .with_extensions(&invoker.current_extensions().await)
+        .expect("selected SHA-256 backend is available")
         .with_route_key(&route.route_key)
         .build();
     let mut payload = RoutePayload::new(serde_json::Value::Null);
@@ -593,6 +595,7 @@ route:
 
     let mut bag = praxis_policy_apl_cmf::BagBuilder::new()
         .with_extensions(&invoker.current_extensions().await)
+        .expect("selected SHA-256 backend is available")
         .with_route_key(&route.route_key)
         .build();
     let mut payload = RoutePayload::new(serde_json::Value::Null);
@@ -710,6 +713,7 @@ route:
 
     let mut bag = praxis_policy_apl_cmf::BagBuilder::new()
         .with_extensions(&invoker.current_extensions().await)
+        .expect("selected SHA-256 backend is available")
         .with_route_key(&route.route_key)
         .build();
     let mut payload = RoutePayload::new(serde_json::Value::Null);
@@ -834,6 +838,7 @@ route:
 
     let mut bag = praxis_policy_apl_cmf::BagBuilder::new()
         .with_extensions(&invoker.current_extensions().await)
+        .expect("selected SHA-256 backend is available")
         .with_route_key(&route.route_key)
         .build();
     let mut payload = RoutePayload::new(serde_json::Value::Null);
@@ -942,6 +947,7 @@ route:
 
     let mut bag = praxis_policy_apl_cmf::BagBuilder::new()
         .with_extensions(&invoker.current_extensions().await)
+        .expect("selected SHA-256 backend is available")
         .with_route_key(&route.route_key)
         .build();
     let mut payload = RoutePayload::new(serde_json::Value::Null);

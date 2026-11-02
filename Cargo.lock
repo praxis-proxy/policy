@@ -3076,7 +3076,6 @@ dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-core",
  "serde_json",
- "sha2",
  "tokio",
 ]
 
@@ -3108,7 +3107,6 @@ dependencies = [
  "praxis-policy-core",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -3173,6 +3171,7 @@ dependencies = [
  "hmac",
  "http",
  "loom",
+ "openssl",
  "praxis-policy-core",
  "praxis-policy-orchestration",
  "serde",

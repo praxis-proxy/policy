@@ -35,6 +35,11 @@
 //! named hooks and the executor dispatches them in five phases, reading every
 //! scheduling decision from trusted config rather than from the plugin.
 
+#[cfg(all(feature = "crypto-rustcrypto", feature = "fips"))]
+compile_error!("select one Policy crypto backend: crypto-rustcrypto or fips");
+#[cfg(not(any(feature = "crypto-rustcrypto", feature = "fips")))]
+compile_error!("select a Policy crypto backend: crypto-rustcrypto or fips");
+
 /// What the engine asserts on a request and a response, as headers.
 pub mod assertions;
 /// Observation-only sinks that see each pipeline verdict.
@@ -45,6 +50,9 @@ pub mod cmf;
 pub mod config;
 /// Per-plugin state carried across hook invocations.
 pub mod context;
+/// Feature-selected SHA-256 and HMAC operations shared by Policy crates.
+#[doc(hidden)]
+pub mod crypto;
 /// What each plugin did to a request, and how the pipeline ruled on it.
 pub mod decision;
 /// The token delegation hook and its payload.

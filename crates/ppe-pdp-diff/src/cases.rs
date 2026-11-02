@@ -345,7 +345,6 @@ fn missing_subject_id() -> Case {
 }
 
 fn alice_via_bridge() -> AttributeBag {
-    use praxis_policy_apl_cmf::extract_extensions;
     use praxis_policy_core::extensions::{
         Extensions, SecurityExtension, SubjectExtension, SubjectType,
     };
@@ -362,7 +361,9 @@ fn alice_via_bridge() -> AttributeBag {
         ..Default::default()
     };
     let mut bag = AttributeBag::new();
-    extract_extensions(&ext, &mut bag);
+    if let Some(security) = ext.security.as_deref() {
+        praxis_policy_apl_cmf::extract_security(security, &mut bag);
+    }
     bag
 }
 

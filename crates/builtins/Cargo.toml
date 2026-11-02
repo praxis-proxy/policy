@@ -39,8 +39,18 @@ default = []
 
 # API-key hashing supports RustCrypto in ordinary builds and system OpenSSL
 # with the `fips=yes` property in FIPS builds.
-crypto-rustcrypto = ["dep:sha2"]
-fips = ["dep:openssl"]
+crypto-rustcrypto = [
+  "dep:sha2",
+  "praxis-policy-core/crypto-rustcrypto",
+  "praxis-policy-apl-cmf/crypto-rustcrypto",
+  "praxis-policy-apl-runtime/crypto-rustcrypto",
+]
+fips = [
+  "dep:openssl",
+  "praxis-policy-core/fips",
+  "praxis-policy-apl-cmf/fips",
+  "praxis-policy-apl-runtime/fips",
+]
 
 # Feature names match the facade's exactly, so each facade body is a one-line
 # forward and a rename is a lockstep two-file edit rather than a translation
@@ -105,10 +115,10 @@ _secrets = []
 # Engine crates, optional so a consumer resolves only the layer it asked for.
 # The three PDPs must stay apl-core-only on their normal edges: a non-optional
 # `apl-runtime` here would silently hand a Cedar-only consumer the runtime.
-praxis-policy-core = { workspace = true, optional = true }
+praxis-policy-core = { workspace = true, default-features = false, optional = true }
 praxis-policy-apl-core = { workspace = true, optional = true }
-praxis-policy-apl-cmf = { workspace = true, optional = true }
-praxis-policy-apl-runtime = { workspace = true, optional = true }
+praxis-policy-apl-cmf = { workspace = true, default-features = false, optional = true }
+praxis-policy-apl-runtime = { workspace = true, default-features = false, optional = true }
 
 # Shared runtime crates, deliberately NOT optional. Every feature enables one
 # engine crate, and `praxis-policy-core` already pulls each of these

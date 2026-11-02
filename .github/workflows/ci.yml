@@ -123,6 +123,8 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-check-features-
       # `make ci` is not what CI runs — the jobs here invoke targets directly —
       # so the per-feature gate needs its own job or it never executes.
+      - run: make check-fips-graph
+      - run: make test-fips-capabilities
       - run: make check-features
 
   release-readiness:

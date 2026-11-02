@@ -11,6 +11,7 @@ CARGO ?= cargo
 # Default workspace features use RustCrypto; `--all-features` would also enable
 # FIPS and combine mutually exclusive crypto backends.
 DEFAULT_FEATURES := \
+	praxis-policy-core/crypto-rustcrypto,praxis-policy-apl-cmf/crypto-rustcrypto,praxis-policy-apl-runtime/crypto-rustcrypto \
 	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/oauth,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
 	praxis-policy/builtins,praxis-policy/http-hyper,praxis-policy/experimental-quota,praxis-policy/experimental-ratelimit \
 	ppe-benches/dhat-heap \
@@ -35,6 +36,7 @@ help:
 	@echo "  build             Build the workspace (debug)"
 	@echo "  build-release     Build the workspace (release)"
 	@echo "  check             cargo check the workspace"
+	@echo "  check-fips-graph  Ensure the API-key FIPS graph excludes sha2 and hmac"
 	@echo "  check-features    cargo check praxis-policy-builtins per feature"
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
@@ -49,6 +51,7 @@ help:
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
+	@echo "  test-fips-capabilities Verify feature-unified FIPS crypto reporting"
 	@echo "  test-integration  Integration, resilience and security suites"
 	@echo "  test-resilience   Resilience suite (dependency failure, concurrency)"
 	@echo "  test-security     Security suite (adversarial inputs)"
@@ -110,6 +113,23 @@ check:
 	@$(CARGO) check --workspace --all-targets
 	@$(CARGO) check --workspace --all-targets --features "$(DEFAULT_FEATURES)"
 	@$(CARGO) check -p praxis-policy --no-default-features --features fips,api-key --lib
+	@$(MAKE) check-fips-graph
+
+.PHONY: check-fips-graph
+check-fips-graph:
+	@tree="$$($(CARGO) tree -p praxis-policy --no-default-features --features fips,api-key -e normal,build --prefix none)"; \
+	if grep -Eq '^(sha2|hmac) v' <<< "$$tree"; then \
+		echo "API-key FIPS graph contains RustCrypto SHA-2 or HMAC" >&2; \
+		grep -E '^(sha2|hmac) v' <<< "$$tree" >&2; \
+		exit 1; \
+	fi; \
+	grep -q '^openssl v' <<< "$$tree" || { echo "API-key FIPS graph is missing OpenSSL" >&2; exit 1; }; \
+	echo "API-key FIPS graph contains OpenSSL and no sha2/hmac"
+
+.PHONY: test-fips-capabilities
+test-fips-capabilities:
+	@$(CARGO) test -p praxis-policy --no-default-features --features fips,api-key,praxis-policy-builtins/jwt --lib crypto_report_matches_the_unified_facade_features
+	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key,jwt --lib builtin_crypto_report_matches_the_unified_features
 
 .PHONY: clean
 clean:

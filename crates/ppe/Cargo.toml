@@ -46,8 +46,18 @@ features = [
 # Engine only by default: no builtin plugins are compiled in. Opt into every
 # bundled extension with `builtins`, or name granular features for a subset.
 default = ["crypto-rustcrypto"]
-crypto-rustcrypto = ["praxis-policy-builtins?/crypto-rustcrypto"]
-fips = ["praxis-policy-builtins?/fips"]
+crypto-rustcrypto = [
+  "praxis-policy-core/crypto-rustcrypto",
+  "praxis-policy-apl-cmf/crypto-rustcrypto",
+  "praxis-policy-apl-runtime/crypto-rustcrypto",
+  "praxis-policy-builtins?/crypto-rustcrypto",
+]
+fips = [
+  "praxis-policy-core/fips",
+  "praxis-policy-apl-cmf/fips",
+  "praxis-policy-apl-runtime/fips",
+  "praxis-policy-builtins?/fips",
+]
 
 # Every builtin, including the Valkey session store and the redis + TLS stack it
 # carries.
@@ -138,10 +148,10 @@ _builtin = []
 
 [dependencies]
 # Host runtime — always present, this is the point of the facade.
-praxis-policy-core = { workspace = true }
+praxis-policy-core = { workspace = true, default-features = false }
 praxis-policy-apl-core = { workspace = true }
-praxis-policy-apl-cmf = { workspace = true }
-praxis-policy-apl-runtime = { workspace = true }
+praxis-policy-apl-cmf = { workspace = true, default-features = false }
+praxis-policy-apl-runtime = { workspace = true, default-features = false }
 
 # Bundled extension crates, each behind its feature above.
 #

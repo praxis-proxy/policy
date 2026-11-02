@@ -204,28 +204,22 @@ impl ContentKey {
     /// Digest `bytes`, prefixed with the scheme and, for a keyed digest, the
     /// key id.
     ///
-    /// `None` only if the HMAC cannot be initialized, which it accepts any key
-    /// length for. Handled rather than asserted, since a panic here would take
-    /// the request down over an audit field.
+    /// `None` when the selected crypto provider cannot digest the bytes.
+    /// Handled rather than asserted, since a panic here would take the request
+    /// down over an audit field.
     #[must_use]
     pub fn digest(&self, bytes: &[u8]) -> Option<String> {
-        use hmac::{Hmac, KeyInit as _, Mac as _};
-        use sha2::{Digest as _, Sha256};
+        use crate::crypto::{hmac_sha256, sha256};
 
         match self {
-            Self::Unkeyed => Some(format!("sha256:{}", hex(&Sha256::digest(bytes)))),
+            Self::Unkeyed => Some(format!("sha256:{}", hex(&sha256(bytes).ok()?))),
             Self::Keyed(secret) => {
                 let key = secret.get();
-                let mac = |data: &[u8]| {
-                    let mut m = <Hmac<Sha256>>::new_from_slice(key.as_bytes()).ok()?;
-                    m.update(data);
-                    Some(m.finalize().into_bytes())
-                };
-                let id = mac(KEY_ID_LABEL)?;
+                let id = hmac_sha256(key.as_bytes(), KEY_ID_LABEL).ok()?;
                 Some(format!(
                     "hmac-sha256:{}:{}",
                     hex(id.get(..8).unwrap_or_default()),
-                    hex(&mac(bytes)?)
+                    hex(&hmac_sha256(key.as_bytes(), bytes).ok()?)
                 ))
             },
         }
@@ -338,6 +332,19 @@ mod tests {
         assert_eq!(h.len(), "sha256:".len() + 64);
         assert_eq!(unkeyed(b"hello"), h, "the same bytes hash the same");
         assert_ne!(unkeyed(b"world"), h);
+    }
+
+    #[cfg(not(feature = "fips"))]
+    #[test]
+    fn digest_helpers_keep_the_existing_vectors() {
+        assert_eq!(
+            unkeyed(b"hello"),
+            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        assert_eq!(
+            keyed(KEY_A).digest(b"hello").unwrap(),
+            "hmac-sha256:60feaba87c33f47b:37e3d4bccba219bd861dd20b3aa3458fa081fbc56a48e5032b28e3bdb6e8f438"
+        );
     }
 
     #[test]

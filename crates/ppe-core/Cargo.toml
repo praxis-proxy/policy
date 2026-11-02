@@ -19,6 +19,9 @@ categories.workspace = true
 rust-version.workspace = true
 
 [features]
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = ["dep:hmac", "dep:sha2"]
+fips = ["dep:openssl"]
 # Test doubles for the seams a host normally fills —
 # `http_testing::FakeTransport` and `fault_testing` (a plugin that panics,
 # errors, or hangs on demand).
@@ -57,8 +60,9 @@ hashbrown = { workspace = true }
 futures = { workspace = true }
 # Audit content provenance: only a keyed digest of a payload is ever recorded,
 # never the payload.
-sha2 = { workspace = true }
-hmac = { workspace = true }
+sha2 = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+openssl = { workspace = true, optional = true }
 arc-swap = { workspace = true }
 wildmatch = { workspace = true }
 chrono = { workspace = true }
@@ -80,7 +84,7 @@ praxis-policy-orchestration = { workspace = true }
 # does not exist yet, so `cargo package` fails before anything is uploaded.
 # Cargo drops a dev-dependency that names no version from the published manifest,
 # which is correct here: no consumer builds this crate's tests.
-praxis-policy-core = { path = ".", features = ["test-util"] }
+praxis-policy-core = { path = ".", default-features = false, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-util = { workspace = true }
 

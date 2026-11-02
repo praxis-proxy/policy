@@ -413,6 +413,12 @@ impl AplRouteHandler {
         let post_extensions = invoker.current_extensions().await;
         let mut bag = BagBuilder::new()
             .with_extensions(&post_extensions)
+            .map_err(|error| {
+                PluginError::Config {
+                    message: format!("Policy crypto operation failed: {error}"),
+                }
+                .boxed()
+            })?
             .with_route_key(&self.route.route_key)
             .with_data(&self.attribute_tree)
             .build();

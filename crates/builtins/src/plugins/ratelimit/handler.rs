@@ -512,7 +512,10 @@ impl HookHandler<HttpHook> for RateLimit {
     ) -> PluginResult<HttpPayload> {
         // Limitador's Context takes only flat string variables, so each CEL
         // name is bound to one bag attribute.
-        let bag = BagBuilder::new().with_extensions(extensions).build();
+        let bag = match BagBuilder::new().with_extensions(extensions) {
+            Ok(builder) => builder.build(),
+            Err(error) => return self.deny_check_failed(&error),
+        };
         let mut values = HashMap::with_capacity(self.bindings.len());
         for (variable, attribute) in &self.bindings {
             let Some(value) = bag.get_string(attribute) else {

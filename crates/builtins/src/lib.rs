@@ -21,7 +21,7 @@
 //! | `jwt` | `plugins::identity_jwt` |
 //! | `api-key` | `plugins::identity_api_key` |
 //! | `crypto-rustcrypto` | RustCrypto SHA-256 for API-key hashing |
-//! | `fips` | System OpenSSL FIPS SHA-256 for API-key hashing |
+//! | `fips` | OpenSSL FIPS SHA-256 and HMAC for Policy and API-key hashing |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
 //! | `quota/limitador` | `plugins::quota` |
@@ -46,24 +46,6 @@ compile_error!("select one API-key crypto backend: crypto-rustcrypto or fips");
 compile_error!("api-key requires crypto-rustcrypto or fips");
 #[cfg(all(feature = "fips", not(feature = "api-key")))]
 compile_error!("the FIPS profile requires the api-key feature");
-#[cfg(all(
-    feature = "fips",
-    any(
-        feature = "jwt",
-        feature = "oauth",
-        feature = "delegator-vault",
-        feature = "valkey",
-        feature = "elicitation-ciba",
-        feature = "experimental-quota",
-        feature = "experimental-ratelimit",
-        feature = "cedar",
-        feature = "cel",
-        feature = "opa",
-        feature = "secrets-vault"
-    )
-))]
-compile_error!("the FIPS profile currently supports API-key only");
-
 #[cfg(feature = "_plugins")]
 pub mod plugins;
 
@@ -76,5 +58,55 @@ pub mod secrets;
 #[cfg(feature = "_session")]
 pub mod session;
 
+/// A builtin crypto operation that still uses RustCrypto in FIPS builds.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NonFipsCryptoCapability {
+    /// JWT signature verification and `DPoP` token hashing.
+    Jwt,
+    /// OAuth delegation cache-key HMAC.
+    OAuth,
+    /// Vault delegation cache-key hashing.
+    VaultDelegation,
+    /// Valkey session-key hashing.
+    Valkey,
+}
+
+/// List crypto operations enabled by the unified builtin feature set.
+#[doc(hidden)]
+#[must_use]
+pub fn non_fips_crypto_capabilities() -> Vec<NonFipsCryptoCapability> {
+    vec![
+        #[cfg(feature = "jwt")]
+        NonFipsCryptoCapability::Jwt,
+        #[cfg(feature = "oauth")]
+        NonFipsCryptoCapability::OAuth,
+        #[cfg(feature = "delegator-vault")]
+        NonFipsCryptoCapability::VaultDelegation,
+        #[cfg(feature = "valkey")]
+        NonFipsCryptoCapability::Valkey,
+    ]
+}
+
 #[cfg(any(feature = "valkey", feature = "elicitation-ciba"))]
 mod env_secret;
+
+#[cfg(test)]
+mod crypto_capability_tests {
+    use super::{NonFipsCryptoCapability, non_fips_crypto_capabilities};
+
+    #[test]
+    fn builtin_crypto_report_matches_the_unified_features() {
+        let expected = vec![
+            #[cfg(feature = "jwt")]
+            NonFipsCryptoCapability::Jwt,
+            #[cfg(feature = "oauth")]
+            NonFipsCryptoCapability::OAuth,
+            #[cfg(feature = "delegator-vault")]
+            NonFipsCryptoCapability::VaultDelegation,
+            #[cfg(feature = "valkey")]
+            NonFipsCryptoCapability::Valkey,
+        ];
+        assert_eq!(non_fips_crypto_capabilities(), expected);
+    }
+}

@@ -168,11 +168,11 @@ limitador-cel = { package = "cel", version = "0.12.0" }
 # The keys are package names, which still carry the engine's previous naming.
 # Renaming them is a manifest change across every crate and lands separately, so
 # that the import stays a move and the rename stays a rename.
-praxis-policy-core = { path = "crates/ppe-core", version = "0.5.0" }
+praxis-policy-core = { path = "crates/ppe-core", version = "0.5.0", default-features = false }
 praxis-policy-orchestration = { path = "crates/ppe-orchestration", version = "0.5.0" }
 praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.5.0" }
-praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.5.0" }
-praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.5.0" }
+praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.5.0", default-features = false }
+praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.5.0", default-features = false }
 praxis-policy-builtins = { path = "crates/builtins", version = "0.5.0" }
 praxis-policy = { path = "crates/ppe", version = "0.5.0" }
 # Unpublished, so path only.

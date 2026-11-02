@@ -43,8 +43,8 @@ Declare individual features instead: `jwt`, `api-key`, `oauth`,
 `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`.
 The token quota plugin is available separately through `experimental-quota`.
 
-For the API-key FIPS profile, disable defaults and select only `fips` and
-`api-key`; the host should call `validate_api_key_crypto()` before serving.
+For the current FIPS profile, disable defaults and select only `fips` and
+`api-key`; the host should require `crypto_capability_report().fips_profile_is_safe()` and call `validate_api_key_crypto()` before serving.
 This check covers the API-key SHA-256 operation only.
 
 The crates are versioned together and released together, so a single `0.4`
