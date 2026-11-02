@@ -20,6 +20,8 @@
 //! |---|---|
 //! | `jwt` | `plugins::identity_jwt` |
 //! | `api-key` | `plugins::identity_api_key` |
+//! | `crypto-rustcrypto` | RustCrypto SHA-256 for API-key hashing |
+//! | `fips` | System OpenSSL FIPS SHA-256 for API-key hashing |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
 //! | `quota/limitador` | `plugins::quota` |
@@ -35,6 +37,33 @@
 // catches a `cfg` naming a feature that does not exist, but not an alternative
 // missing from such a list, so a marker is what keeps a tenth extension from
 // silently failing to declare its module.
+#[cfg(all(feature = "crypto-rustcrypto", feature = "fips"))]
+compile_error!("select one API-key crypto backend: crypto-rustcrypto or fips");
+#[cfg(all(
+    feature = "api-key",
+    not(any(feature = "crypto-rustcrypto", feature = "fips"))
+))]
+compile_error!("api-key requires crypto-rustcrypto or fips");
+#[cfg(all(feature = "fips", not(feature = "api-key")))]
+compile_error!("the FIPS profile requires the api-key feature");
+#[cfg(all(
+    feature = "fips",
+    any(
+        feature = "jwt",
+        feature = "oauth",
+        feature = "delegator-vault",
+        feature = "valkey",
+        feature = "elicitation-ciba",
+        feature = "experimental-quota",
+        feature = "experimental-ratelimit",
+        feature = "cedar",
+        feature = "cel",
+        feature = "opa",
+        feature = "secrets-vault"
+    )
+))]
+compile_error!("the FIPS profile currently supports API-key only");
+
 #[cfg(feature = "_plugins")]
 pub mod plugins;
 

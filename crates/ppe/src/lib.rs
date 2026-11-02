@@ -53,10 +53,13 @@
 //! # Features
 //!
 //! No plugins are on by default (`praxis-policy` alone is the engine).
-//! `builtins` enables every bundled extension, including the Valkey session
+//! `crypto-rustcrypto` is the default API-key SHA-256 backend. `builtins`
+//! enables every bundled extension, including the Valkey session
 //! store; or pick a granular subset (`jwt`, `api-key`, `oauth`, `elicitation-ciba`,
 //! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
+//! The API-key-only FIPS profile uses `default-features = false` with both
+//! `fips` and `api-key`; it does not cover other builtins or Policy crypto.
 //!
 //! # Plugins the host supplies
 //!
@@ -69,6 +72,9 @@
 //! `reference/plugins/` in this repository holds two worked examples, a PII
 //! scanner and an audit logger. Neither is published or bundled; a host registers
 //! them.
+
+#[cfg(all(feature = "fips", not(feature = "api-key")))]
+compile_error!("the `fips` feature requires `api-key`");
 
 // Whole-crate re-exports for advanced use (types not surfaced below).
 
@@ -142,7 +148,8 @@ pub use praxis_policy_builtins::plugins::elicitation_ciba::{
 };
 #[cfg(feature = "api-key")]
 pub use praxis_policy_builtins::plugins::identity_api_key::{
-    ApiKeyIdentityFactory, KIND as API_KEY_KIND,
+    ApiKeyCryptoBackend, ApiKeyCryptoError, ApiKeyIdentityFactory, KIND as API_KEY_KIND,
+    api_key_crypto_backend, validate_api_key_crypto,
 };
 #[cfg(feature = "jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{

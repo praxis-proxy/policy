@@ -36,8 +36,7 @@ jobs:
   lint:
     name: fmt and clippy
     runs-on: ubuntu-24.04
-    # Raised from 15: `make lint` gained an --all-features clippy pass, which
-    # lints the bundled extensions that a default-feature run skips.
+    # Raised from 15 for clippy across the expanded default feature set.
     timeout-minutes: 25
     permissions:
       contents: read
@@ -82,8 +81,7 @@ jobs:
   doc:
     name: docs build
     runs-on: ubuntu-24.04
-    # Raised from 15: `make doc` gained an --all-features pass, which documents
-    # the six extensions a default-feature workspace run does not reach.
+    # Raised from 15 to document the expanded default feature set.
     timeout-minutes: 25
     permissions:
       contents: read

@@ -104,8 +104,8 @@ ids. Those sentences change without the *kind* of deny changing.
 
 ## CI
 
-`make test` runs `cargo test --workspace` twice (default features, then
-`--all-features`). This crate is a default workspace member, so an
+`make test` runs `cargo test --workspace` twice (Cargo defaults, then
+the expanded `DEFAULT_FEATURES` set). This crate is a default workspace member, so an
 unlisted divergence fails GitHub Actions job `test`.
 
 A fourth shipped PDP must be added to `HARNESS_PDP_KINDS` and `Dialect` in

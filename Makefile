@@ -8,6 +8,15 @@ SHELL := /bin/bash
 
 CARGO ?= cargo
 
+# Default workspace features use RustCrypto; `--all-features` would also enable
+# FIPS and combine mutually exclusive crypto backends.
+DEFAULT_FEATURES := \
+	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/oauth,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
+	praxis-policy/builtins,praxis-policy/http-hyper,praxis-policy/experimental-quota,praxis-policy/experimental-ratelimit \
+	ppe-benches/dhat-heap \
+	praxis-policy-test-utils/experimental-ratelimit \
+	praxis-policy-tests-integration/experimental-ratelimit,praxis-policy-tests-resilience/experimental-ratelimit,praxis-policy-tests-security/experimental-ratelimit
+
 # Nightly is needed only for the optional ThreadSanitizer target below.
 NIGHTLY ?= nightly
 
@@ -99,7 +108,8 @@ build-release:
 .PHONY: check
 check:
 	@$(CARGO) check --workspace --all-targets
-	@$(CARGO) check --workspace --all-targets --all-features
+	@$(CARGO) check --workspace --all-targets --features "$(DEFAULT_FEATURES)"
+	@$(CARGO) check -p praxis-policy --no-default-features --features fips,api-key --lib
 
 .PHONY: clean
 clean:
@@ -116,7 +126,7 @@ fmt:
 .PHONY: clippy
 clippy:
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
-	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+	@$(CARGO) clippy --workspace --all-targets --features "$(DEFAULT_FEATURES)" -- -D warnings
 
 # CI-safe gate: read-only fmt check plus clippy. Lint levels come from
 # [workspace.lints] in Cargo.toml.
@@ -125,11 +135,9 @@ lint:
 	@echo "fmt --check + clippy -D warnings ..."
 	@$(CARGO) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
-# The all-features pass is not redundant. `praxis-policy-builtins` is
-# `default = []`, and a default-feature workspace run only reaches cedar, cel
-# and opa — the three `ppe-pdp-diff` turns on through feature unification. The
-# other six extensions are linted by this pass alone.
-	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+# The expanded default feature set enables all builtins; a plain workspace run
+# reaches only cedar, cel, and opa through `ppe-pdp-diff`.
+	@$(CARGO) clippy --workspace --all-targets --features "$(DEFAULT_FEATURES)" -- -D warnings
 	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
 	@echo "lint passed"
 
@@ -169,32 +177,31 @@ setup-hooks:
 # Test
 # =============================================================================
 
-# Two passes. The first is what a host gets naming no features. The second is the
-# only way to reach `#[cfg(feature = ...)]` test modules, and the facade's tests
-# are gated that way because its `default` is empty: the bare dependency is the
-# engine alone. Dropping either pass hides tests without failing.
+# Two passes: Cargo defaults, then the expanded `DEFAULT_FEATURES` set. The
+# facade enables only the RustCrypto backend by default, not a builtin, so its
+# builtin tests are gated on the second pass. Dropping either pass hides tests.
 .PHONY: test
 test:
 	@$(CARGO) test --workspace
-	@$(CARGO) test --workspace --all-features
+	@$(CARGO) test --workspace --features "$(DEFAULT_FEATURES)"
 
-# The suites under tests/. They build only with `--all-features`, which turns on
-# their `suite` feature; `make test` runs them in its second pass. As in praxis,
-# test-integration runs all three.
+# The suites under tests/. They build only with the explicit suite feature, which
+# turns on their `suite` feature; `make test` runs them in its second pass. As in
+# praxis, test-integration runs all three.
 .PHONY: test-integration
 test-integration:
-	@$(CARGO) test --all-features \
+	@$(CARGO) test --features experimental-ratelimit \
 		-p praxis-policy-tests-integration \
 		-p praxis-policy-tests-resilience \
 		-p praxis-policy-tests-security
 
 .PHONY: test-resilience
 test-resilience:
-	@$(CARGO) test --all-features -p praxis-policy-tests-resilience
+	@$(CARGO) test --features experimental-ratelimit -p praxis-policy-tests-resilience
 
 .PHONY: test-security
 test-security:
-	@$(CARGO) test --all-features -p praxis-policy-tests-security
+	@$(CARGO) test --features experimental-ratelimit -p praxis-policy-tests-security
 
 # ThreadSanitizer on the engine concurrency stress test. Needs nightly, a
 # Linux target, and an instrumented libstd (`-Zbuild-std`). The sanitizer
@@ -268,8 +275,8 @@ audit:
 # this is the only copy of the number.
 COVERAGE_FLOOR ?= 96
 
-# `--all-features` reaches the test targets behind `test-util`, without which the
-# compiler's test scaffolding and everything it covers fall outside the floor.
+# The expanded default feature set reaches the test targets behind `test-util`,
+# without which the compiler's test scaffolding and everything it covers fall outside the floor.
 #
 # `--include-ignored` reaches the Valkey integration tests, much of which needs no
 # Valkey at all. `VALKEY_TESTS_OPTIONAL=1` lets them skip instead of fail, because
@@ -278,7 +285,7 @@ COVERAGE_FLOOR ?= 96
 #
 # Both coverage targets share these flags. A report built from a narrower run
 # understates what the floor asserted.
-COVERAGE_ARGS := --workspace --all-features --exclude ppe-benches
+COVERAGE_ARGS := --workspace --features "$(DEFAULT_FEATURES)" --exclude ppe-benches
 COVERAGE_TEST_ARGS := -- --include-ignored
 
 # `clean` first: llvm-cov merges the mappings of every instrumented binary it
@@ -313,15 +320,15 @@ mutants:
 
 # Semver compatibility check against the last published version.
 .PHONY: semver
-# Facade-scoped API compatibility against the last release. --all-features is
-# required, not optional: the facade is `default = []`, so a default-feature run
-# sees no builtin re-export and passes without inspecting the surface this
-# guards. Scoped to the facade deliberately — a workspace-wide run is noisy from
+# Facade-scoped API compatibility against the last release. The expanded default
+# feature set is required, not optional: the facade enables no builtin by
+# default, so a default-feature run sees no builtin re-export and passes without
+# inspecting the surface this guards. Scoped to the facade deliberately — a workspace-wide run is noisy from
 # the retired names and from a crate with no published baseline.
 .PHONY: semver-facade
 semver-facade:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
-	@cargo semver-checks --package praxis-policy --all-features
+	@cargo semver-checks --package praxis-policy --features "crypto-rustcrypto,builtins,http-hyper,experimental-quota,experimental-ratelimit"
 
 semver:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
@@ -337,7 +344,7 @@ doc:
 # Second pass for the same reason as `lint`: a default-feature workspace run
 # documents only the cedar, cel and opa modules, so the other six are covered
 # here alone.
-	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
+	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --features "$(DEFAULT_FEATURES)"
 
 # Link and style checks for the markdown under docs/. Advisory, like
 # lint-extra: neither is part of `make ci`, because both reach for a tool the
@@ -373,10 +380,10 @@ docs-lint:
 # =============================================================================
 
 # Compile `praxis-policy-builtins` with no features, then with each one alone.
-# Neither the default nor the all-features pass can catch a feature body that
-# omits its own `dep:` edge or its module-group marker: under --all-features
-# another feature supplies the dependency, and under default features nothing
-# compiles at all. This is the only gate that builds a partial feature set.
+# Neither the default nor the workspace profile can catch a feature body that
+# omits its own `dep:` edge or its module-group marker: another feature supplies
+# the dependency, and under default features nothing compiles at all. This is the
+# only gate that builds a partial feature set.
 BUILTIN_FEATURES := jwt api-key oauth elicitation-ciba cedar cel opa valkey secrets-vault
 
 .PHONY: check-features
@@ -386,8 +393,9 @@ check-features:
 	@for f in $(BUILTIN_FEATURES); do \
 		echo "  --features $$f"; \
 		$(CARGO) check -p praxis-policy-builtins --all-targets \
-			--no-default-features --features "$$f" || exit 1; \
+			--no-default-features --features "crypto-rustcrypto,$$f" || exit 1; \
 	done
+	@$(CARGO) check -p praxis-policy --no-default-features --features fips,api-key --lib
 	@# The one test that only exists without another feature: CIBA naming the
 	@# missing `valkey` feature. Every other pass builds with it.
 	@$(CARGO) test -p praxis-policy-builtins --no-default-features \
@@ -438,7 +446,7 @@ PACKAGE_TEST_EXCLUDES = --exclude praxis-policy-test-utils \
 	--exclude praxis-policy-tests-security
 publish-dry:
 	@$(CARGO) package --workspace $(PACKAGE_TEST_EXCLUDES) --locked --allow-dirty --no-verify
-	@$(CARGO) check --workspace --all-features --locked
+	@$(CARGO) check --workspace --features "$(DEFAULT_FEATURES)" --locked
 
 # Tag the current commit and push it. The tag is what the release workflow
 # triggers on. VERSION must be semver with no leading `v`.

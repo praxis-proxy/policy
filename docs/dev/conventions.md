@@ -87,16 +87,15 @@ A feature without tests and a usable example is not
 complete. See [Testing Policy] for route outcomes,
 scripted transports, live dependencies, and suite layout.
 
-`make test` runs two passes: default features, then
-`--all-features`. Both are required; the facade's default
-feature set is empty, so dropping the all-features pass
-hides feature-gated tests. During iteration, use
+`make test` runs Cargo defaults, then the expanded `DEFAULT_FEATURES` set.
+The facade enables no builtin by default, so the second pass is needed for
+its feature-gated tests. During iteration, use
 `make check` and `cargo nextest run -p <crate> --lib` for
 the affected crates. Reserve full workspace test runs for
 commit boundaries.
 
 The integration, resilience, and security suites under
-`tests/` run in the all-features pass. Use
+`tests/` run with `DEFAULT_FEATURES`. Use
 `make test-integration`, `make test-resilience`, or
 `make test-security` to run them separately. Prefer one
 test binary per concern, gathering related cases under a

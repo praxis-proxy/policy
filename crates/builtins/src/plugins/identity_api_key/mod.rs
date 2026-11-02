@@ -42,6 +42,8 @@ pub mod cache;
 pub mod config;
 /// Where the key is read from, and the prefix gate.
 pub mod credential;
+/// API-key hashing backend and startup capability check.
+pub mod crypto;
 /// Where identity records live.
 pub mod directory;
 /// Constructs the resolver from configuration.
@@ -58,6 +60,9 @@ pub mod resolver;
 pub use cache::{CacheConfig, CachingDirectory};
 pub use config::{ApiKeyResolverConfig, ExpiryPolicy, OnDirectoryError, ProviderConfig};
 pub use credential::{CredentialLocation, ExtractionError};
+pub use crypto::{
+    ApiKeyCryptoBackend, ApiKeyCryptoError, api_key_crypto_backend, validate_api_key_crypto,
+};
 pub use directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 pub use factory::{ApiKeyIdentityFactory, KIND};
 pub use file_directory::{FileDirectory, FileDirectoryConfig, FileRecord, IndexKind, RecordFile};

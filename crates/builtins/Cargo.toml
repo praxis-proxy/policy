@@ -18,16 +18,35 @@ categories.workspace = true
 # module at all (`default = []`), so without this the rendered page is empty —
 # and the facade's re-exports resolve into it.
 [package.metadata.docs.rs]
-all-features = true
+features = [
+  "crypto-rustcrypto",
+  "jwt",
+  "api-key",
+  "oauth",
+  "delegator-vault",
+  "elicitation-ciba",
+  "experimental-quota",
+  "experimental-ratelimit",
+  "cedar",
+  "cel",
+  "opa",
+  "valkey",
+  "secrets-vault",
+]
 
 [features]
 default = []
+
+# API-key hashing supports RustCrypto in ordinary builds and system OpenSSL
+# with the `fips=yes` property in FIPS builds.
+crypto-rustcrypto = ["dep:sha2"]
+fips = ["dep:openssl"]
 
 # Feature names match the facade's exactly, so each facade body is a one-line
 # forward and a rename is a lockstep two-file edit rather than a translation
 # table nobody maintains.
 jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64", "dep:sha2"]
-api-key = ["_engine-core", "_plugins", "dep:sha2"]
+api-key = ["_engine-core", "_plugins"]
 oauth = [
   "_engine-core",
   "_plugins",
@@ -148,6 +167,7 @@ base64 = { workspace = true, optional = true }
 # 0.13 `hmac` below pairs with the `digest` 0.11 that the workspace `sha2`
 # brings, so a bump to either has to move both.
 sha2 = { workspace = true, optional = true }
+openssl = { workspace = true, optional = true }
 
 # --- oauth -------------------------------------------------------------------
 

@@ -30,16 +30,24 @@ rust-version.workspace = true
 # is workspace-root-relative; cargo bundles it into the published .crate).
 readme.workspace = true
 
-# Build docs.rs with every extension enabled. The default build is engine-only
-# (`default = []`), which compiles no builtin at all, so without this the factory
-# re-exports and `install_builtins` are absent from the rendered docs.
+# Build docs.rs with every ordinary extension enabled. The default build enables
+# only the RustCrypto backend and compiles no builtin, so without this the
+# factory re-exports and `install_builtins` are absent from the rendered docs.
 [package.metadata.docs.rs]
-all-features = true
+features = [
+  "crypto-rustcrypto",
+  "builtins",
+  "http-hyper",
+  "experimental-quota",
+  "experimental-ratelimit",
+]
 
 [features]
 # Engine only by default: no builtin plugins are compiled in. Opt into every
 # bundled extension with `builtins`, or name granular features for a subset.
-default = []
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = ["praxis-policy-builtins?/crypto-rustcrypto"]
+fips = ["praxis-policy-builtins?/fips"]
 
 # Every builtin, including the Valkey session store and the redis + TLS stack it
 # carries.

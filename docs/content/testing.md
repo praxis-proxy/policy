@@ -134,7 +134,7 @@ export VAULT_SECRET_ID=$(vault write -field=secret_id -f auth/approle/role/ppe-l
 Run the ignored test, then stop the container:
 
 ```console
-cargo test -p praxis-policy --all-features --test vault_live -- --ignored --nocapture
+cargo test -p praxis-policy --features "crypto-rustcrypto,secrets-vault" --test vault_live -- --ignored --nocapture
 docker stop ppe-vault
 ```
 
@@ -164,7 +164,7 @@ docker run -d --rm --name ppe-keycloak -p 127.0.0.1:8080:8080 \
 until curl -sf http://127.0.0.1:8080/realms/master >/dev/null; do sleep 2; done
 DPOP_LIVE_KEYCLOAK_URL=http://127.0.0.1:8080 DPOP_LIVE_REALM=master \
   DPOP_LIVE_ADMIN_USER=admin DPOP_LIVE_ADMIN_PASSWORD=admin \
-  cargo test -p praxis-policy --all-features --test dpop_live -- --ignored --nocapture
+  cargo test -p praxis-policy --features "crypto-rustcrypto,jwt,http-hyper" --test dpop_live -- --ignored --nocapture
 docker stop ppe-keycloak
 ```
 
@@ -186,7 +186,7 @@ policies:
 | `praxis-policy-test-utils` | `tests/utils` | The reference host, scripted IdP, upstream stand-in, fixtures, leak checks |
 
 Each suite is one test binary behind a `suite` feature, so it builds only
-in the `--all-features` pass. The demo policies live in
+with the expanded `DEFAULT_FEATURES` set. The demo policies live in
 `tests/integration/fixtures/`, each with a header recording how it departs
 from the demo.
 
@@ -277,7 +277,7 @@ docker run -d --rm --name ppe-keycloak -p 127.0.0.1:8081:8081 \
   quay.io/keycloak/keycloak:26.6.3 start-dev --import-realm --http-port=8081
 docker run -d --rm --name ppe-valkey -p 127.0.0.1:6379:6379 valkey/valkey:8.1.10
 PPE_KEYCLOAK_URL=http://localhost:8081 VALKEY_TEST_URL=redis://127.0.0.1:6379 \
-  cargo test --all-features -p praxis-policy-tests-integration \
+  cargo test --features experimental-ratelimit -p praxis-policy-tests-integration \
   -- --ignored --nocapture scenarios::live::
 docker stop ppe-keycloak ppe-valkey
 ```
@@ -296,7 +296,7 @@ docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-ciba reset on '>ciba-pw' \
   +hget +hexists +hdel +time +multi +exec +evalsha '+script|load' \
   +ping +unwatch '+client|setinfo'
 PPE_ACL_VALKEY=127.0.0.1:6380 PPE_TAINT_PW=taint-pw PPE_CIBA_PW=ciba-pw \
-  cargo nextest run -p praxis-policy-builtins --all-features --test valkey \
+  cargo nextest run -p praxis-policy-builtins --features "crypto-rustcrypto,valkey" --test valkey \
   --run-ignored only -E 'test(documented_acl_users)'
 docker stop ppe-acl-valkey
 ```
@@ -316,9 +316,12 @@ cargo nextest run -p praxis-policy-apl-core --lib
 make test                              # both feature passes, as CI runs them
 ```
 
-Tests run twice, once with default features and once with
-`--all-features`. The facade's `default` is empty, so its tests are
-feature-gated and a single pass would hide them.
+Tests run twice, once with Cargo defaults and once with the expanded
+`DEFAULT_FEATURES` set.
+The facade has no builtin enabled by default, so its builtin tests
+are feature-gated and a single pass would hide them. The FIPS backend is checked
+as a separate API-key-only profile because it is mutually exclusive with the
+default RustCrypto backend.
 
 ## Related documentation
 

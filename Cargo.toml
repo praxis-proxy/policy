@@ -31,9 +31,9 @@ members = [
   # so everyday `cargo build` stays lean. `cargo bench -p ppe-benches` /
   # `make bench` still pick it up, and `clippy --all-targets` compiles it.
   "crates/ppe-benches",
-  # Cross-crate suites and their shared harness. Unpublished, and out of
-  # default-members for the same reason as ppe-benches. They build only in the
-  # `--all-features` pass; see `tests/utils/Cargo.toml`.
+  # Cross-crate suites and their shared harness. Unpublished and out of
+  # default-members like ppe-benches. They build only when their `suite`
+  # features are enabled; see `tests/utils/Cargo.toml`.
   "tests/utils",
   "tests/integration",
   "tests/resilience",
@@ -145,6 +145,7 @@ regex = "1"
 # with the `digest` 0.11 that this major brings. Splitting the requirement
 # would put two `sha2` and two `digest` in the build.
 sha2 = "0.11"
+openssl = "0.10.82"
 # Keyed digests: audit content provenance and the OAuth cache key. Moves with
 # `sha2` above, since both have to agree on `digest`.
 hmac = "0.13"
