@@ -31,7 +31,7 @@ use hashbrown::HashMap;
 use tracing::{error, info, trace, warn};
 
 use crate::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
-use crate::config::{self, PolicyConfig};
+use crate::config::{self, PolicyConfig, config_error};
 use crate::context::PluginContextTable;
 use crate::error::PluginError;
 use crate::executor::{BackgroundTasks, Executor, ExecutorConfig, PipelineResult};
@@ -65,11 +65,22 @@ pub const VIOLATION_ASSERTION_MISSING: &str = "auth.assertion_missing";
 /// deny: the request never reached a rule.
 pub const VIOLATION_UNIDENTIFIED_REQUEST: &str = "unidentified_request";
 
-/// Why a request could not be resolved against the route table.
+/// Violation code for a `rate_limits:` step whose limiter the running snapshot
+/// cannot supply. Denies rather than skipping the limit.
+pub const VIOLATION_RATE_LIMIT_UNAVAILABLE: &str = "ratelimit.unavailable";
+
+/// Violation `details` key a host reads the HTTP status from, spelled as the
+/// CMF layer spells it.
+const DETAIL_HTTP_STATUS: &str = "http.status";
+
+/// Why a request could not be resolved against the route table, or could not
+/// be given the rate limits its route lists.
 ///
 /// Resolving no route is not an error: the request falls back to the global
-/// policy, as it always has. This is only produced when the request line cannot
-/// be read at all and at least one `http:` route is declared. Matching uses the
+/// policy, as it always has. This is produced when the request line cannot be
+/// read at all and at least one `http:` route is declared, when a request
+/// carries no entity metadata under a configured policy, and when a
+/// `rate_limits:` step has no limiter in the running snapshot. Matching uses the
 /// path as given, so the engine and the host's router read one string; a string
 /// that breaks the rules of a path is one the engine cannot vouch is the string
 /// the router and the backend will act on, and a smuggled request line is
@@ -91,13 +102,19 @@ pub enum RouteResolutionError {
          and the configured policy cannot be applied to it"
     )]
     UnidentifiedRequest,
+
+    /// A `rate_limits:` step has no limiter in the running snapshot.
+    #[error("a rate limit step has no limiter in the running configuration")]
+    RateLimitUnavailable,
 }
 
 impl RouteResolutionError {
-    /// The denial a host turns into a wire-level status. `400` because the
-    /// request itself is malformed rather than forbidden: in both cases the
-    /// engine is missing something the host was supposed to supply, and no
-    /// rule was ever reached to forbid anything.
+    /// The denial a host turns into a wire-level status. `400` for an
+    /// unreadable path or an unidentified request, because the request itself
+    /// is malformed rather than forbidden: the engine is missing something the
+    /// host was supposed to supply, and no rule was ever reached to forbid
+    /// anything. `503` for a missing limiter, because the fault is the
+    /// engine's state, not the request.
     fn violation(self) -> crate::error::PluginViolation {
         match self {
             Self::UnreadablePath(cause) => crate::error::PluginViolation::new(
@@ -109,6 +126,15 @@ impl RouteResolutionError {
                 crate::error::PluginViolation::new(VIOLATION_UNIDENTIFIED_REQUEST, self.to_string())
                     .with_proto_error_code(400)
             },
+            Self::RateLimitUnavailable => crate::error::PluginViolation::new(
+                VIOLATION_RATE_LIMIT_UNAVAILABLE,
+                "rate limit unavailable",
+            )
+            .with_details(std::collections::HashMap::from([(
+                DETAIL_HTTP_STATUS.to_owned(),
+                serde_json::json!(503),
+            )]))
+            .with_proto_error_code(503),
         }
     }
 }
@@ -136,6 +162,7 @@ fn declares_a_policy(config: &PolicyConfig, snapshot: &RuntimeSnapshot) -> bool 
         || !config.global.bundles.is_empty()
         || !config.global.defaults.is_empty()
         || config.global.authentication.is_some()
+        || config.global.rate_limits.is_some()
         || !snapshot.route_annotations.is_empty()
 }
 
@@ -284,22 +311,30 @@ fn resolve_contract_route<'a>(
         .filter(|config| config.dispatch_mode().is_policy())?;
     let meta = extensions.meta.as_deref()?;
     let entity_type = meta.entity_type.as_deref()?;
-    let request_scope = meta.scope.as_deref();
     if entity_type == ENTITY_HTTP {
-        let path = match_path(extensions)?;
-        let method = extensions
-            .http
-            .as_deref()
-            .and_then(|http| http.method.as_deref());
-        return config::resolve_route(
-            policy_config,
-            config::RouteQuery::http(path, method).with_scope(request_scope),
-        );
+        return resolve_http_route(policy_config, extensions);
     }
     let entity_name = meta.entity_name.as_deref()?;
     config::resolve_route(
         policy_config,
-        config::RouteQuery::named(entity_type, entity_name).with_scope(request_scope),
+        config::RouteQuery::named(entity_type, entity_name).with_scope(meta.scope.as_deref()),
+    )
+}
+
+/// The `http:` route a request's path, method and scope select.
+fn resolve_http_route<'a>(
+    policy_config: &'a PolicyConfig,
+    extensions: &Extensions,
+) -> Option<config::MatchedRoute<'a>> {
+    let path = match_path(extensions)?;
+    let method = extensions
+        .http
+        .as_deref()
+        .and_then(|http| http.method.as_deref());
+    let request_scope = extensions.meta.as_deref().and_then(|m| m.scope.as_deref());
+    config::resolve_route(
+        policy_config,
+        config::RouteQuery::http(path, method).with_scope(request_scope),
     )
 }
 
@@ -328,16 +363,7 @@ fn contract_route<'a>(
 /// Computed once when a config lands on a snapshot, so the hot path reads an
 /// answer rather than walking the route table.
 fn http_routes_declaring_assertions(config: &PolicyConfig) -> Arc<[String]> {
-    if !config.dispatch_mode().is_policy() {
-        return Arc::from(Vec::new());
-    }
-    config
-        .routes
-        .iter()
-        .filter(|route| route.http.is_some() && route.assertions.is_some())
-        .filter_map(config::route_entity_identity)
-        .flat_map(|(_, names)| names)
-        .collect()
+    http_routes_declaring(config, |route| route.assertions.is_some())
 }
 
 /// The names of the `http:` routes that declare `authentication:`. Those lists
@@ -348,16 +374,260 @@ fn http_routes_declaring_assertions(config: &PolicyConfig) -> Arc<[String]> {
 /// lands on a snapshot rather than per request. Empty in hook mode,
 /// since no route selects anything then.
 fn http_routes_declaring_authentication(config: &PolicyConfig) -> Arc<[String]> {
+    http_routes_declaring(config, |route| route.authentication.is_some())
+}
+
+/// The names of the `http:` routes that declare `rate_limits:`, for the same
+/// missing-path warning as authentication.
+fn http_routes_declaring_rate_limits(config: &PolicyConfig) -> Arc<[String]> {
+    http_routes_declaring(config, |route| route.rate_limits.is_some())
+}
+
+/// The names of the `http:` routes `declares` holds for. Empty in hook mode,
+/// since no route selects anything then.
+fn http_routes_declaring(
+    config: &PolicyConfig,
+    declares: impl Fn(&config::RouteEntry) -> bool,
+) -> Arc<[String]> {
     if !config.dispatch_mode().is_policy() {
         return Arc::from(Vec::new());
     }
     config
         .routes
         .iter()
-        .filter(|route| route.http.is_some() && route.authentication.is_some())
+        .filter(|route| route.http.is_some() && declares(route))
         .filter_map(config::route_entity_identity)
         .flat_map(|(_, names)| names)
         .collect()
+}
+
+/// A structural dispatch list policy mode reads for a hook, rather than a
+/// policy step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StructuralList {
+    /// `authentication:`, for `identity.resolve`.
+    Authentication,
+    /// `rate_limits:`, for one of the two rate-limit hooks.
+    RateLimits(RateLimitStage),
+}
+
+impl StructuralList {
+    fn for_hook(hook_name: &str) -> Option<Self> {
+        match hook_name {
+            crate::identity::HOOK_IDENTITY_RESOLVE => Some(Self::Authentication),
+            crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY => {
+                Some(Self::RateLimits(RateLimitStage::PreIdentity))
+            },
+            crate::ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY => {
+                Some(Self::RateLimits(RateLimitStage::PostIdentity))
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether `hook_name` is one of the two rate-limit hooks.
+    fn is_rate_limits(hook_name: &str) -> bool {
+        matches!(Self::for_hook(hook_name), Some(Self::RateLimits(_)))
+    }
+}
+
+/// Which side of identity resolution a rate-limit hook runs on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RateLimitStage {
+    PreIdentity,
+    PostIdentity,
+}
+
+// A route-cache miss must not rebuild an override and reset its counters: the
+// cache is bounded and is cleared on registration changes.
+struct RateLimitOverride {
+    handlers: Vec<(&'static str, Arc<dyn AnyHookHandler>)>,
+    plugin_ref: Arc<PluginRef>,
+}
+
+impl RateLimitOverride {
+    /// The handler entry for `hook_name`, if this override serves it.
+    fn entry_for(&self, hook_name: &str) -> Option<crate::registry::HookEntry> {
+        self.handlers
+            .iter()
+            .find(|(name, _)| *name == hook_name)
+            .map(|(_, handler)| crate::registry::HookEntry {
+                plugin_ref: Arc::clone(&self.plugin_ref),
+                handler: Arc::clone(handler),
+            })
+    }
+}
+
+/// Override instances by the `rate_limits:` step they serve.
+type RateLimitOverrides = Arc<HashMap<config::RateLimitStepSite, RateLimitOverride>>;
+
+/// Overlay a step's `config:` on the plugin's own, key by key.
+fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Value) -> PluginConfig {
+    let mut merged = base.clone();
+    match (merged.config.as_mut(), override_config.as_object()) {
+        (Some(base_value), Some(override_obj)) => {
+            if let Some(base_obj) = base_value.as_object_mut() {
+                for (key, value) in override_obj {
+                    base_obj.insert(key.clone(), value.clone());
+                }
+            }
+        },
+        (None, _) => merged.config = Some(override_config.clone()),
+        (Some(_), None) => {},
+    }
+    merged
+}
+
+/// Build one instance for every `rate_limits:` step carrying a `config:`
+/// override, through the plugin's own factory.
+///
+/// Must run with no engine lock held, for the reason
+/// [`create_plugin_instances`] gives.
+///
+/// # Errors
+///
+/// A `config:` that is not a mapping fails the load, as does a factory that
+/// rejects the merged config, or an instance with no handler for a rate-limit
+/// hook the plugin declares: falling back to the base instance would run the
+/// limiter with a config nobody wrote.
+///
+/// [`create_plugin_instances`]: create_plugin_instances
+fn create_rate_limit_overrides(
+    config: &PolicyConfig,
+    factories: &[Arc<dyn crate::factory::PluginFactory>],
+    context: &crate::factory::FactoryContext,
+) -> Result<RateLimitOverrides, Box<PluginError>> {
+    let mut overrides = HashMap::new();
+    if !config.dispatch_mode().is_policy() {
+        return Ok(Arc::new(overrides));
+    }
+    for (site, step) in config::rate_limit_override_steps(config) {
+        let where_declared = format!(
+            "`{}` rate_limits step {} (plugin '{}')",
+            site.section, site.index, step.name
+        );
+        let Some((base, factory)) = config
+            .plugins
+            .iter()
+            .zip(factories)
+            .find(|(plugin, _)| plugin.name == step.name)
+        else {
+            return Err(config_error(format!(
+                "{where_declared} names a plugin the config does not declare"
+            )));
+        };
+        let Some(override_config) = step.config_override.as_ref() else {
+            continue;
+        };
+        if !override_config.is_object() {
+            return Err(config_error(format!(
+                "{where_declared}: the step's `config:` must be a mapping"
+            )));
+        }
+        let merged = merge_override_config(base, override_config);
+        let scoped = context.for_plugin(factory.needs_session_store_context(&merged));
+        let instance = factory.create_with(&merged, &scoped).map_err(|e| {
+            config_error(format!(
+                "{where_declared}: the plugin's factory rejects the step's `config:` override: {e}"
+            ))
+        })?;
+        for hook in base
+            .hooks
+            .iter()
+            .filter(|hook| StructuralList::is_rate_limits(hook))
+        {
+            let Some((_, handler)) = instance.handlers.iter().find(|(name, _)| name == hook) else {
+                return Err(config_error(format!(
+                    "{where_declared}: the instance built for the step's `config:` override \
+                     serves no handler for `{hook}`, which the plugin declares"
+                )));
+            };
+            crate::registry::check_handler_family(&step.name, hook, handler.as_ref())
+                .map_err(config_error)?;
+        }
+        overrides.insert(
+            site,
+            RateLimitOverride {
+                handlers: instance.handlers,
+                plugin_ref: Arc::new(PluginRef::new(instance.plugin, merged)),
+            },
+        );
+    }
+    Ok(Arc::new(overrides))
+}
+
+/// The entries one rate-limit hook dispatches for a request, in `rate_limits:`
+/// order.
+///
+/// A step whose plugin declares only the other stage drops out here. A step
+/// with a `config:` override runs the snapshot's instance for it, never one
+/// built per request. A base limiter runs once per request however often the
+/// folded list names it, since each run counts the request again.
+///
+/// # Errors
+///
+/// [`RouteResolutionError::RateLimitUnavailable`] when a step's plugin declares
+/// this stage but the snapshot has no instance for it, as after the plugin is
+/// unregistered: skipping it would admit unlimited traffic.
+///
+/// [`RouteResolutionError::RateLimitUnavailable`]: RouteResolutionError::RateLimitUnavailable
+fn rate_limit_entries(
+    snapshot: &RuntimeSnapshot,
+    policy_config: &PolicyConfig,
+    entries: &[crate::registry::HookEntry],
+    matched: Option<&config::MatchedRoute<'_>>,
+    request_entity_type: Option<&str>,
+    hook_name: &str,
+    unavailable_warned: &AtomicBool,
+) -> Result<Vec<crate::registry::HookEntry>, RouteResolutionError> {
+    let mut selected: Vec<crate::registry::HookEntry> = Vec::new();
+    for resolved in
+        config::rate_limit_step_refs_for_route(policy_config, matched, request_entity_type)
+    {
+        let step = resolved.step;
+        let declares_this_stage = policy_config
+            .plugins
+            .iter()
+            .find(|plugin| plugin.name == step.name)
+            .is_some_and(|plugin| plugin.hooks.iter().any(|hook| hook == hook_name));
+        if !declares_this_stage {
+            continue;
+        }
+        let entry = if step.config_override.is_some() {
+            let site = resolved.site(policy_config, matched.map(|m| m.route));
+            snapshot
+                .rate_limit_overrides
+                .get(&site)
+                .and_then(|instance| instance.entry_for(hook_name))
+        } else {
+            let base = entries.iter().find(|e| e.plugin_ref.name() == step.name);
+            if base.is_some_and(|base| {
+                selected
+                    .iter()
+                    .any(|done| done.plugin_ref.id() == base.plugin_ref.id())
+            }) {
+                continue;
+            }
+            base.cloned()
+        };
+        let Some(entry) = entry else {
+            if !unavailable_warned.swap(true, Ordering::AcqRel) {
+                let site = resolved.site(policy_config, matched.map(|m| m.route));
+                error!(
+                    plugin = %step.name,
+                    section = %site.section,
+                    index = site.index,
+                    hook = hook_name,
+                    "a rate_limits step has no limiter in the running snapshot, so requests it \
+                     covers are denied with ratelimit.unavailable until the plugin is registered \
+                     again or the configuration is reloaded",
+                );
+            }
+            return Err(RouteResolutionError::RateLimitUnavailable);
+        };
+        selected.push(entry);
+    }
+    Ok(selected)
 }
 
 /// Configuration for the `PolicyEngine`.
@@ -520,6 +790,18 @@ struct RuntimeSnapshot {
     /// replacement builds a new snapshot, so the answer cannot go stale.
     http_routes_declaring_authentication: Arc<[String]>,
 
+    /// The `http:` routes that declare `rate_limits:`, for the rate-limit
+    /// hooks' counterpart of the warning above.
+    http_routes_declaring_rate_limits: Arc<[String]>,
+
+    // Keep configured hook presence after unregistration so the empty-registry
+    // path cannot allow unchecked requests.
+    declares_pre_identity_rate_limits: bool,
+    declares_post_identity_rate_limits: bool,
+
+    // Snapshot ownership keeps counters across route-cache and registry changes.
+    rate_limit_overrides: RateLimitOverrides,
+
     /// Whether any level declares an `assertions:` block. False for every
     /// config that does not use the feature, which is what keeps the extra
     /// route resolution the contract needs out of those deployments.
@@ -532,6 +814,27 @@ struct RuntimeSnapshot {
 
     /// Whether any named route uses a glob selector.
     declares_glob_named_routes: bool,
+}
+
+impl RuntimeSnapshot {
+    /// Whether the configuration has nothing to run at `hook_name`, so the
+    /// request can pass without route resolution.
+    fn has_nothing_to_dispatch(
+        &self,
+        hook_name: &str,
+        entries: &[crate::registry::HookEntry],
+    ) -> bool {
+        let lists_rate_limits = match StructuralList::for_hook(hook_name) {
+            Some(StructuralList::RateLimits(RateLimitStage::PreIdentity)) => {
+                self.declares_pre_identity_rate_limits
+            },
+            Some(StructuralList::RateLimits(RateLimitStage::PostIdentity)) => {
+                self.declares_post_identity_rate_limits
+            },
+            _ => false,
+        };
+        entries.is_empty() && self.route_annotations.is_empty() && !lists_rate_limits
+    }
 }
 
 /// Composite key for route annotations. Includes the hook name so a single
@@ -596,6 +899,20 @@ pub struct PolicyEngine {
     /// silent, so it warns once rather than on every request. Reset by
     /// `clear_routing_cache()`.
     route_authentication_unreachable_warned: AtomicBool,
+
+    /// The same gate for an `http:` route's `rate_limits:` list. Separate, so
+    /// one warning does not spend the other. Reset by `clear_routing_cache()`.
+    route_rate_limits_unreachable_warned: AtomicBool,
+
+    /// Whether a skipped `ratelimit.pre_identity` stage has been reported this
+    /// cycle. A host that never calls the stage misses it on every request, so
+    /// it warns once rather than per request. Reset by `clear_routing_cache()`.
+    rate_limit_stage_skipped_warned: AtomicBool,
+
+    /// Whether a `rate_limits:` step with no limiter has been reported this
+    /// cycle. Every request it covers is denied, so it logs once rather than
+    /// per request. Reset by `clear_routing_cache()`.
+    rate_limit_unavailable_warned: AtomicBool,
 
     /// Whether the request-direction contract on an `http:` route has already
     /// been reported unreachable. Per direction, because a host can supply the
@@ -899,6 +1216,52 @@ fn warn_on_dropped_inherited_authentication(cfg: &PolicyConfig) {
     }
 }
 
+/// Report every route whose inherited `rate_limits:` steps a
+/// `replace_inherited: true` drops, at a section or on the route itself.
+fn warn_on_dropped_inherited_rate_limits(cfg: &PolicyConfig) {
+    for finding in crate::config::dropped_inherited_rate_limits(cfg) {
+        warn!(
+            alarm = "rate_limits_replaced_inherited",
+            route = %finding.route,
+            declared_in = %finding.declared_in,
+            dropped = ?finding.dropped,
+            "`rate_limits.replace_inherited: true` drops the rate limits this route inherited, \
+             so requests on it are no longer counted against them. Remove the flag if the block \
+             meant to add limits, or keep it if the route is meant to run without them.",
+        );
+    }
+}
+
+/// Report every route whose folded `rate_limits:` names one base limiter more
+/// than once.
+fn warn_on_rate_limits_listed_twice(cfg: &PolicyConfig) {
+    for finding in crate::config::rate_limits_listed_twice(cfg) {
+        warn!(
+            alarm = "rate_limit_listed_twice",
+            route = %finding.route,
+            limiters = ?finding.limiters,
+            "this route inherits the same rate limiter from more than one section. It runs \
+             once per request, so the repeat adds no limit. Remove the repeated listing, or give \
+             one listing its own `config:` if a second, separate limit was meant.",
+        );
+    }
+}
+
+/// Report every route that runs a post-identity limiter but resolves no
+/// authentication.
+fn warn_on_rate_limits_without_authentication(cfg: &PolicyConfig) {
+    for finding in crate::config::rate_limits_without_authentication(cfg) {
+        warn!(
+            alarm = "rate_limit_without_authentication",
+            route = %finding.route,
+            limiters = ?finding.limiters,
+            "this route runs a post-identity limiter but resolves no authentication, so a \
+             limiter keyed on identity denies every request here. Add an `authentication:` step \
+             the route inherits, or drop the limiter with `rate_limits.replace_inherited: true`.",
+        );
+    }
+}
+
 /// Look up the factory for every entry in `plugin_configs`, in config
 /// order. Returns on the first `kind` with no registered factory.
 ///
@@ -1003,6 +1366,7 @@ fn snapshot_from_config(
     prev: Option<&RuntimeSnapshot>,
     content_key: Option<crate::hooks::payload::ContentKey>,
     factory_context: &crate::factory::FactoryContext,
+    rate_limit_overrides: RateLimitOverrides,
 ) -> RuntimeSnapshot {
     let mut executor = Executor::new(ExecutorConfig {
         timeout_seconds: policy_config.engine_settings.plugin_timeout,
@@ -1074,6 +1438,15 @@ fn snapshot_from_config(
     }
     let route_cache_max_entries = policy_config.engine_settings.route_cache_max_entries;
     let http_routes_declaring_authentication = http_routes_declaring_authentication(&policy_config);
+    let http_routes_declaring_rate_limits = http_routes_declaring_rate_limits(&policy_config);
+    let declares_rate_limits_at = |hook: &str| {
+        policy_config.dispatch_mode().is_policy()
+            && config::declares_rate_limits_at(&policy_config, hook)
+    };
+    let declares_pre_identity_rate_limits =
+        declares_rate_limits_at(crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY);
+    let declares_post_identity_rate_limits =
+        declares_rate_limits_at(crate::ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY);
     let declares_assertions = declares_assertions(&policy_config);
     let http_routes_declaring_assertions = http_routes_declaring_assertions(&policy_config);
     let declares_glob_named_routes = declares_glob_named_routes(&policy_config);
@@ -1085,6 +1458,10 @@ fn snapshot_from_config(
         route_cache_max_entries,
         route_annotations: HashMap::new(),
         http_routes_declaring_authentication,
+        http_routes_declaring_rate_limits,
+        declares_pre_identity_rate_limits,
+        declares_post_identity_rate_limits,
+        rate_limit_overrides,
         declares_assertions,
         http_routes_declaring_assertions,
         declares_glob_named_routes,
@@ -1114,6 +1491,10 @@ impl PolicyEngine {
             route_cache_max_entries: config.route_cache_max_entries,
             route_annotations: HashMap::new(),
             http_routes_declaring_authentication: Arc::from(Vec::new()),
+            http_routes_declaring_rate_limits: Arc::from(Vec::new()),
+            declares_pre_identity_rate_limits: false,
+            declares_post_identity_rate_limits: false,
+            rate_limit_overrides: Arc::new(HashMap::new()),
             declares_assertions: false,
             http_routes_declaring_assertions: Arc::from(Vec::new()),
             declares_glob_named_routes: false,
@@ -1125,6 +1506,9 @@ impl PolicyEngine {
             cache_hasher,
             route_cache_full_warned: AtomicBool::new(false),
             route_authentication_unreachable_warned: AtomicBool::new(false),
+            route_rate_limits_unreachable_warned: AtomicBool::new(false),
+            rate_limit_stage_skipped_warned: AtomicBool::new(false),
+            rate_limit_unavailable_warned: AtomicBool::new(false),
             route_request_assertions_unreachable_warned: AtomicBool::new(false),
             route_response_assertions_unreachable_warned: AtomicBool::new(false),
             executor_depth: AtomicUsize::new(0),
@@ -1418,6 +1802,9 @@ impl PolicyEngine {
             refuse_changed_secrets(self.secrets.get().map(Arc::as_ref), &policy_config)?;
         }
         warn_on_dropped_inherited_authentication(&policy_config);
+        warn_on_dropped_inherited_rate_limits(&policy_config);
+        warn_on_rate_limits_listed_twice(&policy_config);
+        warn_on_rate_limits_without_authentication(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
         // Resolve under the factories read lock, then drop it and
@@ -1433,6 +1820,8 @@ impl PolicyEngine {
             resolve_factories(&policy_config.plugins, &registry)?
         };
         let instances = create_plugin_instances(&policy_config.plugins, &factories, context)?;
+        let rate_limit_overrides =
+            create_rate_limit_overrides(&policy_config, &factories, context)?;
 
         // Build the new snapshot from the current one — copy-on-write so
         // concurrent invokes keep using the existing config until we swap.
@@ -1470,6 +1859,7 @@ impl PolicyEngine {
                 Some(current.as_ref()),
                 content_key,
                 context,
+                Arc::clone(&rate_limit_overrides),
             )));
             // Same generation bump as mutate_runtime — load_config doesn't
             // go through that helper because it has to swap registry + executor
@@ -1477,12 +1867,13 @@ impl PolicyEngine {
             self.generation.fetch_add(1, Ordering::Release);
             Ok(())
         });
-        // Released before `instances`, `new_registry` and `current` fall out
-        // of scope, the same discipline try_mutate_runtime follows. A
-        // rejected load holds the only references to plugins the factories
-        // just built, and dropping one runs host `Drop` code that is free to
-        // re-enter the engine. Errors above stay in `registered`, so nothing
-        // returns from this method while it still holds the lock.
+        // Released before `instances`, `rate_limit_overrides`, `new_registry`
+        // and `current` fall out of scope, the same discipline
+        // try_mutate_runtime follows. A rejected load holds the only
+        // references to plugins the factories just built, and dropping one
+        // runs host `Drop` code that is free to re-enter the engine. Errors
+        // above stay in `registered`, so nothing returns from this method
+        // while it still holds the lock.
         drop(writer);
         drop(current);
         registered?;
@@ -1740,6 +2131,9 @@ impl PolicyEngine {
         warn_on_inactive_settings(&policy_config);
         let policy_config = normalize_and_validate(policy_config, false)?;
         warn_on_dropped_inherited_authentication(&policy_config);
+        warn_on_dropped_inherited_rate_limits(&policy_config);
+        warn_on_rate_limits_listed_twice(&policy_config);
+        warn_on_rate_limits_without_authentication(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
         let engine = Self::new(PolicyEngineConfig {
@@ -1754,6 +2148,11 @@ impl PolicyEngine {
             &resolved,
             &crate::factory::FactoryContext::default(),
         )?;
+        let rate_limit_overrides = create_rate_limit_overrides(
+            &policy_config,
+            &resolved,
+            &crate::factory::FactoryContext::default(),
+        )?;
         let mut new_registry = PluginRegistry::new();
         register_instances_into(&mut new_registry, &policy_config.plugins, &instances)?;
         let content_key = content_key_for(&policy_config, None)?;
@@ -1764,6 +2163,7 @@ impl PolicyEngine {
             None,
             content_key,
             &crate::factory::FactoryContext::default(),
+            rate_limit_overrides,
         )));
 
         Ok(engine)
@@ -2170,6 +2570,50 @@ impl PolicyEngine {
             }
         }
 
+        let mut initialized_overrides: Vec<&RateLimitOverride> = Vec::new();
+        for (site, instance) in snapshot.rate_limit_overrides.iter() {
+            let init_ext =
+                self.init_extensions_for(&instance.plugin_ref.trusted_config().capabilities);
+            if let Err(e) = instance
+                .plugin_ref
+                .plugin()
+                .initialize_with(&init_ext)
+                .await
+            {
+                let plugin_name = instance.plugin_ref.name().to_owned();
+                error!(
+                    "Failed to initialize the `{}` rate_limits step {} instance of '{}': {}",
+                    site.section, site.index, plugin_name, e
+                );
+                let overrides = initialized_overrides
+                    .iter()
+                    .rev()
+                    .map(|done| Arc::clone(done.plugin_ref.plugin()));
+                let base = initialized_plugins
+                    .iter()
+                    .rev()
+                    .filter_map(|name| snapshot.registry.get(name))
+                    .map(|plugin_ref| Arc::clone(plugin_ref.plugin()));
+                for plugin in overrides.chain(base) {
+                    if let Err(shutdown_err) = plugin.shutdown().await {
+                        error!("Error shutting down plugin during rollback: {shutdown_err}");
+                    }
+                }
+                return Err(Box::new(PluginError::Execution {
+                    plugin_name,
+                    message: format!(
+                        "initialization failed for the `{}` rate_limits step {}: {e}",
+                        site.section, site.index
+                    ),
+                    source: Some(Box::new(e)),
+                    code: None,
+                    details: std::collections::HashMap::new(),
+                    proto_error_code: None,
+                }));
+            }
+            initialized_overrides.push(instance);
+        }
+
         // Reconcile whatever a previous run left mid-flight, once, before any
         // traffic. Without this an orphaned intent sits in the log forever and
         // the write-ahead record never becomes an answer about what happened.
@@ -2229,6 +2673,15 @@ impl PolicyEngine {
                 }
             }
         }
+        for instance in snapshot.rate_limit_overrides.values() {
+            if let Err(e) = instance.plugin_ref.plugin().shutdown().await {
+                error!(
+                    "Error shutting down a rate_limits override of '{}': {}",
+                    instance.plugin_ref.name(),
+                    e
+                );
+            }
+        }
 
         self.initialized.store(false, Ordering::Release);
         info!("PolicyEngine shutdown complete");
@@ -2265,6 +2718,8 @@ impl PolicyEngine {
         // a concurrent register/load_config swapping in a new snapshot doesn't
         // change our view mid-pipeline.
         let snapshot = self.load_runtime();
+        let context_table =
+            self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
         let all_entries = snapshot.registry.entries_for_hook(&hook_type);
 
@@ -2272,7 +2727,7 @@ impl PolicyEngine {
         // dispatch entry without any plugin being registered on the
         // hook directly, so we can only short-circuit when both the
         // registry and the annotation map are empty.
-        if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
+        if snapshot.has_nothing_to_dispatch(hook_name, all_entries) {
             // Route filtering has not run, so the route is resolved here: a
             // contract written on a route holds whether or not this hook has a
             // plugin on it.
@@ -2395,13 +2850,15 @@ impl PolicyEngine {
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
         let snapshot = self.load_runtime();
+        let context_table =
+            self.track_rate_limit_stage(&snapshot, H::NAME, &extensions, context_table);
         let hook_type = HookType::new(H::NAME);
         let all_entries = snapshot.registry.entries_for_hook(&hook_type);
 
         // See `invoke_named` for why we don't short-circuit on
         // `all_entries.is_empty()` alone — route annotations can fire
         // without a directly-registered plugin.
-        if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
+        if snapshot.has_nothing_to_dispatch(H::NAME, all_entries) {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             let matched = resolve_contract_route(&snapshot, &extensions);
             return (
@@ -2521,6 +2978,8 @@ impl PolicyEngine {
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
         let snapshot = self.load_runtime();
+        let context_table =
+            self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
         let all_entries = snapshot.registry.entries_for_hook(&hook_type);
 
@@ -2534,7 +2993,7 @@ impl PolicyEngine {
         // Returning here also means a request whose path cannot be read is
         // allowed rather than denied on such a hook. Nothing would have
         // enforced on it either way.
-        if all_entries.is_empty() && snapshot.route_annotations.is_empty() {
+        if snapshot.has_nothing_to_dispatch(hook_name, all_entries) {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             let matched = resolve_contract_route(&snapshot, &extensions);
             return (
@@ -3107,11 +3566,7 @@ impl PolicyEngine {
                     return Err(cause.into());
                 }
             }
-            self.warn_once_if_route_authentication_is_unreachable(
-                &snapshot.http_routes_declaring_authentication,
-                hook_name,
-                path,
-            );
+            self.warn_once_if_route_list_is_unreachable(snapshot, hook_name, path);
             routing_config.zip(path).and_then(|(policy_config, path)| {
                 let method = request_line.and_then(|http| http.method.as_deref());
                 config::resolve_route(
@@ -3279,6 +3734,11 @@ impl PolicyEngine {
             ));
         };
 
+        // Rate-limit lists skip the cache. A fill from a request still on an
+        // older snapshot could outlive the clear a reload runs, and would then
+        // keep serving that generation's limiter instances.
+        let cacheable = !StructuralList::is_rate_limits(hook_name);
+
         // Fast path: zero-allocation cache lookup with raw_entry
         let hash = {
             use std::hash::BuildHasher as _;
@@ -3289,7 +3749,7 @@ impl PolicyEngine {
             request_scope.hash(&mut hasher);
             hasher.finish()
         };
-        {
+        if cacheable {
             // Recover from poisoning: a panic in another thread while holding
             // this lock leaves the cache flagged poisoned. The cache's contents
             // are still valid (HashMap operations are panic-safe and stale
@@ -3315,11 +3775,6 @@ impl PolicyEngine {
 
         // Slow path: resolve, filter, and cache (allocations only here).
         //
-        // Hook-specific resolution for identity.resolve: the route's
-        // `identity:` block is the authoritative dispatch list (NOT
-        // the `plugins:` block, which in APL-driven routes means
-        // "per-route overrides" rather than "binding"). For every
-        // other hook, the generic plugins-block resolution applies.
         // An HTTP request matched above; every other entity type matches here,
         // once, and both resolvers read the route the match produced rather
         // than scanning the route table again.
@@ -3349,40 +3804,51 @@ impl PolicyEngine {
             "Resolved route for request",
         );
 
-        // `identity.resolve` reads the route's `authentication:` steps, the one
-        // structural dispatch list policy mode keeps. Every other hook resolves
-        // to nothing here and is governed by the annotation short-circuit above,
-        // so a policy naming the plugin is what makes it fire.
-        let resolved = if hook_name == crate::identity::HOOK_IDENTITY_RESOLVE {
-            config::resolve_identity_plugins_for_route(policy_config, matched)
-        } else {
-            config::resolve_plugins_for_entity(policy_config)
+        // `identity.resolve` and the two rate-limit hooks read the structural
+        // lists policy mode keeps, `authentication:` and `rate_limits:`. Every
+        // other hook resolves to nothing here and is governed by the annotation
+        // short-circuit above, so a policy naming the plugin is what makes it
+        // fire.
+        let filtered = match StructuralList::for_hook(hook_name) {
+            // `pre_identity` runs before the request is classified, so it reads
+            // the list an HTTP request would: the matched `http:` route, or
+            // `global` and `global.defaults.http` when none matched. A named
+            // entity never has an `http:` route, which is that same fallback.
+            Some(StructuralList::RateLimits(RateLimitStage::PreIdentity)) => rate_limit_entries(
+                snapshot,
+                policy_config,
+                entries,
+                http_matched.as_ref(),
+                Some(ENTITY_HTTP),
+                hook_name,
+                &self.rate_limit_unavailable_warned,
+            )?,
+            Some(StructuralList::RateLimits(RateLimitStage::PostIdentity)) => rate_limit_entries(
+                snapshot,
+                policy_config,
+                entries,
+                matched,
+                Some(entity_type),
+                hook_name,
+                &self.rate_limit_unavailable_warned,
+            )?,
+            Some(StructuralList::Authentication) => {
+                let resolved = config::resolve_identity_plugins_for_route(policy_config, matched);
+                self.resolved_entries(snapshot, entries, &resolved).await
+            },
+            None => {
+                let resolved = config::resolve_plugins_for_entity(policy_config);
+                self.resolved_entries(snapshot, entries, &resolved).await
+            },
         };
 
-        // Filter entries to resolved plugins, preserving resolution order.
-        // If a plugin has config overrides and we have a factory for its kind,
-        // create a new instance with the merged config.
-        let mut filtered = Vec::new();
-        for resolved_plugin in &resolved {
-            if let Some(entry) = entries
-                .iter()
-                .find(|e| e.plugin_ref.name() == resolved_plugin.name)
-            {
-                if let Some(overrides) = &resolved_plugin.config_overrides {
-                    // Try to create an override instance
-                    if let Some(override_entry) = self
-                        .create_override_instance(entry, overrides, &snapshot.factory_context)
-                        .await
-                    {
-                        filtered.push(override_entry);
-                        continue;
-                    }
-                }
-                filtered.push(entry.clone());
-            }
-        }
-
         let cached = Arc::new(filtered);
+        if !cacheable {
+            return Ok((
+                cached,
+                contract_route(snapshot, http_matched.as_ref(), name_matched.as_ref()),
+            ));
+        }
 
         // Store in cache — owned key allocated only on cache miss.
         // Reject-on-full: when the cache is at capacity we still return
@@ -3423,44 +3889,184 @@ impl PolicyEngine {
         ))
     }
 
-    /// Warn once when an `http:` route's `authentication:` list cannot apply
-    /// because the request carried no readable path at the identity hook.
+    /// The entries for a resolved plugin list, in resolution order. A plugin
+    /// with config overrides runs an override instance when its factory can
+    /// build one.
+    async fn resolved_entries(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        entries: &[crate::registry::HookEntry],
+        resolved: &[config::ResolvedPlugin],
+    ) -> Vec<crate::registry::HookEntry> {
+        let mut filtered = Vec::new();
+        for resolved_plugin in resolved {
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| e.plugin_ref.name() == resolved_plugin.name)
+            {
+                if let Some(overrides) = &resolved_plugin.config_overrides
+                    && let Some(override_entry) = self
+                        .create_override_instance(entry, overrides, &snapshot.factory_context)
+                        .await
+                {
+                    filtered.push(override_entry);
+                    continue;
+                }
+                filtered.push(entry.clone());
+            }
+        }
+        filtered
+    }
+
+    /// Warn once when an `http:` route's structural list cannot apply because
+    /// the request carried no readable path at that list's hook.
     ///
     /// Falling back to the global list is the behavior a host gets today and
-    /// stays that way, but doing it silently hides which list authenticated a
+    /// stays that way, but doing it silently hides which list ran for a
     /// request, so the condition is diagnosable from what the engine emits.
+    /// `authentication:` and `rate_limits:` latch separately, so one list's
+    /// warning does not spend the other's.
     ///
     /// Which routes those are is decided when the config lands, so this reads
     /// the answer off the snapshot. Every check here is O(1), which is what
     /// keeps the ordinary config, where the answer is empty, off the route
     /// table entirely.
-    fn warn_once_if_route_authentication_is_unreachable(
+    fn warn_once_if_route_list_is_unreachable(
         &self,
-        unreachable: &[String],
+        snapshot: &RuntimeSnapshot,
         hook_name: &str,
         request_path: Option<&str>,
     ) {
-        if hook_name != crate::identity::HOOK_IDENTITY_RESOLVE
-            || unreachable.is_empty()
+        let Some(list) = StructuralList::for_hook(hook_name) else {
+            return;
+        };
+        let (unreachable, latch) = match list {
+            StructuralList::Authentication => (
+                &snapshot.http_routes_declaring_authentication,
+                &self.route_authentication_unreachable_warned,
+            ),
+            StructuralList::RateLimits(_) => (
+                &snapshot.http_routes_declaring_rate_limits,
+                &self.route_rate_limits_unreachable_warned,
+            ),
+        };
+        if unreachable.is_empty()
             || request_path.is_some_and(|path| path.starts_with('/'))
-            || self
-                .route_authentication_unreachable_warned
-                .load(Ordering::Acquire)
+            || latch.load(Ordering::Acquire)
+            || latch.swap(true, Ordering::AcqRel)
         {
             return;
         }
-        if !self
-            .route_authentication_unreachable_warned
-            .swap(true, Ordering::AcqRel)
-        {
-            warn!(
+        match list {
+            StructuralList::Authentication => warn!(
                 routes = unreachable.join(", "),
                 "An http: route declares authentication: but the request carries no \
                  readable path at the identity hook, so the global authentication \
                  list runs instead. The host must supply the request line on the \
                  extensions at this hook for a route's list to apply.",
-            );
+            ),
+            StructuralList::RateLimits(_) => warn!(
+                routes = unreachable.join(", "),
+                hook = hook_name,
+                "An http: route declares rate_limits: but the request carries no readable \
+                 path at this rate-limit hook, so the global rate_limits list runs instead. \
+                 The host must supply the request line on the extensions at both rate-limit \
+                 hooks for a route's list to apply.",
+            ),
         }
+    }
+
+    /// Mark a context table that reached `ratelimit.pre_identity`, and report
+    /// an `identity.resolve` on a table that did not while a pre-identity
+    /// limit is in force.
+    ///
+    /// The marker rides the context table, which is the only state a host
+    /// threads from one invocation of a request to the next.
+    fn track_rate_limit_stage(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        hook_name: &str,
+        extensions: &Extensions,
+        context_table: Option<PluginContextTable>,
+    ) -> Option<PluginContextTable> {
+        match hook_name {
+            crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY => {
+                let mut table = context_table.unwrap_or_default();
+                table.mark_pre_identity_rate_limited();
+                Some(table)
+            },
+            crate::identity::HOOK_IDENTITY_RESOLVE
+                if snapshot.declares_pre_identity_rate_limits
+                    && !context_table
+                        .as_ref()
+                        .is_some_and(PluginContextTable::pre_identity_rate_limited) =>
+            {
+                self.warn_once_if_rate_limit_stage_skipped(snapshot, extensions);
+                context_table
+            },
+            _ => context_table,
+        }
+    }
+
+    /// Warn once per cycle when `identity.resolve` runs for a request whose
+    /// pre-identity limits never ran, which is a host that skipped the stage.
+    fn warn_once_if_rate_limit_stage_skipped(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        extensions: &Extensions,
+    ) {
+        if self.rate_limit_stage_skipped_warned.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(policy_config) = snapshot
+            .policy_config
+            .as_ref()
+            .filter(|config| config.dispatch_mode().is_policy())
+        else {
+            return;
+        };
+        let is_http = extensions
+            .meta
+            .as_deref()
+            .and_then(|m| m.entity_type.as_deref())
+            == Some(ENTITY_HTTP);
+        let http_matched = is_http
+            .then(|| resolve_http_route(policy_config, extensions))
+            .flatten();
+        let pre_identity = crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY;
+        let skipped: Vec<&str> = config::rate_limit_step_refs_for_route(
+            policy_config,
+            http_matched.as_ref(),
+            Some(ENTITY_HTTP),
+        )
+        .into_iter()
+        .map(|resolved| resolved.step.name.as_str())
+        .filter(|name| {
+            policy_config
+                .plugins
+                .iter()
+                .any(|p| p.name == *name && p.hooks.iter().any(|hook| hook == pre_identity))
+        })
+        .collect();
+        if skipped.is_empty()
+            || self
+                .rate_limit_stage_skipped_warned
+                .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let route = http_matched
+            .as_ref()
+            .map_or(ENTITY_NAME_GLOBAL, |matched| matched.name.as_str());
+        warn!(
+            alarm = "rate_limit_stage_skipped",
+            route,
+            skipped = ?skipped,
+            "identity.resolve ran for a request that never reached ratelimit.pre_identity, so \
+             the pre-identity rate limits in force for it did not run. The host must invoke \
+             ratelimit.pre_identity before the first identity.resolve and pass the context \
+             table it returns into the identity calls of the same request.",
+        );
     }
 
     /// Warn once per direction when an `http:` route's `assertions:` contract
@@ -3742,24 +4348,10 @@ impl PolicyEngine {
         let base_config = base_entry.plugin_ref.trusted_config();
         let kind = &base_config.kind;
 
-        // Merge: start with base config, overlay with overrides
-        let mut merged_config = base_config.clone();
-        if let Some(override_config) = overrides.get("config") {
-            // Merge the plugin-specific config section
-            if let Some(base_plugin_config) = &merged_config.config {
-                let mut merged = base_plugin_config.clone();
-                if let (Some(base_obj), Some(override_obj)) =
-                    (merged.as_object_mut(), override_config.as_object())
-                {
-                    for (key, value) in override_obj {
-                        base_obj.insert(key.clone(), value.clone());
-                    }
-                }
-                merged_config.config = Some(merged);
-            } else {
-                merged_config.config = Some(override_config.clone());
-            }
-        }
+        let merged_config = overrides.get("config").map_or_else(
+            || base_config.clone(),
+            |override_config| merge_override_config(base_config, override_config),
+        );
 
         // Create new instance with merged config — hold the factories
         // read lock just long enough to construct the instance, then drop
@@ -3850,6 +4442,12 @@ impl PolicyEngine {
         // no reason to hold the cache lock while storing them.
         self.route_cache_full_warned.store(false, Ordering::Release);
         self.route_authentication_unreachable_warned
+            .store(false, Ordering::Release);
+        self.route_rate_limits_unreachable_warned
+            .store(false, Ordering::Release);
+        self.rate_limit_stage_skipped_warned
+            .store(false, Ordering::Release);
+        self.rate_limit_unavailable_warned
             .store(false, Ordering::Release);
         self.route_request_assertions_unreachable_warned
             .store(false, Ordering::Release);
@@ -11508,5 +12106,931 @@ routes:
             .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, http_request(None), None)
             .await;
         assert!(!warned(&engine, Direction::Request));
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "tests"
+)]
+mod rate_limit_dispatch_tests {
+    use super::*;
+    use crate::context::PluginContext;
+    use crate::error::PluginViolation;
+    use crate::extensions::{HttpExtension, MetaExtension};
+    use crate::http_hook::{HttpHook, HttpPayload};
+    use crate::ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY};
+    use crate::trace_capture::capturing;
+    use async_trait::async_trait;
+
+    // -----------------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn each_rate_limit_hook_runs_only_its_own_plugins_in_list_order() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a, user-a, edge-b, user-b]\nroutes:\n  - \
+             http: {{ path_prefix: /v1 }}\n"
+        ))
+        .await;
+
+        let pre = dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http("/v1/x")).await;
+        assert!(
+            pre.continue_processing,
+            "an allowing limiter lets the request through"
+        );
+        assert_eq!(
+            probe.fired(),
+            vec!["edge-a", "edge-b"],
+            "the pre-identity hook runs only pre-identity plugins, in list order"
+        );
+
+        probe.clear();
+        dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, http("/v1/x")).await;
+        assert_eq!(
+            probe.fired(),
+            vec!["user-a", "user-b"],
+            "the post-identity hook runs only post-identity plugins, in list order"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_denial_returns_the_plugin_violation_unchanged() {
+        let (engine, _) = limiter_engine(&format!(
+            "{LIMITERS}global:\n  rate_limits:\n    - name: user-a\n      config: {{ deny: true \
+             }}\nroutes:\n  - tool: t\n"
+        ))
+        .await;
+
+        let result = dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, named("tool", "t")).await;
+
+        assert!(
+            !result.continue_processing,
+            "a denying limiter stops the request"
+        );
+        let violation = result.violation.expect("the denial carries a violation");
+        assert_eq!(violation.code, DENIAL_CODE, "the plugin's code is kept");
+        assert_eq!(
+            violation.proto_error_code,
+            Some(429),
+            "the plugin's status reaches the host"
+        );
+        assert_eq!(
+            violation.details.get("retry_after_seconds"),
+            Some(&serde_json::json!(7)),
+            "the plugin's details reach the host"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_rate_limits_both_hooks_pass_and_nothing_runs() {
+        let (engine, probe) = limiter_engine(&format!("{LIMITERS}routes:\n  - tool: t\n")).await;
+
+        for (hook, ext) in [
+            (HOOK_RATELIMIT_PRE_IDENTITY, http("/v1")),
+            (HOOK_RATELIMIT_POST_IDENTITY, named("tool", "t")),
+        ] {
+            let result = dispatch(&engine, hook, ext).await;
+            assert!(
+                result.continue_processing,
+                "{hook} passes with no rate_limits"
+            );
+        }
+        assert!(
+            probe.fired().is_empty(),
+            "no limiter runs without rate_limits"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pre_identity_list_is_the_http_list_whatever_the_request_names() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a]\n  defaults:\n    http:\n      \
+             rate_limits: [edge-b]\nroutes:\n  - tool: t\n    rate_limits: [user-a]\n"
+        ))
+        .await;
+
+        dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, named("tool", "t")).await;
+
+        assert_eq!(
+            probe.fired(),
+            vec!["edge-a", "edge-b"],
+            "pre-identity runs before classification, so it reads global and the http \
+             default, not the tool route"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_step_config_override_runs_its_own_instance_with_its_own_state() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}routes:\n  - http: {{ path_prefix: /v1 }}\n    rate_limits:\n      - \
+             name: edge-a\n        config: {{ tag: route }}\n  - http: {{ path_prefix: /v2 }}\n    \
+             rate_limits: [edge-a]\n"
+        ))
+        .await;
+
+        for _ in 0..3 {
+            dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http("/v1/x")).await;
+        }
+        dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http("/v2/x")).await;
+
+        assert_eq!(
+            probe.hits(),
+            vec![
+                ("edge-a".to_owned(), "route".to_owned(), 1),
+                ("edge-a".to_owned(), "route".to_owned(), 2),
+                ("edge-a".to_owned(), "route".to_owned(), 3),
+                ("edge-a".to_owned(), "base".to_owned(), 1),
+            ],
+            "the override counts on its own instance and the base instance starts fresh"
+        );
+        assert_eq!(
+            probe.inits.load(Ordering::Acquire),
+            probe.built.load(Ordering::Acquire),
+            "every instance, override included, is initialized"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_override_keeps_one_instance_under_cache_pressure_concurrency_and_registration() {
+        let (engine, probe) = limiter_engine(&format!(
+            "engine_settings:\n  route_cache_max_entries: 1\n{LIMITERS}routes:\n  - tool: \
+             \"search-*\"\n    rate_limits:\n      - name: user-a\n        config: {{ tag: route \
+             }}\n"
+        ))
+        .await;
+        let engine = Arc::new(engine);
+        let built_at_load = probe.built.load(Ordering::Acquire);
+
+        let first_requests: Vec<_> = (0..8)
+            .map(|n| {
+                let engine = Arc::clone(&engine);
+                tokio::spawn(async move {
+                    let name = format!("search-{n}");
+                    dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, named("tool", &name)).await
+                })
+            })
+            .collect();
+        for request in first_requests {
+            request.await.expect("the request task completes");
+        }
+
+        let bystander = Arc::new(Limiter::new(limiter_config("bystander"), &probe));
+        let bystander_plugin: Arc<dyn Plugin> = bystander.clone();
+        engine
+            .register_raw::<HttpHook>(
+                bystander_plugin,
+                limiter_config("bystander"),
+                Arc::new(LimiterHandler(bystander)),
+            )
+            .expect("an unrelated plugin registers");
+        dispatch(
+            &engine,
+            HOOK_RATELIMIT_POST_IDENTITY,
+            named("tool", "search-x"),
+        )
+        .await;
+        engine.unregister("bystander");
+        dispatch(
+            &engine,
+            HOOK_RATELIMIT_POST_IDENTITY,
+            named("tool", "search-y"),
+        )
+        .await;
+
+        let mut counts: Vec<u64> = probe.hits().into_iter().map(|(_, _, n)| n).collect();
+        counts.sort_unstable();
+        assert_eq!(
+            counts,
+            (1..=10).collect::<Vec<_>>(),
+            "ten requests across names, a full cache, concurrency and a registration count \
+             on one instance"
+        );
+        assert!(
+            probe.hits().iter().all(|(_, tag, _)| tag == "route"),
+            "every request ran the override, never the base"
+        );
+        assert_eq!(
+            probe.built.load(Ordering::Acquire),
+            built_at_load,
+            "no request builds an instance"
+        );
+    }
+
+    #[test]
+    fn an_override_config_the_factory_rejects_fails_the_load() {
+        let yaml = format!(
+            "{LIMITERS}routes:\n  - tool: t\n    rate_limits:\n      - name: user-a\n        \
+             config: {{ reject: true }}\n"
+        );
+        let (engine, _) = limiter_engine_unloaded();
+        let err = engine
+            .load_config(crate::config::parse_config(&yaml).expect("the config parses"))
+            .expect_err("a rejected override fails the load")
+            .to_string();
+        for needle in ["routes[0]", "rate_limits step 0", "user-a", REJECTION] {
+            assert!(
+                err.contains(needle),
+                "the error must name `{needle}`: {err}"
+            );
+        }
+        assert!(
+            engine.load_runtime().policy_config.is_none(),
+            "a refused load installs nothing"
+        );
+
+        let mut factories = PluginFactoryRegistry::new();
+        factories.register(KIND, Box::new(LimiterFactory(Probe::default())));
+        let err = PolicyEngine::from_config(
+            crate::config::parse_config(&yaml).expect("the config parses"),
+            &factories,
+        )
+        .err()
+        .expect("the typed constructor refuses it too")
+        .to_string();
+        assert!(
+            err.contains(REJECTION),
+            "from_config names the rejection: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_and_tool_routes_under_global_rate_limits_both_dispatch_post_identity() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}global:\n  rate_limits: [user-a]\nroutes:\n  - tool: t\n  - llm: m\n"
+        ))
+        .await;
+
+        dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, named("tool", "t")).await;
+        dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, named("llm", "m")).await;
+
+        assert_eq!(
+            probe.fired(),
+            vec!["user-a", "user-a"],
+            "a tool route and an llm route both inherit the global post-identity limiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_named_entry_point_runs_the_rate_limit_list() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a]\nroutes:\n  - tool: t\n"
+        ))
+        .await;
+
+        let by_name = dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http("/")).await;
+        let (typed, _) = engine
+            .invoke::<PreIdentityHook>(HttpPayload, http("/"), None)
+            .await;
+        let (named_hook, _) = engine
+            .invoke_named::<HttpHook>(HOOK_RATELIMIT_PRE_IDENTITY, HttpPayload, http("/"), None)
+            .await;
+
+        for (entry, result) in [
+            ("invoke_by_name", by_name),
+            ("invoke", typed),
+            ("invoke_named", named_hook),
+        ] {
+            assert!(result.continue_processing, "{entry} allows");
+        }
+        assert_eq!(
+            probe.fired(),
+            vec!["edge-a", "edge-a", "edge-a"],
+            "each entry point runs the list"
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_without_a_prior_pre_identity_call_raises_the_conformance_alarm() {
+        let yaml = format!("{LIMITERS}global:\n  rate_limits: [edge-a]\nroutes:\n  - tool: t\n");
+        let (engine, _) = limiter_engine(&yaml).await;
+        let (events, sink) = capturing();
+
+        for _ in 0..2 {
+            dispatch(&engine, crate::identity::HOOK_IDENTITY_RESOLVE, http("/")).await;
+        }
+
+        let alarms = events.matching("rate_limit_stage_skipped");
+        assert_eq!(
+            alarms.len(),
+            1,
+            "the alarm fires once per cycle: {alarms:?}"
+        );
+        assert!(
+            alarms[0].contains("edge-a"),
+            "the alarm names the limiter that did not run: {alarms:?}"
+        );
+        drop(sink);
+    }
+
+    #[tokio::test]
+    async fn identity_after_pre_identity_on_the_same_context_table_is_silent() {
+        let yaml = format!("{LIMITERS}global:\n  rate_limits: [edge-a]\nroutes:\n  - tool: t\n");
+        let (engine, _) = limiter_engine(&yaml).await;
+        let (events, sink) = capturing();
+
+        let pre = dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http("/")).await;
+        let payload: Box<dyn PluginPayload> = Box::new(HttpPayload);
+        engine
+            .invoke_by_name(
+                crate::identity::HOOK_IDENTITY_RESOLVE,
+                payload,
+                http("/"),
+                Some(pre.context_table),
+            )
+            .await;
+
+        assert!(
+            events.matching("rate_limit_stage_skipped").is_empty(),
+            "a host that threads the table from pre-identity raises no alarm"
+        );
+        drop(sink);
+    }
+
+    #[tokio::test]
+    async fn identity_on_a_config_with_only_post_identity_limits_is_silent() {
+        let yaml = format!("{LIMITERS}global:\n  rate_limits: [user-a]\nroutes:\n  - tool: t\n");
+        let (engine, _) = limiter_engine(&yaml).await;
+        let (events, sink) = capturing();
+
+        dispatch(&engine, crate::identity::HOOK_IDENTITY_RESOLVE, http("/")).await;
+
+        assert!(
+            events.matching("rate_limit_stage_skipped").is_empty(),
+            "no pre-identity limit is in force, so nothing was skipped"
+        );
+        drop(sink);
+    }
+
+    #[tokio::test]
+    async fn an_http_route_rate_limit_list_with_no_path_warns_once() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a]\nroutes:\n  - http: {{ path_prefix: /v1 \
+             }}\n    rate_limits: [edge-b]\n"
+        ))
+        .await;
+        let (events, sink) = capturing();
+
+        for _ in 0..3 {
+            dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http_without_path()).await;
+        }
+
+        assert_eq!(
+            probe.fired(),
+            vec!["edge-a", "edge-a", "edge-a"],
+            "the global list runs when the route cannot be matched"
+        );
+        let warnings = events.matching("global rate_limits list");
+        assert_eq!(warnings.len(), 1, "the warning latches: {warnings:?}");
+        assert!(
+            warnings[0].contains("/v1"),
+            "the warning names the route whose list could not apply: {warnings:?}"
+        );
+        assert!(
+            !engine
+                .route_authentication_unreachable_warned
+                .load(Ordering::Acquire),
+            "the rate-limit warning does not spend the authentication latch"
+        );
+        drop(sink);
+    }
+
+    #[test]
+    fn a_post_identity_limiter_on_a_route_without_authentication_warns_at_load() {
+        let yaml = format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a, user-a]\nroutes:\n  - tool: anonymous\n"
+        );
+        let (engine, _) = limiter_engine_unloaded();
+        let (events, sink) = capturing();
+
+        engine
+            .load_config(crate::config::parse_config(&yaml).expect("the config parses"))
+            .expect("the warning does not refuse the load");
+
+        let alarms = events.matching("rate_limit_without_authentication");
+        assert_eq!(alarms.len(), 1, "one route, one warning: {alarms:?}");
+        for needle in ["tool:anonymous", "user-a"] {
+            assert!(
+                alarms[0].contains(needle),
+                "the warning names `{needle}`: {alarms:?}"
+            );
+        }
+        assert!(
+            !alarms[0].contains("edge-a"),
+            "a pre-identity limiter needs no authentication: {alarms:?}"
+        );
+        drop(sink);
+    }
+
+    #[tokio::test]
+    async fn a_base_limiter_listed_at_two_layers_runs_once_and_warns_at_load() {
+        let yaml = format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a]\nroutes:\n  - http: {{ path_prefix: /v1 \
+             }}\n    rate_limits: [edge-a, edge-b]\n"
+        );
+        let (engine, probe) = limiter_engine_unloaded();
+        let (events, sink) = capturing();
+        engine
+            .load_config(crate::config::parse_config(&yaml).expect("the config parses"))
+            .expect("a repeated limiter still loads");
+        engine.initialize().await.expect("initialize");
+
+        dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http("/v1/x")).await;
+
+        assert_eq!(
+            probe.hits(),
+            vec![
+                ("edge-a".to_owned(), "base".to_owned(), 1),
+                ("edge-b".to_owned(), "base".to_owned(), 1),
+            ],
+            "a base limiter inherited twice counts a request once"
+        );
+        let alarms = events.matching("rate_limit_listed_twice");
+        assert_eq!(alarms.len(), 1, "one route, one warning: {alarms:?}");
+        assert!(
+            alarms[0].contains("edge-a") && !alarms[0].contains("edge-b"),
+            "the warning names only the repeated limiter: {alarms:?}"
+        );
+        drop(sink);
+    }
+
+    #[tokio::test]
+    async fn an_override_step_beside_its_base_limiter_counts_on_both() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a]\nroutes:\n  - http: {{ path_prefix: /v1 \
+             }}\n    rate_limits:\n      - name: edge-a\n        config: {{ tag: route }}\n"
+        ))
+        .await;
+
+        dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http("/v1/x")).await;
+
+        assert_eq!(
+            probe.hits(),
+            vec![
+                ("edge-a".to_owned(), "base".to_owned(), 1),
+                ("edge-a".to_owned(), "route".to_owned(), 1),
+            ],
+            "an override is its own limiter, so it is never folded into the base"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_limiter_denies_with_rate_limit_unavailable() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}global:\n  rate_limits: [edge-a, user-a]\nroutes:\n  - tool: t\n"
+        ))
+        .await;
+        engine.unregister("edge-a");
+        let (events, sink) = capturing();
+
+        for _ in 0..2 {
+            let result = dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, http("/")).await;
+            assert_unavailable(&result);
+        }
+        let post = dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, named("tool", "t")).await;
+
+        assert!(
+            post.continue_processing,
+            "the other stage's limiter is still registered and allows"
+        );
+        assert_eq!(
+            probe.fired(),
+            vec!["user-a"],
+            "only the registered post-identity limiter ran"
+        );
+        assert_eq!(
+            events.matching("ratelimit.unavailable").len(),
+            1,
+            "the missing limiter is logged once per cycle"
+        );
+        drop(sink);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_missing_an_override_instance_denies_with_rate_limit_unavailable() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}routes:\n  - tool: t\n    rate_limits:\n      - name: user-a\n        \
+             config: {{ tag: route }}\n"
+        ))
+        .await;
+        engine.mutate_runtime(|snap| snap.rate_limit_overrides = Arc::new(HashMap::new()));
+
+        let result = dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, named("tool", "t")).await;
+
+        assert_unavailable(&result);
+        assert!(
+            probe.fired().is_empty(),
+            "neither the base nor any other instance runs in the override's place"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_override_that_fails_to_initialize_rolls_back_every_instance() {
+        let (engine, probe) = limiter_engine_unloaded();
+        engine
+            .load_config(
+                crate::config::parse_config(&format!(
+                    "{LIMITERS}routes:\n  - tool: t\n    rate_limits:\n      - name: user-a\n        \
+                     config: {{ fail_init: true }}\n"
+                ))
+                .expect("the config parses"),
+            )
+            .expect("the config loads");
+
+        let err = engine
+            .initialize()
+            .await
+            .expect_err("a failing override fails initialization")
+            .to_string();
+
+        for needle in ["routes[0]", "rate_limits step 0", "user-a"] {
+            assert!(
+                err.contains(needle),
+                "the error must name `{needle}`: {err}"
+            );
+        }
+        assert_eq!(
+            probe.shutdowns.load(Ordering::Acquire),
+            probe.inits.load(Ordering::Acquire),
+            "every instance initialized before the failure is shut down"
+        );
+        assert_eq!(
+            probe.inits.load(Ordering::Acquire),
+            4,
+            "the four base limiters initialized before the override failed"
+        );
+    }
+
+    #[test]
+    fn an_override_instance_without_a_handler_for_its_hook_fails_the_load() {
+        let yaml = format!(
+            "{LIMITERS}routes:\n  - tool: t\n    rate_limits:\n      - name: user-a\n        \
+             config: {{ no_handlers: true }}\n"
+        );
+        let (engine, _) = limiter_engine_unloaded();
+
+        let err = engine
+            .load_config(crate::config::parse_config(&yaml).expect("the config parses"))
+            .expect_err("an override serving no handler fails the load")
+            .to_string();
+
+        for needle in ["routes[0]", "user-a", HOOK_RATELIMIT_POST_IDENTITY] {
+            assert!(
+                err.contains(needle),
+                "the error must name `{needle}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_step_config_that_is_not_a_mapping_fails_the_load() {
+        for (form, config) in [("scalar", "5"), ("list", "[1, 2]")] {
+            let yaml = format!(
+                "{LIMITERS}routes:\n  - tool: t\n    rate_limits:\n      - name: user-a\n        \
+                 config: {config}\n"
+            );
+            let (engine, probe) = limiter_engine_unloaded();
+
+            let err = engine
+                .load_config(crate::config::parse_config(&yaml).expect("the config parses"))
+                .expect_err("a non-mapping config fails the load")
+                .to_string();
+
+            for needle in ["routes[0]", "user-a", "must be a mapping"] {
+                assert!(
+                    err.contains(needle),
+                    "the {form} error must name `{needle}`: {err}"
+                );
+            }
+            assert_eq!(
+                probe.built.load(Ordering::Acquire),
+                4,
+                "the {form} override is refused before its factory runs"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_stage_skipped_alarm_names_the_route() {
+        let yaml = format!(
+            "{LIMITERS}routes:\n  - http: {{ path_prefix: /v1 }}\n    rate_limits: [edge-b]\n"
+        );
+        let (engine, _) = limiter_engine(&yaml).await;
+        let (events, sink) = capturing();
+
+        dispatch(
+            &engine,
+            crate::identity::HOOK_IDENTITY_RESOLVE,
+            http("/v1/x"),
+        )
+        .await;
+
+        let alarms = events.matching("rate_limit_stage_skipped");
+        assert_eq!(alarms.len(), 1, "the alarm fires once: {alarms:?}");
+        assert!(
+            alarms[0].contains("route=prefix:/v1") && alarms[0].contains("edge-b"),
+            "the alarm names the matched route and its skipped limiter: {alarms:?}"
+        );
+        drop(sink);
+    }
+
+    #[tokio::test]
+    async fn override_instances_are_shut_down_with_the_engine() {
+        let (engine, probe) = limiter_engine(&format!(
+            "{LIMITERS}routes:\n  - tool: t\n    rate_limits:\n      - name: user-a\n        \
+             config: {{ tag: route }}\n"
+        ))
+        .await;
+
+        engine.shutdown().await;
+
+        assert_eq!(
+            probe.shutdowns.load(Ordering::Acquire),
+            probe.built.load(Ordering::Acquire),
+            "every instance, override included, is shut down"
+        );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    const KIND: &str = "test/limiter";
+
+    const DENIAL_CODE: &str = "ratelimit.exceeded";
+
+    const REJECTION: &str = "the test limiter refuses this config";
+
+    const INIT_FAILURE: &str = "the test limiter fails to initialize";
+
+    /// Two limiters at each stage.
+    const LIMITERS: &str = "plugins:
+  - { name: edge-a, kind: test/limiter, hooks: [ratelimit.pre_identity] }
+  - { name: edge-b, kind: test/limiter, hooks: [ratelimit.pre_identity] }
+  - { name: user-a, kind: test/limiter, hooks: [ratelimit.post_identity] }
+  - { name: user-b, kind: test/limiter, hooks: [ratelimit.post_identity] }
+";
+
+    /// A typed hook for `invoke::<H>`, which takes its name from the type.
+    struct PreIdentityHook;
+
+    impl HookTypeDef for PreIdentityHook {
+        type Payload = HttpPayload;
+        type Result = PluginResult<HttpPayload>;
+        const NAME: &'static str = HOOK_RATELIMIT_PRE_IDENTITY;
+    }
+
+    /// What every limiter instance built for one engine did.
+    #[derive(Clone, Default)]
+    struct Probe(Arc<ProbeState>);
+
+    #[derive(Default)]
+    struct ProbeState {
+        hits: Mutex<Vec<(String, String, u64)>>,
+        built: AtomicUsize,
+        inits: AtomicUsize,
+        shutdowns: AtomicUsize,
+    }
+
+    impl std::ops::Deref for Probe {
+        type Target = ProbeState;
+
+        fn deref(&self) -> &ProbeState {
+            &self.0
+        }
+    }
+
+    impl Probe {
+        /// `(plugin, instance tag, that instance's count)` per invocation.
+        fn hits(&self) -> Vec<(String, String, u64)> {
+            self.hits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn fired(&self) -> Vec<String> {
+            self.hits().into_iter().map(|(name, _, _)| name).collect()
+        }
+
+        fn clear(&self) {
+            self.hits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+    }
+
+    /// A limiter that counts its own invocations, and denies with a 429 when
+    /// its config says `deny: true`.
+    struct Limiter {
+        cfg: PluginConfig,
+        probe: Probe,
+        count: AtomicU64,
+    }
+
+    impl Limiter {
+        fn new(cfg: PluginConfig, probe: &Probe) -> Self {
+            Self {
+                cfg,
+                probe: probe.clone(),
+                count: AtomicU64::new(0),
+            }
+        }
+
+        fn setting(&self, key: &str) -> Option<&serde_json::Value> {
+            self.cfg.config.as_ref().and_then(|config| config.get(key))
+        }
+    }
+
+    #[async_trait]
+    impl Plugin for Limiter {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+
+        async fn initialize(&self) -> Result<(), Box<PluginError>> {
+            if self.setting("fail_init") == Some(&serde_json::Value::Bool(true)) {
+                return Err(config_error(INIT_FAILURE.to_owned()));
+            }
+            self.probe.inits.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+            self.probe.shutdowns.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    struct LimiterHandler(Arc<Limiter>);
+
+    #[async_trait]
+    impl AnyHookHandler for LimiterHandler {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            let limiter = &self.0;
+            let count = limiter.count.fetch_add(1, Ordering::AcqRel) + 1;
+            let tag = limiter
+                .setting("tag")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("base")
+                .to_owned();
+            limiter
+                .probe
+                .hits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((limiter.cfg.name.clone(), tag, count));
+            let result: PluginResult<HttpPayload> =
+                if limiter.setting("deny") == Some(&serde_json::Value::Bool(true)) {
+                    let details = std::collections::HashMap::from([(
+                        "retry_after_seconds".to_owned(),
+                        serde_json::json!(7),
+                    )]);
+                    PluginResult::deny(
+                        PluginViolation::new(DENIAL_CODE, "over the limit")
+                            .with_details(details)
+                            .with_proto_error_code(429),
+                    )
+                } else {
+                    PluginResult::allow()
+                };
+            Ok(crate::executor::erase_result(result))
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            HttpHook::NAME
+        }
+    }
+
+    struct LimiterFactory(Probe);
+
+    impl crate::factory::PluginFactory for LimiterFactory {
+        fn create(
+            &self,
+            config: &PluginConfig,
+        ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            let rejects = config
+                .config
+                .as_ref()
+                .and_then(|c| c.get("reject"))
+                .is_some_and(|reject| reject == &serde_json::Value::Bool(true));
+            if rejects {
+                return Err(config_error(REJECTION.to_owned()));
+            }
+            self.0.built.fetch_add(1, Ordering::AcqRel);
+            let limiter = Arc::new(Limiter::new(config.clone(), &self.0));
+            let serves_handlers =
+                limiter.setting("no_handlers") != Some(&serde_json::Value::Bool(true));
+            let handlers = [HOOK_RATELIMIT_PRE_IDENTITY, HOOK_RATELIMIT_POST_IDENTITY]
+                .into_iter()
+                .filter(|hook| {
+                    serves_handlers && config.hooks.iter().any(|declared| declared == hook)
+                })
+                .map(|hook| -> (&'static str, Arc<dyn AnyHookHandler>) {
+                    (hook, Arc::new(LimiterHandler(Arc::clone(&limiter))))
+                })
+                .collect();
+            Ok(crate::factory::PluginInstance {
+                plugin: limiter,
+                handlers,
+            })
+        }
+    }
+
+    fn limiter_engine_unloaded() -> (PolicyEngine, Probe) {
+        let probe = Probe::default();
+        let engine = PolicyEngine::default();
+        engine.register_factory(KIND, Box::new(LimiterFactory(probe.clone())));
+        (engine, probe)
+    }
+
+    /// An initialized engine serving test limiters for `yaml`.
+    async fn limiter_engine(yaml: &str) -> (PolicyEngine, Probe) {
+        let (engine, probe) = limiter_engine_unloaded();
+        engine
+            .load_config(crate::config::parse_config(yaml).expect("the fixture parses"))
+            .expect("the fixture loads");
+        engine.initialize().await.expect("initialize");
+        (engine, probe)
+    }
+
+    /// A post-identity limiter config, for one registered outside the document.
+    fn limiter_config(name: &str) -> PluginConfig {
+        let mut config = crate::config::parse_config(LIMITERS)
+            .expect("the limiter declarations parse")
+            .plugins
+            .remove(2);
+        config.name = name.to_owned();
+        config
+    }
+
+    fn assert_unavailable(result: &PipelineResult) {
+        assert!(
+            !result.continue_processing,
+            "a rate_limits step with no limiter denies"
+        );
+        let violation = result
+            .violation
+            .as_ref()
+            .expect("the denial carries a violation");
+        assert_eq!(
+            violation.code, VIOLATION_RATE_LIMIT_UNAVAILABLE,
+            "the denial names the missing limiter"
+        );
+        assert_eq!(
+            violation.proto_error_code,
+            Some(503),
+            "a missing limiter is the engine's fault, not the request's"
+        );
+        assert_eq!(
+            violation.details.get(DETAIL_HTTP_STATUS),
+            Some(&serde_json::json!(503)),
+            "the status rides `http.status` like every other rate-limit denial"
+        );
+    }
+
+    async fn dispatch(engine: &PolicyEngine, hook: &str, ext: Extensions) -> PipelineResult {
+        let payload: Box<dyn PluginPayload> = Box::new(HttpPayload);
+        engine.invoke_by_name(hook, payload, ext, None).await.0
+    }
+
+    fn http(path: &str) -> Extensions {
+        Extensions {
+            http: Some(Arc::new(HttpExtension {
+                method: Some("GET".to_owned()),
+                path: Some(path.to_owned()),
+                ..Default::default()
+            })),
+            ..named(ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+        }
+    }
+
+    fn http_without_path() -> Extensions {
+        Extensions {
+            http: Some(Arc::new(HttpExtension::default())),
+            ..named(ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+        }
+    }
+
+    fn named(entity_type: &str, entity_name: &str) -> Extensions {
+        Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(entity_type.to_owned()),
+                entity_name: Some(entity_name.to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
     }
 }

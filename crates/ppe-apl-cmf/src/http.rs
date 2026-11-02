@@ -13,6 +13,7 @@
 //   http.query                     : String  (query string, no leading `?`)
 //   http.host                      : String
 //   http.scheme                    : String
+//   http.client_address            : String  (host-supplied, normalized)
 //   http.status                    : Int     (response half only)
 //   http.request_headers.<name>    : String  (lowercased name)
 //   http.response_headers.<name>   : String  (lowercased name)
@@ -21,7 +22,8 @@ use praxis_policy_apl_core::AttributeBag;
 use praxis_policy_core::extensions::HttpExtension;
 
 use crate::constants::{
-    BAG_HTTP_HOST, BAG_HTTP_METHOD, BAG_HTTP_PATH, BAG_HTTP_QUERY, BAG_HTTP_SCHEME, BAG_HTTP_STATUS,
+    BAG_HTTP_CLIENT_ADDRESS, BAG_HTTP_HOST, BAG_HTTP_METHOD, BAG_HTTP_PATH, BAG_HTTP_QUERY,
+    BAG_HTTP_SCHEME, BAG_HTTP_STATUS,
 };
 
 /// Write the request line, the response status, and both header maps into the
@@ -50,6 +52,9 @@ pub fn extract_http(http: &HttpExtension, bag: &mut AttributeBag) {
     }
     if let Some(scheme) = &http.scheme {
         bag.set(BAG_HTTP_SCHEME.to_owned(), scheme.clone());
+    }
+    if let Some(address) = http.client_address() {
+        bag.set(BAG_HTTP_CLIENT_ADDRESS.to_owned(), address.to_owned());
     }
     if let Some(status) = http.status {
         bag.set(BAG_HTTP_STATUS.to_owned(), i64::from(status));
@@ -101,6 +106,31 @@ mod tests {
         );
         assert_eq!(bag.get_string("http.host"), Some("api.example.com"));
         assert_eq!(bag.get_string("http.scheme"), Some("https"));
+    }
+
+    #[test]
+    fn client_address_surfaced_in_bag() {
+        let mut http = HttpExtension::default();
+        http.set_client_address("[::ffff:203.0.113.7]:443");
+        let mut bag = AttributeBag::new();
+        extract_http(&http, &mut bag);
+        assert_eq!(
+            bag.get_string("http.client_address"),
+            Some("203.0.113.7"),
+            "the bag carries the normalized address"
+        );
+    }
+
+    #[test]
+    fn client_address_absent_from_bag_when_unset() {
+        let mut http = HttpExtension::default();
+        http.set_client_address("");
+        let mut bag = AttributeBag::new();
+        extract_http(&http, &mut bag);
+        assert!(
+            !bag.contains("http.client_address"),
+            "an unset address must leave the key out, not write an empty string"
+        );
     }
 
     #[test]

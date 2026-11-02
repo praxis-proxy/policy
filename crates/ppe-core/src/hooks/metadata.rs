@@ -85,6 +85,7 @@ use crate::delegation::hook::DELEGATION_HOOK_METADATA;
 use crate::elicitation::hook::ELICITATION_HOOK_METADATA;
 use crate::http_hook::HTTP_HOOK_METADATA;
 use crate::identity::hook::IDENTITY_HOOK_METADATA;
+use crate::ratelimit_hook::RATELIMIT_HOOK_METADATA;
 
 /// Lifecycle position a hook occupies for dispatcher purposes.
 ///
@@ -190,6 +191,7 @@ const HOOK_TABLES: &[&[(&str, HookMetadata)]] = &[
     IDENTITY_HOOK_METADATA,
     DELEGATION_HOOK_METADATA,
     ELICITATION_HOOK_METADATA,
+    RATELIMIT_HOOK_METADATA,
 ];
 
 /// How many rows the per-module tables hold between them, so the flat
@@ -311,6 +313,7 @@ mod tests {
     use crate::hooks::trait_def::HookTypeDef as _;
     use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook};
     use crate::identity::{HOOK_IDENTITY_RESOLVE, IdentityHook};
+    use crate::ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY};
 
     #[test]
     fn cmf_tool_pre_invoke_is_pre_phase_for_tool_entity() {
@@ -331,6 +334,24 @@ mod tests {
         let meta = lookup(HOOK_IDENTITY_RESOLVE).expect("registered");
         assert_eq!(meta.entity_type, None);
         assert_eq!(meta.phase, HookPhase::Unphased);
+    }
+
+    #[test]
+    fn ratelimit_hooks_are_unphased_no_entity() {
+        for name in [HOOK_RATELIMIT_PRE_IDENTITY, HOOK_RATELIMIT_POST_IDENTITY] {
+            let meta = lookup(name).expect("registered");
+            assert_eq!(meta.entity_type, None, "{name} applies to any route");
+            assert_eq!(
+                meta.phase,
+                HookPhase::Unphased,
+                "{name} runs around identity, outside any APL phase",
+            );
+            assert_eq!(
+                meta.family,
+                Some(HttpHook::NAME),
+                "{name} carries the HTTP payload limiters read",
+            );
+        }
     }
 
     #[test]
@@ -482,7 +503,16 @@ mod tests {
         assert_eq!(IDENTITY_HOOK_METADATA.len(), 1);
         assert_eq!(DELEGATION_HOOK_METADATA.len(), 1);
         assert_eq!(ELICITATION_HOOK_METADATA.len(), 1);
-        assert_eq!(BUILTIN_HOOK_METADATA.len(), 13);
+        assert_eq!(
+            RATELIMIT_HOOK_METADATA.len(),
+            2,
+            "the rate-limit family declares a hook per stage"
+        );
+        assert_eq!(
+            BUILTIN_HOOK_METADATA.len(),
+            15,
+            "every family's hooks reach the built-in table"
+        );
         for table in HOOK_TABLES {
             for (name, _) in *table {
                 assert!(
@@ -543,6 +573,7 @@ mod tests {
         use crate::elicitation::HOOK_ELICIT;
         use crate::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
         use crate::identity::HOOK_IDENTITY_RESOLVE;
+        use crate::ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY};
 
         for name in [
             HOOK_CMF_TOOL_PRE_INVOKE,
@@ -558,6 +589,8 @@ mod tests {
             HOOK_IDENTITY_RESOLVE,
             HOOK_TOKEN_DELEGATE,
             HOOK_ELICIT,
+            HOOK_RATELIMIT_PRE_IDENTITY,
+            HOOK_RATELIMIT_POST_IDENTITY,
         ] {
             assert!(
                 BUILTIN_HOOK_METADATA.iter().any(|(n, _)| *n == name),
@@ -577,6 +610,7 @@ mod tests {
             (IDENTITY_HOOK_METADATA, IdentityHook::NAME),
             (DELEGATION_HOOK_METADATA, TokenDelegateHook::NAME),
             (ELICITATION_HOOK_METADATA, ElicitationHook::NAME),
+            (RATELIMIT_HOOK_METADATA, HttpHook::NAME),
         ] {
             for (name, meta) in table {
                 assert_eq!(meta.family, Some(family), "{name}");

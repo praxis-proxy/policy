@@ -41,6 +41,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+use tokio::sync::OnceCell;
+
 use praxis_policy_core::delegation::HOOK_TOKEN_DELEGATE;
 use praxis_policy_core::elicitation::HOOK_ELICIT;
 use praxis_policy_core::engine::PolicyEngine;
@@ -739,7 +741,7 @@ pub(crate) fn route_capability_union(
 /// is a follow-up when per-tenant lineup variation lands.
 #[derive(Default)]
 pub struct DispatchCache {
-    inner: RwLock<HashMap<String, (u64, Arc<RouteDispatchPlan>)>>,
+    inner: RwLock<HashMap<String, CachedDispatchPlan>>,
 }
 
 impl DispatchCache {
@@ -748,45 +750,104 @@ impl DispatchCache {
         Self::default()
     }
 
-    /// Get-or-build a plan for the route. Read-locked fast path returns
-    /// the cached plan when the generation matches; otherwise drop the
-    /// read lock, rebuild, and write-lock-insert. The brief window
-    /// between read-miss and write-insert may let two concurrent
-    /// builders race — both produce identical plans and the second
-    /// insert just overwrites the first. Cheap relative to the cost of
-    /// the build itself, and avoids holding a write lock across the
-    /// build call.
-    ///
-    /// Async because `RouteDispatchPlan::build` may invoke
-    /// `PolicyEngine::build_override_entries`, which calls plugin
-    /// factories and `initialize()` for routes that declare `config:`
-    /// overrides. Routes with no overrides take a synchronous path
-    /// inside the engine (no `.await` does any real work), so the
-    /// async cost is zero for the common case.
+    /// Return the shared plan for this route and configuration generation.
+    /// Concurrent first requests share initialization, including any stateful
+    /// plugin instances created for route configuration overrides.
     pub async fn get_or_build(
         &self,
         route: &CompiledRoute,
         registry: &PluginRegistry,
         engine: &PolicyEngine,
     ) -> Arc<RouteDispatchPlan> {
-        let current_gen = engine.config_generation();
-        {
+        let cell = self.plan_cell(&route.route_key, engine, engine.config_generation());
+        Arc::clone(
+            cell.get_or_init(|| async {
+                Arc::new(RouteDispatchPlan::build(route, registry, engine).await)
+            })
+            .await,
+        )
+    }
+
+    fn plan_cell(
+        &self,
+        route_key: &str,
+        engine: &PolicyEngine,
+        current_gen: u64,
+    ) -> Arc<OnceCell<Arc<RouteDispatchPlan>>> {
+        let cached = {
             let r = self
                 .inner
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some((stored_gen, plan)) = r.get(&route.route_key)
-                && *stored_gen == current_gen
-            {
-                return Arc::clone(plan);
+            r.get(route_key)
+                .filter(|entry| entry.generation == current_gen)
+                .map(|entry| Arc::clone(&entry.plan))
+        };
+        cached.unwrap_or_else(|| {
+            let mut w = self
+                .inner
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A request may have observed an older generation before another
+            // request installed a newer cell. Never evict that newer state.
+            let current_gen = engine.config_generation();
+            let entry = w
+                .entry(route_key.to_owned())
+                .or_insert_with(|| CachedDispatchPlan {
+                    generation: current_gen,
+                    plan: Arc::new(OnceCell::new()),
+                });
+            if entry.generation != current_gen {
+                *entry = CachedDispatchPlan {
+                    generation: current_gen,
+                    plan: Arc::new(OnceCell::new()),
+                };
             }
-        }
-        let plan = Arc::new(RouteDispatchPlan::build(route, registry, engine).await);
-        let mut w = self
-            .inner
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        w.insert(route.route_key.clone(), (current_gen, Arc::clone(&plan)));
-        plan
+            Arc::clone(&entry.plan)
+        })
+    }
+}
+
+struct CachedDispatchPlan {
+    generation: u64,
+    plan: Arc<OnceCell<Arc<RouteDispatchPlan>>>,
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod cache_tests {
+    use super::{CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn stale_generation_reuses_the_newer_initialized_plan() {
+        let engine = PolicyEngine::default();
+        let cache = DispatchCache::new();
+        let route = CompiledRoute {
+            route_key: "http:/toys".to_owned(),
+            ..Default::default()
+        };
+        let registry = PluginRegistry::new();
+        let stale_generation = engine.config_generation();
+
+        engine.remove_route_annotation("http", "/toys", None, "http.request");
+        assert!(engine.config_generation() > stale_generation);
+        let installed = cache.get_or_build(&route, &registry, &engine).await;
+
+        let resumed = cache.plan_cell(&route.route_key, &engine, stale_generation);
+        assert!(
+            resumed
+                .get()
+                .is_some_and(|plan| Arc::ptr_eq(plan, &installed)),
+            "a stale request must reuse the installed plan and its plugin state"
+        );
+        let subsequent = cache.get_or_build(&route, &registry, &engine).await;
+        assert!(
+            Arc::ptr_eq(&installed, &subsequent),
+            "the stale request must not evict the current generation's plan"
+        );
     }
 }

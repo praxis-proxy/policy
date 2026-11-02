@@ -685,6 +685,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Slot::Http,
     ),
     exact(
+        "http.client_address",
+        KeyType::String,
+        Gating::Capability(CAP_READ_HEADERS),
+        Slot::Http,
+    ),
+    exact(
         "http.status",
         KeyType::Int,
         Gating::Capability(CAP_READ_HEADERS),
