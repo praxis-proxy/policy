@@ -37,7 +37,20 @@ This issue addresses that gap by adding the missing projection and write-back lo
 
 ### Existing infrastructure
 
-The read side is largely written already. `MessageView` in
+The structs and their `ContentPart` enum variants already exist in
+`crates/ppe-core/src/cmf/content.rs`:
+
+| Struct | Enum variant | Defined at |
+|---|---|---|
+| `Resource` | `ContentPart::Resource { content: Resource }` | `content.rs:48–80` |
+| `ResourceReference` | `ContentPart::ResourceRef { content: ResourceReference }` | `content.rs:94–115` |
+| `PromptResult` | `ContentPart::PromptResult { content: PromptResult }` | `content.rs:132–151` |
+
+Messages carry these content parts. The routing layer dispatches on them. The
+only component that does not read them is `message_projection.rs` — which is
+exactly what this issue fixes.
+
+The read side is also largely written. `MessageView` in
 `crates/ppe-core/src/cmf/view.rs` reads `Resource.content` and
 `PromptResult.content` — the two values `message_projection.rs` cannot see.
 `MessageView::uri()` reads resource URIs. `MessageView::name()` reads resource
