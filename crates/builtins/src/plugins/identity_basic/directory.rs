@@ -85,8 +85,13 @@ impl UserRecord {
 
     /// Act on this record's verifier, for the backend that produced it.
     ///
-    /// The verifier is borrowed for the call rather than handed out, so a
-    /// caller that only reads records cannot retain the stored material.
+    /// The verifier is borrowed rather than handed out, so the encoded hash
+    /// cannot be read as a field or printed. It is not a confinement boundary:
+    /// [`StoredVerifier`] is [`Clone`], so the closure can keep one and run
+    /// [`verify_credential`] against it. What the borrow buys is that holding a
+    /// record is not enough -- a caller has to ask for the verifier explicitly.
+    ///
+    /// [`verify_credential`]: super::verifier::verify_credential
     pub fn verify_against<T>(&self, check: impl FnOnce(&StoredVerifier) -> T) -> T {
         check(&self.verifier)
     }

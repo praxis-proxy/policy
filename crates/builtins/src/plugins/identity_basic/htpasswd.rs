@@ -472,9 +472,11 @@ impl CredentialDirectory for HtpasswdDirectory {
         }
 
         let index = self.index.load();
-        // The admitted hash travels into the record as it was parsed at load,
-        // so this is a map probe and a clone -- O(1) in the user count,
-        // whatever the file size -- and the verify path never re-parses.
+        // The admitted hash travels into the record as it was admitted at
+        // load, so this is a map probe and a clone -- O(1) in the user count,
+        // whatever the file size. What carrying it forward saves is the
+        // admission checks, not the decode: `verify_bytes` still decodes the
+        // encoding on every call, equally for a hit and for the dummy.
         // `.htpasswd` carries a user-id and a hash and nothing else, so there
         // is nothing to project and nothing to strip: the hash lives in the
         // verifier, never in `fields`. A deployment needing roles or teams
