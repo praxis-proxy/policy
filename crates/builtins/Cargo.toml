@@ -54,8 +54,16 @@ oauth = [
 delegator-vault = ["_engine-core", "_plugins", "dep:sha2", "dep:moka"]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
 # Experimental per-consumer token quota against a standalone Limitador. Calls go
-# through the host transport, so no HTTP dep beyond core, the shared serde, and
+# through the host transport, so no direct HTTP dependency is needed here.
 experimental-quota = ["_engine-core", "_plugins"]
+# Embedded request limiter. The PoC uses only Limitador's in-memory store.
+experimental-ratelimit = [
+  "_engine-core",
+  "_engine-apl-cmf",
+  "_plugins",
+  "dep:limitador",
+  "dep:limitador-cel",
+]
 cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
@@ -76,6 +84,7 @@ secrets-vault = ["_engine-core", "_secrets"]
 # place, so changing how an edge is declared is a one-line edit rather than five.
 _engine-core = ["dep:praxis-policy-core"]
 _engine-apl-core = ["dep:praxis-policy-apl-core"]
+_engine-apl-cmf = ["dep:praxis-policy-apl-cmf"]
 _engine-apl-runtime = ["dep:praxis-policy-apl-runtime"]
 
 # Private module-group markers. Each group's `cfg` gate names one predicate
@@ -93,6 +102,7 @@ _secrets = []
 # `apl-runtime` here would silently hand a Cedar-only consumer the runtime.
 praxis-policy-core = { workspace = true, optional = true }
 praxis-policy-apl-core = { workspace = true, optional = true }
+praxis-policy-apl-cmf = { workspace = true, optional = true }
 praxis-policy-apl-runtime = { workspace = true, optional = true }
 
 # Shared runtime crates, deliberately NOT optional. Every feature enables one
@@ -114,6 +124,12 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 # A unique key per OAuth mint attempt, so recovery can tell attempts apart.
 uuid = { workspace = true }
 zeroize = { workspace = true }
+
+# --- experimental-ratelimit --------------------------------------------------
+
+# Versions and the in-memory-only feature set live in the workspace table.
+limitador = { workspace = true, optional = true }
+limitador-cel = { workspace = true, optional = true }
 
 # --- jwt ---------------------------------------------------------------------
 
@@ -422,11 +438,22 @@ name = "quota"
 path = "tests/quota/main.rs"
 required-features = ["experimental-quota"]
 
+[[test]]
+name = "ratelimit"
+path = "tests/ratelimit/main.rs"
+required-features = ["experimental-ratelimit"]
+
 [[bench]]
 name = "quota_hot_path"
 path = "benches/quota_hot_path.rs"
 harness = false
 required-features = ["experimental-quota"]
+
+[[bench]]
+name = "ratelimit_hot_path"
+path = "benches/ratelimit_hot_path.rs"
+harness = false
+required-features = ["experimental-ratelimit"]
 
 # Cache hit/miss against a real CEL resolver. Kept here so
 # apl-runtime does not depend back on this crate: that cycle makes

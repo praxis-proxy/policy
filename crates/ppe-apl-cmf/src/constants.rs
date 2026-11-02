@@ -159,6 +159,8 @@ pub const BAG_HTTP_QUERY: &str = "http.query";
 pub const BAG_HTTP_HOST: &str = "http.host";
 /// Bag key `http.scheme`.
 pub const BAG_HTTP_SCHEME: &str = "http.scheme";
+/// Bag key `http.client_address`, the host-supplied trusted client address.
+pub const BAG_HTTP_CLIENT_ADDRESS: &str = "http.client_address";
 /// Bag key `http.status`, the response status, set on the response half only.
 pub const BAG_HTTP_STATUS: &str = "http.status";
 // Normalized request keys require `read_llm_request`. The raw body is a

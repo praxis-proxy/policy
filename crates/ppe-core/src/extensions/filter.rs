@@ -397,6 +397,7 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         } else if read_headers {
             filtered.http = Some(Arc::new(HttpExtension {
                 request_headers: http.redacted_request_headers().into_owned(),
+                client_address: http.client_address.clone(),
                 secret_headers: http.secret_headers.clone(),
                 response_headers: http.response_headers.clone(),
                 status: http.status,
@@ -896,6 +897,41 @@ mod tests {
         assert_eq!(both_http.query.as_deref(), Some(query));
         assert_eq!(both_http.method.as_deref(), Some("GET"));
         assert_eq!(both_http.get_request_header("x-request-id"), Some("123"));
+    }
+
+    #[test]
+    fn client_address_requires_read_headers() {
+        let mut http = HttpExtension {
+            query: Some("q=1".to_owned()),
+            ..Default::default()
+        };
+        http.set_client_address("203.0.113.7");
+        let ext = Extensions {
+            http: Some(Arc::new(http)),
+            ..Default::default()
+        };
+
+        let query_only: HashSet<String> = ["read_query".to_owned()].into();
+        let query_view = filter_extensions(&ext, &query_only);
+        let query_http = query_view.http.as_ref().expect("read_query grants HTTP");
+        assert_eq!(
+            query_http.client_address(),
+            None,
+            "read_query alone must not reveal the client address"
+        );
+
+        for caps in [
+            ["read_headers"].as_slice(),
+            ["read_headers", "read_query"].as_slice(),
+        ] {
+            let caps: HashSet<String> = caps.iter().map(|cap| (*cap).to_owned()).collect();
+            let filtered = filter_extensions(&ext, &caps);
+            assert_eq!(
+                filtered.http.as_ref().and_then(|h| h.client_address()),
+                Some("203.0.113.7"),
+                "read_headers reveals the client address for {caps:?}"
+            );
+        }
     }
 
     #[test]

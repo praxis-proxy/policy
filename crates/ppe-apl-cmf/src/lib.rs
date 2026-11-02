@@ -29,7 +29,8 @@
 //   MetaExtension                  → meta.*
 //   RequestExtension               → request.*
 //   HttpExtension                  → http.method, http.path, http.host, http.scheme,
-//                                     http.status, http.request_headers.*,
+//                                     http.client_address, http.status,
+//                                     http.request_headers.*,
 //                                     http.response_headers.*
 //   LLMExtension                   → llm.model.* (with published aliases)
 //   LlmRequest normalized parts    → llm.input.*
