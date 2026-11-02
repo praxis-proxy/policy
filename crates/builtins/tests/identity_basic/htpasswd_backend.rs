@@ -53,6 +53,41 @@ async fn a_known_user_authenticates_and_a_wrong_password_does_not() {
 }
 
 #[tokio::test]
+async fn an_argon2_user_authenticates_and_a_wrong_password_does_not() {
+    let file = HtpasswdFile::write(&format!(
+        "{}\n",
+        crate::support::argon2_line("alice", "correct horse", 19_456, 2)
+    ));
+    let dir = directory(&file).expect("an argon2 file loads");
+    let svc = services();
+
+    let record = dir.lookup("alice", &svc).await.expect("the lookup answers");
+    let record = record.expect("alice is in the file");
+    assert!(
+        dir.verify(
+            Some(&record),
+            &crate::support::password("correct horse"),
+            &svc
+        )
+        .await
+        .expect("the verify answers"),
+        "the right password must authenticate against an argon2 record, so the \
+         argon2 arm runs a real KDF comparison rather than returning a constant"
+    );
+    assert!(
+        !dir.verify(
+            Some(&record),
+            &crate::support::password("wrong horse"),
+            &svc
+        )
+        .await
+        .expect("the verify answers"),
+        "and a wrong password must not: an arm returning a constant would pass \
+         one of these two assertions and fail the other"
+    );
+}
+
+#[tokio::test]
 async fn an_unknown_user_runs_a_dummy_verification() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let dir = directory(&file).expect("the file loads");
@@ -207,6 +242,98 @@ fn a_ceiling_below_the_refresh_interval_fails_validation() {
     assert!(err.contains("below"), "{err}");
 }
 
+#[test]
+fn a_zero_staleness_ceiling_fails_validation() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let mut config = config_for(file.path());
+    config.refresh_secs = 0;
+    config.max_staleness_secs = 0;
+    let err = HtpasswdDirectory::new(config)
+        .expect_err("a zero staleness ceiling denies every lookup and must not load");
+    assert!(
+        err.contains("max_staleness_secs"),
+        "the error should name the field an operator has to change: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_record() {
+    let shared = bcrypt_line("filler", "pw", 4);
+    let (_, stored) = shared
+        .split_once(':')
+        .expect("the fixture line has a separator");
+    let filler: String = (0..400_u32)
+        .map(|n| format!("filler-{n}:{stored}\n"))
+        .collect();
+    let both = format!("{filler}alice:{stored}\nbob:{stored}\n");
+    let revoked = format!("{filler}alice:{stored}\n");
+    tracing::info!(
+        records = 402,
+        "a wide file makes reading and parsing dominate the publish, so \
+         unserialized reloads would overlap readily; one shared hash per line \
+         keeps the fixture cheap to build and costs the same to parse"
+    );
+
+    let file = HtpasswdFile::write(&both);
+    let mut config = config_for(file.path());
+    config.refresh_secs = 3600;
+    config.max_staleness_secs = 7200;
+    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
+    let svc = services();
+
+    let path = file.path().to_owned();
+    let staging = format!("{path}.revoking");
+    std::fs::write(&staging, &revoked).expect("the fixture is writable");
+
+    let start = std::sync::Arc::new(std::sync::Barrier::new(17));
+    let writer = {
+        let start = std::sync::Arc::clone(&start);
+        tokio::task::spawn_blocking(move || {
+            start.wait();
+            std::fs::rename(&staging, &path).expect("the rename lands");
+        })
+    };
+
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..16_u32 {
+        let dir = std::sync::Arc::clone(&dir);
+        let start = std::sync::Arc::clone(&start);
+        set.spawn_blocking(move || {
+            start.wait();
+            dir.reload()
+        });
+    }
+
+    writer.await.expect("the revoking rename completes");
+    while let Some(joined) = set.join_next().await {
+        joined
+            .expect("the reload task completes")
+            .expect("both versions of the file are valid");
+    }
+
+    assert_eq!(
+        dir.peak_concurrent_reloads(),
+        1,
+        "16 reloads racing a file replacement must take the read-parse-publish \
+         path one at a time. Overlapping reloads read opposite sides of the \
+         replacement and then publish in completion order rather than read \
+         order, so the one holding the pre-revocation file can store on top of \
+         an index built from the post-revocation one -- restoring the revoked \
+         record and stamping it fresh for a whole refresh interval"
+    );
+
+    assert!(
+        dir.lookup("bob", &svc).await.expect("answers").is_none(),
+        "the last reload to run read a file without bob, so the settled index \
+         must not carry him"
+    );
+    assert_eq!(
+        dir.len(),
+        401,
+        "and the settled index must hold exactly the records that file has"
+    );
+}
+
 #[tokio::test]
 async fn a_revoked_user_stops_authenticating_after_a_reload() {
     let file = HtpasswdFile::write(&format!(
@@ -255,12 +382,12 @@ async fn past_the_staleness_ceiling_lookups_report_unavailable_not_unknown() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let mut config = config_for(file.path());
     config.refresh_secs = 0;
-    config.max_staleness_secs = 0;
+    config.max_staleness_secs = 1;
     let dir = HtpasswdDirectory::new(config).expect("the file loads");
     let svc = services();
 
     file.unlink();
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
     let outcome = dir.lookup("alice", &svc).await;
     assert!(

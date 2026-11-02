@@ -247,6 +247,56 @@ fn a_correct_password_verifies_and_a_wrong_one_does_not() {
 }
 
 #[test]
+fn a_correct_argon2_password_verifies_and_a_wrong_one_does_not() {
+    let parsed = parse_hash(
+        &crate::support::argon2_at(19_456, 2, "correct horse"),
+        &Limits::default(),
+    )
+    .expect("loads");
+    assert!(
+        crate::support::verify_password(&parsed, b"correct horse"),
+        "the password the argon2 record was minted from must verify, or the \
+         argon2 arm is not running a real KDF comparison"
+    );
+    assert!(
+        !crate::support::verify_password(&parsed, b"wrong horse"),
+        "and any other password must not: an arm that returned a constant \
+         would pass one of these two assertions and fail the other"
+    );
+}
+
+#[test]
+fn argon2_verification_is_specific_to_the_records_own_parameters() {
+    let cheap = parse_hash(
+        &crate::support::argon2_at(19_456, 2, "pw"),
+        &Limits::default(),
+    )
+    .expect("loads");
+    let dearer = parse_hash(
+        &crate::support::argon2_at(32_768, 3, "pw"),
+        &Limits::default(),
+    )
+    .expect("loads");
+
+    assert_ne!(
+        cheap.profile(),
+        dearer.profile(),
+        "precondition: these records differ in their parameters"
+    );
+    for (label, parsed) in [("m=19456,t=2", &cheap), ("m=32768,t=3", &dearer)] {
+        assert!(
+            crate::support::verify_password(parsed, b"pw"),
+            "{label} must verify against the password it was minted from, so \
+             the parameters are read from the record rather than assumed"
+        );
+        assert!(
+            !crate::support::verify_password(parsed, b"pw "),
+            "{label} must reject a near-miss password"
+        );
+    }
+}
+
+#[test]
 fn a_debug_formatted_record_redacts_the_stored_hash() {
     use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
 

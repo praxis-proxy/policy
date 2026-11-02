@@ -57,6 +57,26 @@ pub fn extract_and_decode_with(
     decode_basic(raw, max_user_id, max_password).map_err(Failure::Decode)
 }
 
+/// An argon2 record at the given parameters, minted rather than checked in.
+///
+/// Minted because a checked-in PHC string can only be parsed: its digest
+/// matches no password anyone knows, so it cannot prove a verify.
+pub fn argon2_at(memory_kib: u32, time_cost: u32, password: &str) -> String {
+    use argon2::PasswordHasher as _;
+
+    let params = argon2::Params::new(memory_kib, time_cost, 1, None)
+        .expect("argon2 accepts these parameters");
+    argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+        .hash_password_with_salt(password.as_bytes(), b"saltsaltsalt")
+        .expect("argon2 mints with a legal salt")
+        .to_string()
+}
+
+/// One `.htpasswd` line: a user-id and a freshly minted argon2 hash.
+pub fn argon2_line(user_id: &str, password: &str, memory_kib: u32, time_cost: u32) -> String {
+    format!("{user_id}:{}", argon2_at(memory_kib, time_cost, password))
+}
+
 /// Base64 of a raw credential, for building the malformed cases.
 pub fn b64(raw: &[u8]) -> String {
     use base64::Engine as _;

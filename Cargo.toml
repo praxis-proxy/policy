@@ -120,7 +120,12 @@ unicode-normalization = "0.1.26"
 # here: it errors on hashes it did not mint itself, so it rejects every file
 # Apache wrote.
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
-bcrypt = { version = "0.19.3", default-features = false, features = ["std"] }
+# `zeroize` is in bcrypt's default set, so disabling defaults silently drops
+# it: `_hash` copies the plaintext into a `[u8; 72]` stack buffer and only
+# wipes it under that feature. Our `Zeroizing` password cannot reach that
+# copy, which would otherwise outlive the verify on the blocking thread's
+# stack.
+bcrypt = { version = "0.19.3", default-features = false, features = ["std", "zeroize"] }
 # Constant-time primitives for the verdict comparison. Already in the tree via
 # both hashing crates; named here because this plugin depends on it directly.
 subtle = "2.6.1"

@@ -140,9 +140,28 @@ impl HtpasswdConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the staleness ceiling is below the refresh interval
-    /// or the verification capacity is outside the supported range.
+    /// Returns an error if the staleness ceiling is zero or below the refresh
+    /// interval, or the verification capacity is outside the supported range.
     pub fn validate(&self) -> Result<(), String> {
+        // Zero is not a usable ceiling in either reading an operator might
+        // give it. As a bound it denies everything: `reload` stamps
+        // `loaded_at_ms`, `staleness()` reads the clock again, and the
+        // comparison is `>` against zero, so a lookup that crosses a
+        // millisecond boundary -- or one that loses the refresh slot and
+        // reads an index already 1ms old -- fails as `Stale`. That is an
+        // outage from a config that loaded without complaint, and an
+        // intermittent one. As "no ceiling" it is the opposite of what the
+        // field means, which is the reading the api-key sibling invites by
+        // treating its ceiling as optional; here the ceiling is required, so
+        // there is no value that means unbounded.
+        if self.max_staleness_secs == 0 {
+            return Err(
+                "`max_staleness_secs` must be at least 1: a zero ceiling denies every lookup \
+                 that reads the clock a millisecond after a reload, and there is no value \
+                 meaning `no ceiling` on this backend"
+                    .to_owned(),
+            );
+        }
         if self.max_staleness_secs < self.refresh_secs {
             return Err(format!(
                 "`max_staleness_secs` ({}) is below `refresh_secs` ({}), so lookups would fail \
@@ -212,11 +231,53 @@ pub struct HtpasswdDirectory {
     /// The fallback dummy hash for an empty directory.
     empty: ParsedHash,
 
+    /// Serializes the read-parse-publish sequence in [`Self::reload`].
+    ///
+    /// Without it two reloads can read opposite sides of a file replacement
+    /// and publish in the reverse order, which restores a revoked record and
+    /// stamps it fresh until the next refresh.
+    ///
+    /// [`Self::reload`]: HtpasswdDirectory::reload
+    publishing: std::sync::Mutex<()>,
+
     /// The number of refresh-path file-read attempts, for regression tests.
     reload_attempts: AtomicU64,
 
     /// The number of dummy verification attempts, for regression tests.
     dummy_runs: AtomicU64,
+
+    /// The most reloads ever observed inside [`Self::reload`] at once.
+    ///
+    /// Exists so a test can assert the serialization rather than infer it from
+    /// a timing window it cannot control.
+    ///
+    /// [`Self::reload`]: HtpasswdDirectory::reload
+    peak_concurrent_reloads: AtomicU64,
+
+    /// How many reloads are inside [`Self::reload`] right now.
+    ///
+    /// [`Self::reload`]: HtpasswdDirectory::reload
+    reloads_in_flight: AtomicU64,
+}
+
+/// Tracks how many reloads are in flight, and the most ever at once.
+struct ReloadGuard<'a> {
+    in_flight: &'a AtomicU64,
+}
+
+impl<'a> ReloadGuard<'a> {
+    /// Record one more reload in flight, raising the peak if this is a new one.
+    fn enter(in_flight: &'a AtomicU64, peak: &AtomicU64) -> Self {
+        let now = in_flight.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+        peak.fetch_max(now, Ordering::AcqRel);
+        Self { in_flight }
+    }
+}
+
+impl Drop for ReloadGuard<'_> {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Load and validate a `.htpasswd` index.
@@ -346,12 +407,15 @@ impl HtpasswdDirectory {
             config,
             empty,
             index: ArcSwap::from_pointee(index),
+            publishing: std::sync::Mutex::new(()),
             started: Instant::now(),
             next_attempt_ms: AtomicU64::new(first_attempt),
             loaded_at_ms: AtomicU64::new(0),
             verifications: Arc::new(tokio::sync::Semaphore::new(permits)),
             reload_attempts: AtomicU64::new(0),
             dummy_runs: AtomicU64::new(0),
+            peak_concurrent_reloads: AtomicU64::new(0),
+            reloads_in_flight: AtomicU64::new(0),
         })
     }
 
@@ -385,6 +449,11 @@ impl HtpasswdDirectory {
         self.dummy_runs.load(Ordering::Relaxed)
     }
 
+    /// The most reloads ever in flight at once, for regression tests.
+    pub fn peak_concurrent_reloads(&self) -> u64 {
+        self.peak_concurrent_reloads.load(Ordering::Relaxed)
+    }
+
     /// The number of refresh-path file-read attempts, for regression tests.
     pub fn reload_attempts(&self) -> u64 {
         self.reload_attempts.load(Ordering::Relaxed)
@@ -401,6 +470,32 @@ impl HtpasswdDirectory {
     ///
     /// Returns an error if the file cannot be read or its records fail validation.
     pub fn reload(&self) -> Result<(), String> {
+        // Read, parse and publish under one lock, so concurrent reloads cannot
+        // interleave. Two unserialized reloads that straddle a file
+        // replacement can read opposite sides of it and then publish in the
+        // reverse order, which republishes a revoked record *and* stamps it
+        // fresh -- it then keeps authenticating for a whole refresh interval,
+        // which is the revocation window this backend exists to bound. The
+        // read is the wide part of the race, so narrowing the lock to the two
+        // stores would not close it.
+        //
+        // Held across the file read, not across an `.await`: `reload` is
+        // synchronous and the only caller on a request path
+        // (`refresh_if_due`) is too, so no suspension point sits inside this
+        // scope. A poisoned lock means a previous holder panicked mid-reload;
+        // the index is still whatever was last published, so this recovers the
+        // guard and continues rather than propagating a panic into the host.
+        let _publishing = self
+            .publishing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Counted inside the lock, so a test can assert the exclusion holds
+        // instead of trying to catch a reverse publish in a window it cannot
+        // schedule. A guard rather than a pair of calls, because `read_index`
+        // below returns early with `?` on any unreadable or invalid file.
+        let _in_flight = ReloadGuard::enter(&self.reloads_in_flight, &self.peak_concurrent_reloads);
+
         // The whole next index is built before anything is published, so a read
         // or parse that fails leaves the running index serving.
         let index = read_index(&self.config, &self.empty)?;
