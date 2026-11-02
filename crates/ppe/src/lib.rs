@@ -137,7 +137,6 @@ pub fn crypto_capability_report() -> CryptoCapabilityReport {
     }
 }
 
-#[cfg(feature = "_builtin")]
 fn non_fips_builtin_crypto_for_report() -> Vec<BundledCryptoCapability> {
     praxis_policy_builtins::non_fips_crypto_capabilities()
         .into_iter()
@@ -154,11 +153,6 @@ fn non_fips_builtin_crypto_for_report() -> Vec<BundledCryptoCapability> {
             },
         })
         .collect()
-}
-
-#[cfg(not(feature = "_builtin"))]
-fn non_fips_builtin_crypto_for_report() -> Vec<BundledCryptoCapability> {
-    Vec::new()
 }
 
 #[cfg(feature = "api-key")]
@@ -460,7 +454,7 @@ mod crypto_capability_tests {
     use praxis_policy_core::crypto::CryptoBackend;
 
     #[test]
-    fn crypto_report_matches_the_unified_facade_features() {
+    fn crypto_report_matches_the_unified_builtin_features() {
         let report = crypto_capability_report();
         let backend = if cfg!(feature = "fips") {
             CryptoBackend::OpenSslFips
@@ -468,7 +462,23 @@ mod crypto_capability_tests {
             CryptoBackend::RustCrypto
         };
         let expected_api_key_backend = cfg!(feature = "api-key").then_some(backend);
-        let expected_builtins = super::non_fips_builtin_crypto_for_report();
+        let expected_builtins = praxis_policy_builtins::non_fips_crypto_capabilities()
+            .into_iter()
+            .map(|capability| match capability {
+                praxis_policy_builtins::NonFipsCryptoCapability::Jwt => {
+                    super::BundledCryptoCapability::Jwt
+                },
+                praxis_policy_builtins::NonFipsCryptoCapability::OAuth => {
+                    super::BundledCryptoCapability::OAuth
+                },
+                praxis_policy_builtins::NonFipsCryptoCapability::VaultDelegation => {
+                    super::BundledCryptoCapability::VaultDelegation
+                },
+                praxis_policy_builtins::NonFipsCryptoCapability::Valkey => {
+                    super::BundledCryptoCapability::Valkey
+                },
+            })
+            .collect::<Vec<_>>();
 
         assert_eq!(report.policy_backend, backend);
         assert_eq!(report.api_key_backend, expected_api_key_backend);
