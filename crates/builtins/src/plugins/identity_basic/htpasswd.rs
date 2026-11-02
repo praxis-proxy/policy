@@ -472,17 +472,18 @@ impl CredentialDirectory for HtpasswdDirectory {
         }
 
         let index = self.index.load();
-        // The record carries the stored hash as its verifier. The parse already
-        // happened at load, so this is a map probe and a clone of an encoded
-        // string -- O(1) in the user count, whatever the file size.
+        // The admitted hash travels into the record as it was parsed at load,
+        // so this is a map probe and a clone -- O(1) in the user count,
+        // whatever the file size -- and the verify path never re-parses.
         // `.htpasswd` carries a user-id and a hash and nothing else, so there
-        // is nothing to project and nothing to strip: the hash lives in
-        // `verifier`, never in `fields`. A deployment needing roles or teams
+        // is nothing to project and nothing to strip: the hash lives in the
+        // verifier, never in `fields`. A deployment needing roles or teams
         // wants the YAML backend. No native expiry either -- the resolver still
         // enforces expiry, there is simply never one to enforce here.
-        Ok(index.users.get(user_id).map(|entry| {
-            UserRecord::verifier_only(StoredVerifier::Hash(entry.hash.encoded().to_owned()))
-        }))
+        Ok(index
+            .users
+            .get(user_id)
+            .map(|entry| UserRecord::verifier_only(StoredVerifier::Hash(entry.hash.clone()))))
     }
 
     async fn verify(
@@ -512,24 +513,18 @@ impl CredentialDirectory for HtpasswdDirectory {
 
         let index = self.index.load();
         // The hash to run, and whether this is a real check or a dummy. Both
-        // arms produce a parsed hash *before* the branch is observable in
-        // timing: the found arm re-parses the stored record and the miss arm
-        // takes the pre-built dummy, so neither path skips the parse.
-        let (hash, is_dummy) = match record.map(|r| &r.verifier) {
-            Some(StoredVerifier::Hash(encoded)) => {
-                match parse_hash(encoded, &Limits::from(self.config.limits)) {
-                    Ok(parsed) => (parsed, false),
-                    // A record that parsed at load and not now means the index
-                    // changed underneath; fail closed rather than authenticate.
-                    Err(_) => (index.dummy.clone(), true),
-                }
-            },
-            // A delegated verdict cannot arrive from a file backend.
-            Some(StoredVerifier::Delegated { .. }) => {
-                return Err(DirectoryError::Malformed(
+        // arms hold an admitted hash *before* the branch is observable in
+        // timing: the found arm takes the one the record carries and the miss
+        // arm the pre-built dummy, so neither path pays a parse the other
+        // skips.
+        let (hash, is_dummy) = match record {
+            Some(found) => found.verify_against(|verifier| match verifier {
+                StoredVerifier::Hash(admitted) => Ok((admitted.clone(), false)),
+                // A delegated verdict cannot arrive from a file backend.
+                StoredVerifier::Delegated { .. } => Err(DirectoryError::Malformed(
                     "a file backend cannot carry a delegated verdict".to_owned(),
-                ));
-            },
+                )),
+            })?,
             // No such user. Run the dummy so a miss costs what a hit costs.
             None => (index.dummy.clone(), true),
         };

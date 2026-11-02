@@ -31,42 +31,79 @@ use praxis_policy_core::host::HostServices;
 use serde_json::Value;
 
 use super::BasicCredential;
+use super::verifier::{HashError, Limits, ParsedHash, parse_hash};
 
-/// A recognized user record with projectable fields and a separate verifier.
+/// A recognized user record with projectable fields and an opaque verifier.
 ///
-/// Stored hash material must remain in `verifier`, never in `fields`.
+/// The verifier is reachable only through [`verify_against`], by the backend
+/// that produced the record. A caller holding a record reads the projectable
+/// fields and the expiry; the stored hash is not among them.
+///
+/// Reaching the verifier as a field does not compile:
+///
+/// ```compile_fail
+/// use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
+/// let record = UserRecord::verifier_only(StoredVerifier::Delegated { valid: true });
+/// let _ = record.verifier;
+/// ```
+///
+/// [`verify_against`]: UserRecord::verify_against
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct UserRecord {
     /// Projectable subject attributes, excluding storage and lifecycle fields.
     pub fields: HashMap<String, Value>,
 
-    /// How the stored secret is checked. Never projectable, never logged.
-    pub verifier: StoredVerifier,
-
     /// The expiry instant, when supplied by the backend.
     ///
     /// Callers must reject expired records.
     pub expires_at: Option<DateTime<Utc>>,
+
+    verifier: StoredVerifier,
 }
 
 impl UserRecord {
+    /// Create a record with projectable fields, a verifier, and an optional expiry.
+    ///
+    /// Stored hash material belongs in `verifier`, never in `fields`.
+    pub fn new(
+        fields: HashMap<String, Value>,
+        verifier: StoredVerifier,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            fields,
+            expires_at,
+            verifier,
+        }
+    }
+
     /// Create a record with a verifier, no projectable fields, and no expiry.
     pub fn verifier_only(verifier: StoredVerifier) -> Self {
-        Self {
-            fields: HashMap::new(),
-            verifier,
-            expires_at: None,
-        }
+        Self::new(HashMap::new(), verifier, None)
+    }
+
+    /// Act on this record's verifier, for the backend that produced it.
+    ///
+    /// The verifier is borrowed for the call rather than handed out, so a
+    /// caller that only reads records cannot retain the stored material.
+    pub fn verify_against<T>(&self, check: impl FnOnce(&StoredVerifier) -> T) -> T {
+        check(&self.verifier)
     }
 }
 
-/// A local password hash or a delegated verification verdict.
+/// An admitted password hash or a delegated verification verdict.
+///
+/// The hash variant carries an already-admitted [`ParsedHash`], not a string,
+/// so a record cannot hand out an encoded hash and cannot carry one the
+/// verifier would refuse to run.
+///
+/// [`ParsedHash`]: super::verifier::ParsedHash
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum StoredVerifier {
-    /// A complete encoded password hash for local verification.
-    Hash(String),
+    /// A stored password hash, admitted under a backend's parameter ceilings.
+    Hash(ParsedHash),
 
     /// The backend already verified the password itself, remotely.
     Delegated {
@@ -75,13 +112,30 @@ pub enum StoredVerifier {
     },
 }
 
+impl StoredVerifier {
+    /// Admit an encoded stored hash as a verifier under `limits`.
+    ///
+    /// The only way to put stored hash material into a record, so a verifier
+    /// that exists is one the verifier can run in full.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`HashError`] for a refused, malformed, or over-parameterised
+    /// record.
+    ///
+    /// [`HashError`]: super::verifier::HashError
+    pub fn hash(stored: &str, limits: &Limits) -> Result<Self, HashError> {
+        Ok(Self::Hash(parse_hash(stored, limits)?))
+    }
+}
+
 impl std::fmt::Debug for StoredVerifier {
     /// Format the verifier without exposing stored hash material.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            // Deliberately not the length or the scheme prefix either: the
-            // scheme narrows an offline attack, and the length distinguishes
-            // one scheme from another.
+            // Not delegated to `ParsedHash`'s own redacting `Debug`: that one
+            // prints the cost profile, and the scheme narrows an offline
+            // attack while the length distinguishes one scheme from another.
             Self::Hash(_) => f.write_str("Hash(<redacted>)"),
             Self::Delegated { valid } => f.debug_struct("Delegated").field("valid", valid).finish(),
         }

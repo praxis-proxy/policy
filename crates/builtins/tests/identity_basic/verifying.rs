@@ -250,16 +250,21 @@ fn a_correct_password_verifies_and_a_wrong_one_does_not() {
 fn a_debug_formatted_record_redacts_the_stored_hash() {
     use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
 
-    let stored = "$2y$04$UNIQUE.SALT.AND.DIGEST.MATERIAL.THAT.MUST.NOT.PRINT";
-    let record = UserRecord::verifier_only(StoredVerifier::Hash(stored.to_owned()));
+    let stored = bcrypt_at(4, "correct horse");
+    let verifier =
+        StoredVerifier::hash(&stored, &Limits::default()).expect("a real bcrypt record admits");
+    let record = UserRecord::verifier_only(verifier);
 
     let printed = format!("{record:?}");
+    let salt_and_digest = stored
+        .get(7..)
+        .expect("a bcrypt record carries a salt and digest past its prefix");
     assert!(
-        !printed.contains("UNIQUE.SALT"),
+        !printed.contains(salt_and_digest),
         "a Debug-formatted record must not carry the stored hash, got: {printed}"
     );
     assert!(
-        !printed.contains("$2y$"),
+        !printed.contains("$2b$") && !printed.contains("$2y$"),
         "nor the scheme prefix, which narrows an offline attack, got: {printed}"
     );
     assert!(
@@ -271,6 +276,72 @@ fn a_debug_formatted_record_redacts_the_stored_hash() {
     assert!(
         format!("{delegated:?}").contains("true"),
         "a delegated verdict carries nothing crackable and should stay visible"
+    );
+}
+
+#[test]
+fn a_record_holder_cannot_read_the_stored_hash() {
+    use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
+
+    let stored = bcrypt_at(4, "correct horse");
+    let verifier =
+        StoredVerifier::hash(&stored, &Limits::default()).expect("a real bcrypt record admits");
+    let record = UserRecord::verifier_only(verifier);
+
+    assert!(
+        record.fields.is_empty(),
+        "the projectable half of a record stays readable, and carries nothing here"
+    );
+    assert_eq!(
+        record.expires_at, None,
+        "as does the expiry the resolver enforces"
+    );
+
+    let profile = record.verify_against(|verifier| match verifier {
+        StoredVerifier::Hash(admitted) => Some(admitted.profile()),
+        _not_a_local_hash => None,
+    });
+    assert_eq!(
+        profile,
+        Some(CostProfile::Bcrypt { cost: 4 }),
+        "the backend that produced the record still reaches its parameters, \
+         which is what the uniform-cost check and the miss path need"
+    );
+
+    let printed = format!("{record:?}");
+    assert!(
+        !printed.contains(
+            stored
+                .get(7..)
+                .expect("a bcrypt record carries a salt and digest past its prefix")
+        ),
+        "and no public path yields the encoding: `ParsedHash` exposes the \
+         profile and the scheme and keeps the record itself unreadable, got: \
+         {printed}"
+    );
+}
+
+#[test]
+fn an_unadmitted_hash_cannot_become_a_verifier() {
+    use praxis_policy_builtins::plugins::identity_basic::StoredVerifier;
+
+    assert_eq!(
+        StoredVerifier::hash("plaintext-password", &Limits::default()).err(),
+        Some(HashError::RefusedScheme),
+        "a verifier slot that took any string could carry a record the KDF \
+         would refuse, which is the state this constructor exists to prevent"
+    );
+    assert_eq!(
+        StoredVerifier::hash(
+            &bcrypt_at(10, "pw"),
+            &Limits {
+                max_bcrypt_cost: 9,
+                ..Limits::default()
+            }
+        )
+        .err(),
+        Some(HashError::ParametersTooHigh),
+        "and the configured ceiling applies on the way in, not at verify time"
     );
 }
 
@@ -302,8 +373,15 @@ impl praxis_policy_builtins::plugins::identity_basic::CredentialDirectory for Ou
         credential: &praxis_policy_builtins::plugins::identity_basic::BasicCredential,
         _services: &dyn praxis_policy_core::host::HostServices,
     ) -> Result<bool, praxis_policy_builtins::plugins::identity_basic::DirectoryError> {
+        use praxis_policy_builtins::plugins::identity_basic::StoredVerifier;
+
         let presented = credential.to_zeroized_password();
-        Ok(record.is_some() && presented.as_slice() == self.expected_password.as_slice())
+        let delegated = record.is_some_and(|found| {
+            found.verify_against(|verifier| {
+                matches!(verifier, StoredVerifier::Delegated { valid: true })
+            })
+        });
+        Ok(delegated && presented.as_slice() == self.expected_password.as_slice())
     }
 
     fn kind(&self) -> &'static str {
@@ -334,6 +412,109 @@ async fn the_directory_trait_is_implementable_from_outside_the_plugin() {
             .await
             .expect("the verify answers"),
         "and rejects a wrong password"
+    );
+}
+
+/// An out-of-tree backend carrying its own stored hash, not a delegated verdict.
+#[derive(Debug)]
+struct OutOfTreeHashDirectory {
+    user_id: String,
+    stored: String,
+}
+
+#[async_trait::async_trait]
+impl praxis_policy_builtins::plugins::identity_basic::CredentialDirectory
+    for OutOfTreeHashDirectory
+{
+    async fn lookup(
+        &self,
+        user_id: &str,
+        _services: &dyn praxis_policy_core::host::HostServices,
+    ) -> Result<
+        Option<praxis_policy_builtins::plugins::identity_basic::UserRecord>,
+        praxis_policy_builtins::plugins::identity_basic::DirectoryError,
+    > {
+        use praxis_policy_builtins::plugins::identity_basic::{
+            DirectoryError, StoredVerifier, UserRecord,
+        };
+
+        if user_id != self.user_id {
+            return Ok(None);
+        }
+        let verifier = StoredVerifier::hash(&self.stored, &Limits::default())
+            .map_err(|e| DirectoryError::Malformed(e.to_string()))?;
+        Ok(Some(UserRecord::verifier_only(verifier)))
+    }
+
+    async fn verify(
+        &self,
+        record: Option<&praxis_policy_builtins::plugins::identity_basic::UserRecord>,
+        credential: &praxis_policy_builtins::plugins::identity_basic::BasicCredential,
+        _services: &dyn praxis_policy_core::host::HostServices,
+    ) -> Result<bool, praxis_policy_builtins::plugins::identity_basic::DirectoryError> {
+        use praxis_policy_builtins::plugins::identity_basic::StoredVerifier;
+
+        Ok(record.is_some_and(|found| {
+            found.verify_against(|verifier| match verifier {
+                StoredVerifier::Hash(admitted) => {
+                    praxis_policy_builtins::plugins::identity_basic::verifier::verify_credential(
+                        admitted, credential,
+                    )
+                },
+                StoredVerifier::Delegated { valid } => *valid,
+                _unknown_to_this_backend => false,
+            })
+        }))
+    }
+
+    fn kind(&self) -> &'static str {
+        "out-of-tree-hash-test"
+    }
+}
+
+#[tokio::test]
+async fn an_out_of_tree_backend_round_trips_its_own_stored_hash() {
+    use praxis_policy_builtins::plugins::identity_basic::CredentialDirectory as _;
+
+    let dir = OutOfTreeHashDirectory {
+        user_id: "alice".to_owned(),
+        stored: bcrypt_at(4, "correct horse"),
+    };
+    let svc = crate::support::services();
+
+    let found = dir.lookup("alice", &svc).await.expect("the lookup answers");
+    assert!(
+        found.is_some(),
+        "a backend outside this plugin must be able to admit its own stored \
+         hash into a record, or the opaque verifier has shut out the hosts the \
+         trait is public for"
+    );
+    assert!(
+        dir.verify(
+            found.as_ref(),
+            &crate::support::password("correct horse"),
+            &svc
+        )
+        .await
+        .expect("the verify answers"),
+        "and must be able to recover it to verify a correct password"
+    );
+    assert!(
+        !dir.verify(
+            found.as_ref(),
+            &crate::support::password("wrong horse"),
+            &svc
+        )
+        .await
+        .expect("the verify answers"),
+        "while a wrong password still fails"
+    );
+    assert!(
+        dir.lookup("bob", &svc)
+            .await
+            .expect("the lookup answers")
+            .is_none(),
+        "and an unknown user is still absent"
     );
 }
 
@@ -492,6 +673,32 @@ fn an_argon2_record_missing_its_salt_or_digest_fails_at_load() {
             "a record with {label} must fail at load: argon2 errors out before \
              the KDF without them, which is the same timing signal as any other \
              early rejection"
+        );
+    }
+}
+
+#[test]
+fn an_argon2_record_below_argon2s_salt_or_digest_floor_fails_at_load() {
+    use base64::Engine as _;
+
+    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD;
+    for (label, salt_bytes, digest_bytes) in [
+        ("a salt one byte under argon2's 8-byte minimum", 7, 32),
+        ("a digest one byte under argon2's 10-byte minimum", 16, 9),
+    ] {
+        let record = format!(
+            "$argon2id$v=19$m=19456,t=2,p=1${}${}",
+            b64.encode(vec![b'A'; salt_bytes]),
+            b64.encode(vec![b'B'; digest_bytes]),
+        );
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "{label} must fail at load: argon2 refuses it before the KDF, so \
+             admitting it would make that user-id measurably faster to probe \
+             than an unknown one. The floor is enforced by `password-hash` \
+             upstream of this call, and this pins it -- if a dependency bump \
+             ever relaxed it, admission would silently reopen that oracle"
         );
     }
 }

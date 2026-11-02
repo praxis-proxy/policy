@@ -157,7 +157,9 @@ impl CostProfile {
 
 /// A stored hash admitted for password verification.
 ///
-/// Its `Debug` output redacts the encoded hash.
+/// Carries its own encoding, which no accessor returns: the record is readable
+/// only by the verification call in this module, and `Debug` redacts it. A
+/// holder can read the cost parameters and the scheme, nothing more.
 #[derive(Clone)]
 pub struct ParsedHash {
     profile: CostProfile,
@@ -174,13 +176,6 @@ impl ParsedHash {
     /// Which scheme this record uses.
     pub fn scheme(&self) -> Scheme {
         self.profile.scheme()
-    }
-
-    /// The encoded stored hash, for a backend to carry in a verifier slot.
-    ///
-    /// Do not log or project this offline-crackable verifier.
-    pub fn encoded(&self) -> &str {
-        &self.encoded
     }
 }
 

@@ -278,21 +278,17 @@ async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
     let mut config = config_for(file.path());
     config.max_concurrent_verifications = 1;
     let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
-    let svc = services();
-    let record = dir
-        .lookup("alice", &svc)
-        .await
-        .expect("answers")
-        .expect("alice exists");
 
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..8_u32 {
         let dir = std::sync::Arc::clone(&dir);
-        let encoded = record.verifier.clone();
         set.spawn(async move {
             let svc = services();
-            let rec =
-                praxis_policy_builtins::plugins::identity_basic::UserRecord::verifier_only(encoded);
+            let rec = dir
+                .lookup("alice", &svc)
+                .await
+                .expect("answers")
+                .expect("alice exists");
             dir.verify(Some(&rec), &crate::support::password("pw"), &svc)
                 .await
         });
@@ -315,12 +311,6 @@ async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
 
 #[tokio::test]
 async fn dropping_a_verify_future_does_not_release_its_permit_early() {
-    // A permit held in the async body rather than inside the blocking closure
-    // would be released the instant this future is dropped, while the hashing
-    // it was bounding ran on. That is the unauthenticated CPU-exhaustion path:
-    // a caller that connects and disconnects repeatedly would start as many
-    // concurrent verifies as the Tokio blocking pool allows, whatever the cap.
-    // Cost 12 keeps the work in flight long enough for the drop to land first.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 12)));
     let mut config = config_for(file.path());
     config.max_concurrent_verifications = 1;
@@ -331,26 +321,46 @@ async fn dropping_a_verify_future_does_not_release_its_permit_early() {
         .await
         .expect("the lookup answers")
         .expect("alice is in the file");
-
-    // Polled once so the permit is taken and the blocking task is spawned,
-    // then dropped while that task is still hashing.
     let credential = crate::support::password("pw");
+
     let mut in_flight = Box::pin(dir.verify(Some(&record), &credential, &svc));
     assert!(
         futures::poll!(&mut in_flight).is_pending(),
-        "a cost-12 verify must still be in flight after a single poll"
+        "the first poll must take the only permit and spawn the blocking \
+         verification without completing it"
     );
+
+    let mut observed_in_flight = false;
+    for _ in 0..100_u32 {
+        match dir.verify(Some(&record), &credential, &svc).await {
+            Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated) => {
+                observed_in_flight = true;
+                break;
+            },
+            _not_yet_holding_the_permit => {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            },
+        }
+    }
+    assert!(
+        observed_in_flight,
+        "the spawned verification must be observably holding the cap's only \
+         permit before the drop, so the assertion below tests the permit's \
+         lifetime rather than racing a hash duration"
+    );
+
     drop(in_flight);
 
-    // The dropped future cannot have returned the permit, because the hashing
-    // it paid for is still running.
     assert!(
         matches!(
             dir.verify(Some(&record), &credential, &svc).await,
             Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated)
         ),
-        "a cap of 1 must stay saturated while the dropped future's blocking \
-         verification is still running"
+        "a permit held in the async body rather than inside the blocking \
+         closure would be released the instant that future dropped, while the \
+         hashing it bounded ran on -- the unauthenticated CPU-exhaustion path \
+         where a caller that connects and disconnects starts as many concurrent \
+         verifies as the Tokio blocking pool allows, whatever the cap"
     );
 }
 
@@ -643,6 +653,40 @@ async fn a_reload_onto_mixed_costs_is_refused_and_the_uniform_index_keeps_servin
     assert!(
         dir.lookup("bob", &svc).await.expect("answers").is_none(),
         "and the record from the refused file must not be reachable"
+    );
+
+    let retained = dir
+        .lookup("alice", &svc)
+        .await
+        .expect("answers")
+        .expect("the user from the accepted file must still be indexed");
+    assert!(
+        dir.verify(Some(&retained), &crate::support::password("pw"), &svc)
+            .await
+            .expect("the verify answers"),
+        "and must still authenticate: keeping the previous miss profile while \
+         dropping the user index would pass every other assertion here and \
+         still have locked out everyone in the file"
+    );
+}
+
+#[tokio::test]
+async fn a_file_backend_refuses_a_delegated_verdict() {
+    use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
+
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let dir = directory(&file).expect("the file loads");
+    let svc = services();
+    let record = UserRecord::verifier_only(StoredVerifier::Delegated { valid: true });
+
+    assert!(
+        matches!(
+            dir.verify(Some(&record), &crate::support::password("pw"), &svc)
+                .await,
+            Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Malformed(_))
+        ),
+        "a verdict this backend cannot have produced must fail closed rather \
+         than authenticate on someone else's `valid: true`"
     );
 }
 
