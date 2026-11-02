@@ -285,7 +285,8 @@ COVERAGE_FLOOR ?= 96
 #
 # Both coverage targets share these flags. A report built from a narrower run
 # understates what the floor asserted.
-COVERAGE_ARGS := --workspace --features "$(DEFAULT_FEATURES)" --exclude ppe-benches
+COVERAGE_FEATURES := $(filter-out ppe-benches/dhat-heap,$(DEFAULT_FEATURES))
+COVERAGE_ARGS := --workspace --features "$(COVERAGE_FEATURES)" --exclude ppe-benches
 COVERAGE_TEST_ARGS := -- --include-ignored
 
 # `clean` first: llvm-cov merges the mappings of every instrumented binary it
