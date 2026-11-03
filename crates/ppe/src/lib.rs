@@ -77,6 +77,8 @@
 
 #[cfg(all(feature = "fips", not(feature = "api-key")))]
 compile_error!("the `fips` feature requires `api-key`");
+#[cfg(all(feature = "fips", feature = "http-hyper"))]
+compile_error!("the `fips` profile cannot enable `http-hyper`, which links ring for TLS");
 
 // Whole-crate re-exports for advanced use (types not surfaced below).
 
