@@ -19,7 +19,8 @@ categories.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["crypto-rustcrypto"]
+default = ["crypto-default"]
+crypto-default = ["crypto-rustcrypto"]
 crypto-rustcrypto = ["dep:hmac", "dep:sha2"]
 fips = ["dep:openssl"]
 # Test doubles for the seams a host normally fills —
