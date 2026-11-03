@@ -126,8 +126,29 @@ argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "pa
 # copy, which would otherwise outlive the verify on the blocking thread's
 # stack.
 bcrypt = { version = "0.19.3", default-features = false, features = ["std", "zeroize"] }
+# sha256crypt (`$5$`) and sha512crypt (`$6$`) verification, for deployments
+# restricted to a FIPS 180-4 approved hash. Same RustCrypto family as the two
+# above and built on this tree's existing `sha2`, so it adds `mcf` and nothing
+# with a C toolchain step.
+#
+# These two are the only `.htpasswd` schemes that are both FIPS-approved and
+# actually written by the tools operators have: `htpasswd` has no flag for
+# them, but `mkpasswd -m sha512crypt` and glibc `crypt(3)` do, and a shadow
+# file copied into place carries them already. PBKDF2 is the other approved
+# option and was rejected: its PHC spelling (`$pbkdf2-sha256$`) is a Passlib
+# convention no `.htpasswd` tool emits, so it would be an encoding this
+# backend accepts and no operator can produce.
+#
+# Verified through `ShaCrypt`'s `PasswordVerifier`, which reads the algorithm
+# from the record rather than from the configured hasher and compares with
+# `ct_eq`. Its `Params` keeps `rounds` private with no accessor, so the
+# ceiling is enforced by reading the `rounds=` field out of the encoding in
+# `verifier.rs` -- the same shape as bcrypt's fixed-width cost field above,
+# and for the same reason.
+sha-crypt = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
 # Constant-time primitives for the verdict comparison. Already in the tree via
-# both hashing crates; named here because this plugin depends on it directly.
+# all three hashing crates; named here because this plugin depends on it
+# directly.
 subtle = "2.6.1"
 jsonwebtoken = "11.1.0"
 # rsa 0.9 uses rand_core 0.6, which rand 0.8 implements.

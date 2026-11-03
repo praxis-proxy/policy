@@ -4,10 +4,13 @@
 //! Hash-scheme admission, the parameter ceiling, and the properties that keep
 //! a verify from leaking which users exist.
 
+use praxis_policy_builtins::plugins::identity_basic::ShaCryptVariant;
 use praxis_policy_builtins::plugins::identity_basic::verifier::{
-    BCRYPT_TRUNCATION_BYTES, CostProfile, HashError, Limits, Scheme, empty_directory_hash,
-    parse_hash,
+    BCRYPT_TRUNCATION_BYTES, CostProfile, HashError, Limits, SHA_CRYPT_DEFAULT_ROUNDS, Scheme,
+    empty_directory_hash, parse_hash,
 };
+
+use crate::support::{sha_crypt_at, verify_password};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -779,6 +782,269 @@ fn a_cost_profile_describes_its_own_parameters() {
             described.contains(expected),
             "an argon2 description names {expected}, since every parameter is \
              part of what the uniformity check compares: {described}"
+        );
+    }
+}
+
+#[test]
+fn sha_crypt_records_load_and_verify_in_both_variants() {
+    for (variant, ident) in [
+        (ShaCryptVariant::Sha256, "$5$"),
+        (ShaCryptVariant::Sha512, "$6$"),
+    ] {
+        let minted = sha_crypt_at(variant, 1_000, "pw");
+        assert!(
+            minted.starts_with(ident),
+            "the fixture should be spelled {ident}, got: {minted}"
+        );
+
+        let parsed = parse_hash(&minted, &Limits::default())
+            .unwrap_or_else(|e| panic!("{ident} should load: {e}"));
+        assert_eq!(
+            parsed.scheme(),
+            Scheme::ShaCrypt,
+            "{ident} is a sha-crypt spelling and must be read as one"
+        );
+        assert_eq!(
+            parsed.profile(),
+            CostProfile::ShaCrypt {
+                variant,
+                rounds: 1_000
+            },
+            "{ident} must carry the round count it was minted at"
+        );
+        assert!(
+            verify_password(&parsed, b"pw"),
+            "{ident} must verify the password it was minted from"
+        );
+        assert!(
+            !verify_password(&parsed, b"wrong"),
+            "{ident} must not verify a different password"
+        );
+    }
+}
+
+#[test]
+fn the_two_sha_crypt_variants_are_different_cost_profiles() {
+    let sha256 = parse_hash(
+        &sha_crypt_at(ShaCryptVariant::Sha256, 1_000, "pw"),
+        &Limits::default(),
+    )
+    .expect("the $5$ fixture loads");
+    let sha512 = parse_hash(
+        &sha_crypt_at(ShaCryptVariant::Sha512, 1_000, "pw"),
+        &Limits::default(),
+    )
+    .expect("the $6$ fixture loads");
+
+    assert_ne!(
+        sha256.profile(),
+        sha512.profile(),
+        "$5$ and $6$ are different functions at the same round count, not two          parameterisations of one, so a file holding both is a mixed-cost file          and the uniformity check has to see them as different"
+    );
+}
+
+#[test]
+fn a_sha_crypt_record_without_an_explicit_rounds_field_loads_at_the_default() {
+    let minted = sha_crypt_at(ShaCryptVariant::Sha512, 5_000, "pw");
+    let implicit = minted.replace("rounds=5000$", "");
+    assert!(
+        !implicit.contains("rounds="),
+        "the fixture should carry no rounds field, got: {implicit}"
+    );
+
+    let parsed = parse_hash(&implicit, &Limits::default())
+        .expect("the no-rounds spelling is what crypt(3) and mkpasswd write");
+    assert_eq!(
+        parsed.profile(),
+        CostProfile::ShaCrypt {
+            variant: ShaCryptVariant::Sha512,
+            rounds: SHA_CRYPT_DEFAULT_ROUNDS
+        },
+        "an absent rounds field means the format's default, not zero: reading          it as anything else would make this record's profile differ from an          explicit `rounds=5000` that hashes identically"
+    );
+    assert!(
+        verify_password(&parsed, b"pw"),
+        "and it must verify, since it is the same digest with the field elided"
+    );
+}
+
+#[test]
+fn a_sha_crypt_round_count_above_the_ceiling_fails_at_load() {
+    let minted = sha_crypt_at(ShaCryptVariant::Sha512, 2_000, "pw");
+
+    assert_eq!(
+        parse_hash(
+            &minted,
+            &Limits {
+                max_sha_crypt_rounds: 1_999,
+                ..Limits::default()
+            }
+        )
+        .err(),
+        Some(HashError::ParametersTooHigh),
+        "a round count over the ceiling is refused at load, so a well-formed          but extreme record cannot turn one login into a denial of service"
+    );
+    assert!(
+        parse_hash(
+            &minted,
+            &Limits {
+                max_sha_crypt_rounds: 2_000,
+                ..Limits::default()
+            }
+        )
+        .is_ok(),
+        "and the ceiling is inclusive"
+    );
+}
+
+#[test]
+fn a_sha_crypt_record_the_verifier_would_reject_cheaply_fails_at_load() {
+    let valid = sha_crypt_at(ShaCryptVariant::Sha512, 5_000, "pw");
+    let (_, tail) = valid
+        .split_once("rounds=5000$")
+        .expect("the fixture carries an explicit rounds field");
+    let (salt, digest) = tail
+        .split_once('$')
+        .expect("the fixture carries a salt and a digest");
+
+    for (label, record) in [
+        ("no digest field at all", format!("$6${salt}")),
+        ("an empty digest", format!("$6${salt}$")),
+        (
+            "a digest shorter than the variant's width",
+            format!("$6${salt}$tooshort"),
+        ),
+        (
+            "a sha256crypt-width digest under a sha512crypt ident",
+            format!(
+                "$6${salt}${}",
+                digest.get(..43).expect("the $6$ digest is longer than 43")
+            ),
+        ),
+        (
+            "a salt longer than the format allows",
+            format!("$6$abcdefghijklmnopq${digest}"),
+        ),
+        (
+            "a field after the digest",
+            format!("$6$rounds=5000${salt}${digest}$extra"),
+        ),
+    ] {
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "{label} must fail at load. The salt and digest here come from a \
+             record that does load, so each case differs from a valid one only \
+             in the property it names. The verifier rejects all of these \
+             before running the digest, so admitting one would make that \
+             user-id measurably faster to probe than an unknown one -- the \
+             cheap-reject oracle uniform cost exists to close"
+        );
+    }
+}
+
+#[test]
+fn a_sha_crypt_rounds_field_outside_the_formats_range_fails_at_load() {
+    let valid = sha_crypt_at(ShaCryptVariant::Sha512, 5_000, "pw");
+    let (prefix, tail) = valid
+        .split_once("rounds=5000$")
+        .expect("the fixture carries an explicit rounds field");
+    assert_eq!(prefix, "$6$", "the split should leave the bare ident");
+
+    for (label, rounds) in [
+        ("below the format's minimum", "999"),
+        ("above the format's maximum", "1000000000"),
+        ("not a number", "abc"),
+        ("zero", "0"),
+        ("empty", ""),
+        ("negative", "-1"),
+        ("wider than a u32", "4294967296"),
+    ] {
+        let record = format!("$6$rounds={rounds}${tail}");
+
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a rounds field {label} must fail at load. Everything else about \
+             this record is valid -- salt and digest are the ones from a \
+             record that loads -- so only the rounds bound can reject it. The \
+             verifier does not: a `rounds=` field it cannot parse falls \
+             through to being read as the salt, so the record answers `false` \
+             cheaply without ever running its real parameters, which makes \
+             that user-id measurably faster to probe than an unknown one"
+        );
+    }
+
+    assert!(
+        parse_hash(&format!("$6$rounds=1000${tail}"), &Limits::default()).is_ok(),
+        "and the format's minimum itself is admitted, so the bound rejects \
+         only what is actually out of range"
+    );
+}
+
+#[test]
+fn an_md5_crypt_record_is_not_mistaken_for_sha_crypt() {
+    assert_eq!(
+        parse_hash("$1$abcdefgh$0123456789012345678901", &Limits::default()).err(),
+        Some(HashError::Malformed),
+        "`$1$` is md5crypt, and sits in neither the refused-outright set nor          the sha-crypt idents, so it must still not load"
+    );
+}
+
+#[test]
+fn published_sha_crypt_vectors_verify_against_their_known_password() {
+    for (label, record) in [
+        (
+            "$5$ at the default rounds",
+            "$5$9aEeVXnCiCNHUjO/$FrVBcjyJukRaE6inMYazyQv1DBnwaKfom.71ebgQR/0",
+        ),
+        (
+            "$5$ at rounds=100000",
+            "$5$rounds=100000$PhW/wpSsmgIMKsTW$d9kDD8dQNu3r0Ky.xcOEhdin6EQRebrHfNKDRwWP/pB",
+        ),
+        (
+            "$6$ at the default rounds",
+            "$6$bbe605c2cce4c642$BiBOywFAm9kdv6ZPpj2GaKVqeh/.c21pf1uFBaq.e59KEE2Ej74iJleX\
+             aLXURYV6uh5LF4K7dDc4vtRtPiiKB/",
+        ),
+        (
+            "$6$ at rounds=100000",
+            "$6$rounds=100000$exn6tVc2j/MZD8uG$BI1Xh8qQSK9J4m14uwy7abn.ctj/TIAzlaVCto0MQrOF\
+             IeTXsc1iwzH16XEWo/a7c7Y9eVJvufVzYAs4EsPOy0",
+        ),
+    ] {
+        let record: String = record.split_whitespace().collect();
+        let parsed = parse_hash(&record, &Limits::default())
+            .unwrap_or_else(|e| panic!("{label} is a published record and must load: {e}"));
+
+        assert!(
+            verify_password(&parsed, b"foobar"),
+            "{label} must verify its published password. These four records \
+             were written by another implementation, so they are what proves \
+             this backend agrees with the tool that wrote the file rather than \
+             only with its own minting helper"
+        );
+        assert!(
+            !verify_password(&parsed, b"foobas"),
+            "{label} must not verify a password one byte different"
+        );
+    }
+}
+
+#[test]
+fn a_sha_crypt_profile_describes_its_own_parameters() {
+    let parsed = parse_hash(
+        &sha_crypt_at(ShaCryptVariant::Sha512, 4_096, "pw"),
+        &Limits::default(),
+    )
+    .expect("the fixture loads");
+
+    let described = parsed.profile().describe();
+    for expected in ["$6$", "4096"] {
+        assert!(
+            described.contains(expected),
+            "a sha-crypt description names {expected}, since both the variant              and the round count are part of what the uniformity check              compares: {described}"
         );
     }
 }

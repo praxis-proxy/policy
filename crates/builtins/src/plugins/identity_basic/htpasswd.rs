@@ -88,6 +88,10 @@ pub struct HtpasswdLimits {
     /// The highest argon2 time cost, in passes.
     #[serde(default = "default_max_argon2_time_cost")]
     pub max_argon2_time_cost: u32,
+
+    /// The highest sha-crypt round count this directory will load.
+    #[serde(default = "default_max_sha_crypt_rounds")]
+    pub max_sha_crypt_rounds: u32,
 }
 
 impl Default for HtpasswdLimits {
@@ -97,6 +101,7 @@ impl Default for HtpasswdLimits {
             max_bcrypt_cost: shared.max_bcrypt_cost,
             max_argon2_memory_kib: shared.max_argon2_memory_kib,
             max_argon2_time_cost: shared.max_argon2_time_cost,
+            max_sha_crypt_rounds: shared.max_sha_crypt_rounds,
         }
     }
 }
@@ -107,6 +112,7 @@ impl From<HtpasswdLimits> for Limits {
             max_bcrypt_cost: value.max_bcrypt_cost,
             max_argon2_memory_kib: value.max_argon2_memory_kib,
             max_argon2_time_cost: value.max_argon2_time_cost,
+            max_sha_crypt_rounds: value.max_sha_crypt_rounds,
         }
     }
 }
@@ -121,6 +127,10 @@ fn default_max_argon2_memory_kib() -> u32 {
 
 fn default_max_argon2_time_cost() -> u32 {
     Limits::default().max_argon2_time_cost
+}
+
+fn default_max_sha_crypt_rounds() -> u32 {
+    Limits::default().max_sha_crypt_rounds
 }
 
 fn default_max_concurrent_verifications() -> usize {
@@ -387,6 +397,9 @@ fn read_index(config: &HtpasswdConfig, empty: &ParsedHash) -> Result<Index, Stri
 
 impl HtpasswdDirectory {
     /// Open a `.htpasswd` directory with the supplied configuration.
+    ///
+    /// Accepts bcrypt, argon2, sha256crypt (`$5$`), and sha512crypt (`$6$`)
+    /// records, provided every record in the file shares one cost profile.
     ///
     /// # Errors
     ///

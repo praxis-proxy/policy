@@ -22,12 +22,22 @@
 // records on the miss path, and why admission here rejects any record the
 // verifier would refuse before reaching the KDF.
 //
+// FIPS. bcrypt is Blowfish-based and argon2 is BLAKE2b-based, so neither is
+// built on an approved hash, and a deployment under a FIPS-180-4 restriction
+// cannot use either however well they resist cracking. sha256crypt (`$5$`) and
+// sha512crypt (`$6$`) are SHA-2 iterated per Drepper's scheme, which is the
+// approved option `.htpasswd` can actually carry -- `crypt(3)` and `mkpasswd`
+// write them, and a shadow file already holds them. They are accepted on the
+// same terms as the other two: admitted only with parameters the verifier will
+// run in full, under a round ceiling, and one cost profile per file.
+//
 // Note what is deliberately NOT here: any way to produce a hash for storage.
 // PPE verifies; minting belongs to whatever owns the password.
 
 use argon2::password_hash::phc::PasswordHash;
 use argon2::{Argon2, PasswordVerifier as _};
 use base64::Engine as _;
+use sha_crypt::{PasswordHashRef, ShaCrypt};
 use subtle::ConstantTimeEq as _;
 
 use super::credential::Password;
@@ -46,6 +56,24 @@ pub const EMPTY_DIRECTORY_COST: u32 = 10;
 /// The maximum password length accepted by the bcrypt verifier, in bytes.
 pub const BCRYPT_TRUNCATION_BYTES: usize = 72;
 
+/// The round count a sha-crypt record without an explicit `rounds=` runs.
+pub const SHA_CRYPT_DEFAULT_ROUNDS: u32 = 5_000;
+
+/// The lowest round count the sha-crypt format allows.
+pub const SHA_CRYPT_ROUNDS_MIN: u32 = 1_000;
+
+/// The highest round count the sha-crypt format allows.
+pub const SHA_CRYPT_ROUNDS_MAX: u32 = 999_999_999;
+
+/// The maximum sha-crypt salt length, in characters.
+pub const SHA_CRYPT_MAX_SALT_CHARS: usize = 16;
+
+/// The crypt-base64 width of a sha256crypt digest, in characters.
+const SHA256_CRYPT_DIGEST_CHARS: usize = 43;
+
+/// The crypt-base64 width of a sha512crypt digest, in characters.
+const SHA512_CRYPT_DIGEST_CHARS: usize = 86;
+
 /// The hashing scheme of a stored record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -55,6 +83,40 @@ pub enum Scheme {
 
     /// argon2, in any of the three variants, as a PHC string.
     Argon2,
+
+    /// sha256crypt (`$5$`) or sha512crypt (`$6$`), as an MCF string.
+    ///
+    /// The FIPS-approved option: both build on SHA-2 ([FIPS 180-4]), which
+    /// neither bcrypt nor argon2 does.
+    ///
+    /// [FIPS 180-4]: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf
+    ShaCrypt,
+}
+
+/// Which sha-crypt function a record uses.
+///
+/// `$5$` and `$6$` are different functions, not two parameterisations of one,
+/// so the variant is part of a record's [`CostProfile`].
+///
+/// [`CostProfile`]: CostProfile
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ShaCryptVariant {
+    /// sha256crypt, spelled `$5$`.
+    Sha256,
+
+    /// sha512crypt, spelled `$6$`.
+    Sha512,
+}
+
+impl ShaCryptVariant {
+    /// The MCF identifier an operator sees in the file.
+    pub fn ident(self) -> &'static str {
+        match self {
+            Self::Sha256 => "$5$",
+            Self::Sha512 => "$6$",
+        }
+    }
 }
 
 /// Why a stored hash cannot be admitted for verification.
@@ -70,7 +132,8 @@ pub enum HashError {
     /// The record uses an unsupported MD5 or SHA-1 scheme and must be re-hashed.
     #[error(
         "the stored hash uses an MD5 or SHA-1 grade scheme (`$apr1$`, `{{SHA}}`) that this \
-         plugin does not verify; re-hash the file with bcrypt or argon2"
+         plugin does not verify; re-hash the file with bcrypt, argon2, or -- where a \
+         FIPS-approved hash is required -- sha256crypt (`$5$`) or sha512crypt (`$6$`)"
     )]
     WeakSchemeUnsupported,
 
@@ -121,6 +184,14 @@ pub enum CostProfile {
         /// Degree of parallelism.
         parallelism: u32,
     },
+
+    /// Sha-crypt parameters: the function, and the round count it runs.
+    ShaCrypt {
+        /// Which function (`$5$` or `$6$`), since the two differ in cost.
+        variant: ShaCryptVariant,
+        /// Rounds of the digest function.
+        rounds: u32,
+    },
 }
 
 impl CostProfile {
@@ -129,6 +200,7 @@ impl CostProfile {
         match self {
             Self::Bcrypt { .. } => Scheme::Bcrypt,
             Self::Argon2 { .. } => Scheme::Argon2,
+            Self::ShaCrypt { .. } => Scheme::ShaCrypt,
         }
     }
 
@@ -151,6 +223,9 @@ impl CostProfile {
                 variant.as_str(),
                 u32::from(version),
             ),
+            Self::ShaCrypt { variant, rounds } => {
+                format!("{} rounds={rounds}", variant.ident())
+            },
         }
     }
 }
@@ -199,6 +274,9 @@ pub struct Limits {
 
     /// The highest argon2 time cost (passes).
     pub max_argon2_time_cost: u32,
+
+    /// The highest sha-crypt round count this directory will load.
+    pub max_sha_crypt_rounds: u32,
 }
 
 impl Default for Limits {
@@ -211,13 +289,72 @@ impl Default for Limits {
             max_bcrypt_cost: 15,
             max_argon2_memory_kib: 262_144, // 256 MiB
             max_argon2_time_cost: 10,
+            // Sha-crypt rounds are linear, so the useful range sits far above
+            // bcrypt's exponent in raw count: glibc's default is 5_000 and a
+            // hardened file uses 100_000-656_000. Measured for `$6$` on
+            // current hardware, 5_000 is 0.8ms, 100_000 is 12ms and this
+            // ceiling is 82ms -- under bcrypt 12's ~250ms, so it admits every
+            // sane deployment. What it refuses is the top of the range the
+            // format allows and `Params` accepts: `rounds=999999999` is ~82
+            // seconds of CPU for a single login.
+            max_sha_crypt_rounds: 1_000_000, // ~82ms for $6$
         }
     }
 }
 
-/// Admit a stored bcrypt or argon2 hash under the configured parameter ceilings.
+/// Admit a stored bcrypt, argon2, or sha-crypt hash under the configured
+/// parameter ceilings.
 ///
 /// DES-crypt, plaintext, MD5, and SHA-1 records are refused.
+///
+/// Where a deployment is restricted to a FIPS-approved hash, use sha256crypt
+/// (`$5$`) or sha512crypt (`$6$`); `mkpasswd -m sha512crypt` writes them, and
+/// every record in one file must share a single cost profile.
+///
+/// ```
+/// use praxis_policy_builtins::plugins::identity_basic::{
+///     Limits, Scheme, ShaCryptVariant,
+/// };
+/// use praxis_policy_builtins::plugins::identity_basic::verifier::{
+///     CostProfile, parse_hash,
+/// };
+///
+/// let stored = "$6$rounds=100000$exn6tVc2j/MZD8uG$BI1Xh8qQSK9J4m14uwy7abn.\
+///               ctj/TIAzlaVCto0MQrOFIeTXsc1iwzH16XEWo/a7c7Y9eVJvufVzYAs4EsPOy0";
+/// let stored: String = stored.split_whitespace().collect();
+///
+/// let admitted = parse_hash(&stored, &Limits::default())?;
+/// assert_eq!(admitted.scheme(), Scheme::ShaCrypt);
+/// assert_eq!(
+///     admitted.profile(),
+///     CostProfile::ShaCrypt {
+///         variant: ShaCryptVariant::Sha512,
+///         rounds: 100_000,
+///     },
+/// );
+/// # Ok::<(), praxis_policy_builtins::plugins::identity_basic::HashError>(())
+/// ```
+///
+/// A round count above the configured ceiling is refused at load, so an
+/// extreme record cannot turn one login into a denial of service:
+///
+/// ```
+/// use praxis_policy_builtins::plugins::identity_basic::{HashError, Limits};
+/// use praxis_policy_builtins::plugins::identity_basic::verifier::parse_hash;
+///
+/// let stored = "$6$rounds=100000$exn6tVc2j/MZD8uG$BI1Xh8qQSK9J4m14uwy7abn.\
+///               ctj/TIAzlaVCto0MQrOFIeTXsc1iwzH16XEWo/a7c7Y9eVJvufVzYAs4EsPOy0";
+/// let stored: String = stored.split_whitespace().collect();
+///
+/// let limits = Limits {
+///     max_sha_crypt_rounds: 50_000,
+///     ..Limits::default()
+/// };
+/// assert_eq!(
+///     parse_hash(&stored, &limits).err(),
+///     Some(HashError::ParametersTooHigh),
+/// );
+/// ```
 ///
 /// # Errors
 ///
@@ -257,6 +394,10 @@ pub fn parse_hash(stored: &str, limits: &Limits) -> Result<ParsedHash, HashError
             profile: CostProfile::Bcrypt { cost },
             encoded: stored.to_owned(),
         });
+    }
+
+    if let Some(variant) = sha_crypt_variant(stored) {
+        return admit_sha_crypt(stored, variant, limits);
     }
 
     if stored.starts_with("$argon2") {
@@ -388,6 +529,121 @@ fn decode_bcrypt_field(field: Option<&str>, buffer: &mut [u8]) -> Result<(), Has
     Ok(())
 }
 
+/// Read the sha-crypt variant from a record's MCF identifier.
+///
+/// Returns `None` for a record that is not sha-crypt.
+fn sha_crypt_variant(stored: &str) -> Option<ShaCryptVariant> {
+    match stored.get(..3) {
+        Some("$5$") => Some(ShaCryptVariant::Sha256),
+        Some("$6$") => Some(ShaCryptVariant::Sha512),
+        _ => None,
+    }
+}
+
+/// Admit a sha-crypt record under the configured round ceiling.
+///
+/// # Errors
+///
+/// Returns [`HashError::Malformed`] for a record the verifier would reject
+/// before running the digest, or [`HashError::ParametersTooHigh`] for a round
+/// count above `limits`.
+///
+/// [`HashError::Malformed`]: HashError::Malformed
+/// [`HashError::ParametersTooHigh`]: HashError::ParametersTooHigh
+fn admit_sha_crypt(
+    stored: &str,
+    variant: ShaCryptVariant,
+    limits: &Limits,
+) -> Result<ParsedHash, HashError> {
+    // MCF parsing rejects an empty field, a salt outside the crypt alphabet
+    // and an undecodable digest, so a record reaching the checks below is one
+    // whose shape the verifier can read. No empty-salt or empty-digest check
+    // below for that reason: every spelling of one (`$6$salt$`, `$6$$salt$x`)
+    // fails here as `DelimiterInvalid` or `FieldInvalid`, so such a check
+    // would be unreachable.
+    let parsed = PasswordHashRef::new(stored).map_err(|_mcf_error| HashError::Malformed)?;
+    let mut fields = parsed.fields();
+
+    let first = fields.next().ok_or(HashError::Malformed)?;
+
+    // `rounds=` is optional in this format: `$6$salt$hash` means the spec's
+    // default of 5_000, which is what glibc and `mkpasswd` write when nobody
+    // asks for more. So the first field is the round count or the salt, and
+    // which one it is decides how many fields must follow.
+    //
+    // A field that *looks* like a round count but does not parse -- `rounds=0`,
+    // `rounds=abc`, anything outside the 1_000..=999_999_999 the format allows
+    // -- is refused here rather than passed on. The verifier does not reject
+    // it: it falls through to treating `rounds=abc` as the salt, derives a
+    // digest over the wrong input and answers `false` without ever running the
+    // record's real parameters. That answer is both wrong and cheap, which
+    // makes the user-id measurably faster to probe than an unknown one -- the
+    // same oracle the bcrypt field decode above exists to close.
+    let (rounds, salt) = match parse_sha_crypt_rounds(first.as_str())? {
+        Some(explicit) => (explicit, fields.next().ok_or(HashError::Malformed)?),
+        None => (SHA_CRYPT_DEFAULT_ROUNDS, first),
+    };
+
+    // The digest must be present. Without it the verifier errors out before
+    // the KDF, which is the same timing signal as a refused record.
+    let digest = fields.next().ok_or(HashError::Malformed)?;
+    // And nothing may follow it: the verifier refuses a trailing field, so a
+    // record carrying one would answer cheaply for the same reason.
+    if fields.next().is_some() {
+        return Err(HashError::Malformed);
+    }
+
+    // The full digest width for the variant, so a truncated record cannot be
+    // admitted and then compared against fewer bytes than it claims.
+    let expected = match variant {
+        ShaCryptVariant::Sha256 => SHA256_CRYPT_DIGEST_CHARS,
+        ShaCryptVariant::Sha512 => SHA512_CRYPT_DIGEST_CHARS,
+    };
+    if digest.as_str().len() != expected {
+        return Err(HashError::Malformed);
+    }
+
+    // The salt is capped by the format at 16 characters. The crate does not
+    // enforce that -- it hashes whatever it is given -- so a longer salt would
+    // verify here and fail against `crypt(3)`, making this backend disagree
+    // with the tool that wrote the file.
+    if salt.as_str().len() > SHA_CRYPT_MAX_SALT_CHARS {
+        return Err(HashError::Malformed);
+    }
+
+    if rounds > limits.max_sha_crypt_rounds {
+        return Err(HashError::ParametersTooHigh);
+    }
+
+    Ok(ParsedHash {
+        profile: CostProfile::ShaCrypt { variant, rounds },
+        encoded: stored.to_owned(),
+    })
+}
+
+/// Read an explicit `rounds=` field, if this field is one.
+///
+/// Returns `Ok(None)` when the field is a salt rather than a round count.
+///
+/// # Errors
+///
+/// Returns [`HashError::Malformed`] for a `rounds=` field outside the range the
+/// format allows.
+///
+/// [`HashError::Malformed`]: HashError::Malformed
+fn parse_sha_crypt_rounds(field: &str) -> Result<Option<u32>, HashError> {
+    let Some(digits) = field.strip_prefix("rounds=") else {
+        return Ok(None);
+    };
+    let rounds: u32 = digits
+        .parse()
+        .map_err(|_not_a_number| HashError::Malformed)?;
+    if !(SHA_CRYPT_ROUNDS_MIN..=SHA_CRYPT_ROUNDS_MAX).contains(&rounds) {
+        return Err(HashError::Malformed);
+    }
+    Ok(Some(rounds))
+}
+
 /// Create a bcrypt hash for dummy verification at the requested work factor.
 ///
 /// Use only when a directory holds no records at all. A populated directory
@@ -445,6 +701,18 @@ pub fn verify_bytes(hash: &ParsedHash, bytes: &[u8]) -> bool {
                 return 0_u8;
             };
             u8::from(Argon2::default().verify_password(bytes, &parsed).is_ok())
+        },
+        Scheme::ShaCrypt => {
+            // The variant and rounds come from the record, not from this
+            // hasher: `ShaCrypt`'s verify reads both out of the encoding and
+            // compares with `ct_eq`, so the value here only supplies defaults
+            // it does not use. No length ceiling as bcrypt needs above --
+            // sha-crypt consumes the whole password rather than truncating it.
+            u8::from(
+                ShaCrypt::SHA512
+                    .verify_password(bytes, hash.encoded.as_str())
+                    .is_ok(),
+            )
         },
         // Deliberately exhaustive with no catch-all. `Scheme` is
         // `#[non_exhaustive]` for downstream crates, but within this one the

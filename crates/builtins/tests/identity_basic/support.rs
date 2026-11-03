@@ -3,6 +3,7 @@
 
 //! Test utilities for Basic credential and directory cases.
 
+use praxis_policy_builtins::plugins::identity_basic::ShaCryptVariant;
 use praxis_policy_builtins::plugins::identity_basic::credential::{
     BasicCredential, CredentialLocation, DecodeError, decode_basic,
 };
@@ -75,6 +76,42 @@ pub fn argon2_at(memory_kib: u32, time_cost: u32, password: &str) -> String {
 /// One `.htpasswd` line: a user-id and a freshly minted argon2 hash.
 pub fn argon2_line(user_id: &str, password: &str, memory_kib: u32, time_cost: u32) -> String {
     format!("{user_id}:{}", argon2_at(memory_kib, time_cost, password))
+}
+
+/// A sha-crypt record at the given variant and rounds, minted rather than
+/// checked in.
+///
+/// Minted for the same reason as the argon2 helper: a checked-in digest
+/// matches no password anyone knows, so it cannot prove a verify.
+pub fn sha_crypt_at(variant: ShaCryptVariant, rounds: u32, password: &str) -> String {
+    use sha_crypt::PasswordHasher as _;
+
+    let algorithm = match variant {
+        ShaCryptVariant::Sha256 => sha_crypt::Algorithm::Sha256Crypt,
+        ShaCryptVariant::Sha512 => sha_crypt::Algorithm::Sha512Crypt,
+        _ => panic!("the fixture covers only the two sha-crypt variants"),
+    };
+    let params = sha_crypt::Params::new(rounds).expect("sha-crypt accepts these rounds");
+
+    // Twelve raw bytes, not sixteen: the hasher base64-encodes whatever it is
+    // given before hashing, so a 16-byte salt would land as a 22-character
+    // field and exceed the format's 16-character cap. Twelve encodes to
+    // exactly sixteen, which is the width every published `$5$`/`$6$` vector
+    // carries.
+    sha_crypt::ShaCrypt::new(algorithm, params)
+        .hash_password_with_salt(password.as_bytes(), b"saltsaltsalt")
+        .expect("sha-crypt mints with a legal salt")
+        .to_string()
+}
+
+/// One `.htpasswd` line: a user-id and a freshly minted sha-crypt hash.
+pub fn sha_crypt_line(
+    user_id: &str,
+    password: &str,
+    variant: ShaCryptVariant,
+    rounds: u32,
+) -> String {
+    format!("{user_id}:{}", sha_crypt_at(variant, rounds, password))
 }
 
 /// Base64 of a raw credential, for building the malformed cases.

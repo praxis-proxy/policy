@@ -94,7 +94,8 @@ Authorino-parity escape hatch.
   memory against passes per RFC 9106, and `m=4096,t=10` (14ms) scores above
   `m=65536,t=2` (37ms) on any single-number formula. A hash is synthesized only
   for a directory with no records at all.
-- R8. The `.htpasswd` backend reads bcrypt (`$2a$`, `$2b$`, `$2y$`) and argon2,
+- R8. The `.htpasswd` backend reads bcrypt (`$2a$`, `$2b$`, `$2y$`), argon2,
+  and -- **added 2026-11-03** -- sha256crypt (`$5$`) and sha512crypt (`$6$`),
   but rejects files mixing schemes or cost parameters. Across schemes the cost
   parameters cannot be compared; within a scheme, mixed costs still expose
   user-id existence through a faster hit than miss (R7, KTD9).
@@ -106,6 +107,24 @@ Authorino-parity escape hatch.
   the schemes this plugin exists to migrate operators off is the wrong trade.
   Revisit only if a real migration blocks on it.
   DES-crypt and plaintext are rejected at load.
+- R32. **Added 2026-11-03.** A FIPS-approved encoding is supported:
+  sha256crypt (`$5$`) and sha512crypt (`$6$`) iterate SHA-2 per FIPS 180-4,
+  where bcrypt (Blowfish) and argon2 (BLAKE2b) build on primitives that are
+  not approved. These are the approved schemes `.htpasswd` can actually
+  carry: `crypt(3)` and `mkpasswd -m sha512crypt` write them and a shadow
+  file already holds them, whereas PBKDF2's approved status comes with a PHC
+  spelling (`$pbkdf2-sha256$`) that is a Passlib convention no `.htpasswd`
+  tool emits -- accepting it would be an encoding no operator can produce.
+  An absent `rounds=` field means the format's default of 5_000, and the
+  round count is bounded by `max_sha_crypt_rounds` under R23. A record the
+  verifier would reject *before* running the digest is refused at load, which
+  for this scheme covers a `rounds=` field outside 1_000..=999_999_999, a
+  missing or wrong-width digest, a salt over 16 characters, and a field after
+  the digest: the sha-crypt verifier does not reject a malformed `rounds=`
+  field but silently reads it as the salt, answering `false` without running
+  the record's real parameters, which is the cheap-reject timing oracle R7
+  exists to close. The two variants are distinct cost profiles, so a file
+  mixing `$5$` and `$6$` is a load error under R8 even at equal rounds.
 - R9. A username-indexed YAML backend carries a verifier, projectable fields,
   and
   an optional `expires_at`.
@@ -277,8 +296,14 @@ Authorino-parity escape hatch.
     where a JSON-RPC code belongs. Basic on an MCP route is not a sensible
     deployment, but the plugin should not pretend otherwise.
 
-- KTD5. **Weak hash schemes are refused outright.** apr1 and `{SHA}` are
-  refused at load with a message naming the fix. Accepting MD5-grade
+- KTD5. **Weak hash schemes are refused outright; a FIPS-approved scheme is
+  offered instead.** apr1 and `{SHA}` are refused at load with a message
+  naming the fix, which since 2026-11-03 names sha256crypt and sha512crypt
+  alongside bcrypt and argon2 -- the earlier wording offered only the two
+  non-approved schemes, so an operator under a FIPS restriction was told to
+  re-hash and given no target they could use. Refusing the weak schemes is
+  unchanged: SHA-1 is not approved for this purpose and `{SHA}` is unsalted
+  and uniterated regardless. Accepting MD5-grade
   verifiers silently is worse than failing a drop-in migration loudly, and an
   opt-in that cannot admit anything is worse still: a draft carried one, both
   of its branches returned the same error, so it was a knob that changed
@@ -584,6 +609,28 @@ expect at that density.
   password
   and rejects a wrong one.
 - Covers R8. An argon2 record verifies and rejects.
+- Covers R8, R32. A sha256crypt (`$5$`) and a sha512crypt (`$6$`) record each
+  verify the right password and reject a wrong one.
+- Covers R32. Four published `$5$`/`$6$` vectors verify against their known
+  password, which is what proves this backend agrees with the tool that wrote
+  the file rather than only with its own minting helper.
+- Covers R32. A sha-crypt record with no `rounds=` field loads at the format's
+  default of 5_000, since that is the spelling `crypt(3)` and `mkpasswd`
+  write.
+- Covers R32, R7. A sha-crypt record the verifier would reject before running
+  the digest fails at load: a `rounds=` field outside the format's range or
+  not a number, a missing or wrong-width digest, an over-long salt, and a
+  field after the digest. The verifier reads a malformed `rounds=` field as
+  the salt and answers `false` cheaply, so admitting one would reopen the
+  cheap-reject oracle.
+- Covers R32, R23. A sha-crypt round count above the ceiling fails at load,
+  and the ceiling is inclusive.
+- Covers R32, R8. A file mixing `$5$` with `$6$`, two round counts, or
+  sha-crypt with bcrypt fails at load.
+- Covers R32, R7. A sha-crypt directory runs a sha-crypt dummy for an unknown
+  user, so a miss costs what every hit costs.
+- Covers R32. An `$1$` md5crypt record is not mistaken for sha-crypt and
+  still fails to load.
 - Covers R8. apr1 and `{SHA}` records fail at load, with a message naming the
   fix rather than implying the record is corrupt.
 - Covers R8. A DES-crypt or plaintext record fails at load, distinctly from the

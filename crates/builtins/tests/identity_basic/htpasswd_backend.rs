@@ -8,7 +8,9 @@
 use praxis_policy_builtins::plugins::identity_basic::directory::CredentialDirectory as _;
 use praxis_policy_builtins::plugins::identity_basic::{HtpasswdConfig, HtpasswdDirectory};
 
-use crate::support::{HtpasswdFile, bcrypt_line, config_for, services};
+use praxis_policy_builtins::plugins::identity_basic::ShaCryptVariant;
+
+use crate::support::{HtpasswdFile, bcrypt_line, config_for, services, sha_crypt_line};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -84,6 +86,81 @@ async fn an_argon2_user_authenticates_and_a_wrong_password_does_not() {
         .expect("the verify answers"),
         "and a wrong password must not: an arm returning a constant would pass \
          one of these two assertions and fail the other"
+    );
+}
+
+#[tokio::test]
+async fn a_sha_crypt_user_authenticates_and_a_wrong_password_does_not() {
+    for variant in [ShaCryptVariant::Sha256, ShaCryptVariant::Sha512] {
+        let file = HtpasswdFile::write(&format!(
+            "{}\n",
+            sha_crypt_line("alice", "correct horse", variant, 1_000)
+        ));
+        let dir = directory(&file).expect("the file loads");
+        let svc = services();
+
+        let record = dir
+            .lookup("alice", &svc)
+            .await
+            .expect("the lookup succeeds")
+            .expect("alice is in the file");
+
+        assert!(
+            dir.verify(
+                Some(&record),
+                &crate::support::password("correct horse"),
+                &svc
+            )
+            .await
+            .expect("the verify completes"),
+            "{} must authenticate the password its record was minted from",
+            variant.ident()
+        );
+        assert!(
+            !dir.verify(Some(&record), &crate::support::password("wrong"), &svc)
+                .await
+                .expect("the verify completes"),
+            "{} must reject a wrong password",
+            variant.ident()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_sha_crypt_directory_runs_a_sha_crypt_dummy_for_an_unknown_user() {
+    let line = sha_crypt_line("alice", "pw", ShaCryptVariant::Sha512, 1_000);
+    let file = HtpasswdFile::write(&format!("{line}\n"));
+    let dir = directory(&file).expect("the file loads");
+    let svc = services();
+
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&line),
+        "the miss path must reuse one of the file's own sha-crypt records: a \
+         bcrypt dummy over a sha-crypt directory would cost a different amount \
+         than every hit, which is the user-enumeration oracle the uniformity \
+         rule exists to close"
+    );
+
+    let before = dir.dummy_runs();
+    assert!(
+        dir.lookup("nobody", &svc)
+            .await
+            .expect("the lookup succeeds")
+            .is_none(),
+        "an unknown user must not resolve to a record"
+    );
+    assert!(
+        !dir.verify(None, &crate::support::password("pw"), &svc)
+            .await
+            .expect("the verify completes"),
+        "and the dummy's verdict must be discarded, even when its throwaway \
+         password happens to match"
+    );
+    assert_eq!(
+        dir.dummy_runs(),
+        before.saturating_add(1),
+        "the miss must have run the dummy rather than returning early"
     );
 }
 
@@ -669,6 +746,30 @@ fn a_file_whose_records_cost_different_amounts_fails_at_load() {
                 ARGON2_RECORD.replace("m=19456", "m=8192")
             ),
         ),
+        (
+            "the two sha-crypt variants",
+            format!(
+                "{}\n{}\n",
+                sha_crypt_line("a", "pw", ShaCryptVariant::Sha256, 1_000),
+                sha_crypt_line("b", "pw", ShaCryptVariant::Sha512, 1_000)
+            ),
+        ),
+        (
+            "two sha-crypt round counts",
+            format!(
+                "{}\n{}\n",
+                sha_crypt_line("a", "pw", ShaCryptVariant::Sha512, 1_000),
+                sha_crypt_line("b", "pw", ShaCryptVariant::Sha512, 2_000)
+            ),
+        ),
+        (
+            "sha-crypt and bcrypt",
+            format!(
+                "{}\n{}\n",
+                sha_crypt_line("a", "pw", ShaCryptVariant::Sha512, 1_000),
+                bcrypt_line("b", "pw", 10)
+            ),
+        ),
     ] {
         let file = HtpasswdFile::write(&body);
         let err =
@@ -705,6 +806,19 @@ fn a_uniform_file_loads_under_either_scheme() {
         2,
         "both argon2 records are indexed: the rule is uniformity, not \
          bcrypt-only, so a single-tuning argon2 directory is supported"
+    );
+
+    let sha_crypt = HtpasswdFile::write(&format!(
+        "{}\n{}\n",
+        sha_crypt_line("a", "pw", ShaCryptVariant::Sha512, 1_000),
+        sha_crypt_line("b", "other", ShaCryptVariant::Sha512, 1_000),
+    ));
+    let dir = directory(&sha_crypt).expect("a uniform sha512crypt file loads");
+    assert_eq!(
+        dir.len(),
+        2,
+        "both sha512crypt records are indexed, so a FIPS-restricted deployment \
+         has a directory it can actually use"
     );
 }
 
