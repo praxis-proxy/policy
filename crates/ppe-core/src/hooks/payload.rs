@@ -212,14 +212,24 @@ impl ContentKey {
         use crate::crypto::{hmac_sha256, sha256};
 
         match self {
-            Self::Unkeyed => Some(format!("sha256:{}", hex(&sha256(bytes).ok()?))),
+            Self::Unkeyed => {
+                let digest = sha256(bytes)
+                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+                    .ok()?;
+                Some(format!("sha256:{}", hex(&digest)))
+            },
             Self::Keyed(secret) => {
                 let key = secret.get();
-                let id = hmac_sha256(key.as_bytes(), KEY_ID_LABEL).ok()?;
+                let id = hmac_sha256(key.as_bytes(), KEY_ID_LABEL)
+                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+                    .ok()?;
+                let digest = hmac_sha256(key.as_bytes(), bytes)
+                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+                    .ok()?;
                 Some(format!(
                     "hmac-sha256:{}:{}",
                     hex(id.get(..8).unwrap_or_default()),
-                    hex(&hmac_sha256(key.as_bytes(), bytes).ok()?)
+                    hex(&digest)
                 ))
             },
         }
