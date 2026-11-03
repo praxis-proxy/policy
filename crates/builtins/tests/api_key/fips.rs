@@ -13,6 +13,7 @@ const KEY: &str = "sk-oai-fips-test";
 
 #[tokio::test]
 async fn fips_api_key_allow_and_deny_follow_provider_availability() {
+    let provider_required = std::env::var_os("PRAXIS_REQUIRE_FIPS_PROVIDER").is_some();
     let file = RecordFile::write(&format!(
         "keys:\n  - hash: \"{}\"\n    user: alice\n",
         hash(KEY)
@@ -35,6 +36,10 @@ async fn fips_api_key_allow_and_deny_follow_provider_availability() {
             );
         },
         Err(error) => {
+            assert!(
+                !provider_required,
+                "the FIPS provider is required in this environment: {error}"
+            );
             assert!(
                 matches!(error, ApiKeyCryptoError::OpenSsl(_)),
                 "FIPS provider failures must be returned as OpenSSL errors: {error}"

@@ -176,6 +176,7 @@ jobs:
         run: make test-fips-capabilities
         env:
           OPENSSL_CONF: ${{ github.workspace }}/.github/fips-provider.cnf
+          PRAXIS_REQUIRE_FIPS_PROVIDER: "1"
 
   release-readiness:
     name: packaging + publish order
