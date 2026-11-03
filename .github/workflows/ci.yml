@@ -124,6 +124,8 @@ jobs:
       # `make ci` is not what CI runs — the jobs here invoke targets directly —
       # so the per-feature gate needs its own job or it never executes.
       - run: make check-fips-graph
+      # Includes FIPS API-key allow/deny coverage; on runners without the FIPS
+      # provider, it verifies provider errors fail closed.
       - run: make test-fips-capabilities
       - run: make check-features
 

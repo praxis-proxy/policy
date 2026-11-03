@@ -51,7 +51,7 @@ help:
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
-	@echo "  test-fips-capabilities Verify feature-unified FIPS crypto reporting"
+	@echo "  test-fips-capabilities Run FIPS capability and API-key behavior tests"
 	@echo "  test-integration  Integration, resilience and security suites"
 	@echo "  test-resilience   Resilience suite (dependency failure, concurrency)"
 	@echo "  test-security     Security suite (adversarial inputs)"
@@ -130,6 +130,7 @@ check-fips-graph:
 test-fips-capabilities:
 	@$(CARGO) test -p praxis-policy --no-default-features --features fips,api-key,praxis-policy-builtins/jwt --lib crypto_report_matches_the_unified_builtin_features
 	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key,jwt --lib builtin_crypto_report_matches_the_unified_features
+	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key --test api_key fips::
 
 .PHONY: clean
 clean:
