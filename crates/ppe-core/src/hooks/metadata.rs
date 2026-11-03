@@ -192,8 +192,8 @@ const HOOK_TABLES: &[&[(&str, HookMetadata)]] = &[
     IDENTITY_HOOK_METADATA,
     DELEGATION_HOOK_METADATA,
     ELICITATION_HOOK_METADATA,
-    RATELIMIT_HOOK_METADATA,
     METADATA_HOOK_METADATA,
+    RATELIMIT_HOOK_METADATA,
 ];
 
 /// How many rows the per-module tables hold between them, so the flat
@@ -511,6 +511,7 @@ mod tests {
         assert_eq!(IDENTITY_HOOK_METADATA.len(), 1);
         assert_eq!(DELEGATION_HOOK_METADATA.len(), 1);
         assert_eq!(ELICITATION_HOOK_METADATA.len(), 1);
+        assert_eq!(METADATA_HOOK_METADATA.len(), 1);
         assert_eq!(
             RATELIMIT_HOOK_METADATA.len(),
             2,
@@ -521,7 +522,6 @@ mod tests {
             16,
             "every family's hooks reach the built-in table"
         );
-        assert_eq!(METADATA_HOOK_METADATA.len(), 1);
         for table in HOOK_TABLES {
             for (name, _) in *table {
                 assert!(
@@ -599,9 +599,9 @@ mod tests {
             HOOK_IDENTITY_RESOLVE,
             HOOK_TOKEN_DELEGATE,
             HOOK_ELICIT,
+            HOOK_METADATA_FETCH,
             HOOK_RATELIMIT_PRE_IDENTITY,
             HOOK_RATELIMIT_POST_IDENTITY,
-            HOOK_METADATA_FETCH,
         ] {
             assert!(
                 BUILTIN_HOOK_METADATA.iter().any(|(n, _)| *n == name),
@@ -621,8 +621,8 @@ mod tests {
             (IDENTITY_HOOK_METADATA, IdentityHook::NAME),
             (DELEGATION_HOOK_METADATA, TokenDelegateHook::NAME),
             (ELICITATION_HOOK_METADATA, ElicitationHook::NAME),
-            (RATELIMIT_HOOK_METADATA, HttpHook::NAME),
             (METADATA_HOOK_METADATA, MetadataFetchHook::NAME),
+            (RATELIMIT_HOOK_METADATA, HttpHook::NAME),
         ] {
             for (name, meta) in table {
                 assert_eq!(meta.family, Some(family), "{name}");

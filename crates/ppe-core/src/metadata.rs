@@ -20,31 +20,55 @@ crate::define_hooks! {
 
 /// Typed request and result accumulator for one metadata source invocation.
 ///
-/// The instance name selects exactly one plugin registered on
-/// [`HOOK_METADATA_FETCH`]. A handler returns its record with
-/// [`Self::with_facts`] through [`PluginResult::modify_payload`]. The record is
-/// not installed into extensions here; framework policy evaluation validates,
-/// stamps, and installs it after dispatch.
-#[derive(Clone, Debug, PartialEq)]
+/// The caller selects the source through
+/// [`PolicyEngine::find_plugin_entries`] and dispatches its metadata handler
+/// through [`PolicyEngine::invoke_entries`]. There is no inbound content;
+/// despite its name, this payload is a result accumulator. A handler returns
+/// its record with [`Self::with_facts`] through [`PluginResult::modify_payload`].
+/// Framework policy evaluation validates, stamps, and installs the record.
+///
+/// [`PolicyEngine::find_plugin_entries`]: crate::engine::PolicyEngine::find_plugin_entries
+/// [`PolicyEngine::invoke_entries`]: crate::engine::PolicyEngine::invoke_entries
+///
+/// ```
+/// use praxis_policy_core::engine::PolicyEngine;
+/// use praxis_policy_core::error::PluginError;
+/// use praxis_policy_core::executor::PipelineResult;
+/// use praxis_policy_core::extensions::Extensions;
+/// use praxis_policy_core::metadata::{
+///     HOOK_METADATA_FETCH, MetadataFetchHook, MetadataFetchRequest,
+/// };
+///
+/// async fn fetch_source(
+///     engine: &PolicyEngine,
+///     name: &str,
+///     extensions: Extensions,
+/// ) -> Result<PipelineResult, Box<PluginError>> {
+///     let entry = engine.find_plugin_entries(name).into_iter()
+///         .find(|(hook, _)| hook == HOOK_METADATA_FETCH)
+///         .map(|(_, entry)| entry)
+///         .ok_or_else(|| PluginError::Config {
+///             message: format!("source '{name}' has no metadata.fetch handler"),
+///         }.boxed())?;
+///     let (result, _) = engine.invoke_entries::<MetadataFetchHook>(
+///         std::slice::from_ref(&entry),
+///         MetadataFetchRequest::new(),
+///         extensions,
+///         None,
+///     ).await;
+///     Ok(result)
+/// }
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MetadataFetchRequest {
-    instance: String,
     facts: Option<AcquiredFacts>,
 }
 
 impl MetadataFetchRequest {
-    /// Request acquisition from the configured source instance `instance`.
+    /// Create an empty result accumulator for the caller-selected source.
     #[must_use]
-    pub fn new(instance: impl Into<String>) -> Self {
-        Self {
-            instance: instance.into(),
-            facts: None,
-        }
-    }
-
-    /// Configured source instance selected for this dispatch.
-    #[must_use]
-    pub fn instance(&self) -> &str {
-        &self.instance
+    pub const fn new() -> Self {
+        Self { facts: None }
     }
 
     /// Return the source record produced by the handler, when present.
@@ -244,10 +268,20 @@ mod tests {
                 AcquiredFacts::success(json!(true), Utc::now(), MetadataCacheDisposition::Disabled),
             )
             .unwrap();
+        let entries: Vec<_> = engine
+            .find_plugin_entries("second")
+            .into_iter()
+            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
+            .map(|(_, entry)| entry)
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "selected source must have a metadata handler"
+        );
         let (result, _) = engine
-            .invoke_named::<MetadataFetchHook>(
-                HOOK_METADATA_FETCH,
-                MetadataFetchRequest::new("second"),
+            .invoke_entries::<MetadataFetchHook>(
+                &entries,
+                MetadataFetchRequest::new(),
                 extensions,
                 None,
             )
@@ -274,11 +308,6 @@ mod tests {
         let response = MetadataFetchRequest::from_pipeline_result(&result)
             .expect("dispatch should return the metadata response");
         assert_eq!(
-            response.instance(),
-            "second",
-            "response should name the selected source",
-        );
-        assert_eq!(
             response
                 .facts()
                 .expect("response should carry acquired facts")
@@ -286,119 +315,6 @@ mod tests {
             Some(&json!({"source": "second"})),
             "facts should come from the selected source",
         );
-    }
-
-    #[tokio::test]
-    async fn typed_invoke_dispatches_only_the_named_source() {
-        let engine = PolicyEngine::default();
-        let first_calls = Arc::new(AtomicUsize::new(0));
-        let second_calls = Arc::new(AtomicUsize::new(0));
-        for (name, calls) in [
-            ("first", Arc::clone(&first_calls)),
-            ("second", Arc::clone(&second_calls)),
-        ] {
-            engine
-                .register_handler_for_names::<MetadataFetchHook, _>(
-                    source(
-                        config(name, false),
-                        calls,
-                        Arc::new(AtomicBool::new(false)),
-                        false,
-                    ),
-                    config(name, false),
-                    &[HOOK_METADATA_FETCH],
-                )
-                .unwrap();
-        }
-
-        let (result, _) = engine
-            .invoke::<MetadataFetchHook>(
-                MetadataFetchRequest::new("second"),
-                Extensions::default(),
-                None,
-            )
-            .await;
-
-        assert!(
-            result.continue_processing,
-            "typed dispatch to a registered source should continue",
-        );
-        assert_eq!(
-            first_calls.load(Ordering::Relaxed),
-            0,
-            "unselected source 'first' must not be dispatched",
-        );
-        assert_eq!(
-            second_calls.load(Ordering::Relaxed),
-            1,
-            "selected source 'second' must be dispatched once",
-        );
-    }
-
-    #[tokio::test]
-    async fn dynamic_invoke_dispatches_only_the_named_source() {
-        let engine = PolicyEngine::default();
-        let first_calls = Arc::new(AtomicUsize::new(0));
-        let second_calls = Arc::new(AtomicUsize::new(0));
-        for (name, calls) in [
-            ("first", Arc::clone(&first_calls)),
-            ("second", Arc::clone(&second_calls)),
-        ] {
-            engine
-                .register_handler_for_names::<MetadataFetchHook, _>(
-                    source(
-                        config(name, false),
-                        calls,
-                        Arc::new(AtomicBool::new(false)),
-                        false,
-                    ),
-                    config(name, false),
-                    &[HOOK_METADATA_FETCH],
-                )
-                .unwrap();
-        }
-
-        let (result, _) = engine
-            .invoke_by_name(
-                HOOK_METADATA_FETCH,
-                Box::new(MetadataFetchRequest::new("second")),
-                Extensions::default(),
-                None,
-            )
-            .await;
-
-        assert!(
-            result.continue_processing,
-            "dynamic dispatch to a registered source should continue",
-        );
-        assert_eq!(
-            first_calls.load(Ordering::Relaxed),
-            0,
-            "unselected source 'first' must not be dispatched",
-        );
-        assert_eq!(
-            second_calls.load(Ordering::Relaxed),
-            1,
-            "selected source 'second' must be dispatched once",
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_named_source_denies_with_an_actionable_error() {
-        let engine = PolicyEngine::default();
-        let (result, _) = engine
-            .invoke_named::<MetadataFetchHook>(
-                HOOK_METADATA_FETCH,
-                MetadataFetchRequest::new("missing"),
-                Extensions::default(),
-                None,
-            )
-            .await;
-        assert!(!result.continue_processing, "unknown source must deny");
-        let violation = result.violation.expect("unknown source must deny");
-        assert_eq!(violation.code, "plugin.not_found");
-        assert!(violation.reason.contains("metadata.fetch"));
-        assert!(violation.reason.contains("missing"));
     }
 
     #[tokio::test]
@@ -431,10 +347,20 @@ mod tests {
             )
             .unwrap();
 
+        let entries: Vec<_> = engine
+            .find_plugin_entries("account")
+            .into_iter()
+            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
+            .map(|(_, entry)| entry)
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "selected source must have a metadata handler"
+        );
         let (result, _) = engine
-            .invoke_named::<MetadataFetchHook>(
-                HOOK_METADATA_FETCH,
-                MetadataFetchRequest::new("account"),
+            .invoke_entries::<MetadataFetchHook>(
+                &entries,
+                MetadataFetchRequest::new(),
                 extensions,
                 None,
             )
@@ -512,10 +438,20 @@ routes:
         .unwrap();
         engine.load_config(policy).unwrap();
 
+        let entries: Vec<_> = engine
+            .find_plugin_entries("account")
+            .into_iter()
+            .filter(|(hook, _)| hook == HOOK_METADATA_FETCH)
+            .map(|(_, entry)| entry)
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "selected source must have a metadata handler"
+        );
         let (result, _) = engine
-            .invoke_named::<MetadataFetchHook>(
-                HOOK_METADATA_FETCH,
-                MetadataFetchRequest::new("account"),
+            .invoke_entries::<MetadataFetchHook>(
+                &entries,
+                MetadataFetchRequest::new(),
                 Extensions {
                     meta: Some(Arc::new(MetaExtension {
                         entity_type: Some("tool".to_owned()),

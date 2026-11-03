@@ -539,7 +539,7 @@ where
             .engine
             .invoke_entries::<MetadataFetchHook>(
                 std::slice::from_ref(entry),
-                MetadataFetchRequest::new(&step.plugin_name),
+                MetadataFetchRequest::new(),
                 current_extensions.clone(),
                 None,
             )
