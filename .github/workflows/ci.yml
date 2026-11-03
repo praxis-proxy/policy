@@ -129,6 +129,54 @@ jobs:
       - run: make test-fips-capabilities
       - run: make check-features
 
+  fips-provider-tests:
+    name: FIPS provider API-key tests
+    runs-on: ubuntu-24.04
+    container:
+      # Match the UBI 9 OpenSSL provider used by the Praxis FIPS test setup.
+      image: registry.access.redhat.com/ubi9/ubi@sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Install Git for checkout
+        run: dnf install -y git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install OpenSSL FIPS provider and Rust build tools
+        run: |
+          set -euo pipefail
+          dnf install -y \
+            cmake gcc gcc-c++ make openssl openssl-devel \
+            openssl-fips-provider-so perl-core pkgconf-pkg-config
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Verify the FIPS provider is active
+        env:
+          OPENSSL_CONF: ${{ github.workspace }}/.github/fips-provider.cnf
+        run: |
+          set -euo pipefail
+          openssl list -providers
+          printf '' | openssl dgst -sha256 -propquery 'fips=yes'
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-fips-provider-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-fips-provider-
+      - name: Run FIPS API-key tests with the provider enabled
+        run: make test-fips-capabilities
+        env:
+          OPENSSL_CONF: ${{ github.workspace }}/.github/fips-provider.cnf
+
   release-readiness:
     name: packaging + publish order
     runs-on: ubuntu-24.04
