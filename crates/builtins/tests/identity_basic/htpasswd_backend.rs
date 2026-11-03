@@ -436,59 +436,70 @@ async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
     );
 }
 
-#[tokio::test]
-async fn dropping_a_verify_future_does_not_release_its_permit_early() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 12)));
-    let mut config = config_for(file.path());
-    config.max_concurrent_verifications = 1;
-    let dir = HtpasswdDirectory::new(config).expect("the file loads");
-    let svc = services();
-    let record = dir
-        .lookup("alice", &svc)
-        .await
-        .expect("the lookup answers")
-        .expect("alice is in the file");
-    let credential = crate::support::password("pw");
+#[test]
+fn dropping_a_verify_future_does_not_release_its_permit_early() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_time()
+        .build()
+        .expect("the test runtime builds");
 
-    let mut in_flight = Box::pin(dir.verify(Some(&record), &credential, &svc));
-    assert!(
-        futures::poll!(&mut in_flight).is_pending(),
-        "the first poll must take the only permit and spawn the blocking \
-         verification without completing it"
-    );
+    runtime.block_on(async {
+        let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+        let mut config = config_for(file.path());
+        config.max_concurrent_verifications = 1;
+        let dir = HtpasswdDirectory::new(config).expect("the file loads");
+        let svc = services();
+        let record = dir
+            .lookup("alice", &svc)
+            .await
+            .expect("the lookup answers")
+            .expect("alice is in the file");
+        let credential = crate::support::password("pw");
 
-    let mut observed_in_flight = false;
-    for _ in 0..100_u32 {
-        match dir.verify(Some(&record), &credential, &svc).await {
-            Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated) => {
-                observed_in_flight = true;
-                break;
-            },
-            _not_yet_holding_the_permit => {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            },
-        }
-    }
-    assert!(
-        observed_in_flight,
-        "the spawned verification must be observably holding the cap's only \
-         permit before the drop, so the assertion below tests the permit's \
-         lifetime rather than racing a hash duration"
-    );
+        let occupied = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let squatter = {
+            let occupied = std::sync::Arc::clone(&occupied);
+            let release = std::sync::Arc::clone(&release);
+            tokio::task::spawn_blocking(move || {
+                occupied.wait();
+                release.wait();
+            })
+        };
+        occupied.wait();
 
-    drop(in_flight);
+        let mut in_flight = Box::pin(dir.verify(Some(&record), &credential, &svc));
+        assert!(
+            futures::poll!(&mut in_flight).is_pending(),
+            "the first poll must take the only permit and queue the blocking \
+             verification without completing it"
+        );
+        assert!(
+            saturated(&dir, &record, &credential, &svc).await,
+            "with the pool's only thread occupied by the test, the queued \
+             verification cannot have run, so its permit must still be held"
+        );
 
-    assert!(
-        matches!(
-            dir.verify(Some(&record), &credential, &svc).await,
-            Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated)
-        ),
-        "a permit held in the async body rather than inside the blocking \
-         closure would be released the instant that future dropped, while the \
-         hashing it bounded ran on -- the unauthenticated CPU-exhaustion path \
-         where a caller that connects and disconnects starts as many concurrent \
-         verifies as the Tokio blocking pool allows, whatever the cap"
-    );
+        drop(in_flight);
+
+        let still_held = saturated(&dir, &record, &credential, &svc).await;
+
+        release.wait();
+        squatter.await.expect("the squatting task completes");
+
+        assert!(
+            still_held,
+            "a permit held in the async body rather than inside the blocking \
+             closure would be released the instant that future dropped, while \
+             the hashing it bounded ran on -- the unauthenticated \
+             CPU-exhaustion path where a caller that connects and disconnects \
+             starts as many concurrent verifies as the Tokio blocking pool \
+             allows, whatever the cap. The blocking task still has not run \
+             here, so this cannot be satisfied by a verification that merely \
+             has not finished yet"
+        );
+    });
 }
 
 #[tokio::test]
@@ -853,4 +864,30 @@ fn an_argon2_record_argon2_cannot_verify_fails_at_load() {
 /// Build a directory over a fixture file, with the default ceilings.
 fn directory(file: &HtpasswdFile) -> Result<HtpasswdDirectory, String> {
     HtpasswdDirectory::new(config_for(file.path()))
+}
+
+/// Whether a `verify` is refused for capacity right now.
+///
+/// Bounded, because the answer is only meaningful when it comes back
+/// immediately. `verify` refuses at capacity through a non-blocking
+/// `try_acquire`, so a held permit answers at once; if the permit is instead
+/// free, the call takes it and queues blocking work that a parked pool may
+/// never run. Without the bound that case hangs rather than reporting, and a
+/// hang says far less than a failed assertion.
+async fn saturated(
+    dir: &HtpasswdDirectory,
+    record: &praxis_policy_builtins::plugins::identity_basic::UserRecord,
+    credential: &praxis_policy_builtins::plugins::identity_basic::credential::BasicCredential,
+    svc: &praxis_policy_core::host::InitExtensions,
+) -> bool {
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dir.verify(Some(record), credential, svc),
+        )
+        .await,
+        Ok(Err(
+            praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated
+        ))
+    )
 }
