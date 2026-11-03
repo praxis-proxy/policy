@@ -198,11 +198,11 @@ mod tests {
     };
     use std::sync::Arc;
 
-    fn resolve(ext: &Extensions) -> Option<(String, SessionSource)> {
+    fn resolve_session(ext: &Extensions) -> Option<(String, SessionSource)> {
         super::resolve_session(ext).expect("selected SHA-256 backend is available")
     }
 
-    fn scoped(subject: Option<&str>, raw: &str) -> String {
+    fn subject_scoped(subject: Option<&str>, raw: &str) -> String {
         super::subject_scoped(subject, raw)
             .expect("selected SHA-256 backend is available")
             .expect("subject is present")
@@ -245,9 +245,9 @@ mod tests {
         // A pre-resolved (client-supplied) session id is hashed together
         // with the authenticated subject, never returned raw.
         let ext = extensions_with_agent_and_subject("sess-upstream", "alice");
-        let (sid, src) = resolve(&ext).expect("should resolve");
+        let (sid, src) = resolve_session(&ext).expect("should resolve");
         assert_eq!(src, SessionSource::Agent);
-        assert_eq!(sid, scoped(Some("alice"), "sess-upstream"));
+        assert_eq!(sid, subject_scoped(Some("alice"), "sess-upstream"));
         assert_eq!(sid, "68755f41a98324d6");
         assert_ne!(sid, "sess-upstream", "raw client value must not be the key");
     }
@@ -258,8 +258,8 @@ mod tests {
         // session id must NOT land in B's session bucket.
         let alice = extensions_with_agent_and_subject("shared-sid", "alice");
         let bob = extensions_with_agent_and_subject("shared-sid", "bob");
-        let (sid_a, _) = resolve(&alice).unwrap();
-        let (sid_b, _) = resolve(&bob).unwrap();
+        let (sid_a, _) = resolve_session(&alice).unwrap();
+        let (sid_b, _) = resolve_session(&bob).unwrap();
         assert_ne!(
             sid_a, sid_b,
             "same client session id under different subjects must not collide",
@@ -270,8 +270,8 @@ mod tests {
     fn tier0_stable_for_same_subject_and_session_id() {
         // Same subject + same client session id → same key, so a legit
         // user's taint persists across their own request/response cycles.
-        let (sid1, _) = resolve(&extensions_with_agent_and_subject("s1", "bob")).unwrap();
-        let (sid2, _) = resolve(&extensions_with_agent_and_subject("s1", "bob")).unwrap();
+        let (sid1, _) = resolve_session(&extensions_with_agent_and_subject("s1", "bob")).unwrap();
+        let (sid2, _) = resolve_session(&extensions_with_agent_and_subject("s1", "bob")).unwrap();
         assert_eq!(sid1, sid2);
     }
 
@@ -285,7 +285,7 @@ mod tests {
             agent: Some(Arc::new(agent)),
             ..Default::default()
         };
-        assert!(resolve(&ext).is_none());
+        assert!(resolve_session(&ext).is_none());
     }
 
     #[test]
@@ -304,7 +304,7 @@ mod tests {
             ..Default::default()
         };
         // Empty Tier 0 falls through; identity tier (subject present) hits.
-        let (_, src) = resolve(&ext).expect("should fall through to identity");
+        let (_, src) = resolve_session(&ext).expect("should fall through to identity");
         assert_eq!(src, SessionSource::Identity);
     }
 
@@ -327,9 +327,9 @@ mod tests {
             ..Default::default()
         };
 
-        let (sid, src) = resolve(&ext).unwrap();
+        let (sid, src) = resolve_session(&ext).unwrap();
         assert_eq!(src, SessionSource::Agent);
-        assert_eq!(sid, scoped(Some("alice"), "from-agent"));
+        assert_eq!(sid, subject_scoped(Some("alice"), "from-agent"));
     }
 
     #[test]
@@ -357,13 +357,13 @@ mod tests {
             ..Default::default()
         };
 
-        let (sid, src) = resolve(&ext).unwrap();
+        let (sid, src) = resolve_session(&ext).unwrap();
         assert_eq!(
             src,
             SessionSource::Agent,
             "agent tier must win over identity tier when both are available",
         );
-        assert_eq!(sid, scoped(Some("alice"), "from-agent"));
+        assert_eq!(sid, subject_scoped(Some("alice"), "from-agent"));
     }
 
     #[test]
@@ -377,10 +377,13 @@ mod tests {
         };
         let ext = extensions_with_security(sec);
 
-        let (sid, src) = resolve(&ext).expect("should resolve");
+        let (sid, src) = resolve_session(&ext).expect("should resolve");
         assert_eq!(src, SessionSource::TokenClaim);
         // Subject-bound, not the raw claim value.
-        assert_eq!(sid, scoped(Some("alice@corp.com"), "sess-from-token-789"));
+        assert_eq!(
+            sid,
+            subject_scoped(Some("alice@corp.com"), "sess-from-token-789")
+        );
         assert_ne!(sid, "sess-from-token-789");
     }
 
@@ -396,7 +399,7 @@ mod tests {
         };
         let ext = extensions_with_security(sec);
 
-        let (_, src) = resolve(&ext).expect("should fall through to identity");
+        let (_, src) = resolve_session(&ext).expect("should fall through to identity");
         assert_eq!(src, SessionSource::Identity);
     }
 
@@ -416,8 +419,8 @@ mod tests {
                 ..Default::default()
             }
         };
-        let (sid_a, _) = resolve(&extensions_with_security(mk("alice"))).unwrap();
-        let (sid_b, _) = resolve(&extensions_with_security(mk("bob"))).unwrap();
+        let (sid_a, _) = resolve_session(&extensions_with_security(mk("alice"))).unwrap();
+        let (sid_b, _) = resolve_session(&extensions_with_security(mk("bob"))).unwrap();
         assert_ne!(
             sid_a, sid_b,
             "same JWT session_id claim under different subjects must not collide",
@@ -438,8 +441,8 @@ mod tests {
                 ..Default::default()
             })
         };
-        let (sid1, _) = resolve(&mk()).unwrap();
-        let (sid2, _) = resolve(&mk()).unwrap();
+        let (sid1, _) = resolve_session(&mk()).unwrap();
+        let (sid2, _) = resolve_session(&mk()).unwrap();
         assert_eq!(sid1, sid2);
     }
 
@@ -461,7 +464,7 @@ mod tests {
         };
         let ext = extensions_with_security(sec);
         assert!(
-            resolve(&ext).is_none(),
+            resolve_session(&ext).is_none(),
             "claim with no subject id has no safe scope; must not honor",
         );
     }
@@ -489,13 +492,13 @@ mod tests {
         };
         let ext = extensions_with_security(sec);
 
-        let (sid, src) = resolve(&ext).unwrap();
+        let (sid, src) = resolve_session(&ext).unwrap();
         assert_eq!(
             src,
             SessionSource::TokenClaim,
             "token-claim tier must win over identity tier when both are available",
         );
-        assert_eq!(sid, scoped(Some("alice"), "from-claim"));
+        assert_eq!(sid, subject_scoped(Some("alice"), "from-claim"));
     }
 
     // The client-supplied `X-PPE-Session-Id` header tier is
@@ -522,7 +525,7 @@ mod tests {
         };
         let ext = extensions_with_security(sec);
 
-        let (sid, src) = resolve(&ext).expect("should resolve");
+        let (sid, src) = resolve_session(&ext).expect("should resolve");
         assert_eq!(src, SessionSource::Identity);
         assert_eq!(sid, "a0cd6df24fe19df1");
         // 16 hex chars of the sha256 digest.
@@ -551,8 +554,8 @@ mod tests {
         };
         let ext1 = extensions_with_security(mk());
         let ext2 = extensions_with_security(mk());
-        let (sid1, _) = resolve(&ext1).unwrap();
-        let (sid2, _) = resolve(&ext2).unwrap();
+        let (sid1, _) = resolve_session(&ext1).unwrap();
+        let (sid2, _) = resolve_session(&ext2).unwrap();
         assert_eq!(sid1, sid2);
     }
 
@@ -566,8 +569,8 @@ mod tests {
             subject: Some(subject_with_claims(Some("bob"), &[])),
             ..Default::default()
         };
-        let (sid_a, _) = resolve(&extensions_with_security(alice)).unwrap();
-        let (sid_b, _) = resolve(&extensions_with_security(bob)).unwrap();
+        let (sid_a, _) = resolve_session(&extensions_with_security(alice)).unwrap();
+        let (sid_b, _) = resolve_session(&extensions_with_security(bob)).unwrap();
         assert_ne!(sid_a, sid_b);
     }
 
@@ -586,15 +589,15 @@ mod tests {
                 ..Default::default()
             }
         };
-        let (sid1, _) = resolve(&extensions_with_security(mk("agent-a"))).unwrap();
-        let (sid2, _) = resolve(&extensions_with_security(mk("agent-b"))).unwrap();
+        let (sid1, _) = resolve_session(&extensions_with_security(mk("agent-a"))).unwrap();
+        let (sid2, _) = resolve_session(&extensions_with_security(mk("agent-b"))).unwrap();
         assert_ne!(sid1, sid2);
     }
 
     #[test]
     fn tier3_no_session_when_no_data() {
         let ext = Extensions::default();
-        assert!(resolve(&ext).is_none());
+        assert!(resolve_session(&ext).is_none());
     }
 
     #[test]
@@ -606,7 +609,7 @@ mod tests {
             ..Default::default()
         };
         let ext = extensions_with_security(sec);
-        assert!(resolve(&ext).is_none());
+        assert!(resolve_session(&ext).is_none());
     }
 
     #[test]
@@ -627,8 +630,8 @@ mod tests {
         // unilaterally) breaks the build and forces a deliberate
         // re-design — most likely a length-prefixed format like
         // `{sub_len}:{sub}:{raw}`.
-        let a = subject_scoped(Some("alice:foo"), "bar").unwrap();
-        let b = subject_scoped(Some("alice"), "foo:bar").unwrap();
+        let a = subject_scoped(Some("alice:foo"), "bar");
+        let b = subject_scoped(Some("alice"), "foo:bar");
         assert_eq!(
             a, b,
             "current format collides; if subject IDs can contain colons, switch to length-prefix",
@@ -664,7 +667,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (sid, src) = resolve(&ext).expect("identity should still hit");
+        let (sid, src) = resolve_session(&ext).expect("identity should still hit");
         assert_eq!(
             src,
             SessionSource::Identity,

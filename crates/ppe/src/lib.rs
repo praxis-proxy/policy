@@ -92,7 +92,7 @@ pub use praxis_policy_core::engine::PolicyEngine;
 
 /// Crypto implemented by an enabled builtin with the default backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DefaultBuiltinCryptoCapability {
+pub enum BundledCryptoCapability {
     /// JWT `DPoP` token hashing.
     Jwt,
     /// OAuth delegation cache-key HMAC.
@@ -111,7 +111,7 @@ pub struct CryptoCapabilityReport {
     /// Backend used for API-key credential hashing, when that builtin is enabled.
     pub api_key_backend: Option<praxis_policy_core::crypto::CryptoBackend>,
     /// Enabled builtin crypto operations that use the default backend.
-    pub default_builtin_crypto: Vec<DefaultBuiltinCryptoCapability>,
+    pub default_builtin_crypto: Vec<BundledCryptoCapability>,
 }
 
 impl CryptoCapabilityReport {
@@ -137,21 +137,19 @@ pub fn crypto_capability_report() -> CryptoCapabilityReport {
     }
 }
 
-fn default_builtin_crypto_for_report() -> Vec<DefaultBuiltinCryptoCapability> {
+fn default_builtin_crypto_for_report() -> Vec<BundledCryptoCapability> {
     praxis_policy_builtins::default_crypto_capabilities()
         .into_iter()
         .map(|capability| match capability {
-            praxis_policy_builtins::DefaultCryptoCapability::Jwt => {
-                DefaultBuiltinCryptoCapability::Jwt
-            },
+            praxis_policy_builtins::DefaultCryptoCapability::Jwt => BundledCryptoCapability::Jwt,
             praxis_policy_builtins::DefaultCryptoCapability::OAuth => {
-                DefaultBuiltinCryptoCapability::OAuth
+                BundledCryptoCapability::OAuth
             },
             praxis_policy_builtins::DefaultCryptoCapability::VaultDelegation => {
-                DefaultBuiltinCryptoCapability::VaultDelegation
+                BundledCryptoCapability::VaultDelegation
             },
             praxis_policy_builtins::DefaultCryptoCapability::Valkey => {
-                DefaultBuiltinCryptoCapability::Valkey
+                BundledCryptoCapability::Valkey
             },
         })
         .collect()
@@ -468,16 +466,16 @@ mod crypto_capability_tests {
             .into_iter()
             .map(|capability| match capability {
                 praxis_policy_builtins::DefaultCryptoCapability::Jwt => {
-                    super::DefaultBuiltinCryptoCapability::Jwt
+                    super::BundledCryptoCapability::Jwt
                 },
                 praxis_policy_builtins::DefaultCryptoCapability::OAuth => {
-                    super::DefaultBuiltinCryptoCapability::OAuth
+                    super::BundledCryptoCapability::OAuth
                 },
                 praxis_policy_builtins::DefaultCryptoCapability::VaultDelegation => {
-                    super::DefaultBuiltinCryptoCapability::VaultDelegation
+                    super::BundledCryptoCapability::VaultDelegation
                 },
                 praxis_policy_builtins::DefaultCryptoCapability::Valkey => {
-                    super::DefaultBuiltinCryptoCapability::Valkey
+                    super::BundledCryptoCapability::Valkey
                 },
             })
             .collect::<Vec<_>>();

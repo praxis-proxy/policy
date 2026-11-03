@@ -12,7 +12,7 @@
 use praxis_policy_apl_core::attributes::{AttributeBag, AttributeValue};
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDialect};
-use praxis_policy_core::crypto::{CryptoError, sha256};
+use praxis_policy_core::crypto::{CryptoError, Sha256};
 
 /// 32-byte digest used as the map key. Copyable, comparable, and opaque.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -44,25 +44,42 @@ impl CacheKey {
         bag: &AttributeBag,
         structured: &StructuredInput,
     ) -> Result<Self, CryptoError> {
-        let mut hasher = Preimage::default();
-        hash_dialect(&mut hasher, &call.dialect);
-        hash_yaml(&mut hasher, &call.args);
-        hash_bag(&mut hasher, bag);
-        hash_structured(&mut hasher, structured);
-        Ok(Self(sha256(&hasher.0)?))
+        let mut hasher = Sha256::new()?;
+        hash_dialect(&mut hasher, &call.dialect)?;
+        hash_yaml(&mut hasher, &call.args)?;
+        hash_bag(&mut hasher, bag)?;
+        hash_structured(&mut hasher, structured)?;
+        Ok(Self(hasher.finalize()?))
     }
 }
 
-fn hash_dialect(hasher: &mut Preimage, dialect: &PdpDialect) {
+trait HashSink {
+    fn update(&mut self, bytes: impl AsRef<[u8]>) -> Result<(), CryptoError>;
+}
+
+impl HashSink for Sha256 {
+    fn update(&mut self, bytes: impl AsRef<[u8]>) -> Result<(), CryptoError> {
+        Sha256::update(self, bytes)
+    }
+}
+
+impl HashSink for Vec<u8> {
+    fn update(&mut self, bytes: impl AsRef<[u8]>) -> Result<(), CryptoError> {
+        self.extend_from_slice(bytes.as_ref());
+        Ok(())
+    }
+}
+
+fn hash_dialect(hasher: &mut impl HashSink, dialect: &PdpDialect) -> Result<(), CryptoError> {
     match dialect {
-        PdpDialect::Cedar => hasher.update([0_u8]),
-        PdpDialect::Opa => hasher.update([1_u8]),
-        PdpDialect::AuthZen => hasher.update([2_u8]),
-        PdpDialect::NeMo => hasher.update([3_u8]),
-        PdpDialect::Cel => hasher.update([4_u8]),
+        PdpDialect::Cedar => hasher.update([0_u8])?,
+        PdpDialect::Opa => hasher.update([1_u8])?,
+        PdpDialect::AuthZen => hasher.update([2_u8])?,
+        PdpDialect::NeMo => hasher.update([3_u8])?,
+        PdpDialect::Cel => hasher.update([4_u8])?,
         PdpDialect::Custom(name) => {
-            hasher.update([5_u8]);
-            hash_bytes(hasher, name.as_bytes());
+            hasher.update([5_u8])?;
+            hash_bytes(hasher, name.as_bytes())?;
         },
         // `PdpDialect` is `#[non_exhaustive]` in another crate, so this
         // match needs a catch-all. Tag 255 alone would collide if two
@@ -70,193 +87,196 @@ fn hash_dialect(hasher: &mut Preimage, dialect: &PdpDialect) {
         // is the variant name, so each unknown dialect gets its own
         // digest. `Custom` is already handled above.
         other => {
-            hasher.update([255_u8]);
-            hash_bytes(hasher, format!("{other:?}").as_bytes());
+            hasher.update([255_u8])?;
+            hash_bytes(hasher, format!("{other:?}").as_bytes())?;
         },
     }
+    Ok(())
 }
 
-fn hash_bag(hasher: &mut Preimage, bag: &AttributeBag) {
+fn hash_bag(hasher: &mut impl HashSink, bag: &AttributeBag) -> Result<(), CryptoError> {
     let mut entries: Vec<(&str, &AttributeValue)> = bag.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
-    hash_len(hasher, entries.len());
+    hash_len(hasher, entries.len())?;
     for (key, value) in entries {
-        hash_bytes(hasher, key.as_bytes());
-        hash_attr(hasher, value);
+        hash_bytes(hasher, key.as_bytes())?;
+        hash_attr(hasher, value)?;
     }
+    Ok(())
 }
 
-fn hash_attr(hasher: &mut Preimage, value: &AttributeValue) {
+fn hash_attr(hasher: &mut impl HashSink, value: &AttributeValue) -> Result<(), CryptoError> {
     match value {
         AttributeValue::Bool(v) => {
-            hasher.update([0_u8]);
-            hasher.update([u8::from(*v)]);
+            hasher.update([0_u8])?;
+            hasher.update([u8::from(*v)])?;
         },
         AttributeValue::Int(v) => {
-            hasher.update([1_u8]);
-            hasher.update(v.to_be_bytes());
+            hasher.update([1_u8])?;
+            hasher.update(v.to_be_bytes())?;
         },
         AttributeValue::Float(v) => {
-            hasher.update([2_u8]);
-            hasher.update(v.to_bits().to_be_bytes());
+            hasher.update([2_u8])?;
+            hasher.update(v.to_bits().to_be_bytes())?;
         },
         AttributeValue::String(v) => {
-            hasher.update([3_u8]);
-            hash_bytes(hasher, v.as_bytes());
+            hasher.update([3_u8])?;
+            hash_bytes(hasher, v.as_bytes())?;
         },
         AttributeValue::StringSet(set) => {
-            hasher.update([4_u8]);
+            hasher.update([4_u8])?;
             let mut members: Vec<&str> = set.iter().map(String::as_str).collect();
             members.sort_unstable();
-            hash_len(hasher, members.len());
+            hash_len(hasher, members.len())?;
             for member in members {
-                hash_bytes(hasher, member.as_bytes());
+                hash_bytes(hasher, member.as_bytes())?;
             }
         },
-        AttributeValue::NonScalar => hasher.update([5_u8]),
+        AttributeValue::NonScalar => hasher.update([5_u8])?,
     }
+    Ok(())
 }
 
-fn hash_yaml(hasher: &mut Preimage, value: &serde_yaml::Value) {
+fn hash_yaml(hasher: &mut impl HashSink, value: &serde_yaml::Value) -> Result<(), CryptoError> {
     match value {
-        serde_yaml::Value::Null => hasher.update([0_u8]),
+        serde_yaml::Value::Null => hasher.update([0_u8])?,
         serde_yaml::Value::Bool(v) => {
-            hasher.update([1_u8]);
-            hasher.update([u8::from(*v)]);
+            hasher.update([1_u8])?;
+            hasher.update([u8::from(*v)])?;
         },
         serde_yaml::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                hasher.update([2_u8]);
-                hasher.update(i.to_be_bytes());
+                hasher.update([2_u8])?;
+                hasher.update(i.to_be_bytes())?;
             } else if let Some(u) = n.as_u64() {
-                hasher.update([3_u8]);
-                hasher.update(u.to_be_bytes());
+                hasher.update([3_u8])?;
+                hasher.update(u.to_be_bytes())?;
             } else if let Some(f) = n.as_f64() {
-                hasher.update([4_u8]);
-                hasher.update(f.to_bits().to_be_bytes());
+                hasher.update([4_u8])?;
+                hasher.update(f.to_bits().to_be_bytes())?;
             } else {
-                hasher.update([5_u8]);
+                hasher.update([5_u8])?;
             }
         },
         serde_yaml::Value::String(s) => {
-            hasher.update([6_u8]);
-            hash_bytes(hasher, s.as_bytes());
+            hasher.update([6_u8])?;
+            hash_bytes(hasher, s.as_bytes())?;
         },
         serde_yaml::Value::Sequence(seq) => {
-            hasher.update([7_u8]);
-            hash_len(hasher, seq.len());
+            hasher.update([7_u8])?;
+            hash_len(hasher, seq.len())?;
             for item in seq {
-                hash_yaml(hasher, item);
+                hash_yaml(hasher, item)?;
             }
         },
         serde_yaml::Value::Mapping(map) => {
-            hasher.update([8_u8]);
+            hasher.update([8_u8])?;
             let mut pairs: Vec<(Vec<u8>, &serde_yaml::Value)> = map
                 .iter()
-                .map(|(k, v)| (canonical_yaml_bytes(k), v))
-                .collect();
+                .map(|(k, v)| canonical_yaml_bytes(k).map(|bytes| (bytes, v)))
+                .collect::<Result<_, _>>()?;
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            hash_len(hasher, pairs.len());
+            hash_len(hasher, pairs.len())?;
             for (key_bytes, val) in pairs {
-                hash_bytes(hasher, &key_bytes);
-                hash_yaml(hasher, val);
+                hash_bytes(hasher, &key_bytes)?;
+                hash_yaml(hasher, val)?;
             }
         },
         serde_yaml::Value::Tagged(tagged) => {
-            hasher.update([9_u8]);
-            hash_bytes(hasher, tagged.tag.to_string().as_bytes());
-            hash_yaml(hasher, &tagged.value);
+            hasher.update([9_u8])?;
+            hash_bytes(hasher, tagged.tag.to_string().as_bytes())?;
+            hash_yaml(hasher, &tagged.value)?;
         },
     }
+    Ok(())
 }
 
-fn canonical_yaml_bytes(value: &serde_yaml::Value) -> Vec<u8> {
-    let mut preimage = Preimage::default();
-    hash_yaml(&mut preimage, value);
-    preimage.0
+fn canonical_yaml_bytes(value: &serde_yaml::Value) -> Result<Vec<u8>, CryptoError> {
+    let mut bytes = Vec::new();
+    hash_yaml(&mut bytes, value)?;
+    Ok(bytes)
 }
 
-fn hash_structured(hasher: &mut Preimage, structured: &StructuredInput) {
-    hasher.update([u8::from(structured.too_deep())]);
+fn hash_structured(
+    hasher: &mut impl HashSink,
+    structured: &StructuredInput,
+) -> Result<(), CryptoError> {
+    hasher.update([u8::from(structured.too_deep())])?;
     hash_optional_json(
         hasher,
         structured.llm_request().map(std::convert::AsRef::as_ref),
-    );
-    hash_optional_json(hasher, structured.args().map(std::convert::AsRef::as_ref));
+    )?;
+    hash_optional_json(hasher, structured.args().map(std::convert::AsRef::as_ref))
 }
 
-fn hash_optional_json(hasher: &mut Preimage, value: Option<&serde_json::Value>) {
+fn hash_optional_json(
+    hasher: &mut impl HashSink,
+    value: Option<&serde_json::Value>,
+) -> Result<(), CryptoError> {
     match value {
-        None => hasher.update([0_u8]),
+        None => hasher.update([0_u8])?,
         Some(value) => {
-            hasher.update([1_u8]);
-            hash_json(hasher, value);
+            hasher.update([1_u8])?;
+            hash_json(hasher, value)?;
         },
     }
+    Ok(())
 }
 
-fn hash_json(hasher: &mut Preimage, value: &serde_json::Value) {
+fn hash_json(hasher: &mut impl HashSink, value: &serde_json::Value) -> Result<(), CryptoError> {
     match value {
-        serde_json::Value::Null => hasher.update([0_u8]),
+        serde_json::Value::Null => hasher.update([0_u8])?,
         serde_json::Value::Bool(v) => {
-            hasher.update([1_u8]);
-            hasher.update([u8::from(*v)]);
+            hasher.update([1_u8])?;
+            hasher.update([u8::from(*v)])?;
         },
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                hasher.update([2_u8]);
-                hasher.update(i.to_be_bytes());
+                hasher.update([2_u8])?;
+                hasher.update(i.to_be_bytes())?;
             } else if let Some(u) = n.as_u64() {
-                hasher.update([3_u8]);
-                hasher.update(u.to_be_bytes());
+                hasher.update([3_u8])?;
+                hasher.update(u.to_be_bytes())?;
             } else if let Some(f) = n.as_f64() {
-                hasher.update([4_u8]);
-                hasher.update(f.to_bits().to_be_bytes());
+                hasher.update([4_u8])?;
+                hasher.update(f.to_bits().to_be_bytes())?;
             } else {
-                hasher.update([5_u8]);
+                hasher.update([5_u8])?;
             }
         },
         serde_json::Value::String(s) => {
-            hasher.update([6_u8]);
-            hash_bytes(hasher, s.as_bytes());
+            hasher.update([6_u8])?;
+            hash_bytes(hasher, s.as_bytes())?;
         },
         serde_json::Value::Array(items) => {
-            hasher.update([7_u8]);
-            hash_len(hasher, items.len());
+            hasher.update([7_u8])?;
+            hash_len(hasher, items.len())?;
             for item in items {
-                hash_json(hasher, item);
+                hash_json(hasher, item)?;
             }
         },
         serde_json::Value::Object(map) => {
-            hasher.update([8_u8]);
+            hasher.update([8_u8])?;
             let mut pairs: Vec<(&str, &serde_json::Value)> =
                 map.iter().map(|(key, val)| (key.as_str(), val)).collect();
             pairs.sort_by(|left, right| left.0.cmp(right.0));
-            hash_len(hasher, pairs.len());
+            hash_len(hasher, pairs.len())?;
             for (key, val) in pairs {
-                hash_bytes(hasher, key.as_bytes());
-                hash_json(hasher, val);
+                hash_bytes(hasher, key.as_bytes())?;
+                hash_json(hasher, val)?;
             }
         },
     }
+    Ok(())
 }
 
-fn hash_bytes(hasher: &mut Preimage, bytes: &[u8]) {
-    hash_len(hasher, bytes.len());
-    hasher.update(bytes);
+fn hash_bytes(hasher: &mut impl HashSink, bytes: &[u8]) -> Result<(), CryptoError> {
+    hash_len(hasher, bytes.len())?;
+    hasher.update(bytes)
 }
 
-fn hash_len(hasher: &mut Preimage, len: usize) {
-    hasher.update(u64::try_from(len).unwrap_or(u64::MAX).to_be_bytes());
-}
-
-#[derive(Default)]
-struct Preimage(Vec<u8>);
-
-impl Preimage {
-    fn update(&mut self, bytes: impl AsRef<[u8]>) {
-        self.0.extend_from_slice(bytes.as_ref());
-    }
+fn hash_len(hasher: &mut impl HashSink, len: usize) -> Result<(), CryptoError> {
+    hasher.update(u64::try_from(len).unwrap_or(u64::MAX).to_be_bytes())
 }
 
 #[cfg(test)]
