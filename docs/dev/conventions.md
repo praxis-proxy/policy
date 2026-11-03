@@ -129,12 +129,13 @@ and produces `lcov.info`. The floor only ratchets up,
 never down. The Makefile is the authority on coverage
 flags and exclusions; `ppe-benches` is excluded.
 
-Coverage includes all features and ignored tests, with
-`VALKEY_TESTS_OPTIONAL=1` so tests needing a live Valkey
-server skip gracefully. Set `VALKEY_TEST_URL` to measure
-those paths against a real server. Other live suites and
-their environment requirements are documented in
-[Testing Policy].
+Coverage uses the expanded `DEFAULT_FEATURES` RustCrypto
+profile and includes ignored tests. FIPS is excluded and
+needs separate coverage. `VALKEY_TESTS_OPTIONAL=1` lets
+tests needing a live Valkey server skip gracefully. Set
+`VALKEY_TEST_URL` to measure those paths against a real
+server. Other live suites and their environment
+requirements are documented in [Testing Policy].
 
 #### Mutation Testing
 
