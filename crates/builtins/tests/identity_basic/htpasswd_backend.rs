@@ -817,8 +817,8 @@ fn a_uniform_file_loads_under_either_scheme() {
     assert_eq!(
         dir.len(),
         2,
-        "both sha512crypt records are indexed, so a FIPS-restricted deployment \
-         has a directory it can actually use"
+        "both sha512crypt records are indexed, so a deployment restricted to \
+         SHA-2 has a directory it can actually use"
     );
 }
 

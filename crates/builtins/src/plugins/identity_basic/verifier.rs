@@ -22,12 +22,15 @@
 // records on the miss path, and why admission here rejects any record the
 // verifier would refuse before reaching the KDF.
 //
-// FIPS. bcrypt is Blowfish-based and argon2 is BLAKE2b-based, so neither is
-// built on an approved hash, and a deployment under a FIPS-180-4 restriction
-// cannot use either however well they resist cracking. sha256crypt (`$5$`) and
-// sha512crypt (`$6$`) are SHA-2 iterated per Drepper's scheme, which is the
-// approved option `.htpasswd` can actually carry -- `crypt(3)` and `mkpasswd`
-// write them, and a shadow file already holds them. They are accepted on the
+// Underlying hash. bcrypt is Blowfish-based and argon2 is BLAKE2b-based, so
+// neither is built on a SHA-2 primitive, and a deployment restricted to the
+// hashes FIPS 180-4 specifies cannot use either however well they resist
+// cracking. sha256crypt (`$5$`) and sha512crypt (`$6$`) are SHA-2 iterated per
+// Drepper's scheme -- FIPS 180-4 covers those SHA-2 functions, not this
+// password scheme built on them, so the distinction here is the primitive and
+// not an approval of the scheme. They are the SHA-2-based option `.htpasswd`
+// can actually carry -- `crypt(3)` and `mkpasswd` write them, and a shadow
+// file already holds them. They are accepted on the
 // same terms as the other two: admitted only with parameters the verifier will
 // run in full, under a round ceiling, and one cost profile per file.
 //
@@ -86,8 +89,9 @@ pub enum Scheme {
 
     /// sha256crypt (`$5$`) or sha512crypt (`$6$`), as an MCF string.
     ///
-    /// The FIPS-approved option: both build on SHA-2 ([FIPS 180-4]), which
-    /// neither bcrypt nor argon2 does.
+    /// The SHA-2-based option: both iterate SHA-2 ([FIPS 180-4] specifies
+    /// those functions, not this password scheme), which neither bcrypt nor
+    /// argon2 does.
     ///
     /// [FIPS 180-4]: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf
     ShaCrypt,
@@ -133,7 +137,7 @@ pub enum HashError {
     #[error(
         "the stored hash uses an MD5 or SHA-1 grade scheme (`$apr1$`, `{{SHA}}`) that this \
          plugin does not verify; re-hash the file with bcrypt, argon2, or -- where a \
-         FIPS-approved hash is required -- sha256crypt (`$5$`) or sha512crypt (`$6$`)"
+         SHA-2 based hash is required -- sha256crypt (`$5$`) or sha512crypt (`$6$`)"
     )]
     WeakSchemeUnsupported,
 
@@ -307,7 +311,7 @@ impl Default for Limits {
 ///
 /// DES-crypt, plaintext, MD5, and SHA-1 records are refused.
 ///
-/// Where a deployment is restricted to a FIPS-approved hash, use sha256crypt
+/// Where a deployment is restricted to a SHA-2 underlying hash, use sha256crypt
 /// (`$5$`) or sha512crypt (`$6$`); `mkpasswd -m sha512crypt` writes them, and
 /// every record in one file must share a single cost profile.
 ///

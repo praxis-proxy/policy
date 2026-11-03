@@ -167,7 +167,7 @@ unicode-normalization = { workspace = true, optional = true }
 # are unused outside tests.
 #
 # Three crates rather than one because `.htpasswd` in the wild is bcrypt, the
-# modern alternative is argon2, and a FIPS-restricted deployment needs
+# modern alternative is argon2, and a deployment restricted to SHA-2 needs
 # sha256crypt or sha512crypt; no single crate reads all three well. None
 # exposes a public hash *parser*, so the cost ceiling in R23 is enforced by
 # reading bcrypt's fixed-width cost field, argon2's PHC params, and

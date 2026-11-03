@@ -107,14 +107,17 @@ Authorino-parity escape hatch.
   the schemes this plugin exists to migrate operators off is the wrong trade.
   Revisit only if a real migration blocks on it.
   DES-crypt and plaintext are rejected at load.
-- R32. **Added 2026-11-03.** A FIPS-approved encoding is supported:
-  sha256crypt (`$5$`) and sha512crypt (`$6$`) iterate SHA-2 per FIPS 180-4,
-  where bcrypt (Blowfish) and argon2 (BLAKE2b) build on primitives that are
-  not approved. These are the approved schemes `.htpasswd` can actually
-  carry: `crypt(3)` and `mkpasswd -m sha512crypt` write them and a shadow
-  file already holds them, whereas PBKDF2's approved status comes with a PHC
-  spelling (`$pbkdf2-sha256$`) that is a Passlib convention no `.htpasswd`
-  tool emits -- accepting it would be an encoding no operator can produce.
+- R32. **Added 2026-11-03.** SHA-2-based encodings are supported:
+  sha256crypt (`$5$`) and sha512crypt (`$6$`) iterate the SHA-2 functions that
+  FIPS 180-4 specifies, where bcrypt (Blowfish) and argon2 (BLAKE2b) build on
+  other primitives. FIPS 180-4 approves those hash functions and not the
+  SHA-crypt password scheme built on them, so this requirement is about the
+  underlying primitive and claims no approval for the scheme itself. These are
+  the SHA-2-based schemes `.htpasswd` can actually carry: `crypt(3)` and
+  `mkpasswd -m sha512crypt` write them and a shadow file already holds them,
+  whereas PBKDF2 comes with a PHC spelling (`$pbkdf2-sha256$`) that is a
+  Passlib convention no `.htpasswd` tool emits -- accepting it would be an
+  encoding no operator can produce.
   An absent `rounds=` field means the format's default of 5_000, and the
   round count is bounded by `max_sha_crypt_rounds` under R23. A record the
   verifier would reject *before* running the digest is refused at load, which
@@ -296,11 +299,11 @@ Authorino-parity escape hatch.
     where a JSON-RPC code belongs. Basic on an MCP route is not a sensible
     deployment, but the plugin should not pretend otherwise.
 
-- KTD5. **Weak hash schemes are refused outright; a FIPS-approved scheme is
+- KTD5. **Weak hash schemes are refused outright; a SHA-2-based scheme is
   offered instead.** apr1 and `{SHA}` are refused at load with a message
   naming the fix, which since 2026-11-03 names sha256crypt and sha512crypt
-  alongside bcrypt and argon2 -- the earlier wording offered only the two
-  non-approved schemes, so an operator under a FIPS restriction was told to
+  alongside bcrypt and argon2 -- the earlier wording offered only schemes
+  built on other primitives, so an operator restricted to SHA-2 was told to
   re-hash and given no target they could use. Refusing the weak schemes is
   unchanged: SHA-1 is not approved for this purpose and `{SHA}` is unsalted
   and uniterated regardless. Accepting MD5-grade
