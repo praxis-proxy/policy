@@ -163,6 +163,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The FIPS profile rejects configurations that enable keyed content
+  provenance, which requires HMAC. Plain SHA-256 provenance remains available
+  by explicitly selecting `content_provenance_key: unkeyed`.
 - A `run(name)` step whose plugin has no hook for the request's context
   fails with a `PluginError::Dispatch` message that now names the remedy:
   move the step, or use a plugin with a hook for that context.

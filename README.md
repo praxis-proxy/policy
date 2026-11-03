@@ -44,7 +44,11 @@ Declare individual features instead: `jwt`, `api-key`, `oauth`,
 The token quota plugin is available separately through `experimental-quota`.
 
 For the current FIPS profile, disable defaults and select only `fips` and
-`api-key`; the host should require `crypto_capability_report().fips_profile_is_safe()` and call `validate_api_key_crypto()` before serving.
+`api-key`; the host should require
+`crypto_capability_report().fips_profile_is_safe()` and call
+`validate_api_key_crypto()` before serving. This profile rejects keyed content
+provenance, which requires HMAC; unkeyed content provenance remains available
+through SHA-256.
 This check covers the API-key SHA-256 operation only.
 
 The crates are versioned together and released together, so a single `0.4`

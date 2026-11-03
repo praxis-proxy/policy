@@ -21,7 +21,7 @@
 //! | `jwt` | `plugins::identity_jwt` |
 //! | `api-key` | `plugins::identity_api_key` |
 //! | `crypto-rustcrypto` | RustCrypto SHA-256 for API-key hashing |
-//! | `fips` | OpenSSL FIPS SHA-256 and HMAC for Policy and API-key hashing |
+//! | `fips` | OpenSSL FIPS SHA-256 for Policy and API-key; no HMAC |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
 //! | `quota/limitador` | `plugins::quota` |

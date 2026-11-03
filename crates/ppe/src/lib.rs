@@ -61,7 +61,9 @@
 //! The FIPS profile currently requires API-key and uses `default-features = false` with both
 //! `fips` and `api-key`. Call [`crypto_capability_report`] at startup and
 //! require [`CryptoCapabilityReport::fips_profile_is_safe`] in addition
-//! to `praxis_policy::validate_api_key_crypto` when the `api-key` feature is enabled.
+//! to `praxis_policy::validate_api_key_crypto` when the `api-key` feature is enabled. The
+//! profile supports SHA-256 only; configuration that enables keyed content provenance is
+//! rejected because it requires HMAC.
 //!
 //! # Plugins the host supplies
 //!
@@ -108,7 +110,7 @@ pub enum BundledCryptoCapability {
 /// Crypto backends and builtin operations compiled into this Policy graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CryptoCapabilityReport {
-    /// Backend used by Policy's always-enabled hashing and MAC operations.
+    /// Backend used by Policy's always-enabled SHA-256 operations.
     pub policy_backend: praxis_policy_core::crypto::CryptoBackend,
     /// Backend used for API-key credential hashing, when that builtin is enabled.
     pub api_key_backend: Option<praxis_policy_core::crypto::CryptoBackend>,
@@ -117,7 +119,7 @@ pub struct CryptoCapabilityReport {
 }
 
 impl CryptoCapabilityReport {
-    /// Whether this graph meets Policy’s supported FIPS profile.
+    /// Whether this graph meets Policy’s supported API-key FIPS profile.
     #[must_use]
     pub fn fips_profile_is_safe(&self) -> bool {
         cfg!(feature = "fips")

@@ -6,10 +6,10 @@
 #[cfg(feature = "fips")]
 use std::sync::{Arc, OnceLock};
 
-/// The backend used for Policy's always-enabled SHA-256 and HMAC operations.
+/// The backend used for Policy's always-enabled SHA-256 operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CryptoBackend {
-    /// SHA-256 and HMAC operations use OpenSSL with the `fips=yes` property.
+    /// SHA-256 uses OpenSSL with the `fips=yes` property.
     OpenSslFips,
     /// SHA-256 and HMAC from `RustCrypto`.
     RustCrypto,
@@ -38,6 +38,10 @@ pub enum CryptoError {
     #[cfg(feature = "fips")]
     #[error("OpenSSL FIPS cryptographic operation failed: {0}")]
     OpenSsl(#[from] openssl::error::ErrorStack),
+    /// HMAC is unavailable in the FIPS profile.
+    #[cfg(feature = "fips")]
+    #[error("HMAC-SHA256 is unavailable with the FIPS feature")]
+    HmacUnavailable,
     /// `RustCrypto` rejected an HMAC key.
     #[cfg(feature = "crypto-rustcrypto")]
     #[error("RustCrypto HMAC key initialization failed: {0}")]
@@ -138,21 +142,15 @@ pub fn sha256(bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
     digest.finalize()
 }
 
-/// Compute HMAC-SHA256 with the backend selected for this Policy build.
+/// Compute HMAC-SHA256 with the RustCrypto backend.
 ///
 /// # Errors
-/// Returns an error if the selected provider cannot perform HMAC-SHA256.
+/// Returns an error if the key is invalid or the `fips` feature is enabled.
 pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
     #[cfg(feature = "fips")]
     {
-        let digest = fips_sha256()?;
-        let pkey = openssl::pkey::PKey::hmac(key)?;
-        let mut context = openssl::md_ctx::MdCtx::new()?;
-        context.digest_sign_init(Some(&digest), &pkey)?;
-        context.digest_sign_update(bytes)?;
-        let mut output = Vec::new();
-        context.digest_sign_final_to_vec(&mut output)?;
-        output.try_into().map_err(|_| CryptoError::DigestLength)
+        let _ = (key, bytes);
+        return Err(CryptoError::HmacUnavailable);
     }
     #[cfg(feature = "crypto-rustcrypto")]
     {

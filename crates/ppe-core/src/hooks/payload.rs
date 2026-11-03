@@ -169,8 +169,9 @@ pub enum ContentKey {
     /// a short or templated message carrying a redacted value can be
     /// enumerated back out of the digest.
     Unkeyed,
-    /// HMAC-SHA256 under an operator secret. Read on every digest, so a
-    /// refresh that rotates the secret takes effect without a reload.
+    /// HMAC-SHA256 under an operator secret in RustCrypto builds. Read on
+    /// every digest, so a refresh that rotates the secret takes effect without
+    /// a reload.
     Keyed(crate::secrets::SecretRef),
 }
 

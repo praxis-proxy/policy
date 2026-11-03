@@ -2465,6 +2465,13 @@ fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<Plug
     let refuse = |message: String| Err(Box::new(PluginError::Config { message }));
     let Some(key) = settings.content_provenance_key.as_deref() else {
         if settings.capture_content_provenance {
+            #[cfg(feature = "fips")]
+            return refuse(format!(
+                "engine_settings.capture_content_provenance is on but no \
+                 content_provenance_key is set. Set it to `{UNKEYED_CONTENT_PROVENANCE}` for \
+                 plain SHA-256; keyed content provenance is unavailable with the `fips` feature"
+            ));
+            #[cfg(not(feature = "fips"))]
             return refuse(format!(
                 "engine_settings.capture_content_provenance is on but no \
                  content_provenance_key is set. Name a value from secrets.values to digest \
@@ -2491,6 +2498,15 @@ fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<Plug
             ));
         }
         return Ok(());
+    }
+    #[cfg(feature = "fips")]
+    if settings.capture_content_provenance {
+        return refuse(format!(
+            "engine_settings.capture_content_provenance uses named key `{key}`, but keyed \
+             content provenance requires HMAC and is unavailable with the `fips` feature. \
+             Set content_provenance_key to `{UNKEYED_CONTENT_PROVENANCE}` for plain SHA-256 or \
+             disable capture_content_provenance"
+        ));
     }
     if !declared {
         return refuse(format!(

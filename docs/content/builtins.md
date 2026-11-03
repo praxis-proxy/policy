@@ -65,7 +65,7 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 | `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
 | `jwt` | `identity/jwt` |
 | `api-key` | `identity/api-key` |
-| `fips` | OpenSSL FIPS SHA-256 and HMAC for API-key and always-enabled Policy hashing. Select with `default-features = false`; other crypto-using builtins are reported and make the API-key profile unsafe. |
+| `fips` | OpenSSL FIPS SHA-256 for API-key and always-enabled Policy hashing. Keyed content provenance is rejected because it requires HMAC. Select with `default-features = false`; other crypto-using builtins are reported and make the API-key profile unsafe. |
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
 | `elicitation-ciba` | `elicitation/ciba` |
@@ -84,7 +84,9 @@ runtime and its own plugins compiles nothing extra.
 API-key builds with default features use RustCrypto SHA-256. A host building the
 API-key FIPS slice selects API-key plus OpenSSL FIPS hashing, then checks
 the whole-graph capability report and independently checks that the FIPS
-provider is available before serving traffic:
+provider is available before serving traffic. The FIPS slice supports SHA-256
+only; configurations that enable keyed content provenance are refused.
+Unkeyed content provenance remains available through plain SHA-256:
 
 ```toml
 praxis-policy = { version = "0.5", default-features = false, features = ["fips", "api-key"] }
