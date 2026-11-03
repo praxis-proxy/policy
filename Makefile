@@ -351,7 +351,8 @@ mutants:
 .PHONY: semver-facade
 semver-facade:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
-	@cargo semver-checks --package praxis-policy --features "crypto-rustcrypto,builtins,http-hyper,experimental-quota,experimental-ratelimit"
+	@cargo semver-checks --package praxis-policy --only-explicit-features \
+		--features "crypto-rustcrypto,builtins,http-hyper,experimental-quota,experimental-ratelimit"
 
 semver:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
@@ -402,7 +403,8 @@ docs-lint:
 # CI
 # =============================================================================
 
-# Compile `praxis-policy-builtins` with no features, then with each one alone.
+# Compile `praxis-policy-builtins` with its crypto backend and no plugins, then
+# with each plugin feature alone.
 # Neither the default nor the workspace profile can catch a feature body that
 # omits its own `dep:` edge or its module-group marker: another feature supplies
 # the dependency, and under default features nothing compiles at all. This is the
@@ -412,7 +414,8 @@ BUILTIN_FEATURES := jwt api-key oauth elicitation-ciba cedar cel opa valkey secr
 .PHONY: check-features
 check-features:
 	@echo "per-feature check: praxis-policy-builtins ..."
-	@$(CARGO) check -p praxis-policy-builtins --all-targets --no-default-features
+	@$(CARGO) check -p praxis-policy-builtins --all-targets \
+		--no-default-features --features crypto-rustcrypto
 	@for f in $(BUILTIN_FEATURES); do \
 		echo "  --features $$f"; \
 		$(CARGO) check -p praxis-policy-builtins --all-targets \
@@ -422,7 +425,7 @@ check-features:
 	@# The one test that only exists without another feature: CIBA naming the
 	@# missing `valkey` feature. Every other pass builds with it.
 	@$(CARGO) test -p praxis-policy-builtins --no-default-features \
-		--features elicitation-ciba --lib -- elicitation_ciba::factory
+		--features crypto-rustcrypto,elicitation-ciba --lib -- elicitation_ciba::factory
 	@echo "check-features passed"
 
 .PHONY: ci

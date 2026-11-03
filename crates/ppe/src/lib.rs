@@ -61,7 +61,7 @@
 //! The FIPS profile currently requires API-key and uses `default-features = false` with both
 //! `fips` and `api-key`. Call [`crypto_capability_report`] at startup and
 //! require [`CryptoCapabilityReport::fips_profile_is_safe`] in addition
-//! to [`validate_api_key_crypto`].
+//! to `praxis_policy::validate_api_key_crypto` when the `api-key` feature is enabled.
 //!
 //! # Plugins the host supplies
 //!
