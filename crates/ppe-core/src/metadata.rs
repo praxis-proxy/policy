@@ -395,10 +395,70 @@ mod tests {
             )
             .await;
         assert!(!result.continue_processing, "unknown source must deny");
-        let violation = result.violation.expect("unknown source must deny");
-        assert_eq!(violation.code, "plugin.not_found");
-        assert!(violation.reason.contains("metadata.fetch"));
-        assert!(violation.reason.contains("missing"));
+        let violation = result
+            .violation
+            .expect("unknown source must return a violation");
+        assert_eq!(
+            violation.code, "plugin.not_found",
+            "unknown source must use the plugin.not_found code",
+        );
+        assert!(
+            violation.reason.contains("metadata.fetch"),
+            "denial reason should name the hook",
+        );
+        assert!(
+            violation.reason.contains("missing"),
+            "denial reason should name the requested instance",
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_typed_source_denies_with_not_found() {
+        let engine = PolicyEngine::default();
+        let (result, _) = engine
+            .invoke::<MetadataFetchHook>(
+                MetadataFetchRequest::new("missing"),
+                Extensions::default(),
+                None,
+            )
+            .await;
+
+        assert!(
+            !result.continue_processing,
+            "unknown typed source must deny"
+        );
+        let violation = result
+            .violation
+            .expect("unknown typed source must return a violation");
+        assert_eq!(
+            violation.code, "plugin.not_found",
+            "unknown typed source must use the plugin.not_found code",
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_dynamic_source_denies_with_not_found() {
+        let engine = PolicyEngine::default();
+        let (result, _) = engine
+            .invoke_by_name(
+                HOOK_METADATA_FETCH,
+                Box::new(MetadataFetchRequest::new("missing")),
+                Extensions::default(),
+                None,
+            )
+            .await;
+
+        assert!(
+            !result.continue_processing,
+            "unknown dynamic source must deny"
+        );
+        let violation = result
+            .violation
+            .expect("unknown dynamic source must return a violation");
+        assert_eq!(
+            violation.code, "plugin.not_found",
+            "unknown dynamic source must use the plugin.not_found code",
+        );
     }
 
     #[tokio::test]

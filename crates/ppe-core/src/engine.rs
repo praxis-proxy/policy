@@ -66,14 +66,23 @@ pub const VIOLATION_ASSERTION_MISSING: &str = "auth.assertion_missing";
 /// deny: the request never reached a rule.
 pub const VIOLATION_UNIDENTIFIED_REQUEST: &str = "unidentified_request";
 
+fn metadata_target<'a>(hook_name: &str, payload: &'a dyn PluginPayload) -> Option<&'a str> {
+    (hook_name == crate::metadata::HOOK_METADATA_FETCH)
+        .then(|| {
+            payload
+                .as_any()
+                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
+                .map(crate::metadata::MetadataFetchRequest::instance)
+        })
+        .flatten()
+}
+
 fn entries_for_target<'a>(
     entries: &'a [crate::registry::HookEntry],
-    payload: &dyn PluginPayload,
+    hook_name: &str,
+    payload: &'a dyn PluginPayload,
 ) -> Cow<'a, [crate::registry::HookEntry]> {
-    let target = payload
-        .as_any()
-        .downcast_ref::<crate::metadata::MetadataFetchRequest>()
-        .map(crate::metadata::MetadataFetchRequest::instance);
+    let target = metadata_target(hook_name, payload);
     target.map_or_else(
         || Cow::Borrowed(entries),
         |target| {
@@ -2746,19 +2755,11 @@ impl PolicyEngine {
             self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
         let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        let targeted_entries = entries_for_target(hook_entries, payload.as_ref());
+        let targeted_entries = entries_for_target(hook_entries, hook_name, payload.as_ref());
 
         if targeted_entries.is_empty()
-            && payload
-                .as_any()
-                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
-                .is_some()
+            && let Some(target) = metadata_target(hook_name, payload.as_ref())
         {
-            let target = payload
-                .as_any()
-                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
-                .map(crate::metadata::MetadataFetchRequest::instance)
-                .unwrap_or_default();
             let violation = crate::error::PluginViolation::new(
                 "plugin.not_found",
                 format!("hook '{hook_name}' has no registered plugin instance named '{target}'"),
@@ -2927,19 +2928,11 @@ impl PolicyEngine {
             self.track_rate_limit_stage(&snapshot, H::NAME, &extensions, context_table);
         let hook_type = HookType::new(H::NAME);
         let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        let targeted_entries = entries_for_target(hook_entries, &payload);
+        let targeted_entries = entries_for_target(hook_entries, H::NAME, &payload);
 
         if targeted_entries.is_empty()
-            && payload
-                .as_any()
-                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
-                .is_some()
+            && let Some(target) = metadata_target(H::NAME, &payload)
         {
-            let target = payload
-                .as_any()
-                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
-                .map(crate::metadata::MetadataFetchRequest::instance)
-                .unwrap_or_default();
             let violation = crate::error::PluginViolation::new(
                 "plugin.not_found",
                 format!(
@@ -3107,19 +3100,11 @@ impl PolicyEngine {
             self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
         let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        let targeted_entries = entries_for_target(hook_entries, &payload);
+        let targeted_entries = entries_for_target(hook_entries, hook_name, &payload);
 
         if targeted_entries.is_empty()
-            && payload
-                .as_any()
-                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
-                .is_some()
+            && let Some(target) = metadata_target(hook_name, &payload)
         {
-            let target = payload
-                .as_any()
-                .downcast_ref::<crate::metadata::MetadataFetchRequest>()
-                .map(crate::metadata::MetadataFetchRequest::instance)
-                .unwrap_or_default();
             let violation = crate::error::PluginViolation::new(
                 "plugin.not_found",
                 format!("hook '{hook_name}' has no registered plugin instance named '{target}'"),

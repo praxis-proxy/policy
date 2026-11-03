@@ -33,6 +33,24 @@ response lifecycle hook. Its typed request selects one configured source by
 plugin instance name. The source receives the ordinary capability-filtered
 extension view and returns an acquired-facts record; framework code owns
 validation, provenance stamping, and installation of that record.
+Run metadata sources in `sequential` or `transform` mode: audit and concurrent
+modes can allow the operation while discarding the modified payload. A request
+for an unregistered source instance is denied with `plugin.not_found`.
+
+A host-provided metadata source can be configured in hook dispatch mode:
+
+```yaml
+engine_settings:
+  dispatch: hooks
+plugins:
+  - name: account
+    kind: metadata/source
+    hooks: [metadata.fetch]
+    mode: sequential
+```
+
+The host registers the `metadata/source` factory and the source instance name
+(`account`) is selected by `MetadataFetchRequest`.
 
 `http.response` is the return half of the generic HTTP path, installed
 when a global `result:` or `post_invocation:` block exists. Response

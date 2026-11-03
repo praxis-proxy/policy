@@ -1,0 +1,7 @@
+engine_settings:
+  dispatch: hooks
+plugins:
+  - name: account
+    kind: metadata/source
+    hooks: [metadata.fetch]
+    mode: sequential
