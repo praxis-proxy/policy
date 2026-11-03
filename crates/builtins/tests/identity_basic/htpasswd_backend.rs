@@ -457,17 +457,7 @@ fn dropping_a_verify_future_does_not_release_its_permit_early() {
             .expect("alice is in the file");
         let credential = crate::support::password("pw");
 
-        let occupied = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let squatter = {
-            let occupied = std::sync::Arc::clone(&occupied);
-            let release = std::sync::Arc::clone(&release);
-            tokio::task::spawn_blocking(move || {
-                occupied.wait();
-                release.wait();
-            })
-        };
-        occupied.wait();
+        let (squatter, release) = occupy_the_blocking_pool();
 
         let mut in_flight = Box::pin(dir.verify(Some(&record), &credential, &svc));
         assert!(
@@ -485,7 +475,7 @@ fn dropping_a_verify_future_does_not_release_its_permit_early() {
 
         let still_held = saturated(&dir, &record, &credential, &svc).await;
 
-        release.wait();
+        drop(release);
         squatter.await.expect("the squatting task completes");
 
         assert!(
@@ -864,6 +854,31 @@ fn an_argon2_record_argon2_cannot_verify_fails_at_load() {
 /// Build a directory over a fixture file, with the default ceilings.
 fn directory(file: &HtpasswdFile) -> Result<HtpasswdDirectory, String> {
     HtpasswdDirectory::new(config_for(file.path()))
+}
+
+/// Hold the runtime's only blocking thread until the returned sender drops.
+///
+/// Returns once the thread is occupied, so a `spawn_blocking` queued after
+/// this call is provably unstarted rather than merely unfinished.
+///
+/// The release is a channel rather than a barrier because a failing assertion
+/// unwinds out of `block_on`, and dropping the runtime then waits for the
+/// blocking pool to drain. A barrier would still be waiting for a partner that
+/// is never coming, so the test would hang instead of reporting its failure.
+/// Unwinding drops the sender, which ends the `recv` and lets the thread go.
+fn occupy_the_blocking_pool() -> (tokio::task::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let occupied = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let squatter = {
+        let occupied = std::sync::Arc::clone(&occupied);
+        tokio::task::spawn_blocking(move || {
+            occupied.wait();
+            let _ = released.recv();
+        })
+    };
+    occupied.wait();
+
+    (squatter, release)
 }
 
 /// Whether a `verify` is refused for capacity right now.
