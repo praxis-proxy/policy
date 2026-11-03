@@ -142,7 +142,7 @@ pub fn sha256(bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
     digest.finalize()
 }
 
-/// Compute HMAC-SHA256 with the RustCrypto backend.
+/// Compute HMAC-SHA256 with the `RustCrypto` backend.
 ///
 /// # Errors
 /// Returns an error if the key is invalid or the `fips` feature is enabled.
