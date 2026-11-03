@@ -58,10 +58,10 @@ pub mod secrets;
 #[cfg(feature = "_session")]
 pub mod session;
 
-/// A builtin crypto operation that still uses RustCrypto in FIPS builds.
+/// A builtin crypto operation that uses the default RustCrypto backend.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NonFipsCryptoCapability {
+pub enum DefaultCryptoCapability {
     /// JWT signature verification and `DPoP` token hashing.
     Jwt,
     /// OAuth delegation cache-key HMAC.
@@ -72,19 +72,19 @@ pub enum NonFipsCryptoCapability {
     Valkey,
 }
 
-/// List crypto operations enabled by the unified builtin feature set.
+/// List builtin crypto operations enabled by the unified feature set.
 #[doc(hidden)]
 #[must_use]
-pub fn non_fips_crypto_capabilities() -> Vec<NonFipsCryptoCapability> {
+pub fn default_crypto_capabilities() -> Vec<DefaultCryptoCapability> {
     vec![
         #[cfg(feature = "jwt")]
-        NonFipsCryptoCapability::Jwt,
+        DefaultCryptoCapability::Jwt,
         #[cfg(feature = "oauth")]
-        NonFipsCryptoCapability::OAuth,
+        DefaultCryptoCapability::OAuth,
         #[cfg(feature = "delegator-vault")]
-        NonFipsCryptoCapability::VaultDelegation,
+        DefaultCryptoCapability::VaultDelegation,
         #[cfg(feature = "valkey")]
-        NonFipsCryptoCapability::Valkey,
+        DefaultCryptoCapability::Valkey,
     ]
 }
 
@@ -93,20 +93,28 @@ mod env_secret;
 
 #[cfg(test)]
 mod crypto_capability_tests {
-    use super::{NonFipsCryptoCapability, non_fips_crypto_capabilities};
+    use super::default_crypto_capabilities;
+
+    #[cfg(any(
+        feature = "jwt",
+        feature = "oauth",
+        feature = "delegator-vault",
+        feature = "valkey"
+    ))]
+    use super::DefaultCryptoCapability;
 
     #[test]
     fn builtin_crypto_report_matches_the_unified_features() {
         let expected = vec![
             #[cfg(feature = "jwt")]
-            NonFipsCryptoCapability::Jwt,
+            DefaultCryptoCapability::Jwt,
             #[cfg(feature = "oauth")]
-            NonFipsCryptoCapability::OAuth,
+            DefaultCryptoCapability::OAuth,
             #[cfg(feature = "delegator-vault")]
-            NonFipsCryptoCapability::VaultDelegation,
+            DefaultCryptoCapability::VaultDelegation,
             #[cfg(feature = "valkey")]
-            NonFipsCryptoCapability::Valkey,
+            DefaultCryptoCapability::Valkey,
         ];
-        assert_eq!(non_fips_crypto_capabilities(), expected);
+        assert_eq!(default_crypto_capabilities(), expected);
     }
 }

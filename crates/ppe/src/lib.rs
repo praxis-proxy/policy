@@ -90,9 +90,9 @@ pub use praxis_policy_apl_runtime::{
 };
 pub use praxis_policy_core::engine::PolicyEngine;
 
-/// Crypto implemented by an enabled builtin with `RustCrypto`.
+/// Crypto implemented by an enabled builtin with the default backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BundledCryptoCapability {
+pub enum DefaultBuiltinCryptoCapability {
     /// JWT `DPoP` token hashing.
     Jwt,
     /// OAuth delegation cache-key HMAC.
@@ -110,8 +110,8 @@ pub struct CryptoCapabilityReport {
     pub policy_backend: praxis_policy_core::crypto::CryptoBackend,
     /// Backend used for API-key credential hashing, when that builtin is enabled.
     pub api_key_backend: Option<praxis_policy_core::crypto::CryptoBackend>,
-    /// Enabled builtin crypto operations that still use `RustCrypto`.
-    pub non_fips_builtin_crypto: Vec<BundledCryptoCapability>,
+    /// Enabled builtin crypto operations that use the default backend.
+    pub default_builtin_crypto: Vec<DefaultBuiltinCryptoCapability>,
 }
 
 impl CryptoCapabilityReport {
@@ -121,35 +121,37 @@ impl CryptoCapabilityReport {
         cfg!(feature = "fips")
             && self.policy_backend == praxis_policy_core::crypto::CryptoBackend::OpenSslFips
             && self.api_key_backend == Some(praxis_policy_core::crypto::CryptoBackend::OpenSslFips)
-            && self.non_fips_builtin_crypto.is_empty()
+            && self.default_builtin_crypto.is_empty()
     }
 }
 
 /// Report crypto backends selected by the unified Cargo feature set.
 #[must_use]
 pub fn crypto_capability_report() -> CryptoCapabilityReport {
-    let non_fips_builtin_crypto = non_fips_builtin_crypto_for_report();
+    let default_builtin_crypto = default_builtin_crypto_for_report();
 
     CryptoCapabilityReport {
         policy_backend: praxis_policy_core::crypto::crypto_backend(),
         api_key_backend: api_key_backend_for_report(),
-        non_fips_builtin_crypto,
+        default_builtin_crypto,
     }
 }
 
-fn non_fips_builtin_crypto_for_report() -> Vec<BundledCryptoCapability> {
-    praxis_policy_builtins::non_fips_crypto_capabilities()
+fn default_builtin_crypto_for_report() -> Vec<DefaultBuiltinCryptoCapability> {
+    praxis_policy_builtins::default_crypto_capabilities()
         .into_iter()
         .map(|capability| match capability {
-            praxis_policy_builtins::NonFipsCryptoCapability::Jwt => BundledCryptoCapability::Jwt,
-            praxis_policy_builtins::NonFipsCryptoCapability::OAuth => {
-                BundledCryptoCapability::OAuth
+            praxis_policy_builtins::DefaultCryptoCapability::Jwt => {
+                DefaultBuiltinCryptoCapability::Jwt
             },
-            praxis_policy_builtins::NonFipsCryptoCapability::VaultDelegation => {
-                BundledCryptoCapability::VaultDelegation
+            praxis_policy_builtins::DefaultCryptoCapability::OAuth => {
+                DefaultBuiltinCryptoCapability::OAuth
             },
-            praxis_policy_builtins::NonFipsCryptoCapability::Valkey => {
-                BundledCryptoCapability::Valkey
+            praxis_policy_builtins::DefaultCryptoCapability::VaultDelegation => {
+                DefaultBuiltinCryptoCapability::VaultDelegation
+            },
+            praxis_policy_builtins::DefaultCryptoCapability::Valkey => {
+                DefaultBuiltinCryptoCapability::Valkey
             },
         })
         .collect()
@@ -462,27 +464,27 @@ mod crypto_capability_tests {
             CryptoBackend::RustCrypto
         };
         let expected_api_key_backend = cfg!(feature = "api-key").then_some(backend);
-        let expected_builtins = praxis_policy_builtins::non_fips_crypto_capabilities()
+        let expected_builtins = praxis_policy_builtins::default_crypto_capabilities()
             .into_iter()
             .map(|capability| match capability {
-                praxis_policy_builtins::NonFipsCryptoCapability::Jwt => {
-                    super::BundledCryptoCapability::Jwt
+                praxis_policy_builtins::DefaultCryptoCapability::Jwt => {
+                    super::DefaultBuiltinCryptoCapability::Jwt
                 },
-                praxis_policy_builtins::NonFipsCryptoCapability::OAuth => {
-                    super::BundledCryptoCapability::OAuth
+                praxis_policy_builtins::DefaultCryptoCapability::OAuth => {
+                    super::DefaultBuiltinCryptoCapability::OAuth
                 },
-                praxis_policy_builtins::NonFipsCryptoCapability::VaultDelegation => {
-                    super::BundledCryptoCapability::VaultDelegation
+                praxis_policy_builtins::DefaultCryptoCapability::VaultDelegation => {
+                    super::DefaultBuiltinCryptoCapability::VaultDelegation
                 },
-                praxis_policy_builtins::NonFipsCryptoCapability::Valkey => {
-                    super::BundledCryptoCapability::Valkey
+                praxis_policy_builtins::DefaultCryptoCapability::Valkey => {
+                    super::DefaultBuiltinCryptoCapability::Valkey
                 },
             })
             .collect::<Vec<_>>();
 
         assert_eq!(report.policy_backend, backend);
         assert_eq!(report.api_key_backend, expected_api_key_backend);
-        assert_eq!(report.non_fips_builtin_crypto, expected_builtins);
+        assert_eq!(report.default_builtin_crypto, expected_builtins);
         assert_eq!(
             report.fips_profile_is_safe(),
             cfg!(all(feature = "fips", feature = "api-key")) && expected_builtins.is_empty()

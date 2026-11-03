@@ -130,6 +130,7 @@ check-fips-graph:
 test-fips-capabilities:
 	@$(CARGO) test -p praxis-policy --no-default-features --features fips,api-key,praxis-policy-builtins/jwt --lib crypto_report_matches_the_unified_builtin_features
 	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key,jwt --lib builtin_crypto_report_matches_the_unified_features
+	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key --lib plugins::identity_api_key::crypto::tests::
 	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key --test api_key fips::
 
 .PHONY: clean
