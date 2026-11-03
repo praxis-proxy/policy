@@ -3,7 +3,7 @@
 
 //! End-to-end coverage for named metadata-source dispatch.
 
-#![expect(clippy::expect_used, clippy::unwrap_used, reason = "test code")]
+#![expect(clippy::expect_used, reason = "test code")]
 
 use std::sync::{
     Arc,
@@ -177,8 +177,12 @@ fn documented_metadata_fetch_fixture_parses() {
         1,
         "metadata source example should declare one plugin"
     );
+    let plugin = policy
+        .plugins
+        .first()
+        .expect("metadata source example should include its plugin");
     assert_eq!(
-        policy.plugins[0].hooks,
+        plugin.hooks,
         vec![HOOK_METADATA_FETCH.to_owned()],
         "metadata source example should declare metadata.fetch",
     );
