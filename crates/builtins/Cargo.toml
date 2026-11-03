@@ -46,7 +46,6 @@ crypto-rustcrypto = [
   "praxis-policy-apl-runtime/crypto-rustcrypto",
 ]
 fips = [
-  "dep:openssl",
   "praxis-policy-core/fips",
   "praxis-policy-apl-cmf/fips",
   "praxis-policy-apl-runtime/fips",
@@ -177,7 +176,6 @@ base64 = { workspace = true, optional = true }
 # 0.13 `hmac` below pairs with the `digest` 0.11 that the workspace `sha2`
 # brings, so a bump to either has to move both.
 sha2 = { workspace = true, optional = true }
-openssl = { workspace = true, optional = true }
 
 # --- oauth -------------------------------------------------------------------
 

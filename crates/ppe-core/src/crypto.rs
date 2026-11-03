@@ -3,6 +3,9 @@
 
 //! Feature-selected cryptographic operations shared by Policy crates.
 
+#[cfg(feature = "fips")]
+use std::sync::{Arc, OnceLock};
+
 /// The backend used for Policy's always-enabled SHA-256 and HMAC operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CryptoBackend {
@@ -64,7 +67,7 @@ impl Sha256 {
     pub fn new() -> Result<Self, CryptoError> {
         #[cfg(feature = "fips")]
         {
-            let digest = openssl::md::Md::fetch(None, "SHA256", Some("fips=yes"))?;
+            let digest = fips_sha256()?;
             let mut context = openssl::md_ctx::MdCtx::new()?;
             context.digest_init(&digest)?;
             Ok(Self(Sha256State::OpenSsl(context)))
@@ -142,7 +145,7 @@ pub fn sha256(bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
 pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
     #[cfg(feature = "fips")]
     {
-        let digest = openssl::md::Md::fetch(None, "SHA256", Some("fips=yes"))?;
+        let digest = fips_sha256()?;
         let pkey = openssl::pkey::PKey::hmac(key)?;
         let mut context = openssl::md_ctx::MdCtx::new()?;
         context.digest_sign_init(Some(&digest), &pkey)?;
@@ -160,5 +163,20 @@ pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
             Hmac::<Sha256Digest>::new_from_slice(key).map_err(CryptoError::HmacInitialization)?;
         mac.update(bytes);
         Ok(mac.finalize().into_bytes().into())
+    }
+}
+
+#[cfg(feature = "fips")]
+fn fips_sha256() -> Result<Arc<openssl::md::Md>, CryptoError> {
+    static FIPS_SHA256: OnceLock<Arc<openssl::md::Md>> = OnceLock::new();
+
+    if let Some(digest) = FIPS_SHA256.get() {
+        return Ok(Arc::clone(digest));
+    }
+
+    let digest = Arc::new(openssl::md::Md::fetch(None, "SHA256", Some("fips=yes"))?);
+    match FIPS_SHA256.set(Arc::clone(&digest)) {
+        Ok(()) => Ok(digest),
+        Err(raced_value) => Ok(FIPS_SHA256.get().cloned().unwrap_or(raced_value)),
     }
 }
