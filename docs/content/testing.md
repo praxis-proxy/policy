@@ -185,8 +185,11 @@ policies:
 | `praxis-policy-tests-security` | `tests/security` | Adversarial tokens, headers and arguments |
 | `praxis-policy-test-utils` | `tests/utils` | The reference host, scripted IdP, upstream stand-in, fixtures, leak checks |
 
-Each suite is one test binary behind a `suite` feature, so it builds only
-with the expanded `DEFAULT_FEATURES` set. The demo policies live in
+Each suite is one test binary behind a `suite` feature. The `make test` pass
+builds these suites with the expanded `DEFAULT_FEATURES` set; dedicated
+targets use explicit feature selections. The live-mode command below selects
+`experimental-ratelimit` to enable the suite and its rate-limit support. The
+demo policies live in
 `tests/integration/fixtures/`, each with a header recording how it departs
 from the demo.
 
