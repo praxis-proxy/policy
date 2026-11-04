@@ -161,6 +161,23 @@ pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
     }
 }
 
+/// Check that the selected Policy backend can perform SHA-256 at startup.
+///
+/// Covers SHA-256 users of the shared backend. Plugins with independent
+/// crypto require their own checks; HMAC remains unavailable under FIPS.
+///
+/// # Errors
+/// Returns an error if the selected backend cannot perform SHA-256.
+///
+/// ```
+/// praxis_policy_core::validate_crypto_backend()?;
+/// # Ok::<(), praxis_policy_core::CryptoError>(())
+/// ```
+pub fn validate_crypto_backend() -> Result<(), CryptoError> {
+    sha256(&[])?;
+    Ok(())
+}
+
 /// The backend's in-progress digest behind [`Sha256`].
 enum Sha256State {
     #[cfg(feature = "fips")]
@@ -212,6 +229,11 @@ mod tests {
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
         ),
     ];
+
+    #[test]
+    fn an_available_backend_passes_startup_validation() -> Result<(), CryptoError> {
+        validate_crypto_backend()
+    }
 
     #[test]
     fn sha256_matches_the_standard_vectors() {
@@ -286,6 +308,10 @@ mod tests {
         );
         assert!(matches!(sha256(b"abc"), Err(CryptoError::OpenSsl(_))));
         assert!(matches!(Sha256::new(), Err(CryptoError::OpenSsl(_))));
+        assert!(matches!(
+            validate_crypto_backend(),
+            Err(CryptoError::OpenSsl(_))
+        ));
     }
 
     // -----------------------------------------------------------------------------

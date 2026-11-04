@@ -28,8 +28,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **FIPS startup checks.** `crypto_capability_report()` describes the compiled
   backend and the builtins that do their own `RustCrypto` crypto (JWT, OAuth,
   Vault delegation, Valkey); `fips_profile_is_safe()` is false while any of
-  them is enabled. `validate_api_key_crypto()` checks that the FIPS provider
-  is loaded. A host needs both: the report covers the build, not the runtime.
+  them is enabled. `validate_crypto_backend()`, exported from core and the
+  facade without requiring API-key, checks shared SHA-256 availability.
+  A host needs both: the report covers the build, not the runtime.
 - **Crypto failure alarm.** A hashing failure on the request path logs
   `alarm = "policy_crypto_failure"` with the operation, and an APL route that
   cannot hash its attribute bag denies with `policy.crypto_failed`.

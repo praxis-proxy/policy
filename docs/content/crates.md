@@ -127,6 +127,21 @@ ordinary features so the feature-gated re-exports are visible.
 
 The crates are versioned and released together.
 
+## Validate shared hashing at startup
+
+Call `validate_crypto_backend()` before serving requests to check that
+Policy's selected backend can perform SHA-256. The function is exported
+from core and the facade, including builds with no API-key builtin.
+
+The check covers the shared backend used for session ids, instruction
+digests, decision-cache keys, API-key hashing and plugins that use those
+same hashing functions. Plugins with independent crypto implementations
+need their own checks. HMAC remains unavailable under FIPS even when
+SHA-256 validation succeeds.
+
+FIPS hosts also check `crypto_capability_report().fips_profile_is_safe()`
+to reject unsupported bundled crypto operations.
+
 ## Fallible hashing
 
 `resolve_session`, `instruction_digest`, `extract_llm_request`,

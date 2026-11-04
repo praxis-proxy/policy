@@ -63,7 +63,7 @@
 //! The FIPS profile is `default-features = false` with `fips` and `api-key`.
 //! At startup, require [`CryptoCapabilityReport::fips_profile_is_safe`] from
 //! [`crypto_capability_report`], which checks the compiled selection, and
-//! `validate_api_key_crypto`, which checks that the provider is loaded. The
+//! [`validate_crypto_backend`], which checks shared SHA-256 availability. The
 //! profile supports SHA-256 only; configuration that enables keyed content
 //! provenance is rejected because it requires HMAC.
 //!
@@ -97,6 +97,7 @@ pub use praxis_policy_apl_runtime::{
 pub use praxis_policy_core::engine::PolicyEngine;
 
 pub use praxis_policy_builtins::BundledCryptoCapability;
+pub use praxis_policy_core::validate_crypto_backend;
 /// Types for the selected backend and fallible hashing operations.
 ///
 /// Match errors with a fallback for future variants:
@@ -209,7 +210,7 @@ pub use praxis_policy_builtins::plugins::elicitation_ciba::{
 #[cfg(feature = "api-key")]
 pub use praxis_policy_builtins::plugins::identity_api_key::{
     ApiKeyCryptoBackend, ApiKeyCryptoError, ApiKeyIdentityFactory, KIND as API_KEY_KIND,
-    api_key_crypto_backend, validate_api_key_crypto,
+    api_key_crypto_backend,
 };
 #[cfg(feature = "jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{

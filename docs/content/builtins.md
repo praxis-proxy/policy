@@ -93,13 +93,13 @@ praxis-policy = { version = "0.5", default-features = false, features = ["fips",
 ```
 
 ```rust,ignore
-use praxis_policy::{crypto_capability_report, validate_api_key_crypto};
+use praxis_policy::{crypto_capability_report, validate_crypto_backend};
 
 let report = crypto_capability_report();
 if !report.fips_profile_is_safe() {
     anyhow::bail!("Policy crypto graph is not API-key-only FIPS safe: {report:?}");
 }
-validate_api_key_crypto()?;
+validate_crypto_backend()?;
 tracing::info!(crypto = ?report, "Policy crypto providers are ready");
 ```
 
@@ -107,7 +107,9 @@ The capability report reflects the unified builtin features, including direct
 dependency feature unification. It lists JWT,
 OAuth, Vault delegation, and Valkey when enabled because those builtins retain
 RustCrypto operations. The independent startup check verifies OpenSSL can
-fetch FIPS SHA-256. The host must verify its final image and runtime separately.
+perform FIPS SHA-256 for every user of Policy's shared backend. Plugins
+with independent crypto need their own checks; HMAC remains unavailable
+under FIPS. The host must verify its final image and runtime separately.
 
 Every crate in the graph must leave the backend choice to the host.
 `default-features = false` at the top cannot remove `crypto-rustcrypto`

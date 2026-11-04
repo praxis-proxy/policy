@@ -9,8 +9,10 @@ mod tests {
 
     #[cfg(all(feature = "crypto-rustcrypto", not(feature = "api-key")))]
     #[test]
-    fn ordinary_engine_reports_no_api_key_backend() {
+    fn ordinary_engine_reports_no_api_key_backend() -> Result<(), policy::CryptoError> {
+        policy::validate_crypto_backend()?;
         assert_report(CryptoBackend::RustCrypto, None, false);
+        Ok(())
     }
 
     #[cfg(all(feature = "crypto-rustcrypto", feature = "api-key"))]

@@ -115,4 +115,4 @@ mod trace_capture;
 /// Config visitors, which let a dialect compile its own route blocks at load time.
 pub mod visitor;
 
-pub use crypto::{CryptoBackend, CryptoError, crypto_backend};
+pub use crypto::{CryptoBackend, CryptoError, crypto_backend, validate_crypto_backend};

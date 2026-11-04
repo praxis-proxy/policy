@@ -3,9 +3,7 @@
 
 //! API-key behavior with the OpenSSL FIPS feature selected.
 
-use praxis_policy_builtins::plugins::identity_api_key::{
-    ApiKeyCryptoError, validate_api_key_crypto,
-};
+use praxis_policy_core::{CryptoError, validate_crypto_backend};
 
 use crate::support::{RecordFile, denial_code, file_config, hash, resolve_with_header, resolver};
 
@@ -20,7 +18,7 @@ async fn fips_api_key_allow_and_deny_follow_provider_availability() {
     ));
     let resolver = resolver(file_config(file.path(), None)).expect("the config builds");
 
-    match validate_api_key_crypto() {
+    match validate_crypto_backend() {
         Ok(()) => {
             let known = resolve_with_header(&resolver, KEY).await;
             assert!(
@@ -41,7 +39,7 @@ async fn fips_api_key_allow_and_deny_follow_provider_availability() {
                 "the FIPS provider is required in this environment: {error}"
             );
             assert!(
-                matches!(error, ApiKeyCryptoError::OpenSsl(_)),
+                matches!(error, CryptoError::OpenSsl(_)),
                 "FIPS provider failures must be returned as OpenSSL errors: {error}"
             );
 
