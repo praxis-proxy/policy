@@ -307,7 +307,7 @@ docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-ciba reset on '>ciba-pw' \
   +hget +hexists +hdel +time +multi +exec +evalsha '+script|load' \
   +ping +unwatch '+client|setinfo'
 PPE_ACL_VALKEY=127.0.0.1:6380 PPE_TAINT_PW=taint-pw PPE_CIBA_PW=ciba-pw \
-  cargo nextest run -p praxis-policy-builtins --features "crypto-rustcrypto,valkey" --test valkey \
+  cargo nextest run -p praxis-policy-builtins --features "crypto-rustcrypto,valkey,elicitation-ciba" --test valkey \
   --run-ignored only -E 'test(documented_acl_users)'
 docker stop ppe-acl-valkey
 ```
@@ -349,8 +349,9 @@ The API-key cases check both the file-index and cache failure alarms.
 `test-fips-provider` runs the core, CMF and runtime suites under `fips`,
 including startup recovery after provider loading in an isolated test process;
 it requires `PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded OpenSSL FIPS provider,
-as in the CI job. Both fail when a named test selects
-nothing, so a rename cannot pass silently.
+as in the CI job. Both fail when a named test selects nothing. Groups of
+exact names also require the expected test count, so a partial match cannot
+silently drop a renamed test.
 
 ## Related documentation
 

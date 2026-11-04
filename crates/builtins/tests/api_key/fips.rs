@@ -82,8 +82,8 @@ async fn fips_api_key_allow_and_deny_follow_provider_availability() {
 #[tokio::test]
 async fn a_hashing_failure_skips_the_api_key_directory_and_cache() {
     assert!(
-        std::env::var_os("PRAXIS_REQUIRE_FIPS_PROVIDER").is_none(),
-        "this test requires provider absence"
+        matches!(validate_crypto_backend(), Err(CryptoError::OpenSsl(_))),
+        "this test needs the FIPS provider absent; run `make test-fips-no-provider`"
     );
     let inner = Arc::new(CountingDirectory {
         calls: AtomicUsize::new(0),

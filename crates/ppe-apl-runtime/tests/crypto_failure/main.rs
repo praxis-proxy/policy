@@ -58,7 +58,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_hashing_failure_denies_the_route_before_authorization() {
-        assert_provider_not_required();
+        assert_provider_absent();
         let engine = Arc::new(PolicyEngine::default());
         let pdp = Arc::new(CountingPdp::default());
         let store = Arc::new(CountingStore::default());
@@ -149,7 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_hashing_failure_skips_the_pdp_and_decision_cache() {
-        assert_provider_not_required();
+        assert_provider_absent();
         let pdp = Arc::new(CountingPdp::default());
         let cache = CachedPdpResolver::wrap(
             pdp.clone(),
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn a_hashing_failure_is_not_a_raw_or_sessionless_session_id() {
-        assert_provider_not_required();
+        assert_provider_absent();
         for (tier, extensions) in session_requests() {
             assert!(
                 matches!(resolve_session(&extensions), Err(CryptoError::OpenSsl(_))),
@@ -208,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_hashing_failure_stops_session_hydration() {
-        assert_provider_not_required();
+        assert_provider_absent();
         let engine = Arc::new(PolicyEngine::default());
         let store = Arc::new(CountingStore::default());
         let (events, _capture) = capturing();
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn a_hashing_failure_omits_unkeyed_content_provenance() {
-        assert_provider_not_required();
+        assert_provider_absent();
         let (events, _capture) = capturing();
         assert_eq!(
             praxis_policy_core::hooks::payload::ContentKey::Unkeyed
@@ -277,10 +277,13 @@ mod tests {
     // Test Utilities
     // -----------------------------------------------------------------------------
 
-    fn assert_provider_not_required() {
+    fn assert_provider_absent() {
         assert!(
-            std::env::var_os("PRAXIS_REQUIRE_FIPS_PROVIDER").is_none(),
-            "these tests require provider absence"
+            matches!(
+                praxis_policy_core::validate_crypto_backend(),
+                Err(CryptoError::OpenSsl(_))
+            ),
+            "these tests need the FIPS provider absent; run `make test-fips-no-provider`"
         );
     }
 

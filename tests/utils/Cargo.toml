@@ -4,9 +4,9 @@
 # praxis-policy-test-utils: shared harness for the integration, resilience and
 # security suites under `tests/`.
 #
-# Every dependency is declared without features, and the lib is empty unless
-# `suite` is on. Cargo unifies features across the workspace, so a feature named
-# here would reach the default `--workspace` pass and turn on builtins there.
+# RustCrypto is explicit because this harness uses ordinary JWT fixtures.
+# Builtins stay behind `suite` so the default workspace pass keeps them off.
+# The lib is empty unless `suite` is on.
 # The suites forward `suite`, which only the `make test` second pass enables.
 
 [package]
@@ -49,7 +49,7 @@ experimental-ratelimit = ["suite", "praxis-policy/experimental-ratelimit"]
 
 [dependencies]
 praxis-policy = { workspace = true }
-praxis-policy-core = { workspace = true }
+praxis-policy-core = { workspace = true, features = ["crypto-rustcrypto"] }
 praxis-policy-plugin-pii-scanner = { workspace = true }
 praxis-policy-plugin-audit-logger = { workspace = true }
 

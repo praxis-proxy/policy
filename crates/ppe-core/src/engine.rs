@@ -1063,12 +1063,17 @@ fn warn_on_inactive_settings(cfg: &PolicyConfig) {
         );
     }
     if settings.content_key_source() == Some(crate::config::ContentKeySource::Unkeyed) {
+        #[cfg(feature = "fips")]
+        let remedy =
+            "Disable engine_settings.capture_content_provenance if unkeyed hashes are unacceptable";
+        #[cfg(not(feature = "fips"))]
+        let remedy = "Name a secret in engine_settings.content_provenance_key outside development";
         warn!(
             alarm = "content_provenance_unkeyed",
             "content provenance is UNKEYED: every audit record carries a plain SHA-256 of the \
              payload, and anyone holding a record can test guesses at that payload against it. \
              A short or templated message carrying a redacted value can be recovered this way. \
-             Name a secret in engine_settings.content_provenance_key outside development"
+             {remedy}"
         );
     }
 }
@@ -4864,6 +4869,39 @@ mod tests {
             .load_config(PolicyConfig::default())
             .expect("reload after failed startup");
         std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[test]
+    fn an_unkeyed_provenance_warning_offers_a_supported_remedy() -> Result<(), Box<PluginError>> {
+        let engine = Arc::new(PolicyEngine::default());
+        let (events, _capture) = capturing();
+        engine.load_config_yaml(
+            "engine_settings:\n  capture_content_provenance: true\n  content_provenance_key: unkeyed\n",
+        )?;
+
+        let alarms = events.matching("content_provenance_unkeyed");
+        assert_eq!(alarms.len(), 1, "one warning per config load: {alarms:?}");
+        let warning = &alarms[0];
+        assert!(
+            warning.contains("test guesses"),
+            "the warning must explain the unkeyed digest risk: {warning}"
+        );
+        if cfg!(feature = "fips") {
+            assert!(
+                warning.contains("Disable engine_settings.capture_content_provenance"),
+                "FIPS must offer a supported remedy: {warning}"
+            );
+            assert!(
+                !warning.contains("Name a secret"),
+                "FIPS must not recommend unsupported keyed provenance: {warning}"
+            );
+        } else {
+            assert!(
+                warning.contains("Name a secret in engine_settings.content_provenance_key"),
+                "RustCrypto must retain the keyed provenance remedy: {warning}"
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]

@@ -184,11 +184,14 @@ FIPS_RATELIMIT_TEST := a_crypto_failure_denies_and_logs_once_per_interval
 FIPS_API_KEY := fips,api-key
 FIPS_UNSAFE_BUILTINS := oauth,delegator-vault,valkey
 
-# Run a cargo test command and fail if it selected no tests, which cargo
-# reports as success when a named test was renamed or removed.
+# Cargo succeeds when filters stop matching. Require a nonempty selection and
+# optionally its expected count so a renamed test cannot disappear from a group.
 run_selected = out="$$($(1) 2>&1)" || { echo "$$out"; exit 1; }; echo "$$out"; \
 	if grep -q '^running 0 tests' <<< "$$out"; then \
 		echo "no tests selected by: $(strip $(1))" >&2; exit 1; \
+	fi; \
+	if [ -n "$(2)" ] && ! grep -Eq '^running $(2) tests?$$' <<< "$$out"; then \
+		echo "expected $(2) tests from: $(strip $(1))" >&2; exit 1; \
 	fi
 
 .PHONY: test-fips-capabilities
@@ -201,21 +204,21 @@ test-fips-no-provider:
 		echo "test-fips-no-provider needs PRAXIS_REQUIRE_FIPS_PROVIDER unset" >&2; exit 1; \
 	fi
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
-		--lib -- --exact $(FIPS_REPORT_TEST))
+		--lib -- --exact $(FIPS_REPORT_TEST),1)
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
-		--no-default-features --features $(FIPS_API_KEY) --lib -- --exact $(FIPS_REPORT_TEST))
+		--no-default-features --features $(FIPS_API_KEY) --lib -- --exact $(FIPS_REPORT_TEST),1)
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=jwt $(CARGO) test -p praxis-policy \
 		--no-default-features --features $(FIPS_API_KEY)$(,)praxis-policy-builtins/jwt --lib \
-		-- --exact $(FIPS_REPORT_TEST))
+		-- --exact $(FIPS_REPORT_TEST),1)
 	@for builtin in $(subst $(,), ,$(FIPS_UNSAFE_BUILTINS)); do \
 		$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=$$builtin $(CARGO) test -p praxis-policy \
 			--no-default-features --features $(FIPS_API_KEY)$(,)$$builtin --lib \
-			-- --exact $(FIPS_REPORT_TEST)); \
+			-- --exact $(FIPS_REPORT_TEST),1); \
 	done
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=$(FIPS_UNSAFE_BUILTINS) \
 		$(CARGO) test -p praxis-policy --no-default-features \
 		--features $(FIPS_API_KEY)$(,)$(FIPS_UNSAFE_BUILTINS) --lib \
-		-- --exact $(FIPS_REPORT_TEST))
+		-- --exact $(FIPS_REPORT_TEST),1)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-core --no-default-features \
 		--features fips --lib -- --exact \
 		crypto::tests::hmac_is_unavailable_under_fips \
@@ -224,15 +227,15 @@ test-fips-no-provider:
 		engine::tests::a_missing_crypto_backend_stops_initialization \
 		hooks::payload::tests::a_keyed_digest_is_omitted_under_fips \
 		config::assertions_tests::fips_refuses_a_declared_provenance_key \
-		config::assertions_tests::fips_refuses_provenance_without_a_key_and_offers_only_unkeyed)
+		config::assertions_tests::fips_refuses_provenance_without_a_key_and_offers_only_unkeyed,7)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST) \
-		fips::a_hashing_failure_skips_the_api_key_directory_and_cache)
+		fips::a_hashing_failure_skips_the_api_key_directory_and_cache,2)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-apl-runtime --no-default-features \
 		--features fips --test crypto_failure)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_API_KEY)$(,)experimental-ratelimit --test ratelimit \
-		-- --exact $(FIPS_RATELIMIT_TEST))
+		-- --exact $(FIPS_RATELIMIT_TEST),1)
 
 .PHONY: test-fips-provider
 test-fips-provider:
@@ -242,7 +245,7 @@ test-fips-provider:
 		-- --skip crypto::tests::a_missing_fips_provider_fails_closed \
 		--skip engine::tests::a_missing_crypto_backend_stops_initialization
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
-		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST))
+		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST),1)
 	@$(CARGO) test -p praxis-policy -p praxis-policy-core -p praxis-policy-apl-cmf --no-default-features \
 		--features $(FIPS_API_KEY) --doc
 
@@ -558,6 +561,11 @@ check-features:
 	@$(CARGO) check -p praxis-policy-builtins --lib --no-default-features --features fips,api-key
 	@$(CARGO) check -p praxis-policy --lib --no-default-features --features fips,api-key
 	@$(CARGO) check -p praxis-policy --lib --no-default-features --features crypto-rustcrypto,jwt
+	@$(CARGO) check -p praxis-policy-test-utils --all-targets
+	@$(CARGO) check -p praxis-policy-test-utils --all-targets --features suite
+	@for p in praxis-policy-tests-integration praxis-policy-tests-resilience praxis-policy-tests-security; do \
+		$(CARGO) check -p $$p --all-targets --features suite || exit 1; \
+	done
 	@# The one test that only exists without another feature: CIBA naming the
 	@# missing `valkey` feature. Every other pass builds with it.
 	@$(CARGO) test -p praxis-policy-builtins --features elicitation-ciba --lib \

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::plugins::identity_api_key::crypto::sha256;
+use crate::plugins::identity_api_key::crypto::hash_credential;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -360,10 +360,7 @@ impl FileDirectory {
     fn digest(&self, presented: &PresentedKey) -> Result<String, DirectoryError> {
         match self.config.index {
             IndexKind::Sha256 => {
-                let digest = sha256(presented.as_bytes()).map_err(|error| {
-                    tracing::error!(alarm = "policy_crypto_failure", op = "api_key_index", %error);
-                    DirectoryError::Unavailable("API key hashing failed".to_owned())
-                })?;
+                let digest = hash_credential(presented, "api_key_index")?;
                 let mut out = String::with_capacity("sha256:".len() + SHA256_HEX_LEN);
                 out.push_str("sha256:");
                 for byte in digest {

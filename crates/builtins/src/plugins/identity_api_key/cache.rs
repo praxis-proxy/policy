@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;
 
-use crate::plugins::identity_api_key::crypto::sha256;
+use crate::plugins::identity_api_key::crypto::hash_credential;
 use praxis_policy_core::host::HostServices;
 use serde::{Deserialize, Serialize};
 
@@ -184,10 +184,7 @@ impl CachingDirectory {
     /// SHA-256 per lookup and removes that entirely. It is also what makes the
     /// entry safe to count, log and size.
     fn key_of(presented: &PresentedKey) -> Result<[u8; 32], DirectoryError> {
-        sha256(presented.as_bytes()).map_err(|error| {
-            tracing::error!(alarm = "policy_crypto_failure", op = "api_key_cache", %error);
-            DirectoryError::Unavailable("API key hashing failed".to_owned())
-        })
+        hash_credential(presented, "api_key_cache")
     }
 
     /// A live entry for `key`, if there is one.
