@@ -155,7 +155,7 @@ pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
     #[cfg(feature = "fips")]
     {
         let _ = (key, bytes);
-        return Err(CryptoError::HmacUnavailable);
+        Err(CryptoError::HmacUnavailable)
     }
     #[cfg(feature = "crypto-rustcrypto")]
     {

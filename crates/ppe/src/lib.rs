@@ -415,6 +415,7 @@ pub fn install_builtins_with_default_http_transport(mgr: &std::sync::Arc<PolicyE
 /// `make test-fips-capabilities`, so the expectation comes from the
 /// invocation rather than from the report under test.
 #[cfg(test)]
+#[allow(clippy::panic, reason = "tests")]
 mod crypto_capability_tests {
     #[cfg(feature = "fips")]
     use super::BundledCryptoCapability;

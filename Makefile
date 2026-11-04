@@ -202,6 +202,14 @@ fmt:
 clippy:
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
 	@$(CARGO) clippy --workspace --all-targets --features "$(DEFAULT_FEATURES)" -- -D warnings
+	@$(MAKE) clippy-fips
+
+# The FIPS profile compiles code no RustCrypto pass sees. Linting the facade
+# also lints core, CMF, runtime and builtins in that build.
+.PHONY: clippy-fips
+clippy-fips:
+	@$(CARGO) clippy -p praxis-policy --all-targets --no-default-features \
+		--features $(FIPS_API_KEY) -- -D warnings
 
 # CI-safe gate: read-only fmt check plus clippy. Lint levels come from
 # [workspace.lints] in Cargo.toml.
@@ -214,6 +222,7 @@ lint:
 # reaches only cedar, cel, and opa through `ppe-pdp-diff`.
 	@$(CARGO) clippy --workspace --all-targets --features "$(DEFAULT_FEATURES)" -- -D warnings
 	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
+	@$(MAKE) clippy-fips
 	@echo "lint passed"
 
 .PHONY: lint-fix
