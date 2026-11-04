@@ -1173,7 +1173,7 @@ async fn a_persistent_check_failure_logs_once_per_interval() {
 
     let failures: Vec<&String> = errors
         .iter()
-        .filter(|event| event.contains("Limitador check failed"))
+        .filter(|event| event.contains("rate limit check failed"))
         .collect();
     assert_eq!(
         failures.len(),

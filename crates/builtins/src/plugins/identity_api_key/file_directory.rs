@@ -360,8 +360,10 @@ impl FileDirectory {
     fn digest(&self, presented: &PresentedKey) -> Result<String, DirectoryError> {
         match self.config.index {
             IndexKind::Sha256 => {
-                let digest = sha256(presented.as_bytes())
-                    .map_err(|error| DirectoryError::Unavailable(error.to_string()))?;
+                let digest = sha256(presented.as_bytes()).map_err(|error| {
+                    tracing::error!(alarm = "policy_crypto_failure", op = "api_key_index", %error);
+                    DirectoryError::Unavailable("API key hashing failed".to_owned())
+                })?;
                 let mut out = String::with_capacity("sha256:".len() + SHA256_HEX_LEN);
                 out.push_str("sha256:");
                 for byte in digest {

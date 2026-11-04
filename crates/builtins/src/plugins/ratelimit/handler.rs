@@ -442,7 +442,7 @@ impl RateLimit {
                 error = %cause,
                 suppressed,
                 interval_seconds = FAILURE_LOG_INTERVAL_SECS,
-                "ratelimit: Limitador check failed, so the request is denied; repeats are \
+                "ratelimit: rate limit check failed, so the request is denied; repeats are \
                  counted in `suppressed` and logged once per interval",
             );
         }
@@ -514,7 +514,9 @@ impl HookHandler<HttpHook> for RateLimit {
         // name is bound to one bag attribute.
         let bag = match BagBuilder::new().with_extensions(extensions) {
             Ok(builder) => builder.build(),
-            Err(error) => return self.deny_check_failed(&error),
+            Err(error) => {
+                return self.deny_check_failed(&format_args!("attribute bag hashing: {error}"));
+            },
         };
         let mut values = HashMap::with_capacity(self.bindings.len());
         for (variable, attribute) in &self.bindings {

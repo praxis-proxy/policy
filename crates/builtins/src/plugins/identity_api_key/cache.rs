@@ -184,7 +184,10 @@ impl CachingDirectory {
     /// SHA-256 per lookup and removes that entirely. It is also what makes the
     /// entry safe to count, log and size.
     fn key_of(presented: &PresentedKey) -> Result<[u8; 32], DirectoryError> {
-        sha256(presented.as_bytes()).map_err(|error| DirectoryError::Unavailable(error.to_string()))
+        sha256(presented.as_bytes()).map_err(|error| {
+            tracing::error!(alarm = "policy_crypto_failure", op = "api_key_cache", %error);
+            DirectoryError::Unavailable("API key hashing failed".to_owned())
+        })
     }
 
     /// A live entry for `key`, if there is one.

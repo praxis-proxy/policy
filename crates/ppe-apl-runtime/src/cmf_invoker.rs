@@ -178,7 +178,8 @@ where
         // that hydration performs.
         let session_id: Option<String> = crate::session_resolver::resolve_session(&extensions)
             .map_err(|error| {
-                SessionStoreError::Backend(format!("session id hashing failed: {error}"))
+                tracing::error!(alarm = "policy_crypto_failure", op = "session_id", %error);
+                SessionStoreError::Backend("session id hashing failed".to_owned())
             })?
             .map(|(sid, _src)| sid);
 
