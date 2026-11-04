@@ -15,6 +15,7 @@ use praxis_policy_apl_cmf::constants::{
     BAG_HTTP_CLIENT_ADDRESS, BAG_HTTP_METHOD, BAG_SUBJECT_ID, DETAIL_HTTP_STATUS,
 };
 use praxis_policy_apl_cmf::{BagBuilder, capability_namespaces, known_read_capabilities};
+use praxis_policy_core::CryptoError;
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
@@ -84,6 +85,7 @@ pub(super) struct RateLimit {
     config: PluginConfig,
     condition_rules: Vec<Vec<ConditionCheck>>,
     computed_rules: Vec<ComputedCounterRule>,
+    crypto_failure_log: IntervalLog,
     has_limit_conditions: bool,
     limiter: RateLimiter,
     macro_locals: BTreeSet<String>,
@@ -273,6 +275,7 @@ impl RateLimit {
             config,
             condition_rules,
             computed_rules,
+            crypto_failure_log: IntervalLog::default(),
             has_limit_conditions,
             limiter,
             macro_locals,
@@ -446,10 +449,23 @@ impl RateLimit {
                  counted in `suppressed` and logged once per interval",
             );
         }
-        PluginResult::deny(with_status(
-            PluginViolation::new(CODE_CHECK_FAILED, "request rate limit check failed"),
-            STATUS_SERVICE_UNAVAILABLE,
-        ))
+        check_failed_denial()
+    }
+
+    fn deny_crypto_failed(&self, error: &CryptoError) -> PluginResult<HttpPayload> {
+        if let Some(suppressed) = self.crypto_failure_log.admit() {
+            tracing::error!(
+                alarm = "policy_crypto_failure",
+                op = "attribute_bag",
+                plugin = %self.config.name,
+                %error,
+                suppressed,
+                interval_seconds = FAILURE_LOG_INTERVAL_SECS,
+                "ratelimit: attribute bag hashing failed, so the request is denied; repeats are \
+                 counted in `suppressed` and logged once per interval",
+            );
+        }
+        check_failed_denial()
     }
 
     /// Deny an over-limit request with the client-safe view of its most
@@ -515,7 +531,7 @@ impl HookHandler<HttpHook> for RateLimit {
         let bag = match BagBuilder::new().with_extensions(extensions) {
             Ok(builder) => builder.build(),
             Err(error) => {
-                return self.deny_check_failed(&format_args!("attribute bag hashing: {error}"));
+                return self.deny_crypto_failed(&error);
             },
         };
         let mut values = HashMap::with_capacity(self.bindings.len());
@@ -584,6 +600,13 @@ impl HookHandler<HttpHook> for RateLimit {
 // -----------------------------------------------------------------------------
 // Private Utilities
 // -----------------------------------------------------------------------------
+
+fn check_failed_denial() -> PluginResult<HttpPayload> {
+    PluginResult::deny(with_status(
+        PluginViolation::new(CODE_CHECK_FAILED, "request rate limit check failed"),
+        STATUS_SERVICE_UNAVAILABLE,
+    ))
+}
 
 fn with_status(violation: PluginViolation, status: i64) -> PluginViolation {
     violation

@@ -180,6 +180,7 @@ check-fips-graph:
 FIPS_REPORT_TEST := crypto_capability_tests::report_matches_the_expected_builtins
 FIPS_LIBS := -p praxis-policy-core -p praxis-policy-apl-cmf -p praxis-policy-apl-runtime
 FIPS_API_KEY_TEST := fips::fips_api_key_allow_and_deny_follow_provider_availability
+FIPS_RATELIMIT_TEST := a_crypto_failure_denies_and_logs_once_per_interval
 FIPS_API_KEY := fips,api-key
 FIPS_UNSAFE_BUILTINS := oauth,delegator-vault,valkey
 
@@ -194,7 +195,11 @@ run_selected = out="$$($(1) 2>&1)" || { echo "$$out"; exit 1; }; echo "$$out"; \
 test-fips-capabilities: test-fips-no-provider
 
 .PHONY: test-fips-no-provider
+test-fips-no-provider: export OPENSSL_CONF := $(CURDIR)/.github/fips-no-provider.cnf
 test-fips-no-provider:
+	@if printenv PRAXIS_REQUIRE_FIPS_PROVIDER >/dev/null; then \
+		echo "test-fips-no-provider needs PRAXIS_REQUIRE_FIPS_PROVIDER unset" >&2; exit 1; \
+	fi
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
 		--lib -- --exact $(FIPS_REPORT_TEST))
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
@@ -221,6 +226,9 @@ test-fips-no-provider:
 		config::assertions_tests::fips_refuses_provenance_without_a_key_and_offers_only_unkeyed)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST))
+	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY)$(,)experimental-ratelimit --test ratelimit \
+		-- --exact $(FIPS_RATELIMIT_TEST))
 
 .PHONY: test-fips-provider
 test-fips-provider:
@@ -255,6 +263,8 @@ clippy:
 clippy-fips:
 	@$(CARGO) clippy -p praxis-policy --all-targets --no-default-features \
 		--features $(FIPS_API_KEY) -- -D warnings
+	@$(CARGO) clippy -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY),experimental-ratelimit --test ratelimit -- -D warnings
 
 # CI-safe gate: read-only fmt check plus clippy. Lint levels come from
 # [workspace.lints] in Cargo.toml.
