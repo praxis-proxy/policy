@@ -127,6 +127,7 @@ jobs:
       # No FIPS provider here: checks reports, refusals and fail-closed hashing.
       - run: make test-fips-no-provider
       - run: make check-features
+      - run: make check-crypto-consumer
 
   fips-provider-tests:
     name: FIPS provider tests

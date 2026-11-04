@@ -60,6 +60,13 @@ a scripted transport.
 
 ## Testing what reaches outside the process
 
+`make check-crypto-consumer` builds the facade with the three compatible
+reference plugins in `tests/consumers/crypto`, a separate Cargo workspace
+with locked dependencies. It asserts ordinary and FIPS capability reports,
+checks the FIPS production dependency graph, and requires the expected
+diagnostics for missing or conflicting backends. CI runs this alongside
+the per-package feature checks.
+
 Plugins that fetch JWKS, exchange tokens, or dispatch approvals go
 through the host's `HttpTransport`, which makes their failure paths
 testable without a server. `praxis_policy_core::http_testing` provides

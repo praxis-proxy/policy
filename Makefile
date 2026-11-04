@@ -41,6 +41,7 @@ help:
 	@echo "  check             cargo check the workspace"
 	@echo "  check-fips-graph  Ensure FIPS graphs link OpenSSL and no other crypto"
 	@echo "  check-features    cargo check each builtin feature and reference plugin"
+	@echo "  check-crypto-consumer  Verify standalone backend composition and reports"
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
@@ -121,6 +122,42 @@ check:
 
 NON_FIPS_CRYPTO := sha2|hmac|ring|rustls|aws-lc-rs|aws-lc-sys
 
+CRYPTO_CONSUMER_MANIFEST := tests/consumers/crypto/Cargo.toml
+CRYPTO_CONSUMER_CARGO = CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),target))" $(CARGO)
+
+.PHONY: check-crypto-consumer
+check-crypto-consumer:
+	@$(CARGO) fmt --manifest-path $(CRYPTO_CONSUMER_MANIFEST) -- --check
+	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --lib)
+	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --features api-key --lib)
+	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --no-default-features --features fips$(,)api-key --lib)
+	@for features in crypto-rustcrypto crypto-rustcrypto,api-key fips,api-key; do \
+		$(CRYPTO_CONSUMER_CARGO) clippy --manifest-path $(CRYPTO_CONSUMER_MANIFEST) \
+			--locked --no-default-features --features "$$features" --all-targets -- -D warnings; \
+	done
+	@tree="$$($(CRYPTO_CONSUMER_CARGO) tree --manifest-path $(CRYPTO_CONSUMER_MANIFEST) \
+		--locked --no-default-features --features fips,api-key -e normal,build --prefix none)"; \
+	if grep -Eq "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree"; then \
+		echo "FIPS consumer links non-FIPS crypto:" >&2; \
+		grep -E "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree" >&2; exit 1; \
+	fi; \
+	grep -q '^openssl v' <<< "$$tree" || \
+		{ echo "FIPS consumer is missing OpenSSL" >&2; exit 1; }
+	@for features in fips,api-key,plugin-defaults api-key; do \
+		if out="$$($(CRYPTO_CONSUMER_CARGO) check --manifest-path $(CRYPTO_CONSUMER_MANIFEST) \
+			--locked --no-default-features --features "$$features" --lib 2>&1)"; then \
+			echo "consumer unexpectedly built with $$features" >&2; exit 1; \
+		fi; \
+		echo "$$out"; \
+		case "$$features" in \
+			api-key) diagnostic="select a Policy crypto backend: crypto-rustcrypto or fips" ;; \
+			*) diagnostic="select one Policy crypto backend: crypto-rustcrypto or fips" ;; \
+		esac; \
+		grep -Fq "$$diagnostic" <<< "$$out" || \
+			{ echo "consumer failed without the expected backend diagnostic" >&2; exit 1; }; \
+	done
+	@echo "Standalone consumer reports, dependency graph and backend refusals passed"
+
 .PHONY: check-fips-graph
 check-fips-graph:
 	@for pkg in praxis-policy praxis-policy-builtins; do \
@@ -165,6 +202,11 @@ test-fips-no-provider:
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=jwt $(CARGO) test -p praxis-policy \
 		--no-default-features --features $(FIPS_API_KEY)$(,)praxis-policy-builtins/jwt --lib \
 		-- --exact $(FIPS_REPORT_TEST))
+	@for builtin in $(subst $(,), ,$(FIPS_UNSAFE_BUILTINS)); do \
+		$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=$$builtin $(CARGO) test -p praxis-policy \
+			--no-default-features --features $(FIPS_API_KEY)$(,)$$builtin --lib \
+			-- --exact $(FIPS_REPORT_TEST)); \
+	done
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=$(FIPS_UNSAFE_BUILTINS) \
 		$(CARGO) test -p praxis-policy --no-default-features \
 		--features $(FIPS_API_KEY)$(,)$(FIPS_UNSAFE_BUILTINS) --lib \

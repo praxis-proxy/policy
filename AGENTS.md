@@ -23,6 +23,7 @@ the responsible human contributor signs off. Do not add AI tool trailers.
 
 ```console
 make check          # type-check both feature sets (never links)
+make check-crypto-consumer  # standalone backend composition and reports
 make build          # workspace build (debug)
 make test           # all workspace tests (two passes)
 make test-integration  # integration + resilience + security suites
