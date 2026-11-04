@@ -226,7 +226,10 @@ test-fips-no-provider:
 		config::assertions_tests::fips_refuses_a_declared_provenance_key \
 		config::assertions_tests::fips_refuses_provenance_without_a_key_and_offers_only_unkeyed)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
-		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST))
+		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST) \
+		fips::a_hashing_failure_skips_the_api_key_directory_and_cache)
+	@$(call run_selected,$(CARGO) test -p praxis-policy-apl-runtime --no-default-features \
+		--features fips --test crypto_failure)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_API_KEY)$(,)experimental-ratelimit --test ratelimit \
 		-- --exact $(FIPS_RATELIMIT_TEST))
@@ -269,6 +272,12 @@ clippy-fips:
 		--features $(FIPS_API_KEY) -- -D warnings
 	@$(CARGO) clippy -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_API_KEY),experimental-ratelimit --test ratelimit -- -D warnings
+	@$(CARGO) clippy -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY) --test api_key -- -D warnings
+	@$(CARGO) clippy -p praxis-policy-apl-runtime --all-targets --no-default-features \
+		--features fips -- -D warnings
+	@$(CARGO) clippy -p praxis-policy-core --all-targets --no-default-features \
+		--features fips -- -D warnings
 
 # CI-safe gate: read-only fmt check plus clippy. Lint levels come from
 # [workspace.lints] in Cargo.toml.

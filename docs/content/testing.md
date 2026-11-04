@@ -342,7 +342,12 @@ default-provider-only OpenSSL configuration and requires
 `PRAXIS_REQUIRE_FIPS_PROVIDER` to be unset. Its rate-limit test invokes the
 handler directly and asserts a safe denial and
 throttled crypto alarm when instruction hashing fails.
-`test-fips-provider` runs the core, CMF and runtime suites under `fips`;
+The runtime crypto-failure harness checks route denials, PDP-cache failures,
+session-id failures and unkeyed audit digest omission, including safe errors
+and skipped downstream work.
+The API-key cases check both the file-index and cache failure alarms.
+`test-fips-provider` runs the core, CMF and runtime suites under `fips`,
+including startup recovery after provider loading in an isolated test process;
 it requires `PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded OpenSSL FIPS provider,
 as in the CI job. Both fail when a named test selects
 nothing, so a rename cannot pass silently.

@@ -287,19 +287,6 @@ mod tests {
 
     use super::*;
 
-    fn call_with_map(alpha_first: bool) -> PdpCall {
-        let yaml = if alpha_first {
-            "alpha: 1\nbeta: 2\n"
-        } else {
-            "beta: 2\nalpha: 1\n"
-        };
-        let args: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        PdpCall {
-            dialect: PdpDialect::Cel,
-            args,
-        }
-    }
-
     #[test]
     fn map_iteration_order_does_not_change_the_digest() {
         let bag = AttributeBag::new();
@@ -426,5 +413,196 @@ mod tests {
         .unwrap();
         assert_ne!(empty, with_args);
         assert_eq!(with_args, reordered);
+    }
+
+    #[test]
+    fn every_supported_dialect_has_a_distinct_cache_key() {
+        let keys: Vec<CacheKey> = [
+            PdpDialect::Cedar,
+            PdpDialect::Opa,
+            PdpDialect::AuthZen,
+            PdpDialect::NeMo,
+            PdpDialect::Cel,
+            PdpDialect::Custom("custom-a".to_owned()),
+            PdpDialect::Custom("custom-b".to_owned()),
+        ]
+        .into_iter()
+        .map(|dialect| {
+            CacheKey::for_call(
+                &PdpCall {
+                    dialect,
+                    args: serde_yaml::Value::Null,
+                },
+                &AttributeBag::new(),
+            )
+        })
+        .collect();
+        assert_distinct(&keys);
+    }
+
+    #[test]
+    fn bag_value_types_and_values_have_distinct_cache_keys() {
+        let keys: Vec<CacheKey> = [
+            AttributeValue::Bool(false),
+            AttributeValue::Bool(true),
+            AttributeValue::Int(0),
+            AttributeValue::Int(1),
+            AttributeValue::Float(0.0),
+            AttributeValue::Float(1.0),
+            AttributeValue::String("0".to_owned()),
+            AttributeValue::String("1".to_owned()),
+            AttributeValue::StringSet(HashSet::new()),
+            AttributeValue::StringSet(HashSet::from(["1".to_owned()])),
+            AttributeValue::NonScalar,
+        ]
+        .into_iter()
+        .map(|value| {
+            let mut bag = AttributeBag::new();
+            bag.set("value", value);
+            CacheKey::for_call(&call_with_map(true), &bag)
+        })
+        .collect();
+        assert_distinct(&keys);
+    }
+
+    #[test]
+    fn yaml_value_types_and_values_have_distinct_cache_keys() {
+        let keys: Vec<CacheKey> = [
+            "null",
+            "false",
+            "true",
+            "0",
+            "1",
+            "18446744073709551615",
+            "1.0",
+            "1.5",
+            "'1'",
+            "[]",
+            "[1]",
+            "{}",
+            "{x: 1}",
+            "!note 1",
+        ]
+        .into_iter()
+        .map(yaml_key)
+        .collect();
+        assert_distinct(&keys);
+    }
+
+    #[test]
+    fn json_value_types_and_values_have_distinct_cache_keys() {
+        let keys: Vec<CacheKey> = [
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(true),
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(1.0),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+            serde_json::json!([]),
+            serde_json::json!([1]),
+            serde_json::json!({}),
+            serde_json::json!({"x": 1}),
+        ]
+        .into_iter()
+        .map(json_key)
+        .collect();
+        assert_distinct(&keys);
+    }
+
+    #[test]
+    fn structured_input_presence_and_slot_have_distinct_cache_keys() {
+        let call = call_with_map(true);
+        let bag = AttributeBag::new();
+        let null = Arc::new(serde_json::Value::Null);
+        let keys: Vec<CacheKey> = [
+            StructuredInput::default(),
+            StructuredInput::new(None, Some(null.clone())),
+            StructuredInput::new(Some(null.clone()), None),
+            StructuredInput::new(Some(null.clone()), Some(null)),
+        ]
+        .into_iter()
+        .map(|input| CacheKey::for_evaluation(&call, &bag, &input).unwrap())
+        .collect();
+        assert_distinct(&keys);
+    }
+
+    #[test]
+    fn nested_yaml_map_order_is_ignored_and_sequence_order_matters() {
+        let left = yaml_key(
+            "? [1, true]\n: {x: [false, 2.5], y: 18446744073709551615}\n? {a: 1, b: 2}\n: other\n",
+        );
+        let reordered = yaml_key(
+            "? {b: 2, a: 1}\n: other\n? [1, true]\n: {y: 18446744073709551615, x: [false, 2.5]}\n",
+        );
+        let reversed = yaml_key(
+            "? [true, 1]\n: {x: [false, 2.5], y: 18446744073709551615}\n? {a: 1, b: 2}\n: other\n",
+        );
+        assert_eq!(
+            left, reordered,
+            "mapping order must not affect nested keys or values"
+        );
+        assert_ne!(left, reversed, "sequence order is part of a mapping key");
+        assert_ne!(yaml_key("[1, 2]"), yaml_key("[2, 1]"));
+    }
+
+    #[test]
+    fn nested_json_object_order_is_ignored_and_array_order_matters() {
+        let left =
+            json_key(serde_json::json!({"a": {"x": [null, false, 2.5, "one"], "y": 1}, "b": true}));
+        let reordered =
+            json_key(serde_json::json!({"b": true, "a": {"y": 1, "x": [null, false, 2.5, "one"]}}));
+        let reversed =
+            json_key(serde_json::json!({"a": {"x": ["one", 2.5, false, null], "y": 1}, "b": true}));
+        assert_eq!(left, reordered, "object order must not change nested keys");
+        assert_ne!(left, reversed, "array order must change the key");
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    fn assert_distinct(keys: &[CacheKey]) {
+        for (index, key) in keys.iter().enumerate() {
+            for other in keys.iter().skip(index + 1) {
+                assert_ne!(
+                    key, other,
+                    "distinct input types or values must not share a cache key"
+                );
+            }
+        }
+    }
+
+    fn call_with_map(alpha_first: bool) -> PdpCall {
+        let yaml = if alpha_first {
+            "alpha: 1\nbeta: 2\n"
+        } else {
+            "beta: 2\nalpha: 1\n"
+        };
+        PdpCall {
+            dialect: PdpDialect::Cel,
+            args: serde_yaml::from_str(yaml).unwrap(),
+        }
+    }
+
+    fn json_key(value: serde_json::Value) -> CacheKey {
+        CacheKey::for_evaluation(
+            &call_with_map(true),
+            &AttributeBag::new(),
+            &StructuredInput::new(None, Some(Arc::new(value))),
+        )
+        .unwrap()
+    }
+
+    fn yaml_key(yaml: &str) -> CacheKey {
+        CacheKey::for_call(
+            &PdpCall {
+                dialect: PdpDialect::Cel,
+                args: serde_yaml::from_str(yaml).unwrap(),
+            },
+            &AttributeBag::new(),
+        )
     }
 }

@@ -219,6 +219,13 @@ fn fips_sha256() -> Result<Arc<openssl::md::Md>, CryptoError> {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------------------
+
+    #[cfg(feature = "fips")]
+    const FIPS_RECOVERY_CHILD: &str = "PPE_FIPS_RECOVERY_CHILD";
+
     /// FIPS 180-2 examples: empty, one block, and a two-block message.
     const SHA256_VECTORS: [(&[u8], &str); 3] = [
         (
@@ -234,6 +241,10 @@ mod tests {
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
         ),
     ];
+
+    // -----------------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------------
 
     #[test]
     fn an_available_backend_passes_startup_validation() -> Result<(), CryptoError> {
@@ -317,6 +328,71 @@ mod tests {
             validate_crypto_backend(),
             Err(CryptoError::OpenSsl(_))
         ));
+    }
+
+    #[cfg(feature = "fips")]
+    #[tokio::test]
+    async fn a_failed_startup_recovers_when_the_provider_becomes_available()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if std::env::var_os(FIPS_RECOVERY_CHILD).is_none() {
+            assert!(
+                std::env::var_os("PRAXIS_REQUIRE_FIPS_PROVIDER").is_some(),
+                "recovery requires an installed provider; select this test in the provider job"
+            );
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .arg("--exact")
+                .arg("crypto::tests::a_failed_startup_recovers_when_the_provider_becomes_available")
+                .arg("--format=pretty")
+                .arg("--color=never")
+                .env(FIPS_RECOVERY_CHILD, "1")
+                .env(
+                    "OPENSSL_CONF",
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../.github/fips-no-provider.cnf"
+                    ),
+                )
+                .output()?;
+            assert!(
+                output.status.success(),
+                "isolated provider recovery failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+                "the recovery child must execute one test: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return Ok(());
+        }
+
+        let engine = crate::engine::PolicyEngine::default();
+        for _ in 0..2 {
+            let Err(error) = engine.initialize().await else {
+                return Err("startup succeeded without a FIPS provider".into());
+            };
+            assert!(matches!(
+                error.as_ref(),
+                crate::error::PluginError::Crypto {
+                    source: CryptoError::OpenSsl(_)
+                }
+            ));
+            assert!(!engine.is_initialized());
+        }
+
+        let _provider = openssl::provider::Provider::load(None, "fips")?;
+        engine.initialize().await?;
+        assert!(
+            engine.is_initialized(),
+            "startup must succeed after provider loading"
+        );
+        validate_crypto_backend()?;
+        assert_eq!(hex(&sha256(b"abc")?), SHA256_VECTORS[1].1);
+        engine.initialize().await?;
+        engine.shutdown().await;
+        assert!(!engine.is_initialized());
+        Ok(())
     }
 
     // -----------------------------------------------------------------------------
