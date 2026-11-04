@@ -54,7 +54,7 @@
 //!
 //! No plugins are on by default (`praxis-policy` alone is the engine).
 //! `builtins` enables every bundled extension, including the Valkey session
-//! store; or pick a granular subset (`jwt`, `api-key`, `oauth`, `elicitation-ciba`,
+//! store; or pick a granular subset (`jwt`, `api-key`, `basic`, `oauth`, `elicitation-ciba`,
 //! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
@@ -144,6 +144,10 @@ pub use praxis_policy_builtins::plugins::elicitation_ciba::{
 pub use praxis_policy_builtins::plugins::identity_api_key::{
     ApiKeyIdentityFactory, KIND as API_KEY_KIND,
 };
+#[cfg(feature = "basic")]
+pub use praxis_policy_builtins::plugins::identity_basic::{
+    BasicIdentityFactory, KIND as BASIC_KIND,
+};
 #[cfg(feature = "jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{
     JwtIdentityFactory, JwtIdentityFactoryWithReplay, KIND as JWT_KIND,
@@ -187,9 +191,9 @@ pub use praxis_policy_builtins::session::valkey::{
 macro_rules! register_builtins {
     ( $( feature $feat:literal => $krate:ident :: $factory:ident ),* $(,)? ) => {
         /// Register every enabled by-kind plugin factory on `mgr`: identity
-        /// (`jwt`), delegators (`oauth`), and elicitation approvers
-        /// (`elicitation-ciba`). Call before loading a config so the engine can
-        /// instantiate plugins whose YAML `kind:` matches.
+        /// (`jwt`, `api-key`, `basic`), delegators (`oauth`), and elicitation
+        /// approvers (`elicitation-ciba`). Call before loading a config so the
+        /// engine can instantiate plugins whose YAML `kind:` matches.
         ///
         /// A host adds its own with [`PolicyEngine::register_factory`], after
         /// this call so a host registration wins on a shared `kind`.
@@ -219,6 +223,8 @@ use praxis_policy_builtins::plugins::delegator_vault as vault_delegator_builtin;
 use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 #[cfg(feature = "api-key")]
 use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
+#[cfg(feature = "basic")]
+use praxis_policy_builtins::plugins::identity_basic as basic_builtin;
 #[cfg(feature = "jwt")]
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 #[cfg(feature = "experimental-quota")]
@@ -230,6 +236,7 @@ use praxis_policy_builtins::plugins::ratelimit as ratelimit_builtin;
 register_builtins! {
     feature "jwt"                => jwt_builtin::JwtIdentityFactory,
     feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
+    feature "basic"              => basic_builtin::BasicIdentityFactory,
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
     feature "delegator-vault"    => vault_delegator_builtin::VaultDelegatorFactory,
     feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
@@ -451,6 +458,7 @@ mod tests {
         let expected = [
             (cfg!(feature = "jwt"), "identity/jwt"),
             (cfg!(feature = "api-key"), "identity/api-key"),
+            (cfg!(feature = "basic"), "identity/basic"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "delegator-vault"), "delegator/vault"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),

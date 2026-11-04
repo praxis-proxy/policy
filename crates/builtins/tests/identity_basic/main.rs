@@ -16,9 +16,12 @@
     reason = "test and example code"
 )]
 
+mod challenge;
 mod decoding;
 mod htpasswd_backend;
+mod projection;
 mod verifying;
+mod wiring;
 
 /// Shared test utilities for Basic authentication cases.
 pub mod support;

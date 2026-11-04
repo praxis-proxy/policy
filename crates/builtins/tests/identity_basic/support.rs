@@ -226,3 +226,115 @@ pub fn password(plaintext: &str) -> BasicCredential {
     extract_and_decode_with(&format!("Basic {encoded}"), CEILING, usize::MAX)
         .expect("the fixture credential decodes")
 }
+
+// -----------------------------------------------------------------------------
+// Resolver test utilities
+// -----------------------------------------------------------------------------
+
+/// Build a resolver from a `config:` block.
+pub fn resolver(
+    block: serde_json::Value,
+) -> Result<praxis_policy_builtins::plugins::identity_basic::BasicIdentityResolver, String> {
+    use praxis_policy_builtins::plugins::identity_basic::{BasicIdentityResolver, KIND};
+    use praxis_policy_core::plugin::PluginConfig;
+
+    BasicIdentityResolver::new(PluginConfig {
+        name: "basic-auth".into(),
+        kind: KIND.into(),
+        hooks: vec!["identity.resolve".to_owned()],
+        config: Some(block),
+        ..Default::default()
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// A config block naming the `.htpasswd` backend at `path`.
+pub fn htpasswd_block(path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "realm": "ops",
+        "credential": { "kind": "header", "name": "Authorization" },
+        "provider": {
+            "kind": "htpasswd",
+            "path": path,
+            "refresh_secs": 30,
+            "max_staleness_secs": 300,
+        },
+    })
+}
+
+/// The `Authorization: Basic` header value for a user-id and password.
+pub fn basic_header(user_id: &str, plaintext: &str) -> String {
+    format!("Basic {}", b64(format!("{user_id}:{plaintext}").as_bytes()))
+}
+
+/// Run the resolver against a request carrying `value` in `Authorization`.
+pub async fn resolve_with_header(
+    resolver: &praxis_policy_builtins::plugins::identity_basic::BasicIdentityResolver,
+    value: &str,
+) -> praxis_policy_core::hooks::trait_def::PluginResult<praxis_policy_core::identity::IdentityPayload>
+{
+    resolve(
+        resolver,
+        std::collections::HashMap::from([("authorization".to_owned(), value.to_owned())]),
+    )
+    .await
+}
+
+/// Run the resolver against a request carrying `headers`.
+pub async fn resolve(
+    resolver: &praxis_policy_builtins::plugins::identity_basic::BasicIdentityResolver,
+    headers: std::collections::HashMap<String, String>,
+) -> praxis_policy_core::hooks::trait_def::PluginResult<praxis_policy_core::identity::IdentityPayload>
+{
+    use praxis_policy_core::identity::{IdentityPayload, TokenSource};
+
+    let payload = IdentityPayload::new("", TokenSource::Basic).with_headers(headers);
+    resolve_with_payload(resolver, &payload).await
+}
+
+/// Run the resolver against a payload another handler already contributed to,
+/// which is how the executor threads a chain.
+pub async fn resolve_with_payload(
+    resolver: &praxis_policy_builtins::plugins::identity_basic::BasicIdentityResolver,
+    payload: &praxis_policy_core::identity::IdentityPayload,
+) -> praxis_policy_core::hooks::trait_def::PluginResult<praxis_policy_core::identity::IdentityPayload>
+{
+    use praxis_policy_builtins::plugins::identity_basic::BasicIdentityResolver;
+    use praxis_policy_core::context::PluginContext;
+    use praxis_policy_core::hooks::payload::Extensions;
+    use praxis_policy_core::hooks::trait_def::HookHandler;
+    use praxis_policy_core::identity::IdentityHook;
+
+    let ext = Extensions::default();
+    let mut ctx = PluginContext::default();
+    <BasicIdentityResolver as HookHandler<IdentityHook>>::handle(resolver, payload, &ext, &mut ctx)
+        .await
+}
+
+/// The denial code on a result, or `None` when it allowed.
+pub fn denial_code(
+    result: &praxis_policy_core::hooks::trait_def::PluginResult<
+        praxis_policy_core::identity::IdentityPayload,
+    >,
+) -> Option<String> {
+    result
+        .violation
+        .as_ref()
+        .map(|violation| violation.code.clone())
+}
+
+/// The `WWW-Authenticate` value a denial carries, if any.
+pub fn challenge_of(
+    result: &praxis_policy_core::hooks::trait_def::PluginResult<
+        praxis_policy_core::identity::IdentityPayload,
+    >,
+) -> Option<String> {
+    result
+        .violation
+        .as_ref()?
+        .details
+        .get(praxis_policy_apl_cmf::constants::DETAIL_HTTP_HEADERS)?
+        .get("WWW-Authenticate")?
+        .as_str()
+        .map(str::to_owned)
+}

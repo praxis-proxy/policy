@@ -32,9 +32,13 @@ api-key = ["_engine-core", "_plugins", "dep:sha2"]
 # `unicode-normalization` NFC-folds the user-id before it is used as an index
 # key; both must be named here, since `base64` is optional and reached only
 # through other features' edges, and `unicode-normalization` is otherwise just
-# a transitive of the Cedar stack.
+# a transitive of the Cedar stack. `_engine-apl-cmf` is for one constant, the
+# `http.headers` violation-details key the 401 challenge rides: spelling the
+# string literally here instead would be a second definition of a cross-crate
+# contract, silently diverging the day the key is renamed.
 basic = [
   "_engine-core",
+  "_engine-apl-cmf",
   "_plugins",
   "dep:base64",
   "dep:unicode-normalization",

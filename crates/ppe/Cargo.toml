@@ -46,6 +46,7 @@ default = []
 builtins = [
   "jwt",
   "api-key",
+  "basic",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
@@ -64,6 +65,7 @@ experimental = ["dep:tracing"]
 # these, so they are deliberately shorter than the crate names they pull.
 jwt = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/jwt"]
 api-key = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/api-key"]
+basic = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/basic"]
 oauth = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/oauth"]
 delegator-vault = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/delegator-vault"]
 elicitation-ciba = [
