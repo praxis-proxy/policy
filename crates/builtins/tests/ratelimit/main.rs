@@ -1144,12 +1144,22 @@ async fn a_crypto_failure_denies_and_logs_once_per_interval() {
             "[read_subject, read_headers, read_llm_request]",
         )
         .replace("subject_id == 'alice'", "int(subject_id) > 1");
-    let manager = engine_with(&policy).await;
+    let config = praxis_policy_core::config::parse_config(&policy).expect("valid policy");
+    let instance = RateLimitFactory
+        .create(&config.plugins[0])
+        .expect("limiter builds");
+    instance
+        .plugin
+        .initialize()
+        .await
+        .expect("limiter initializes");
+    let handler = &instance.handlers[0].1;
 
     start_capture();
+    let violation = direct_violation(handler.as_ref(), request(Some("alice"), Some("GET"))).await;
     assert_eq!(
-        verdict(&manager, Some("alice"), Some("GET")).await.1,
-        Some((CODE_CHECK_FAILED.to_owned(), Some(503))),
+        (violation.code, violation.proto_error_code),
+        (CODE_CHECK_FAILED.to_owned(), Some(503)),
         "a generic evaluation error must not suppress the first crypto alarm"
     );
     for number in 1..=20 {
@@ -1161,9 +1171,7 @@ async fn a_crypto_failure_denies_and_logs_once_per_interval() {
             }],
             ..Default::default()
         }));
-        let violation = violation_at(&manager, HOOK_RATELIMIT_POST_IDENTITY, extensions)
-            .await
-            .expect("missing-provider hashing denies the request");
+        let violation = direct_violation(handler.as_ref(), extensions).await;
 
         assert_eq!(
             violation.code, CODE_CHECK_FAILED,
@@ -1693,6 +1701,23 @@ async fn engine_with(policy: &str) -> Arc<PolicyEngine> {
         .await
         .expect("rate limiter initializes");
     manager
+}
+
+#[cfg(feature = "fips")]
+async fn direct_violation(
+    handler: &dyn praxis_policy_core::registry::AnyHookHandler,
+    extensions: Extensions,
+) -> PluginViolation {
+    let result = handler
+        .invoke(&HttpPayload, &extensions, &mut Default::default())
+        .await
+        .expect("handler returns a result");
+    let result = praxis_policy_core::executor::extract_erased(result).expect("handler result");
+    assert!(
+        !result.continue_processing,
+        "hashing failure halts processing"
+    );
+    result.violation.expect("handler denies")
 }
 
 async fn engine() -> Arc<PolicyEngine> {

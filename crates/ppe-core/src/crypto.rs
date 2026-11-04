@@ -163,6 +163,9 @@ pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
 
 /// Check that the selected Policy backend can perform SHA-256 at startup.
 ///
+/// [`PolicyEngine::initialize`] calls this automatically. Call it directly
+/// for an earlier preflight check or when using core without an engine.
+///
 /// Covers SHA-256 users of the shared backend. Plugins with independent
 /// crypto require their own checks; HMAC remains unavailable under FIPS.
 ///
@@ -173,6 +176,8 @@ pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// praxis_policy_core::validate_crypto_backend()?;
 /// # Ok::<(), praxis_policy_core::CryptoError>(())
 /// ```
+///
+/// [`PolicyEngine::initialize`]: crate::engine::PolicyEngine::initialize
 pub fn validate_crypto_backend() -> Result<(), CryptoError> {
     sha256(&[])?;
     Ok(())

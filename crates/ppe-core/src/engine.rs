@@ -2484,7 +2484,7 @@ impl PolicyEngine {
         extensions
     }
 
-    /// Initialize every registered plugin.
+    /// Validate the shared crypto backend and initialize every registered plugin.
     ///
     /// Calls `plugin.initialize_with()` on each, handing it the host
     /// services its capabilities allow. Must be called before invoking
@@ -2492,9 +2492,13 @@ impl PolicyEngine {
     ///
     /// # Errors
     ///
+    /// Returns [`PluginError::Crypto`] if shared SHA-256 is unavailable,
+    /// before resolving secrets or initializing plugins.
     /// Returns `PluginError::Execution` when a plugin's initialization
     /// fails. Plugins already initialized in this call are shut down
     /// first, so the engine does not come up half-started.
+    ///
+    /// [`PluginError::Crypto`]: crate::error::PluginError::Crypto
     pub async fn initialize(&self) -> Result<(), Box<PluginError>> {
         if self.initialized.load(Ordering::Acquire) {
             return Ok(());
@@ -2517,6 +2521,17 @@ impl PolicyEngine {
                 count: &self.initializations_in_flight,
             }
         };
+
+        crate::validate_crypto_backend().map_err(|source| {
+            error!(
+                alarm = "policy_crypto_failure",
+                op = "initialize",
+                backend = ?crate::crypto_backend(),
+                error = %source,
+                "Policy crypto backend validation failed"
+            );
+            PluginError::Crypto { source }.boxed()
+        })?;
 
         // Before any plugin. A secret a plugin reads at `initialize_with` has
         // to already be resolved, and a document whose credentials cannot be
@@ -4799,6 +4814,57 @@ mod tests {
     }
 
     // -- Tests --
+
+    #[tokio::test]
+    #[cfg(feature = "fips")]
+    async fn a_missing_crypto_backend_stops_initialization() {
+        let (dir, yaml) = secret_fixture("unused");
+        let engine = engine_reading_secrets(&yaml);
+        std::fs::remove_file(dir.join("upstream.key")).expect("remove secret");
+        let cfg = make_config("startup-probe", 10, PluginMode::Sequential);
+        let plugin = Arc::new(StartupProbe {
+            cfg: cfg.clone(),
+            initializations: AtomicUsize::new(0),
+            shutdowns: AtomicUsize::new(0),
+        });
+        engine
+            .register_handler::<TestHook, _>(Arc::clone(&plugin), cfg)
+            .expect("startup probe registers");
+        let (events, _capture) = capturing();
+
+        for _ in 0..2 {
+            let error = engine
+                .initialize()
+                .await
+                .expect_err("missing provider refuses startup");
+            assert!(matches!(
+                error.as_ref(),
+                PluginError::Crypto {
+                    source: crate::CryptoError::OpenSsl(_)
+                }
+            ));
+            assert!(!engine.is_initialized());
+            assert_eq!(engine.initializations_in_flight.load(Ordering::Acquire), 0);
+            assert!(
+                engine.secrets.get().is_none(),
+                "crypto fails before secret resolution"
+            );
+            assert_eq!(plugin.initializations.load(Ordering::Acquire), 0);
+            assert_eq!(plugin.shutdowns.load(Ordering::Acquire), 0);
+        }
+
+        let alarms = events.matching("policy_crypto_failure");
+        assert_eq!(alarms.len(), 2, "each startup attempt reports its failure");
+        for alarm in alarms {
+            for field in ["[ERROR]", "op=initialize", "backend=OpenSslFips", "error="] {
+                assert!(alarm.contains(field), "missing {field}: {alarm}");
+            }
+        }
+        engine
+            .load_config(PolicyConfig::default())
+            .expect("reload after failed startup");
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
 
     #[tokio::test]
     async fn test_manager_lifecycle() {
@@ -11917,6 +11983,47 @@ routes:
             Some(&None),
             "typed reload clears the previous YAML context"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    #[cfg(feature = "fips")]
+    struct StartupProbe {
+        cfg: PluginConfig,
+        initializations: AtomicUsize,
+        shutdowns: AtomicUsize,
+    }
+
+    #[cfg(feature = "fips")]
+    #[async_trait]
+    impl Plugin for StartupProbe {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+
+        async fn initialize(&self) -> Result<(), Box<PluginError>> {
+            self.initializations.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+            self.shutdowns.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "fips")]
+    impl HookHandler<TestHook> for StartupProbe {
+        async fn handle(
+            &self,
+            _payload: &TestPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> PluginResult<TestPayload> {
+            PluginResult::allow()
+        }
     }
 }
 

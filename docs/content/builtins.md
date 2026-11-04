@@ -83,9 +83,10 @@ runtime and its own plugins compiles nothing extra.
 
 API-key builds with default features use RustCrypto SHA-256. A host building the
 API-key FIPS slice selects API-key plus OpenSSL FIPS hashing, then checks
-the whole-graph capability report and independently checks that the FIPS
-provider is available before serving traffic. The FIPS slice supports SHA-256
-only; configurations that enable keyed content provenance are refused.
+the whole-graph capability report. `PolicyEngine::initialize()` checks that
+the FIPS provider can perform SHA-256 before serving traffic.
+The FIPS slice supports SHA-256 only; configurations that enable keyed content
+provenance are refused.
 Unkeyed content provenance remains available through plain SHA-256:
 
 ```toml
@@ -93,23 +94,25 @@ praxis-policy = { version = "0.5", default-features = false, features = ["fips",
 ```
 
 ```rust,ignore
-use praxis_policy::{crypto_capability_report, validate_crypto_backend};
+use praxis_policy::{crypto_capability_report, PolicyEngine};
 
 let report = crypto_capability_report();
 if !report.fips_profile_is_safe() {
     anyhow::bail!("Policy crypto graph is not API-key-only FIPS safe: {report:?}");
 }
-validate_crypto_backend()?;
+let engine = PolicyEngine::default();
+engine.initialize().await?;
 tracing::info!(crypto = ?report, "Policy crypto providers are ready");
 ```
 
 The capability report reflects the unified builtin features, including direct
 dependency feature unification. It lists JWT,
 OAuth, Vault delegation, and Valkey when enabled because those builtins retain
-RustCrypto operations. The independent startup check verifies OpenSSL can
+RustCrypto operations. Engine initialization verifies OpenSSL can
 perform FIPS SHA-256 for every user of Policy's shared backend. Plugins
 with independent crypto need their own checks; HMAC remains unavailable
-under FIPS. The host must verify its final image and runtime separately.
+under FIPS. `validate_crypto_backend()` remains available for an earlier
+preflight check. The host must verify its final image and runtime separately.
 
 Every crate in the graph must leave the backend choice to the host.
 `default-features = false` at the top cannot remove `crypto-rustcrypto`

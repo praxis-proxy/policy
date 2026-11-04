@@ -30,9 +30,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   Vault delegation, Valkey); `fips_profile_is_safe()` is false while any of
   them is enabled. `validate_crypto_backend()`, exported from core and the
   facade without requiring API-key, checks shared SHA-256 availability.
-  A host needs both: the report covers the build, not the runtime.
+  `PolicyEngine::initialize()` calls this check before resolving secrets or
+  initializing plugins. Hosts still check the capability report and their
+  own crypto requirements.
 - **Crypto failure alarm.** A hashing failure on the request path logs
-  `alarm = "policy_crypto_failure"` with the operation, and an APL route that
+  `alarm = "policy_crypto_failure"` with the operation; shared-backend startup
+  failures emit the same alarm with `op = "initialize"`. An APL route that
   cannot hash its attribute bag denies with `policy.crypto_failed`.
 
 - **Pre- and post-identity rate-limit hooks.** `ratelimit.pre_identity` runs
@@ -179,6 +182,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking Rust API: crypto initialization errors.** `PluginError` adds
+  `Crypto { source: CryptoError }`; exhaustive matches need a new arm.
+  `PolicyEngine::initialize()` refuses startup when the shared SHA-256
+  backend is unavailable, without resolving secrets or starting plugins.
 - **Breaking Rust API: hashing is fallible.** `resolve_session` returns
   `Result<Option<(String, SessionSource)>, CryptoError>`, `instruction_digest`
   returns `Result<String, CryptoError>`, and `extract_llm_request`,

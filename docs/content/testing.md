@@ -336,13 +336,15 @@ are feature-gated and a single pass would hide them.
 
 The FIPS backend is mutually exclusive with RustCrypto, so it has its own
 targets rather than an `--all-features` pass. `test-fips-no-provider` checks
-the capability report, the HMAC and config refusals, and that hashing fails
-closed without a provider. It selects a default-provider-only OpenSSL
-configuration and requires `PRAXIS_REQUIRE_FIPS_PROVIDER` to be unset. Its
-rate-limit test asserts a safe denial and throttled crypto alarm when
-instruction hashing fails. `test-fips-provider` runs the core, CMF and runtime
-suites under `fips`; it requires `PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded
-OpenSSL FIPS provider, as in the CI job. Both fail when a named test selects
+the capability report, the HMAC and config refusals, and that hashing and
+engine initialization fail closed without a provider. It selects a
+default-provider-only OpenSSL configuration and requires
+`PRAXIS_REQUIRE_FIPS_PROVIDER` to be unset. Its rate-limit test invokes the
+handler directly and asserts a safe denial and
+throttled crypto alarm when instruction hashing fails.
+`test-fips-provider` runs the core, CMF and runtime suites under `fips`;
+it requires `PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded OpenSSL FIPS provider,
+as in the CI job. Both fail when a named test selects
 nothing, so a rename cannot pass silently.
 
 ## Related documentation

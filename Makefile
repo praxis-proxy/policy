@@ -221,6 +221,7 @@ test-fips-no-provider:
 		crypto::tests::hmac_is_unavailable_under_fips \
 		crypto::tests::the_fips_build_reports_its_backend \
 		crypto::tests::a_missing_fips_provider_fails_closed \
+		engine::tests::a_missing_crypto_backend_stops_initialization \
 		hooks::payload::tests::a_keyed_digest_is_omitted_under_fips \
 		config::assertions_tests::fips_refuses_a_declared_provenance_key \
 		config::assertions_tests::fips_refuses_provenance_without_a_key_and_offers_only_unkeyed)
@@ -235,7 +236,8 @@ test-fips-provider:
 	@test -n "$$PRAXIS_REQUIRE_FIPS_PROVIDER" || \
 		{ echo "test-fips-provider needs PRAXIS_REQUIRE_FIPS_PROVIDER and a FIPS provider" >&2; exit 1; }
 	@$(CARGO) test $(FIPS_LIBS) --no-default-features --features fips --lib \
-		-- --skip crypto::tests::a_missing_fips_provider_fails_closed
+		-- --skip crypto::tests::a_missing_fips_provider_fails_closed \
+		--skip engine::tests::a_missing_crypto_backend_stops_initialization
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST))
 	@$(CARGO) test -p praxis-policy -p praxis-policy-core -p praxis-policy-apl-cmf --no-default-features \

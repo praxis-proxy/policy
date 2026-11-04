@@ -129,9 +129,15 @@ The crates are versioned and released together.
 
 ## Validate shared hashing at startup
 
-Call `validate_crypto_backend()` before serving requests to check that
-Policy's selected backend can perform SHA-256. The function is exported
-from core and the facade, including builds with no API-key builtin.
+`PolicyEngine::initialize()` checks that Policy's selected backend can
+perform SHA-256 before resolving secrets or initializing plugins. A failure
+returns `PluginError::Crypto`, leaves the engine uninitialized, and permits
+a later retry or configuration reload.
+Configure the OpenSSL FIPS provider before calling `initialize()`.
+
+Hosts can call `validate_crypto_backend()` for an earlier preflight check
+or when using core without an engine. The function is exported from core
+and the facade, including builds with no API-key builtin.
 
 The check covers the shared backend used for session ids, instruction
 digests, decision-cache keys, API-key hashing and plugins that use those
@@ -141,6 +147,11 @@ SHA-256 validation succeeds.
 
 FIPS hosts also check `crypto_capability_report().fips_profile_is_safe()`
 to reject unsupported bundled crypto operations.
+
+`PluginError` adds a `Crypto { source: CryptoError }` variant. Consumers
+with exhaustive matches must add an arm for it. Error records use
+`policy.crypto_failed` and omit backend diagnostics; the typed error and
+the `policy_crypto_failure` startup alarm retain the cause for operators.
 
 ## Fallible hashing
 

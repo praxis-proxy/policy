@@ -45,11 +45,10 @@ The token quota plugin is available separately through `experimental-quota`.
 
 For the current FIPS profile, disable defaults and select only `fips` and
 `api-key`; the host should require
-`crypto_capability_report().fips_profile_is_safe()` and call
-`validate_crypto_backend()` before serving. This profile rejects keyed content
-provenance, which requires HMAC; unkeyed content provenance remains available
-through SHA-256.
-This check covers Policy's shared SHA-256 backend.
+`crypto_capability_report().fips_profile_is_safe()` before serving.
+`PolicyEngine::initialize()` checks that the shared SHA-256 backend works.
+This profile rejects keyed content provenance, which requires HMAC;
+unkeyed content provenance remains available through SHA-256.
 
 The crates are versioned together and released together, so a single `0.4`
 requirement covers the set. Requires Rust 1.92 or newer.

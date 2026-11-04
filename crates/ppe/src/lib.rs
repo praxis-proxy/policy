@@ -62,8 +62,8 @@
 //!
 //! The FIPS profile is `default-features = false` with `fips` and `api-key`.
 //! At startup, require [`CryptoCapabilityReport::fips_profile_is_safe`] from
-//! [`crypto_capability_report`], which checks the compiled selection, and
-//! [`validate_crypto_backend`], which checks shared SHA-256 availability. The
+//! [`crypto_capability_report`], which checks the compiled selection.
+//! [`PolicyEngine::initialize`] checks shared SHA-256 availability. The
 //! profile supports SHA-256 only; configuration that enables keyed content
 //! provenance is rejected because it requires HMAC.
 //!

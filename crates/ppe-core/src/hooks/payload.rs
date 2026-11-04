@@ -304,12 +304,7 @@ macro_rules! impl_plugin_payload {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    reason = "tests"
-)]
+#[expect(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -372,6 +367,10 @@ mod tests {
     }
 
     #[cfg(feature = "crypto-rustcrypto")]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the test asserts the number of digest parts"
+    )]
     #[test]
     fn a_keyed_digest_names_its_scheme_and_key() {
         let h = keyed(KEY_A).digest(b"hello").unwrap();
