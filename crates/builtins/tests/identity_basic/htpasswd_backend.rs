@@ -6,7 +6,10 @@
 //! than a hit.
 
 use praxis_policy_builtins::plugins::identity_basic::directory::CredentialDirectory as _;
-use praxis_policy_builtins::plugins::identity_basic::{HtpasswdConfig, HtpasswdDirectory};
+use praxis_policy_builtins::plugins::identity_basic::verifier::EMPTY_DIRECTORY_COST;
+use praxis_policy_builtins::plugins::identity_basic::{
+    CostProfile, HtpasswdConfig, HtpasswdDirectory,
+};
 
 use praxis_policy_builtins::plugins::identity_basic::ShaCryptVariant;
 
@@ -668,18 +671,57 @@ async fn lookup_cost_does_not_grow_with_the_record_count() {
 fn loading_an_argon2_record_does_not_mint_an_expensive_dummy() {
     let phc = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
                MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
-    let file = HtpasswdFile::write(&format!("alice:{phc}\n"));
+    let line = format!("alice:{phc}");
+    let file = HtpasswdFile::write(&format!("{line}\n"));
 
-    let start = std::time::Instant::now();
     let dir = directory(&file).expect("an argon2 file loads");
-    let elapsed = start.elapsed();
 
-    assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "loading one argon2 record took {elapsed:?}; the miss-path hash must be \
-         reused from the file rather than minted from a scaled cost"
+    assert_eq!(
+        dir.floor_mints(),
+        0,
+        "a populated file must take its miss-path hash from a stored record; \
+         minting the bcrypt floor hash instead is work this load never needs"
+    );
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&line),
+        "and the miss path must cost what the stored argon2 record costs, \
+         which is the property the absent mint leaves intact"
     );
     assert_eq!(dir.len(), 1, "the record is indexed");
+}
+
+#[test]
+fn an_empty_file_mints_one_floor_hash_and_reuses_it_across_reloads() {
+    let file = HtpasswdFile::write("# every record commented out\n");
+    let dir = directory(&file).expect("a file with no records loads");
+
+    assert_eq!(
+        dir.floor_mints(),
+        1,
+        "a file with no records has no stored hash to borrow, so the floor hash \
+         is the only thing that keeps an empty directory from answering a miss \
+         in nanoseconds"
+    );
+    assert_eq!(
+        dir.miss_cost_profile(),
+        CostProfile::Bcrypt {
+            cost: EMPTY_DIRECTORY_COST
+        },
+        "and it runs at the documented floor cost"
+    );
+
+    for _ in 0..5_u32 {
+        dir.reload().expect("the reload succeeds");
+    }
+
+    assert_eq!(
+        dir.floor_mints(),
+        1,
+        "a reload that finds the file still empty reuses the first floor hash: \
+         reload runs on the request path, where a second bcrypt mint would \
+         block an executor worker"
+    );
 }
 
 #[test]

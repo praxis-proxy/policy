@@ -25,8 +25,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -238,8 +238,16 @@ pub struct HtpasswdDirectory {
     /// The capacity limit for in-flight verifications.
     verifications: Arc<tokio::sync::Semaphore>,
 
-    /// The fallback dummy hash for an empty directory.
-    empty: ParsedHash,
+    /// The fallback dummy hash for an empty directory, minted on first need.
+    ///
+    /// A populated file supplies its own miss-path hash from a stored record,
+    /// so the floor hash exists only for a file with no records at all. Minting
+    /// it is a full bcrypt hash at [`EMPTY_DIRECTORY_COST`], so it is deferred
+    /// rather than paid by every construction and reload.
+    empty: OnceLock<ParsedHash>,
+
+    /// How many times the floor hash has been minted, for regression tests.
+    floor_mints: AtomicU64,
 
     /// Serializes the read-parse-publish sequence in [`Self::reload`].
     ///
@@ -290,8 +298,36 @@ impl Drop for ReloadGuard<'_> {
     }
 }
 
+/// The floor hash for an empty directory, minted once and then reused.
+///
+/// Minting is a full bcrypt hash at [`EMPTY_DIRECTORY_COST`], so a reload that
+/// finds the file still empty reuses the first one rather than paying again.
+fn mint_floor_hash(
+    path: &std::path::Path,
+    cell: &OnceLock<ParsedHash>,
+    mints: &AtomicU64,
+) -> Result<ParsedHash, String> {
+    if let Some(minted) = cell.get() {
+        return Ok(minted.clone());
+    }
+    let minted = empty_directory_hash().map_err(|e| {
+        format!(
+            "{}: could not build the miss-path hash: {e}",
+            path.display()
+        )
+    })?;
+    mints.fetch_add(1, Ordering::Relaxed);
+    Ok(cell.get_or_init(|| minted).clone())
+}
+
 /// Load and validate a `.htpasswd` index.
-fn read_index(config: &HtpasswdConfig, empty: &ParsedHash) -> Result<Index, String> {
+///
+/// `floor` supplies the miss-path hash for a file with no records. It is a
+/// closure rather than a value so that a populated file never mints one.
+fn read_index(
+    config: &HtpasswdConfig,
+    floor: impl FnOnce() -> Result<ParsedHash, String>,
+) -> Result<Index, String> {
     let text = std::fs::read_to_string(&config.path)
         .map_err(|e| format!("reading {}: {e}", config.path.display()))?;
     let limits = Limits::from(config.limits);
@@ -390,7 +426,10 @@ fn read_index(config: &HtpasswdConfig, empty: &ParsedHash) -> Result<Index, Stri
     // rather than by estimate. The synthesized hash is for a file with no
     // records at all, which otherwise answers in nanoseconds and is
     // distinguishable from a populated one by timing alone.
-    let dummy = reference.unwrap_or_else(|| empty.clone());
+    let dummy = match reference {
+        Some(stored) => stored,
+        None => floor()?,
+    };
 
     Ok(Index { users, dummy })
 }
@@ -407,18 +446,17 @@ impl HtpasswdDirectory {
     /// records, duplicate user-ids, mixed hashing schemes, or refused hash parameters.
     pub fn new(config: HtpasswdConfig) -> Result<Self, String> {
         config.validate()?;
-        let empty = empty_directory_hash().map_err(|e| {
-            format!(
-                "{}: could not build the miss-path hash: {e}",
-                config.path.display()
-            )
+        let empty = OnceLock::new();
+        let floor_mints = AtomicU64::new(0);
+        let index = read_index(&config, || {
+            mint_floor_hash(&config.path, &empty, &floor_mints)
         })?;
-        let index = read_index(&config, &empty)?;
         let first_attempt = config.refresh_secs.saturating_mul(1000);
         let permits = config.max_concurrent_verifications;
         Ok(Self {
             config,
             empty,
+            floor_mints,
             index: ArcSwap::from_pointee(index),
             publishing: std::sync::Mutex::new(()),
             started: Instant::now(),
@@ -467,6 +505,11 @@ impl HtpasswdDirectory {
         self.peak_concurrent_reloads.load(Ordering::Relaxed)
     }
 
+    /// How many times the empty-directory floor hash was minted, for the tests.
+    pub fn floor_mints(&self) -> u64 {
+        self.floor_mints.load(Ordering::Relaxed)
+    }
+
     /// The number of refresh-path file-read attempts, for regression tests.
     pub fn reload_attempts(&self) -> u64 {
         self.reload_attempts.load(Ordering::Relaxed)
@@ -511,7 +554,9 @@ impl HtpasswdDirectory {
 
         // The whole next index is built before anything is published, so a read
         // or parse that fails leaves the running index serving.
-        let index = read_index(&self.config, &self.empty)?;
+        let index = read_index(&self.config, || {
+            mint_floor_hash(&self.config.path, &self.empty, &self.floor_mints)
+        })?;
         // Records first, then the timestamp, and not the other way round. The
         // two are not published together, so a lookup can land between them:
         // this order shows it a new index under an old timestamp, which reads

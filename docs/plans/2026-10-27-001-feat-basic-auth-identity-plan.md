@@ -923,6 +923,11 @@ above; capability declaration is operator-side via
   through the secret provider and sent on the request; a config trying to set
   TLS material (`ca_bundle`, `client_cert`) fails at load with a message saying
   the host transport owns it, so the key cannot look natural and do nothing.
+- Covers KTD11. A configured service credential that the secret provider cannot
+  resolve is unavailable, and the request is **not** sent. Asserting only that
+  a resolved credential is attached would pass for an implementation that omits
+  the credential entirely, and the password must not reach an unauthenticated
+  service while that is the state.
 - Covers R10. The user-id and password arrive as separate JSON fields.
 - Covers R10. A timeout and a connection failure both surface as unavailable,
   with a message that does not vary by user-id.
@@ -1000,7 +1005,10 @@ not encryption, so TLS is required. The guidance must say so **without
 overstating it**: R10 and KTD11 do permit an `http://` HTTP-backend URL behind
 an explicit cleartext opt-in, so U7 names that exception and what it costs --
 the password crosses the network in the clear to the verification service, and
-anything on that path can read every credential it carries. The opt-in exists
+anything on that path can read every credential it carries. Reading is not the
+whole cost: the verdict crosses the same unprotected path, so anything that can
+rewrite it can answer `valid: true` for a password it never checked, which is a
+full authentication bypass rather than a disclosure (KTD11). The opt-in exists
 for a loopback or mesh-encrypted deployment and nowhere else. The operator
 guidance must also state: the
 hash file is an offline-crackable verifier and should not be world-readable; the
@@ -1014,8 +1022,14 @@ out of the changelog and the docs. Explain that only one Basic resolver is
 supported per route, MCP routes are unsupported, a route's `response:` block
 does not decorate an identity denial, and a wrong-scheme decline has no
 challenge. State the host's duties:
-render the challenge from violation details and remove the inbound
-`Authorization` header before forwarding to an upstream.
+render the challenge from violation details; remove the inbound
+`Authorization` header before forwarding to an upstream; and, for the HTTP
+backend, mutually authenticate the transport to the verification service and
+pin the trust roots that verify it (KTD11). That last duty is the host's
+because the transport seam cannot express it as a config field, so U7 is the
+only place an operator is told the obligation exists -- and an unauthenticated
+verifier is reachable by other clients, which lets them probe user-ids around
+the resolver's failure limiter.
 
 **Patterns to follow:** `docs/content/identity-delegation.md` Recipe 7 for
 shape; `crates/ppe/tests/docs_examples/` for the regression hook.
