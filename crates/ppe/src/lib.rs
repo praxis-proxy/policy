@@ -418,25 +418,6 @@ pub fn install_builtins_with_default_http_transport(mgr: &std::sync::Arc<PolicyE
 mod crypto_capability_tests {
     use super::{BundledCryptoCapability, CryptoBackend, crypto_capability_report};
 
-    /// The builtin list from `PPE_EXPECT_BUILTIN_CRYPTO`, or `None` when the
-    /// invocation does not state one. A workspace run unifies builtin
-    /// features across members, so only a package-scoped run can.
-    fn expected_builtin_crypto() -> Option<Vec<BundledCryptoCapability>> {
-        let names = std::env::var("PPE_EXPECT_BUILTIN_CRYPTO").ok()?;
-        let parsed = names
-            .split(',')
-            .filter(|name| !name.is_empty())
-            .map(|name| match name {
-                "jwt" => BundledCryptoCapability::Jwt,
-                "oauth" => BundledCryptoCapability::OAuth,
-                "delegator-vault" => BundledCryptoCapability::VaultDelegation,
-                "valkey" => BundledCryptoCapability::Valkey,
-                other => panic!("unknown builtin in PPE_EXPECT_BUILTIN_CRYPTO: {other}"),
-            })
-            .collect();
-        Some(parsed)
-    }
-
     #[cfg(not(feature = "fips"))]
     #[test]
     fn rustcrypto_build_is_never_fips_safe() {
@@ -460,6 +441,29 @@ mod crypto_capability_tests {
             assert_eq!(report.api_key_backend, Some(CryptoBackend::OpenSslFips));
             assert_eq!(report.fips_profile_is_safe(), expected.is_empty());
         }
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// The builtin list from `PPE_EXPECT_BUILTIN_CRYPTO`, or `None` when the
+    /// invocation does not state one. A workspace run unifies builtin
+    /// features across members, so only a package-scoped run can.
+    fn expected_builtin_crypto() -> Option<Vec<BundledCryptoCapability>> {
+        let names = std::env::var("PPE_EXPECT_BUILTIN_CRYPTO").ok()?;
+        let parsed = names
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(|name| match name {
+                "jwt" => BundledCryptoCapability::Jwt,
+                "oauth" => BundledCryptoCapability::OAuth,
+                "delegator-vault" => BundledCryptoCapability::VaultDelegation,
+                "valkey" => BundledCryptoCapability::Valkey,
+                other => panic!("unknown builtin in PPE_EXPECT_BUILTIN_CRYPTO: {other}"),
+            })
+            .collect();
+        Some(parsed)
     }
 }
 

@@ -134,7 +134,8 @@ export VAULT_SECRET_ID=$(vault write -field=secret_id -f auth/approle/role/ppe-l
 Run the ignored test, then stop the container:
 
 ```console
-cargo test -p praxis-policy --features "crypto-rustcrypto,secrets-vault,http-hyper" --test vault_live -- --ignored --nocapture
+cargo test -p praxis-policy --features "crypto-rustcrypto,secrets-vault,http-hyper" \
+  --test vault_live -- --ignored --nocapture
 docker stop ppe-vault
 ```
 

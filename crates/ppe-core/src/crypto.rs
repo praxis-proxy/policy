@@ -54,14 +54,6 @@ pub enum CryptoError {
 }
 
 /// Incremental SHA-256 input builder used by CMF and runtime hashes.
-enum Sha256State {
-    #[cfg(feature = "fips")]
-    OpenSsl(openssl::md_ctx::MdCtx),
-    #[cfg(feature = "crypto-rustcrypto")]
-    RustCrypto(sha2::Sha256),
-}
-
-/// Incremental SHA-256 input builder used by CMF and runtime hashes.
 pub struct Sha256(Sha256State);
 
 impl Sha256 {
@@ -86,27 +78,6 @@ impl Sha256 {
             use sha2::Digest as _;
             Ok(Self(Sha256State::RustCrypto(sha2::Sha256::new())))
         }
-    }
-
-    /// Append bytes to the hash input.
-    ///
-    /// # Errors
-    /// Returns an error if the selected provider cannot update SHA-256.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "the FIPS provider can fail, so updates remain fallible across backends"
-    )]
-    pub fn update(&mut self, bytes: impl AsRef<[u8]>) -> Result<(), CryptoError> {
-        match &mut self.0 {
-            #[cfg(feature = "fips")]
-            Sha256State::OpenSsl(context) => context.digest_update(bytes.as_ref())?,
-            #[cfg(feature = "crypto-rustcrypto")]
-            Sha256State::RustCrypto(context) => {
-                use sha2::Digest as _;
-                context.update(bytes.as_ref());
-            },
-        }
-        Ok(())
     }
 
     /// Finish hashing the accumulated input.
@@ -134,6 +105,27 @@ impl Sha256 {
                 Ok(context.finalize().into())
             },
         }
+    }
+
+    /// Append bytes to the hash input.
+    ///
+    /// # Errors
+    /// Returns an error if the selected provider cannot update SHA-256.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the FIPS provider can fail, so updates remain fallible across backends"
+    )]
+    pub fn update(&mut self, bytes: impl AsRef<[u8]>) -> Result<(), CryptoError> {
+        match &mut self.0 {
+            #[cfg(feature = "fips")]
+            Sha256State::OpenSsl(context) => context.digest_update(bytes.as_ref())?,
+            #[cfg(feature = "crypto-rustcrypto")]
+            Sha256State::RustCrypto(context) => {
+                use sha2::Digest as _;
+                context.update(bytes.as_ref());
+            },
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +160,18 @@ pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
         Ok(mac.finalize().into_bytes().into())
     }
 }
+
+/// The backend's in-progress digest behind [`Sha256`].
+enum Sha256State {
+    #[cfg(feature = "fips")]
+    OpenSsl(openssl::md_ctx::MdCtx),
+    #[cfg(feature = "crypto-rustcrypto")]
+    RustCrypto(sha2::Sha256),
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
 
 #[cfg(feature = "fips")]
 fn fips_sha256() -> Result<Arc<openssl::md::Md>, CryptoError> {
@@ -208,10 +212,6 @@ mod tests {
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
         ),
     ];
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
 
     #[test]
     fn sha256_matches_the_standard_vectors() {
@@ -286,5 +286,13 @@ mod tests {
         );
         assert!(matches!(sha256(b"abc"), Err(CryptoError::OpenSsl(_))));
         assert!(matches!(Sha256::new(), Err(CryptoError::OpenSsl(_))));
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
