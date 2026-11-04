@@ -4,8 +4,8 @@
 //! Bundled extensions for the Praxis Policy Engine: decision points, identity
 //! and delegation plugins, a session store, and a secret provider.
 //!
-//! Every extension sits behind its own Cargo feature and nothing is enabled by
-//! default. Hosts normally reach these through the `praxis-policy` facade,
+//! Every extension sits behind its own Cargo feature and none is enabled by
+//! default; the default selects only the `RustCrypto` backend. Hosts normally reach these through the `praxis-policy` facade,
 //! which maps its own feature of the same name onto each one and registers the
 //! factories; depend on this crate directly only to use an extension without
 //! the facade.
@@ -20,7 +20,7 @@
 //! |---|---|
 //! | `jwt` | `plugins::identity_jwt` |
 //! | `api-key` | `plugins::identity_api_key` |
-//! | `crypto-rustcrypto` | RustCrypto SHA-256 for API-key hashing |
+//! | `crypto-rustcrypto` | RustCrypto SHA-256 and HMAC; on by default |
 //! | `fips` | OpenSSL FIPS SHA-256 for Policy and API-key; no HMAC |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
@@ -58,10 +58,11 @@ pub mod secrets;
 #[cfg(feature = "_session")]
 pub mod session;
 
-/// A builtin crypto operation that uses the default RustCrypto backend.
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DefaultCryptoCapability {
+/// An enabled builtin that does its own crypto with `RustCrypto`, outside
+/// the selected Policy backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BundledCryptoCapability {
     /// JWT signature verification and `DPoP` token hashing.
     Jwt,
     /// OAuth delegation cache-key HMAC.
@@ -72,49 +73,20 @@ pub enum DefaultCryptoCapability {
     Valkey,
 }
 
-/// List builtin crypto operations enabled by the unified feature set.
-#[doc(hidden)]
+/// List the enabled builtins that do their own crypto.
 #[must_use]
-pub fn default_crypto_capabilities() -> Vec<DefaultCryptoCapability> {
+pub fn bundled_crypto_capabilities() -> Vec<BundledCryptoCapability> {
     vec![
         #[cfg(feature = "jwt")]
-        DefaultCryptoCapability::Jwt,
+        BundledCryptoCapability::Jwt,
         #[cfg(feature = "oauth")]
-        DefaultCryptoCapability::OAuth,
+        BundledCryptoCapability::OAuth,
         #[cfg(feature = "delegator-vault")]
-        DefaultCryptoCapability::VaultDelegation,
+        BundledCryptoCapability::VaultDelegation,
         #[cfg(feature = "valkey")]
-        DefaultCryptoCapability::Valkey,
+        BundledCryptoCapability::Valkey,
     ]
 }
 
 #[cfg(any(feature = "valkey", feature = "elicitation-ciba"))]
 mod env_secret;
-
-#[cfg(test)]
-mod crypto_capability_tests {
-    use super::default_crypto_capabilities;
-
-    #[cfg(any(
-        feature = "jwt",
-        feature = "oauth",
-        feature = "delegator-vault",
-        feature = "valkey"
-    ))]
-    use super::DefaultCryptoCapability;
-
-    #[test]
-    fn builtin_crypto_report_matches_the_unified_features() {
-        let expected = vec![
-            #[cfg(feature = "jwt")]
-            DefaultCryptoCapability::Jwt,
-            #[cfg(feature = "oauth")]
-            DefaultCryptoCapability::OAuth,
-            #[cfg(feature = "delegator-vault")]
-            DefaultCryptoCapability::VaultDelegation,
-            #[cfg(feature = "valkey")]
-            DefaultCryptoCapability::Valkey,
-        ];
-        assert_eq!(default_crypto_capabilities(), expected);
-    }
-}

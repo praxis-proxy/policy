@@ -7,7 +7,8 @@
 use std::sync::{Arc, OnceLock};
 
 /// The backend used for Policy's always-enabled SHA-256 operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum CryptoBackend {
     /// SHA-256 uses OpenSSL with the `fips=yes` property.
     OpenSslFips,
@@ -29,7 +30,11 @@ pub const fn crypto_backend() -> CryptoBackend {
 }
 
 /// Failure while hashing with the selected Policy backend.
+///
+/// The variant set depends on the backend: `OpenSsl` and `HmacUnavailable`
+/// exist with `fips`, `HmacInitialization` with `crypto-rustcrypto`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CryptoError {
     /// The selected backend returned an unexpected digest length.
     #[error("Policy SHA-256 returned an invalid digest length")]

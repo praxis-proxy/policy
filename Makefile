@@ -133,9 +133,14 @@ check-fips-graph:
 
 .PHONY: test-fips-capabilities
 test-fips-capabilities:
-	@$(CARGO) test -p praxis-policy --no-default-features --features fips,api-key,praxis-policy-builtins/jwt --lib crypto_report_matches_the_unified_builtin_features
-	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key,jwt --lib builtin_crypto_report_matches_the_unified_features
-	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key --lib plugins::identity_api_key::crypto::tests::
+	@$(CARGO) test -p praxis-policy --no-default-features --features fips,api-key --lib \
+		-- --exact crypto_capability_tests::fips_report_matches_the_expected_builtins
+	@PPE_EXPECT_BUILTIN_CRYPTO=jwt $(CARGO) test -p praxis-policy --no-default-features \
+		--features fips,api-key,praxis-policy-builtins/jwt --lib \
+		-- --exact crypto_capability_tests::fips_report_matches_the_expected_builtins
+	@PPE_EXPECT_BUILTIN_CRYPTO=oauth,delegator-vault,valkey $(CARGO) test -p praxis-policy \
+		--no-default-features --features fips,api-key,oauth,delegator-vault,valkey --lib \
+		-- --exact crypto_capability_tests::fips_report_matches_the_expected_builtins
 	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key --test api_key fips::
 
 .PHONY: clean
