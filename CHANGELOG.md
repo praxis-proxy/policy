@@ -185,6 +185,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   CryptoError>`. Propagate the error with `?`, or deny: a hashing failure
   must not fall back to an unhashed value. `CryptoError` is
   `#[non_exhaustive]` and its variants depend on the backend.
+  See the [hashing migration](docs/content/crates.md#fallible-hashing).
 - **Breaking for builds without default features:** `praxis-policy`,
   `praxis-policy-core`, `-apl-cmf` and `-apl-runtime` with
   `default-features = false` must name `crypto-rustcrypto` or `fips`. For

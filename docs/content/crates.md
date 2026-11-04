@@ -123,10 +123,50 @@ top. Offer a `fips` feature only if the plugin does no crypto of its own.
 ## Generated API docs
 
 [docs.rs/praxis-policy](https://docs.rs/praxis-policy), built with all
-features so the feature-gated re-exports are visible.
+ordinary features so the feature-gated re-exports are visible.
 
-The crates are versioned and released together, so one `0.3`
-requirement covers the set.
+The crates are versioned and released together.
+
+## Fallible hashing
+
+`resolve_session`, `instruction_digest`, `extract_llm_request`,
+`extract_extensions` and `BagBuilder::with_extensions` return a
+`Result<_, CryptoError>`. Propagate failures with `?` or turn them into a
+safe denial. A provider failure must not substitute an unhashed value.
+
+The builder chain now propagates the error before calling `build`:
+
+```rust
+use praxis_policy::{
+    CryptoError,
+    praxis_policy_apl_cmf::BagBuilder,
+    praxis_policy_apl_core::AttributeBag,
+    praxis_policy_core::extensions::Extensions,
+};
+
+fn request_bag(ext: &Extensions) -> Result<AttributeBag, CryptoError> {
+    Ok(BagBuilder::new().with_extensions(ext)?.build())
+}
+```
+
+`CryptoError` is available at the core and facade roots and is
+non-exhaustive. Match known variants with a fallback:
+
+```rust
+use praxis_policy::CryptoError;
+
+let error = CryptoError::DigestLength;
+let reason = match error {
+    CryptoError::DigestLength => "invalid digest length",
+    _ => "crypto backend unavailable",
+};
+assert_eq!(reason, "invalid digest length");
+```
+
+`DigestLength` exists under both backends. `OpenSsl` and
+`HmacUnavailable` exist under `fips`; `HmacInitialization` exists under
+`crypto-rustcrypto`. Keep provider details in operator logs and return a
+safe reason to clients.
 
 ## Next
 

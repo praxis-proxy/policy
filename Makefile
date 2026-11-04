@@ -238,6 +238,8 @@ test-fips-provider:
 		-- --skip crypto::tests::a_missing_fips_provider_fails_closed
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST))
+	@$(CARGO) test -p praxis-policy -p praxis-policy-apl-cmf --no-default-features \
+		--features $(FIPS_API_KEY) --doc
 
 .PHONY: clean
 clean:

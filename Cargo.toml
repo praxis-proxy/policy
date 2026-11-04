@@ -42,8 +42,8 @@ members = [
 
 # The session store pulls a redis client and a TLS stack, which slows a default
 # build noticeably. That cost is now held off by features rather than by
-# membership: `praxis-policy-builtins` is `default = []` and marks redis,
-# deadpool-redis and url optional behind `valkey`, so a default build resolves
+# membership: the default backend enables no extensions, and redis,
+# deadpool-redis and url are optional behind `valkey`, so a default build resolves
 # none of them even though the crate is a default member.
 default-members = [
   "crates/ppe",

@@ -97,6 +97,20 @@ pub use praxis_policy_apl_runtime::{
 pub use praxis_policy_core::engine::PolicyEngine;
 
 pub use praxis_policy_builtins::BundledCryptoCapability;
+/// Types for the selected backend and fallible hashing operations.
+///
+/// Match errors with a fallback for future variants:
+///
+/// ```
+/// use praxis_policy::CryptoError;
+///
+/// let error = CryptoError::DigestLength;
+/// let reason = match error {
+///     CryptoError::DigestLength => "invalid digest length",
+///     _ => "crypto backend unavailable",
+/// };
+/// assert_eq!(reason, "invalid digest length");
+/// ```
 pub use praxis_policy_core::{CryptoBackend, CryptoError};
 
 /// Crypto backends and builtin operations compiled into this Policy graph.

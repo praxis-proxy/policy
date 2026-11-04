@@ -44,7 +44,7 @@ Use the targets in [Makefile] for the repository's
 supported workflows. `make audit` uses `cargo deny check`
 for advisories, licenses, bans, and sources; `make machete`
 is advisory, and `make semver-facade` checks the facade's
-public API with all features enabled.
+public API with an explicit compatible feature set.
 
 [Makefile]: ../../Makefile
 

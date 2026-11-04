@@ -150,6 +150,20 @@ impl BagBuilder {
     ///
     /// # Errors
     /// Returns an error if the selected SHA-256 provider cannot digest LLM instructions.
+    ///
+    /// ```
+    /// use praxis_policy_apl_cmf::BagBuilder;
+    /// use praxis_policy_apl_core::AttributeBag;
+    /// use praxis_policy_core::{CryptoError, extensions::Extensions};
+    ///
+    /// fn request_bag(ext: &Extensions) -> Result<AttributeBag, CryptoError> {
+    ///     Ok(BagBuilder::new().with_extensions(ext)?.build())
+    /// }
+    ///
+    /// let bag = request_bag(&Extensions::default())?;
+    /// assert!(bag.get_string("subject.id").is_none());
+    /// # Ok::<(), CryptoError>(())
+    /// ```
     pub fn with_extensions(
         mut self,
         ext: &Extensions,
