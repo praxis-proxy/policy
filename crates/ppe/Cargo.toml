@@ -43,8 +43,9 @@ features = [
 ]
 
 [features]
-# Engine only by default: no builtin plugins are compiled in. Opt into every
-# bundled extension with `builtins`, or name granular features for a subset.
+# Engine only by default: no builtin plugins, RustCrypto backend. Opt into every
+# bundled extension with `builtins`, or name granular features for a subset. A
+# build without defaults must name `crypto-rustcrypto` or `fips`.
 default = ["crypto-rustcrypto"]
 crypto-rustcrypto = [
   "praxis-policy-core/crypto-rustcrypto",
@@ -150,12 +151,14 @@ praxis-policy-apl-core = { workspace = true }
 praxis-policy-apl-cmf = { workspace = true, default-features = false }
 praxis-policy-apl-runtime = { workspace = true, default-features = false }
 
-# Bundled extension crates, each behind its feature above.
+# Bundled extensions. Always linked so the crypto report can list them; each
+# module still compiles only behind its feature above. Defaults are off so the
+# backend comes from this crate's features.
 #
 # Not everything shipped in this repository belongs here. `reference/` holds
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
-praxis-policy-builtins = { workspace = true }
+praxis-policy-builtins = { workspace = true, default-features = false }
 
 # `experimental` only: the one-line warn_experimental_features.
 tracing = { workspace = true, optional = true }

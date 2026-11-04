@@ -109,6 +109,12 @@ OAuth, Vault delegation, and Valkey when enabled because those builtins retain
 RustCrypto operations. The independent startup check verifies OpenSSL can
 fetch FIPS SHA-256. The host must verify its final image and runtime separately.
 
+Every crate in the graph must leave the backend choice to the host.
+`default-features = false` at the top cannot remove `crypto-rustcrypto`
+enabled by another dependency; the build then fails with both backends
+selected. Disable defaults on each Policy dependency, including plugin
+crates, as described in [Crypto backend](crates.md#crypto-backend).
+
 ### The HTTP transport
 
 `http-hyper` is the odd one. PPE performs no outbound HTTP of its own: a

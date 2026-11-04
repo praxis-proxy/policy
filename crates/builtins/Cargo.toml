@@ -14,9 +14,9 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-# Build docs.rs with every extension enabled. The default build enables no
-# module at all (`default = []`), so without this the rendered page is empty —
-# and the facade's re-exports resolve into it.
+# Build docs.rs with every RustCrypto extension enabled. The default build
+# enables no module, so without this the rendered page is empty, and the
+# facade's re-exports resolve into it.
 [package.metadata.docs.rs]
 features = [
   "crypto-rustcrypto",
@@ -35,20 +35,20 @@ features = [
 ]
 
 [features]
-default = []
+default = ["crypto-rustcrypto"]
 
-# API-key hashing supports RustCrypto in ordinary builds and system OpenSSL
-# with the `fips=yes` property in FIPS builds.
+# Exactly one backend reaches the engine crates. The default selects RustCrypto
+# and no extension; a FIPS consumer disables defaults and enables `fips`. The
+# forwards are weak so a backend never pulls in an engine layer by itself.
 crypto-rustcrypto = [
-  "dep:sha2",
-  "praxis-policy-core/crypto-rustcrypto",
-  "praxis-policy-apl-cmf/crypto-rustcrypto",
-  "praxis-policy-apl-runtime/crypto-rustcrypto",
+  "praxis-policy-core?/crypto-rustcrypto",
+  "praxis-policy-apl-cmf?/crypto-rustcrypto",
+  "praxis-policy-apl-runtime?/crypto-rustcrypto",
 ]
 fips = [
-  "praxis-policy-core/fips",
-  "praxis-policy-apl-cmf/fips",
-  "praxis-policy-apl-runtime/fips",
+  "praxis-policy-core?/fips",
+  "praxis-policy-apl-cmf?/fips",
+  "praxis-policy-apl-runtime?/fips",
 ]
 
 # Feature names match the facade's exactly, so each facade body is a one-line

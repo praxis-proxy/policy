@@ -99,6 +99,27 @@ There is no separate SDK crate. The Plugin Factory surface is
 An unrecognized `kind` fails policy loading, so a missing registration
 is caught at startup rather than at the first request that needed it.
 
+### Crypto backend
+
+The engine crates compile exactly one SHA-256 backend: `crypto-rustcrypto`
+or `fips`. Selecting none or both is a build error, and Cargo features
+only add, so a host cannot remove a backend another dependency enabled. A
+reusable plugin crate therefore depends on core with defaults off and
+forwards its own backend features, as the reference plugins do:
+
+```toml
+[features]
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = ["praxis-policy-core/crypto-rustcrypto"]
+fips = ["praxis-policy-core/fips"]
+
+[dependencies]
+praxis-policy-core = { version = "0.5", default-features = false }
+```
+
+A FIPS host disables the plugin's defaults and enables `fips` once at the
+top. Offer a `fips` feature only if the plugin does no crypto of its own.
+
 ## Generated API docs
 
 [docs.rs/praxis-policy](https://docs.rs/praxis-policy), built with all

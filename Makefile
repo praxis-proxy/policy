@@ -36,8 +36,8 @@ help:
 	@echo "  build             Build the workspace (debug)"
 	@echo "  build-release     Build the workspace (release)"
 	@echo "  check             cargo check the workspace"
-	@echo "  check-fips-graph  Ensure the API-key FIPS graph excludes sha2 and hmac"
-	@echo "  check-features    cargo check praxis-policy-builtins per feature"
+	@echo "  check-fips-graph  Ensure FIPS graphs link OpenSSL and no other crypto"
+	@echo "  check-features    cargo check each builtin feature and reference plugin"
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
@@ -115,16 +115,21 @@ check:
 	@$(CARGO) check -p praxis-policy --no-default-features --features fips,api-key --lib
 	@$(MAKE) check-fips-graph
 
+NON_FIPS_CRYPTO := sha2|hmac|ring|rustls|aws-lc-rs|aws-lc-sys
+
 .PHONY: check-fips-graph
 check-fips-graph:
-	@tree="$$($(CARGO) tree -p praxis-policy --no-default-features --features fips,api-key -e normal,build --prefix none)"; \
-	if grep -Eq '^(sha2|hmac) v' <<< "$$tree"; then \
-		echo "API-key FIPS graph contains RustCrypto SHA-2 or HMAC" >&2; \
-		grep -E '^(sha2|hmac) v' <<< "$$tree" >&2; \
-		exit 1; \
-	fi; \
-	grep -q '^openssl v' <<< "$$tree" || { echo "API-key FIPS graph is missing OpenSSL" >&2; exit 1; }; \
-	echo "API-key FIPS graph contains OpenSSL and no sha2/hmac"
+	@for pkg in praxis-policy praxis-policy-builtins; do \
+		tree="$$($(CARGO) tree -p $$pkg --no-default-features --features fips,api-key \
+			-e normal,build --prefix none)" || exit 1; \
+		if grep -Eq "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree"; then \
+			echo "FIPS graph for $$pkg links non-FIPS crypto:" >&2; \
+			grep -E "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree" >&2; \
+			exit 1; \
+		fi; \
+		grep -q '^openssl v' <<< "$$tree" || { echo "FIPS graph for $$pkg is missing OpenSSL" >&2; exit 1; }; \
+	done
+	@echo "FIPS graphs contain OpenSSL and no RustCrypto, ring or AWS-LC"
 
 .PHONY: test-fips-capabilities
 test-fips-capabilities:
@@ -403,29 +408,35 @@ docs-lint:
 # CI
 # =============================================================================
 
-# Compile `praxis-policy-builtins` with its crypto backend and no plugins, then
-# with each plugin feature alone.
-# Neither the default nor the workspace profile can catch a feature body that
-# omits its own `dep:` edge or its module-group marker: another feature supplies
-# the dependency, and under default features nothing compiles at all. This is the
-# only gate that builds a partial feature set.
-BUILTIN_FEATURES := jwt api-key oauth elicitation-ciba cedar cel opa valkey secrets-vault
+# Compile each builtin feature alone on ordinary defaults, then each reference
+# plugin as its own package. Workspace builds unify features across members, so
+# only per-package checks catch a feature body that omits its own `dep:` edge,
+# module-group marker or crypto backend. This is the only gate that builds a
+# partial feature set.
+BUILTIN_FEATURES := jwt api-key oauth delegator-vault elicitation-ciba \
+	experimental-quota experimental-ratelimit cedar cel opa valkey secrets-vault
+REFERENCE_PLUGINS := praxis-policy-plugin-audit-logger praxis-policy-plugin-ocsf-audit \
+	praxis-policy-plugin-pii-scanner praxis-policy-plugin-transcript-scanner
 
 .PHONY: check-features
 check-features:
 	@echo "per-feature check: praxis-policy-builtins ..."
-	@$(CARGO) check -p praxis-policy-builtins --all-targets \
-		--no-default-features --features crypto-rustcrypto
+	@$(CARGO) check -p praxis-policy-builtins --all-targets
 	@for f in $(BUILTIN_FEATURES); do \
 		echo "  --features $$f"; \
-		$(CARGO) check -p praxis-policy-builtins --all-targets \
-			--no-default-features --features "crypto-rustcrypto,$$f" || exit 1; \
+		$(CARGO) check -p praxis-policy-builtins --all-targets --features "$$f" || exit 1; \
 	done
-	@$(CARGO) check -p praxis-policy --no-default-features --features fips,api-key --lib
+	@for p in $(REFERENCE_PLUGINS); do \
+		echo "  -p $$p"; \
+		$(CARGO) check -p $$p --all-targets || exit 1; \
+	done
+	@$(CARGO) check -p praxis-policy-builtins --lib --no-default-features --features fips,api-key
+	@$(CARGO) check -p praxis-policy --lib --no-default-features --features fips,api-key
+	@$(CARGO) check -p praxis-policy --lib --no-default-features --features crypto-rustcrypto,jwt
 	@# The one test that only exists without another feature: CIBA naming the
 	@# missing `valkey` feature. Every other pass builds with it.
-	@$(CARGO) test -p praxis-policy-builtins --no-default-features \
-		--features crypto-rustcrypto,elicitation-ciba --lib -- elicitation_ciba::factory
+	@$(CARGO) test -p praxis-policy-builtins --features elicitation-ciba --lib \
+		-- elicitation_ciba::factory
 	@echo "check-features passed"
 
 .PHONY: ci
