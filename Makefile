@@ -7,6 +7,8 @@ SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 CARGO ?= cargo
+# A literal comma for `$(call ...)` arguments.
+, := ,
 
 # Default workspace features use RustCrypto; `--all-features` would also enable
 # FIPS and combine mutually exclusive crypto backends.
@@ -51,7 +53,8 @@ help:
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
-	@echo "  test-fips-capabilities Run FIPS capability and API-key behavior tests"
+	@echo "  test-fips-no-provider  FIPS reports, refusals and fail-closed hashing"
+	@echo "  test-fips-provider     FIPS lib suites against a loaded provider"
 	@echo "  test-integration  Integration, resilience and security suites"
 	@echo "  test-resilience   Resilience suite (dependency failure, concurrency)"
 	@echo "  test-security     Security suite (adversarial inputs)"
@@ -131,17 +134,57 @@ check-fips-graph:
 	done
 	@echo "FIPS graphs contain OpenSSL and no RustCrypto, ring or AWS-LC"
 
+# FIPS tests split by provider availability. `test-fips-no-provider` runs
+# where no FIPS provider is loaded: capability reports, HMAC and config
+# refusals, and fail-closed hashing. `test-fips-provider` needs
+# PRAXIS_REQUIRE_FIPS_PROVIDER and a loaded provider, and runs the full FIPS
+# lib suites against it.
+FIPS_REPORT_TEST := crypto_capability_tests::fips_report_matches_the_expected_builtins
+FIPS_LIBS := -p praxis-policy-core -p praxis-policy-apl-cmf -p praxis-policy-apl-runtime
+FIPS_API_KEY_TEST := fips::fips_api_key_allow_and_deny_follow_provider_availability
+FIPS_API_KEY := fips,api-key
+FIPS_UNSAFE_BUILTINS := oauth,delegator-vault,valkey
+
+# Run a cargo test command and fail if it selected no tests, which cargo
+# reports as success when a named test was renamed or removed.
+run_selected = out="$$($(1) 2>&1)" || { echo "$$out"; exit 1; }; echo "$$out"; \
+	if grep -q '^running 0 tests' <<< "$$out"; then \
+		echo "no tests selected by: $(strip $(1))" >&2; exit 1; \
+	fi
+
 .PHONY: test-fips-capabilities
-test-fips-capabilities:
-	@$(CARGO) test -p praxis-policy --no-default-features --features fips,api-key --lib \
-		-- --exact crypto_capability_tests::fips_report_matches_the_expected_builtins
-	@PPE_EXPECT_BUILTIN_CRYPTO=jwt $(CARGO) test -p praxis-policy --no-default-features \
-		--features fips,api-key,praxis-policy-builtins/jwt --lib \
-		-- --exact crypto_capability_tests::fips_report_matches_the_expected_builtins
-	@PPE_EXPECT_BUILTIN_CRYPTO=oauth,delegator-vault,valkey $(CARGO) test -p praxis-policy \
-		--no-default-features --features fips,api-key,oauth,delegator-vault,valkey --lib \
-		-- --exact crypto_capability_tests::fips_report_matches_the_expected_builtins
-	@$(CARGO) test -p praxis-policy-builtins --no-default-features --features fips,api-key --test api_key fips::
+test-fips-capabilities: test-fips-no-provider
+
+.PHONY: test-fips-no-provider
+test-fips-no-provider:
+	@$(call run_selected,$(CARGO) test -p praxis-policy --no-default-features \
+		--features $(FIPS_API_KEY) --lib -- --exact $(FIPS_REPORT_TEST))
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=jwt $(CARGO) test -p praxis-policy \
+		--no-default-features --features $(FIPS_API_KEY)$(,)praxis-policy-builtins/jwt --lib \
+		-- --exact $(FIPS_REPORT_TEST))
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=$(FIPS_UNSAFE_BUILTINS) \
+		$(CARGO) test -p praxis-policy --no-default-features \
+		--features $(FIPS_API_KEY)$(,)$(FIPS_UNSAFE_BUILTINS) --lib \
+		-- --exact $(FIPS_REPORT_TEST))
+	@$(call run_selected,$(CARGO) test -p praxis-policy-core --no-default-features \
+		--features fips --lib -- --exact \
+		crypto::tests::hmac_is_unavailable_under_fips \
+		crypto::tests::the_fips_build_reports_its_backend \
+		crypto::tests::a_missing_fips_provider_fails_closed \
+		hooks::payload::tests::a_keyed_digest_is_omitted_under_fips \
+		config::assertions_tests::fips_refuses_a_declared_provenance_key \
+		config::assertions_tests::fips_refuses_provenance_without_a_key_and_offers_only_unkeyed)
+	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST))
+
+.PHONY: test-fips-provider
+test-fips-provider:
+	@test -n "$$PRAXIS_REQUIRE_FIPS_PROVIDER" || \
+		{ echo "test-fips-provider needs PRAXIS_REQUIRE_FIPS_PROVIDER and a FIPS provider" >&2; exit 1; }
+	@$(CARGO) test $(FIPS_LIBS) --no-default-features --features fips --lib \
+		-- --skip crypto::tests::a_missing_fips_provider_fails_closed
+	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST))
 
 .PHONY: clean
 clean:

@@ -183,3 +183,108 @@ fn fips_sha256() -> Result<Arc<openssl::md::Md>, CryptoError> {
         Err(raced_value) => Ok(FIPS_SHA256.get().cloned().unwrap_or(raced_value)),
     }
 }
+
+/// Known-answer tests. Under `fips` they need a loaded provider: CI runs them
+/// in the provider job and runs `a_missing_fips_provider_fails_closed` where
+/// none is loaded. `PRAXIS_REQUIRE_FIPS_PROVIDER` states which one applies,
+/// so a misconfigured job fails instead of passing vacuously.
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    /// FIPS 180-2 examples: empty, one block, and a two-block message.
+    const SHA256_VECTORS: [(&[u8], &str); 3] = [
+        (
+            b"",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+        (
+            b"abc",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ),
+        (
+            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+        ),
+    ];
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn sha256_matches_the_standard_vectors() {
+        for (input, expected) in SHA256_VECTORS {
+            assert_eq!(hex(&sha256(input).unwrap()), expected);
+        }
+    }
+
+    #[test]
+    fn incremental_updates_match_one_shot_at_every_split() {
+        let (input, expected) = SHA256_VECTORS[2];
+        for split in 0..=input.len() {
+            let mut digest = Sha256::new().unwrap();
+            let (head, tail) = input.split_at(split);
+            digest.update(head).unwrap();
+            digest.update(tail).unwrap();
+            assert_eq!(
+                hex(&digest.finalize().unwrap()),
+                expected,
+                "split at {split}"
+            );
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[test]
+    fn hmac_sha256_matches_rfc_4231() {
+        let cases: [(&[u8], &[u8], &str); 2] = [
+            (
+                &[0x0b; 20],
+                b"Hi There",
+                "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+            ),
+            (
+                b"Jefe",
+                b"what do ya want for nothing?",
+                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+            ),
+        ];
+        for (key, data, expected) in cases {
+            assert_eq!(hex(&hmac_sha256(key, data).unwrap()), expected);
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[test]
+    fn the_rustcrypto_build_reports_its_backend() {
+        assert_eq!(crypto_backend(), CryptoBackend::RustCrypto);
+    }
+
+    #[cfg(feature = "fips")]
+    #[test]
+    fn the_fips_build_reports_its_backend() {
+        assert_eq!(crypto_backend(), CryptoBackend::OpenSslFips);
+    }
+
+    #[cfg(feature = "fips")]
+    #[test]
+    fn hmac_is_unavailable_under_fips() {
+        assert!(matches!(
+            hmac_sha256(b"key", b"data"),
+            Err(CryptoError::HmacUnavailable)
+        ));
+    }
+
+    #[cfg(feature = "fips")]
+    #[test]
+    fn a_missing_fips_provider_fails_closed() {
+        assert!(
+            std::env::var_os("PRAXIS_REQUIRE_FIPS_PROVIDER").is_none(),
+            "this test asserts provider absence; do not select it in the provider job"
+        );
+        assert!(matches!(sha256(b"abc"), Err(CryptoError::OpenSsl(_))));
+        assert!(matches!(Sha256::new(), Err(CryptoError::OpenSsl(_))));
+    }
+}

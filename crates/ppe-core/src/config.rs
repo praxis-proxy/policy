@@ -10523,6 +10523,9 @@ routes:
     /// is the half that rejects: a typed parse drops a key the table omits and
     /// succeeds, so only the loader catches the doc and `ENGINE_SETTINGS_KEYS`
     /// disagreeing.
+    ///
+    /// The documented key is keyed provenance, which `fips` refuses.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn the_documented_auditing_config_loads() {
         let yaml = "
@@ -10616,9 +10619,36 @@ plugins:
         validate_config(&provenance_config(Some("unkeyed"), &[])).unwrap();
     }
 
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn a_key_naming_a_declared_value_loads() {
         validate_config(&provenance_config(Some("pk"), &["pk"])).unwrap();
+    }
+
+    #[cfg(feature = "fips")]
+    #[test]
+    fn fips_refuses_a_declared_provenance_key() {
+        let msg = validate_config(&provenance_config(Some("pk"), &["pk"]))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("`pk`") && msg.contains("`fips`"), "{msg}");
+        assert!(
+            msg.contains("unkeyed"),
+            "the message must name the remedy: {msg}"
+        );
+    }
+
+    #[cfg(feature = "fips")]
+    #[test]
+    fn fips_refuses_provenance_without_a_key_and_offers_only_unkeyed() {
+        let msg = validate_config(&provenance_config(None, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("`fips`") && msg.contains("unkeyed"), "{msg}");
+        assert!(
+            !msg.contains("HMAC key"),
+            "fips must not suggest a keyed digest: {msg}"
+        );
     }
 
     #[test]

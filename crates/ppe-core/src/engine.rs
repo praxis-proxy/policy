@@ -7744,9 +7744,11 @@ secrets:
     }
 
     /// A secret long enough to key content provenance.
+    #[cfg(feature = "crypto-rustcrypto")]
     const PROVENANCE_KEY: &str = "a-provenance-key-of-thirty-two-bytes-or-more";
 
     /// The secret fixture with provenance keyed by `upstream_key`.
+    #[cfg(feature = "crypto-rustcrypto")]
     fn provenance_fixture(contents: &str) -> (std::path::PathBuf, String) {
         let (dir, yaml) = secret_fixture(contents);
         let yaml = yaml.replace(
@@ -7759,6 +7761,7 @@ secrets:
 
     /// The executor is built at load, before any secret is read, so the key
     /// reaches it at `initialize`.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[tokio::test]
     async fn initialize_hands_the_executor_its_content_key() {
         let (dir, yaml) = provenance_fixture(PROVENANCE_KEY);
@@ -7774,6 +7777,7 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "crypto-rustcrypto")]
     #[tokio::test]
     async fn a_short_content_key_stops_initialize() {
         let (dir, yaml) = provenance_fixture("too-short");
@@ -7793,6 +7797,7 @@ secrets:
 
     /// Secret resolution precedes the rest of initialization. If a later step
     /// fails, the resolved `OnceLock` is still the binding baseline for reloads.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[tokio::test]
     async fn a_failed_initialize_still_freezes_resolved_secret_declarations() {
         let (dir, yaml) = provenance_fixture("too-short");
@@ -7824,6 +7829,7 @@ secrets:
     }
 
     /// A reload rebuilds the executor, and the key comes with it.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[tokio::test]
     async fn a_reload_keeps_the_content_key() {
         let (dir, yaml) = provenance_fixture(PROVENANCE_KEY);
@@ -7840,6 +7846,7 @@ secrets:
 
     /// Secrets are read once, so a reload declaring a different set describes
     /// bindings the process does not have.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[tokio::test]
     async fn a_reload_that_renames_a_secret_is_refused() {
         let (dir, yaml) = provenance_fixture(PROVENANCE_KEY);

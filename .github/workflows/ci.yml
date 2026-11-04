@@ -124,13 +124,12 @@ jobs:
       # `make ci` is not what CI runs — the jobs here invoke targets directly —
       # so the per-feature gate needs its own job or it never executes.
       - run: make check-fips-graph
-      # Includes FIPS API-key allow/deny coverage; on runners without the FIPS
-      # provider, it verifies provider errors fail closed.
-      - run: make test-fips-capabilities
+      # No FIPS provider here: checks reports, refusals and fail-closed hashing.
+      - run: make test-fips-no-provider
       - run: make check-features
 
   fips-provider-tests:
-    name: FIPS provider API-key tests
+    name: FIPS provider tests
     runs-on: ubuntu-24.04
     container:
       # Match the UBI 9 OpenSSL provider used by the Praxis FIPS test setup.
@@ -172,8 +171,8 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-fips-provider-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-fips-provider-
-      - name: Run FIPS API-key tests with the provider enabled
-        run: make test-fips-capabilities
+      - name: Run FIPS tests with the provider enabled
+        run: make test-fips-provider
         env:
           OPENSSL_CONF: ${{ github.workspace }}/.github/fips-provider.cnf
           PRAXIS_REQUIRE_FIPS_PROVIDER: "1"

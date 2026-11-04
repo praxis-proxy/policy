@@ -333,6 +333,7 @@ mod tests {
     }
 
     const KEY_A: &str = "a-provenance-key-of-thirty-two-bytes-or-more";
+    #[cfg(feature = "crypto-rustcrypto")]
     const KEY_B: &str = "another-provenance-key-of-thirty-two-bytes";
 
     #[test]
@@ -345,19 +346,32 @@ mod tests {
         assert_ne!(unkeyed(b"world"), h);
     }
 
-    #[cfg(not(feature = "fips"))]
     #[test]
-    fn digest_helpers_keep_the_existing_vectors() {
+    fn the_unkeyed_digest_keeps_its_vector() {
         assert_eq!(
             unkeyed(b"hello"),
             "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[test]
+    fn the_keyed_digest_keeps_its_vector() {
         assert_eq!(
             keyed(KEY_A).digest(b"hello").unwrap(),
             "hmac-sha256:60feaba87c33f47b:37e3d4bccba219bd861dd20b3aa3458fa081fbc56a48e5032b28e3bdb6e8f438"
         );
     }
 
+    /// Config validation refuses keyed provenance under `fips`; a host that
+    /// builds the key directly gets no digest rather than a non-FIPS one.
+    #[cfg(feature = "fips")]
+    #[test]
+    fn a_keyed_digest_is_omitted_under_fips() {
+        assert_eq!(keyed(KEY_A).digest(b"hello"), None);
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn a_keyed_digest_names_its_scheme_and_key() {
         let h = keyed(KEY_A).digest(b"hello").unwrap();
@@ -371,6 +385,7 @@ mod tests {
 
     /// Equal content under one key gives equal digests, which is what lets a
     /// reader spot a payload replayed across requests.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn the_same_key_and_content_digest_the_same() {
         assert_eq!(keyed(KEY_A).digest(b"hello"), keyed(KEY_A).digest(b"hello"));
@@ -379,6 +394,7 @@ mod tests {
 
     /// A rotated key shows up as a different key id, so a reader does not
     /// compare digests across it and read the rotation as the content changing.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn a_different_key_has_a_different_id() {
         let id = |key: &str| {
@@ -396,6 +412,7 @@ mod tests {
 
     /// The keyed digest is not the plain hash of the content, which is the
     /// whole point: a guess cannot be checked without the key.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn a_keyed_digest_is_not_the_plain_hash() {
         let plain = unkeyed(b"hello");
