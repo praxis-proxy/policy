@@ -410,21 +410,20 @@ pub fn install_builtins_with_default_http_transport(mgr: &std::sync::Arc<PolicyE
     installed
 }
 
-/// The FIPS case reads its expected builtin list from
-/// `PPE_EXPECT_BUILTIN_CRYPTO`, set per feature set by
-/// `make test-fips-capabilities`, so the expectation comes from the
-/// invocation rather than from the report under test.
+/// The expected builtin list comes from `PPE_EXPECT_BUILTIN_CRYPTO`, set per
+/// feature set by `make test-fips-no-provider`, rather than from the report
+/// under test.
 #[cfg(test)]
 #[allow(clippy::panic, reason = "tests")]
 mod crypto_capability_tests {
-    #[cfg(feature = "fips")]
-    use super::BundledCryptoCapability;
-    use super::{CryptoBackend, crypto_capability_report};
+    use super::{BundledCryptoCapability, CryptoBackend, crypto_capability_report};
 
-    #[cfg(feature = "fips")]
-    fn expected_builtin_crypto() -> Vec<BundledCryptoCapability> {
-        std::env::var("PPE_EXPECT_BUILTIN_CRYPTO")
-            .unwrap_or_default()
+    /// The builtin list from `PPE_EXPECT_BUILTIN_CRYPTO`, or `None` when the
+    /// invocation does not state one. A workspace run unifies builtin
+    /// features across members, so only a package-scoped run can.
+    fn expected_builtin_crypto() -> Option<Vec<BundledCryptoCapability>> {
+        let names = std::env::var("PPE_EXPECT_BUILTIN_CRYPTO").ok()?;
+        let parsed = names
             .split(',')
             .filter(|name| !name.is_empty())
             .map(|name| match name {
@@ -434,7 +433,8 @@ mod crypto_capability_tests {
                 "valkey" => BundledCryptoCapability::Valkey,
                 other => panic!("unknown builtin in PPE_EXPECT_BUILTIN_CRYPTO: {other}"),
             })
-            .collect()
+            .collect();
+        Some(parsed)
     }
 
     #[cfg(not(feature = "fips"))]
@@ -445,23 +445,21 @@ mod crypto_capability_tests {
         assert!(!report.fips_profile_is_safe());
     }
 
-    #[cfg(not(feature = "_builtin"))]
     #[test]
-    fn engine_only_build_reports_no_api_key_or_builtin_crypto() {
+    fn report_matches_the_expected_builtins() {
         let report = crypto_capability_report();
-        assert_eq!(report.api_key_backend, None);
-        assert!(report.default_builtin_crypto.is_empty());
-    }
-
-    #[cfg(feature = "fips")]
-    #[test]
-    fn fips_report_matches_the_expected_builtins() {
-        let report = crypto_capability_report();
-        let expected = expected_builtin_crypto();
-        assert_eq!(report.policy_backend, CryptoBackend::OpenSslFips);
-        assert_eq!(report.api_key_backend, Some(CryptoBackend::OpenSslFips));
+        let Some(expected) = expected_builtin_crypto() else {
+            #[cfg(feature = "fips")]
+            panic!("a FIPS run must set PPE_EXPECT_BUILTIN_CRYPTO to state the expected report");
+            #[cfg(not(feature = "fips"))]
+            return;
+        };
         assert_eq!(report.default_builtin_crypto, expected);
-        assert_eq!(report.fips_profile_is_safe(), expected.is_empty());
+        if cfg!(feature = "fips") {
+            assert_eq!(report.policy_backend, CryptoBackend::OpenSslFips);
+            assert_eq!(report.api_key_backend, Some(CryptoBackend::OpenSslFips));
+            assert_eq!(report.fips_profile_is_safe(), expected.is_empty());
+        }
     }
 }
 

@@ -139,7 +139,7 @@ check-fips-graph:
 # refusals, and fail-closed hashing. `test-fips-provider` needs
 # PRAXIS_REQUIRE_FIPS_PROVIDER and a loaded provider, and runs the full FIPS
 # lib suites against it.
-FIPS_REPORT_TEST := crypto_capability_tests::fips_report_matches_the_expected_builtins
+FIPS_REPORT_TEST := crypto_capability_tests::report_matches_the_expected_builtins
 FIPS_LIBS := -p praxis-policy-core -p praxis-policy-apl-cmf -p praxis-policy-apl-runtime
 FIPS_API_KEY_TEST := fips::fips_api_key_allow_and_deny_follow_provider_availability
 FIPS_API_KEY := fips,api-key
@@ -157,8 +157,10 @@ test-fips-capabilities: test-fips-no-provider
 
 .PHONY: test-fips-no-provider
 test-fips-no-provider:
-	@$(call run_selected,$(CARGO) test -p praxis-policy --no-default-features \
-		--features $(FIPS_API_KEY) --lib -- --exact $(FIPS_REPORT_TEST))
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
+		--lib -- --exact $(FIPS_REPORT_TEST))
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
+		--no-default-features --features $(FIPS_API_KEY) --lib -- --exact $(FIPS_REPORT_TEST))
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=jwt $(CARGO) test -p praxis-policy \
 		--no-default-features --features $(FIPS_API_KEY)$(,)praxis-policy-builtins/jwt --lib \
 		-- --exact $(FIPS_REPORT_TEST))
