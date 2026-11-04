@@ -2468,8 +2468,10 @@ fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<Plug
             #[cfg(feature = "fips")]
             return refuse(format!(
                 "engine_settings.capture_content_provenance is on but no \
-                 content_provenance_key is set. Set it to `{UNKEYED_CONTENT_PROVENANCE}` for \
-                 plain SHA-256; keyed content provenance is unavailable with the `fips` feature"
+                 content_provenance_key is set. Keyed content provenance is unavailable with \
+                 the `fips` feature: set it to `{UNKEYED_CONTENT_PROVENANCE}` for plain \
+                 SHA-256, which anyone holding a record can test guesses at the payload \
+                 against, or disable capture_content_provenance"
             ));
             #[cfg(not(feature = "fips"))]
             return refuse(format!(
@@ -2504,7 +2506,8 @@ fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<Plug
         return refuse(format!(
             "engine_settings.capture_content_provenance uses named key `{key}`, but keyed \
              content provenance requires HMAC and is unavailable with the `fips` feature. \
-             Set content_provenance_key to `{UNKEYED_CONTENT_PROVENANCE}` for plain SHA-256 or \
+             Set content_provenance_key to `{UNKEYED_CONTENT_PROVENANCE}` for plain SHA-256, \
+             which anyone holding a record can test guesses at the payload against, or \
              disable capture_content_provenance"
         ));
     }
@@ -10633,8 +10636,8 @@ plugins:
             .to_string();
         assert!(msg.contains("`pk`") && msg.contains("`fips`"), "{msg}");
         assert!(
-            msg.contains("unkeyed"),
-            "the message must name the remedy: {msg}"
+            msg.contains("unkeyed") && msg.contains("test guesses"),
+            "the message must name the remedy and its tradeoff: {msg}"
         );
     }
 
@@ -10644,7 +10647,10 @@ plugins:
         let msg = validate_config(&provenance_config(None, &[]))
             .unwrap_err()
             .to_string();
-        assert!(msg.contains("`fips`") && msg.contains("unkeyed"), "{msg}");
+        assert!(
+            msg.contains("`fips`") && msg.contains("unkeyed") && msg.contains("test guesses"),
+            "{msg}"
+        );
         assert!(
             !msg.contains("HMAC key"),
             "fips must not suggest a keyed digest: {msg}"

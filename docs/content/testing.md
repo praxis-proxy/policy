@@ -186,7 +186,7 @@ policies:
 | `praxis-policy-test-utils` | `tests/utils` | The reference host, scripted IdP, upstream stand-in, fixtures, leak checks |
 
 Each suite is one test binary behind a `suite` feature. The `make test` pass
-builds these suites with the expanded `DEFAULT_FEATURES` set; dedicated
+builds these suites with the expanded `WORKSPACE_TEST_FEATURES` set; dedicated
 targets use explicit feature selections. The live-mode command below selects
 `experimental-ratelimit` to enable the suite and its rate-limit support. The
 demo policies live in
@@ -317,14 +317,22 @@ dispatch, and never blocks a merge.
 cargo nextest run --workspace          # everything
 cargo nextest run -p praxis-policy-apl-core --lib
 make test                              # both feature passes, as CI runs them
+make test-fips-no-provider             # FIPS checks that need no provider
+make test-fips-provider                # FIPS suites; needs a loaded provider
 ```
 
 Tests run twice, once with Cargo defaults and once with the expanded
-`DEFAULT_FEATURES` set.
+`WORKSPACE_TEST_FEATURES` set.
 The facade has no builtin enabled by default, so its builtin tests
-are feature-gated and a single pass would hide them. The FIPS backend is checked
-as a separate API-key-only profile because it is mutually exclusive with the
-default RustCrypto backend.
+are feature-gated and a single pass would hide them.
+
+The FIPS backend is mutually exclusive with RustCrypto, so it has its own
+targets rather than an `--all-features` pass. `test-fips-no-provider` checks
+the capability report, the HMAC and config refusals, and that hashing fails
+closed without a provider. `test-fips-provider` runs the core, CMF and runtime
+suites under `fips`; it requires `PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded
+OpenSSL FIPS provider, as in the CI job. Both fail when a named test selects
+nothing, so a rename cannot pass silently.
 
 ## Related documentation
 

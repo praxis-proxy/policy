@@ -10,9 +10,10 @@ CARGO ?= cargo
 # A literal comma for `$(call ...)` arguments.
 , := ,
 
-# Default workspace features use RustCrypto; `--all-features` would also enable
-# FIPS and combine mutually exclusive crypto backends.
-DEFAULT_FEATURES := \
+# Every compatible feature for the second workspace pass, on the RustCrypto
+# backend. It stands in for `--all-features`, which would also enable `fips`
+# and select both mutually exclusive backends. FIPS has its own targets.
+WORKSPACE_TEST_FEATURES := \
 	praxis-policy-core/crypto-rustcrypto,praxis-policy-apl-cmf/crypto-rustcrypto,praxis-policy-apl-runtime/crypto-rustcrypto \
 	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/oauth,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
 	praxis-policy/builtins,praxis-policy/http-hyper,praxis-policy/experimental-quota,praxis-policy/experimental-ratelimit \
@@ -114,7 +115,7 @@ build-release:
 .PHONY: check
 check:
 	@$(CARGO) check --workspace --all-targets
-	@$(CARGO) check --workspace --all-targets --features "$(DEFAULT_FEATURES)"
+	@$(CARGO) check --workspace --all-targets --features "$(WORKSPACE_TEST_FEATURES)"
 	@$(CARGO) check -p praxis-policy --no-default-features --features fips,api-key --lib
 	@$(MAKE) check-fips-graph
 
@@ -203,7 +204,7 @@ fmt:
 .PHONY: clippy
 clippy:
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
-	@$(CARGO) clippy --workspace --all-targets --features "$(DEFAULT_FEATURES)" -- -D warnings
+	@$(CARGO) clippy --workspace --all-targets --features "$(WORKSPACE_TEST_FEATURES)" -- -D warnings
 	@$(MAKE) clippy-fips
 
 # The FIPS profile compiles code no RustCrypto pass sees. Linting the facade
@@ -222,7 +223,7 @@ lint:
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
 # The expanded default feature set enables all builtins; a plain workspace run
 # reaches only cedar, cel, and opa through `ppe-pdp-diff`.
-	@$(CARGO) clippy --workspace --all-targets --features "$(DEFAULT_FEATURES)" -- -D warnings
+	@$(CARGO) clippy --workspace --all-targets --features "$(WORKSPACE_TEST_FEATURES)" -- -D warnings
 	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
 	@$(MAKE) clippy-fips
 	@echo "lint passed"
@@ -263,13 +264,13 @@ setup-hooks:
 # Test
 # =============================================================================
 
-# Two passes: Cargo defaults, then the expanded `DEFAULT_FEATURES` set. The
+# Two passes: Cargo defaults, then the expanded `WORKSPACE_TEST_FEATURES` set. The
 # facade enables only the RustCrypto backend by default, not a builtin, so its
 # builtin tests are gated on the second pass. Dropping either pass hides tests.
 .PHONY: test
 test:
 	@$(CARGO) test --workspace
-	@$(CARGO) test --workspace --features "$(DEFAULT_FEATURES)"
+	@$(CARGO) test --workspace --features "$(WORKSPACE_TEST_FEATURES)"
 
 # The suites under tests/. They build only with the explicit suite feature, which
 # turns on their `suite` feature; `make test` runs them in its second pass. As in
@@ -371,7 +372,7 @@ COVERAGE_FLOOR ?= 96
 #
 # Both coverage targets share these flags. A report built from a narrower run
 # understates what the floor asserted.
-COVERAGE_FEATURES := $(filter-out ppe-benches/dhat-heap,$(DEFAULT_FEATURES))
+COVERAGE_FEATURES := $(filter-out ppe-benches/dhat-heap,$(WORKSPACE_TEST_FEATURES))
 COVERAGE_ARGS := --workspace --features "$(COVERAGE_FEATURES)" --exclude ppe-benches
 COVERAGE_TEST_ARGS := -- --include-ignored
 
@@ -432,7 +433,7 @@ doc:
 # Second pass for the same reason as `lint`: a default-feature workspace run
 # documents only the cedar, cel and opa modules, so the other six are covered
 # here alone.
-	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --features "$(DEFAULT_FEATURES)"
+	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --features "$(WORKSPACE_TEST_FEATURES)"
 
 # Link and style checks for the markdown under docs/. Advisory, like
 # lint-extra: neither is part of `make ci`, because both reach for a tool the
@@ -542,7 +543,7 @@ PACKAGE_TEST_EXCLUDES = --exclude praxis-policy-test-utils \
 	--exclude praxis-policy-tests-security
 publish-dry:
 	@$(CARGO) package --workspace $(PACKAGE_TEST_EXCLUDES) --locked --allow-dirty --no-verify
-	@$(CARGO) check --workspace --features "$(DEFAULT_FEATURES)" --locked
+	@$(CARGO) check --workspace --features "$(WORKSPACE_TEST_FEATURES)" --locked
 
 # Tag the current commit and push it. The tag is what the release workflow
 # triggers on. VERSION must be semver with no leading `v`.

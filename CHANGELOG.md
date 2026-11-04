@@ -19,6 +19,21 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Selectable crypto backend.** Policy's SHA-256 operations (content
+  digests, decision-cache keys, session ids, instruction digests and API-key
+  hashing) use `crypto-rustcrypto`, the default, or `fips`, which uses OpenSSL
+  with the `fips=yes` property. The FIPS profile is SHA-256 only and is
+  `default-features = false` with `fips` and `api-key`. Exactly one backend
+  must be selected; none or both is a build error.
+- **FIPS startup checks.** `crypto_capability_report()` describes the compiled
+  backend and the builtins that do their own `RustCrypto` crypto (JWT, OAuth,
+  Vault delegation, Valkey); `fips_profile_is_safe()` is false while any of
+  them is enabled. `validate_api_key_crypto()` checks that the FIPS provider
+  is loaded. A host needs both: the report covers the build, not the runtime.
+- **Crypto failure alarm.** A hashing failure on the request path logs
+  `alarm = "policy_crypto_failure"` with the operation, and an APL route that
+  cannot hash its attribute bag denies with `policy.crypto_failed`.
+
 - **Pre- and post-identity rate-limit hooks.** `ratelimit.pre_identity` runs
   before the first `identity.resolve` and `ratelimit.post_identity` after the
   last, once per request. A `rate_limits:` list at `global`,
@@ -163,9 +178,31 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking Rust API: hashing is fallible.** `resolve_session` returns
+  `Result<Option<(String, SessionSource)>, CryptoError>`, `instruction_digest`
+  returns `Result<String, CryptoError>`, and `extract_llm_request`,
+  `extract_extensions` and `BagBuilder::with_extensions` return `Result<_,
+  CryptoError>`. Propagate the error with `?`, or deny: a hashing failure
+  must not fall back to an unhashed value. `CryptoError` is
+  `#[non_exhaustive]` and its variants depend on the backend.
+- **Breaking for builds without default features:** `praxis-policy`,
+  `praxis-policy-core`, `-apl-cmf` and `-apl-runtime` with
+  `default-features = false` must name `crypto-rustcrypto` or `fips`. For
+  example, `--no-default-features --features jwt` now fails; use
+  `jwt,crypto-rustcrypto`. `praxis-policy-builtins` now defaults to
+  `crypto-rustcrypto`, so `features = ["jwt"]` still builds.
+- **Composing a FIPS build:** Cargo features only add, so a dependency that
+  leaves Policy's defaults on selects `crypto-rustcrypto` and the FIPS build
+  fails with both backends. Every Policy dependency in a FIPS graph, plugin
+  crates included, must disable defaults. A plugin crate forwards its own
+  backend features to core, as the reference plugins do.
 - The FIPS profile rejects configurations that enable keyed content
   provenance, which requires HMAC. Plain SHA-256 provenance remains available
-  by explicitly selecting `content_provenance_key: unkeyed`.
+  by explicitly selecting `content_provenance_key: unkeyed`, which lets anyone
+  holding a record test guesses at the payload.
+- A rate-limit check that fails because the request cannot be hashed denies
+  the request, and the throttled failure log reads "rate limit check failed"
+  instead of naming Limitador.
 - A `run(name)` step whose plugin has no hook for the request's context
   fails with a `PluginError::Dispatch` message that now names the remedy:
   move the step, or use a plugin with a hook for that context.

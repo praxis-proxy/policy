@@ -7,7 +7,7 @@
 # Every dependency is declared without features, and the lib is empty unless
 # `suite` is on. Cargo unifies features across the workspace, so a feature named
 # here would reach the default `--workspace` pass and turn on builtins there.
-# The suites forward `suite`, which only `--all-features` enables.
+# The suites forward `suite`, which only the `make test` second pass enables.
 
 [package]
 name = "praxis-policy-test-utils"
@@ -44,7 +44,7 @@ suite = [
   "dep:tracing",
 ]
 # The experimental rate limiter, which `builtins` leaves out. Only
-# `--all-features` turns it on, as with `suite`.
+# the `make test` second pass turns it on, as with `suite`.
 experimental-ratelimit = ["suite", "praxis-policy/experimental-ratelimit"]
 
 [dependencies]

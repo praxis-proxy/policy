@@ -78,7 +78,7 @@ reference/
   plugins/      pii-scanner, audit-logger,
                 transcript-scanner (examples)
 
-tests/          suites, `--all-features` pass only
+tests/          suites, second test pass only
   integration   demo scenarios via the reference host,
                 live mode (env-gated)
   resilience    dependency failure, concurrency
@@ -147,9 +147,12 @@ No author lines, no path lines.
 
 ### Tests
 
-Two test passes: default features then `--all-features`.
-The facade's tests are feature-gated because its
-`default` is empty. Dropping either pass hides tests.
+Two test passes: default features, then the RustCrypto
+`WORKSPACE_TEST_FEATURES` set. `--all-features` is not
+used: it would select both crypto backends. FIPS runs in
+its own targets, `make test-fips-no-provider` and `make
+test-fips-provider`. The facade's builtin tests are
+feature-gated, so dropping either pass hides tests.
 
 The Valkey session store tests are `#[ignore]`-gated
 and need `VALKEY_TEST_URL` set to run against a real
