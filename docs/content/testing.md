@@ -357,10 +357,9 @@ The `jwt_fips` builtins suite covers `jwt-openssl-fips`. The `jsonwebtoken`
 provider and OpenSSL's provider state are process-wide, so each case re-runs
 itself in a child process with its own `OPENSSL_CONF`: `fips-default.cnf`
 (FIPS as the default), `fips-provider.cnf` (FIPS loaded but not the default)
-or `fips-no-provider.cnf`. Tokens come from published RFC 7515 and RFC 7520
-examples and from Python `cryptography`, regenerated with the script noted in
-`crates/builtins/tests/jwt_fips/fixtures/README.md`, so OpenSSL never
-verifies its own signatures. The missing-provider case runs in `test-fips-no-provider`; the
+or `fips-no-provider.cnf`. Tokens come from the RFC 7515 and RFC 7520
+examples or are signed with RustCrypto, so no OpenSSL code signs what the
+suite verifies; see `crates/builtins/tests/jwt_fips/fixtures/README.md`. The missing-provider case runs in `test-fips-no-provider`; the
 rest run in `test-fips-provider`.
 
 The `jwt_verify` bench in `praxis-policy-builtins` compares the two JWT

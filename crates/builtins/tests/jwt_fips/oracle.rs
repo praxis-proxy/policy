@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Test utilities: tokens and keys from an independent signer.
+//! Test utilities: fixture tokens and keys.
 //!
-//! `fixtures/oracle.json` holds tokens signed by Python `cryptography` and the
-//! RFC 7515 Appendix A.2 and A.3 and RFC 7520 section 4.2 examples, so no
-//! OpenSSL path signs what it verifies. Tokens with a live `iat` or `ath` are
-//! signed here with the `RustCrypto` `p256` crate.
+//! `fixtures/oracle.json` holds the RFC 7515 Appendix A.2 and A.3 and RFC 7520
+//! section 4.2 examples, and tokens signed with `RustCrypto` by
+//! `fixtures/gen`. Tokens with a live `iat` or `ath` are signed here with the
+//! `RustCrypto` `p256` crate.
 
 use std::sync::OnceLock;
 

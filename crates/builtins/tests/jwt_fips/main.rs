@@ -15,8 +15,8 @@
 //! The `jsonwebtoken` provider and OpenSSL's provider state are process-wide,
 //! so each case that depends on them runs in a child process with its own
 //! `OPENSSL_CONF`. The parent is what `make` selects; it asserts the child ran
-//! exactly one test. Tokens are signed by an independent implementation
-//! (Python `cryptography`) or come from published RFC examples.
+//! exactly one test. Tokens come from published RFC examples or are signed
+//! with RustCrypto, never by OpenSSL.
 
 mod oracle;
 mod refusals;
