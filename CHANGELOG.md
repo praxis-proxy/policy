@@ -25,8 +25,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   validation. It requires `fips` and cannot be combined with `jwt`, which
   keeps AWS-LC. RS256 to RS512, PS256 to PS512, ES256 and ES384 are
   supported, with RSA keys of 2048 to 8192 bits and a FIPS 186-5 public
-  exponent, and EC keys on P-256 or P-384; other keys, including DPoP proof
-  keys, are refused at load and skipped on JWKS refresh. The
+  exponent, and EC keys on P-256 or P-384. Other inline and file keys are
+  refused at load, other JWKS entries are skipped on refresh, and other
+  client-supplied DPoP proof keys are refused when the proof is verified. The
   DPoP `ath` hash and JWK thumbprint use the shared SHA-256 backend.
   `fips,jwt-openssl-fips` passes `fips_profile_is_safe()`, with or without
   `api-key`. Building a

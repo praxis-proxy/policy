@@ -3,10 +3,11 @@
 
 //! Feature-selected cryptographic operations shared by Policy crates.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "fips")]
-use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 /// The violation code for a request denied because the crypto backend failed.
 pub const CRYPTO_FAILED_CODE: &str = "policy.crypto_failed";
@@ -96,9 +97,14 @@ impl IntervalLog {
 
     /// The count held back since the last admitted line, when a line is due.
     pub fn admit(&self) -> Option<u64> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
+        // Monotonic, so a wall-clock step back cannot silence alarms. The
+        // offset lets the first call pass the initial `next_at` of 0.
+        static START: OnceLock<Instant> = OnceLock::new();
+        let now = START
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_secs()
+            .saturating_add(1);
         let next = self.next_at.load(Ordering::Relaxed);
         let due = now >= next
             && self
@@ -408,6 +414,26 @@ mod tests {
         for (key, data, expected) in cases {
             assert_eq!(hex(&hmac_sha256(key, data).unwrap()), expected);
         }
+    }
+
+    #[test]
+    fn interval_log_admits_one_line_per_interval_and_counts_the_rest() {
+        let log = IntervalLog::new(3_600);
+        assert_eq!(log.admit(), Some(0), "the first line is admitted");
+        assert_eq!(
+            log.admit(),
+            None,
+            "a repeat inside the interval is held back"
+        );
+        assert_eq!(log.admit(), None, "and so is the next");
+
+        let open = IntervalLog::new(0);
+        assert_eq!(
+            open.admit(),
+            Some(0),
+            "a zero interval admits the first line"
+        );
+        assert_eq!(open.admit(), Some(0), "and every line after it");
     }
 
     #[cfg(feature = "crypto-rustcrypto")]

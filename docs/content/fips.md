@@ -93,10 +93,10 @@ thumbprint use Policy's shared SHA-256 backend.
   `jwt-openssl-fips`. DPoP algorithms are checked even while `dpop.mode` is
   `off`.
 - **Keys:** RSA moduli of 2048 to 8192 bits with an odd public exponent
-  between 2^16 and 2^256 (FIPS 186-5), and EC keys on P-256 or P-384. This
-  covers DPoP proof keys, which the client chooses.
-  Inline and file keys outside these are refused at load; a JWKS entry
-  outside them is skipped on every fetch, including refreshes.
+  between 2^16 and 2^256 (FIPS 186-5), and EC keys on P-256 or P-384.
+  A DPoP proof key, which the client supplies, is refused when its proof is
+  verified. Inline and file keys outside these are refused at load; a JWKS
+  entry outside them is skipped on every fetch, including refreshes.
 - **Provider:** JWT configuration loading validates shared SHA-256, OpenSSL's
   FIPS default properties (see [Host setup](#host-setup)) and the configured
   signature algorithms. A crypto failure stops config loading with
