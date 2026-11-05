@@ -65,6 +65,7 @@ pub const VIOLATION_ASSERTION_MISSING: &str = "auth.assertion_missing";
 /// deny: the request never reached a rule.
 pub const VIOLATION_UNIDENTIFIED_REQUEST: &str = "unidentified_request";
 
+/// Why a request could not be resolved against the route table.
 /// Violation code for a `rate_limits:` step whose limiter the running snapshot
 /// cannot supply. Denies rather than skipping the limit.
 pub const VIOLATION_RATE_LIMIT_UNAVAILABLE: &str = "ratelimit.unavailable";
@@ -2741,13 +2742,12 @@ impl PolicyEngine {
         let context_table =
             self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
-        let all_entries = snapshot.registry.entries_for_hook(&hook_type);
-
+        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
         // Same caveat as `invoke_named`: route annotations can produce a
         // dispatch entry without any plugin being registered on the
         // hook directly, so we can only short-circuit when both the
         // registry and the annotation map are empty.
-        if snapshot.has_nothing_to_dispatch(hook_name, all_entries) {
+        if snapshot.has_nothing_to_dispatch(hook_name, hook_entries) {
             // Route filtering has not run, so the route is resolved here: a
             // contract written on a route holds whether or not this hook has a
             // plugin on it.
@@ -2770,7 +2770,7 @@ impl PolicyEngine {
         }
 
         let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
+            .filter_entries_by_route(&snapshot, hook_entries, &extensions, hook_name)
             .await
         {
             Ok(resolved) => resolved,
@@ -2873,12 +2873,11 @@ impl PolicyEngine {
         let context_table =
             self.track_rate_limit_stage(&snapshot, H::NAME, &extensions, context_table);
         let hook_type = HookType::new(H::NAME);
-        let all_entries = snapshot.registry.entries_for_hook(&hook_type);
-
+        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
         // See `invoke_named` for why we don't short-circuit on
-        // `all_entries.is_empty()` alone — route annotations can fire
+        // `hook_entries.is_empty()` alone — route annotations can fire
         // without a directly-registered plugin.
-        if snapshot.has_nothing_to_dispatch(H::NAME, all_entries) {
+        if snapshot.has_nothing_to_dispatch(H::NAME, hook_entries) {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             let matched = resolve_contract_route(&snapshot, &extensions);
             return (
@@ -2899,7 +2898,7 @@ impl PolicyEngine {
         }
 
         let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, all_entries, &extensions, H::NAME)
+            .filter_entries_by_route(&snapshot, hook_entries, &extensions, H::NAME)
             .await
         {
             Ok(resolved) => resolved,
@@ -3001,11 +3000,10 @@ impl PolicyEngine {
         let context_table =
             self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
-        let all_entries = snapshot.registry.entries_for_hook(&hook_type);
-
+        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
         // No registered entries AND no route annotations → nothing to
         // do. Allow-and-pass-through. We can't short-circuit on
-        // `all_entries.is_empty()` alone, because route annotations
+        // `hook_entries.is_empty()` alone, because route annotations
         // (external-orchestrator handlers from APL / future Rego /
         // Cedar-direct) can produce a single-entry dispatch even when
         // no plugin was registered on the hook directly.
@@ -3013,7 +3011,7 @@ impl PolicyEngine {
         // Returning here also means a request whose path cannot be read is
         // allowed rather than denied on such a hook. Nothing would have
         // enforced on it either way.
-        if snapshot.has_nothing_to_dispatch(hook_name, all_entries) {
+        if snapshot.has_nothing_to_dispatch(hook_name, hook_entries) {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
             let matched = resolve_contract_route(&snapshot, &extensions);
             return (
@@ -3034,7 +3032,7 @@ impl PolicyEngine {
         }
 
         let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, all_entries, &extensions, hook_name)
+            .filter_entries_by_route(&snapshot, hook_entries, &extensions, hook_name)
             .await
         {
             Ok(resolved) => resolved,
