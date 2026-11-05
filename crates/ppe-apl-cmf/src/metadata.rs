@@ -243,7 +243,8 @@ mod tests {
             filter_extensions(&child, &HashSet::from(["read_metadata".to_owned()]));
         let mut child_bag = AttributeBag::new();
 
-        extract_extensions(&filtered_child, &mut child_bag);
+        extract_extensions(&filtered_child, &mut child_bag)
+            .expect("selected SHA-256 backend is available");
 
         assert!(filtered_child.metadata.is_none());
         assert!(
