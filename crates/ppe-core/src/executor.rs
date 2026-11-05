@@ -1166,7 +1166,18 @@ impl Executor {
                             }
                             if let Some(mut owned) = erased.modified_extensions {
                                 let mut immutable_ok = false;
-                                if extensions.validate_immutable(&owned) {
+                                let trusted = entry.plugin_ref.trusted_config();
+                                let may_publish_metadata = trusted.kind == "builtin"
+                                    && plugin_name.starts_with("apl::")
+                                    && capabilities.contains(
+                                        crate::extensions::CAP_FRAMEWORK_PUBLISH_METADATA,
+                                    );
+                                let published_metadata = may_publish_metadata
+                                    .then(|| owned.metadata.clone())
+                                    .flatten();
+                                if extensions
+                                    .validate_immutable_with_metadata(&owned, may_publish_metadata)
+                                {
                                     // `merge_owned` enforces the tiers per
                                     // *field*, gated on the write tokens that
                                     // `owned` carries. It is not a slot swap: a
@@ -1252,6 +1263,9 @@ impl Executor {
                                     );
                                 } else {
                                     extensions.merge_owned(owned);
+                                    if let Some(metadata) = published_metadata {
+                                        extensions.metadata = Some(metadata);
+                                    }
                                     if action == PluginAction::Allowed {
                                         action = PluginAction::ModifiedExtensions;
                                     }
