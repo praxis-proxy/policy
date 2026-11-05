@@ -30,8 +30,6 @@ use openssl::sign::RsaPssSaltlen;
 use praxis_policy_core::CryptoError;
 use praxis_policy_core::error::PluginError;
 
-use crate::plugins::identity_jwt::alarm::{Op, crypto_failure};
-
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -207,15 +205,12 @@ impl Verifier<Vec<u8>> for OpenSslVerifier {
             },
             None => signature.as_slice(),
         };
-        // `jsonwebtoken` reports every error here as an invalid signature, so
-        // a backend failure raises its alarm before that, and still denies.
+        // A mismatched signature also surfaces as `Err`, so no error here is
+        // treated as a backend failure: a forged token must not raise the
+        // crypto alarm. Backend failures are reported when the context is set up.
         match context.digest_verify(msg, signature) {
             Ok(true) => Ok(()),
-            Ok(false) => Err(jsonwebtoken::signature::Error::new()),
-            Err(error) => {
-                crypto_failure(Op::JwtVerify, &error);
-                Err(jsonwebtoken::signature::Error::new())
-            },
+            _ => Err(jsonwebtoken::signature::Error::new()),
         }
     }
 }

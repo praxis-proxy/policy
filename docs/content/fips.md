@@ -107,14 +107,15 @@ thumbprint use Policy's shared SHA-256 backend.
   process. A host that installs its own, or calls `jsonwebtoken` before
   Policy builds a resolver, makes JWT resolvers refuse to build rather than
   verify with that provider.
-- **Request path:** a backend failure denies and logs `policy_crypto_failure`
-  with `op = "jwt_verify"`, `"dpop_verify"`, `"dpop_provider"`,
-  `"dpop_thumbprint"` or `"dpop_ath"`, at most once a minute per operation
-  with a `suppressed` count. A failure while setting up verification, or in
-  DPoP hashing, denies with `policy.crypto_failed`. A failure inside the
-  signature check itself denies as `auth.signature_invalid` or
-  `auth.dpop_invalid`, because `jsonwebtoken` reports every verifier error
-  as an invalid signature. The denial reason carries no backend detail.
+- **Request path:** a backend failure while setting up verification, or in
+  DPoP hashing, denies with `policy.crypto_failed` and logs
+  `policy_crypto_failure` with `op = "jwt_verify"`, `"dpop_verify"`,
+  `"dpop_provider"`, `"dpop_thumbprint"` or `"dpop_ath"`, at most once a
+  minute per operation with a `suppressed` count. The signature check itself
+  raises no alarm: OpenSSL reports a mismatched signature and a failure the
+  same way, and a client must not be able to raise the alarm with a forged
+  token. It denies as `auth.signature_invalid` or `auth.dpop_invalid`. The
+  denial reason carries no backend detail.
 
 ## Accepted crates in the graph
 

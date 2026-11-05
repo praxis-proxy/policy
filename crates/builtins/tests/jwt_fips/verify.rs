@@ -196,6 +196,7 @@ async fn invalid_tokens() {
         None,
         "the control token verifies against the inline PEM"
     );
+    let (events, _guard) = crate::support::capturing();
     for (name, code) in [
         ("ES256_bad_signature", "auth.signature_invalid"),
         ("ES256_expired", "auth.token_expired"),
@@ -207,6 +208,10 @@ async fn invalid_tokens() {
             "{name}"
         );
     }
+    assert!(
+        events.matching("policy_crypto_failure").is_empty(),
+        "a forged or invalid token must not raise the crypto alarm"
+    );
     let rs_only = jwks_resolver(&["RS256"]).await;
     assert_eq!(
         denial_code(&resolve(&rs_only, token("PS256")).await).as_deref(),
