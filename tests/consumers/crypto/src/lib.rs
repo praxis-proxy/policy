@@ -35,7 +35,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "fips", feature = "jwt-openssl-fips"))]
+    #[cfg(all(feature = "fips", feature = "api-key", feature = "jwt-openssl-fips"))]
     #[test]
     fn openssl_jwt_keeps_the_fips_profile_safe() {
         assert_report(
@@ -43,7 +43,11 @@ mod tests {
             Some(CryptoBackend::OpenSslFips),
             true,
         );
-        assert_eq!(policy::JWT_KIND, "identity/jwt");
+        assert_eq!(
+            policy::JWT_KIND,
+            "identity/jwt",
+            "the JWT kind is the same under jwt-openssl-fips"
+        );
     }
 
     #[cfg(feature = "api-key")]

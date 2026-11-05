@@ -249,7 +249,7 @@ fn new_signer(_: &Algorithm, _: &EncodingKey) -> Result<Box<dyn JwtSigner>, Erro
 
 /// Initialize verification, selecting the FIPS digest and the JOSE padding.
 fn init_verify(algorithm: Algorithm, key: &PKey<Public>) -> Result<MdCtx, CryptoError> {
-    let digest = fips_digest(digest_name(algorithm))?;
+    let digest = fips_digest(digest_for(algorithm))?;
     let mut context = MdCtx::new()?;
     let pkey = context.digest_verify_init(Some(digest), key)?;
     if algorithm.family() == AlgorithmFamily::Rsa {
@@ -375,13 +375,13 @@ fn ed_components_from_private_key(_: &[u8], _: &EllipticCurve) -> Result<Vec<u8>
 }
 
 fn compute_digest(data: &[u8], hash: ThumbprintHash) -> Result<Vec<u8>, Error> {
-    let name = match hash {
-        ThumbprintHash::SHA256 => "SHA256",
-        ThumbprintHash::SHA384 => "SHA384",
-        ThumbprintHash::SHA512 => "SHA512",
+    let digest = match hash {
+        ThumbprintHash::SHA256 => Digest::Sha256,
+        ThumbprintHash::SHA384 => Digest::Sha384,
+        ThumbprintHash::SHA512 => Digest::Sha512,
         _ => return Err(ErrorKind::UnsupportedAlgorithm.into()),
     };
-    let digest = fips_digest(name).map_err(provider_error)?;
+    let digest = fips_digest(digest).map_err(provider_error)?;
     let digest_bytes = || -> Result<Vec<u8>, openssl::error::ErrorStack> {
         let mut context = MdCtx::new()?;
         context.digest_init(digest)?;
@@ -393,15 +393,33 @@ fn compute_digest(data: &[u8], hash: ThumbprintHash) -> Result<Vec<u8>, Error> {
     digest_bytes().map_err(|e| provider_error(e.into()))
 }
 
+/// The digests this provider uses.
+#[derive(Clone, Copy)]
+enum Digest {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl Digest {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Sha256 => "SHA256",
+            Self::Sha384 => "SHA384",
+            Self::Sha512 => "SHA512",
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
 
-fn digest_name(algorithm: Algorithm) -> &'static str {
+fn digest_for(algorithm: Algorithm) -> Digest {
     match algorithm {
-        Algorithm::RS384 | Algorithm::PS384 | Algorithm::ES384 => "SHA384",
-        Algorithm::RS512 | Algorithm::PS512 => "SHA512",
-        _ => "SHA256",
+        Algorithm::RS384 | Algorithm::PS384 | Algorithm::ES384 => Digest::Sha384,
+        Algorithm::RS512 | Algorithm::PS512 => Digest::Sha512,
+        _ => Digest::Sha256,
     }
 }
 
@@ -422,19 +440,19 @@ fn ecdsa_coordinate_len(algorithm: Algorithm) -> Option<usize> {
 }
 
 /// A digest fetched with `fips=yes`, cached once fetched.
-fn fips_digest(name: &'static str) -> Result<&'static MdRef, CryptoError> {
+fn fips_digest(digest: Digest) -> Result<&'static MdRef, CryptoError> {
     static SHA256: OnceLock<Md> = OnceLock::new();
     static SHA384: OnceLock<Md> = OnceLock::new();
     static SHA512: OnceLock<Md> = OnceLock::new();
-    let slot = match name {
-        "SHA384" => &SHA384,
-        "SHA512" => &SHA512,
-        _ => &SHA256,
+    let slot = match digest {
+        Digest::Sha256 => &SHA256,
+        Digest::Sha384 => &SHA384,
+        Digest::Sha512 => &SHA512,
     };
     if let Some(digest) = slot.get() {
         return Ok(digest);
     }
-    let fetched = Md::fetch(None, name, Some("fips=yes"))?;
+    let fetched = Md::fetch(None, digest.name(), Some("fips=yes"))?;
     Ok(slot.get_or_init(|| fetched))
 }
 
