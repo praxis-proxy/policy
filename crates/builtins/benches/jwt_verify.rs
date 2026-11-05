@@ -10,7 +10,7 @@
 //! ```console
 //! cargo bench -p praxis-policy-builtins --features jwt --bench jwt_verify
 //! cargo bench -p praxis-policy-builtins --no-default-features \
-//!   --features fips,api-key,jwt-openssl-fips --bench jwt_verify --no-run
+//!   --features fips,jwt-openssl-fips --bench jwt_verify --no-run
 //! OPENSSL_CONF=.github/fips-default.cnf target/release/deps/jwt_verify-<hash> --bench
 //! ```
 

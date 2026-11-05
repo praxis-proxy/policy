@@ -27,7 +27,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   supported, with RSA keys of 2048 to 8192 bits and EC keys on P-256 or
   P-384; other keys are refused at load and skipped on JWKS refresh. The
   DPoP `ath` hash and JWK thumbprint use the shared SHA-256 backend.
-  `fips,api-key,jwt-openssl-fips` passes `fips_profile_is_safe()`. Building a
+  `fips,jwt-openssl-fips` passes `fips_profile_is_safe()`, with or without
+  `api-key`. Building a
   resolver checks that the FIPS provider is the OpenSSL default and refuses a
   conflicting `jsonwebtoken` provider, with `policy_crypto_failure`.
 - **Backend-selected randomness.** `praxis_policy_core::crypto::random_bytes`
@@ -43,14 +44,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Selectable crypto backend.** Policy's SHA-256 operations (content
   digests, decision-cache keys, session ids, instruction digests and API-key
   hashing) use `crypto-rustcrypto`, the default, or `fips`, which uses OpenSSL
-  with the `fips=yes` property. The FIPS profile is SHA-256 only and is
-  `default-features = false` with `fips` and `api-key`. Exactly one backend
+  with the `fips=yes` property. The FIPS profile is `default-features = false`
+  with `fips`; `api-key` and `jwt-openssl-fips` are optional identity
+  builtins, and an engine-only `fips` build is supported. Exactly one backend
   must be selected; none or both is a build error.
 - **FIPS startup checks.** `crypto_capability_report()` describes the compiled
   backend and the builtins that do their own `RustCrypto` crypto (JWT, OAuth,
   Vault delegation, Valkey); `fips_profile_is_safe()` is false while any of
-  them is enabled. `validate_crypto_backend()`, exported from core and the
-  facade without requiring API-key, checks shared SHA-256 availability.
+  them is enabled, and does not require an API-key builtin.
+  `validate_crypto_backend()`, exported from core and the facade without
+  requiring API-key, checks shared SHA-256 availability.
   `PolicyEngine::initialize()` calls this check before resolving secrets or
   initializing plugins. Hosts still check the capability report and their
   own crypto requirements.

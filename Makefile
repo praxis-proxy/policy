@@ -117,7 +117,9 @@ build-release:
 check:
 	@$(CARGO) check --workspace --all-targets
 	@$(CARGO) check --workspace --all-targets --features "$(WORKSPACE_TEST_FEATURES)"
-	@$(CARGO) check -p praxis-policy --no-default-features --features fips,api-key --lib
+	@for features in $(FIPS_SELECTIONS); do \
+		$(CARGO) check -p praxis-policy --no-default-features --features "$$features" --lib || exit 1; \
+	done
 	@$(MAKE) check-fips-graph
 
 NON_FIPS_CRYPTO := sha2|hmac|ring|rustls|aws-lc-rs|aws-lc-sys
@@ -131,10 +133,13 @@ FIPS_GRAPH_ALLOWED := uuid|getrandom|signature
 # Crypto crates that must be classified, as allowed or non-FIPS, before they
 # can appear in a FIPS graph.
 CRYPTO_PATTERN := rand|rand_core|chacha20|sha1|sha3|md-5|md5|blake2|blake3|aes|aes-gcm|p256|p384|p521|rsa|ed25519-dalek|curve25519-dalek|ecdsa|elliptic-curve|digest|signature|$(NON_FIPS_CRYPTO)|$(FIPS_GRAPH_ALLOWED)
-FIPS_PROFILES := fips,api-key fips,api-key,jwt-openssl-fips
+# Every supported FIPS selection: the shared backend, with optional identity
+# builtins.
+FIPS_SELECTIONS := fips fips,api-key fips,jwt-openssl-fips fips,api-key,jwt-openssl-fips
 
 # Fail on a non-FIPS or unclassified crypto crate in the graph on stdin, and
-# print the allowed crates found. `$(1)` names the graph in messages.
+# print the allowed crates found. `$(1)` names the graph in messages; a
+# nonempty `$(2)` skips the OpenSSL requirement for a graph with no crypto.
 check_fips_tree = tree="$$(cat)"; \
 	if grep -Eq "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree"; then \
 		echo "FIPS graph for $(1) links non-FIPS crypto:" >&2; \
@@ -146,7 +151,7 @@ check_fips_tree = tree="$$(cat)"; \
 		echo "FIPS graph for $(1) has unclassified crypto; add it to FIPS_GRAPH_ALLOWED or NON_FIPS_CRYPTO:" >&2; \
 		echo "$$unclassified" >&2; exit 1; \
 	fi; \
-	grep -q '^openssl v' <<< "$$tree" || { echo "FIPS graph for $(1) is missing OpenSSL" >&2; exit 1; }; \
+	[ -n "$(2)" ] || grep -q '^openssl v' <<< "$$tree" || { echo "FIPS graph for $(1) is missing OpenSSL" >&2; exit 1; }; \
 	echo "$(1): allowed $$(grep -Eo "^($(FIPS_GRAPH_ALLOWED)) v[^ ]*" <<< "$$tree" | sort -u | tr '\n' ' ')"
 
 CRYPTO_CONSUMER_MANIFEST := tests/consumers/crypto/Cargo.toml
@@ -157,13 +162,14 @@ check-crypto-consumer:
 	@$(CARGO) fmt --manifest-path $(CRYPTO_CONSUMER_MANIFEST) -- --check
 	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --lib)
 	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --features api-key --lib)
-	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --no-default-features --features fips$(,)api-key --lib)
-	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --no-default-features --features fips$(,)api-key$(,)jwt-openssl-fips --lib)
-	@for features in crypto-rustcrypto crypto-rustcrypto,api-key fips,api-key fips,api-key,jwt-openssl-fips; do \
+	@for features in $(FIPS_SELECTIONS); do \
+		$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --no-default-features --features $$features --lib); \
+	done
+	@for features in crypto-rustcrypto crypto-rustcrypto,api-key $(FIPS_SELECTIONS); do \
 		$(CRYPTO_CONSUMER_CARGO) clippy --manifest-path $(CRYPTO_CONSUMER_MANIFEST) \
 			--locked --no-default-features --features "$$features" --all-targets -- -D warnings; \
 	done
-	@for features in $(FIPS_PROFILES); do \
+	@for features in $(FIPS_SELECTIONS); do \
 		$(CRYPTO_CONSUMER_CARGO) tree --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked \
 			--no-default-features --features "$$features" -e normal,build --prefix none \
 			| { $(call check_fips_tree,consumer $$features); } || exit 1; \
@@ -188,13 +194,20 @@ check-crypto-consumer:
 
 .PHONY: check-fips-graph
 check-fips-graph:
-	@for features in $(FIPS_PROFILES); do \
-		for pkg in praxis-policy praxis-policy-builtins; do \
-			$(CARGO) tree -p $$pkg --no-default-features --features "$$features" \
-				-e normal,build --prefix none \
-				| { $(call check_fips_tree,$$pkg $$features); } || exit 1; \
-		done; \
+	@for features in $(FIPS_SELECTIONS); do \
+		$(CARGO) tree -p praxis-policy --no-default-features --features "$$features" \
+			-e normal,build --prefix none \
+			| { $(call check_fips_tree,praxis-policy $$features); } || exit 1; \
 	done
+	@for features in $(filter-out fips,$(FIPS_SELECTIONS)); do \
+		$(CARGO) tree -p praxis-policy-builtins --no-default-features --features "$$features" \
+			-e normal,build --prefix none \
+			| { $(call check_fips_tree,praxis-policy-builtins $$features); } || exit 1; \
+	done
+	@# Builtins with only `fips` activates no engine crate, so it has no OpenSSL.
+	@$(CARGO) tree -p praxis-policy-builtins --no-default-features --features fips \
+		-e normal,build --prefix none \
+		| { $(call check_fips_tree,praxis-policy-builtins fips,no-openssl); }
 	@echo "FIPS graphs contain OpenSSL and no RustCrypto, ring or AWS-LC"
 
 # FIPS tests split by provider availability. `test-fips-no-provider` runs
@@ -206,9 +219,10 @@ FIPS_REPORT_TEST := crypto_capability_tests::report_matches_the_expected_builtin
 FIPS_LIBS := -p praxis-policy-core -p praxis-policy-apl-cmf -p praxis-policy-apl-runtime
 FIPS_API_KEY_TEST := fips::fips_api_key_allow_and_deny_follow_provider_availability
 FIPS_RATELIMIT_TEST := a_crypto_failure_denies_and_logs_once_per_interval
+FIPS_ENGINE_TEST := crypto_capability_tests::initialize_checks_the_shared_backend_in_every_fips_selection
 FIPS_API_KEY := fips,api-key
 FIPS_UNSAFE_BUILTINS := oauth,delegator-vault,valkey
-FIPS_JWT := fips,api-key,jwt-openssl-fips
+FIPS_JWT := fips,jwt-openssl-fips
 FIPS_JWT_NO_PROVIDER_TESTS := refusals::a_missing_provider_fails_with_the_shared_backend_error
 FIPS_JWT_PROVIDER_TESTS := \
 	verify::every_approved_algorithm_verifies_independently_signed_tokens \
@@ -244,13 +258,15 @@ test-fips-no-provider:
 	fi
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
 		--lib -- --exact $(FIPS_REPORT_TEST),1)
-	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
-		--no-default-features --features $(FIPS_API_KEY) --lib -- --exact $(FIPS_REPORT_TEST),1)
+	@for features in $(FIPS_SELECTIONS); do \
+		$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
+			--no-default-features --features $$features --lib -- --exact $(FIPS_REPORT_TEST),1); \
+	done
+	@$(call run_selected,$(CARGO) test -p praxis-policy --no-default-features --features fips \
+		--lib -- --exact $(FIPS_ENGINE_TEST),1)
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=jwt $(CARGO) test -p praxis-policy \
 		--no-default-features --features $(FIPS_API_KEY)$(,)praxis-policy-builtins/jwt --lib \
 		-- --exact $(FIPS_REPORT_TEST),1)
-	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
-		--no-default-features --features $(FIPS_JWT) --lib -- --exact $(FIPS_REPORT_TEST),1)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_JWT) --test jwt_fips -- --exact $(FIPS_JWT_NO_PROVIDER_TESTS),1)
 	@for builtin in $(subst $(,), ,$(FIPS_UNSAFE_BUILTINS)); do \
@@ -291,6 +307,8 @@ test-fips-provider:
 		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST),1)
 	@$(CARGO) test -p praxis-policy -p praxis-policy-core -p praxis-policy-apl-cmf --no-default-features \
 		--features $(FIPS_API_KEY) --doc
+	@$(call run_selected,$(CARGO) test -p praxis-policy --no-default-features --features fips \
+		--lib -- --exact $(FIPS_ENGINE_TEST),1)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_JWT) --test jwt_fips -- --exact $(FIPS_JWT_PROVIDER_TESTS),11)
 
@@ -322,8 +340,10 @@ clippy-fips:
 		--features $(FIPS_API_KEY),experimental-ratelimit --test ratelimit -- -D warnings
 	@$(CARGO) clippy -p praxis-policy-builtins --no-default-features \
 		--features $(FIPS_API_KEY) --test api_key -- -D warnings
-	@$(CARGO) clippy -p praxis-policy --all-targets --no-default-features \
-		--features $(FIPS_JWT) -- -D warnings
+	@for features in fips $(FIPS_JWT) fips,api-key,jwt-openssl-fips; do \
+		$(CARGO) clippy -p praxis-policy --all-targets --no-default-features \
+			--features "$$features" -- -D warnings || exit 1; \
+	done
 	@$(CARGO) clippy -p praxis-policy-builtins --lib --test jwt_fips --no-default-features \
 		--features $(FIPS_JWT) -- -D warnings
 	@$(CARGO) clippy -p praxis-policy-apl-runtime --all-targets --no-default-features \
@@ -607,10 +627,10 @@ check-features:
 		echo "  -p $$p"; \
 		$(CARGO) check -p $$p --all-targets || exit 1; \
 	done
-	@$(CARGO) check -p praxis-policy-builtins --lib --no-default-features --features fips,api-key
-	@$(CARGO) check -p praxis-policy --lib --no-default-features --features fips,api-key
-	@$(CARGO) check -p praxis-policy-builtins --lib --no-default-features --features fips,api-key,jwt-openssl-fips
-	@$(CARGO) check -p praxis-policy --lib --no-default-features --features fips,api-key,jwt-openssl-fips
+	@for features in $(FIPS_SELECTIONS); do \
+		$(CARGO) check -p praxis-policy-builtins --lib --no-default-features --features "$$features" || exit 1; \
+		$(CARGO) check -p praxis-policy --lib --no-default-features --features "$$features" || exit 1; \
+	done
 	@$(CARGO) check -p praxis-policy --lib --no-default-features --features crypto-rustcrypto,jwt
 	@$(CARGO) check -p praxis-policy-test-utils --all-targets
 	@$(CARGO) check -p praxis-policy-test-utils --all-targets --features suite

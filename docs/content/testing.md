@@ -62,10 +62,11 @@ a scripted transport.
 
 `make check-crypto-consumer` builds the facade with the three compatible
 reference plugins in `tests/consumers/crypto`, a separate Cargo workspace
-with locked dependencies. It asserts ordinary and FIPS capability reports,
-checks the FIPS production dependency graph, and requires the expected
-diagnostics for missing or conflicting backends. CI runs this alongside
-the per-package feature checks.
+with locked dependencies. It asserts ordinary capability reports and the
+four FIPS selections (`fips`, `fips,api-key`, `fips,jwt-openssl-fips` and
+both identity builtins), checks each FIPS production dependency graph, and
+requires the expected diagnostics for missing or conflicting backends. CI
+runs this alongside the per-package feature checks.
 
 Plugins that fetch JWKS, exchange tokens, or dispatch approvals go
 through the host's `HttpTransport`, which makes their failure paths
@@ -339,7 +340,9 @@ targets rather than an `--all-features` pass. `test-fips-no-provider` checks
 the capability report, the HMAC and config refusals, and that hashing and
 engine initialization fail closed without a provider. It selects a
 default-provider-only OpenSSL configuration and requires
-`PRAXIS_REQUIRE_FIPS_PROVIDER` to be unset. Its rate-limit test invokes the
+`PRAXIS_REQUIRE_FIPS_PROVIDER` to be unset. It checks the report for each FIPS
+selection and that an engine-only `fips` build refuses to start. Its
+rate-limit test invokes the
 handler directly and asserts a safe denial and
 throttled crypto alarm when instruction hashing fails.
 The runtime crypto-failure harness checks route denials, PDP-cache failures,
@@ -347,20 +350,23 @@ session-id failures and unkeyed audit digest omission, including safe errors
 and skipped downstream work.
 The API-key cases check both the file-index and cache failure alarms.
 `test-fips-provider` runs the core, CMF and runtime suites under `fips`,
-including startup recovery after provider loading in an isolated test process;
-it requires `PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded OpenSSL FIPS provider,
-as in the CI job. Both fail when a named test selects nothing. Groups of
+including startup recovery after provider loading in an isolated test process,
+and starts an engine-only `fips` build; it requires
+`PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded OpenSSL FIPS provider, as in the
+CI job. Both fail when a named test selects nothing. Groups of
 exact names also require the expected test count, so a partial match cannot
 silently drop a renamed test.
 
-The `jwt_fips` builtins suite covers `jwt-openssl-fips`. The `jsonwebtoken`
+The `jwt_fips` builtins suite covers `jwt-openssl-fips` and runs under
+`fips,jwt-openssl-fips`, without API-key. The `jsonwebtoken`
 provider and OpenSSL's provider state are process-wide, so each case re-runs
 itself in a child process with its own `OPENSSL_CONF`: `fips-default.cnf`
 (FIPS as the default), `fips-provider.cnf` (FIPS loaded but not the default)
 or `fips-no-provider.cnf`. Tokens come from the RFC 7515 and RFC 7520
 examples or are signed with RustCrypto, so no OpenSSL code signs what the
-suite verifies; see `crates/builtins/tests/jwt_fips/fixtures/README.md`. The missing-provider case runs in `test-fips-no-provider`; the
-rest run in `test-fips-provider`.
+suite verifies; see `crates/builtins/tests/jwt_fips/fixtures/README.md`.
+The missing-provider case runs in `test-fips-no-provider`; the rest run in
+`test-fips-provider`.
 
 The `jwt_verify` bench in `praxis-policy-builtins` compares the two JWT
 backends on the same tokens; its doc comment has both commands. Run the FIPS
