@@ -29,6 +29,11 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+[features]
+# No `fips` feature: the hash chain and DSSE signer use `sha2` and `p256`.
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = ["praxis-policy-core/crypto-rustcrypto"]
+
 [dependencies]
 praxis-policy-core = { workspace = true }
 

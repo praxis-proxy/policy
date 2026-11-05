@@ -214,6 +214,11 @@ hash a guess and compare, so a templated message with a redacted SSN in it is a
 billion guesses away from recovery. The digest is therefore an HMAC-SHA256
 under an operator secret, named from the `secrets:` block:
 
+Keyed content provenance uses HMAC and is unavailable with the `fips` feature.
+A FIPS build rejects a configuration that enables it. Plain SHA-256 provenance
+can be selected with `content_provenance_key: unkeyed` when that exposure is
+acceptable.
+
 ```yaml
 engine_settings:
   capture_content_provenance: true

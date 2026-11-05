@@ -99,13 +99,100 @@ There is no separate SDK crate. The Plugin Factory surface is
 An unrecognized `kind` fails policy loading, so a missing registration
 is caught at startup rather than at the first request that needed it.
 
+### Crypto backend
+
+The engine crates compile exactly one SHA-256 backend: `crypto-rustcrypto`
+or `fips`. Selecting none or both is a build error, and Cargo features
+only add, so a host cannot remove a backend another dependency enabled. A
+reusable plugin crate therefore depends on core with defaults off and
+forwards its own backend features, as the reference plugins do:
+
+```toml
+[features]
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = ["praxis-policy-core/crypto-rustcrypto"]
+fips = ["praxis-policy-core/fips"]
+
+[dependencies]
+praxis-policy-core = { version = "0.5", default-features = false }
+```
+
+A FIPS host disables the plugin's defaults and enables `fips` once at the
+top. Offer a `fips` feature only if the plugin does no crypto of its own.
+
 ## Generated API docs
 
 [docs.rs/praxis-policy](https://docs.rs/praxis-policy), built with all
-features so the feature-gated re-exports are visible.
+ordinary features so the feature-gated re-exports are visible.
 
-The crates are versioned and released together, so one `0.3`
-requirement covers the set.
+The crates are versioned and released together.
+
+## Validate shared hashing at startup
+
+`PolicyEngine::initialize()` checks that Policy's selected backend can
+perform SHA-256 before resolving secrets or initializing plugins. A failure
+returns `PluginError::Crypto`, leaves the engine uninitialized, and permits
+a later retry or configuration reload.
+Configure the OpenSSL FIPS provider before calling `initialize()`.
+
+Hosts can call `validate_crypto_backend()` for an earlier preflight check
+or when using core without an engine. The function is exported from core
+and the facade, including builds with no API-key builtin.
+
+The check covers the shared backend used for session ids, instruction
+digests, decision-cache keys, API-key hashing and plugins that use those
+same hashing functions. Plugins with independent crypto implementations
+need their own checks. HMAC remains unavailable under FIPS even when
+SHA-256 validation succeeds.
+
+FIPS hosts also check `crypto_capability_report().fips_profile_is_safe()`
+to reject unsupported bundled crypto operations.
+
+`PluginError` adds a `Crypto { source: CryptoError }` variant. Consumers
+with exhaustive matches must add an arm for it. Error records use
+`policy.crypto_failed` and omit backend diagnostics; the typed error and
+the `policy_crypto_failure` startup alarm retain the cause for operators.
+
+## Fallible hashing
+
+`resolve_session`, `instruction_digest`, `extract_llm_request`,
+`extract_extensions` and `BagBuilder::with_extensions` return a
+`Result<_, CryptoError>`. Propagate failures with `?` or turn them into a
+safe denial. A provider failure must not substitute an unhashed value.
+
+The builder chain now propagates the error before calling `build`:
+
+```rust
+use praxis_policy::{
+    CryptoError,
+    praxis_policy_apl_cmf::BagBuilder,
+    praxis_policy_apl_core::AttributeBag,
+    praxis_policy_core::extensions::Extensions,
+};
+
+fn request_bag(ext: &Extensions) -> Result<AttributeBag, CryptoError> {
+    Ok(BagBuilder::new().with_extensions(ext)?.build())
+}
+```
+
+`CryptoError` is available at the core and facade roots and is
+non-exhaustive. Match known variants with a fallback:
+
+```rust
+use praxis_policy::CryptoError;
+
+let error = CryptoError::DigestLength;
+let reason = match error {
+    CryptoError::DigestLength => "invalid digest length",
+    _ => "crypto backend unavailable",
+};
+assert_eq!(reason, "invalid digest length");
+```
+
+`DigestLength` exists under both backends. `OpenSsl` and
+`HmacUnavailable` exist under `fips`; `HmacInitialization` exists under
+`crypto-rustcrypto`. Keep provider details in operator logs and return a
+safe reason to clients.
 
 ## Next
 

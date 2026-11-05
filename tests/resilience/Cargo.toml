@@ -3,7 +3,7 @@
 
 # praxis-policy-tests-resilience: Dependency failure and concurrency behavior of the full engine.
 #
-# Runs only in the `--all-features` pass. The one test target requires
+# Runs only in the `make test` second pass. The one test target requires
 # `suite`, which forwards to test-utils so the default pass builds nothing here
 # and unifies no builtin features.
 

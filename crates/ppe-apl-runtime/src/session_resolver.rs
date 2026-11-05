@@ -46,8 +46,8 @@
 // plugins (the JWT identity plugin). The resolver stays free of crypto /
 // parsing logic.
 
+use praxis_policy_core::crypto::{CryptoError, Sha256};
 use praxis_policy_core::extensions::Extensions;
-use sha2::{Digest as _, Sha256};
 
 /// Which tier produced the session id. Useful for diagnostics / audit
 /// and to let downstream code branch on binding strength (e.g., only
@@ -78,11 +78,11 @@ impl SessionSource {
 /// 16 hex chars (64 bits) of `sha256(raw)`. Shared by the identity tier
 /// and the subject-binding of the Agent/TokenClaim tiers so all derived
 /// session ids have one keying scheme.
-fn short_hash(raw: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(raw.as_bytes());
-    let digest = hasher.finalize();
-    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+fn short_hash(raw: &str) -> Result<String, CryptoError> {
+    let mut hasher = Sha256::new()?;
+    hasher.update(raw.as_bytes())?;
+    let digest = hasher.finalize()?;
+    Ok(digest.iter().take(8).map(|b| format!("{b:02x}")).collect())
 }
 
 /// Bind a client/upstream-supplied raw session value to the authenticated
@@ -92,9 +92,11 @@ fn short_hash(raw: &str) -> String {
 /// session bucket. Returns `None` when there is no authenticated subject — a
 /// bare client value has no safe scope, consistent with the identity tier,
 /// which also requires a subject.
-fn subject_scoped(subject_id: Option<&str>, raw: &str) -> Option<String> {
-    let sub = subject_id?;
-    Some(short_hash(&format!("{sub}:{raw}")))
+fn subject_scoped(subject_id: Option<&str>, raw: &str) -> Result<Option<String>, CryptoError> {
+    let Some(sub) = subject_id else {
+        return Ok(None);
+    };
+    Ok(Some(short_hash(&format!("{sub}:{raw}"))?))
 }
 
 /// Resolve a session id from the request's `Extensions`. Returns
@@ -109,7 +111,10 @@ fn subject_scoped(subject_id: Option<&str>, raw: &str) -> Option<String> {
 /// `"-"` sentinel when absent, which keeps the hash defined but
 /// degrades to a (sub, *, *) session — usually fine for demos with
 /// a single gateway and single agent.
-pub fn resolve_session(ext: &Extensions) -> Option<(String, SessionSource)> {
+///
+/// # Errors
+/// Returns an error if the selected SHA-256 provider cannot derive a session key.
+pub fn resolve_session(ext: &Extensions) -> Result<Option<(String, SessionSource)>, CryptoError> {
     // The authenticated subject, populated by the identity resolvers
     // (the JWT identity plugin) before this runs. Every client/upstream-supplied
     // session value below is bound to it so one principal can't address
@@ -128,9 +133,9 @@ pub fn resolve_session(ext: &Extensions) -> Option<(String, SessionSource)> {
     if let Some(agent) = ext.agent.as_deref()
         && let Some(sid) = agent.session_id.as_deref()
         && !sid.is_empty()
-        && let Some(bound) = subject_scoped(subject_id, sid)
+        && let Some(bound) = subject_scoped(subject_id, sid)?
     {
-        return Some((bound, SessionSource::Agent));
+        return Ok(Some((bound, SessionSource::Agent)));
     }
 
     // Tier 1: explicit JWT `session_id` claim — also subject-bound. Even a
@@ -140,9 +145,9 @@ pub fn resolve_session(ext: &Extensions) -> Option<(String, SessionSource)> {
         && let Some(subj) = sec.subject.as_ref()
         && let Some(sid) = subj.claim_str("session_id")
         && !sid.is_empty()
-        && let Some(bound) = subject_scoped(subject_id, sid.as_ref())
+        && let Some(bound) = subject_scoped(subject_id, sid.as_ref())?
     {
-        return Some((bound, SessionSource::TokenClaim));
+        return Ok(Some((bound, SessionSource::TokenClaim)));
     }
 
     // Tier 2: identity-derived. Hash the triple
@@ -166,12 +171,12 @@ pub fn resolve_session(ext: &Extensions) -> Option<(String, SessionSource)> {
                 .and_then(|w| w.client_id.as_deref())
                 .unwrap_or("-");
             let raw = format!("{sub}:{actor}:{aud}");
-            return Some((short_hash(&raw), SessionSource::Identity));
+            return Ok(Some((short_hash(&raw)?, SessionSource::Identity)));
         }
     }
 
     // Tier 3: no session.
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -192,6 +197,16 @@ mod tests {
         AgentExtension, HttpExtension, SecurityExtension, SubjectExtension, WorkloadIdentity,
     };
     use std::sync::Arc;
+
+    fn resolve_session(ext: &Extensions) -> Option<(String, SessionSource)> {
+        super::resolve_session(ext).expect("selected SHA-256 backend is available")
+    }
+
+    fn subject_scoped(subject: Option<&str>, raw: &str) -> String {
+        super::subject_scoped(subject, raw)
+            .expect("selected SHA-256 backend is available")
+            .expect("subject is present")
+    }
 
     fn extensions_with_security(sec: SecurityExtension) -> Extensions {
         Extensions {
@@ -232,7 +247,8 @@ mod tests {
         let ext = extensions_with_agent_and_subject("sess-upstream", "alice");
         let (sid, src) = resolve_session(&ext).expect("should resolve");
         assert_eq!(src, SessionSource::Agent);
-        assert_eq!(sid, subject_scoped(Some("alice"), "sess-upstream").unwrap());
+        assert_eq!(sid, subject_scoped(Some("alice"), "sess-upstream"));
+        assert_eq!(sid, "68755f41a98324d6");
         assert_ne!(sid, "sess-upstream", "raw client value must not be the key");
     }
 
@@ -313,7 +329,7 @@ mod tests {
 
         let (sid, src) = resolve_session(&ext).unwrap();
         assert_eq!(src, SessionSource::Agent);
-        assert_eq!(sid, subject_scoped(Some("alice"), "from-agent").unwrap());
+        assert_eq!(sid, subject_scoped(Some("alice"), "from-agent"));
     }
 
     #[test]
@@ -347,7 +363,7 @@ mod tests {
             SessionSource::Agent,
             "agent tier must win over identity tier when both are available",
         );
-        assert_eq!(sid, subject_scoped(Some("alice"), "from-agent").unwrap());
+        assert_eq!(sid, subject_scoped(Some("alice"), "from-agent"));
     }
 
     #[test]
@@ -366,7 +382,7 @@ mod tests {
         // Subject-bound, not the raw claim value.
         assert_eq!(
             sid,
-            subject_scoped(Some("alice@corp.com"), "sess-from-token-789").unwrap()
+            subject_scoped(Some("alice@corp.com"), "sess-from-token-789")
         );
         assert_ne!(sid, "sess-from-token-789");
     }
@@ -482,7 +498,7 @@ mod tests {
             SessionSource::TokenClaim,
             "token-claim tier must win over identity tier when both are available",
         );
-        assert_eq!(sid, subject_scoped(Some("alice"), "from-claim").unwrap());
+        assert_eq!(sid, subject_scoped(Some("alice"), "from-claim"));
     }
 
     // The client-supplied `X-PPE-Session-Id` header tier is
@@ -511,6 +527,7 @@ mod tests {
 
         let (sid, src) = resolve_session(&ext).expect("should resolve");
         assert_eq!(src, SessionSource::Identity);
+        assert_eq!(sid, "a0cd6df24fe19df1");
         // 16 hex chars of the sha256 digest.
         assert_eq!(sid.len(), 16);
         assert!(sid.chars().all(|c| c.is_ascii_hexdigit()));
@@ -613,8 +630,8 @@ mod tests {
         // unilaterally) breaks the build and forces a deliberate
         // re-design — most likely a length-prefixed format like
         // `{sub_len}:{sub}:{raw}`.
-        let a = subject_scoped(Some("alice:foo"), "bar").unwrap();
-        let b = subject_scoped(Some("alice"), "foo:bar").unwrap();
+        let a = subject_scoped(Some("alice:foo"), "bar");
+        let b = subject_scoped(Some("alice"), "foo:bar");
         assert_eq!(
             a, b,
             "current format collides; if subject IDs can contain colons, switch to length-prefix",
