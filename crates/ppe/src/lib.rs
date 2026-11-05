@@ -57,15 +57,30 @@
 //! defaults must select it or `fips`. `builtins`
 //! enables every bundled extension, including the Valkey session
 //! store; or pick a granular subset (`jwt`, `api-key`, `oauth`, `elicitation-ciba`,
-//! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`). Any of them brings in the registration
+//! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`; or `jwt-openssl-fips` in
+//! place of `jwt`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
-//! The FIPS profile is `default-features = false` with `fips` and `api-key`.
-//! At startup, require [`CryptoCapabilityReport::fips_profile_is_safe`] from
+//! The FIPS profile is `default-features = false` with `fips` and `api-key`,
+//! optionally with `jwt-openssl-fips` for JWT and `DPoP`. At startup, require
+//! [`CryptoCapabilityReport::fips_profile_is_safe`] from
 //! [`crypto_capability_report`], which checks the compiled selection.
 //! [`PolicyEngine::initialize`] checks shared SHA-256 availability. The
 //! profile supports SHA-256 only; configuration that enables keyed content
 //! provenance is rejected because it requires HMAC.
+//!
+//! `jwt-openssl-fips` verifies RS256 to RS512, PS256 to PS512, ES256 and
+//! ES384 with OpenSSL, and refuses HMAC (HS*) and `EdDSA` at config load. It
+//! needs the FIPS provider as the OpenSSL default (`default_properties =
+//! fips=yes`, or a FIPS-mode host); a JWT resolver refuses to build
+//! otherwise. Do not install another `jsonwebtoken` crypto provider in the
+//! same process.
+//!
+//! ```toml
+//! praxis-policy = { version = "0.5", default-features = false, features = [
+//!   "fips", "api-key", "jwt-openssl-fips",
+//! ] }
+//! ```
 //!
 //! # Plugins the host supplies
 //!
@@ -83,6 +98,10 @@
 compile_error!("the `fips` feature requires `api-key`");
 #[cfg(all(feature = "fips", feature = "http-hyper"))]
 compile_error!("the `fips` profile cannot enable `http-hyper`, which links ring for TLS");
+#[cfg(all(feature = "jwt", feature = "jwt-openssl-fips"))]
+compile_error!("select one JWT backend: `jwt` or `jwt-openssl-fips`");
+#[cfg(all(feature = "jwt-openssl-fips", not(feature = "fips")))]
+compile_error!("the `jwt-openssl-fips` feature requires `fips`");
 
 // Whole-crate re-exports for advanced use (types not surfaced below).
 
@@ -212,7 +231,7 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
     ApiKeyCryptoBackend, ApiKeyCryptoError, ApiKeyIdentityFactory, KIND as API_KEY_KIND,
     api_key_crypto_backend,
 };
-#[cfg(feature = "jwt")]
+#[cfg(feature = "_jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{
     JwtIdentityFactory, JwtIdentityFactoryWithReplay, KIND as JWT_KIND,
 };
@@ -287,7 +306,7 @@ use praxis_policy_builtins::plugins::delegator_vault as vault_delegator_builtin;
 use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 #[cfg(feature = "api-key")]
 use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
-#[cfg(feature = "jwt")]
+#[cfg(feature = "_jwt")]
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 #[cfg(feature = "experimental-quota")]
 use praxis_policy_builtins::plugins::quota as quota_builtin;
@@ -296,7 +315,7 @@ use praxis_policy_builtins::plugins::ratelimit as ratelimit_builtin;
 
 #[cfg(feature = "_builtin")]
 register_builtins! {
-    feature "jwt"                => jwt_builtin::JwtIdentityFactory,
+    feature "_jwt"               => jwt_builtin::JwtIdentityFactory,
     feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
     feature "delegator-vault"    => vault_delegator_builtin::VaultDelegatorFactory,
@@ -574,7 +593,7 @@ mod tests {
     #[test]
     fn every_enabled_builtin_resolves_its_kind() {
         let expected = [
-            (cfg!(feature = "jwt"), "identity/jwt"),
+            (cfg!(feature = "_jwt"), "identity/jwt"),
             (cfg!(feature = "api-key"), "identity/api-key"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "delegator-vault"), "delegator/vault"),

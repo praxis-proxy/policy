@@ -93,7 +93,7 @@ fn claims_for(token: &str) -> Value {
         "htu": URL,
         "iat": now_unix(),
         "jti": format!("jti-{}", now_unix_nanos()),
-        "ath": access_token_hash(token),
+        "ath": access_token_hash(token).expect("ath"),
     })
 }
 
@@ -390,7 +390,7 @@ async fn a_proof_for_another_method_url_time_or_token_is_denied() {
         ("stale iat", json!({ "iat": now_unix() - 600 })),
         (
             "ath",
-            json!({ "ath": access_token_hash("some other token") }),
+            json!({ "ath": access_token_hash("some other token").expect("ath") }),
         ),
     ];
     for (what, change) in cases {

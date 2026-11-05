@@ -33,10 +33,11 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use base64::Engine as _;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use praxis_policy_core::CryptoError;
+use praxis_policy_core::crypto::sha256;
 use praxis_policy_core::extensions::KeyBinding;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 
 use crate::plugins::identity_jwt::config::DpopConfig;
 
@@ -55,6 +56,8 @@ pub mod codes {
     pub const DPOP_REPLAY: &str = "auth.dpop_replay";
     /// The replay store could not answer, so the proof cannot be accepted.
     pub const DPOP_REPLAY_UNAVAILABLE: &str = "auth.dpop_replay_unavailable";
+    /// The crypto backend failed, so the proof cannot be checked.
+    pub const CRYPTO_FAILED: &str = "policy.crypto_failed";
 }
 
 /// The [`KeyBinding::method`] a verified `DPoP` proof records.
@@ -255,15 +258,46 @@ impl ReplayGuard for InMemoryReplayGuard {
     }
 }
 
+/// Why [`jwk_thumbprint`] produced no thumbprint.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ThumbprintError {
+    /// The JWK is not a supported public key or lacks a required member.
+    #[error("the JWK is not a supported public key")]
+    Unsupported,
+    /// The crypto backend could not hash the canonical JWK.
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+}
+
 /// The [RFC 7638 Section 3] thumbprint of a public JWK: base64url SHA-256 over
 /// its required members in lexicographic order, without whitespace.
 ///
 /// [RFC 7638 Section 3]: https://datatracker.ietf.org/doc/html/rfc7638#section-3
 ///
-/// Returns `None` for a key type this verifier does not accept or a JWK missing
-/// a required member. Symmetric (`oct`) keys are not accepted: a proof signed
-/// with a shared secret proves nothing about who holds it.
-pub fn jwk_thumbprint(jwk: &Value) -> Option<String> {
+/// Symmetric (`oct`) keys are not accepted: a proof signed with a shared
+/// secret proves nothing about who holds it.
+///
+/// # Errors
+///
+/// [`ThumbprintError::Unsupported`] for a key type this verifier does not
+/// accept or a JWK missing a required member; [`ThumbprintError::Crypto`] when
+/// the backend cannot hash.
+///
+/// ```
+/// use praxis_policy_builtins::plugins::identity_jwt::dpop::jwk_thumbprint;
+///
+/// let jwk = serde_json::json!({"kty": "EC", "crv": "P-256", "x": "AA", "y": "BB"});
+/// assert_eq!(jwk_thumbprint(&jwk)?.len(), 43);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn jwk_thumbprint(jwk: &Value) -> Result<String, ThumbprintError> {
+    let canonical = canonical_jwk(jwk).ok_or(ThumbprintError::Unsupported)?;
+    Ok(b64url(&sha256(canonical.as_bytes())?))
+}
+
+/// The required members of a supported public JWK, serialized per RFC 7638.
+fn canonical_jwk(jwk: &Value) -> Option<String> {
     let member = |name: &'static str| -> Option<(&'static str, &str)> {
         Some((name, jwk.get(name)?.as_str()?))
     };
@@ -273,8 +307,7 @@ pub fn jwk_thumbprint(jwk: &Value) -> Option<String> {
         "OKP" => [member("crv")?, member("kty")?, member("x")?].into(),
         _ => return None,
     };
-    let canonical = serde_json::to_string(&required).ok()?;
-    Some(b64url(&Sha256::digest(canonical.as_bytes())))
+    serde_json::to_string(&required).ok()
 }
 
 /// Normalize a URL for `htu` comparison: lowercase scheme and host, drop a
@@ -303,8 +336,12 @@ pub fn normalize_htu(url: &str) -> Option<String> {
 }
 
 /// The `ath` value for an access token: base64url SHA-256 of its ASCII bytes.
-pub fn access_token_hash(token: &str) -> String {
-    b64url(&Sha256::digest(token.as_bytes()))
+///
+/// # Errors
+///
+/// Returns an error when the crypto backend cannot hash.
+pub fn access_token_hash(token: &str) -> Result<String, CryptoError> {
+    Ok(b64url(&sha256(token.as_bytes())?))
 }
 
 fn b64url(bytes: &[u8]) -> String {
@@ -356,6 +393,9 @@ impl<'a> DpopVerifier<'a> {
     /// Every check except the replay lookup, in an order that touches the
     /// replay store only for a proof that is otherwise valid.
     fn check(&self, request: &PopRequest<'_>) -> Result<(String, ProofClaims), PopDenial> {
+        #[cfg(feature = "jwt-openssl-fips")]
+        crate::plugins::identity_jwt::openssl_fips::provider_ready()
+            .map_err(|error| crypto_denial("dpop_provider", &error))?;
         let invalid = |reason: String| PopDenial::new(codes::DPOP_INVALID, reason);
         let Some(proof) = request.proof else {
             return Err(PopDenial::new(
@@ -405,8 +445,10 @@ impl<'a> DpopVerifier<'a> {
                 "the DPoP proof's jwk carries the private member '{member}'"
             )));
         }
-        let thumbprint = jwk_thumbprint(jwk)
-            .ok_or_else(|| invalid("the DPoP proof's jwk is not a supported public key".into()))?;
+        let thumbprint = jwk_thumbprint(jwk).map_err(|error| match error {
+            ThumbprintError::Crypto(error) => crypto_denial("dpop_thumbprint", &error),
+            _ => invalid("the DPoP proof's jwk is not a supported public key".into()),
+        })?;
         if thumbprint != request.bound_thumbprint {
             return Err(PopDenial::new(
                 codes::DPOP_KEY_MISMATCH,
@@ -435,7 +477,17 @@ impl<'a> DpopVerifier<'a> {
         validation.validate_nbf = false;
         validation.validate_aud = false;
         let claims = decode::<ProofClaims>(proof, &key, &validation)
-            .map_err(|e| invalid(format!("the DPoP proof did not verify: {e}")))?
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::Provider(detail) => {
+                    tracing::error!(
+                        alarm = "policy_crypto_failure",
+                        op = "dpop_verify",
+                        error = %detail,
+                    );
+                    PopDenial::new(codes::CRYPTO_FAILED, CRYPTO_FAILED_REASON)
+                },
+                _ => invalid(format!("the DPoP proof did not verify: {e}")),
+            })?
             .claims;
 
         if claims.htm != request.method {
@@ -462,7 +514,9 @@ impl<'a> DpopVerifier<'a> {
                 self.config.iat_window_seconds
             )));
         }
-        if claims.ath.as_deref() != Some(access_token_hash(request.access_token).as_str()) {
+        let ath = access_token_hash(request.access_token)
+            .map_err(|error| crypto_denial("dpop_ath", &error))?;
+        if claims.ath.as_deref() != Some(ath.as_str()) {
             return Err(invalid(
                 "the DPoP proof's ath does not match the access token presented with it".into(),
             ));
@@ -512,6 +566,14 @@ impl ProofOfPossession for DpopVerifier<'_> {
     }
 }
 
+const CRYPTO_FAILED_REASON: &str = "the DPoP proof could not be checked";
+
+/// Log a backend failure and deny without repeating its detail.
+fn crypto_denial(op: &'static str, error: &CryptoError) -> PopDenial {
+    tracing::error!(alarm = "policy_crypto_failure", op, %error);
+    PopDenial::new(codes::CRYPTO_FAILED, CRYPTO_FAILED_REASON)
+}
+
 /// Whether `alg` is one a `DPoP` proof may use: asymmetric only.
 pub fn is_asymmetric(alg: Algorithm) -> bool {
     !matches!(alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512)
@@ -533,8 +595,8 @@ mod tests {
             "kid": "2011-04-29"
         });
         assert_eq!(
-            jwk_thumbprint(&jwk).as_deref(),
-            Some("NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs")
+            jwk_thumbprint(&jwk).unwrap(),
+            "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
         );
     }
 
@@ -545,15 +607,18 @@ mod tests {
         let members = with_extras.as_object_mut().unwrap();
         members.insert("kid".into(), "k1".into());
         members.insert("use".into(), "sig".into());
-        assert_eq!(jwk_thumbprint(&ec), jwk_thumbprint(&with_extras));
         assert_eq!(
+            jwk_thumbprint(&ec).unwrap(),
+            jwk_thumbprint(&with_extras).unwrap()
+        );
+        assert!(matches!(
             jwk_thumbprint(&serde_json::json!({"kty": "oct", "k": "c2VjcmV0"})),
-            None
-        );
-        assert_eq!(
+            Err(ThumbprintError::Unsupported)
+        ));
+        assert!(matches!(
             jwk_thumbprint(&serde_json::json!({"kty": "EC", "crv": "P-256", "x": "AA"})),
-            None
-        );
+            Err(ThumbprintError::Unsupported)
+        ));
     }
 
     #[test]
@@ -585,7 +650,7 @@ mod tests {
     fn access_token_hash_is_base64url_sha256() {
         // SHA-256 of "abc", base64url without padding.
         assert_eq!(
-            access_token_hash("abc"),
+            access_token_hash("abc").unwrap(),
             "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
         );
     }

@@ -18,10 +18,11 @@
 //!
 //! | Feature | Module |
 //! |---|---|
-//! | `jwt` | `plugins::identity_jwt` |
+//! | `jwt` | `plugins::identity_jwt`, verified with AWS-LC |
+//! | `jwt-openssl-fips` | `plugins::identity_jwt`, verified with OpenSSL FIPS; requires `fips` |
 //! | `api-key` | `plugins::identity_api_key` |
 //! | `crypto-rustcrypto` | RustCrypto SHA-256 and HMAC; on by default |
-//! | `fips` | OpenSSL FIPS SHA-256 for Policy and API-key; no HMAC |
+//! | `fips` | OpenSSL FIPS SHA-256 for Policy, API-key and DPoP; no HMAC |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
 //! | `quota/limitador` | `plugins::quota` |
@@ -46,6 +47,10 @@ compile_error!("select one API-key crypto backend: crypto-rustcrypto or fips");
 compile_error!("api-key requires crypto-rustcrypto or fips");
 #[cfg(all(feature = "fips", not(feature = "api-key")))]
 compile_error!("the FIPS profile requires the api-key feature");
+#[cfg(all(feature = "jwt", feature = "jwt-openssl-fips"))]
+compile_error!("select one JWT backend: jwt or jwt-openssl-fips");
+#[cfg(all(feature = "jwt-openssl-fips", not(feature = "fips")))]
+compile_error!("jwt-openssl-fips requires the fips feature");
 #[cfg(feature = "_plugins")]
 pub mod plugins;
 
@@ -63,7 +68,8 @@ pub mod session;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BundledCryptoCapability {
-    /// JWT signature verification and `DPoP` token hashing.
+    /// JWT signature verification and `DPoP` hashing with AWS-LC. Not
+    /// listed under `jwt-openssl-fips`.
     Jwt,
     /// OAuth delegation cache-key HMAC.
     OAuth,

@@ -194,6 +194,9 @@ impl JwtIdentityResolver {
         cfg: PluginConfig,
         replay: Arc<dyn ReplayGuard>,
     ) -> Result<Self, Box<PluginError>> {
+        #[cfg(feature = "jwt-openssl-fips")]
+        crate::plugins::identity_jwt::openssl_fips::ensure_provider()?;
+
         let raw_config = cfg.config.as_ref().ok_or_else(|| {
             Box::new(PluginError::Config {
                 message: format!(
@@ -300,6 +303,14 @@ impl JwtIdentityResolver {
                     message: format!("plugin '{}' ({KIND}): {e}", cfg.name),
                 })
             })?;
+            #[cfg(feature = "jwt-openssl-fips")]
+            {
+                use crate::plugins::identity_jwt::openssl_fips::probe_algorithms;
+                probe_algorithms(&raw.algorithms)?;
+                if raw.dpop.mode != DpopMode::Off {
+                    probe_algorithms(&raw.dpop.algorithms)?;
+                }
+            }
             if raw.decoding_key.needs_async() {
                 pending_jwks.push(raw);
             } else {
@@ -1003,6 +1014,17 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 ));
             },
             Err(ValidateError::Jwt(e)) => {
+                if let jsonwebtoken::errors::ErrorKind::Provider(detail) = e.kind() {
+                    tracing::error!(
+                        alarm = "policy_crypto_failure",
+                        op = "jwt_verify",
+                        error = %detail,
+                    );
+                    return PluginResult::deny(PluginViolation::new(
+                        dpop_codes::CRYPTO_FAILED,
+                        "the token signature could not be checked",
+                    ));
+                }
                 let (code, reason) = classify_jwt_error(&e);
                 return PluginResult::deny(PluginViolation::new(code, reason));
             },

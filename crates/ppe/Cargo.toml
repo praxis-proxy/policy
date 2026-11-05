@@ -81,7 +81,10 @@ experimental = ["dep:tracing"]
 
 # One feature per bundled extension. The names are the public API: a host writes
 # these, so they are deliberately shorter than the crate names they pull.
-jwt = ["_builtin", "praxis-policy-builtins/jwt"]
+jwt = ["_jwt", "praxis-policy-builtins/jwt"]
+# The JWT plugin verifying with system OpenSSL under the FIPS provider. Requires
+# `fips`; cannot be combined with `jwt`.
+jwt-openssl-fips = ["_jwt", "praxis-policy-builtins/jwt-openssl-fips"]
 api-key = ["_builtin", "praxis-policy-builtins/api-key"]
 oauth = ["_builtin", "praxis-policy-builtins/oauth"]
 delegator-vault = ["_builtin", "praxis-policy-builtins/delegator-vault"]
@@ -143,6 +146,8 @@ http-hyper = [
 # alternative is repeating a nine-arm `any(feature = ...)` at every gate, and one
 # missed arm there is a silently absent registration.
 _builtin = []
+# Private marker for either JWT backend.
+_jwt = ["_builtin"]
 
 [dependencies]
 # Host runtime — always present, this is the point of the facade.
@@ -222,7 +227,9 @@ serde_json = { workspace = true }
 # Test-only: `dpop_live` signs DPoP proofs with a P-256 key derived from a
 # fixed scalar, and decodes the token Keycloak binds to it.
 p256 = { workspace = true }
-jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+# No backend here: `jwt` selects AWS-LC through the builtins crate, so a FIPS
+# test build never links it.
+jsonwebtoken = { workspace = true }
 base64 = { workspace = true }
 
 [lints]

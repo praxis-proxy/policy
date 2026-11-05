@@ -146,6 +146,8 @@ regex = "1"
 # would put two `sha2` and two `digest` in the build.
 sha2 = "0.11"
 openssl = "0.10.82"
+# OS randomness for secrets under the RustCrypto backend.
+getrandom = "0.4.3"
 # Keyed digests: audit content provenance and the OAuth cache key. Moves with
 # `sha2` above, since both have to agree on `digest`.
 hmac = "0.13"

@@ -349,7 +349,21 @@ The API-key cases check both the file-index and cache failure alarms.
 `test-fips-provider` runs the core, CMF and runtime suites under `fips`,
 including startup recovery after provider loading in an isolated test process;
 it requires `PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded OpenSSL FIPS provider,
-as in the CI job. Both fail when a named test selects nothing. Groups of
+as in the CI job.
+
+The `jwt_fips` builtins suite covers `jwt-openssl-fips`. The `jsonwebtoken`
+provider and OpenSSL's provider state are process-wide, so each case re-runs
+itself in a child process with its own `OPENSSL_CONF`: `fips-default.cnf`
+(FIPS as the default), `fips-provider.cnf` (FIPS loaded but not the default)
+or `fips-no-provider.cnf`. Tokens come from published RFC 7515 and RFC 7520
+examples and from Python `cryptography`, regenerated with the script noted in
+`crates/builtins/tests/jwt_fips/fixtures/README.md`, so OpenSSL never verifies its own
+signatures. The missing-provider case runs in `test-fips-no-provider`; the
+rest run in `test-fips-provider`.
+
+The `jwt_verify` bench in `praxis-policy-builtins` compares the two JWT
+backends on the same tokens; its doc comment has both commands. Run the FIPS
+binary under `fips-default.cnf` after building with an ordinary config. Both fail when a named test selects nothing. Groups of
 exact names also require the expected test count, so a partial match cannot
 silently drop a renamed test.
 

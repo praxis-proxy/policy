@@ -63,7 +63,8 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 | Feature | Pulls in |
 |---|---|
 | `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
-| `jwt` | `identity/jwt` |
+| `jwt` | `identity/jwt`, verified with AWS-LC |
+| `jwt-openssl-fips` | `identity/jwt` and DPoP, verified with system OpenSSL under the FIPS provider. Requires `fips`; cannot be combined with `jwt`. HMAC (HS256, HS384, HS512) and EdDSA are refused at config load |
 | `api-key` | `identity/api-key` |
 | `fips` | OpenSSL FIPS SHA-256 for API-key and always-enabled Policy hashing. Keyed content provenance is rejected because it requires HMAC. Select with `default-features = false`; other crypto-using builtins are reported and make the API-key profile unsafe. |
 | `oauth` | `delegator/oauth` |
@@ -106,13 +107,80 @@ tracing::info!(crypto = ?report, "Policy crypto providers are ready");
 ```
 
 The capability report reflects the unified builtin features, including direct
-dependency feature unification. It lists JWT,
+dependency feature unification. It lists JWT (with `jwt`),
 OAuth, Vault delegation, and Valkey when enabled because those builtins retain
-RustCrypto operations. Engine initialization verifies OpenSSL can
+non-FIPS operations. Engine initialization verifies OpenSSL can
 perform FIPS SHA-256 for every user of Policy's shared backend. Plugins
 with independent crypto need their own checks; HMAC remains unavailable
 under FIPS. `validate_crypto_backend()` remains available for an earlier
 preflight check. The host must verify its final image and runtime separately.
+
+### JWT and DPoP under FIPS
+
+`jwt-openssl-fips` adds JWT identity to the FIPS profile without changing its
+safety: the capability report stays safe with `fips,api-key,jwt-openssl-fips`
+and no other crypto-using builtin.
+
+```toml
+praxis-policy = { version = "0.5", default-features = false, features = [
+  "fips", "api-key", "jwt-openssl-fips",
+] }
+```
+
+`jsonwebtoken` still parses tokens, selects JWKS keys and validates claims.
+Signatures are verified with OpenSSL, and the DPoP `ath` hash and RFC 7638
+thumbprint use Policy's shared SHA-256 backend.
+
+- **Algorithms:** RS256, RS384, RS512, PS256, PS384, PS512, ES256 and ES384,
+  for both `algorithms:` and `dpop.algorithms:`. HS256, HS384, HS512, EdDSA
+  and the `secret` key kind fail config load with an error naming
+  `jwt-openssl-fips`. DPoP algorithms are checked even while `dpop.mode` is
+  `off`.
+- **Keys:** RSA moduli of 2048 to 8192 bits, and EC keys on P-256 or P-384.
+  Inline and file keys outside these are refused at load; a JWKS entry
+  outside them is skipped on every fetch, including refreshes.
+- **Provider:** signature verification takes its OpenSSL implementation from
+  the process default properties, so the FIPS provider must be the default:
+
+  ```ini
+  [algorithm_sect]
+  default_properties = fips=yes
+  ```
+
+  A FIPS-mode host already arranges this. Set it for the running host, not
+  for build tools: Cargo's own TLS fails with FIPS-only defaults. Building a
+  JWT resolver checks the
+  shared backend first, then that a non-FIPS algorithm is unreachable by
+  default, then installs Policy's `jsonwebtoken` provider and probes each
+  configured algorithm. Each failure stops config load with
+  `PluginError::Crypto` and logs `alarm = "policy_crypto_failure"` with
+  `op = "jwt_provider"` or `"jwt_algorithm_probe"`. No host call is needed.
+- **One provider per process:** `jsonwebtoken` takes one crypto provider per
+  process. A host that installs its own, or calls `jsonwebtoken` before
+  Policy builds a resolver, makes JWT resolvers refuse to build rather than
+  verify with that provider.
+- **Request path:** a backend failure while verifying denies with
+  `policy.crypto_failed` and logs the alarm with `op = "jwt_verify"`,
+  `"dpop_verify"`, `"dpop_thumbprint"` or `"dpop_ath"`. The denial reason
+  carries no backend detail.
+
+#### Accepted crates in the FIPS graph
+
+`make check-fips-graph` fails on any crate in the FIPS graph that matches a
+crypto pattern and is in neither its non-FIPS list nor `FIPS_GRAPH_ALLOWED`.
+The allowed crates, and why:
+
+| Crate | Why it is accepted |
+|---|---|
+| `uuid` | Trace, span and registry ids, CIBA poll owners and effect keys: identifiers, never keys or secrets |
+| `getrandom` | The OS source behind `uuid::Uuid::new_v4` |
+| `signature` | `jsonwebtoken`'s signer and verifier traits; it holds no algorithms |
+
+Secret material, such as the OAuth cache-key secret, is drawn with
+`praxis_policy_core::crypto::random_bytes`. Under `fips` that uses OpenSSL's
+private DRBG, which is the FIPS DRBG when the FIPS provider is the process
+default, and fails otherwise. A new key, nonce or secret must use it rather
+than `uuid` or `getrandom`.
 
 Every crate in the graph must leave the backend choice to the host.
 `default-features = false` at the top cannot remove `crypto-rustcrypto`

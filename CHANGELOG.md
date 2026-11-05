@@ -19,6 +19,27 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **JWT and DPoP under FIPS.** The `jwt-openssl-fips` feature verifies
+  `identity/jwt` tokens and DPoP proofs with system OpenSSL under the FIPS
+  provider, while `jsonwebtoken` keeps parsing, JWKS selection and claim
+  validation. It requires `fips` and cannot be combined with `jwt`, which
+  keeps AWS-LC. RS256 to RS512, PS256 to PS512, ES256 and ES384 are
+  supported, with RSA keys of 2048 to 8192 bits and EC keys on P-256 or
+  P-384; other keys are refused at load and skipped on JWKS refresh. The
+  DPoP `ath` hash and JWK thumbprint use the shared SHA-256 backend.
+  `fips,api-key,jwt-openssl-fips` passes `fips_profile_is_safe()`. Building a
+  resolver checks that the FIPS provider is the OpenSSL default and refuses a
+  conflicting `jsonwebtoken` provider, with `policy_crypto_failure`.
+- **Backend-selected randomness.** `praxis_policy_core::crypto::random_bytes`
+  draws secret material from the OS under `crypto-rustcrypto` and from
+  OpenSSL's private DRBG under `fips`, failing unless the FIPS provider is
+  the default. The OAuth cache-key secret uses it, so under `fips` an OAuth
+  delegator fails to build unless the FIPS provider is the default. OAuth
+  stays reported unsafe under FIPS because its cache key is still an HMAC.
+- **FIPS graph classification.** `make check-fips-graph` and
+  `make check-crypto-consumer` fail on an unclassified crypto crate and print
+  the accepted ones (`uuid`, `getrandom`, `signature`).
+
 - **Selectable crypto backend.** Policy's SHA-256 operations (content
   digests, decision-cache keys, session ids, instruction digests and API-key
   hashing) use `crypto-rustcrypto`, the default, or `fips`, which uses OpenSSL
@@ -182,6 +203,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **HMAC JWTs are refused under `jwt-openssl-fips`.** HS256, HS384, HS512 and
+  `decoding_key: { kind: secret }` fail config load with that feature; the
+  shared FIPS backend has no HMAC. Ordinary `jwt` keeps HMAC unchanged.
+- **Breaking Rust API: DPoP hashing is fallible.** `jwk_thumbprint` returns
+  `Result<String, ThumbprintError>`, separating an unsupported key
+  (`Unsupported`) from a backend failure (`Crypto`); `access_token_hash`
+  returns `Result<String, CryptoError>`.
+- **Breaking Rust API: new `CryptoError` variants.** `NonFipsDefault` and
+  `ProviderConflict` under `fips`, and `Random` under `crypto-rustcrypto`.
+  The enum is `#[non_exhaustive]`.
 - **Breaking Rust API: crypto initialization errors.** `PluginError` adds
   `Crypto { source: CryptoError }`; exhaustive matches need a new arm.
   `PolicyEngine::initialize()` refuses startup when the shared SHA-256

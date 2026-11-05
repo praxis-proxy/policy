@@ -48,6 +48,8 @@ pub mod dpop;
 pub mod dpop_valkey;
 /// Constructs the resolver from configuration.
 pub mod factory;
+#[cfg(feature = "jwt-openssl-fips")]
+mod openssl_fips;
 /// The shipped claim maps, by name.
 pub mod presets;
 /// The identity hook handler.

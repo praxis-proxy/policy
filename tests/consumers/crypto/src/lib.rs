@@ -35,6 +35,17 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "fips", feature = "jwt-openssl-fips"))]
+    #[test]
+    fn openssl_jwt_keeps_the_fips_profile_safe() {
+        assert_report(
+            CryptoBackend::OpenSslFips,
+            Some(CryptoBackend::OpenSslFips),
+            true,
+        );
+        assert_eq!(policy::JWT_KIND, "identity/jwt");
+    }
+
     #[cfg(feature = "api-key")]
     #[test]
     fn api_key_aliases_are_the_core_types() {
