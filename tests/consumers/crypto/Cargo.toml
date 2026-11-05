@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+[package]
+name = "policy-crypto-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[features]
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = [
+  "policy/crypto-rustcrypto",
+  "audit/crypto-rustcrypto",
+  "pii/crypto-rustcrypto",
+  "transcript/crypto-rustcrypto",
+]
+fips = ["policy/fips", "audit/fips", "pii/fips", "transcript/fips"]
+api-key = ["policy/api-key"]
+plugin-defaults = ["audit/default"]
+
+[dependencies]
+policy = { package = "praxis-policy", path = "../../../crates/ppe", default-features = false }
+audit = { package = "praxis-policy-plugin-audit-logger", path = "../../../reference/plugins/audit-logger", default-features = false }
+pii = { package = "praxis-policy-plugin-pii-scanner", path = "../../../reference/plugins/pii-scanner", default-features = false }
+transcript = { package = "praxis-policy-plugin-transcript-scanner", path = "../../../reference/plugins/transcript-scanner", default-features = false }

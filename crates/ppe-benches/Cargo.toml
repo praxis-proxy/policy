@@ -26,7 +26,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-praxis-policy-builtins = { workspace = true, features = ["cedar", "cel", "opa", "jwt"] }
+praxis-policy-builtins = { workspace = true, features = ["crypto-rustcrypto", "cedar", "cel", "opa", "jwt"] }
 praxis-policy-core = { workspace = true }
 praxis-policy-apl-core = { workspace = true }
 praxis-policy-apl-runtime = { workspace = true }

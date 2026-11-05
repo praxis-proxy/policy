@@ -119,7 +119,7 @@ jobs:
           key: ${{ runner.os }}-cargo-live-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-live-
       - name: Build the integration suite
-        run: cargo test --all-features -p praxis-policy-tests-integration --no-run
+        run: cargo test --features experimental-ratelimit -p praxis-policy-tests-integration --no-run
       - name: Wait for the realm
         run: |
           for _ in $(seq 1 90); do
@@ -131,7 +131,7 @@ jobs:
       # The tests never print a token. `--nocapture` shows the skip lines.
       - name: Live scenarios
         run: |
-          cargo test --all-features -p praxis-policy-tests-integration \
+          cargo test --features experimental-ratelimit -p praxis-policy-tests-integration \
             -- --ignored --nocapture scenarios::live::
       - name: Keycloak logs
         if: failure()

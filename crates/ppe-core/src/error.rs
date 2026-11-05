@@ -14,7 +14,7 @@ use thiserror::Error;
 /// Top-level error type for the PPE framework.
 ///
 /// Covers plugin execution failures, policy violations, timeouts,
-/// and configuration issues. Each variant carries enough context
+/// configuration issues, and shared crypto failures. Each variant carries context
 /// for the caller to log, report, or recover.
 ///
 /// - `code` — business-logic error code (e.g., `"rate_limit_exceeded"`)
@@ -23,6 +23,14 @@ use thiserror::Error;
 ///   map back to the wire format (MCP JSON-RPC, HTTP status, etc.)
 #[derive(Debug, Error)]
 pub enum PluginError {
+    /// The shared crypto backend failed its startup check.
+    #[error("Policy crypto backend validation failed: {source}")]
+    Crypto {
+        /// The backend failure.
+        #[source]
+        source: crate::CryptoError,
+    },
+
     /// A plugin raised an execution error.
     #[error("plugin '{plugin_name}' failed: {message}")]
     Execution {
@@ -108,7 +116,7 @@ impl PluginError {
 /// `PluginError` itself can't be `Clone` because of its
 /// `Box<dyn std::error::Error + Send + Sync>` source field, and that
 /// field doesn't survive serialization anyway. `PluginErrorRecord`
-/// flattens the five enum variants into a single shape — the
+/// flattens the enum variants into a single shape — the
 /// `From<&PluginError>` impl handles the variant-to-fields mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginErrorRecord {
@@ -144,6 +152,13 @@ impl From<&Box<PluginError>> for PluginErrorRecord {
 impl From<&PluginError> for PluginErrorRecord {
     fn from(e: &PluginError) -> Self {
         match e {
+            PluginError::Crypto { .. } => Self {
+                plugin_name: String::new(),
+                message: "Policy crypto backend validation failed".to_owned(),
+                code: Some("policy.crypto_failed".to_owned()),
+                details: HashMap::new(),
+                proto_error_code: None,
+            },
             PluginError::Execution {
                 plugin_name,
                 message,
@@ -294,6 +309,29 @@ mod tests {
             details: HashMap::from([("kid".to_owned(), serde_json::json!("abc"))]),
             proto_error_code: Some(-32_603),
         }
+    }
+
+    #[test]
+    fn a_crypto_error_retains_its_source_and_uses_a_safe_record() {
+        use std::error::Error as _;
+
+        let error = PluginError::Crypto {
+            source: crate::CryptoError::DigestLength,
+        };
+        assert!(matches!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<crate::CryptoError>()),
+            Some(crate::CryptoError::DigestLength)
+        ));
+        assert!(error.to_string().contains("invalid digest length"));
+
+        let record: PluginErrorRecord = (&error).into();
+        assert_eq!(record.plugin_name, "");
+        assert_eq!(record.message, "Policy crypto backend validation failed");
+        assert_eq!(record.code.as_deref(), Some("policy.crypto_failed"));
+        assert!(record.details.is_empty());
+        assert_eq!(record.proto_error_code, None);
     }
 
     #[test]

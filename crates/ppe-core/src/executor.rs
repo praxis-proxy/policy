@@ -3589,6 +3589,7 @@ mod audit_seam_tests {
 
     /// Both digests come from the executor, under the one key, so a sink
     /// compares them without ever holding the key.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[tokio::test]
     async fn an_opted_in_payload_is_digested_at_entry_and_emission() {
         let executor = Executor::new(ExecutorConfig {

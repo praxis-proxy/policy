@@ -65,6 +65,7 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 | `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
 | `jwt` | `identity/jwt` |
 | `api-key` | `identity/api-key` |
+| `fips` | OpenSSL FIPS SHA-256 for API-key and always-enabled Policy hashing. Keyed content provenance is rejected because it requires HMAC. Select with `default-features = false`; other crypto-using builtins are reported and make the API-key profile unsafe. |
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
 | `elicitation-ciba` | `elicitation/ciba` |
@@ -79,6 +80,45 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 
 The default build is the engine alone, so a host that needs only the
 runtime and its own plugins compiles nothing extra.
+
+API-key builds with default features use RustCrypto SHA-256. A host building the
+API-key FIPS slice selects API-key plus OpenSSL FIPS hashing, then checks
+the whole-graph capability report. `PolicyEngine::initialize()` checks that
+the FIPS provider can perform SHA-256 before serving traffic.
+The FIPS slice supports SHA-256 only; configurations that enable keyed content
+provenance are refused.
+Unkeyed content provenance remains available through plain SHA-256:
+
+```toml
+praxis-policy = { version = "0.5", default-features = false, features = ["fips", "api-key"] }
+```
+
+```rust,ignore
+use praxis_policy::{crypto_capability_report, PolicyEngine};
+
+let report = crypto_capability_report();
+if !report.fips_profile_is_safe() {
+    anyhow::bail!("Policy crypto graph is not API-key-only FIPS safe: {report:?}");
+}
+let engine = PolicyEngine::default();
+engine.initialize().await?;
+tracing::info!(crypto = ?report, "Policy crypto providers are ready");
+```
+
+The capability report reflects the unified builtin features, including direct
+dependency feature unification. It lists JWT,
+OAuth, Vault delegation, and Valkey when enabled because those builtins retain
+RustCrypto operations. Engine initialization verifies OpenSSL can
+perform FIPS SHA-256 for every user of Policy's shared backend. Plugins
+with independent crypto need their own checks; HMAC remains unavailable
+under FIPS. `validate_crypto_backend()` remains available for an earlier
+preflight check. The host must verify its final image and runtime separately.
+
+Every crate in the graph must leave the backend choice to the host.
+`default-features = false` at the top cannot remove `crypto-rustcrypto`
+enabled by another dependency; the build then fails with both backends
+selected. Disable defaults on each Policy dependency, including plugin
+crates, as described in [Crypto backend](crates.md#crypto-backend).
 
 ### The HTTP transport
 
