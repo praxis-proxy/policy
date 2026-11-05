@@ -147,9 +147,29 @@ impl BagBuilder {
     /// Bridge every present slot in an `Extensions` container at once —
     /// security, delegation, agent, meta, request, http, llm, mcp,
     /// completion, provenance, framework, custom.
-    pub fn with_extensions(mut self, ext: &Extensions) -> Self {
-        extract_extensions(ext, &mut self.bag);
-        self
+    ///
+    /// # Errors
+    /// Returns an error if the selected SHA-256 provider cannot digest LLM instructions.
+    ///
+    /// ```
+    /// use praxis_policy_apl_cmf::BagBuilder;
+    /// use praxis_policy_apl_core::AttributeBag;
+    /// use praxis_policy_core::{CryptoError, extensions::Extensions};
+    ///
+    /// fn request_bag(ext: &Extensions) -> Result<AttributeBag, CryptoError> {
+    ///     Ok(BagBuilder::new().with_extensions(ext)?.build())
+    /// }
+    ///
+    /// let bag = request_bag(&Extensions::default())?;
+    /// assert!(bag.get_string("subject.id").is_none());
+    /// # Ok::<(), CryptoError>(())
+    /// ```
+    pub fn with_extensions(
+        mut self,
+        ext: &Extensions,
+    ) -> Result<Self, praxis_policy_core::crypto::CryptoError> {
+        extract_extensions(ext, &mut self.bag)?;
+        Ok(self)
     }
 
     /// Bridge the call arguments into `args.*` keys.
