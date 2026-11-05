@@ -8,7 +8,7 @@ use praxis_policy_builtins::plugins::identity_basic::{
 };
 use praxis_policy_core::identity::TokenSource;
 
-use crate::support::{HtpasswdFile, bcrypt_line, htpasswd_block, resolver};
+use crate::support::{HtpasswdFile, argon2_line, bcrypt_line, htpasswd_block, resolver};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -456,4 +456,51 @@ fn the_failure_limiter_blocks_a_user_id_past_its_budget() {
         "a success clears the counter, so the budget is restored"
     );
     assert_eq!(limiter.tracked(), 0, "the cleared counter frees its slot");
+}
+
+#[test]
+fn a_password_ceiling_above_bcrypts_truncation_point_fails_at_load() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["limits"] = serde_json::json!({ "max_password_bytes": 128 });
+
+    let Err(err) = resolver(block) else {
+        panic!("a ceiling bcrypt cannot honour must not load");
+    };
+    assert!(
+        err.contains("max_password_bytes") && err.contains("72"),
+        "the error must name the setting and bcrypt's truncation point so an operator can act \
+         on it, got: {err}"
+    );
+}
+
+#[test]
+fn the_bcrypt_password_ceiling_admits_exactly_the_truncation_point() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["limits"] = serde_json::json!({ "max_password_bytes": 72 });
+
+    assert!(
+        resolver(block).is_ok(),
+        "72 is the longest password bcrypt verifies in full, so it is admitted rather than \
+         refused one byte early"
+    );
+}
+
+#[test]
+fn a_large_password_ceiling_loads_on_a_directory_that_consumes_whole_passwords() {
+    // argon2 has no truncation point, so the ceiling that locks out bcrypt
+    // users is a legitimate configuration here.
+    let file = HtpasswdFile::write(&format!(
+        "{}\n",
+        argon2_line("alice", "correct horse", 19_456, 2)
+    ));
+    let mut block = htpasswd_block(file.path());
+    block["limits"] = serde_json::json!({ "max_password_bytes": 128 });
+
+    assert!(
+        resolver(block).is_ok(),
+        "the ceiling is refused for bcrypt specifically, not for every backend: argon2 consumes \
+         the whole password, so a longer one verifies rather than always failing"
+    );
 }

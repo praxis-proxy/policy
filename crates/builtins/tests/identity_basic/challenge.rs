@@ -473,8 +473,17 @@ async fn a_record_map_that_cannot_project_the_client_slot_denies() {
     );
 }
 
+/// The log budget must never cost a denial.
+///
+/// Past the budget `may_log_failure` drops the line, and this pins that it
+/// drops only the line: all forty attempts are still denied and still counted.
+/// It deliberately asserts nothing about the log output itself -- that would
+/// need a capturing subscriber, and `tracing-subscriber` is not a
+/// dev-dependency of this crate. The budget's arithmetic is covered by the
+/// unit tests beside it in `resolver.rs`, which is where the defect that
+/// broke it lived.
 #[tokio::test]
-async fn a_burst_of_failures_does_not_log_one_line_per_attempt() {
+async fn every_failure_in_a_burst_is_denied_whether_or_not_it_is_logged() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
     let mut block = htpasswd_block(file.path());
     block["failure_limit"] = serde_json::json!({ "max_failures": 1_000, "window_secs": 60 });

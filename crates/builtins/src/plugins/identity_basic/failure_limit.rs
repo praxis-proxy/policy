@@ -93,12 +93,27 @@ impl FailureLimiter {
     /// [`saturations`]: FailureLimiter::saturations
     pub fn admit(&self, user_id: &str) -> Result<(), Refusal> {
         let now = self.now_ms();
-        let Ok(guard) = self.counters.read() else {
-            // A poisoned lock means a panic while a counter was being written.
-            // Failing closed: the alternative is an unbounded guess rate on
-            // the path this type exists to bound.
-            return Err(Refusal::Blocked);
-        };
+        // A poisoned lock means some holder panicked. Recovered rather than
+        // treated as a denial, matching the reload lock in `htpasswd`.
+        //
+        // Poisoning is permanent -- an `RwLock` is never un-poisoned -- so
+        // returning `Blocked` here denied *every* user-id for the rest of the
+        // process's life, from one panic, on the hook that gates all
+        // authentication. That is the outage this crate avoids `panic =
+        // "abort"` to prevent, not a safe default. The counters themselves
+        // stay sound: every critical section here is map probes, integer
+        // compares and `saturating_add`, none of which can panic partway and
+        // leave a counter torn, so the worst a recovered guard shows is a
+        // count written just before an unrelated panic.
+        //
+        // Untested on purpose, rather than untested by oversight: `counters`
+        // is private and no critical section above can panic, so poisoning is
+        // unreachable through this type's API and a test could only fake it.
+        // Anyone adding a fallible critical section here owes it a test.
+        let guard = self
+            .counters
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match guard.get(user_id) {
             Some(counter) if counter.live(now) => {
                 if counter.failures >= self.config.max_failures {
@@ -132,9 +147,12 @@ impl FailureLimiter {
     /// Record a failed verification for `user_id`.
     pub fn record_failure(&self, user_id: &str) {
         let now = self.now_ms();
-        let Ok(mut guard) = self.counters.write() else {
-            return;
-        };
+        // Recovered, not skipped: dropping the write would leave a poisoned
+        // limiter counting nothing at all. See `admit`.
+        let mut guard = self
+            .counters
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let window = self.config.window_secs.saturating_mul(1000);
 
         if let Some(counter) = guard.get_mut(user_id) {
@@ -170,14 +188,21 @@ impl FailureLimiter {
 
     /// Clear `user_id`'s counter after a successful verification.
     pub fn record_success(&self, user_id: &str) {
-        if let Ok(mut guard) = self.counters.write() {
-            guard.remove(user_id);
-        }
+        // Recovered for the same reason as `record_failure`: a poisoned
+        // limiter that cannot clear a counter would hold a legitimate user at
+        // their spent budget for the whole window.
+        self.counters
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(user_id);
     }
 
     /// How many user-ids are currently tracked.
     pub fn tracked(&self) -> usize {
-        self.counters.read().map_or(0, |guard| guard.len())
+        self.counters
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     fn now_ms(&self) -> u64 {

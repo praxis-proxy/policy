@@ -268,6 +268,27 @@ impl std::fmt::Debug for ParsedHash {
 }
 
 /// Parameter ceilings for stored password hashes.
+///
+/// Deliberately not `#[non_exhaustive]`, unlike the enums in this module.
+/// Every field is a ceiling with a sane default, so the supported way to build
+/// one is to name the ceilings being changed and defer the rest:
+///
+/// ```
+/// use praxis_policy_builtins::plugins::identity_basic::Limits;
+///
+/// let limits = Limits {
+///     max_bcrypt_cost: 12,
+///     ..Limits::default()
+/// };
+/// assert_eq!(limits.max_bcrypt_cost, 12);
+/// ```
+///
+/// That pattern already absorbs a new ceiling without a caller change, which
+/// is what `#[non_exhaustive]` would be buying -- and it would cost the
+/// pattern itself, since the attribute forbids functional update even inside
+/// this crate. A caller who instead names all four fields is opting out of
+/// that, and a new ceiling will not compile for them. Sealing the type is
+/// therefore a change to make when a field is actually added, not before.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// The highest bcrypt cost this directory will load.

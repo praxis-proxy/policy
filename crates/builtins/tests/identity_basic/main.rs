@@ -18,6 +18,7 @@
 
 mod challenge;
 mod decoding;
+mod engine_e2e;
 mod htpasswd_backend;
 mod projection;
 mod verifying;

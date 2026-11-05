@@ -53,8 +53,16 @@ pub struct HtpasswdConfig {
 
     /// The required refresh interval, in seconds.
     ///
-    /// Zero requests a reload on every lookup. Removed records may remain usable
-    /// until a successful reload.
+    /// Removed records may remain usable until a successful reload.
+    ///
+    /// Zero requests a reload on every lookup, and that is a test and
+    /// small-deployment setting rather than a production one: the reload reads
+    /// the file and re-admits every record's hash parameters, and it runs
+    /// inline on the async worker that is serving the request. At zero that
+    /// cost lands on every lookup, so a caller who can drive lookups drives
+    /// file I/O and parsing at the same rate, on the runtime's worker threads.
+    /// Any non-zero value bounds it to once per interval instead, which is why
+    /// the default is non-zero.
     pub refresh_secs: u64,
 
     /// The required maximum index age, in seconds.
@@ -569,6 +577,24 @@ impl HtpasswdDirectory {
     }
 
     /// Attempt a reload when the refresh interval has elapsed.
+    ///
+    /// Runs inline, on the caller's async worker, and the reload it may start
+    /// is blocking: a file read plus a re-admission of every record's hash
+    /// parameters. The refresh interval is what bounds that to once per
+    /// interval however many requests arrive, so the cost per lookup is the
+    /// interval check alone.
+    ///
+    /// At `refresh_secs: 0` there is no such bound. The slot below is
+    /// reclaimed immediately, so every lookup performs the full blocking
+    /// reload on the worker thread serving it, and a caller who can drive
+    /// lookups drives that I/O and parsing at the same rate. Documented at
+    /// [`refresh_secs`] rather than refused, because zero is the setting that
+    /// makes a test or a hand-edited file take effect at once, and moving the
+    /// reload off the worker would mean restructuring this backend for
+    /// `spawn_blocking` -- a change to make deliberately, not as a side effect
+    /// of a doc fix.
+    ///
+    /// [`refresh_secs`]: HtpasswdConfig::refresh_secs
     fn refresh_if_due(&self) {
         let interval = self.config.refresh_secs;
         let now = self.now_ms();
@@ -592,10 +618,11 @@ impl HtpasswdDirectory {
 
         self.reload_attempts.fetch_add(1, Ordering::Relaxed);
         if let Err(error) = self.reload() {
-            // Rate limited by the refresh interval itself: this runs once per
-            // interval, not once per request, because the slot was claimed
-            // above. The path is operator-supplied and the error carries no
-            // credential material.
+            // Rate limited by the refresh interval itself: the slot claimed
+            // above means this runs once per interval rather than once per
+            // request -- except at `refresh_secs: 0`, where the interval is
+            // the request rate and so is this line. The path is
+            // operator-supplied and the error carries no credential material.
             tracing::warn!(
                 path = %self.config.path.display(),
                 %error,
