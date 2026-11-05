@@ -510,3 +510,36 @@ async fn a_record_map_that_cannot_project_the_subject_slot_denies() {
         "a mapping denial is still one this resolver raises"
     );
 }
+
+#[tokio::test]
+async fn a_directory_that_cannot_answer_does_not_spend_the_user_ids_budget() {
+    // A stale index is the cheapest way to make every answer a
+    // `DirectoryError` without racing a concurrency cap.
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["provider"]["refresh_secs"] = serde_json::json!(0);
+    block["provider"]["max_staleness_secs"] = serde_json::json!(1);
+    block["failure_limit"] =
+        serde_json::json!({ "capacity": 16, "max_failures": 2, "window_secs": 300 });
+    let resolver = resolver(block).expect("the config loads");
+    file.unlink();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    // Far more attempts than the budget of two, every one naming alice.
+    for _ in 0..8 {
+        let denied = resolve_with_header(&resolver, &basic_header("alice", "whatever")).await;
+        assert_eq!(
+            denial_code(&denied).as_deref(),
+            Some(codes::DIRECTORY_UNAVAILABLE),
+            "while the index is stale the directory cannot answer"
+        );
+    }
+
+    assert_eq!(
+        resolver.limiter_tracked(),
+        0,
+        "a guess the directory never evaluated must not be counted against the user-id: \
+         otherwise anyone able to stale or saturate the directory could spend a named victim's \
+         budget to zero without ever guessing a password"
+    );
+}
