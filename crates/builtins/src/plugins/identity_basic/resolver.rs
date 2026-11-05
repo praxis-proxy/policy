@@ -100,8 +100,16 @@ pub struct BasicIdentityResolver {
     challenge: String,
     limiter: FailureLimiter,
     /// How many failures have been logged in the current window, and when it
-    /// closes. One word, so the request path pays one atomic rather than a
-    /// lock: the window start is the high 24 bits and the count the low 40.
+    /// closes.
+    ///
+    /// Packed into one word so the request path pays one atomic rather than a
+    /// lock. **The current split is wrong and the budget stops limiting after
+    /// roughly 4.7 hours of uptime**: `now_ms` masks the window start to 40
+    /// bits while `may_log_failure` packs it with `<< 40`, so every bit above
+    /// the low 24 is discarded and `elapsed` then exceeds the window on every
+    /// call. Reviewed and left for a deliberate fix, because the three
+    /// candidate shapes -- widen the field, narrow the mask, or drop the
+    /// packing for a mutex the failure path can afford -- are not equivalent.
     log_budget: AtomicU64,
     started: std::time::Instant,
 }
@@ -238,10 +246,9 @@ impl BasicIdentityResolver {
     }
 
     fn now_ms(&self) -> u64 {
-        // Truncated to 40 bits so it shares a word with the counter: that is
-        // ~34 years of uptime, past which the window start wraps and one
-        // window logs early. Chosen over a second atomic because the failure
-        // path must not pay a second contended word.
+        // This 40-bit mask does not survive the `<< 40` in `may_log_failure`,
+        // which keeps only the low 24 bits. See `log_budget` for why the
+        // mismatch is recorded rather than patched here.
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX) & 0xff_ffff_ffff
     }
 }
@@ -330,22 +337,18 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         // Before the lookup, so a blocked user-id costs no verification. The
         // limiter keys on the normalised user-id, so two encodings of one name
         // share a bucket rather than getting a budget each.
+        //
+        // Only a user-id past its own budget is refused here. A full limiter
+        // admits, because the user-ids it has no counter for are the ones it
+        // has no evidence against -- refusing those let a spray of junk
+        // user-ids lock out every legitimate caller. Saturation is surfaced
+        // through `limiter_saturations` instead.
         match self.limiter.admit(user_id) {
             Ok(()) => {},
             Err(Refusal::Blocked) => {
                 return self.deny(
                     codes::TOO_MANY_FAILURES,
                     "too many recent failures for this credential",
-                );
-            },
-            Err(Refusal::AtCapacity) => {
-                tracing::warn!(
-                    saturations = self.limiter.saturations(),
-                    "basic: the failure limiter is at capacity; raise `failure_limit.capacity`",
-                );
-                return self.deny(
-                    codes::TOO_MANY_FAILURES,
-                    "the failure limiter has no capacity to track this credential",
                 );
             },
         }
@@ -388,6 +391,8 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
             return self.deny_invalid();
         }
 
+        // `record.is_none()` returned above, so this cannot bind `None`. Kept
+        // as a binding rather than an unwrap because the crate denies both.
         let Some(record) = record else {
             return self.deny_invalid();
         };

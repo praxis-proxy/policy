@@ -258,14 +258,14 @@ async fn limiter_capacity_does_not_evict_a_blocked_user_id() {
     let fresh = resolve_with_header(&resolver, &basic_header("bob", "whatever")).await;
     assert_eq!(
         denial_code(&fresh).as_deref(),
-        Some(codes::TOO_MANY_FAILURES),
-        "at capacity a fresh user-id is denied rather than admitted, or the limiter would go \
-         inert exactly when it is under attack"
+        Some(codes::INVALID_CREDENTIALS),
+        "a full limiter must judge bob on his credential, not refuse him for want of a slot"
     );
     assert_eq!(
         resolver.limiter_saturations(),
         1,
-        "saturation must be observable without logging a user-id"
+        "the untracked attempt is still counted, so saturation is observable without logging a \
+         user-id"
     );
 
     let blocked = resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
@@ -273,6 +273,34 @@ async fn limiter_capacity_does_not_evict_a_blocked_user_id() {
         denial_code(&blocked).as_deref(),
         Some(codes::TOO_MANY_FAILURES),
         "the blocked counter must survive the flood that tried to displace it"
+    );
+}
+
+#[tokio::test]
+async fn a_user_id_spray_does_not_lock_out_a_legitimate_caller() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["failure_limit"] =
+        serde_json::json!({ "capacity": 8, "max_failures": 3, "window_secs": 300 });
+    let resolver = resolver(block).expect("the config loads");
+
+    // Alice is well-behaved, so she holds no counter -- which is exactly what
+    // made her a victim when a full map denied untracked user-ids.
+    for n in 0..16 {
+        resolve_with_header(&resolver, &basic_header(&format!("junk{n}"), "whatever")).await;
+    }
+    assert!(
+        resolver.limiter_saturations() > 0,
+        "the spray must have filled the map, or this test is not exercising saturation"
+    );
+
+    let accepted = resolve_with_header(&resolver, &basic_header("alice", "correct horse")).await;
+    assert_eq!(
+        denial_code(&accepted).as_deref(),
+        None,
+        "a spray of junk user-ids must not deny a caller presenting the correct password: \
+         refusing untracked user-ids at capacity was a global-outage primitive costing the \
+         attacker nothing but cheap, hash-free requests"
     );
 }
 

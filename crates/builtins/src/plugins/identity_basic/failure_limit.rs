@@ -12,6 +12,11 @@
 // keyed per user-id, so a spray across many user-ids never fills one counter.
 // Both gaps need an edge or shared counter and are stated in the operator
 // documentation rather than implied away here.
+//
+// It is also not an admission controller. The only attempt it refuses is one
+// whose own user-id has spent its budget; running out of slots never denies a
+// caller, because the callers holding no slot are the ones with no recorded
+// failures. `FailureLimiter::admit` carries that reasoning.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -28,15 +33,10 @@ use crate::plugins::identity_basic::config::FailureLimitConfig;
 #[non_exhaustive]
 pub enum Refusal {
     /// This user-id has spent its failure budget for the current window.
-    Blocked,
-
-    /// Every tracked slot holds a live counter, and this user-id has none.
     ///
-    /// Denied rather than admitted. Evicting a counter to make room would let
-    /// a flood of fresh user-ids clear a blocked one, which is the bypass the
-    /// capacity ceiling exists to stop; admitting without a counter would make
-    /// the limiter inert exactly when it is under attack.
-    AtCapacity,
+    /// The only refusal there is. Saturation deliberately does not produce
+    /// one: see [`FailureLimiter::admit`].
+    Blocked,
 }
 
 /// Consecutive-failure counters, keyed on the normalised user-id.
@@ -66,12 +66,31 @@ impl FailureLimiter {
 
     /// Whether `user_id` may attempt a verification now.
     ///
+    /// Saturation is counted, not enforced. A user-id with no live counter is
+    /// one this limiter holds no evidence against, so refusing it would deny
+    /// on the absence of evidence -- and because `record_success` drops a
+    /// counter, the user-ids holding no slot when the map fills are exactly
+    /// the well-behaved ones. Refusing them turned a spray of junk user-ids
+    /// into a global outage: at the shipped capacity an attacker could lock
+    /// out every legitimate caller for a whole window with cheap requests that
+    /// never reached a hash. Admitting instead costs the attacker the full
+    /// verification price per guess and leaves the directory's own saturation
+    /// ceiling as the bound on concurrency.
+    ///
+    /// This does not reopen the eviction bypass. A counter is never displaced
+    /// to make room: a full map stops *counting* new user-ids (see
+    /// [`record_failure`]), and a blocked counter is found and enforced here
+    /// whatever the map's occupancy. What saturation costs is new counters,
+    /// which is why it is surfaced through [`saturations`] for an operator to
+    /// act on by raising `failure_limit.capacity`.
+    ///
     /// # Errors
     ///
-    /// Returns a [`Refusal`] when the user-id has spent its budget or the
-    /// limiter has no slot to track it in.
+    /// Returns [`Refusal::Blocked`] when the user-id has spent its failure
+    /// budget for the current window.
     ///
-    /// [`Refusal`]: Refusal
+    /// [`record_failure`]: FailureLimiter::record_failure
+    /// [`saturations`]: FailureLimiter::saturations
     pub fn admit(&self, user_id: &str) -> Result<(), Refusal> {
         let now = self.now_ms();
         let Ok(guard) = self.counters.read() else {
@@ -87,20 +106,25 @@ impl FailureLimiter {
                 }
                 Ok(())
             },
-            // An expired counter is as good as none: the window has passed, so
-            // the budget is spent. It is reclaimed on the recording path,
-            // which is the one that would otherwise grow the map.
+            // An expired counter is as good as none: the window has passed,
+            // so the budget is restored. Reclaiming it is left to
+            // `record_failure`, the path that would otherwise grow the map,
+            // which keeps this one a read.
             Some(_) | None => {
                 if guard.len() >= self.config.capacity && !guard.contains_key(user_id) {
-                    drop(guard);
-                    return self.admit_after_reclaim(user_id, now);
+                    self.saturations
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(())
             },
         }
     }
 
-    /// How many attempts have been refused for want of a slot.
+    /// How many attempts found no slot to be tracked in.
+    ///
+    /// Those attempts were admitted, not refused: a rising count says new
+    /// failures are going uncounted because `failure_limit.capacity` is too
+    /// small for the traffic, not that callers were denied.
     pub fn saturations(&self) -> u64 {
         self.saturations.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -126,10 +150,12 @@ impl FailureLimiter {
         if guard.len() >= self.config.capacity {
             guard.retain(|_, held| held.live(now));
             if guard.len() >= self.config.capacity {
-                // No slot, so this failure goes uncounted. The attempt that
-                // produced it was already refused by `admit`, which is where
-                // the denial comes from; this only declines to displace a
-                // counter that is still doing its job.
+                // No slot, so this failure goes uncounted: every counter held
+                // is still live, and displacing one would let a flood of fresh
+                // user-ids clear a blocked counter. The attempt itself was
+                // admitted -- `admit` does not refuse for want of a slot -- so
+                // what is lost is the bound on *this* user-id, which is what
+                // the saturation count tells an operator to fix.
                 return;
             }
         }
@@ -152,23 +178,6 @@ impl FailureLimiter {
     /// How many user-ids are currently tracked.
     pub fn tracked(&self) -> usize {
         self.counters.read().map_or(0, |guard| guard.len())
-    }
-
-    /// Admit after reclaiming expired counters, or report saturation.
-    ///
-    /// Split out so the read-lock path above stays a read: this takes the
-    /// write lock, and it only runs once the map is full.
-    fn admit_after_reclaim(&self, user_id: &str, now: u64) -> Result<(), Refusal> {
-        let Ok(mut guard) = self.counters.write() else {
-            return Err(Refusal::Blocked);
-        };
-        guard.retain(|_, held| held.live(now));
-        if guard.len() >= self.config.capacity && !guard.contains_key(user_id) {
-            self.saturations
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Err(Refusal::AtCapacity);
-        }
-        Ok(())
     }
 
     fn now_ms(&self) -> u64 {

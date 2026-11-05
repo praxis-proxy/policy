@@ -357,8 +357,8 @@ fn the_factory_surfaces_a_config_error_rather_than_building() {
 }
 
 #[test]
-fn the_failure_limiter_refuses_a_fresh_user_id_when_every_slot_is_live() {
-    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+fn the_failure_limiter_admits_a_fresh_user_id_when_every_slot_is_live() {
+    use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
 
     let limiter = FailureLimiter::new(
         serde_json::from_value(serde_json::json!({
@@ -370,8 +370,9 @@ fn the_failure_limiter_refuses_a_fresh_user_id_when_every_slot_is_live() {
 
     assert_eq!(
         limiter.admit("bob"),
-        Err(Refusal::AtCapacity),
-        "evicting alice's counter would let a flood of fresh user-ids clear a blocked one"
+        Ok(()),
+        "a full map must not deny a user-id it holds no evidence against, or a spray of junk \
+         user-ids becomes a global lockout"
     );
     assert_eq!(
         limiter.admit("alice"),
@@ -381,7 +382,49 @@ fn the_failure_limiter_refuses_a_fresh_user_id_when_every_slot_is_live() {
     assert_eq!(
         limiter.saturations(),
         1,
-        "saturation is counted so it is observable without logging a user-id"
+        "the admitted-but-untracked attempt is still counted, so an operator can see that \
+         capacity is too small without a user-id reaching the logs"
+    );
+}
+
+#[test]
+fn a_full_failure_limiter_does_not_displace_a_blocked_counter() {
+    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 1, "max_failures": 1, "window_secs": 60,
+        }))
+        .expect("the limiter config parses"),
+    );
+    limiter.record_failure("alice");
+    assert_eq!(
+        limiter.admit("alice"),
+        Err(Refusal::Blocked),
+        "one failure spends a budget of one"
+    );
+
+    // The flood that, under an evicting limiter, would buy alice a fresh budget.
+    for n in 0..32 {
+        let sprayed = format!("junk{n}");
+        assert_eq!(
+            limiter.admit(&sprayed),
+            Ok(()),
+            "a sprayed user-id is admitted rather than denied"
+        );
+        limiter.record_failure(&sprayed);
+    }
+
+    assert_eq!(
+        limiter.admit("alice"),
+        Err(Refusal::Blocked),
+        "alice's counter must survive the flood: admitting untracked user-ids must not become a \
+         way to clear a blocked one"
+    );
+    assert_eq!(
+        limiter.tracked(),
+        1,
+        "the flood is uncounted rather than tracked, so capacity still bounds the map"
     );
 }
 
