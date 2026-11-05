@@ -411,8 +411,28 @@ impl AplRouteHandler {
         // `route.key` lets default/policy-bundle predicates branch on
         // which route they're attached to.
         let post_extensions = invoker.current_extensions().await;
-        let mut bag = BagBuilder::new()
-            .with_extensions(&post_extensions)
+        let builder = match BagBuilder::new().with_extensions(&post_extensions) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::error!(
+                    alarm = "policy_crypto_failure",
+                    op = "attribute_bag",
+                    route = %self.route.route_key,
+                    %error,
+                    "attribute bag hashing failed; failing request closed"
+                );
+                let mut v =
+                    PluginViolation::new("policy.crypto_failed", "the request could not be hashed");
+                decorate_denial_response(&mut v, self.route.response.as_ref());
+                return Ok(Box::new(ErasedResultFields {
+                    continue_processing: false,
+                    modified_payload: None,
+                    modified_extensions: None,
+                    violation: Some(v),
+                }));
+            },
+        };
+        let mut bag = builder
             .with_route_key(&self.route.route_key)
             .with_data(&self.attribute_tree)
             .build();
