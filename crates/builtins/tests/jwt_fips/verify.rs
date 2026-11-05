@@ -216,6 +216,24 @@ async fn invalid_tokens() {
 }
 
 async fn unapproved_keys() {
+    let n = fixtures()["jwks"]["keys"][0]["n"].clone();
+    let rsa_with_e = |e: &str| json!({ "kind": "jwk", "jwk": { "kty": "RSA", "n": n, "e": e } });
+    for e in [
+        "Aw",
+        "AQAC",
+        "AQAA",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+    ] {
+        let message = config_error(config(issuer(), audience(), &["RS256"], rsa_with_e(e)));
+        assert!(
+            message.contains("public exponent"),
+            "e={e} (3, even, 2^16 or 2^256+1) must be refused: {message}"
+        );
+    }
+    assert!(
+        build(config(issuer(), audience(), &["RS256"], rsa_with_e("AQAB"))).is_ok(),
+        "e=65537 is accepted"
+    );
     for (key, needle) in [
         (
             json!({ "kind": "jwk", "jwk": fixtures()["rsa_1024_jwk"] }),
@@ -371,6 +389,7 @@ async fn dpop_binding_and_replay() {
         Some(codes::DPOP_KEY_MISMATCH),
         "a proof from another key is refused"
     );
+    dpop_with_a_weak_rsa_key(&issuer_key).await;
 }
 
 fn hmac_refused() {
@@ -410,6 +429,45 @@ fn hmac_refused() {
         let message = config_error(settings);
         assert!(message.contains("dpop.algorithms"), "{dpop}: {message}");
     }
+}
+
+async fn dpop_with_a_weak_rsa_key(issuer_key: &P256) {
+    let weak = fixtures()["rsa_e3_jwk"].clone();
+    let mut settings = config(
+        "https://idp.dpop",
+        "dpop-api",
+        &["ES256"],
+        json!({ "kind": "jwk", "jwk": issuer_key.jwk }),
+    );
+    settings["trusted_issuers"][0]["dpop"] = json!({ "mode": "required", "algorithms": ["RS256"] });
+    let resolver = build(settings).unwrap();
+    let public = json!({ "kty": "RSA", "n": weak["n"], "e": weak["e"] });
+    let access = issuer_key.sign(
+        &json!({ "alg": "ES256", "typ": "JWT" }),
+        &json!({
+            "iss": "https://idp.dpop",
+            "aud": "dpop-api",
+            "sub": "agent-1",
+            "exp": now() + 300,
+            "cnf": { "jkt": jwk_thumbprint(&public).unwrap() },
+        }),
+    );
+    let proof = crate::oracle::rs256(
+        text("rsa_e3_private_pem"),
+        &json!({ "alg": "RS256", "typ": "dpop+jwt", "jwk": public }),
+        &json!({
+            "htm": "POST",
+            "htu": URL,
+            "iat": now(),
+            "jti": "weak-1",
+            "ath": access_token_hash(&access).unwrap(),
+        }),
+    );
+    assert_eq!(
+        dpop(&resolver, &access, &proof).await.as_deref(),
+        Some(codes::DPOP_INVALID),
+        "a validly signed proof with an e=3 key is refused"
+    );
 }
 
 async fn dpop(resolver: &JwtIdentityResolver, access: &str, proof: &str) -> Option<String> {

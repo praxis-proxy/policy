@@ -14,7 +14,7 @@
 
 use base64::Engine as _;
 use rand::rngs::OsRng;
-use rsa::pkcs8::{EncodePublicKey as _, LineEnding};
+use rsa::pkcs8::{EncodePrivateKey as _, EncodePublicKey as _, LineEnding};
 use rsa::signature::{RandomizedSigner as _, SignatureEncoding as _, Signer as _};
 use rsa::traits::PublicKeyParts as _;
 use rsa::{RsaPrivateKey, RsaPublicKey};
@@ -150,6 +150,10 @@ fn main() {
             .to_vec()
     });
 
+    // A 2048-bit key with e=3, which FIPS 186-5 forbids; the DPoP test signs a
+    // proof with it at run time.
+    let weak = RsaPrivateKey::new_with_exp(&mut OsRng, 2048, &rsa::BigUint::from(3_u8)).unwrap();
+
     let p521_point = p521_public_point();
     let ed = ed25519_dalek::SigningKey::generate(&mut OsRng);
     let ed_public = ed.verifying_key();
@@ -165,6 +169,8 @@ fn main() {
             .unwrap(),
         "rsa_1024_jwk": rsa_jwk(&small.to_public_key(), "rsa-1024"),
         "rsa_1024_token": rsa_1024_token,
+        "rsa_e3_private_pem": weak.to_pkcs8_pem(LineEnding::LF).unwrap().to_string(),
+        "rsa_e3_jwk": rsa_jwk(&weak.to_public_key(), "rsa-e3"),
         "ec_p521_jwk": ec_jwk("ec-p521", "P-521", &p521_point.0, &p521_point.1),
         "ed25519_public_pem": ed_public.to_public_key_pem(LineEnding::LF).unwrap(),
         "ed25519_jwk": {

@@ -166,15 +166,14 @@ impl Events {
             .collect()
     }
 
-    /// Assert one crypto alarm for `op`, at error level.
-    pub(crate) fn assert_crypto_alarm(&self, op: &str) {
-        let alarms = self.matching("policy_crypto_failure");
-        assert!(
-            alarms
-                .iter()
-                .any(|alarm| alarm.contains(&format!("op={op}"))),
-            "expected a crypto alarm for {op}: {alarms:?}"
-        );
+    /// Assert `count` crypto alarms for `op`, at error level.
+    pub(crate) fn assert_crypto_alarms(&self, op: &str, count: usize) {
+        let alarms: Vec<_> = self
+            .matching("policy_crypto_failure")
+            .into_iter()
+            .filter(|alarm| alarm.contains(&format!("op={op} ")))
+            .collect();
+        assert_eq!(alarms.len(), count, "crypto alarms for {op}: {alarms:?}");
     }
 }
 

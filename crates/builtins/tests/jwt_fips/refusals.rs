@@ -26,7 +26,7 @@ fn a_missing_provider_fails_with_the_shared_backend_error() {
                 matches!(error, CryptoError::OpenSsl(_)),
                 "the shared SHA-256 check fails first: {error}"
             );
-            events.assert_crypto_alarm("jwt_provider");
+            events.assert_crypto_alarms("jwt_provider", 1);
             assert!(
                 matches!(
                     praxis_policy_core::crypto::random_bytes(&mut [0_u8; 32]),
@@ -50,7 +50,7 @@ fn a_non_fips_default_is_refused() {
                 matches!(error, CryptoError::NonFipsDefault),
                 "FIPS SHA-256 works, but signatures could use the default provider: {error}"
             );
-            events.assert_crypto_alarm("jwt_provider");
+            events.assert_crypto_alarms("jwt_provider", 1);
         },
     );
 }
@@ -80,7 +80,7 @@ fn a_conflicting_provider_is_refused() {
                     "Policy refuses rather than verify with another provider: {error}"
                 );
             }
-            events.assert_crypto_alarm("jwt_provider");
+            events.assert_crypto_alarms("jwt_provider", 2);
         },
     );
 }

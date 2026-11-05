@@ -130,7 +130,7 @@ pub use praxis_policy_core::validate_crypto_backend;
 /// };
 /// assert_eq!(reason, "invalid digest length");
 /// ```
-pub use praxis_policy_core::{CryptoBackend, CryptoError};
+pub use praxis_policy_core::{CRYPTO_FAILED_CODE, CryptoBackend, CryptoError};
 
 /// Crypto backends and builtin operations compiled into this Policy graph.
 ///

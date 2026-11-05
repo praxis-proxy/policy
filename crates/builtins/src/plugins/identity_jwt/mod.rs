@@ -35,6 +35,7 @@
 //! `HookHandler<IdentityHook>` instead. This module's API surface is the
 //! reference shape, and nothing prevents other resolvers coexisting with it.
 
+mod alarm;
 /// The OIDC-standard claim map.
 pub mod claim_map;
 /// Plugin configuration and its validation.

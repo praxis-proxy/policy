@@ -30,6 +30,8 @@ use openssl::sign::RsaPssSaltlen;
 use praxis_policy_core::CryptoError;
 use praxis_policy_core::error::PluginError;
 
+use crate::plugins::identity_jwt::alarm::{Op, crypto_failure};
+
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -130,8 +132,8 @@ pub(crate) fn check_algorithms(
 
 /// Refuse a key that FIPS verification would not accept.
 ///
-/// RSA moduli must be 2048 to 8192 bits and EC keys on P-256 or P-384. Ed and
-/// HMAC keys are refused.
+/// RSA moduli must be 2048 to 8192 bits with a FIPS 186-5 public exponent,
+/// and EC keys on P-256 or P-384. Ed and HMAC keys are refused.
 pub(crate) fn check_key(key: &DecodingKey) -> Result<(), String> {
     match key.family() {
         AlgorithmFamily::Rsa => rsa_public_key(key).map(drop).map_err(|e| e.to_string()),
@@ -161,10 +163,10 @@ fn startup_failure(op: &'static str, source: CryptoError) -> Box<PluginError> {
 fn probe(algorithm: Algorithm) -> Result<(), CryptoError> {
     let key = if let Some(curve) = curve_nid(algorithm) {
         let group = EcGroup::from_curve_name(curve)?;
-        let point = group
-            .generator_opt()
-            .ok_or(CryptoError::DigestLength)?
-            .to_owned(&group)?;
+        let one = BigNum::from_u32(1)?;
+        let mut ctx = BigNumContext::new()?;
+        let mut point = EcPoint::new(&group)?;
+        point.mul_generator2(&group, &one, &mut ctx)?;
         PKey::from_ec_key(EcKey::from_public_key(&group, &point)?)?
     } else {
         let n = BigNum::from_hex_str(PROBE_RSA_MODULUS_HEX)?;
@@ -205,9 +207,15 @@ impl Verifier<Vec<u8>> for OpenSslVerifier {
             },
             None => signature.as_slice(),
         };
+        // `jsonwebtoken` reports every error here as an invalid signature, so
+        // a backend failure raises its alarm before that, and still denies.
         match context.digest_verify(msg, signature) {
             Ok(true) => Ok(()),
-            _ => Err(jsonwebtoken::signature::Error::new()),
+            Ok(false) => Err(jsonwebtoken::signature::Error::new()),
+            Err(error) => {
+                crypto_failure(Op::JwtVerify, &error);
+                Err(jsonwebtoken::signature::Error::new())
+            },
         }
     }
 }
@@ -296,6 +304,14 @@ fn rsa_public_key(key: &DecodingKey) -> Result<PKey<Public>, Error> {
             "a {bits}-bit RSA key is outside the {MIN_RSA_BITS} to {MAX_RSA_BITS} bits \
              jwt-openssl-fips accepts"
         ))
+        .into());
+    }
+    // FIPS 186-5 section 5.4: odd, with 2^16 < e < 2^256.
+    let e = rsa.e();
+    if !e.is_odd() || !(17..=256).contains(&e.num_bits()) {
+        return Err(ErrorKind::InvalidRsaKey(
+            "the RSA public exponent must be odd and between 2^16 and 2^256".into(),
+        )
         .into());
     }
     PKey::from_rsa(rsa).map_err(|e| provider_error(e.into()))

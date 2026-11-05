@@ -24,8 +24,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   provider, while `jsonwebtoken` keeps parsing, JWKS selection and claim
   validation. It requires `fips` and cannot be combined with `jwt`, which
   keeps AWS-LC. RS256 to RS512, PS256 to PS512, ES256 and ES384 are
-  supported, with RSA keys of 2048 to 8192 bits and EC keys on P-256 or
-  P-384; other keys are refused at load and skipped on JWKS refresh. The
+  supported, with RSA keys of 2048 to 8192 bits and a FIPS 186-5 public
+  exponent, and EC keys on P-256 or P-384; other keys, including DPoP proof
+  keys, are refused at load and skipped on JWKS refresh. The
   DPoP `ath` hash and JWK thumbprint use the shared SHA-256 backend.
   `fips,jwt-openssl-fips` passes `fips_profile_is_safe()`, with or without
   `api-key`. Building a
@@ -34,9 +35,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Backend-selected randomness.** `praxis_policy_core::crypto::random_bytes`
   draws secret material from the OS under `crypto-rustcrypto` and from
   OpenSSL's private DRBG under `fips`, failing unless the FIPS provider is
-  the default. The OAuth cache-key secret uses it, so under `fips` an OAuth
-  delegator fails to build unless the FIPS provider is the default. OAuth
-  stays reported unsafe under FIPS because its cache key is still an HMAC.
+  the default. The OAuth cache-key secret uses it.
+- **Shared crypto failure code.** `CRYPTO_FAILED_CODE` (`policy.crypto_failed`)
+  is exported from core and the facade, for plugins that deny on a backend
+  failure.
 - **FIPS graph classification.** `make check-fips-graph` and
   `make check-crypto-consumer` fail on an unclassified crypto crate and print
   the accepted ones (`uuid`, `getrandom`, `signature`).
@@ -206,6 +208,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **OAuth needs the FIPS default under `fips`.** The OAuth cache-key secret
+  now comes from `random_bytes`, so with `fips` an OAuth delegator fails to
+  build unless the FIPS provider is the OpenSSL default. This affects
+  `fips,api-key,oauth` builds that use no JWT. OAuth stays reported unsafe
+  under FIPS because its cache key is still an HMAC.
 - **HMAC JWTs are refused under `jwt-openssl-fips`.** HS256, HS384, HS512 and
   `decoding_key: { kind: secret }` fail config load with that feature; the
   shared FIPS backend has no HMAC. Ordinary `jwt` keeps HMAC unchanged.

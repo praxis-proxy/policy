@@ -3,8 +3,13 @@
 
 //! Feature-selected cryptographic operations shared by Policy crates.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "fips")]
 use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// The violation code for a request denied because the crypto backend failed.
+pub const CRYPTO_FAILED_CODE: &str = "policy.crypto_failed";
 
 /// The backend used for Policy's always-enabled SHA-256 operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,6 +72,57 @@ pub enum CryptoError {
     #[cfg(feature = "crypto-rustcrypto")]
     #[error("the OS random number generator failed: {0}")]
     Random(#[source] getrandom::Error),
+}
+
+/// Admits one log line per interval and counts the ones it holds back, for
+/// alarms a request can repeat.
+#[derive(Debug)]
+pub struct IntervalLog {
+    interval_secs: u64,
+    next_at: AtomicU64,
+    suppressed: AtomicU64,
+}
+
+impl IntervalLog {
+    /// A log admitting at most one line per `interval_secs`.
+    #[must_use]
+    pub const fn new(interval_secs: u64) -> Self {
+        Self {
+            interval_secs,
+            next_at: AtomicU64::new(0),
+            suppressed: AtomicU64::new(0),
+        }
+    }
+
+    /// The count held back since the last admitted line, when a line is due.
+    pub fn admit(&self) -> Option<u64> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let next = self.next_at.load(Ordering::Relaxed);
+        let due = now >= next
+            && self
+                .next_at
+                .compare_exchange(
+                    next,
+                    now.saturating_add(self.interval_secs),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok();
+        if due {
+            Some(self.suppressed.swap(0, Ordering::Relaxed))
+        } else {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+
+    /// The interval between admitted lines, in seconds.
+    #[must_use]
+    pub const fn interval_secs(&self) -> u64 {
+        self.interval_secs
+    }
 }
 
 /// Incremental SHA-256 input builder used by CMF and runtime hashes.

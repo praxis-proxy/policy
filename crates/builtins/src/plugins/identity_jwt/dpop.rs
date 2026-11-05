@@ -33,12 +33,13 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use base64::Engine as _;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use praxis_policy_core::CryptoError;
 use praxis_policy_core::crypto::sha256;
 use praxis_policy_core::extensions::KeyBinding;
+use praxis_policy_core::{CRYPTO_FAILED_CODE, CryptoError};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::plugins::identity_jwt::alarm::{Op, crypto_failure};
 use crate::plugins::identity_jwt::config::DpopConfig;
 
 /// Stable denial codes for a failed proof of possession.
@@ -56,8 +57,6 @@ pub mod codes {
     pub const DPOP_REPLAY: &str = "auth.dpop_replay";
     /// The replay store could not answer, so the proof cannot be accepted.
     pub const DPOP_REPLAY_UNAVAILABLE: &str = "auth.dpop_replay_unavailable";
-    /// The crypto backend failed, so the proof cannot be checked.
-    pub const CRYPTO_FAILED: &str = "policy.crypto_failed";
 }
 
 /// The [`KeyBinding::method`] a verified `DPoP` proof records.
@@ -395,7 +394,7 @@ impl<'a> DpopVerifier<'a> {
     fn check(&self, request: &PopRequest<'_>) -> Result<(String, ProofClaims), PopDenial> {
         #[cfg(feature = "jwt-openssl-fips")]
         crate::plugins::identity_jwt::openssl_fips::provider_ready()
-            .map_err(|error| crypto_denial("dpop_provider", &error))?;
+            .map_err(|error| crypto_denial(Op::DpopProvider, &error))?;
         let invalid = |reason: String| PopDenial::new(codes::DPOP_INVALID, reason);
         let Some(proof) = request.proof else {
             return Err(PopDenial::new(
@@ -446,7 +445,7 @@ impl<'a> DpopVerifier<'a> {
             )));
         }
         let thumbprint = jwk_thumbprint(jwk).map_err(|error| match error {
-            ThumbprintError::Crypto(error) => crypto_denial("dpop_thumbprint", &error),
+            ThumbprintError::Crypto(error) => crypto_denial(Op::DpopThumbprint, &error),
             _ => invalid("the DPoP proof's jwk is not a supported public key".into()),
         })?;
         if thumbprint != request.bound_thumbprint {
@@ -479,12 +478,8 @@ impl<'a> DpopVerifier<'a> {
         let claims = decode::<ProofClaims>(proof, &key, &validation)
             .map_err(|e| match e.kind() {
                 jsonwebtoken::errors::ErrorKind::Provider(detail) => {
-                    tracing::error!(
-                        alarm = "policy_crypto_failure",
-                        op = "dpop_verify",
-                        error = %detail,
-                    );
-                    PopDenial::new(codes::CRYPTO_FAILED, CRYPTO_FAILED_REASON)
+                    crypto_failure(Op::DpopVerify, detail);
+                    PopDenial::new(CRYPTO_FAILED_CODE, CRYPTO_FAILED_REASON)
                 },
                 _ => invalid(format!("the DPoP proof did not verify: {e}")),
             })?
@@ -515,7 +510,7 @@ impl<'a> DpopVerifier<'a> {
             )));
         }
         let ath = access_token_hash(request.access_token)
-            .map_err(|error| crypto_denial("dpop_ath", &error))?;
+            .map_err(|error| crypto_denial(Op::DpopAth, &error))?;
         if claims.ath.as_deref() != Some(ath.as_str()) {
             return Err(invalid(
                 "the DPoP proof's ath does not match the access token presented with it".into(),
@@ -569,9 +564,9 @@ impl ProofOfPossession for DpopVerifier<'_> {
 const CRYPTO_FAILED_REASON: &str = "the DPoP proof could not be checked";
 
 /// Log a backend failure and deny without repeating its detail.
-fn crypto_denial(op: &'static str, error: &CryptoError) -> PopDenial {
-    tracing::error!(alarm = "policy_crypto_failure", op, %error);
-    PopDenial::new(codes::CRYPTO_FAILED, CRYPTO_FAILED_REASON)
+fn crypto_denial(op: Op, error: &CryptoError) -> PopDenial {
+    crypto_failure(op, error);
+    PopDenial::new(CRYPTO_FAILED_CODE, CRYPTO_FAILED_REASON)
 }
 
 /// Whether `alg` is one a `DPoP` proof may use: asymmetric only.

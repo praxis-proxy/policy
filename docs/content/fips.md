@@ -92,7 +92,9 @@ thumbprint use Policy's shared SHA-256 backend.
   and the `secret` key kind fail config load with an error naming
   `jwt-openssl-fips`. DPoP algorithms are checked even while `dpop.mode` is
   `off`.
-- **Keys:** RSA moduli of 2048 to 8192 bits, and EC keys on P-256 or P-384.
+- **Keys:** RSA moduli of 2048 to 8192 bits with an odd public exponent
+  between 2^16 and 2^256 (FIPS 186-5), and EC keys on P-256 or P-384. This
+  covers DPoP proof keys, which the client chooses.
   Inline and file keys outside these are refused at load; a JWKS entry
   outside them is skipped on every fetch, including refreshes.
 - **Provider:** JWT configuration loading validates shared SHA-256, OpenSSL's
@@ -105,10 +107,14 @@ thumbprint use Policy's shared SHA-256 backend.
   process. A host that installs its own, or calls `jsonwebtoken` before
   Policy builds a resolver, makes JWT resolvers refuse to build rather than
   verify with that provider.
-- **Request path:** a backend failure while verifying denies with
-  `policy.crypto_failed` and logs the alarm with `op = "jwt_verify"`,
-  `"dpop_verify"`, `"dpop_thumbprint"` or `"dpop_ath"`. The denial reason
-  carries no backend detail.
+- **Request path:** a backend failure denies and logs `policy_crypto_failure`
+  with `op = "jwt_verify"`, `"dpop_verify"`, `"dpop_provider"`,
+  `"dpop_thumbprint"` or `"dpop_ath"`, at most once a minute per operation
+  with a `suppressed` count. A failure while setting up verification, or in
+  DPoP hashing, denies with `policy.crypto_failed`. A failure inside the
+  signature check itself denies as `auth.signature_invalid` or
+  `auth.dpop_invalid`, because `jsonwebtoken` reports every verifier error
+  as an invalid signature. The denial reason carries no backend detail.
 
 ## Accepted crates in the graph
 
