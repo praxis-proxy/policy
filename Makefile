@@ -15,7 +15,7 @@ CARGO ?= cargo
 # and select both mutually exclusive backends. FIPS has its own targets.
 WORKSPACE_TEST_FEATURES := \
 	praxis-policy-core/crypto-rustcrypto,praxis-policy-apl-cmf/crypto-rustcrypto,praxis-policy-apl-runtime/crypto-rustcrypto \
-	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/oauth,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
+	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/oauth,praxis-policy-builtins/basic,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
 	praxis-policy/builtins,praxis-policy/http-hyper,praxis-policy/experimental-quota,praxis-policy/experimental-ratelimit \
 	ppe-benches/dhat-heap \
 	praxis-policy-test-utils/experimental-ratelimit \
@@ -541,7 +541,7 @@ docs-lint:
 # only per-package checks catch a feature body that omits its own `dep:` edge,
 # module-group marker or crypto backend. This is the only gate that builds a
 # partial feature set.
-BUILTIN_FEATURES := jwt api-key oauth delegator-vault elicitation-ciba \
+BUILTIN_FEATURES := jwt api-key basic oauth delegator-vault elicitation-ciba \
 	experimental-quota experimental-ratelimit cedar cel opa valkey secrets-vault
 REFERENCE_PLUGINS := praxis-policy-plugin-audit-logger praxis-policy-plugin-ocsf-audit \
 	praxis-policy-plugin-pii-scanner praxis-policy-plugin-transcript-scanner

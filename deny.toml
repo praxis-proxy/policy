@@ -36,6 +36,19 @@ ignore = [
     # `heapless-cas`, which pulls it in; on targets with native atomics it
     # re-exports `core` atomics, and Limitador gives no way to turn it off.
     "RUSTSEC-2023-0089",
+    # --- Dev-only: Valkey session-store container harness ---
+    # `astral-tokio-tar` is unmaintained: Astral ended maintenance on
+    # 2026-11-03 and deprecated every version, so there is no upgrade to take.
+    # It reaches us only through `testcontainers`, a dev-dependency of
+    # `praxis-policy-builtins` that spins the `valkey/valkey` container for the
+    # `#[ignore]`d session-store tests. `cargo tree --edges normal -i
+    # astral-tokio-tar` is empty: it is absent from the shipped graph and never
+    # reaches consumers. The crate is used to build the tar stream sent to the
+    # local Docker socket, not to unpack untrusted archives. `testcontainers`
+    # 0.28 still depends on it, and `testcontainers-modules` 0.15 (latest)
+    # pins `testcontainers` 0.27, so neither upgrade clears this. Drop this
+    # entry once testcontainers-rs #1006 lands and ships.
+    "RUSTSEC-2026-0440",
 ]
 
 [licenses]
