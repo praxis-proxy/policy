@@ -398,7 +398,7 @@ struct Checked {
 
 /// A proof this request already accepted, kept in the context table's
 /// `global_state` so a later resolution in the same request can reuse it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProofRecord {
     issuer: String,
@@ -428,11 +428,27 @@ impl ProofRecord {
     /// Whether `stored` records this same proof, request and guard, and the
     /// guard still remembers it at `now`.
     fn reusable(&self, stored: &Self, now: i64) -> bool {
-        now < stored.expires_at
-            && Self {
-                expires_at: self.expires_at,
-                ..stored.clone()
-            } == *self
+        let Self {
+            ath,
+            binding,
+            expires_at,
+            htm,
+            htu,
+            issuer,
+            jti,
+            replay_guard,
+            thumbprint,
+        } = stored;
+
+        now < *expires_at
+            && *ath == self.ath
+            && *binding == self.binding
+            && *htm == self.htm
+            && *htu == self.htu
+            && *issuer == self.issuer
+            && *jti == self.jti
+            && *replay_guard == self.replay_guard
+            && *thumbprint == self.thumbprint
     }
 }
 
