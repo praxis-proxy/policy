@@ -93,6 +93,66 @@ readme = "README.md"
 
 [workspace.dependencies]
 base64 = "0.23.1"
+# NFC normalisation of a Basic user-id before it is used as an index key, so
+# one name in two encodings cannot split into two directory entries (or slip
+# past a duplicate check). The Unicode-maintained reference implementation and
+# the crate the `unicode-*` family is built around; it is already in the
+# lockfile as a transitive of the Cedar stack, but a transitive is not a
+# declared edge, so a `--features basic` build would not resolve it.
+# Deliberately not `icu`/`icu_normalizer`: a full ICU data pipeline for one
+# normalisation form is a new dependency tree for no additional capability.
+unicode-normalization = "0.1.26"
+# bcrypt and argon2 verification for the Basic identity directory. Verify only:
+# PPE checks a stored hash, it never mints one.
+#
+# Both are RustCrypto-adjacent and share this tree's existing `digest`,
+# `getrandom`, `base64ct`, `subtle` and `zeroize`, so between them they add
+# `blowfish`, `cipher`, `blake2`, `phc` and `password-hash` and nothing with a
+# C toolchain step. Deliberately not `rust-crypt`/`pwhash`: those cover the
+# legacy DES and MD5-crypt family this plugin refuses at load anyway, and
+# carry no advisory policy worth inheriting on a runtime path.
+#
+# `bcrypt` is the one crate here that verifies the `$2a$`/`$2b$`/`$2y$` variants
+# `.htpasswd` actually contains. It exposes no public hash *parser* -- its
+# `split_hash` is private and `HashParts` cannot be built from a string -- so
+# the cost ceiling is enforced by reading bcrypt's fixed-width cost field
+# directly in `verifier.rs`. Its `non_truncating_verify` is likewise unusable
+# here: it errors on hashes it did not mint itself, so it rejects every file
+# Apache wrote.
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
+# `zeroize` is in bcrypt's default set, so disabling defaults silently drops
+# it: `_hash` copies the plaintext into a `[u8; 72]` stack buffer and only
+# wipes it under that feature. Our `Zeroizing` password cannot reach that
+# copy, which would otherwise outlive the verify on the blocking thread's
+# stack.
+bcrypt = { version = "0.19.3", default-features = false, features = ["std", "zeroize"] }
+# sha256crypt (`$5$`) and sha512crypt (`$6$`) verification, for deployments
+# restricted to a SHA-2 underlying hash. Same RustCrypto family as the two
+# above and built on this tree's existing `sha2`, so it adds `mcf` and nothing
+# with a C toolchain step.
+#
+# FIPS 180-4 specifies the SHA-2 functions themselves; it does not approve the
+# SHA-crypt password scheme built on them, so these are described by their
+# underlying primitive and not as approved schemes. They are the only
+# `.htpasswd` schemes built on SHA-2 that the tools operators have actually
+# write: `htpasswd` has no flag for them, but `mkpasswd -m sha512crypt` and
+# glibc `crypt(3)` do, and a shadow file copied into place carries them
+# already. PBKDF2 is the other SHA-2-based option and was rejected: its PHC
+# spelling (`$pbkdf2-sha256$`) is a Passlib convention no `.htpasswd` tool
+# emits, so it would be an encoding this backend accepts and no operator can
+# produce.
+#
+# Verified through `ShaCrypt`'s `PasswordVerifier`, which reads the algorithm
+# from the record rather than from the configured hasher and compares with
+# `ct_eq`. Its `Params` keeps `rounds` private with no accessor, so the
+# ceiling is enforced by reading the `rounds=` field out of the encoding in
+# `verifier.rs` -- the same shape as bcrypt's fixed-width cost field above,
+# and for the same reason.
+sha-crypt = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
+# Constant-time primitives for the verdict comparison. Already in the tree via
+# all three hashing crates; named here because this plugin depends on it
+# directly.
+subtle = "2.6.1"
 jsonwebtoken = "11.1.0"
 # rsa 0.9 uses rand_core 0.6, which rand 0.8 implements.
 rand = "0.8.8"
@@ -144,7 +204,17 @@ regex = "1"
 # (audit provenance, session ids, a PKCE verifier, the system prompt digest), and `hmac` 0.13 pairs
 # with the `digest` 0.11 that this major brings. Splitting the requirement
 # would put two `sha2` and two `digest` in the build.
-sha2 = "0.11"
+#
+# `zeroize` is on because `sha-crypt` above feeds the password into these
+# hashers rather than into its own buffers, and does no wiping of its own:
+# every `$5$`/`$6$` verify pushes the plaintext through `Sha256`/`Sha512`
+# block buffers thousands of times. Without the feature, `BlockBuffer`'s
+# `Drop` is a no-op and those copies outlive the verify on the blocking
+# thread's stack, where `verifier.rs`'s `Zeroizing` password cannot reach
+# them. The feature forwards to `digest/zeroize` and `block-buffer/zeroize`,
+# which is what makes the wipe happen. Same reasoning as bcrypt's `zeroize`
+# feature.
+sha2 = { version = "0.11.1", features = ["zeroize"] }
 openssl = "0.10.82"
 # Keyed digests: audit content provenance and the OAuth cache key. Moves with
 # `sha2` above, since both have to agree on `digest`.

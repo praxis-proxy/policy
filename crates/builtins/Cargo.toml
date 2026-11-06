@@ -56,6 +56,21 @@ fips = [
 # table nobody maintains.
 jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64", "dep:sha2"]
 api-key = ["_engine-core", "_plugins"]
+# RFC 7617 Basic authentication. `base64` decodes the credential and
+# `unicode-normalization` NFC-folds the user-id before it is used as an index
+# key; both must be named here, since `base64` is optional and reached only
+# through other features' edges, and `unicode-normalization` is otherwise just
+# a transitive of the Cedar stack.
+basic = [
+  "_engine-core",
+  "_plugins",
+  "dep:base64",
+  "dep:unicode-normalization",
+  "dep:argon2",
+  "dep:bcrypt",
+  "dep:sha-crypt",
+  "dep:subtle",
+]
 oauth = [
   "_engine-core",
   "_plugins",
@@ -160,13 +175,38 @@ limitador-cel = { workspace = true, optional = true }
 # runtime tree at the cost of a C/cmake build step.
 jsonwebtoken = { workspace = true, optional = true, features = ["aws_lc_rs"] }
 
-# --- jwt, oauth, elicitation-ciba -------------------------------------------
+# --- jwt, basic, oauth, elicitation-ciba -------------------------------------
 
-# `base64` for the peek-at-iss helper in the JWT resolver, the read-only `act`
-# claim interop check in the OAuth delegator, and the approver-claim decode in
-# CIBA. None of the three verifies a signature with it. jsonwebtoken 11 still
+# `base64` for the peek-at-iss helper in the JWT resolver, the RFC 7617
+# credential decode in the Basic resolver, the read-only `act` claim interop
+# check in the OAuth delegator, and the approver-claim decode in CIBA. None of
+# the four verifies a signature with it. jsonwebtoken 11 still
 # pulls 0.22, so both versions sit in the tree until it catches up.
 base64 = { workspace = true, optional = true }
+
+# --- basic -------------------------------------------------------------------
+
+# NFC normalisation for the Basic user-id. See the workspace manifest for why
+# this is a declared edge rather than a transitive, and why not ICU.
+unicode-normalization = { workspace = true, optional = true }
+
+# Password-hash verification for the Basic directory. Verify only: this plugin
+# checks a stored hash and never mints one, so the minting halves of both APIs
+# are unused outside tests.
+#
+# Three crates rather than one because `.htpasswd` in the wild is bcrypt, the
+# modern alternative is argon2, and a deployment restricted to SHA-2 needs
+# sha256crypt or sha512crypt; no single crate reads all three well. None
+# exposes a public hash *parser*, so the cost ceiling in R23 is enforced by
+# reading bcrypt's fixed-width cost field, argon2's PHC params, and
+# sha-crypt's `rounds=` field directly.
+argon2 = { workspace = true, optional = true }
+bcrypt = { workspace = true, optional = true }
+sha-crypt = { workspace = true, optional = true }
+
+# Constant-time equality for the verdict, so a verify result cannot be probed
+# by timing. Already in the tree through all three hashing crates.
+subtle = { workspace = true, optional = true }
 
 # --- api-key, oauth, valkey --------------------------------------------------
 
@@ -384,6 +424,11 @@ required-features = ["jwt"]
 name = "api_key"
 path = "tests/api_key/main.rs"
 required-features = ["api-key"]
+
+[[test]]
+name = "identity_basic"
+path = "tests/identity_basic/main.rs"
+required-features = ["basic"]
 
 [[test]]
 name = "oauth"
