@@ -15,10 +15,10 @@ for Policy's SHA-256 operations. Identity builtins are optional.
 
 ```toml
 # engine only
-praxis-policy = { version = "0.5", default-features = false, features = ["fips"] }
+praxis-policy = { version = "0.6.0", default-features = false, features = ["fips"] }
 
 # JWT and DPoP
-praxis-policy = { version = "0.5", default-features = false, features = [
+praxis-policy = { version = "0.6.0", default-features = false, features = [
   "fips", "jwt-openssl-fips",
 ] }
 ```

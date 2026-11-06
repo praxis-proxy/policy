@@ -78,7 +78,7 @@
 //! same process.
 //!
 //! ```toml
-//! praxis-policy = { version = "0.5", default-features = false, features = [
+//! praxis-policy = { version = "0.6.0", default-features = false, features = [
 //!   "fips", "jwt-openssl-fips",
 //! ] }
 //! ```

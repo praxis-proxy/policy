@@ -17,6 +17,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
 ### Added
 
 - **JWT and DPoP under FIPS.** The `jwt-openssl-fips` feature verifies
@@ -43,6 +45,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **FIPS graph classification.** `make check-fips-graph` and
   `make check-crypto-consumer` fail on an unclassified crypto crate and print
   the accepted ones (`uuid`, `getrandom`, `signature`).
+- **Raw HTTP query strings reach policy.** Hosts populate `HttpExtension.query`
+  separately from the path, and APL, CEL and OPA read it as `http.query`;
+  Cedar templates can project it into context. Plugin views require
+  `read_query`. Debug output, HTTP serialization and built-in PDP diagnostics
+  redact it because a query can carry credentials.
+  ([#222](https://github.com/praxis-proxy/policy/issues/222))
+- **Audit record exporters.** `praxis_policy_core::audit::export` provides
+  `AuditExporter` and stderr, stdout and append-only file exporters. The
+  reference `audit/ocsf` sink accepts an `exporters:` list, including a tracing
+  exporter, and sends the same serialized record to each destination.
+  ([#226](https://github.com/praxis-proxy/policy/pull/226))
 
 - **Selectable crypto backend.** Policy's SHA-256 operations (content
   digests, decision-cache keys, session ids, instruction digests and API-key
@@ -52,7 +65,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   builtins, and an engine-only `fips` build is supported. Exactly one backend
   must be selected; none or both is a build error.
 - **FIPS startup checks.** `crypto_capability_report()` describes the compiled
-  backend and the builtins that do their own `RustCrypto` crypto (JWT, OAuth,
+  backend and the builtins that use other crypto (ordinary JWT, OAuth,
   Vault delegation, Valkey); `fips_profile_is_safe()` is false while any of
   them is enabled, and does not require an API-key builtin.
   `validate_crypto_backend()`, exported from core and the facade without
@@ -209,14 +222,20 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking Rust API: HTTP query support.** `HttpExtension` adds `query`;
+  exhaustive struct literals must initialize it or use `..Default::default()`.
+  `Capability` adds `ReadQuery`, requiring a new arm in exhaustive matches.
+  `read_headers` does not grant access to the raw query; plugins need
+  `read_query`. Serialized HTTP state contains a redacted query placeholder,
+  so hosts must carry the live query between hooks without a JSON round trip.
 - **OAuth needs the FIPS default under `fips`.** The OAuth cache-key secret
   now comes from `random_bytes`, so with `fips` an OAuth delegator fails to
   build unless the FIPS provider is the OpenSSL default. This affects
   `fips,api-key,oauth` builds that use no JWT. OAuth stays reported unsafe
   under FIPS because its cache key is still an HMAC.
-- **HMAC JWTs are refused under `jwt-openssl-fips`.** HS256, HS384, HS512 and
-  `decoding_key: { kind: secret }` fail config load with that feature; the
-  shared FIPS backend has no HMAC. Ordinary `jwt` keeps HMAC unchanged.
+- **HMAC and EdDSA JWTs are refused under `jwt-openssl-fips`.** HS256, HS384,
+  HS512, EdDSA and `decoding_key: { kind: secret }` fail config load with that
+  feature. Ordinary `jwt` keeps these algorithms unchanged.
 - **Breaking Rust API: DPoP hashing is fallible.** `jwk_thumbprint` returns
   `Result<String, ThumbprintError>`, separating an unsupported key
   (`Unsupported`) from a backend failure (`Crypto`); `access_token_hash`
@@ -342,6 +361,23 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `Capability` adds `ReadMetadata` and `SlotName` adds `Metadata`, so
   exhaustive matches need a new arm. `Extensions.metadata` is never
   serialized. The new metadata enums are `#[non_exhaustive]`.
+
+### Fixed
+
+- `&` and `|` no longer abort when one operand cannot be ordered and
+  another already settles the expression. A true `|` operand or a false `&`
+  operand decides the same way in either order, so some phases that denied
+  on an unparseable value now evaluate normally. An unorderable result is
+  still fail-closed when no operand settles.
+  ([#69](https://github.com/praxis-proxy/policy/issues/69))
+- Enabled audit sinks without policy hooks load under `dispatch: policy`;
+  they receive verdicts without a `run(name)` step and are exempt from the
+  plugin reachability error. Disabled sinks remain subject to that check.
+  ([#210](https://github.com/praxis-proxy/policy/pull/210))
+- Crypto and rate-limit alarm throttling uses a monotonic clock, so a backward
+  wall-clock adjustment cannot silence failure logs. Forged JWT and DPoP
+  signatures deny without raising a crypto-backend alarm; verification setup
+  and hashing failures still raise the throttled alarm.
 
 ## [0.5.0] - 2026-10-13
 
@@ -510,12 +546,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- `&` and `|` no longer abort when one operand cannot be ordered and
-  another already settles the expression. A true `|` operand or a false `&`
-  operand decides the same way in either order, so some phases that denied
-  on an unparseable value now evaluate normally. An unorderable result is
-  still fail-closed when no operand settles.
-  ([#69](https://github.com/praxis-proxy/policy/issues/69))
 - Rejected JWTs with unsupported critical headers. OAuth token exchange now
   validates the issued token type, granted scopes, and JWT audience and subject
   by default. Empty scope requests accept IdP defaults, and
@@ -1097,7 +1127,8 @@ First release. The engine was extracted from another project rather than written
 
 - **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/praxis-proxy/policy/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/praxis-proxy/policy/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/praxis-proxy/policy/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/praxis-proxy/policy/compare/v0.3.1...v0.4.0

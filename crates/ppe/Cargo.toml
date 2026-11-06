@@ -8,8 +8,8 @@
 # bundled plugins, PDPs and session stores. Each is behind a feature, so the bare
 # dependency is the engine alone, no plugins compiled.
 #
-#   praxis-policy = { version = "0.4", features = ["builtins"] }      # stable builtins
-#   praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }  # a subset
+#   praxis-policy = { version = "0.6.0", features = ["builtins"] }      # stable builtins
+#   praxis-policy = { version = "0.6.0", features = ["jwt", "cedar"] }  # a subset
 #
 # then `praxis_policy::install_builtins(&mgr)` registers every enabled factory and
 # installs the APL config visitor in one call.

@@ -51,13 +51,13 @@ stderr. Register them the way you would any host plugin.
 
 ```toml
 # engine only, the default
-praxis-policy = "0.4"
+praxis-policy = "0.6.0"
 
 # every bundled extension
-praxis-policy = { version = "0.4", features = ["builtins"] }
+praxis-policy = { version = "0.6.0", features = ["builtins"] }
 
 # a granular subset
-praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
+praxis-policy = { version = "0.6.0", features = ["jwt", "cedar"] }
 ```
 
 | Feature | Pulls in |

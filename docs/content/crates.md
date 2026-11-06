@@ -114,7 +114,7 @@ crypto-rustcrypto = ["praxis-policy-core/crypto-rustcrypto"]
 fips = ["praxis-policy-core/fips"]
 
 [dependencies]
-praxis-policy-core = { version = "0.5", default-features = false }
+praxis-policy-core = { version = "0.6.0", default-features = false }
 ```
 
 A FIPS host disables the plugin's defaults and enables `fips` once at the
