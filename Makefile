@@ -182,7 +182,7 @@ FIPS_LIBS := -p praxis-policy-core -p praxis-policy-apl-cmf -p praxis-policy-apl
 FIPS_API_KEY_TEST := fips::fips_api_key_allow_and_deny_follow_provider_availability
 FIPS_RATELIMIT_TEST := a_crypto_failure_denies_and_logs_once_per_interval
 FIPS_API_KEY := fips,api-key
-FIPS_UNSAFE_BUILTINS := oauth,delegator-vault,valkey
+FIPS_UNSAFE_BUILTINS := basic,oauth,delegator-vault,valkey
 
 # Cargo succeeds when filters stop matching. Require a nonempty selection and
 # optionally its expected count so a renamed test cannot disappear from a group.

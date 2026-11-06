@@ -64,6 +64,19 @@ pub mod session;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BundledCryptoCapability {
+    /// Basic `.htpasswd` password verification.
+    ///
+    /// The `basic` feature bundles argon2, bcrypt and sha-crypt, so all three
+    /// are present whichever one a directory holds. Of the three, only
+    /// sha-crypt (`$5$` / `$6$`) iterates a hash function FIPS 180-4
+    /// specifies; that approves the function and not the password scheme
+    /// built on it, and the implementation here is `RustCrypto`'s rather than
+    /// a validated provider's.
+    ///
+    /// Which scheme a directory uses is settled when its file is read, after
+    /// this report is computable, so an operator who has chosen sha-crypt
+    /// confirms it from the directory's own configuration rather than here.
+    BasicPasswordHashing,
     /// JWT signature verification and `DPoP` token hashing.
     Jwt,
     /// OAuth delegation cache-key HMAC.
@@ -78,6 +91,8 @@ pub enum BundledCryptoCapability {
 #[must_use]
 pub fn bundled_crypto_capabilities() -> Vec<BundledCryptoCapability> {
     vec![
+        #[cfg(feature = "basic")]
+        BundledCryptoCapability::BasicPasswordHashing,
         #[cfg(feature = "jwt")]
         BundledCryptoCapability::Jwt,
         #[cfg(feature = "oauth")]

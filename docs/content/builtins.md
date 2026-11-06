@@ -62,9 +62,10 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
+| `builtins` | all eleven below: `jwt`, `api-key`, `basic`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
 | `jwt` | `identity/jwt` |
 | `api-key` | `identity/api-key` |
+| `basic` | `identity/basic`, and the argon2, bcrypt and sha-crypt verifiers it carries |
 | `fips` | OpenSSL FIPS SHA-256 for API-key and always-enabled Policy hashing. Keyed content provenance is rejected because it requires HMAC. Select with `default-features = false`; other crypto-using builtins are reported and make the API-key profile unsafe. |
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
@@ -106,13 +107,25 @@ tracing::info!(crypto = ?report, "Policy crypto providers are ready");
 ```
 
 The capability report reflects the unified builtin features, including direct
-dependency feature unification. It lists JWT,
+dependency feature unification. It lists Basic password hashing, JWT,
 OAuth, Vault delegation, and Valkey when enabled because those builtins retain
 RustCrypto operations. Engine initialization verifies OpenSSL can
 perform FIPS SHA-256 for every user of Policy's shared backend. Plugins
 with independent crypto need their own checks; HMAC remains unavailable
 under FIPS. `validate_crypto_backend()` remains available for an earlier
 preflight check. The host must verify its final image and runtime separately.
+
+`basic` is reported whichever hash scheme the directory holds, so
+`fips_profile_is_safe()` is false on a build that enables it. A FIPS operator
+who needs Basic should hash the file with sha256crypt (`$5$`) or sha512crypt
+(`$6$`), which iterate the hash functions FIPS 180-4 specifies, where bcrypt
+(Blowfish) and argon2 (BLAKE2b) build on other primitives. That covers the
+underlying primitive only: FIPS 180-4 approves those functions and not the
+SHA-crypt password scheme built on them, and the implementation is
+RustCrypto's rather than a validated provider's. The profile flag asserts the
+supported API-key-only FIPS slice, not a judgement on a scheme, so a build
+carrying Basic needs the plugin-level check above and its own assessment of
+what the deployment requires.
 
 Every crate in the graph must leave the backend choice to the host.
 `default-features = false` at the top cannot remove `crypto-rustcrypto`

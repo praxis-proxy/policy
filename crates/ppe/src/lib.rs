@@ -448,6 +448,26 @@ mod crypto_capability_tests {
         assert!(!report.fips_profile_is_safe());
     }
 
+    #[cfg(feature = "basic")]
+    #[test]
+    fn basic_reports_its_bundled_password_hashing() {
+        let report = crypto_capability_report();
+
+        assert!(
+            report
+                .default_builtin_crypto
+                .contains(&BundledCryptoCapability::BasicPasswordHashing),
+            "the `basic` feature compiles in argon2, bcrypt and sha-crypt, so a report that \
+             omitted it would let a host preflight a graph carrying three unvalidated \
+             password-hashing crates"
+        );
+        assert!(
+            !report.fips_profile_is_safe(),
+            "the profile flag asserts the supported API-key-only FIPS slice, which a build \
+             carrying Basic is not, whichever hash scheme its directory holds"
+        );
+    }
+
     #[test]
     fn report_matches_the_expected_builtins() {
         let report = crypto_capability_report();
@@ -478,6 +498,7 @@ mod crypto_capability_tests {
             .split(',')
             .filter(|name| !name.is_empty())
             .map(|name| match name {
+                "basic" => BundledCryptoCapability::BasicPasswordHashing,
                 "jwt" => BundledCryptoCapability::Jwt,
                 "oauth" => BundledCryptoCapability::OAuth,
                 "delegator-vault" => BundledCryptoCapability::VaultDelegation,
