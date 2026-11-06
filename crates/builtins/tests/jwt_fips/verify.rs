@@ -377,10 +377,16 @@ async fn dpop_binding_and_replay() {
     };
 
     let first = proof(&agent, "jti-1");
+    let mut request = PluginContext::new();
     assert_eq!(
-        dpop(&resolver, &access, &first).await,
+        dpop_in(&resolver, &access, &first, &mut request).await,
         None,
         "a bound proof verifies"
+    );
+    assert_eq!(
+        dpop_in(&resolver, &access, &first, &mut request).await,
+        None,
+        "the same request may resolve the proof again"
     );
     assert_eq!(
         dpop(&resolver, &access, &first).await.as_deref(),
@@ -476,6 +482,16 @@ async fn dpop_with_a_weak_rsa_key(issuer_key: &P256) {
 }
 
 async fn dpop(resolver: &JwtIdentityResolver, access: &str, proof: &str) -> Option<String> {
+    dpop_in(resolver, access, proof, &mut PluginContext::new()).await
+}
+
+/// [`dpop`] with the context an earlier resolution of the same request left.
+async fn dpop_in(
+    resolver: &JwtIdentityResolver,
+    access: &str,
+    proof: &str,
+    ctx: &mut PluginContext,
+) -> Option<String> {
     let headers = HashMap::from([
         ("authorization".to_owned(), format!("DPoP {access}")),
         ("dpop".to_owned(), proof.to_owned()),
@@ -491,9 +507,7 @@ async fn dpop(resolver: &JwtIdentityResolver, access: &str, proof: &str) -> Opti
         })),
         ..Default::default()
     };
-    let result = resolver
-        .handle(&payload, &ext, &mut PluginContext::new())
-        .await;
+    let result = resolver.handle(&payload, &ext, ctx).await;
     denial_code(&result)
 }
 

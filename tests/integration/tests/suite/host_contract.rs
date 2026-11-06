@@ -1053,6 +1053,77 @@ async fn leak_checks_include_tokens_minted_before_a_denial() {
     assert_recorded_token(&mut out, minted, "access_token");
 }
 
+/// The agent's token bound to the foreign key, which signs its RS256 proofs.
+const DPOP_CONFIG: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: jwt-client
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [perform_http, read_headers]
+    config:
+      role: client
+      credential:
+        kind: header
+        name: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.test/realms/policy-demo"
+          audiences: ["praxis-gateway"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://idp.test/realms/policy-demo/protocol/openid-connect/certs"
+          dpop:
+            mode: required
+            algorithms: ["RS256"]
+            external_base_url: "https://gateway.test"
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-client
+"#;
+
+/// The host resolves identity at the HTTP gate and again at the tool with one
+/// context table, so one proof serves both; a second request cannot reuse it.
+#[tokio::test]
+async fn a_dpop_bound_call_resolves_at_the_gate_and_the_tool_with_one_proof() {
+    use praxis_policy_builtins::plugins::identity_jwt::dpop::{access_token_hash, jwk_thumbprint};
+
+    let host = RefHost::builder()
+        .start(DPOP_CONFIG)
+        .await
+        .expect("DPoP fixture");
+    let key = idp::foreign_jwk("agent-key");
+    let mut claims = Persona::HrCopilot.claims();
+    claims["cnf"] = json!({ "jkt": jwk_thumbprint(&key).expect("thumbprint") });
+    let token = idp::sign(&claims);
+    let proof = idp::forge(
+        &json!({ "typ": "dpop+jwt", "alg": "RS256", "jwk": key }),
+        &json!({
+            "htm": "POST",
+            "htu": "https://gateway.test/mcp",
+            "iat": claims["iat"],
+            "jti": "host-dpop-1",
+            "ath": access_token_hash(&token).expect("ath"),
+        }),
+        idp::Signer::Foreign,
+    );
+    let call = Call::anonymous("delete_records")
+        .header("authorization", &format!("DPoP {token}"))
+        .header("dpop", &proof);
+
+    let out = host.call(call.clone()).await;
+    assert!(
+        out.allowed(),
+        "the tool resolution reuses the gate's proof: {:?}",
+        out.violation
+    );
+    let replay = host.call(call).await;
+    assert_eq!(replay.denied_at, Some(Stage::Identity));
+    assert_eq!(replay.violation_code(), Some("auth.dpop_replay"));
+}
+
 const HS256_SECRET: &str = "test-secret-at-least-32-bytes-long!!";
 
 const COOKIE_CONFIG: &str = r#"

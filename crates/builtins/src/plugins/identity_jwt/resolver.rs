@@ -69,7 +69,7 @@ use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::credential::{CredentialLocation, ExtractionError};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
-use praxis_policy_core::plugin::{Plugin, PluginConfig};
+use praxis_policy_core::plugin::{Plugin, PluginConfig, PluginMode};
 
 use crate::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE;
 use crate::plugins::identity_jwt::config::DpopMode;
@@ -77,8 +77,7 @@ use crate::plugins::identity_jwt::config::{
     JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError, TrustedIssuerConfig,
 };
 use crate::plugins::identity_jwt::dpop::{
-    DpopVerifier, InMemoryReplayGuard, PopDenial, PopRequest, ProofOfPossession as _, ReplayGuard,
-    codes as dpop_codes,
+    DpopVerifier, InMemoryReplayGuard, PopDenial, PopRequest, ReplayGuard, codes as dpop_codes,
 };
 use crate::plugins::identity_jwt::presets;
 use crate::plugins::identity_jwt::{KIND, alarm};
@@ -265,6 +264,30 @@ impl JwtIdentityResolver {
                      the request's method and URL; grant the plugin the `read_headers` \
                      capability",
                     cfg.name, issuer.issuer
+                ),
+            }));
+        }
+
+        // A verified proof is recorded in the request's context table so a
+        // second resolution does not consume it again. Only the serial modes
+        // commit context back to the table; in any other mode the record is
+        // lost and the next resolution of the same request is denied as a
+        // replay.
+        if let Some(issuer) = typed
+            .trusted_issuers
+            .iter()
+            .find(|i| i.dpop.mode != DpopMode::Off)
+            && !matches!(
+                cfg.mode,
+                PluginMode::Sequential | PluginMode::Transform | PluginMode::Disabled
+            )
+        {
+            return Err(Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' ({KIND}): trusted_issuer '{}' turns on dpop, which needs \
+                     mode sequential or transform to keep a verified proof for the rest of \
+                     the request; mode {} does not",
+                    cfg.name, issuer.issuer, cfg.mode
                 ),
             }));
         }
@@ -876,7 +899,7 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
         &self,
         payload: &IdentityPayload,
         ext: &Extensions,
-        _ctx: &mut PluginContext,
+        ctx: &mut PluginContext,
     ) -> PluginResult<IdentityPayload> {
         let (scheme, raw_token) = match self.extract_token(payload, ext) {
             Ok(t) => t,
@@ -1029,10 +1052,14 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
         // 3. Proof of possession, for an issuer that binds tokens to keys.
         //    After validation, so a forged token never reaches the replay
         //    store, and before mapping, so a failed proof leaves no identity.
-        let key_binding = match self
-            .check_key_binding(issuer, scheme, &raw_token, &token_data.claims, payload, ext)
-            .await
-        {
+        let presented = Presented {
+            scheme,
+            token: &raw_token,
+            claims: &token_data.claims,
+            payload,
+            ext,
+        };
+        let key_binding = match self.check_key_binding(issuer, &presented, ctx).await {
             Ok(binding) => binding,
             Err(denial) => {
                 return PluginResult::deny(PluginViolation::new(denial.code, denial.reason));
@@ -1234,12 +1261,16 @@ impl JwtIdentityResolver {
     async fn check_key_binding(
         &self,
         issuer: &TrustedIssuer,
-        scheme: AuthScheme,
-        token: &str,
-        claims: &ClaimMap,
-        payload: &IdentityPayload,
-        ext: &Extensions,
+        presented: &Presented<'_>,
+        ctx: &mut PluginContext,
     ) -> Result<Option<KeyBinding>, PopDenial> {
+        let Presented {
+            scheme,
+            token,
+            claims,
+            payload,
+            ext,
+        } = *presented;
         let denial = |code: &'static str, reason: String| PopDenial { code, reason };
         if issuer.dpop.mode == DpopMode::Off {
             if scheme == AuthScheme::Dpop {
@@ -1325,8 +1356,18 @@ impl JwtIdentityResolver {
             url: &url,
             now: chrono::Utc::now().timestamp(),
         };
-        verifier.verify(&request).await.map(Some)
+        verifier.verify_in(&request, ctx).await.map(Some)
     }
+}
+
+/// A validated token and the request it came with.
+#[derive(Clone, Copy)]
+struct Presented<'a> {
+    scheme: AuthScheme,
+    token: &'a str,
+    claims: &'a ClaimMap,
+    payload: &'a IdentityPayload,
+    ext: &'a Extensions,
 }
 
 /// Reason `validate_token` couldn't verify the JWT. Wraps the

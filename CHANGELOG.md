@@ -322,6 +322,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   exhaustive matches may need updates.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
+- **DPoP proofs are idempotent within a request.** `identity/jwt` records each
+  accepted proof in the request's `PluginContextTable`, so resolving identity
+  again with the table the host threads through the request, for example at
+  the HTTP gate and then at the tool, reuses the proof instead of denying it
+  as `auth.dpop_replay`. Every other proof check still runs. A route
+  `config:` override instance reuses the record when it shares the base
+  instance's replay guard. A new table is a new request and still hits the
+  replay guard. `DpopVerifier::verify_in` exposes the same check. A resolver
+  with DPoP turned on in a mode other than `sequential` or `transform` is
+  refused at load, because those modes do not keep the record.
 - **Breaking:** `SubjectExtension`, `ClientExtension`, and `WorkloadIdentity`
   add `key_binding`. Hosts using exhaustive struct literals must initialize it
   or use `..Default::default()`. `TrustedIssuerConfig` adds `dpop`; exhaustive

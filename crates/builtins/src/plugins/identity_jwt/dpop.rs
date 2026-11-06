@@ -20,9 +20,16 @@
 //! A host running several instances can inject guards backed by one store;
 //! `ValkeyReplayGuard` is supplied when the `valkey` feature is enabled.
 //!
+//! A host may resolve identity more than once for one request, for example at
+//! the HTTP gate and again at the tool. [`DpopVerifier::verify_in`] records each
+//! proof it accepts in the request's context table, so a later resolution of
+//! the same proof against the same replay guard runs every check but does not
+//! consume the proof a second time.
+//!
 //! [`ProofOfPossession`]: crate::plugins::identity_jwt::dpop::ProofOfPossession
 //! [`ReplayGuard`]: crate::plugins::identity_jwt::dpop::ReplayGuard
 //! [`InMemoryReplayGuard`]: crate::plugins::identity_jwt::dpop::InMemoryReplayGuard
+//! [`DpopVerifier::verify_in`]: crate::plugins::identity_jwt::dpop::DpopVerifier::verify_in
 //! [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
 //! [RFC 7638]: https://datatracker.ietf.org/doc/html/rfc7638
 //! [RFC 8705]: https://datatracker.ietf.org/doc/html/rfc8705
@@ -33,10 +40,11 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use base64::Engine as _;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::crypto::sha256;
 use praxis_policy_core::extensions::KeyBinding;
 use praxis_policy_core::{CRYPTO_FAILED_CODE, CryptoError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::plugins::identity_jwt::alarm::{Op, crypto_failure};
@@ -376,6 +384,61 @@ fn clip(value: &str) -> String {
     clipped
 }
 
+/// What [`DpopVerifier::check`] established about a proof.
+struct Checked {
+    /// The proof key's RFC 7638 thumbprint, equal to the token's `cnf.jkt`.
+    thumbprint: String,
+    /// The proof's `jti`.
+    jti: String,
+    /// The request URL, normalized as the proof's `htu` was matched against it.
+    htu: String,
+    /// The access token's hash, equal to the proof's `ath`.
+    ath: String,
+}
+
+/// A proof this request already accepted, kept in the context table's
+/// `global_state` so a later resolution in the same request can reuse it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProofRecord {
+    issuer: String,
+    thumbprint: String,
+    jti: String,
+    htm: String,
+    htu: String,
+    ath: String,
+    /// The address of the replay guard that consumed the proof. Base and
+    /// override instances of one resolver share a guard, and with it its
+    /// record, only when the host injected the same guard into both.
+    replay_guard: usize,
+    /// When the guard forgets the proof, Unix seconds.
+    expires_at: i64,
+    binding: KeyBinding,
+}
+
+impl ProofRecord {
+    /// The `global_state` key: one entry per guard, key and proof id.
+    fn key(&self) -> String {
+        format!(
+            "{RECORD_KEY_PREFIX}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            self.replay_guard, self.issuer, self.thumbprint, self.jti
+        )
+    }
+
+    /// Whether `stored` records this same proof, request and guard, and the
+    /// guard still remembers it at `now`.
+    fn reusable(&self, stored: &Self, now: i64) -> bool {
+        now < stored.expires_at
+            && Self {
+                expires_at: self.expires_at,
+                ..stored.clone()
+            } == *self
+    }
+}
+
+/// Prefix of the `global_state` keys holding [`ProofRecord`]s.
+const RECORD_KEY_PREFIX: &str = "identity/jwt:dpop_proof\u{1f}";
+
 /// `DPoP` proof verification for one issuer's settings.
 #[derive(Debug)]
 pub struct DpopVerifier<'a> {
@@ -391,7 +454,7 @@ impl<'a> DpopVerifier<'a> {
 
     /// Every check except the replay lookup, in an order that touches the
     /// replay store only for a proof that is otherwise valid.
-    fn check(&self, request: &PopRequest<'_>) -> Result<(String, ProofClaims), PopDenial> {
+    fn check(&self, request: &PopRequest<'_>) -> Result<Checked, PopDenial> {
         #[cfg(feature = "jwt-openssl-fips")]
         crate::plugins::identity_jwt::openssl_fips::provider_ready()
             .map_err(|error| crypto_denial(Op::DpopProvider, &error))?;
@@ -521,7 +584,112 @@ impl<'a> DpopVerifier<'a> {
                 "the DPoP proof's jti must be 1 to {MAX_JTI_LEN} characters"
             )));
         }
-        Ok((thumbprint, claims))
+        Ok(Checked {
+            thumbprint,
+            jti: claims.jti,
+            htu: expected,
+            ath,
+        })
+    }
+
+    /// Verify the request's proof, reusing a verification this request already
+    /// made instead of consuming the proof's `jti` again.
+    ///
+    /// Every check of [`ProofOfPossession::verify`] still runs. When `ctx`
+    /// holds an unexpired record of the same proof, for the same issuer, key,
+    /// method, URL and access token, accepted through the same replay guard,
+    /// only the replay lookup is skipped. Otherwise the proof is checked
+    /// against the guard and, once accepted, recorded in `ctx`'s
+    /// `global_state`. A host that passes one request's context table from
+    /// hook to hook can therefore resolve identity more than once per request;
+    /// a fresh table, which is a new request, still hits the guard.
+    ///
+    /// # Errors
+    ///
+    /// A [`PopDenial`] naming why the proof was not accepted.
+    pub async fn verify_in(
+        &self,
+        request: &PopRequest<'_>,
+        ctx: &mut PluginContext,
+    ) -> Result<KeyBinding, PopDenial> {
+        // A zero-sized guard has no address of its own, so two of them cannot be
+        // told apart; its proofs are consumed on every resolution.
+        if std::mem::size_of_val(self.replay) == 0 {
+            return self.verify(request).await;
+        }
+        let checked = self.check(request)?;
+        let record = self.record(request, checked);
+        let key = record.key();
+        let stored = ctx
+            .get_global(&key)
+            .and_then(|value| ProofRecord::deserialize(value).ok());
+        if stored.is_some_and(|stored| record.reusable(&stored, request.now)) {
+            tracing::debug!(
+                issuer = request.issuer,
+                "DPoP proof already verified for this request; replay guard not consulted again"
+            );
+            return Ok(record.binding);
+        }
+
+        self.consume(request, &record.thumbprint, &record.jti)
+            .await?;
+        if let Ok(value) = serde_json::to_value(&record) {
+            ctx.set_global(key, value);
+        }
+        Ok(record.binding)
+    }
+
+    /// The record of `checked`, accepted for `request` through this verifier's
+    /// replay guard.
+    fn record(&self, request: &PopRequest<'_>, checked: Checked) -> ProofRecord {
+        ProofRecord {
+            issuer: request.issuer.to_owned(),
+            binding: KeyBinding {
+                method: METHOD.to_owned(),
+                thumbprint: checked.thumbprint.clone(),
+            },
+            thumbprint: checked.thumbprint,
+            jti: checked.jti,
+            htm: request.method.to_owned(),
+            htu: checked.htu,
+            ath: checked.ath,
+            replay_guard: std::ptr::from_ref(self.replay).cast::<()>().addr(),
+            expires_at: self.retained_until(request.now),
+        }
+    }
+
+    /// When the replay guard may forget a proof first used at `now`.
+    fn retained_until(&self, now: i64) -> i64 {
+        let window = i64::try_from(self.config.iat_window_seconds).unwrap_or(i64::MAX);
+        // A second gateway's clock may be behind this one's. Retain the id for
+        // the full span in which any one clock can accept this proof, even if
+        // this gateway first saw it at the end of its own window.
+        now.saturating_add(window.saturating_mul(2).saturating_add(1))
+    }
+
+    /// Record the proof's `jti` in the replay guard, denying a second use.
+    async fn consume(
+        &self,
+        request: &PopRequest<'_>,
+        thumbprint: &str,
+        jti: &str,
+    ) -> Result<(), PopDenial> {
+        let scope = format!("{}\u{1f}{thumbprint}", request.issuer);
+        let expires_at = self.retained_until(request.now);
+        match self
+            .replay
+            .first_use(&scope, jti, expires_at, request.now)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(PopDenial::new(
+                codes::DPOP_REPLAY,
+                "the DPoP proof's jti was already used",
+            )),
+            Err(ReplayUnavailable(reason)) => {
+                Err(PopDenial::new(codes::DPOP_REPLAY_UNAVAILABLE, reason))
+            },
+        }
     }
 }
 
@@ -532,32 +700,13 @@ impl ProofOfPossession for DpopVerifier<'_> {
     }
 
     async fn verify(&self, request: &PopRequest<'_>) -> Result<KeyBinding, PopDenial> {
-        let (thumbprint, claims) = self.check(request)?;
-        let window = i64::try_from(self.config.iat_window_seconds).unwrap_or(i64::MAX);
-        // A second gateway's clock may be behind this one's. Retain the id for
-        // the full span in which any one clock can accept this proof, even if
-        // this gateway first saw it at the end of its own window.
-        let expires_at = request
-            .now
-            .saturating_add(window.saturating_mul(2).saturating_add(1));
-        let scope = format!("{}\u{1f}{thumbprint}", request.issuer);
-        match self
-            .replay
-            .first_use(&scope, &claims.jti, expires_at, request.now)
-            .await
-        {
-            Ok(true) => Ok(KeyBinding {
-                method: METHOD.to_owned(),
-                thumbprint,
-            }),
-            Ok(false) => Err(PopDenial::new(
-                codes::DPOP_REPLAY,
-                "the DPoP proof's jti was already used",
-            )),
-            Err(ReplayUnavailable(reason)) => {
-                Err(PopDenial::new(codes::DPOP_REPLAY_UNAVAILABLE, reason))
-            },
-        }
+        let checked = self.check(request)?;
+        self.consume(request, &checked.thumbprint, &checked.jti)
+            .await?;
+        Ok(KeyBinding {
+            method: METHOD.to_owned(),
+            thumbprint: checked.thumbprint,
+        })
     }
 }
 
