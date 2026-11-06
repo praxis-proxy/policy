@@ -36,6 +36,8 @@ ignore = [
     # `heapless-cas`, which pulls it in; on targets with native atomics it
     # re-exports `core` atomics, and Limitador gives no way to turn it off.
     "RUSTSEC-2023-0089",
+    # Unmaintained `astral-tokio-tar`, dev-only via testcontainers.
+    "RUSTSEC-2026-0440",
 ]
 
 [licenses]

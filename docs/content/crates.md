@@ -114,7 +114,7 @@ crypto-rustcrypto = ["praxis-policy-core/crypto-rustcrypto"]
 fips = ["praxis-policy-core/fips"]
 
 [dependencies]
-praxis-policy-core = { version = "0.5", default-features = false }
+praxis-policy-core = { version = "0.6.0", default-features = false }
 ```
 
 A FIPS host disables the plugin's defaults and enables `fips` once at the
@@ -146,7 +146,8 @@ need their own checks. HMAC remains unavailable under FIPS even when
 SHA-256 validation succeeds.
 
 FIPS hosts also check `crypto_capability_report().fips_profile_is_safe()`
-to reject unsupported bundled crypto operations.
+to reject unsupported bundled crypto operations. See [FIPS](fips.md) for
+the supported selections and host setup.
 
 `PluginError` adds a `Crypto { source: CryptoError }` variant. Consumers
 with exhaustive matches must add an arm for it. Error records use

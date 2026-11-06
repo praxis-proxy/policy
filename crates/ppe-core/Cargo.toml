@@ -21,7 +21,7 @@ rust-version.workspace = true
 [features]
 default = ["crypto-default"]
 crypto-default = ["crypto-rustcrypto"]
-crypto-rustcrypto = ["dep:hmac", "dep:sha2"]
+crypto-rustcrypto = ["dep:getrandom", "dep:hmac", "dep:sha2"]
 fips = ["dep:openssl"]
 # Test doubles for the seams a host normally fills —
 # `http_testing::FakeTransport` and `fault_testing` (a plugin that panics,
@@ -37,7 +37,7 @@ fips = ["dep:openssl"]
 # or injecting plugin faults enable it as a dev-dependency:
 #
 #     [dev-dependencies]
-#     praxis-policy-core = { version = "0.4", features = ["test-util"] }
+#     praxis-policy-core = { version = "0.6.0", features = ["test-util"] }
 test-util = []
 
 [dependencies]
@@ -64,6 +64,8 @@ futures = { workspace = true }
 sha2 = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 openssl = { workspace = true, optional = true }
+# Secret material under `crypto-rustcrypto`; `fips` uses OpenSSL's DRBG.
+getrandom = { workspace = true, optional = true }
 arc-swap = { workspace = true }
 wildmatch = { workspace = true }
 chrono = { workspace = true }

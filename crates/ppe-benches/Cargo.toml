@@ -39,7 +39,8 @@ dhat = { version = "0.3.3", optional = true }
 criterion = { workspace = true }
 # The `dpop` bench signs proofs with a P-256 key derived from a fixed scalar.
 p256 = { workspace = true }
-jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+# The backend comes from the builtins `jwt` feature.
+jsonwebtoken = { workspace = true }
 base64 = { workspace = true }
 serde_json = { workspace = true }
 

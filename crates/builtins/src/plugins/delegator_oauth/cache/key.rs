@@ -115,7 +115,7 @@ const DOMAIN: &[u8] = b"ppe.delegation.cache.v1";
 pub(in crate::plugins::delegator_oauth) struct KeySecret(Hmac<Sha256>);
 
 impl KeySecret {
-    /// Draw a fresh secret from the OS CSPRNG.
+    /// Draw a fresh secret from the selected crypto backend.
     ///
     /// # Errors
     ///
@@ -125,8 +125,8 @@ impl KeySecret {
     /// something weaker.
     pub(in crate::plugins::delegator_oauth) fn random() -> Result<Self, String> {
         let mut bytes = Zeroizing::new([0_u8; 32]);
-        getrandom::fill(bytes.as_mut())
-            .map_err(|e| format!("could not draw a cache-key secret from the OS CSPRNG: {e}"))?;
+        praxis_policy_core::crypto::random_bytes(bytes.as_mut())
+            .map_err(|e| format!("could not draw a cache-key secret: {e}"))?;
         // `Hmac` accepts a key of any length, so this cannot fail for a
         // 32-byte array. Handled rather than asserted because a panic
         // here would take down a host over something recoverable.

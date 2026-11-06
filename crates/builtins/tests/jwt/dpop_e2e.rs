@@ -12,14 +12,15 @@
 //! checked in.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use p256::ecdsa::SigningKey;
 use p256::pkcs8::{EncodePrivateKey as _, LineEnding};
-use praxis_policy_builtins::plugins::identity_jwt::JwtIdentityResolver;
 use praxis_policy_builtins::plugins::identity_jwt::dpop::{
     DpopVerifier, InMemoryReplayGuard, PopRequest, ProofOfPossession as _, ReplayGuard,
     ReplayUnavailable, access_token_hash, codes, jwk_thumbprint,
@@ -27,14 +28,21 @@ use praxis_policy_builtins::plugins::identity_jwt::dpop::{
 #[cfg(feature = "valkey")]
 use praxis_policy_builtins::plugins::identity_jwt::dpop_valkey::ValkeyReplayGuard;
 use praxis_policy_builtins::plugins::identity_jwt::{DpopConfig, DpopMode};
+use praxis_policy_builtins::plugins::identity_jwt::{
+    JwtIdentityFactory, JwtIdentityResolver, KIND,
+};
+use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL, ENTITY_TOOL};
+use praxis_policy_core::context::{PluginContext, PluginContextTable};
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::error::PluginError;
 use praxis_policy_core::executor::PipelineResult;
-use praxis_policy_core::extensions::HttpExtension;
+use praxis_policy_core::extensions::{HttpExtension, MetaExtension};
+use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::identity::{
     HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource,
 };
-use praxis_policy_core::plugin::PluginConfig;
+use praxis_policy_core::plugin::{PluginConfig, PluginMode};
 use serde_json::{Value, json};
 #[cfg(feature = "valkey")]
 use testcontainers_modules::testcontainers::ContainerAsync;
@@ -42,6 +50,7 @@ use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::runners::AsyncRunner as _;
 #[cfg(feature = "valkey")]
 use testcontainers_modules::valkey::{VALKEY_PORT, Valkey};
+use tokio::sync::Barrier;
 
 use crate::common::{TEST_AUDIENCE, TEST_ISSUER, mint, now_unix, plugin_config};
 
@@ -93,7 +102,7 @@ fn claims_for(token: &str) -> Value {
         "htu": URL,
         "iat": now_unix(),
         "jti": format!("jti-{}", now_unix_nanos()),
-        "ath": access_token_hash(token),
+        "ath": access_token_hash(token).expect("ath"),
     })
 }
 
@@ -213,6 +222,12 @@ impl Gateway {
     }
 
     async fn send(&self, request: Request) -> PipelineResult {
+        self.send_in(request, None).await
+    }
+
+    /// Send `request` with the context table an earlier hook of the same
+    /// request returned, as a host threading one table through a request does.
+    async fn send_in(&self, request: Request, table: Option<PluginContextTable>) -> PipelineResult {
         let mut headers = HashMap::from([("authorization".to_owned(), request.authorization)]);
         if let Some(proof) = request.dpop {
             headers.insert("dpop".to_owned(), proof);
@@ -225,7 +240,7 @@ impl Gateway {
         };
         let (result, _bg) = self
             .engine
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, ext, None)
+            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, ext, table)
             .await;
         result
     }
@@ -390,7 +405,7 @@ async fn a_proof_for_another_method_url_time_or_token_is_denied() {
         ("stale iat", json!({ "iat": now_unix() - 600 })),
         (
             "ath",
-            json!({ "ath": access_token_hash("some other token") }),
+            json!({ "ath": access_token_hash("some other token").expect("ath") }),
         ),
     ];
     for (what, change) in cases {
@@ -918,4 +933,556 @@ async fn valkey_rejects_a_replay_across_independent_gateway_pools() {
     assert!(a.continue_processing, "first violation = {:?}", a.violation);
     let b = second.send(Request::dpop(&token, once)).await;
     assert_eq!(denied_with(&b), codes::DPOP_REPLAY);
+}
+
+// ---------------------------------------------------------------------
+// One request, several resolutions
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_second_resolution_with_the_requests_table_reuses_the_proof() {
+    let guard = Arc::new(StrictGuard::default());
+    let gateway = Gateway::with_replay_guard(required(), guard.clone()).await;
+    let token = bound_token(&agent());
+    let once = valid_proof(&token);
+
+    let first = gateway.send(Request::dpop(&token, once.clone())).await;
+    let second = gateway
+        .send_in(
+            Request::dpop(&token, once),
+            Some(first.context_table.clone()),
+        )
+        .await;
+
+    assert!(first.continue_processing, "first = {:?}", first.violation);
+    assert!(
+        second.continue_processing,
+        "the same request resolving again must not be a replay: {:?}",
+        second.violation
+    );
+    assert_eq!(guard.calls(), 1, "the proof is consumed once per request");
+    assert_eq!(
+        binding_of(&first),
+        binding_of(&second),
+        "both resolutions record the same binding"
+    );
+}
+
+#[tokio::test]
+async fn the_same_proof_in_a_new_request_is_still_a_replay() {
+    let gateway = Gateway::new(required()).await;
+    let token = bound_token(&agent());
+    let once = valid_proof(&token);
+    let first = gateway.send(Request::dpop(&token, once.clone())).await;
+    let again = gateway
+        .send_in(
+            Request::dpop(&token, once.clone()),
+            Some(first.context_table.clone()),
+        )
+        .await;
+    assert!(
+        again.continue_processing,
+        "violation = {:?}",
+        again.violation
+    );
+
+    let fresh = gateway.send(Request::dpop(&token, once.clone())).await;
+    assert_eq!(denied_with(&fresh), codes::DPOP_REPLAY, "no table");
+    let empty = gateway
+        .send_in(Request::dpop(&token, once), Some(PluginContextTable::new()))
+        .await;
+    assert_eq!(denied_with(&empty), codes::DPOP_REPLAY, "an empty table");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_requests_with_the_same_proof_accept_exactly_one() {
+    let guard = Arc::new(SynchronizedReplayGuard {
+        barrier: Barrier::new(2),
+        inner: InMemoryReplayGuard::default(),
+    });
+    let gateway = Arc::new(Gateway::with_replay_guard(required(), guard).await);
+    let token = bound_token(&agent());
+    let once = valid_proof(&token);
+
+    let send = |request| {
+        let gateway = Arc::clone(&gateway);
+        tokio::spawn(async move { gateway.send(request).await })
+    };
+    let first = send(Request::dpop(&token, once.clone()));
+    let second = send(Request::dpop(&token, once));
+
+    let (first, second) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(first, second)
+    })
+    .await
+    .expect("both requests must reach the shared replay guard")
+    .expect("both request tasks must complete");
+
+    let results = [first, second];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.continue_processing)
+            .count(),
+        1,
+        "exactly one concurrent request may consume the proof: {results:?}"
+    );
+
+    let denied = results
+        .iter()
+        .find(|result| !result.continue_processing)
+        .expect("one request is denied");
+    assert_eq!(
+        denied_with(denied),
+        codes::DPOP_REPLAY,
+        "the losing request must be denied as a replay"
+    );
+}
+
+#[tokio::test]
+async fn a_recorded_jti_does_not_cover_another_method_or_url() {
+    let key = agent();
+    let token = bound_token(&key);
+    for (what, change, method, path) in [
+        ("method", json!({ "htm": "GET" }), "GET", "/mcp"),
+        (
+            "url",
+            json!({ "htu": "https://gateway.test/other" }),
+            "POST",
+            "/other",
+        ),
+    ] {
+        let guard = Arc::new(StrictGuard::default());
+        let gateway = Gateway::with_replay_guard(required(), guard.clone()).await;
+        let mut claims = claims_for(&token);
+        let first = gateway
+            .send(Request::dpop(
+                &token,
+                proof(&key, &key.jwk, Algorithm::ES256, &claims),
+            ))
+            .await;
+        assert!(first.continue_processing, "{what}: {:?}", first.violation);
+
+        for (k, v) in change.as_object().expect("object") {
+            claims[k] = v.clone();
+        }
+        let mut request = Request::dpop(&token, proof(&key, &key.jwk, Algorithm::ES256, &claims));
+        let http = request.http.as_mut().expect("request line");
+        http.method = Some(method.to_owned());
+        http.path = Some(path.to_owned());
+        let second = gateway
+            .send_in(request, Some(first.context_table.clone()))
+            .await;
+        assert_eq!(
+            denied_with(&second),
+            codes::DPOP_REPLAY,
+            "a proof for another {what} is checked against the guard"
+        );
+        assert_eq!(guard.calls(), 2, "{what}: the guard was consulted again");
+    }
+}
+
+#[tokio::test]
+async fn a_recorded_jti_does_not_cover_another_access_token() {
+    let key = agent();
+    let token = bound_token(&key);
+    let other_token = mint(json!({ "sub": "agent-2", "cnf": { "jkt": key.thumbprint() } }));
+    let gateway = Gateway::new(required()).await;
+    let mut claims = claims_for(&token);
+    let first = gateway
+        .send(Request::dpop(
+            &token,
+            proof(&key, &key.jwk, Algorithm::ES256, &claims),
+        ))
+        .await;
+    assert!(first.continue_processing, "{:?}", first.violation);
+
+    let stale_ath = gateway
+        .send_in(
+            Request::dpop(
+                &other_token,
+                proof(&key, &key.jwk, Algorithm::ES256, &claims),
+            ),
+            Some(first.context_table.clone()),
+        )
+        .await;
+    assert_eq!(
+        denied_with(&stale_ath),
+        codes::DPOP_INVALID,
+        "the proof's ath names the first token"
+    );
+
+    claims["ath"] = json!(access_token_hash(&other_token).expect("ath"));
+    let same_jti = gateway
+        .send_in(
+            Request::dpop(
+                &other_token,
+                proof(&key, &key.jwk, Algorithm::ES256, &claims),
+            ),
+            Some(first.context_table.clone()),
+        )
+        .await;
+    assert_eq!(
+        denied_with(&same_jti),
+        codes::DPOP_REPLAY,
+        "a recorded jti covers only the token it was verified with"
+    );
+}
+
+#[tokio::test]
+async fn a_route_override_reuses_the_gates_proof_through_a_shared_guard() {
+    let guard = Arc::new(StrictGuard::default());
+    let built = Arc::new(AtomicUsize::new(0));
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(
+        KIND,
+        Box::new(CountingFactory {
+            inner: JwtIdentityFactory::with_replay_guard(guard.clone()),
+            built: Arc::clone(&built),
+        }),
+    );
+    engine
+        .load_config_yaml(&gate_and_route_config().to_string())
+        .expect("load");
+    engine.initialize().await.expect("initialize");
+    let token = bound_token(&agent());
+    let once = valid_proof(&token);
+
+    let gate = resolve_at(
+        &engine,
+        &token,
+        &once,
+        ENTITY_HTTP,
+        ENTITY_NAME_GLOBAL,
+        None,
+    )
+    .await;
+    assert!(gate.continue_processing, "gate = {:?}", gate.violation);
+    let tool = resolve_at(
+        &engine,
+        &token,
+        &once,
+        ENTITY_TOOL,
+        "get_weather",
+        Some(gate.context_table.clone()),
+    )
+    .await;
+
+    assert!(
+        tool.continue_processing,
+        "the route's instance must reuse the gate's verification: {:?}",
+        tool.violation
+    );
+    assert_eq!(built.load(Ordering::SeqCst), 2, "base and route instances");
+    assert_eq!(guard.calls(), 1, "the shared guard consumed the proof once");
+    let fresh = resolve_at(&engine, &token, &once, ENTITY_TOOL, "get_weather", None).await;
+    assert_eq!(
+        denied_with(&fresh),
+        codes::DPOP_REPLAY,
+        "a fresh table is a new request, so the proof is a replay"
+    );
+}
+
+#[tokio::test]
+async fn a_record_is_not_reused_through_another_guard_or_issuer() {
+    let (token, thumbprint, once, config) = verifier_fixture();
+    let now = now_unix();
+    let first_guard = StrictGuard::default();
+    let second_guard = StrictGuard::default();
+    let mut ctx = PluginContext::new();
+    DpopVerifier::new(&config, &first_guard)
+        .verify_in(&pop(&token, &thumbprint, &once, TEST_ISSUER, now), &mut ctx)
+        .await
+        .expect("first verification");
+    assert_eq!(
+        second_guard
+            .first_use(
+                &format!("{TEST_ISSUER}\u{1f}{thumbprint}"),
+                &jti_of(&once),
+                now + 60,
+                now
+            )
+            .await,
+        Ok(true),
+        "seed the second guard as if another gateway had seen the proof"
+    );
+
+    let denial = DpopVerifier::new(&config, &second_guard)
+        .verify_in(&pop(&token, &thumbprint, &once, TEST_ISSUER, now), &mut ctx)
+        .await
+        .expect_err("another guard has its own answer");
+    assert_eq!(
+        denial.code,
+        codes::DPOP_REPLAY,
+        "the second guard has seen the seeded jti"
+    );
+    assert_eq!(second_guard.calls(), 2, "the second guard was consulted");
+
+    DpopVerifier::new(&config, &first_guard)
+        .verify_in(
+            &pop(&token, &thumbprint, &once, "https://other.issuer", now),
+            &mut ctx,
+        )
+        .await
+        .expect("another issuer's scope has not seen the jti");
+    assert_eq!(first_guard.calls(), 2, "another issuer is checked in full");
+}
+
+#[tokio::test]
+async fn an_expired_record_is_ignored() {
+    let (token, thumbprint, once, mut config) = verifier_fixture();
+    let now = now_unix();
+    let guard = StrictGuard::default();
+    let mut ctx = PluginContext::new();
+    config.iat_window_seconds = 5;
+    DpopVerifier::new(&config, &guard)
+        .verify_in(&pop(&token, &thumbprint, &once, TEST_ISSUER, now), &mut ctx)
+        .await
+        .expect("first verification");
+
+    config.iat_window_seconds = 60;
+    let wide = DpopVerifier::new(&config, &guard);
+    wide.verify_in(
+        &pop(&token, &thumbprint, &once, TEST_ISSUER, now + 10),
+        &mut ctx,
+    )
+    .await
+    .expect("the record is still within the first window's retention");
+    assert_eq!(guard.calls(), 1, "an unexpired record is reused");
+    let denial = wide
+        .verify_in(
+            &pop(&token, &thumbprint, &once, TEST_ISSUER, now + 11),
+            &mut ctx,
+        )
+        .await
+        .expect_err("past the retention the guard decides");
+    assert_eq!(denial.code, codes::DPOP_REPLAY);
+    assert_eq!(guard.calls(), 2, "an expired record is not reused");
+}
+
+#[tokio::test]
+async fn a_failed_verification_records_nothing() {
+    let (token, thumbprint, once, config) = verifier_fixture();
+    let now = now_unix();
+    let forged = proof(
+        &other(),
+        &agent().jwk,
+        Algorithm::ES256,
+        &claims_for(&token),
+    );
+    let mut ctx = PluginContext::new();
+    let guard = StrictGuard::default();
+    let attempts: [(&String, &dyn ReplayGuard); 2] =
+        [(&forged, &guard), (&once, &UnreachableStore)];
+    for (proof, replay) in attempts {
+        DpopVerifier::new(&config, replay)
+            .verify_in(&pop(&token, &thumbprint, proof, TEST_ISSUER, now), &mut ctx)
+            .await
+            .expect_err("the proof is not accepted");
+    }
+    assert!(ctx.global_state.is_empty(), "{:?}", ctx.global_state);
+    assert_eq!(guard.calls(), 0, "a bad signature never reaches the guard");
+
+    DpopVerifier::new(&config, &guard)
+        .verify_in(&pop(&token, &thumbprint, &once, TEST_ISSUER, now), &mut ctx)
+        .await
+        .expect("the next resolution verifies in full");
+    assert_eq!(
+        guard.calls(),
+        1,
+        "the failed attempts did not consume the proof"
+    );
+}
+
+#[test]
+fn dpop_in_a_mode_that_does_not_keep_context_fails_at_load() {
+    for mode in [
+        PluginMode::Audit,
+        PluginMode::Concurrent,
+        PluginMode::FireAndForget,
+    ] {
+        let mut cfg = required();
+        cfg.mode = mode;
+        let Err(e) = JwtIdentityResolver::new(cfg) else {
+            panic!("DPoP in mode {mode} must not load")
+        };
+        assert!(e.to_string().contains(&format!("mode {mode}")), "{e}");
+
+        let mut off = plugin_config(json!({}));
+        off.mode = mode;
+        JwtIdentityResolver::new(off).expect("without DPoP any mode loads");
+    }
+    for mode in [PluginMode::Sequential, PluginMode::Transform] {
+        let mut cfg = required();
+        cfg.mode = mode;
+        JwtIdentityResolver::new(cfg).expect("a serial mode keeps the record");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// Test utilities that synchronize entry to the shared in-memory replay guard.
+#[derive(Debug)]
+struct SynchronizedReplayGuard {
+    barrier: Barrier,
+    inner: InMemoryReplayGuard,
+}
+
+#[async_trait]
+impl ReplayGuard for SynchronizedReplayGuard {
+    async fn first_use(
+        &self,
+        scope: &str,
+        id: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<bool, ReplayUnavailable> {
+        self.barrier.wait().await;
+        self.inner.first_use(scope, id, expires_at, now).await
+    }
+}
+
+/// Remembers every `(scope, id)` forever and counts its calls.
+#[derive(Debug, Default)]
+struct StrictGuard {
+    seen: Mutex<HashSet<(String, String)>>,
+    calls: AtomicUsize,
+}
+
+impl StrictGuard {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ReplayGuard for StrictGuard {
+    async fn first_use(
+        &self,
+        scope: &str,
+        id: &str,
+        _: i64,
+        _: i64,
+    ) -> Result<bool, ReplayUnavailable> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .seen
+            .lock()
+            .expect("strict guard lock")
+            .insert((scope.to_owned(), id.to_owned())))
+    }
+}
+
+/// Counts the instances a JWT factory builds.
+struct CountingFactory<F> {
+    inner: F,
+    built: Arc<AtomicUsize>,
+}
+
+impl<F: PluginFactory> PluginFactory for CountingFactory<F> {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        self.built.fetch_add(1, Ordering::SeqCst);
+        self.inner.create(config)
+    }
+}
+
+fn binding_of(result: &PipelineResult) -> Option<praxis_policy_core::extensions::KeyBinding> {
+    IdentityPayload::from_pipeline_result(result)
+        .and_then(|identity| identity.subject)
+        .and_then(|subject| subject.key_binding)
+}
+
+/// A gate on the global list, and a `tool: get_weather` route whose own
+/// `config:` builds a second instance of the same resolver.
+fn gate_and_route_config() -> Value {
+    let config = required().config.expect("config block");
+    json!({
+        "engine_settings": { "dispatch": "policy" },
+        "plugins": [{
+            "name": "jwt",
+            "kind": KIND,
+            "hooks": [HOOK_IDENTITY_RESOLVE],
+            "capabilities": ["read_headers"],
+            "config": config,
+        }],
+        "global": { "authentication": ["jwt"] },
+        "routes": [{
+            "tool": "get_weather",
+            "authentication": {
+                "replace_inherited": true,
+                "steps": [{ "name": "jwt", "config": { "claim_mapper": "standard" } }],
+            },
+        }],
+    })
+}
+
+async fn resolve_at(
+    engine: &PolicyEngine,
+    token: &str,
+    proof: &str,
+    entity_type: &str,
+    entity_name: &str,
+    table: Option<PluginContextTable>,
+) -> PipelineResult {
+    let headers = HashMap::from([
+        ("authorization".to_owned(), format!("DPoP {token}")),
+        ("dpop".to_owned(), proof.to_owned()),
+    ]);
+    let payload = IdentityPayload::new(String::new(), TokenSource::Bearer).with_headers(headers);
+    let request = Request::dpop(token, proof.to_owned());
+    let ext = Extensions {
+        meta: Some(Arc::new(MetaExtension {
+            entity_type: Some(entity_type.to_owned()),
+            entity_name: Some(entity_name.to_owned()),
+            ..Default::default()
+        })),
+        http: request.http.map(Arc::new),
+        ..Default::default()
+    };
+    let (result, _bg) = engine
+        .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, ext, table)
+        .await;
+    result
+}
+
+/// A bound token, its key's thumbprint, a valid proof and required settings.
+fn verifier_fixture() -> (String, String, String, DpopConfig) {
+    let token = bound_token(&agent());
+    let proof = valid_proof(&token);
+    let config = DpopConfig {
+        mode: DpopMode::Required,
+        ..DpopConfig::default()
+    };
+    (token, agent().thumbprint(), proof, config)
+}
+
+fn pop<'a>(
+    token: &'a str,
+    thumbprint: &'a str,
+    proof: &'a str,
+    issuer: &'a str,
+    now: i64,
+) -> PopRequest<'a> {
+    PopRequest {
+        issuer,
+        access_token: token,
+        bound_thumbprint: thumbprint,
+        proof: Some(proof),
+        method: "POST",
+        url: URL,
+        now,
+    }
+}
+
+fn jti_of(proof: &str) -> String {
+    let claims = proof.split('.').nth(1).expect("claims segment");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(claims)
+        .expect("base64url claims");
+    serde_json::from_slice::<Value>(&bytes).expect("claims JSON")["jti"]
+        .as_str()
+        .expect("jti")
+        .to_owned()
 }

@@ -4,8 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use limitador::RateLimiter;
 use limitador::counter::Counter;
@@ -17,6 +16,7 @@ use praxis_policy_apl_cmf::constants::{
 use praxis_policy_apl_cmf::{BagBuilder, capability_namespaces, known_read_capabilities};
 use praxis_policy_core::CryptoError;
 use praxis_policy_core::context::PluginContext;
+use praxis_policy_core::crypto::IntervalLog;
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
 use praxis_policy_core::http_hook::{HttpHook, HttpPayload};
@@ -102,37 +102,6 @@ struct ComputedCounterRule {
 struct ConditionCheck {
     predicate: Predicate,
     with_limit: Option<limitador_cel::IdedExpr>,
-}
-
-/// Admits one log line per interval and counts the ones it holds back.
-#[derive(Default)]
-struct IntervalLog {
-    next_at: AtomicU64,
-    suppressed: AtomicU64,
-}
-
-impl IntervalLog {
-    /// The count held back since the last admitted line, when a line is due.
-    fn admit(&self) -> Option<u64> {
-        let now = unix_seconds();
-        let next = self.next_at.load(Ordering::Relaxed);
-        let due = now >= next
-            && self
-                .next_at
-                .compare_exchange(
-                    next,
-                    now.saturating_add(FAILURE_LOG_INTERVAL_SECS),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok();
-        if due {
-            Some(self.suppressed.swap(0, Ordering::Relaxed))
-        } else {
-            self.suppressed.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-    }
 }
 
 impl RateLimit {
@@ -270,17 +239,17 @@ impl RateLimit {
 
         Ok(Self {
             bindings: typed.bindings,
-            check_failure_log: IntervalLog::default(),
+            check_failure_log: IntervalLog::new(FAILURE_LOG_INTERVAL_SECS),
             check_lock: Mutex::new(()),
             config,
             condition_rules,
             computed_rules,
-            crypto_failure_log: IntervalLog::default(),
+            crypto_failure_log: IntervalLog::new(FAILURE_LOG_INTERVAL_SECS),
             has_limit_conditions,
             limiter,
             macro_locals,
             namespace,
-            unbound_log: IntervalLog::default(),
+            unbound_log: IntervalLog::new(FAILURE_LOG_INTERVAL_SECS),
         })
     }
 
@@ -632,12 +601,6 @@ fn ceil_seconds(duration: Duration) -> u64 {
     duration
         .as_secs()
         .saturating_add(u64::from(duration.subsec_nanos() > 0))
-}
-
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// The read capabilities that expose `attribute` in the bag.
