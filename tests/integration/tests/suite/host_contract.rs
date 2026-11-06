@@ -1120,8 +1120,16 @@ async fn a_dpop_bound_call_resolves_at_the_gate_and_the_tool_with_one_proof() {
         out.violation
     );
     let replay = host.call(call).await;
-    assert_eq!(replay.denied_at, Some(Stage::Identity));
-    assert_eq!(replay.violation_code(), Some("auth.dpop_replay"));
+    assert_eq!(
+        replay.denied_at,
+        Some(Stage::Identity),
+        "the replayed call is denied at the identity stage"
+    );
+    assert_eq!(
+        replay.violation_code(),
+        Some("auth.dpop_replay"),
+        "the replay carries the DPoP replay code"
+    );
 }
 
 const HS256_SECRET: &str = "test-secret-at-least-32-bytes-long!!";

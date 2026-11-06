@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -49,6 +50,7 @@ use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::runners::AsyncRunner as _;
 #[cfg(feature = "valkey")]
 use testcontainers_modules::valkey::{VALKEY_PORT, Valkey};
+use tokio::sync::Barrier;
 
 use crate::common::{TEST_AUDIENCE, TEST_ISSUER, mint, now_unix, plugin_config};
 
@@ -992,6 +994,51 @@ async fn the_same_proof_in_a_new_request_is_still_a_replay() {
     assert_eq!(denied_with(&empty), codes::DPOP_REPLAY, "an empty table");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_requests_with_the_same_proof_accept_exactly_one() {
+    let guard = Arc::new(SynchronizedReplayGuard {
+        barrier: Barrier::new(2),
+        inner: InMemoryReplayGuard::default(),
+    });
+    let gateway = Arc::new(Gateway::with_replay_guard(required(), guard).await);
+    let token = bound_token(&agent());
+    let once = valid_proof(&token);
+
+    let send = |request| {
+        let gateway = Arc::clone(&gateway);
+        tokio::spawn(async move { gateway.send(request).await })
+    };
+    let first = send(Request::dpop(&token, once.clone()));
+    let second = send(Request::dpop(&token, once));
+
+    let (first, second) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(first, second)
+    })
+    .await
+    .expect("both requests must reach the shared replay guard")
+    .expect("both request tasks must complete");
+
+    let results = [first, second];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.continue_processing)
+            .count(),
+        1,
+        "exactly one concurrent request may consume the proof: {results:?}"
+    );
+
+    let denied = results
+        .iter()
+        .find(|result| !result.continue_processing)
+        .expect("one request is denied");
+    assert_eq!(
+        denied_with(denied),
+        codes::DPOP_REPLAY,
+        "the losing request must be denied as a replay"
+    );
+}
+
 #[tokio::test]
 async fn a_recorded_jti_does_not_cover_another_method_or_url() {
     let key = agent();
@@ -1129,7 +1176,11 @@ async fn a_route_override_reuses_the_gates_proof_through_a_shared_guard() {
     assert_eq!(built.load(Ordering::SeqCst), 2, "base and route instances");
     assert_eq!(guard.calls(), 1, "the shared guard consumed the proof once");
     let fresh = resolve_at(&engine, &token, &once, ENTITY_TOOL, "get_weather", None).await;
-    assert_eq!(denied_with(&fresh), codes::DPOP_REPLAY);
+    assert_eq!(
+        denied_with(&fresh),
+        codes::DPOP_REPLAY,
+        "a fresh table is a new request, so the proof is a replay"
+    );
 }
 
 #[tokio::test]
@@ -1160,7 +1211,11 @@ async fn a_record_is_not_reused_through_another_guard_or_issuer() {
         .verify_in(&pop(&token, &thumbprint, &once, TEST_ISSUER, now), &mut ctx)
         .await
         .expect_err("another guard has its own answer");
-    assert_eq!(denial.code, codes::DPOP_REPLAY);
+    assert_eq!(
+        denial.code,
+        codes::DPOP_REPLAY,
+        "the second guard has seen the seeded jti"
+    );
     assert_eq!(second_guard.calls(), 2, "the second guard was consulted");
 
     DpopVerifier::new(&config, &first_guard)
@@ -1232,7 +1287,11 @@ async fn a_failed_verification_records_nothing() {
         .verify_in(&pop(&token, &thumbprint, &once, TEST_ISSUER, now), &mut ctx)
         .await
         .expect("the next resolution verifies in full");
-    assert_eq!(guard.calls(), 1);
+    assert_eq!(
+        guard.calls(),
+        1,
+        "the failed attempts did not consume the proof"
+    );
 }
 
 #[test]
@@ -1257,6 +1316,31 @@ fn dpop_in_a_mode_that_does_not_keep_context_fails_at_load() {
         let mut cfg = required();
         cfg.mode = mode;
         JwtIdentityResolver::new(cfg).expect("a serial mode keeps the record");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// Test utilities that synchronize entry to the shared in-memory replay guard.
+#[derive(Debug)]
+struct SynchronizedReplayGuard {
+    barrier: Barrier,
+    inner: InMemoryReplayGuard,
+}
+
+#[async_trait]
+impl ReplayGuard for SynchronizedReplayGuard {
+    async fn first_use(
+        &self,
+        scope: &str,
+        id: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<bool, ReplayUnavailable> {
+        self.barrier.wait().await;
+        self.inner.first_use(scope, id, expires_at, now).await
     }
 }
 
