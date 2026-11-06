@@ -7,6 +7,19 @@ SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 CARGO ?= cargo
+# A literal comma for `$(call ...)` arguments.
+, := ,
+
+# Every compatible feature for the second workspace pass, on the RustCrypto
+# backend. It stands in for `--all-features`, which would also enable `fips`
+# and select both mutually exclusive backends. FIPS has its own targets.
+WORKSPACE_TEST_FEATURES := \
+	praxis-policy-core/crypto-rustcrypto,praxis-policy-apl-cmf/crypto-rustcrypto,praxis-policy-apl-runtime/crypto-rustcrypto \
+	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/oauth,praxis-policy-builtins/basic,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
+	praxis-policy/builtins,praxis-policy/http-hyper,praxis-policy/experimental-quota,praxis-policy/experimental-ratelimit \
+	ppe-benches/dhat-heap \
+	praxis-policy-test-utils/experimental-ratelimit \
+	praxis-policy-tests-integration/experimental-ratelimit,praxis-policy-tests-resilience/experimental-ratelimit,praxis-policy-tests-security/experimental-ratelimit
 
 # Nightly is needed only for the optional ThreadSanitizer target below.
 NIGHTLY ?= nightly
@@ -26,7 +39,9 @@ help:
 	@echo "  build             Build the workspace (debug)"
 	@echo "  build-release     Build the workspace (release)"
 	@echo "  check             cargo check the workspace"
-	@echo "  check-features    cargo check praxis-policy-builtins per feature"
+	@echo "  check-fips-graph  Ensure FIPS graphs link OpenSSL and no other crypto"
+	@echo "  check-features    cargo check each builtin feature and reference plugin"
+	@echo "  check-crypto-consumer  Verify standalone backend composition and reports"
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
@@ -40,6 +55,8 @@ help:
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
+	@echo "  test-fips-no-provider  FIPS reports, refusals and fail-closed hashing"
+	@echo "  test-fips-provider     FIPS lib suites against a loaded provider"
 	@echo "  test-integration  Integration, resilience and security suites"
 	@echo "  test-resilience   Resilience suite (dependency failure, concurrency)"
 	@echo "  test-security     Security suite (adversarial inputs)"
@@ -99,7 +116,138 @@ build-release:
 .PHONY: check
 check:
 	@$(CARGO) check --workspace --all-targets
-	@$(CARGO) check --workspace --all-targets --all-features
+	@$(CARGO) check --workspace --all-targets --features "$(WORKSPACE_TEST_FEATURES)"
+	@$(CARGO) check -p praxis-policy --no-default-features --features fips,api-key --lib
+	@$(MAKE) check-fips-graph
+
+NON_FIPS_CRYPTO := sha2|hmac|ring|rustls|aws-lc-rs|aws-lc-sys
+
+CRYPTO_CONSUMER_MANIFEST := tests/consumers/crypto/Cargo.toml
+CRYPTO_CONSUMER_CARGO = CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),target))" $(CARGO)
+
+.PHONY: check-crypto-consumer
+check-crypto-consumer:
+	@$(CARGO) fmt --manifest-path $(CRYPTO_CONSUMER_MANIFEST) -- --check
+	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --lib)
+	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --features api-key --lib)
+	@$(call run_selected,$(CRYPTO_CONSUMER_CARGO) test --manifest-path $(CRYPTO_CONSUMER_MANIFEST) --locked --no-default-features --features fips$(,)api-key --lib)
+	@for features in crypto-rustcrypto crypto-rustcrypto,api-key fips,api-key; do \
+		$(CRYPTO_CONSUMER_CARGO) clippy --manifest-path $(CRYPTO_CONSUMER_MANIFEST) \
+			--locked --no-default-features --features "$$features" --all-targets -- -D warnings; \
+	done
+	@tree="$$($(CRYPTO_CONSUMER_CARGO) tree --manifest-path $(CRYPTO_CONSUMER_MANIFEST) \
+		--locked --no-default-features --features fips,api-key -e normal,build --prefix none)"; \
+	if grep -Eq "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree"; then \
+		echo "FIPS consumer links non-FIPS crypto:" >&2; \
+		grep -E "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree" >&2; exit 1; \
+	fi; \
+	grep -q '^openssl v' <<< "$$tree" || \
+		{ echo "FIPS consumer is missing OpenSSL" >&2; exit 1; }
+	@for features in fips,api-key,plugin-defaults api-key; do \
+		if out="$$($(CRYPTO_CONSUMER_CARGO) check --manifest-path $(CRYPTO_CONSUMER_MANIFEST) \
+			--locked --no-default-features --features "$$features" --lib 2>&1)"; then \
+			echo "consumer unexpectedly built with $$features" >&2; exit 1; \
+		fi; \
+		echo "$$out"; \
+		case "$$features" in \
+			api-key) diagnostic="select a Policy crypto backend: crypto-rustcrypto or fips" ;; \
+			*) diagnostic="select one Policy crypto backend: crypto-rustcrypto or fips" ;; \
+		esac; \
+		grep -Fq "$$diagnostic" <<< "$$out" || \
+			{ echo "consumer failed without the expected backend diagnostic" >&2; exit 1; }; \
+	done
+	@echo "Standalone consumer reports, dependency graph and backend refusals passed"
+
+.PHONY: check-fips-graph
+check-fips-graph:
+	@for pkg in praxis-policy praxis-policy-builtins; do \
+		tree="$$($(CARGO) tree -p $$pkg --no-default-features --features fips,api-key \
+			-e normal,build --prefix none)" || exit 1; \
+		if grep -Eq "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree"; then \
+			echo "FIPS graph for $$pkg links non-FIPS crypto:" >&2; \
+			grep -E "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree" >&2; \
+			exit 1; \
+		fi; \
+		grep -q '^openssl v' <<< "$$tree" || { echo "FIPS graph for $$pkg is missing OpenSSL" >&2; exit 1; }; \
+	done
+	@echo "FIPS graphs contain OpenSSL and no RustCrypto, ring or AWS-LC"
+
+# FIPS tests split by provider availability. `test-fips-no-provider` runs
+# where no FIPS provider is loaded: capability reports, HMAC and config
+# refusals, and fail-closed hashing. `test-fips-provider` needs
+# PRAXIS_REQUIRE_FIPS_PROVIDER and a loaded provider, and runs the full FIPS
+# lib suites against it.
+FIPS_REPORT_TEST := crypto_capability_tests::report_matches_the_expected_builtins
+FIPS_LIBS := -p praxis-policy-core -p praxis-policy-apl-cmf -p praxis-policy-apl-runtime
+FIPS_API_KEY_TEST := fips::fips_api_key_allow_and_deny_follow_provider_availability
+FIPS_RATELIMIT_TEST := a_crypto_failure_denies_and_logs_once_per_interval
+FIPS_API_KEY := fips,api-key
+FIPS_UNSAFE_BUILTINS := oauth,delegator-vault,valkey
+
+# Cargo succeeds when filters stop matching. Require a nonempty selection and
+# optionally its expected count so a renamed test cannot disappear from a group.
+run_selected = out="$$($(1) 2>&1)" || { echo "$$out"; exit 1; }; echo "$$out"; \
+	if grep -q '^running 0 tests' <<< "$$out"; then \
+		echo "no tests selected by: $(strip $(1))" >&2; exit 1; \
+	fi; \
+	if [ -n "$(2)" ] && ! grep -Eq '^running $(2) tests?$$' <<< "$$out"; then \
+		echo "expected $(2) tests from: $(strip $(1))" >&2; exit 1; \
+	fi
+
+.PHONY: test-fips-capabilities
+test-fips-capabilities: test-fips-no-provider
+
+.PHONY: test-fips-no-provider
+test-fips-no-provider: export OPENSSL_CONF := $(CURDIR)/.github/fips-no-provider.cnf
+test-fips-no-provider:
+	@if printenv PRAXIS_REQUIRE_FIPS_PROVIDER >/dev/null; then \
+		echo "test-fips-no-provider needs PRAXIS_REQUIRE_FIPS_PROVIDER unset" >&2; exit 1; \
+	fi
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
+		--lib -- --exact $(FIPS_REPORT_TEST),1)
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO= $(CARGO) test -p praxis-policy \
+		--no-default-features --features $(FIPS_API_KEY) --lib -- --exact $(FIPS_REPORT_TEST),1)
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=jwt $(CARGO) test -p praxis-policy \
+		--no-default-features --features $(FIPS_API_KEY)$(,)praxis-policy-builtins/jwt --lib \
+		-- --exact $(FIPS_REPORT_TEST),1)
+	@for builtin in $(subst $(,), ,$(FIPS_UNSAFE_BUILTINS)); do \
+		$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=$$builtin $(CARGO) test -p praxis-policy \
+			--no-default-features --features $(FIPS_API_KEY)$(,)$$builtin --lib \
+			-- --exact $(FIPS_REPORT_TEST),1); \
+	done
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=$(FIPS_UNSAFE_BUILTINS) \
+		$(CARGO) test -p praxis-policy --no-default-features \
+		--features $(FIPS_API_KEY)$(,)$(FIPS_UNSAFE_BUILTINS) --lib \
+		-- --exact $(FIPS_REPORT_TEST),1)
+	@$(call run_selected,$(CARGO) test -p praxis-policy-core --no-default-features \
+		--features fips --lib -- --exact \
+		crypto::tests::hmac_is_unavailable_under_fips \
+		crypto::tests::the_fips_build_reports_its_backend \
+		crypto::tests::a_missing_fips_provider_fails_closed \
+		engine::tests::a_missing_crypto_backend_stops_initialization \
+		hooks::payload::tests::a_keyed_digest_is_omitted_under_fips \
+		config::assertions_tests::fips_refuses_a_declared_provenance_key \
+		config::assertions_tests::fips_refuses_provenance_without_a_key_and_offers_only_unkeyed,7)
+	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST) \
+		fips::a_hashing_failure_skips_the_api_key_directory_and_cache,2)
+	@$(call run_selected,$(CARGO) test -p praxis-policy-apl-runtime --no-default-features \
+		--features fips --test crypto_failure)
+	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY)$(,)experimental-ratelimit --test ratelimit \
+		-- --exact $(FIPS_RATELIMIT_TEST),1)
+
+.PHONY: test-fips-provider
+test-fips-provider:
+	@test -n "$$PRAXIS_REQUIRE_FIPS_PROVIDER" || \
+		{ echo "test-fips-provider needs PRAXIS_REQUIRE_FIPS_PROVIDER and a FIPS provider" >&2; exit 1; }
+	@$(CARGO) test $(FIPS_LIBS) --no-default-features --features fips --lib \
+		-- --skip crypto::tests::a_missing_fips_provider_fails_closed \
+		--skip engine::tests::a_missing_crypto_backend_stops_initialization
+	@$(call run_selected,$(CARGO) test -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY) --test api_key -- --exact $(FIPS_API_KEY_TEST),1)
+	@$(CARGO) test -p praxis-policy -p praxis-policy-core -p praxis-policy-apl-cmf --no-default-features \
+		--features $(FIPS_API_KEY) --doc
 
 .PHONY: clean
 clean:
@@ -116,7 +264,23 @@ fmt:
 .PHONY: clippy
 clippy:
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
-	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+	@$(CARGO) clippy --workspace --all-targets --features "$(WORKSPACE_TEST_FEATURES)" -- -D warnings
+	@$(MAKE) clippy-fips
+
+# The FIPS profile compiles code no RustCrypto pass sees. Linting the facade
+# also lints core, CMF, runtime and builtins in that build.
+.PHONY: clippy-fips
+clippy-fips:
+	@$(CARGO) clippy -p praxis-policy --all-targets --no-default-features \
+		--features $(FIPS_API_KEY) -- -D warnings
+	@$(CARGO) clippy -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY),experimental-ratelimit --test ratelimit -- -D warnings
+	@$(CARGO) clippy -p praxis-policy-builtins --no-default-features \
+		--features $(FIPS_API_KEY) --test api_key -- -D warnings
+	@$(CARGO) clippy -p praxis-policy-apl-runtime --all-targets --no-default-features \
+		--features fips -- -D warnings
+	@$(CARGO) clippy -p praxis-policy-core --all-targets --no-default-features \
+		--features fips -- -D warnings
 
 # CI-safe gate: read-only fmt check plus clippy. Lint levels come from
 # [workspace.lints] in Cargo.toml.
@@ -125,12 +289,11 @@ lint:
 	@echo "fmt --check + clippy -D warnings ..."
 	@$(CARGO) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
-# The all-features pass is not redundant. `praxis-policy-builtins` is
-# `default = []`, and a default-feature workspace run only reaches cedar, cel
-# and opa — the three `ppe-pdp-diff` turns on through feature unification. The
-# other six extensions are linted by this pass alone.
-	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+# The expanded default feature set enables all builtins; a plain workspace run
+# reaches only cedar, cel, and opa through `ppe-pdp-diff`.
+	@$(CARGO) clippy --workspace --all-targets --features "$(WORKSPACE_TEST_FEATURES)" -- -D warnings
 	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
+	@$(MAKE) clippy-fips
 	@echo "lint passed"
 
 .PHONY: lint-fix
@@ -169,32 +332,31 @@ setup-hooks:
 # Test
 # =============================================================================
 
-# Two passes. The first is what a host gets naming no features. The second is the
-# only way to reach `#[cfg(feature = ...)]` test modules, and the facade's tests
-# are gated that way because its `default` is empty: the bare dependency is the
-# engine alone. Dropping either pass hides tests without failing.
+# Two passes: Cargo defaults, then the expanded `WORKSPACE_TEST_FEATURES` set. The
+# facade enables only the RustCrypto backend by default, not a builtin, so its
+# builtin tests are gated on the second pass. Dropping either pass hides tests.
 .PHONY: test
 test:
 	@$(CARGO) test --workspace
-	@$(CARGO) test --workspace --all-features
+	@$(CARGO) test --workspace --features "$(WORKSPACE_TEST_FEATURES)"
 
-# The suites under tests/. They build only with `--all-features`, which turns on
-# their `suite` feature; `make test` runs them in its second pass. As in praxis,
-# test-integration runs all three.
+# The suites under tests/. They build only with the explicit suite feature, which
+# turns on their `suite` feature; `make test` runs them in its second pass. As in
+# praxis, test-integration runs all three.
 .PHONY: test-integration
 test-integration:
-	@$(CARGO) test --all-features \
+	@$(CARGO) test --features experimental-ratelimit \
 		-p praxis-policy-tests-integration \
 		-p praxis-policy-tests-resilience \
 		-p praxis-policy-tests-security
 
 .PHONY: test-resilience
 test-resilience:
-	@$(CARGO) test --all-features -p praxis-policy-tests-resilience
+	@$(CARGO) test --features experimental-ratelimit -p praxis-policy-tests-resilience
 
 .PHONY: test-security
 test-security:
-	@$(CARGO) test --all-features -p praxis-policy-tests-security
+	@$(CARGO) test --features experimental-ratelimit -p praxis-policy-tests-security
 
 # ThreadSanitizer on the engine concurrency stress test. Needs nightly, a
 # Linux target, and an instrumented libstd (`-Zbuild-std`). The sanitizer
@@ -268,8 +430,8 @@ audit:
 # this is the only copy of the number.
 COVERAGE_FLOOR ?= 96
 
-# `--all-features` reaches the test targets behind `test-util`, without which the
-# compiler's test scaffolding and everything it covers fall outside the floor.
+# The expanded default feature set reaches the test targets behind `test-util`,
+# without which the compiler's test scaffolding and everything it covers fall outside the floor.
 #
 # `--include-ignored` reaches the Valkey integration tests, much of which needs no
 # Valkey at all. `VALKEY_TESTS_OPTIONAL=1` lets them skip instead of fail, because
@@ -278,7 +440,8 @@ COVERAGE_FLOOR ?= 96
 #
 # Both coverage targets share these flags. A report built from a narrower run
 # understates what the floor asserted.
-COVERAGE_ARGS := --workspace --all-features --exclude ppe-benches
+COVERAGE_FEATURES := $(filter-out ppe-benches/dhat-heap,$(WORKSPACE_TEST_FEATURES))
+COVERAGE_ARGS := --workspace --features "$(COVERAGE_FEATURES)" --exclude ppe-benches
 COVERAGE_TEST_ARGS := -- --include-ignored
 
 # `clean` first: llvm-cov merges the mappings of every instrumented binary it
@@ -313,15 +476,16 @@ mutants:
 
 # Semver compatibility check against the last published version.
 .PHONY: semver
-# Facade-scoped API compatibility against the last release. --all-features is
-# required, not optional: the facade is `default = []`, so a default-feature run
-# sees no builtin re-export and passes without inspecting the surface this
-# guards. Scoped to the facade deliberately — a workspace-wide run is noisy from
+# Facade-scoped API compatibility against the last release. The expanded default
+# feature set is required, not optional: the facade enables no builtin by
+# default, so a default-feature run sees no builtin re-export and passes without
+# inspecting the surface this guards. Scoped to the facade deliberately — a workspace-wide run is noisy from
 # the retired names and from a crate with no published baseline.
 .PHONY: semver-facade
 semver-facade:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
-	@cargo semver-checks --package praxis-policy --all-features
+	@cargo semver-checks --package praxis-policy --only-explicit-features \
+		--features "crypto-rustcrypto,builtins,http-hyper,experimental-quota,experimental-ratelimit"
 
 semver:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
@@ -337,7 +501,7 @@ doc:
 # Second pass for the same reason as `lint`: a default-feature workspace run
 # documents only the cedar, cel and opa modules, so the other six are covered
 # here alone.
-	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
+	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --features "$(WORKSPACE_TEST_FEATURES)"
 
 # Link and style checks for the markdown under docs/. Advisory, like
 # lint-extra: neither is part of `make ci`, because both reach for a tool the
@@ -372,26 +536,40 @@ docs-lint:
 # CI
 # =============================================================================
 
-# Compile `praxis-policy-builtins` with no features, then with each one alone.
-# Neither the default nor the all-features pass can catch a feature body that
-# omits its own `dep:` edge or its module-group marker: under --all-features
-# another feature supplies the dependency, and under default features nothing
-# compiles at all. This is the only gate that builds a partial feature set.
-BUILTIN_FEATURES := jwt api-key basic oauth elicitation-ciba cedar cel opa valkey secrets-vault
+# Compile each builtin feature alone on ordinary defaults, then each reference
+# plugin as its own package. Workspace builds unify features across members, so
+# only per-package checks catch a feature body that omits its own `dep:` edge,
+# module-group marker or crypto backend. This is the only gate that builds a
+# partial feature set.
+BUILTIN_FEATURES := jwt api-key basic oauth delegator-vault elicitation-ciba \
+	experimental-quota experimental-ratelimit cedar cel opa valkey secrets-vault
+REFERENCE_PLUGINS := praxis-policy-plugin-audit-logger praxis-policy-plugin-ocsf-audit \
+	praxis-policy-plugin-pii-scanner praxis-policy-plugin-transcript-scanner
 
 .PHONY: check-features
 check-features:
 	@echo "per-feature check: praxis-policy-builtins ..."
-	@$(CARGO) check -p praxis-policy-builtins --all-targets --no-default-features
+	@$(CARGO) check -p praxis-policy-builtins --all-targets
 	@for f in $(BUILTIN_FEATURES); do \
 		echo "  --features $$f"; \
-		$(CARGO) check -p praxis-policy-builtins --all-targets \
-			--no-default-features --features "$$f" || exit 1; \
+		$(CARGO) check -p praxis-policy-builtins --all-targets --features "$$f" || exit 1; \
+	done
+	@for p in $(REFERENCE_PLUGINS); do \
+		echo "  -p $$p"; \
+		$(CARGO) check -p $$p --all-targets || exit 1; \
+	done
+	@$(CARGO) check -p praxis-policy-builtins --lib --no-default-features --features fips,api-key
+	@$(CARGO) check -p praxis-policy --lib --no-default-features --features fips,api-key
+	@$(CARGO) check -p praxis-policy --lib --no-default-features --features crypto-rustcrypto,jwt
+	@$(CARGO) check -p praxis-policy-test-utils --all-targets
+	@$(CARGO) check -p praxis-policy-test-utils --all-targets --features suite
+	@for p in praxis-policy-tests-integration praxis-policy-tests-resilience praxis-policy-tests-security; do \
+		$(CARGO) check -p $$p --all-targets --features suite || exit 1; \
 	done
 	@# The one test that only exists without another feature: CIBA naming the
 	@# missing `valkey` feature. Every other pass builds with it.
-	@$(CARGO) test -p praxis-policy-builtins --no-default-features \
-		--features elicitation-ciba --lib -- elicitation_ciba::factory
+	@$(CARGO) test -p praxis-policy-builtins --features elicitation-ciba --lib \
+		-- elicitation_ciba::factory
 	@echo "check-features passed"
 
 .PHONY: ci
@@ -438,7 +616,7 @@ PACKAGE_TEST_EXCLUDES = --exclude praxis-policy-test-utils \
 	--exclude praxis-policy-tests-security
 publish-dry:
 	@$(CARGO) package --workspace $(PACKAGE_TEST_EXCLUDES) --locked --allow-dirty --no-verify
-	@$(CARGO) check --workspace --all-features --locked
+	@$(CARGO) check --workspace --features "$(WORKSPACE_TEST_FEATURES)" --locked
 
 # Tag the current commit and push it. The tag is what the release workflow
 # triggers on. VERSION must be semver with no leading `v`.

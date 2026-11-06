@@ -30,16 +30,35 @@ rust-version.workspace = true
 # is workspace-root-relative; cargo bundles it into the published .crate).
 readme.workspace = true
 
-# Build docs.rs with every extension enabled. The default build is engine-only
-# (`default = []`), which compiles no builtin at all, so without this the factory
-# re-exports and `install_builtins` are absent from the rendered docs.
+# Build docs.rs with every ordinary extension enabled. The default build enables
+# only the RustCrypto backend and compiles no builtin, so without this the
+# factory re-exports and `install_builtins` are absent from the rendered docs.
 [package.metadata.docs.rs]
-all-features = true
+features = [
+  "crypto-rustcrypto",
+  "builtins",
+  "http-hyper",
+  "experimental-quota",
+  "experimental-ratelimit",
+]
 
 [features]
-# Engine only by default: no builtin plugins are compiled in. Opt into every
-# bundled extension with `builtins`, or name granular features for a subset.
-default = []
+# Engine only by default: no builtin plugins, RustCrypto backend. Opt into every
+# bundled extension with `builtins`, or name granular features for a subset. A
+# build without defaults must name `crypto-rustcrypto` or `fips`.
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = [
+  "praxis-policy-core/crypto-rustcrypto",
+  "praxis-policy-apl-cmf/crypto-rustcrypto",
+  "praxis-policy-apl-runtime/crypto-rustcrypto",
+  "praxis-policy-builtins/crypto-rustcrypto",
+]
+fips = [
+  "praxis-policy-core/fips",
+  "praxis-policy-apl-cmf/fips",
+  "praxis-policy-apl-runtime/fips",
+  "praxis-policy-builtins/fips",
+]
 
 # Every builtin, including the Valkey session store and the redis + TLS stack it
 # carries.
@@ -63,31 +82,29 @@ experimental = ["dep:tracing"]
 
 # One feature per bundled extension. The names are the public API: a host writes
 # these, so they are deliberately shorter than the crate names they pull.
-jwt = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/jwt"]
-api-key = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/api-key"]
+jwt = ["_builtin", "praxis-policy-builtins/jwt"]
+api-key = ["_builtin", "praxis-policy-builtins/api-key"]
 basic = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/basic"]
-oauth = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/oauth"]
-delegator-vault = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/delegator-vault"]
+oauth = ["_builtin", "praxis-policy-builtins/oauth"]
+delegator-vault = ["_builtin", "praxis-policy-builtins/delegator-vault"]
 elicitation-ciba = [
   "_builtin",
-  "dep:praxis-policy-builtins",
   "praxis-policy-builtins/elicitation-ciba",
 ]
-cedar = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cedar"]
-cel = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/cel"]
-opa = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/opa"]
-valkey = ["_builtin", "dep:praxis-policy-builtins", "praxis-policy-builtins/valkey"]
+cedar = ["_builtin", "praxis-policy-builtins/cedar"]
+cel = ["_builtin", "praxis-policy-builtins/cel"]
+opa = ["_builtin", "praxis-policy-builtins/opa"]
+valkey = ["_builtin", "praxis-policy-builtins/valkey"]
 # Vault KV v2 secret backend. Off the default build; compiled with
 # `builtins` or by name. The host still registers it with a transport —
 # this feature only makes the factory available.
-secrets-vault = ["dep:praxis-policy-builtins", "praxis-policy-builtins/secrets-vault"]
+secrets-vault = ["praxis-policy-builtins/secrets-vault"]
 
 # Experimental token quota. Registers via the builtin path but only when named;
 # sets `experimental` so the host can warn. Not covered by semver.
 experimental-quota = [
   "_builtin",
   "experimental",
-  "dep:praxis-policy-builtins",
   "praxis-policy-builtins/experimental-quota",
 ]
 
@@ -95,7 +112,6 @@ experimental-quota = [
 experimental-ratelimit = [
   "_builtin",
   "experimental",
-  "dep:praxis-policy-builtins",
   "praxis-policy-builtins/experimental-ratelimit",
 ]
 
@@ -132,17 +148,19 @@ _builtin = []
 
 [dependencies]
 # Host runtime — always present, this is the point of the facade.
-praxis-policy-core = { workspace = true }
+praxis-policy-core = { workspace = true, default-features = false }
 praxis-policy-apl-core = { workspace = true }
-praxis-policy-apl-cmf = { workspace = true }
-praxis-policy-apl-runtime = { workspace = true }
+praxis-policy-apl-cmf = { workspace = true, default-features = false }
+praxis-policy-apl-runtime = { workspace = true, default-features = false }
 
-# Bundled extension crates, each behind its feature above.
+# Bundled extensions. Always linked so the crypto report can list them; each
+# module still compiles only behind its feature above. Defaults are off so the
+# backend comes from this crate's features.
 #
 # Not everything shipped in this repository belongs here. `reference/` holds
 # unpublished examples a host registers itself; each of those manifests says why it
 # is not a builtin.
-praxis-policy-builtins = { workspace = true, optional = true }
+praxis-policy-builtins = { workspace = true, default-features = false }
 
 # `experimental` only: the one-line warn_experimental_features.
 tracing = { workspace = true, optional = true }

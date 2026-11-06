@@ -14,20 +14,48 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-# Build docs.rs with every extension enabled. The default build enables no
-# module at all (`default = []`), so without this the rendered page is empty —
-# and the facade's re-exports resolve into it.
+# Build docs.rs with every RustCrypto extension enabled. The default build
+# enables no module, so without this the rendered page is empty, and the
+# facade's re-exports resolve into it.
 [package.metadata.docs.rs]
-all-features = true
+features = [
+  "crypto-rustcrypto",
+  "jwt",
+  "api-key",
+  "oauth",
+  "delegator-vault",
+  "elicitation-ciba",
+  "experimental-quota",
+  "experimental-ratelimit",
+  "cedar",
+  "cel",
+  "opa",
+  "valkey",
+  "secrets-vault",
+]
 
 [features]
-default = []
+default = ["crypto-rustcrypto"]
+
+# Exactly one backend reaches the engine crates. The default selects RustCrypto
+# and no extension; a FIPS consumer disables defaults and enables `fips`. The
+# forwards are weak so a backend never pulls in an engine layer by itself.
+crypto-rustcrypto = [
+  "praxis-policy-core?/crypto-rustcrypto",
+  "praxis-policy-apl-cmf?/crypto-rustcrypto",
+  "praxis-policy-apl-runtime?/crypto-rustcrypto",
+]
+fips = [
+  "praxis-policy-core?/fips",
+  "praxis-policy-apl-cmf?/fips",
+  "praxis-policy-apl-runtime?/fips",
+]
 
 # Feature names match the facade's exactly, so each facade body is a one-line
 # forward and a rename is a lockstep two-file edit rather than a translation
 # table nobody maintains.
 jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64", "dep:sha2"]
-api-key = ["_engine-core", "_plugins", "dep:sha2"]
+api-key = ["_engine-core", "_plugins"]
 # RFC 7617 Basic authentication. `base64` decodes the credential and
 # `unicode-normalization` NFC-folds the user-id before it is used as an index
 # key; both must be named here, since `base64` is optional and reached only
@@ -105,10 +133,10 @@ _secrets = []
 # Engine crates, optional so a consumer resolves only the layer it asked for.
 # The three PDPs must stay apl-core-only on their normal edges: a non-optional
 # `apl-runtime` here would silently hand a Cedar-only consumer the runtime.
-praxis-policy-core = { workspace = true, optional = true }
+praxis-policy-core = { workspace = true, default-features = false, optional = true }
 praxis-policy-apl-core = { workspace = true, optional = true }
-praxis-policy-apl-cmf = { workspace = true, optional = true }
-praxis-policy-apl-runtime = { workspace = true, optional = true }
+praxis-policy-apl-cmf = { workspace = true, default-features = false, optional = true }
+praxis-policy-apl-runtime = { workspace = true, default-features = false, optional = true }
 
 # Shared runtime crates, deliberately NOT optional. Every feature enables one
 # engine crate, and `praxis-policy-core` already pulls each of these

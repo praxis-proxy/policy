@@ -4,8 +4,8 @@
 //! Bundled extensions for the Praxis Policy Engine: decision points, identity
 //! and delegation plugins, a session store, and a secret provider.
 //!
-//! Every extension sits behind its own Cargo feature and nothing is enabled by
-//! default. Hosts normally reach these through the `praxis-policy` facade,
+//! Every extension sits behind its own Cargo feature and none is enabled by
+//! default; the default selects only the `RustCrypto` backend. Hosts normally reach these through the `praxis-policy` facade,
 //! which maps its own feature of the same name onto each one and registers the
 //! factories; depend on this crate directly only to use an extension without
 //! the facade.
@@ -20,6 +20,8 @@
 //! |---|---|
 //! | `jwt` | `plugins::identity_jwt` |
 //! | `api-key` | `plugins::identity_api_key` |
+//! | `crypto-rustcrypto` | RustCrypto SHA-256 and HMAC; on by default |
+//! | `fips` | OpenSSL FIPS SHA-256 for Policy and API-key; no HMAC |
 //! | `basic` | `plugins::identity_basic` |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
@@ -36,6 +38,15 @@
 // catches a `cfg` naming a feature that does not exist, but not an alternative
 // missing from such a list, so a marker is what keeps a tenth extension from
 // silently failing to declare its module.
+#[cfg(all(feature = "crypto-rustcrypto", feature = "fips"))]
+compile_error!("select one API-key crypto backend: crypto-rustcrypto or fips");
+#[cfg(all(
+    feature = "api-key",
+    not(any(feature = "crypto-rustcrypto", feature = "fips"))
+))]
+compile_error!("api-key requires crypto-rustcrypto or fips");
+#[cfg(all(feature = "fips", not(feature = "api-key")))]
+compile_error!("the FIPS profile requires the api-key feature");
 #[cfg(feature = "_plugins")]
 pub mod plugins;
 
@@ -47,6 +58,36 @@ pub mod secrets;
 
 #[cfg(feature = "_session")]
 pub mod session;
+
+/// An enabled builtin that does its own crypto with `RustCrypto`, outside
+/// the selected Policy backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BundledCryptoCapability {
+    /// JWT signature verification and `DPoP` token hashing.
+    Jwt,
+    /// OAuth delegation cache-key HMAC.
+    OAuth,
+    /// Vault delegation cache-key hashing.
+    VaultDelegation,
+    /// Valkey session-key hashing.
+    Valkey,
+}
+
+/// List the enabled builtins that do their own crypto.
+#[must_use]
+pub fn bundled_crypto_capabilities() -> Vec<BundledCryptoCapability> {
+    vec![
+        #[cfg(feature = "jwt")]
+        BundledCryptoCapability::Jwt,
+        #[cfg(feature = "oauth")]
+        BundledCryptoCapability::OAuth,
+        #[cfg(feature = "delegator-vault")]
+        BundledCryptoCapability::VaultDelegation,
+        #[cfg(feature = "valkey")]
+        BundledCryptoCapability::Valkey,
+    ]
+}
 
 #[cfg(any(feature = "valkey", feature = "elicitation-ciba"))]
 mod env_secret;

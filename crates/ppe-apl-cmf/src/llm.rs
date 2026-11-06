@@ -32,10 +32,10 @@
 // OPA inputs, where dotted keys become nested maps.
 
 use praxis_policy_apl_core::AttributeBag;
+use praxis_policy_core::crypto::{CryptoError, Sha256};
 use praxis_policy_core::extensions::{
     LLMExtension, LlmInstruction, LlmInstructionRole, LlmRequestParts, ToolChoice,
 };
-use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
 
 use crate::constants::{
@@ -62,7 +62,13 @@ pub fn extract_llm(llm: &LLMExtension, bag: &mut AttributeBag) {
 }
 
 /// Write what the request asks of the model into the bag.
-pub fn extract_llm_request(req: &LlmRequestParts, bag: &mut AttributeBag) {
+///
+/// # Errors
+/// Returns an error if the selected SHA-256 provider cannot digest instructions.
+pub fn extract_llm_request(
+    req: &LlmRequestParts,
+    bag: &mut AttributeBag,
+) -> Result<(), CryptoError> {
     // Sets follow the empty-set rule within a present request.
     let offered: HashSet<String> = req.offered_tools.iter().map(|t| t.name.clone()).collect();
     bag.set(BAG_LLM_OFFERED_TOOLS, offered);
@@ -98,8 +104,9 @@ pub fn extract_llm_request(req: &LlmRequestParts, bag: &mut AttributeBag) {
     }
     bag.set(
         BAG_LLM_INSTRUCTIONS_DIGEST,
-        instruction_digest(&req.instructions),
+        instruction_digest(&req.instructions)?,
     );
+    Ok(())
 }
 
 /// Digest of ordered instructions, including their roles and boundaries.
@@ -107,38 +114,37 @@ pub fn extract_llm_request(req: &LlmRequestParts, bag: &mut AttributeBag) {
 /// The preimage is `ppe.llm.instructions.v1\0`, a big-endian `u32` count,
 /// then for each instruction a one-byte role (`0` system, `1` developer),
 /// a big-endian `u64` byte length, and the exact UTF-8 text bytes.
-#[must_use]
-pub fn instruction_digest(instructions: &[LlmInstruction]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"ppe.llm.instructions.v1\0");
+///
+/// # Errors
+/// Returns an error if the selected SHA-256 provider cannot hash the input.
+pub fn instruction_digest(instructions: &[LlmInstruction]) -> Result<String, CryptoError> {
+    let mut digest = Sha256::new()?;
+    digest.update(b"ppe.llm.instructions.v1\0")?;
     digest.update(
         u32::try_from(instructions.len())
             .unwrap_or(u32::MAX)
             .to_be_bytes(),
-    );
+    )?;
     for instruction in instructions {
         let role = match instruction.role {
             LlmInstructionRole::System => 0_u8,
             LlmInstructionRole::Developer => 1_u8,
         };
-        digest.update([role]);
+        digest.update([role])?;
         digest.update(
             u64::try_from(instruction.text.len())
                 .unwrap_or(u64::MAX)
                 .to_be_bytes(),
-        );
-        digest.update(instruction.text.as_bytes());
+        )?;
+        digest.update(instruction.text.as_bytes())?;
     }
-    let hex: String = digest
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    format!("sha256-v1:{hex}")
+    let digest = digest.finalize()?;
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("sha256-v1:{hex}"))
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "tests")]
+#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
     use praxis_policy_core::extensions::{Extensions, LlmRequest, ToolMetadata};
@@ -155,7 +161,7 @@ mod tests {
             ..Default::default()
         };
         let mut bag = AttributeBag::new();
-        crate::extract_extensions(&ext, &mut bag);
+        crate::extract_extensions(&ext, &mut bag).expect("selected SHA-256 backend is available");
         bag
     }
 
@@ -204,7 +210,11 @@ mod tests {
         assert_eq!(bag.get_bool("llm.input.stream"), Some(true));
         assert_eq!(
             bag.get_string("llm.input.instructions_digest"),
-            Some(instruction_digest(&parts.instructions).as_str())
+            Some(
+                instruction_digest(&parts.instructions)
+                    .expect("selected SHA-256 backend is available")
+                    .as_str(),
+            )
         );
         assert!(!bag.contains("llm.offered_tools"));
     }
@@ -220,7 +230,7 @@ mod tests {
             text: text.into(),
         };
         let base = vec![system("ab"), developer("c")];
-        let digest = instruction_digest(&base);
+        let digest = instruction_digest(&base).expect("selected SHA-256 backend is available");
         assert!(digest.starts_with("sha256-v1:"));
         for changed in [
             vec![developer("ab"), developer("c")],
@@ -228,9 +238,28 @@ mod tests {
             vec![developer("c"), system("ab")],
             vec![system("aB"), developer("c")],
         ] {
-            assert_ne!(digest, instruction_digest(&changed));
+            assert_ne!(
+                digest,
+                instruction_digest(&changed).expect("selected SHA-256 backend is available")
+            );
         }
-        assert_ne!(digest, instruction_digest(&[]));
+        assert_ne!(
+            digest,
+            instruction_digest(&[]).expect("selected SHA-256 backend is available")
+        );
+    }
+
+    #[test]
+    fn instruction_digest_keeps_its_existing_sha256_vector() {
+        let instructions = [LlmInstruction {
+            role: LlmInstructionRole::System,
+            text: "abc".into(),
+        }];
+
+        assert_eq!(
+            instruction_digest(&instructions).expect("selected SHA-256 backend is available"),
+            "sha256-v1:58ef993cc02f9ea75d2a41be204c9a11fa10bed0280bc80de150290dcbc4b2ff"
+        );
     }
 
     #[test]

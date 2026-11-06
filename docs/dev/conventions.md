@@ -44,7 +44,7 @@ Use the targets in [Makefile] for the repository's
 supported workflows. `make audit` uses `cargo deny check`
 for advisories, licenses, bans, and sources; `make machete`
 is advisory, and `make semver-facade` checks the facade's
-public API with all features enabled.
+public API with an explicit compatible feature set.
 
 [Makefile]: ../../Makefile
 
@@ -87,16 +87,16 @@ A feature without tests and a usable example is not
 complete. See [Testing Policy] for route outcomes,
 scripted transports, live dependencies, and suite layout.
 
-`make test` runs two passes: default features, then
-`--all-features`. Both are required; the facade's default
-feature set is empty, so dropping the all-features pass
-hides feature-gated tests. During iteration, use
+`make test` runs Cargo defaults, then the expanded
+`WORKSPACE_TEST_FEATURES` set. The facade enables no
+builtin by default, so the second pass is needed for its
+feature-gated tests. During iteration, use
 `make check` and `cargo nextest run -p <crate> --lib` for
 the affected crates. Reserve full workspace test runs for
 commit boundaries.
 
 The integration, resilience, and security suites under
-`tests/` run in the all-features pass. Use
+`tests/` run with `WORKSPACE_TEST_FEATURES`. Use
 `make test-integration`, `make test-resilience`, or
 `make test-security` to run them separately. Prefer one
 test binary per concern, gathering related cases under a
@@ -130,12 +130,15 @@ and produces `lcov.info`. The floor only ratchets up,
 never down. The Makefile is the authority on coverage
 flags and exclusions; `ppe-benches` is excluded.
 
-Coverage includes all features and ignored tests, with
-`VALKEY_TESTS_OPTIONAL=1` so tests needing a live Valkey
-server skip gracefully. Set `VALKEY_TEST_URL` to measure
-those paths against a real server. Other live suites and
-their environment requirements are documented in
-[Testing Policy].
+Coverage uses the expanded `WORKSPACE_TEST_FEATURES`
+RustCrypto profile and includes ignored tests. FIPS is
+excluded; its behavior is checked by `make
+test-fips-no-provider` and `make test-fips-provider`.
+`VALKEY_TESTS_OPTIONAL=1` lets tests needing a live Valkey
+server skip gracefully. Set
+`VALKEY_TEST_URL` to measure those paths against a real
+server. Other live suites and their environment
+requirements are documented in [Testing Policy].
 
 #### Mutation Testing
 

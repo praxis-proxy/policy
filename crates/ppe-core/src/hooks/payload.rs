@@ -169,8 +169,9 @@ pub enum ContentKey {
     /// a short or templated message carrying a redacted value can be
     /// enumerated back out of the digest.
     Unkeyed,
-    /// HMAC-SHA256 under an operator secret. Read on every digest, so a
-    /// refresh that rotates the secret takes effect without a reload.
+    /// HMAC-SHA256 under an operator secret in `RustCrypto` builds. Read on
+    /// every digest, so a refresh that rotates the secret takes effect without
+    /// a reload.
     Keyed(crate::secrets::SecretRef),
 }
 
@@ -204,28 +205,32 @@ impl ContentKey {
     /// Digest `bytes`, prefixed with the scheme and, for a keyed digest, the
     /// key id.
     ///
-    /// `None` only if the HMAC cannot be initialized, which it accepts any key
-    /// length for. Handled rather than asserted, since a panic here would take
-    /// the request down over an audit field.
+    /// `None` when the selected crypto provider cannot digest the bytes.
+    /// Handled rather than asserted, since a panic here would take the request
+    /// down over an audit field.
     #[must_use]
     pub fn digest(&self, bytes: &[u8]) -> Option<String> {
-        use hmac::{Hmac, KeyInit as _, Mac as _};
-        use sha2::{Digest as _, Sha256};
+        use crate::crypto::{hmac_sha256, sha256};
 
         match self {
-            Self::Unkeyed => Some(format!("sha256:{}", hex(&Sha256::digest(bytes)))),
+            Self::Unkeyed => {
+                let digest = sha256(bytes)
+                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+                    .ok()?;
+                Some(format!("sha256:{}", hex(&digest)))
+            },
             Self::Keyed(secret) => {
                 let key = secret.get();
-                let mac = |data: &[u8]| {
-                    let mut m = <Hmac<Sha256>>::new_from_slice(key.as_bytes()).ok()?;
-                    m.update(data);
-                    Some(m.finalize().into_bytes())
-                };
-                let id = mac(KEY_ID_LABEL)?;
+                let id = hmac_sha256(key.as_bytes(), KEY_ID_LABEL)
+                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+                    .ok()?;
+                let digest = hmac_sha256(key.as_bytes(), bytes)
+                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+                    .ok()?;
                 Some(format!(
                     "hmac-sha256:{}:{}",
                     hex(id.get(..8).unwrap_or_default()),
-                    hex(&mac(bytes)?)
+                    hex(&digest)
                 ))
             },
         }
@@ -299,12 +304,7 @@ macro_rules! impl_plugin_payload {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    reason = "tests"
-)]
+#[expect(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -328,6 +328,7 @@ mod tests {
     }
 
     const KEY_A: &str = "a-provenance-key-of-thirty-two-bytes-or-more";
+    #[cfg(feature = "crypto-rustcrypto")]
     const KEY_B: &str = "another-provenance-key-of-thirty-two-bytes";
 
     #[test]
@@ -341,6 +342,36 @@ mod tests {
     }
 
     #[test]
+    fn the_unkeyed_digest_keeps_its_vector() {
+        assert_eq!(
+            unkeyed(b"hello"),
+            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[test]
+    fn the_keyed_digest_keeps_its_vector() {
+        assert_eq!(
+            keyed(KEY_A).digest(b"hello").unwrap(),
+            "hmac-sha256:60feaba87c33f47b:37e3d4bccba219bd861dd20b3aa3458fa081fbc56a48e5032b28e3bdb6e8f438"
+        );
+    }
+
+    /// Config validation refuses keyed provenance under `fips`; a host that
+    /// builds the key directly gets no digest rather than a non-FIPS one.
+    #[cfg(feature = "fips")]
+    #[test]
+    fn a_keyed_digest_is_omitted_under_fips() {
+        assert_eq!(keyed(KEY_A).digest(b"hello"), None);
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the test asserts the number of digest parts"
+    )]
+    #[test]
     fn a_keyed_digest_names_its_scheme_and_key() {
         let h = keyed(KEY_A).digest(b"hello").unwrap();
         let parts: Vec<&str> = h.split(':').collect();
@@ -353,6 +384,7 @@ mod tests {
 
     /// Equal content under one key gives equal digests, which is what lets a
     /// reader spot a payload replayed across requests.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn the_same_key_and_content_digest_the_same() {
         assert_eq!(keyed(KEY_A).digest(b"hello"), keyed(KEY_A).digest(b"hello"));
@@ -361,6 +393,7 @@ mod tests {
 
     /// A rotated key shows up as a different key id, so a reader does not
     /// compare digests across it and read the rotation as the content changing.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn a_different_key_has_a_different_id() {
         let id = |key: &str| {
@@ -378,6 +411,7 @@ mod tests {
 
     /// The keyed digest is not the plain hash of the content, which is the
     /// whole point: a guess cannot be checked without the key.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn a_keyed_digest_is_not_the_plain_hash() {
         let plain = unkeyed(b"hello");
