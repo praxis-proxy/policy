@@ -90,7 +90,7 @@ fn proof(key: &Key, jti: i64) -> String {
         "htu": URL,
         "iat": now(),
         "jti": format!("jti-{jti}"),
-        "ath": access_token_hash(TOKEN),
+        "ath": access_token_hash(TOKEN).expect("ath"),
     });
     encode(&header, &claims, &key.encoding).expect("sign proof")
 }

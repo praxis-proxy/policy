@@ -17,19 +17,59 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
 ### Added
+
+- **JWT and DPoP under FIPS.** The `jwt-openssl-fips` feature verifies
+  `identity/jwt` tokens and DPoP proofs with system OpenSSL under the FIPS
+  provider, while `jsonwebtoken` keeps parsing, JWKS selection and claim
+  validation. It requires `fips` and cannot be combined with `jwt`, which
+  keeps AWS-LC. RS256 to RS512, PS256 to PS512, ES256 and ES384 are
+  supported, with RSA keys of 2048 to 8192 bits and a FIPS 186-5 public
+  exponent, and EC keys on P-256 or P-384. Other inline and file keys are
+  refused at load, other JWKS entries are skipped on refresh, and other
+  client-supplied DPoP proof keys are refused when the proof is verified. The
+  DPoP `ath` hash and JWK thumbprint use the shared SHA-256 backend.
+  `fips,jwt-openssl-fips` passes `fips_profile_is_safe()`, with or without
+  `api-key`. Building a
+  resolver checks that the FIPS provider is the OpenSSL default and refuses a
+  conflicting `jsonwebtoken` provider, with `policy_crypto_failure`.
+- **Backend-selected randomness.** `praxis_policy_core::crypto::random_bytes`
+  draws secret material from the OS under `crypto-rustcrypto` and from
+  OpenSSL's private DRBG under `fips`, failing unless the FIPS provider is
+  the default. The OAuth cache-key secret uses it.
+- **Shared crypto failure code.** `CRYPTO_FAILED_CODE` (`policy.crypto_failed`)
+  is exported from core and the facade, for plugins that deny on a backend
+  failure.
+- **FIPS graph classification.** `make check-fips-graph` and
+  `make check-crypto-consumer` fail on an unclassified crypto crate and print
+  the accepted ones (`uuid`, `getrandom`, `signature`).
+- **Raw HTTP query strings reach policy.** Hosts populate `HttpExtension.query`
+  separately from the path, and APL, CEL and OPA read it as `http.query`;
+  Cedar templates can project it into context. Plugin views require
+  `read_query`. Debug output, HTTP serialization and built-in PDP diagnostics
+  redact it because a query can carry credentials.
+  ([#222](https://github.com/praxis-proxy/policy/issues/222))
+- **Audit record exporters.** `praxis_policy_core::audit::export` provides
+  `AuditExporter` and stderr, stdout and append-only file exporters. The
+  reference `audit/ocsf` sink accepts an `exporters:` list, including a tracing
+  exporter, and sends the same serialized record to each destination.
+  ([#226](https://github.com/praxis-proxy/policy/pull/226))
 
 - **Selectable crypto backend.** Policy's SHA-256 operations (content
   digests, decision-cache keys, session ids, instruction digests and API-key
   hashing) use `crypto-rustcrypto`, the default, or `fips`, which uses OpenSSL
-  with the `fips=yes` property. The FIPS profile is SHA-256 only and is
-  `default-features = false` with `fips` and `api-key`. Exactly one backend
+  with the `fips=yes` property. The FIPS profile is `default-features = false`
+  with `fips`; `api-key` and `jwt-openssl-fips` are optional identity
+  builtins, and an engine-only `fips` build is supported. Exactly one backend
   must be selected; none or both is a build error.
 - **FIPS startup checks.** `crypto_capability_report()` describes the compiled
-  backend and the builtins that do their own `RustCrypto` crypto (JWT, OAuth,
+  backend and the builtins that use other crypto (ordinary JWT, OAuth,
   Vault delegation, Valkey); `fips_profile_is_safe()` is false while any of
-  them is enabled. `validate_crypto_backend()`, exported from core and the
-  facade without requiring API-key, checks shared SHA-256 availability.
+  them is enabled, and does not require an API-key builtin.
+  `validate_crypto_backend()`, exported from core and the facade without
+  requiring API-key, checks shared SHA-256 availability.
   `PolicyEngine::initialize()` calls this check before resolving secrets or
   initializing plugins. Hosts still check the capability report and their
   own crypto requirements.
@@ -182,6 +222,27 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking Rust API: HTTP query support.** `HttpExtension` adds `query`;
+  exhaustive struct literals must initialize it or use `..Default::default()`.
+  `Capability` adds `ReadQuery`, requiring a new arm in exhaustive matches.
+  `read_headers` does not grant access to the raw query; plugins need
+  `read_query`. Serialized HTTP state contains a redacted query placeholder,
+  so hosts must carry the live query between hooks without a JSON round trip.
+- **OAuth needs the FIPS default under `fips`.** The OAuth cache-key secret
+  now comes from `random_bytes`, so with `fips` an OAuth delegator fails to
+  build unless the FIPS provider is the OpenSSL default. This affects
+  `fips,api-key,oauth` builds that use no JWT. OAuth stays reported unsafe
+  under FIPS because its cache key is still an HMAC.
+- **HMAC and EdDSA JWTs are refused under `jwt-openssl-fips`.** HS256, HS384,
+  HS512, EdDSA and `decoding_key: { kind: secret }` fail config load with that
+  feature. Ordinary `jwt` keeps these algorithms unchanged.
+- **Breaking Rust API: DPoP hashing is fallible.** `jwk_thumbprint` returns
+  `Result<String, ThumbprintError>`, separating an unsupported key
+  (`Unsupported`) from a backend failure (`Crypto`); `access_token_hash`
+  returns `Result<String, CryptoError>`.
+- **Breaking Rust API: new `CryptoError` variants.** `NonFipsDefault` and
+  `ProviderConflict` under `fips`, and `Random` under `crypto-rustcrypto`.
+  The enum is `#[non_exhaustive]`.
 - **Breaking Rust API: crypto initialization errors.** `PluginError` adds
   `Crypto { source: CryptoError }`; exhaustive matches need a new arm.
   `PolicyEngine::initialize()` refuses startup when the shared SHA-256
@@ -280,6 +341,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   exhaustive matches may need updates.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
 
+- **DPoP proofs are idempotent within a request.** `identity/jwt` records each
+  accepted proof in the request's `PluginContextTable`, so resolving identity
+  again with the table the host threads through the request, for example at
+  the HTTP gate and then at the tool, reuses the proof instead of denying it
+  as `auth.dpop_replay`. Every other proof check still runs. A route
+  `config:` override instance reuses the record when it shares the base
+  instance's replay guard. A new table is a new request and still hits the
+  replay guard. `DpopVerifier::verify_in` exposes the same check. A resolver
+  with DPoP turned on in a mode other than `sequential` or `transform` is
+  refused at load, because those modes do not keep the record.
 - **Breaking:** `SubjectExtension`, `ClientExtension`, and `WorkloadIdentity`
   add `key_binding`. Hosts using exhaustive struct literals must initialize it
   or use `..Default::default()`. `TrustedIssuerConfig` adds `dpop`; exhaustive
@@ -290,6 +361,24 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `Capability` adds `ReadMetadata` and `SlotName` adds `Metadata`, so
   exhaustive matches need a new arm. `Extensions.metadata` is never
   serialized. The new metadata enums are `#[non_exhaustive]`.
+
+### Fixed
+
+- `&` and `|` no longer abort when one operand cannot be ordered and
+  another already settles the expression. A true `|` operand or a false `&`
+  operand decides the same way in either order, so some phases that denied
+  on an unparseable value now evaluate normally. An unorderable result is
+  still fail-closed when no operand settles.
+  ([#69](https://github.com/praxis-proxy/policy/issues/69))
+- Enabled audit sinks without policy hooks load under `dispatch: policy`;
+  they receive verdicts without a `run(name)` step and are exempt from the
+  plugin reachability error. Disabled sinks remain subject to that check.
+  ([#210](https://github.com/praxis-proxy/policy/pull/210))
+- Crypto and rate-limit alarm throttling uses a monotonic clock, so a backward
+  wall-clock adjustment cannot silence failure logs. Forged JWT and DPoP
+  signatures deny without raising a crypto-backend alarm; verification setup
+  and hashing failures still raise the throttled alarm.
+
 ## [0.5.0] - 2026-10-13
 
 ### Added
@@ -457,12 +546,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- `&` and `|` no longer abort when one operand cannot be ordered and
-  another already settles the expression. A true `|` operand or a false `&`
-  operand decides the same way in either order, so some phases that denied
-  on an unparseable value now evaluate normally. An unorderable result is
-  still fail-closed when no operand settles.
-  ([#69](https://github.com/praxis-proxy/policy/issues/69))
 - Rejected JWTs with unsupported critical headers. OAuth token exchange now
   validates the issued token type, granted scopes, and JWT audience and subject
   by default. Empty scope requests accept IdP defaults, and
@@ -693,9 +776,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#86](https://github.com/praxis-proxy/policy/pull/86))
 - Added multithreaded engine stress tests, a Loom memory-ordering model, and a
   nightly ThreadSanitizer job. ([#60](https://github.com/praxis-proxy/policy/pull/60))
-
-### Internal
-
 - **Line coverage floor raised to 96%.** `COVERAGE_FLOOR` in the `Makefile` is the gate. Parser error-return sites, `load_config_yaml` visitor refusals (`visit_route` / `visit_complete`), and the Valkey empty-append path are now tested. About 25 unreachable defensive guards still cap the number below 100. ([#14](https://github.com/praxis-proxy/policy/issues/14))
 - **The coverage artifact now measures the gated run.** The coverage job built `lcov.info` from a second, narrower run (default features, ignored tests skipped), so the uploaded report understated the number the floor asserted. `make coverage-lcov` measures once and derives both the floor check and the report from that data. ([#86](https://github.com/praxis-proxy/policy/pull/86))
 - **Line coverage raised to 96.5%, and a secret leak closed on the way.** `DecodingKeySource`'s derived `Debug` printed inline PEM keys and HMAC secrets verbatim, and `TrustedIssuer`'s hand-written `Debug` forwarded that field while its comment claimed the key was elided, so any host logging its plugin list disclosed the signing secret. It now redacts the material and keeps the locator (path, JWKS URL). Tests cover the redaction on all five hand-written `Debug` impls, the non-blocking and timeout arms of every executor phase, `AplRouteHandler`'s wiring guards, and the Valkey endpoint error paths. ([#86](https://github.com/praxis-proxy/policy/pull/86))
@@ -759,6 +839,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **Each shipped preset records what it omits.** Auth0 and Keycloak put their roles claim where no preset can name it, so those need a hand-written `claim_map`. Presets leave a field empty rather than filling it with the wrong concept, because Keycloak's `groups` holds realm roles and Cognito's `cognito:roles` holds IAM role ARNs. Each preset's description says what it covers and what is opt-in at the provider. ([#31](https://github.com/praxis-proxy/policy/pull/31))
 
 - **Roles and permissions are readable as whole sets.** `subject.roles`, `subject.permissions`, `client.roles`, and `client.permissions` join `subject.teams` as `StringSet` bag keys, so a policy can write `"hr" in subject.roles` rather than enumerating `role.<name>` booleans. The flattened boolean keys are unchanged. ([#7](https://github.com/praxis-proxy/policy/pull/7))
+
 ### Changed
 
 - **`require(P)` is now a predicate meaning `!P`.** It accepts general predicates, including comparisons, negation, and composition with `&` or `|`. Existing accepted forms retain their semantics: `require(a)`, `require(a, b)`, and `require(a | b)` still normalize to the same trees.
@@ -939,6 +1020,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **The unused `hooks::types::hook_names` and `hooks::types::cmf_hook_names` modules.** **Breaking for Rust callers**: import CMF names from `praxis_policy_core::cmf::constants`, alongside `identity::HOOK_IDENTITY_RESOLVE`, `delegation::HOOK_TOKEN_DELEGATE`, and `elicitation::HOOK_ELICIT`. Their operator-facing string values remain stable.
 
 - **`AplRouteHandler::with_pdp_router` is gone.** Install a `PdpRouter` through `with_pdp`, which is what the visitor already does. ([#13](https://github.com/praxis-proxy/policy/issues/13))
+
 ### Fixed
 
 - **Delegators and elicitation handlers are no longer reported as narrowed when their family-specific hooks are reached.** `delegate(...)` is credited to `token.delegate`, and elicitation verbs to `elicit`. Unreached hooks declared by those plugins are still reported.
@@ -1045,7 +1127,8 @@ First release. The engine was extracted from another project rather than written
 
 - **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/praxis-proxy/policy/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/praxis-proxy/policy/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/praxis-proxy/policy/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/praxis-proxy/policy/compare/v0.3.1...v0.4.0

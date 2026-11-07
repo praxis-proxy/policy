@@ -57,7 +57,8 @@ praxis-policy-plugin-audit-logger = { workspace = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
-jsonwebtoken = { workspace = true, optional = true, features = ["aws_lc_rs"] }
+# The backend comes from the builtins `jwt` feature that `suite` enables.
+jsonwebtoken = { workspace = true, optional = true }
 # Pinned to 0.8 for rsa 0.9's rand_core; see `crates/builtins/Cargo.toml`.
 rand = { workspace = true, optional = true }
 rsa = { workspace = true, optional = true, features = ["pem"] }

@@ -155,7 +155,7 @@ impl From<&PluginError> for PluginErrorRecord {
             PluginError::Crypto { .. } => Self {
                 plugin_name: String::new(),
                 message: "Policy crypto backend validation failed".to_owned(),
-                code: Some("policy.crypto_failed".to_owned()),
+                code: Some(crate::CRYPTO_FAILED_CODE.to_owned()),
                 details: HashMap::new(),
                 proto_error_code: None,
             },

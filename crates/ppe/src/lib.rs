@@ -57,15 +57,31 @@
 //! defaults must select it or `fips`. `builtins`
 //! enables every bundled extension, including the Valkey session
 //! store; or pick a granular subset (`jwt`, `api-key`, `basic`, `oauth`, `elicitation-ciba`,
-//! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`). Any of them brings in the registration
+//! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`; or `jwt-openssl-fips` in
+//! place of `jwt`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
-//! The FIPS profile is `default-features = false` with `fips` and `api-key`.
+//! The FIPS profile is `default-features = false` with `fips`, which selects
+//! OpenSSL FIPS for Policy's shared SHA-256. `api-key` and `jwt-openssl-fips`
+//! are optional identity builtins; JWT and `DPoP` signatures use OpenSSL too.
 //! At startup, require [`CryptoCapabilityReport::fips_profile_is_safe`] from
 //! [`crypto_capability_report`], which checks the compiled selection.
-//! [`PolicyEngine::initialize`] checks shared SHA-256 availability. The
-//! profile supports SHA-256 only; configuration that enables keyed content
-//! provenance is rejected because it requires HMAC.
+//! [`PolicyEngine::initialize`] checks shared SHA-256 availability. HMAC is
+//! unavailable, so configuration that enables keyed content provenance is
+//! rejected.
+//!
+//! `jwt-openssl-fips` verifies RS256 to RS512, PS256 to PS512, ES256 and
+//! ES384 with OpenSSL, and refuses HMAC (HS*) and `EdDSA` at config load. It
+//! needs the FIPS provider as the OpenSSL default (`default_properties =
+//! fips=yes`, or a FIPS-mode host); a JWT resolver refuses to build
+//! otherwise. Do not install another `jsonwebtoken` crypto provider in the
+//! same process.
+//!
+//! ```toml
+//! praxis-policy = { version = "0.6.0", default-features = false, features = [
+//!   "fips", "jwt-openssl-fips",
+//! ] }
+//! ```
 //!
 //! # Plugins the host supplies
 //!
@@ -79,10 +95,12 @@
 //! scanner and an audit logger. Neither is published or bundled; a host registers
 //! them.
 
-#[cfg(all(feature = "fips", not(feature = "api-key")))]
-compile_error!("the `fips` feature requires `api-key`");
 #[cfg(all(feature = "fips", feature = "http-hyper"))]
 compile_error!("the `fips` profile cannot enable `http-hyper`, which links ring for TLS");
+#[cfg(all(feature = "jwt", feature = "jwt-openssl-fips"))]
+compile_error!("select one JWT backend: `jwt` or `jwt-openssl-fips`");
+#[cfg(all(feature = "jwt-openssl-fips", not(feature = "fips")))]
+compile_error!("the `jwt-openssl-fips` feature requires `fips`");
 
 // Whole-crate re-exports for advanced use (types not surfaced below).
 
@@ -112,7 +130,7 @@ pub use praxis_policy_core::validate_crypto_backend;
 /// };
 /// assert_eq!(reason, "invalid digest length");
 /// ```
-pub use praxis_policy_core::{CryptoBackend, CryptoError};
+pub use praxis_policy_core::{CRYPTO_FAILED_CODE, CryptoBackend, CryptoError};
 
 /// Crypto backends and builtin operations compiled into this Policy graph.
 ///
@@ -130,11 +148,15 @@ pub struct CryptoCapabilityReport {
 }
 
 impl CryptoCapabilityReport {
-    /// Whether this graph meets Policy's supported API-key FIPS profile.
+    /// Whether this graph meets Policy's supported FIPS selection: the FIPS
+    /// shared backend, API-key on it when enabled, and no builtin with its own
+    /// non-FIPS crypto.
     #[must_use]
     pub fn fips_profile_is_safe(&self) -> bool {
         self.policy_backend == CryptoBackend::OpenSslFips
-            && self.api_key_backend == Some(CryptoBackend::OpenSslFips)
+            && self
+                .api_key_backend
+                .is_none_or(|backend| backend == CryptoBackend::OpenSslFips)
             && self.default_builtin_crypto.is_empty()
     }
 }
@@ -216,7 +238,7 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
 pub use praxis_policy_builtins::plugins::identity_basic::{
     BasicIdentityFactory, KIND as BASIC_KIND,
 };
-#[cfg(feature = "jwt")]
+#[cfg(feature = "_jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{
     JwtIdentityFactory, JwtIdentityFactoryWithReplay, KIND as JWT_KIND,
 };
@@ -293,7 +315,7 @@ use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
 #[cfg(feature = "basic")]
 use praxis_policy_builtins::plugins::identity_basic as basic_builtin;
-#[cfg(feature = "jwt")]
+#[cfg(feature = "_jwt")]
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 #[cfg(feature = "experimental-quota")]
 use praxis_policy_builtins::plugins::quota as quota_builtin;
@@ -302,7 +324,7 @@ use praxis_policy_builtins::plugins::ratelimit as ratelimit_builtin;
 
 #[cfg(feature = "_builtin")]
 register_builtins! {
-    feature "jwt"                => jwt_builtin::JwtIdentityFactory,
+    feature "_jwt"               => jwt_builtin::JwtIdentityFactory,
     feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
     feature "basic"              => basic_builtin::BasicIdentityFactory,
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
@@ -436,7 +458,7 @@ pub fn install_builtins_with_default_http_transport(mgr: &std::sync::Arc<PolicyE
 /// feature set by `make test-fips-no-provider`, rather than from the report
 /// under test.
 #[cfg(test)]
-#[allow(clippy::panic, reason = "tests")]
+#[allow(clippy::expect_used, clippy::panic, reason = "tests")]
 mod crypto_capability_tests {
     use super::{BundledCryptoCapability, CryptoBackend, crypto_capability_report};
 
@@ -469,6 +491,71 @@ mod crypto_capability_tests {
     }
 
     #[test]
+    fn an_absent_api_key_backend_does_not_bypass_the_other_checks() {
+        let report = |policy_backend, api_key_backend, default_builtin_crypto| {
+            super::CryptoCapabilityReport {
+                api_key_backend,
+                default_builtin_crypto,
+                policy_backend,
+            }
+        };
+        let fips = CryptoBackend::OpenSslFips;
+        let rust = CryptoBackend::RustCrypto;
+        let jwt = vec![BundledCryptoCapability::Jwt];
+        for (case, safe, name) in [
+            (report(fips, None, vec![]), true, "engine or JWT only"),
+            (report(fips, Some(fips), vec![]), true, "API-key on FIPS"),
+            (
+                report(fips, Some(rust), vec![]),
+                false,
+                "API-key on RustCrypto",
+            ),
+            (
+                report(fips, None, jwt.clone()),
+                false,
+                "unsafe builtin, no API-key",
+            ),
+            (
+                report(rust, None, vec![]),
+                false,
+                "RustCrypto shared backend",
+            ),
+            (report(rust, Some(rust), jwt), false, "ordinary build"),
+        ] {
+            assert_eq!(case.fips_profile_is_safe(), safe, "{name}");
+        }
+    }
+
+    #[cfg(feature = "fips")]
+    #[tokio::test]
+    async fn initialize_checks_the_shared_backend_in_every_fips_selection() {
+        let engine = super::PolicyEngine::default();
+        if praxis_policy_core::validate_crypto_backend().is_ok() {
+            engine
+                .initialize()
+                .await
+                .expect("FIPS SHA-256 is available");
+            engine.shutdown().await;
+            return;
+        }
+        assert!(
+            std::env::var_os("PRAXIS_REQUIRE_FIPS_PROVIDER").is_none(),
+            "the FIPS provider is required in this environment"
+        );
+        let error = engine
+            .initialize()
+            .await
+            .expect_err("startup refuses without FIPS SHA-256");
+        assert!(
+            matches!(
+                error.as_ref(),
+                praxis_policy_core::error::PluginError::Crypto { .. }
+            ),
+            "the refusal is a crypto error: {error}"
+        );
+    }
+
+    #[test]
     fn report_matches_the_expected_builtins() {
         let report = crypto_capability_report();
         let Some(expected) = expected_builtin_crypto() else {
@@ -480,7 +567,11 @@ mod crypto_capability_tests {
         assert_eq!(report.default_builtin_crypto, expected);
         if cfg!(feature = "fips") {
             assert_eq!(report.policy_backend, CryptoBackend::OpenSslFips);
-            assert_eq!(report.api_key_backend, Some(CryptoBackend::OpenSslFips));
+            assert_eq!(
+                report.api_key_backend,
+                cfg!(feature = "api-key").then_some(CryptoBackend::OpenSslFips),
+                "API-key reports a backend only when enabled"
+            );
             assert_eq!(report.fips_profile_is_safe(), expected.is_empty());
         }
     }
@@ -602,7 +693,7 @@ mod tests {
     #[test]
     fn every_enabled_builtin_resolves_its_kind() {
         let expected = [
-            (cfg!(feature = "jwt"), "identity/jwt"),
+            (cfg!(feature = "_jwt"), "identity/jwt"),
             (cfg!(feature = "api-key"), "identity/api-key"),
             (cfg!(feature = "basic"), "identity/basic"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
