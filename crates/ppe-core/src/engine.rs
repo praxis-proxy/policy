@@ -65,7 +65,6 @@ pub const VIOLATION_ASSERTION_MISSING: &str = "auth.assertion_missing";
 /// deny: the request never reached a rule.
 pub const VIOLATION_UNIDENTIFIED_REQUEST: &str = "unidentified_request";
 
-/// Why a request could not be resolved against the route table.
 /// Violation code for a `rate_limits:` step whose limiter the running snapshot
 /// cannot supply. Denies rather than skipping the limit.
 pub const VIOLATION_RATE_LIMIT_UNAVAILABLE: &str = "ratelimit.unavailable";
