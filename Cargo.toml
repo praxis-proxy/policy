@@ -65,7 +65,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 # MSRV. Keep in sync with rust-toolchain.toml `channel` and clippy.toml `msrv`.
 rust-version = "1.92"
@@ -146,6 +146,8 @@ regex = "1"
 # would put two `sha2` and two `digest` in the build.
 sha2 = "0.11"
 openssl = "0.10.82"
+# OS randomness for secrets under the RustCrypto backend.
+getrandom = "0.4.3"
 # Keyed digests: audit content provenance and the OAuth cache key. Moves with
 # `sha2` above, since both have to agree on `digest`.
 hmac = "0.13"
@@ -168,13 +170,13 @@ limitador-cel = { package = "cel", version = "0.12.0" }
 # The keys are package names, which still carry the engine's previous naming.
 # Renaming them is a manifest change across every crate and lands separately, so
 # that the import stays a move and the rename stays a rename.
-praxis-policy-core = { path = "crates/ppe-core", version = "0.5.0", default-features = false }
-praxis-policy-orchestration = { path = "crates/ppe-orchestration", version = "0.5.0" }
-praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.5.0" }
-praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.5.0", default-features = false }
-praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.5.0", default-features = false }
-praxis-policy-builtins = { path = "crates/builtins", version = "0.5.0", default-features = false }
-praxis-policy = { path = "crates/ppe", version = "0.5.0" }
+praxis-policy-core = { path = "crates/ppe-core", version = "0.6.0", default-features = false }
+praxis-policy-orchestration = { path = "crates/ppe-orchestration", version = "0.6.0" }
+praxis-policy-apl-core = { path = "crates/ppe-apl-core", version = "0.6.0" }
+praxis-policy-apl-cmf = { path = "crates/ppe-apl-cmf", version = "0.6.0", default-features = false }
+praxis-policy-apl-runtime = { path = "crates/ppe-apl-runtime", version = "0.6.0", default-features = false }
+praxis-policy-builtins = { path = "crates/builtins", version = "0.6.0", default-features = false }
+praxis-policy = { path = "crates/ppe", version = "0.6.0" }
 # Unpublished, so path only.
 praxis-policy-test-utils = { path = "tests/utils" }
 praxis-policy-plugin-audit-logger = { path = "reference/plugins/audit-logger" }

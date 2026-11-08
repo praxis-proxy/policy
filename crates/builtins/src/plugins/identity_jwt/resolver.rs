@@ -69,19 +69,18 @@ use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::credential::{CredentialLocation, ExtractionError};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
-use praxis_policy_core::plugin::{Plugin, PluginConfig};
+use praxis_policy_core::plugin::{Plugin, PluginConfig, PluginMode};
 
-use crate::plugins::identity_jwt::KIND;
 use crate::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE;
 use crate::plugins::identity_jwt::config::DpopMode;
 use crate::plugins::identity_jwt::config::{
     JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError, TrustedIssuerConfig,
 };
 use crate::plugins::identity_jwt::dpop::{
-    DpopVerifier, InMemoryReplayGuard, PopDenial, PopRequest, ProofOfPossession as _, ReplayGuard,
-    codes as dpop_codes,
+    DpopVerifier, InMemoryReplayGuard, PopDenial, PopRequest, ReplayGuard, codes as dpop_codes,
 };
 use crate::plugins::identity_jwt::presets;
+use crate::plugins::identity_jwt::{KIND, alarm};
 use praxis_policy_core::extensions::{HttpExtension, KeyBinding};
 use praxis_policy_core::identity::mapping::ConfiguredClaimMap;
 use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper};
@@ -194,6 +193,9 @@ impl JwtIdentityResolver {
         cfg: PluginConfig,
         replay: Arc<dyn ReplayGuard>,
     ) -> Result<Self, Box<PluginError>> {
+        #[cfg(feature = "jwt-openssl-fips")]
+        crate::plugins::identity_jwt::openssl_fips::ensure_provider()?;
+
         let raw_config = cfg.config.as_ref().ok_or_else(|| {
             Box::new(PluginError::Config {
                 message: format!(
@@ -266,6 +268,30 @@ impl JwtIdentityResolver {
             }));
         }
 
+        // A verified proof is recorded in the request's context table so a
+        // second resolution does not consume it again. Only the serial modes
+        // commit context back to the table; in any other mode the record is
+        // lost and the next resolution of the same request is denied as a
+        // replay.
+        if let Some(issuer) = typed
+            .trusted_issuers
+            .iter()
+            .find(|i| i.dpop.mode != DpopMode::Off)
+            && !matches!(
+                cfg.mode,
+                PluginMode::Sequential | PluginMode::Transform | PluginMode::Disabled
+            )
+        {
+            return Err(Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' ({KIND}): trusted_issuer '{}' turns on dpop, which needs \
+                     mode sequential or transform to keep a verified proof for the rest of \
+                     the request; mode {} does not",
+                    cfg.name, issuer.issuer, cfg.mode
+                ),
+            }));
+        }
+
         if let Some(issuer) = typed
             .trusted_issuers
             .iter()
@@ -300,6 +326,14 @@ impl JwtIdentityResolver {
                     message: format!("plugin '{}' ({KIND}): {e}", cfg.name),
                 })
             })?;
+            #[cfg(feature = "jwt-openssl-fips")]
+            {
+                use crate::plugins::identity_jwt::openssl_fips::probe_algorithms;
+                probe_algorithms(&raw.algorithms)?;
+                if raw.dpop.mode != DpopMode::Off {
+                    probe_algorithms(&raw.dpop.algorithms)?;
+                }
+            }
             if raw.decoding_key.needs_async() {
                 pending_jwks.push(raw);
             } else {
@@ -865,7 +899,7 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
         &self,
         payload: &IdentityPayload,
         ext: &Extensions,
-        _ctx: &mut PluginContext,
+        ctx: &mut PluginContext,
     ) -> PluginResult<IdentityPayload> {
         let (scheme, raw_token) = match self.extract_token(payload, ext) {
             Ok(t) => t,
@@ -1003,6 +1037,13 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                 ));
             },
             Err(ValidateError::Jwt(e)) => {
+                if let jsonwebtoken::errors::ErrorKind::Provider(detail) = e.kind() {
+                    alarm::crypto_failure(alarm::Op::JwtVerify, detail);
+                    return PluginResult::deny(PluginViolation::new(
+                        praxis_policy_core::CRYPTO_FAILED_CODE,
+                        "the token signature could not be checked",
+                    ));
+                }
                 let (code, reason) = classify_jwt_error(&e);
                 return PluginResult::deny(PluginViolation::new(code, reason));
             },
@@ -1011,10 +1052,14 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
         // 3. Proof of possession, for an issuer that binds tokens to keys.
         //    After validation, so a forged token never reaches the replay
         //    store, and before mapping, so a failed proof leaves no identity.
-        let key_binding = match self
-            .check_key_binding(issuer, scheme, &raw_token, &token_data.claims, payload, ext)
-            .await
-        {
+        let presented = Presented {
+            scheme,
+            token: &raw_token,
+            claims: &token_data.claims,
+            payload,
+            ext,
+        };
+        let key_binding = match self.check_key_binding(issuer, &presented, ctx).await {
             Ok(binding) => binding,
             Err(denial) => {
                 return PluginResult::deny(PluginViolation::new(denial.code, denial.reason));
@@ -1216,12 +1261,16 @@ impl JwtIdentityResolver {
     async fn check_key_binding(
         &self,
         issuer: &TrustedIssuer,
-        scheme: AuthScheme,
-        token: &str,
-        claims: &ClaimMap,
-        payload: &IdentityPayload,
-        ext: &Extensions,
+        presented: &Presented<'_>,
+        ctx: &mut PluginContext,
     ) -> Result<Option<KeyBinding>, PopDenial> {
+        let Presented {
+            scheme,
+            token,
+            claims,
+            payload,
+            ext,
+        } = *presented;
         let denial = |code: &'static str, reason: String| PopDenial { code, reason };
         if issuer.dpop.mode == DpopMode::Off {
             if scheme == AuthScheme::Dpop {
@@ -1307,8 +1356,18 @@ impl JwtIdentityResolver {
             url: &url,
             now: chrono::Utc::now().timestamp(),
         };
-        verifier.verify(&request).await.map(Some)
+        verifier.verify_in(&request, ctx).await.map(Some)
     }
+}
+
+/// A validated token and the request it came with.
+#[derive(Clone, Copy)]
+struct Presented<'a> {
+    scheme: AuthScheme,
+    token: &'a str,
+    claims: &'a ClaimMap,
+    payload: &'a IdentityPayload,
+    ext: &'a Extensions,
 }
 
 /// Reason `validate_token` couldn't verify the JWT. Wraps the
@@ -3283,5 +3342,124 @@ mod tests {
             validate_token(&good, &issuer).is_ok(),
             "the kid present in the store must verify"
         );
+    }
+
+    /// A provider failure while verifying denies with `policy.crypto_failed`
+    /// and logs a throttled alarm. Runs in a child process: it installs a
+    /// failing `jsonwebtoken` provider, which is process-wide.
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[tokio::test]
+    async fn a_provider_failure_denies_with_crypto_failed_and_throttles_its_alarm() {
+        const CHILD: &str = "PPE_JWT_PROVIDER_FAILURE_CHILD";
+        let name = "plugins::identity_jwt::resolver::tests::\
+                    a_provider_failure_denies_with_crypto_failed_and_throttles_its_alarm";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([name, "--exact", "--nocapture", "--color=never"])
+                .env(CHILD, "1")
+                .output()
+                .expect("run the child test");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+                "the child must run and pass: {stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        static FAILING: jsonwebtoken::crypto::CryptoProvider =
+            jsonwebtoken::crypto::CryptoProvider {
+                signer_factory: |_, _| {
+                    Err(jsonwebtoken::errors::ErrorKind::Provider("signing disabled".into()).into())
+                },
+                verifier_factory: |_, _| {
+                    Err(
+                        jsonwebtoken::errors::ErrorKind::Provider("backend unavailable".into())
+                            .into(),
+                    )
+                },
+                key_utils: jsonwebtoken::crypto::KeyUtils::new_unimplemented(),
+            };
+        let token = hs256_without_jsonwebtoken(b"test-secret", &valid_claims(json!({})));
+        assert!(
+            FAILING.install_default().is_ok(),
+            "nothing used jsonwebtoken first"
+        );
+        let alarms = alarm_capture();
+        let resolver = resolver_for_role("user");
+
+        for _ in 0..3 {
+            let result = result_for(&resolver, &token).await;
+            let violation = result.violation.expect("a provider failure denies");
+            assert_eq!(violation.code, praxis_policy_core::CRYPTO_FAILED_CODE);
+            assert!(
+                !violation.reason.contains("backend unavailable"),
+                "the denial must not carry backend detail: {}",
+                violation.reason
+            );
+        }
+        let logged = alarms.lock().expect("alarm log").clone();
+        assert_eq!(
+            logged.len(),
+            1,
+            "three failures log once per interval: {logged:?}"
+        );
+        assert!(logged[0].contains("op=jwt_verify"), "{logged:?}");
+    }
+
+    /// Sign HS256 without `jsonwebtoken`, so its process-wide provider is
+    /// still unset.
+    #[cfg(feature = "crypto-rustcrypto")]
+    fn hs256_without_jsonwebtoken(secret: &[u8], claims: &Value) -> String {
+        let input = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims"))
+        );
+        let mac = praxis_policy_core::crypto::hmac_sha256(secret, input.as_bytes())
+            .expect("HMAC under RustCrypto");
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(mac))
+    }
+
+    /// Record `policy_crypto_failure` events. For a child process only: it
+    /// installs the global subscriber.
+    #[cfg(feature = "crypto-rustcrypto")]
+    fn alarm_capture() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write as _;
+                let _ = write!(self.0, "{}={value:?} ", field.name());
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                use std::fmt::Write as _;
+                let _ = write!(self.0, "{}={value} ", field.name());
+            }
+        }
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut fields = Fields(String::new());
+                event.record(&mut fields);
+                if fields.0.contains("policy_crypto_failure") {
+                    self.0.lock().expect("alarm log").push(fields.0);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let log = std::sync::Arc::default();
+        tracing::subscriber::set_global_default(Capture(std::sync::Arc::clone(&log)))
+            .expect("the child installs the only subscriber");
+        log
     }
 }

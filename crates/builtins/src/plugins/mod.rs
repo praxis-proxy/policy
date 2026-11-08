@@ -6,7 +6,7 @@
 //! Module paths are fixed here rather than per extension as it lands: these are
 //! public API from first publish, so a later rename is a breaking change.
 //!
-//! - `identity_jwt` (`jwt`) — kind `identity/jwt`
+//! - `identity_jwt` (`jwt` or `jwt-openssl-fips`): kind `identity/jwt`
 //! - `identity_api_key` (`api-key`) — kind `identity/api-key`
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `delegator_vault` (`delegator-vault`) — kind `delegator/vault`
@@ -14,7 +14,7 @@
 //! - `quota` (`experimental-quota`) — kind `quota/limitador`
 //! - `ratelimit` (`experimental-ratelimit`): kind `ratelimit/limitador`
 
-#[cfg(feature = "jwt")]
+#[cfg(feature = "_jwt")]
 pub mod identity_jwt;
 
 #[cfg(feature = "api-key")]

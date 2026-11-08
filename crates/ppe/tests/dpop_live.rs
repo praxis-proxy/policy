@@ -105,7 +105,7 @@ impl ProofKey {
         header.jwk = Some(serde_json::from_value(self.jwk.clone()).expect("header JWK"));
         let mut claims = json!({ "htm": method, "htu": url, "iat": now(), "jti": unique() });
         if let Some(token) = access_token {
-            claims["ath"] = json!(access_token_hash(token));
+            claims["ath"] = json!(access_token_hash(token).expect("ath"));
         }
         encode(&header, &claims, &self.encoding).expect("sign proof")
     }

@@ -4,7 +4,13 @@
 //! Feature-selected cryptographic operations shared by Policy crates.
 
 #[cfg(feature = "fips")]
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+/// The violation code for a request denied because the crypto backend failed.
+pub const CRYPTO_FAILED_CODE: &str = "policy.crypto_failed";
 
 /// The backend used for Policy's always-enabled SHA-256 operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,10 +35,11 @@ pub const fn crypto_backend() -> CryptoBackend {
     }
 }
 
-/// Failure while hashing with the selected Policy backend.
+/// Failure of an operation on the selected Policy backend.
 ///
-/// The variant set depends on the backend: `OpenSsl` and `HmacUnavailable`
-/// exist with `fips`, `HmacInitialization` with `crypto-rustcrypto`.
+/// The variant set depends on the backend: `OpenSsl`, `HmacUnavailable`,
+/// `NonFipsDefault` and `ProviderConflict` exist with `fips`;
+/// `HmacInitialization` and `Random` with `crypto-rustcrypto`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CryptoError {
@@ -47,10 +54,81 @@ pub enum CryptoError {
     #[cfg(feature = "fips")]
     #[error("HMAC-SHA256 is unavailable with the FIPS feature")]
     HmacUnavailable,
+    /// OpenSSL's default properties reach non-FIPS implementations, so an
+    /// operation without an explicit property query could leave the FIPS
+    /// provider.
+    #[cfg(feature = "fips")]
+    #[error("OpenSSL default properties do not restrict operations to the FIPS provider")]
+    NonFipsDefault,
+    /// Another crypto provider was installed for `jsonwebtoken` in this
+    /// process, so Policy cannot verify JWTs with OpenSSL.
+    #[cfg(feature = "fips")]
+    #[error("another jsonwebtoken crypto provider is installed in this process")]
+    ProviderConflict,
     /// `RustCrypto` rejected an HMAC key.
     #[cfg(feature = "crypto-rustcrypto")]
     #[error("RustCrypto HMAC key initialization failed: {0}")]
     HmacInitialization(#[source] hmac::digest::InvalidLength),
+    /// The operating system could not supply random bytes.
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[error("the OS random number generator failed: {0}")]
+    Random(#[source] getrandom::Error),
+}
+
+/// Admits one log line per interval and counts the ones it holds back, for
+/// alarms a request can repeat.
+#[derive(Debug)]
+pub struct IntervalLog {
+    interval_secs: u64,
+    next_at: AtomicU64,
+    suppressed: AtomicU64,
+}
+
+impl IntervalLog {
+    /// A log admitting at most one line per `interval_secs`.
+    #[must_use]
+    pub const fn new(interval_secs: u64) -> Self {
+        Self {
+            interval_secs,
+            next_at: AtomicU64::new(0),
+            suppressed: AtomicU64::new(0),
+        }
+    }
+
+    /// The count held back since the last admitted line, when a line is due.
+    pub fn admit(&self) -> Option<u64> {
+        // Monotonic, so a wall-clock step back cannot silence alarms. The
+        // offset lets the first call pass the initial `next_at` of 0.
+        static START: OnceLock<Instant> = OnceLock::new();
+        let now = START
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_secs()
+            .saturating_add(1);
+        let next = self.next_at.load(Ordering::Relaxed);
+        let due = now >= next
+            && self
+                .next_at
+                .compare_exchange(
+                    next,
+                    now.saturating_add(self.interval_secs),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok();
+        if due {
+            Some(self.suppressed.swap(0, Ordering::Relaxed))
+        } else {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+
+    /// The interval between admitted lines, in seconds.
+    #[must_use]
+    pub const fn interval_secs(&self) -> u64 {
+        self.interval_secs
+    }
 }
 
 /// Incremental SHA-256 input builder used by CMF and runtime hashes.
@@ -159,6 +237,50 @@ pub fn hmac_sha256(key: &[u8], bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
         mac.update(bytes);
         Ok(mac.finalize().into_bytes().into())
     }
+}
+
+/// Fill `buf` with random bytes suitable for keys and other secrets.
+///
+/// With `crypto-rustcrypto` the bytes come from the operating system. With
+/// `fips` they come from OpenSSL's private DRBG, which is the FIPS DRBG only
+/// when the FIPS provider is the process default; the call fails unless
+/// `require_fips_default` passes.
+///
+/// # Errors
+/// Returns an error if the backend cannot produce random bytes, or under
+/// `fips` if the FIPS provider is not the process default.
+pub fn random_bytes(buf: &mut [u8]) -> Result<(), CryptoError> {
+    #[cfg(feature = "fips")]
+    {
+        require_fips_default()?;
+        openssl::rand::rand_priv_bytes(buf)?;
+        Ok(())
+    }
+    #[cfg(feature = "crypto-rustcrypto")]
+    {
+        getrandom::fill(buf).map_err(CryptoError::Random)
+    }
+}
+
+/// Check that OpenSSL operations without a property query use the FIPS
+/// provider.
+///
+/// Signature verification and random generation select their OpenSSL
+/// implementation from the default properties, as configured by
+/// `default_properties = fips=yes` or a FIPS-mode host. This passes when
+/// FIPS SHA-256 is available and a non-FIPS algorithm (MD5) is not reachable
+/// by default.
+///
+/// # Errors
+/// Returns [`CryptoError::OpenSsl`] if FIPS SHA-256 is unavailable, or
+/// [`CryptoError::NonFipsDefault`] if the default reaches other providers.
+#[cfg(feature = "fips")]
+pub fn require_fips_default() -> Result<(), CryptoError> {
+    fips_sha256()?;
+    if openssl::md::Md::fetch(None, "MD5", None).is_ok() {
+        return Err(CryptoError::NonFipsDefault);
+    }
+    Ok(())
 }
 
 /// Check that the selected Policy backend can perform SHA-256 at startup.
@@ -292,6 +414,38 @@ mod tests {
         for (key, data, expected) in cases {
             assert_eq!(hex(&hmac_sha256(key, data).unwrap()), expected);
         }
+    }
+
+    #[test]
+    fn interval_log_admits_one_line_per_interval_and_counts_the_rest() {
+        let log = IntervalLog::new(3_600);
+        assert_eq!(log.admit(), Some(0), "the first line is admitted");
+        assert_eq!(
+            log.admit(),
+            None,
+            "a repeat inside the interval is held back"
+        );
+        assert_eq!(log.admit(), None, "and so is the next");
+
+        let open = IntervalLog::new(0);
+        assert_eq!(
+            open.admit(),
+            Some(0),
+            "a zero interval admits the first line"
+        );
+        assert_eq!(open.admit(), Some(0), "and every line after it");
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[test]
+    fn random_bytes_fills_the_buffer_and_two_draws_differ() -> Result<(), CryptoError> {
+        let (mut a, mut b) = ([0_u8; 32], [0_u8; 32]);
+        random_bytes(&mut a)?;
+        random_bytes(&mut b)?;
+        assert_ne!(a, b, "two 32-byte draws must differ");
+        assert_ne!(a, [0_u8; 32], "the buffer must be filled");
+        random_bytes(&mut [])?;
+        Ok(())
     }
 
     #[cfg(feature = "crypto-rustcrypto")]
