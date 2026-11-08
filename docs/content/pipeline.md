@@ -26,6 +26,37 @@ The hook names a plugin declares in `hooks:` come from a fixed table:
 | Rate limit | `ratelimit.pre_identity`, `ratelimit.post_identity` |
 | Delegation | `token.delegate` |
 | Elicitation | `elicit` |
+| Metadata | `metadata.fetch` |
+
+`metadata.fetch` is an unphased PPE policy operation. The caller resolves one
+configured source with `PolicyEngine::find_plugin_entries(name)`, selects its
+`metadata.fetch` handler, and dispatches it with
+`PolicyEngine::invoke_entries::<MetadataFetchHook>()`. Generic hook dispatch
+retains its ordinary routing behavior; the payload does not select a source.
+The source receives the ordinary capability-filtered extension view and returns
+an acquired-facts record; framework code owns validation, provenance stamping,
+and installation of that record under the caller-resolved instance name.
+Run metadata sources in `sequential` or `transform` mode: audit and concurrent
+modes can allow the operation while discarding the modified payload. The caller
+must reject a missing source or missing `metadata.fetch` handler before
+dispatch; `invoke_entries` itself allows an empty entry list.
+
+A host-provided metadata source can be configured in hook dispatch mode:
+
+```yaml
+engine_settings:
+  dispatch: hooks
+plugins:
+  - name: account
+    kind: metadata/source
+    hooks: [metadata.fetch]
+    mode: sequential
+```
+
+The host registers the `metadata/source` factory, then explicitly selects the
+`account` instance. `MetadataFetchRequest::new()` starts with no facts and no
+source selector. The handler returns its facts through
+`PluginResult::modify_payload`; it cannot install metadata directly.
 
 `http.response` is the return half of the generic HTTP path, installed
 when a global `result:` or `post_invocation:` block exists. Response
