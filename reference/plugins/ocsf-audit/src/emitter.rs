@@ -29,7 +29,7 @@ use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
-use crate::config::{OcsfAuditConfig, OutputSelectionError, SigningMode};
+use crate::config::{OcsfAuditConfig, SigningMode};
 use crate::ocsf;
 use crate::sign::{DsseSigner, NoopSigner, OcsfSigner, canonical_bytes, fingerprint_value};
 
@@ -137,29 +137,19 @@ impl OcsfAuditEmitter {
     /// Returns an error for invalid configuration, a missing output, an
     /// unavailable exporter, or invalid signing keys.
     pub fn new(mut cfg: PluginConfig) -> Result<Self, Box<PluginError>> {
-        let mut typed: OcsfAuditConfig = match cfg.config.as_ref() {
-            Some(raw) => serde_json::from_value(raw.clone()).map_err(|e| {
-                Box::new(PluginError::Config {
-                    message: format!(
-                        "plugin '{}' (praxis-policy-plugin-ocsf-audit) config parse failed: {e}",
-                        cfg.name
-                    ),
-                })
-            })?,
-            None => {
-                return Err(Box::new(PluginError::Config {
-                    message: format!(
-                        "plugin '{}' (praxis-policy-plugin-ocsf-audit): {}",
-                        cfg.name,
-                        OutputSelectionError::Missing
-                    ),
-                }));
-            },
-        };
+        let raw = cfg.config.clone().unwrap_or_else(|| json!({}));
+        let mut typed: OcsfAuditConfig = serde_json::from_value(raw).map_err(|e| {
+            Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' (praxis-policy-plugin-ocsf-audit) config parse failed: {e}",
+                    cfg.name
+                ),
+            })
+        })?;
 
         // Opened here so an unwritable file fails the load, not the first
         // verdict.
-        let exporters = typed.build_exporters().map_err(|e| {
+        let exporters = typed.output.build_exporters().map_err(|e| {
             Box::new(PluginError::Config {
                 message: format!(
                     "plugin '{}' (praxis-policy-plugin-ocsf-audit): {e}",
@@ -1955,6 +1945,7 @@ mod tests {
 
     fn exporter_names(typed: &OcsfAuditConfig) -> Vec<String> {
         typed
+            .output
             .build_exporters()
             .unwrap()
             .iter()
@@ -1966,21 +1957,6 @@ mod tests {
         OcsfAuditEmitter::new(sink_cfg(extra))
             .unwrap_err()
             .to_string()
-    }
-
-    #[test]
-    fn destination_and_exporters_together_are_rejected() {
-        let err = exporter_err(json!({
-            "destination": "stderr",
-            "exporters": [{ "kind": "stderr" }],
-        }));
-        assert!(err.contains("not both"), "{err}");
-    }
-
-    #[test]
-    fn an_empty_exporter_list_is_rejected() {
-        let err = exporter_err(json!({ "exporters": [] }));
-        assert!(err.contains("empty"), "{err}");
     }
 
     #[test]
@@ -2032,24 +2008,6 @@ mod tests {
                 "an entry without an output must not build: {err}"
             );
         }
-    }
-
-    #[test]
-    fn an_explicit_destination_is_the_one_exporter() {
-        let stderr: OcsfAuditConfig =
-            serde_json::from_value(json!({ "destination": "stderr" })).unwrap();
-        assert_eq!(
-            exporter_names(&stderr),
-            ["stderr"],
-            "destination: stderr must build one stderr exporter"
-        );
-        let tracing: OcsfAuditConfig =
-            serde_json::from_value(json!({ "destination": "tracing" })).unwrap();
-        assert_eq!(
-            exporter_names(&tracing),
-            ["tracing"],
-            "destination: tracing must build one tracing exporter"
-        );
     }
 
     #[test]

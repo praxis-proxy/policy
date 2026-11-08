@@ -320,16 +320,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   longer looks like a working one. `stderr` is still available and has to be
   named. ([#237](https://github.com/praxis-proxy/policy/issues/237))
 - **Breaking for Rust callers of `praxis-policy-plugin-ocsf-audit`:**
-  `OcsfAuditConfig` holds one `output: OutputSelection` in place of the
-  `destination` and `exporters` fields, and no longer implements `Default`. A
-  config therefore always names exactly one output: a `destination`, or an
-  `ExporterList` built with `TryFrom<Vec<OcsfExporterConfig>>`, which refuses
-  an empty list. Build one in code with
-  `OcsfAuditConfig::new(OutputSelection::Destination(OcsfDestination::Stderr))`
-  and set the other fields afterwards. YAML is unchanged: `destination:` and
-  `exporters:` keep their keys and serialized shape, and a block that sets
-  neither, both, a null, or an empty list now fails while it is parsed.
-  ([#264](https://github.com/praxis-proxy/policy/issues/264))
+  `OcsfAuditConfig.destination` and `.exporters` become one
+  `output: OutputSelection`, and the struct no longer implements `Default`;
+  build one with `OcsfAuditConfig::new`. YAML keys and serialized shape are
+  unchanged; a block that names no output, both, or an empty list now fails at
+  parse. ([#264](https://github.com/praxis-proxy/policy/issues/264))
 - **Breaking: CIBA config rejects unknown fields.** A misspelled key such as
   `stroe` now fails at load and names the field.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))

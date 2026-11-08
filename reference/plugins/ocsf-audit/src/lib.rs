@@ -44,7 +44,7 @@ pub mod sign;
 
 pub use config::{
     ExporterList, OcsfAuditConfig, OcsfDestination, OcsfExporterConfig, OutputSelection,
-    OutputSelectionError, SigningMode,
+    OutputSelectionError, SigningMode, TracingTag,
 };
 pub use emitter::OcsfAuditEmitter;
 pub use factory::{KIND, OcsfAuditFactory};

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use praxis_policy_core::audit::export::{AuditExporter, ExportError, ExporterConfig};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::emitter::TracingExporter;
 
@@ -22,10 +23,9 @@ const MISSING_OUTPUT: &str = "no audit destination configured; set `destination:
 
 /// The `config:` block of an `audit/ocsf` plugin entry.
 ///
-/// Every value of this type holds exactly one usable output: the block is
-/// read through its `destination` and `exporters` keys, and a block that sets
-/// neither, both, or an empty list is rejected while it is parsed. Code builds
-/// one with [`OcsfAuditConfig::new`] and sets the other fields afterwards.
+/// Holds exactly one output. In YAML the entry sets exactly one of
+/// `destination` and `exporters`, and an `exporters` list is never empty.
+/// Build one in code with [`OcsfAuditConfig::new`].
 ///
 /// ```
 /// use praxis_policy_plugin_ocsf_audit::{OcsfAuditConfig, OcsfDestination, OutputSelection};
@@ -129,9 +129,8 @@ pub struct OcsfAuditConfig {
 }
 
 impl OcsfAuditConfig {
-    /// A config that writes to `output` and takes the documented default for
-    /// every other field, the same values an entry that sets only
-    /// `destination` or `exporters` gets.
+    /// A config that writes to `output`, with every other field at its
+    /// default.
     #[must_use]
     pub fn new(output: OutputSelection) -> Self {
         Self {
@@ -147,15 +146,6 @@ impl OcsfAuditConfig {
             authority_uid: None,
             include_gap_fields: default_true(),
         }
-    }
-
-    /// The exporters records go to, opened and ready to write.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an exporter cannot be opened.
-    pub fn build_exporters(&self) -> Result<Vec<Arc<dyn AuditExporter>>, ExportError> {
-        self.output.build_exporters()
     }
 }
 
@@ -192,11 +182,17 @@ impl OutputSelection {
 /// A nonempty `exporters` list.
 ///
 /// ```
-/// use praxis_policy_plugin_ocsf_audit::config::{ExporterList, OcsfExporterConfig, TracingTag};
+/// use praxis_policy_plugin_ocsf_audit::{
+///     ExporterList, OcsfExporterConfig, OutputSelectionError, TracingTag,
+/// };
 ///
 /// let list = ExporterList::try_from(vec![OcsfExporterConfig::Tracing(TracingTag::Tracing)])?;
 /// assert_eq!(list.as_slice().len(), 1);
-/// # Ok::<(), praxis_policy_plugin_ocsf_audit::OutputSelectionError>(())
+/// assert!(
+///     matches!(ExporterList::try_from(vec![]), Err(OutputSelectionError::Empty)),
+///     "an empty list is refused"
+/// );
+/// # Ok::<(), OutputSelectionError>(())
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExporterList(Vec<OcsfExporterConfig>);
@@ -212,9 +208,6 @@ impl ExporterList {
 impl TryFrom<Vec<OcsfExporterConfig>> for ExporterList {
     type Error = OutputSelectionError;
 
-    /// # Errors
-    ///
-    /// Returns [`OutputSelectionError::Empty`] for an empty list.
     fn try_from(entries: Vec<OcsfExporterConfig>) -> Result<Self, Self::Error> {
         if entries.is_empty() {
             return Err(OutputSelectionError::Empty);
@@ -224,7 +217,7 @@ impl TryFrom<Vec<OcsfExporterConfig>> for ExporterList {
 }
 
 /// Why a `config:` block does not select an output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum OutputSelectionError {
     /// Both `destination` and `exporters` are set.
     #[error("set either `destination` or `exporters`, not both")]
@@ -232,7 +225,7 @@ pub enum OutputSelectionError {
     /// `exporters` is set but names nothing.
     #[error("`exporters` is empty; name at least one of stderr, stdout, file or tracing")]
     Empty,
-    /// Neither key is set, or both are null.
+    /// Neither key is set; null counts as unset.
     #[error("{MISSING_OUTPUT}")]
     Missing,
 }
@@ -398,7 +391,7 @@ impl From<OcsfAuditConfig> for WireConfig {
 }
 
 // -----------------------------------------------------------------------------
-// Private Utilities
+// Helpers
 // -----------------------------------------------------------------------------
 
 fn default_product_name() -> String {
@@ -418,13 +411,10 @@ fn default_true() -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use serde_json::json;
 
     use super::*;
-
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
     fn a_config_built_in_code_matches_a_destination_only_block() -> TestResult {
@@ -444,8 +434,16 @@ mod tests {
         let stderr = OutputSelection::Destination(OcsfDestination::Stderr).build_exporters()?;
         let tracing = OutputSelection::Destination(OcsfDestination::Tracing).build_exporters()?;
 
-        assert_eq!(exporter_names(&stderr), ["stderr"]);
-        assert_eq!(exporter_names(&tracing), ["tracing"]);
+        assert_eq!(
+            exporter_names(&stderr),
+            ["stderr"],
+            "destination stderr must build one stderr exporter"
+        );
+        assert_eq!(
+            exporter_names(&tracing),
+            ["tracing"],
+            "destination tracing must build one tracing exporter"
+        );
         Ok(())
     }
 
@@ -457,7 +455,11 @@ mod tests {
         ])?;
         let exporters = OutputSelection::Exporters(list).build_exporters()?;
 
-        assert_eq!(exporter_names(&exporters), ["tracing", "stdout"]);
+        assert_eq!(
+            exporter_names(&exporters),
+            ["tracing", "stdout"],
+            "exporters must build in list order"
+        );
         Ok(())
     }
 
@@ -571,7 +573,11 @@ mod tests {
             let reparsed: OcsfAuditConfig = serde_json::from_value(wire.clone())?;
 
             for (key, value) in block.as_object().into_iter().flatten() {
-                assert_eq!(&wire[key], value, "{key} must serialize as it was written");
+                assert_eq!(
+                    wire.get(key),
+                    Some(value),
+                    "{key} must serialize as it was written"
+                );
             }
             assert_eq!(
                 wire.as_object().map(serde_json::Map::len),
@@ -590,6 +596,8 @@ mod tests {
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn exporter_names(exporters: &[Arc<dyn AuditExporter>]) -> Vec<String> {
         exporters
