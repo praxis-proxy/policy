@@ -100,6 +100,7 @@ impl PluginFactory for NoHandlerFactory {
     }
 }
 
+/// Build a request whose flag controls the conditional-fetch scenarios.
 fn payload(fetch: bool) -> MessagePayload {
     MessagePayload {
         message: Message {
@@ -118,6 +119,7 @@ fn payload(fetch: bool) -> MessagePayload {
     }
 }
 
+/// Build the request extension view shared by the end-to-end scenarios.
 fn extensions() -> Extensions {
     let meta = MetaExtension {
         entity_type: Some("tool".to_owned()),
@@ -130,6 +132,7 @@ fn extensions() -> Extensions {
     }
 }
 
+/// Load an engine with one controlled metadata source and the supplied policy.
 async fn engine(yaml: &str, result: SourceResult) -> Arc<PolicyEngine> {
     let engine = Arc::new(PolicyEngine::default());
     engine.register_factory("test-source", Box::new(SourceFactory(result)));
@@ -164,6 +167,7 @@ impl PdpResolver for MetadataPdp {
 }
 
 #[tokio::test]
+/// Fetched facts are available to the immediately following APL predicate.
 async fn fetched_facts_are_visible_to_the_next_predicate() {
     let engine = engine(
         r#"
@@ -202,6 +206,7 @@ routes:
 }
 
 #[tokio::test]
+/// Fetched facts are included in the immediately following PDP input.
 async fn fetched_facts_are_visible_to_the_next_pdp() {
     let yaml = r#"
 engine_settings:
@@ -238,6 +243,7 @@ routes:
 }
 
 #[tokio::test]
+/// A failing source denies without leaving a partial metadata record.
 async fn failed_source_publishes_nothing_and_stops() {
     let engine = engine(
         r#"
@@ -280,6 +286,7 @@ routes:
 }
 
 #[tokio::test]
+/// An ignored source error publishes only its normalized error outcome.
 async fn ignored_source_error_is_published_for_later_policy() {
     let engine = engine(
         r#"
@@ -318,6 +325,7 @@ routes:
 }
 
 #[tokio::test]
+/// A false conditional does not dispatch or create a metadata instance.
 async fn skipped_conditional_fetch_publishes_no_instance() {
     let engine = engine(
         r#"
@@ -357,6 +365,7 @@ routes:
 }
 
 #[test]
+/// Loading rejects a fetch whose source is absent from the plugin registry.
 fn unknown_metadata_source_is_rejected_at_load() {
     let engine = Arc::new(PolicyEngine::default());
     register_apl(&engine, AplOptions::in_process());
@@ -377,6 +386,7 @@ routes:
 }
 
 #[test]
+/// Loading rejects a source registered for an incompatible hook family.
 fn incompatible_metadata_source_hook_is_rejected_at_load() {
     let engine = Arc::new(PolicyEngine::default());
     engine.register_factory(
@@ -404,6 +414,7 @@ routes:
 }
 
 #[test]
+/// Declaring the hook without installing its handler is rejected at load time.
 fn metadata_source_without_registered_handler_is_rejected_at_load() {
     let engine = Arc::new(PolicyEngine::default());
     engine.register_factory("test-source", Box::new(NoHandlerFactory));
@@ -431,6 +442,7 @@ routes:
 }
 
 #[test]
+/// Route stacking cannot introduce a second fetch of the same source.
 fn duplicate_fetch_introduced_by_route_stacking_is_rejected() {
     let engine = Arc::new(PolicyEngine::default());
     engine.register_factory(
@@ -464,6 +476,7 @@ routes:
 }
 
 #[test]
+/// Fetch sources must use the sequential execution mode.
 fn metadata_source_with_non_sequential_mode_is_rejected_at_load() {
     let engine = Arc::new(PolicyEngine::default());
     engine.register_factory(
@@ -495,6 +508,7 @@ routes:
 }
 
 #[test]
+/// Fetch sources reject error policies that cannot preserve fetch semantics.
 fn metadata_source_with_disable_error_policy_is_rejected_at_load() {
     let engine = Arc::new(PolicyEngine::default());
     engine.register_factory(

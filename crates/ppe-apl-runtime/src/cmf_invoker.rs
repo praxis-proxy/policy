@@ -526,6 +526,7 @@ where
         })
     }
 
+    /// Dispatch one resolved source and publish its validated acquired facts.
     async fn fetch_metadata(
         &self,
         step: &FetchStep,

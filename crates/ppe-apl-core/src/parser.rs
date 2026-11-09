@@ -1158,6 +1158,7 @@ pub fn parse_step(value: &serde_yaml::Value, source: &str) -> Result<Step, Parse
     }
 }
 
+/// Parse one string-form policy step and attach its source location to errors.
 fn parse_step_string(line: &str, source: &str) -> Result<Step, ParseError> {
     let trimmed = line.trim();
 
@@ -1278,6 +1279,7 @@ fn parse_step_string(line: &str, source: &str) -> Result<Step, ParseError> {
     Ok(Step::Rule(rule))
 }
 
+/// Whether a metadata instance is one safe dotted-namespace segment.
 fn is_valid_metadata_instance_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
@@ -2505,6 +2507,7 @@ pub(crate) fn step_to_top_level_effect(step: Step) -> Result<Effect, ParseError>
     }
 }
 
+/// Convert a parsed nested step into an effect, rejecting invalid nesting.
 fn step_to_effect(step: Step, source: &str) -> Result<Effect, ParseError> {
     match step {
         Step::Plugin { name } => Ok(Effect::Plugin { name }),
@@ -3250,6 +3253,7 @@ fn compile_declared_pipeline(half: &str, field: &str, chain: &str) -> Result<Pip
     Ok(pipeline)
 }
 
+/// Compile one deserialized route block into the validated effect tree.
 fn compile_apl_blocks(source: &str, raw: RouteYaml) -> Result<CompiledRoute, ParseError> {
     reject_empty_authorization(source, raw.authorization.as_ref())?;
     let mut route = CompiledRoute::new(source);
@@ -5016,6 +5020,7 @@ route:
     }
 
     #[test]
+    /// A fetch expression compiles to its dedicated effect variant.
     fn fetch_compiles_to_dedicated_effect() {
         let yaml = r#"
 route:
@@ -5034,6 +5039,7 @@ route:
     }
 
     #[test]
+    /// Post-invocation policy cannot acquire new request metadata.
     fn fetch_is_rejected_after_invocation() {
         let yaml = r#"
 route:
@@ -5046,6 +5052,7 @@ route:
     }
 
     #[test]
+    /// Fetch instance names must remain unambiguous attribute segments.
     fn fetch_rejects_ambiguous_metadata_instance_name() {
         let yaml = r#"
 route:
@@ -5058,6 +5065,7 @@ route:
     }
 
     #[test]
+    /// Mutually exclusive branches still cannot fetch one source twice.
     fn duplicate_fetches_across_conditional_branches_are_rejected() {
         let yaml = r#"
 route:
@@ -5073,6 +5081,7 @@ route:
     }
 
     #[test]
+    /// A route may fetch multiple distinct metadata sources.
     fn distinct_fetches_are_accepted() {
         let yaml = r#"
 route:
@@ -5086,6 +5095,7 @@ route:
     }
 
     #[test]
+    /// Parallel effects reject metadata publication at compile time.
     fn parallel_rejects_fetch() {
         let error =
             parse_step_yaml("parallel:\n  - \"fetch(account)\"\n  - \"run(audit)\"").unwrap_err();

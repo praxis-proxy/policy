@@ -1522,6 +1522,7 @@ fn reject_field_stages_without_fields(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Install one synthetic APL handler with the route's effective capabilities.
 fn install_handler(
     mgr: &Arc<PolicyEngine>,
     entity_type: &str,
@@ -1738,6 +1739,7 @@ fn on_error_to_string(on_err: &praxis_policy_core::plugin::OnError) -> String {
     on_err.to_string()
 }
 
+/// Reject fetch sources whose registration cannot safely publish a result.
 fn validate_metadata_fetch_sources(
     location: &str,
     route: &CompiledRoute,

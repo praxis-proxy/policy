@@ -2232,6 +2232,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Configurable framework-like strings cannot grant publication authority.
     async fn ordinary_handler_cannot_publish_metadata_with_framework_config_strings() {
         let capabilities = std::collections::HashSet::from([
             "read_metadata".to_owned(),
