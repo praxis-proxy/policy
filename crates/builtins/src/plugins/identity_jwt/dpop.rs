@@ -20,9 +20,16 @@
 //! A host running several instances can inject guards backed by one store;
 //! `ValkeyReplayGuard` is supplied when the `valkey` feature is enabled.
 //!
+//! A host may resolve identity more than once for one request, for example at
+//! the HTTP gate and again at the tool. [`DpopVerifier::verify_in`] records each
+//! proof it accepts in the request's context table, so a later resolution of
+//! the same proof against the same replay guard runs every check but does not
+//! consume the proof a second time.
+//!
 //! [`ProofOfPossession`]: crate::plugins::identity_jwt::dpop::ProofOfPossession
 //! [`ReplayGuard`]: crate::plugins::identity_jwt::dpop::ReplayGuard
 //! [`InMemoryReplayGuard`]: crate::plugins::identity_jwt::dpop::InMemoryReplayGuard
+//! [`DpopVerifier::verify_in`]: crate::plugins::identity_jwt::dpop::DpopVerifier::verify_in
 //! [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
 //! [RFC 7638]: https://datatracker.ietf.org/doc/html/rfc7638
 //! [RFC 8705]: https://datatracker.ietf.org/doc/html/rfc8705
@@ -33,11 +40,14 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use base64::Engine as _;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use praxis_policy_core::context::PluginContext;
+use praxis_policy_core::crypto::sha256;
 use praxis_policy_core::extensions::KeyBinding;
-use serde::Deserialize;
+use praxis_policy_core::{CRYPTO_FAILED_CODE, CryptoError};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 
+use crate::plugins::identity_jwt::alarm::{Op, crypto_failure};
 use crate::plugins::identity_jwt::config::DpopConfig;
 
 /// Stable denial codes for a failed proof of possession.
@@ -255,15 +265,46 @@ impl ReplayGuard for InMemoryReplayGuard {
     }
 }
 
+/// Why [`jwk_thumbprint`] produced no thumbprint.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ThumbprintError {
+    /// The JWK is not a supported public key or lacks a required member.
+    #[error("the JWK is not a supported public key")]
+    Unsupported,
+    /// The crypto backend could not hash the canonical JWK.
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+}
+
 /// The [RFC 7638 Section 3] thumbprint of a public JWK: base64url SHA-256 over
 /// its required members in lexicographic order, without whitespace.
 ///
 /// [RFC 7638 Section 3]: https://datatracker.ietf.org/doc/html/rfc7638#section-3
 ///
-/// Returns `None` for a key type this verifier does not accept or a JWK missing
-/// a required member. Symmetric (`oct`) keys are not accepted: a proof signed
-/// with a shared secret proves nothing about who holds it.
-pub fn jwk_thumbprint(jwk: &Value) -> Option<String> {
+/// Symmetric (`oct`) keys are not accepted: a proof signed with a shared
+/// secret proves nothing about who holds it.
+///
+/// # Errors
+///
+/// [`ThumbprintError::Unsupported`] for a key type this verifier does not
+/// accept or a JWK missing a required member; [`ThumbprintError::Crypto`] when
+/// the backend cannot hash.
+///
+/// ```
+/// use praxis_policy_builtins::plugins::identity_jwt::dpop::jwk_thumbprint;
+///
+/// let jwk = serde_json::json!({"kty": "EC", "crv": "P-256", "x": "AA", "y": "BB"});
+/// assert_eq!(jwk_thumbprint(&jwk)?.len(), 43);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn jwk_thumbprint(jwk: &Value) -> Result<String, ThumbprintError> {
+    let canonical = canonical_jwk(jwk).ok_or(ThumbprintError::Unsupported)?;
+    Ok(b64url(&sha256(canonical.as_bytes())?))
+}
+
+/// The required members of a supported public JWK, serialized per RFC 7638.
+fn canonical_jwk(jwk: &Value) -> Option<String> {
     let member = |name: &'static str| -> Option<(&'static str, &str)> {
         Some((name, jwk.get(name)?.as_str()?))
     };
@@ -273,8 +314,7 @@ pub fn jwk_thumbprint(jwk: &Value) -> Option<String> {
         "OKP" => [member("crv")?, member("kty")?, member("x")?].into(),
         _ => return None,
     };
-    let canonical = serde_json::to_string(&required).ok()?;
-    Some(b64url(&Sha256::digest(canonical.as_bytes())))
+    serde_json::to_string(&required).ok()
 }
 
 /// Normalize a URL for `htu` comparison: lowercase scheme and host, drop a
@@ -303,8 +343,12 @@ pub fn normalize_htu(url: &str) -> Option<String> {
 }
 
 /// The `ath` value for an access token: base64url SHA-256 of its ASCII bytes.
-pub fn access_token_hash(token: &str) -> String {
-    b64url(&Sha256::digest(token.as_bytes()))
+///
+/// # Errors
+///
+/// Returns an error when the crypto backend cannot hash.
+pub fn access_token_hash(token: &str) -> Result<String, CryptoError> {
+    Ok(b64url(&sha256(token.as_bytes())?))
 }
 
 fn b64url(bytes: &[u8]) -> String {
@@ -340,6 +384,77 @@ fn clip(value: &str) -> String {
     clipped
 }
 
+/// What [`DpopVerifier::check`] established about a proof.
+struct Checked {
+    /// The proof key's RFC 7638 thumbprint, equal to the token's `cnf.jkt`.
+    thumbprint: String,
+    /// The proof's `jti`.
+    jti: String,
+    /// The request URL, normalized as the proof's `htu` was matched against it.
+    htu: String,
+    /// The access token's hash, equal to the proof's `ath`.
+    ath: String,
+}
+
+/// A proof this request already accepted, kept in the context table's
+/// `global_state` so a later resolution in the same request can reuse it.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProofRecord {
+    issuer: String,
+    thumbprint: String,
+    jti: String,
+    htm: String,
+    htu: String,
+    ath: String,
+    /// The address of the replay guard that consumed the proof. Base and
+    /// override instances of one resolver share a guard, and with it its
+    /// record, only when the host injected the same guard into both.
+    replay_guard: usize,
+    /// When the guard forgets the proof, Unix seconds.
+    expires_at: i64,
+    binding: KeyBinding,
+}
+
+impl ProofRecord {
+    /// The `global_state` key: one entry per guard, key and proof id.
+    fn key(&self) -> String {
+        format!(
+            "{RECORD_KEY_PREFIX}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            self.replay_guard, self.issuer, self.thumbprint, self.jti
+        )
+    }
+
+    /// Whether `stored` records this same proof, request and guard, and the
+    /// guard still remembers it at `now`.
+    fn reusable(&self, stored: &Self, now: i64) -> bool {
+        let Self {
+            ath,
+            binding,
+            expires_at,
+            htm,
+            htu,
+            issuer,
+            jti,
+            replay_guard,
+            thumbprint,
+        } = stored;
+
+        now < *expires_at
+            && *ath == self.ath
+            && *binding == self.binding
+            && *htm == self.htm
+            && *htu == self.htu
+            && *issuer == self.issuer
+            && *jti == self.jti
+            && *replay_guard == self.replay_guard
+            && *thumbprint == self.thumbprint
+    }
+}
+
+/// Prefix of the `global_state` keys holding [`ProofRecord`]s.
+const RECORD_KEY_PREFIX: &str = "identity/jwt:dpop_proof\u{1f}";
+
 /// `DPoP` proof verification for one issuer's settings.
 #[derive(Debug)]
 pub struct DpopVerifier<'a> {
@@ -355,7 +470,10 @@ impl<'a> DpopVerifier<'a> {
 
     /// Every check except the replay lookup, in an order that touches the
     /// replay store only for a proof that is otherwise valid.
-    fn check(&self, request: &PopRequest<'_>) -> Result<(String, ProofClaims), PopDenial> {
+    fn check(&self, request: &PopRequest<'_>) -> Result<Checked, PopDenial> {
+        #[cfg(feature = "jwt-openssl-fips")]
+        crate::plugins::identity_jwt::openssl_fips::provider_ready()
+            .map_err(|error| crypto_denial(Op::DpopProvider, &error))?;
         let invalid = |reason: String| PopDenial::new(codes::DPOP_INVALID, reason);
         let Some(proof) = request.proof else {
             return Err(PopDenial::new(
@@ -405,8 +523,10 @@ impl<'a> DpopVerifier<'a> {
                 "the DPoP proof's jwk carries the private member '{member}'"
             )));
         }
-        let thumbprint = jwk_thumbprint(jwk)
-            .ok_or_else(|| invalid("the DPoP proof's jwk is not a supported public key".into()))?;
+        let thumbprint = jwk_thumbprint(jwk).map_err(|error| match error {
+            ThumbprintError::Crypto(error) => crypto_denial(Op::DpopThumbprint, &error),
+            _ => invalid("the DPoP proof's jwk is not a supported public key".into()),
+        })?;
         if thumbprint != request.bound_thumbprint {
             return Err(PopDenial::new(
                 codes::DPOP_KEY_MISMATCH,
@@ -435,7 +555,13 @@ impl<'a> DpopVerifier<'a> {
         validation.validate_nbf = false;
         validation.validate_aud = false;
         let claims = decode::<ProofClaims>(proof, &key, &validation)
-            .map_err(|e| invalid(format!("the DPoP proof did not verify: {e}")))?
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::Provider(detail) => {
+                    crypto_failure(Op::DpopVerify, detail);
+                    PopDenial::new(CRYPTO_FAILED_CODE, CRYPTO_FAILED_REASON)
+                },
+                _ => invalid(format!("the DPoP proof did not verify: {e}")),
+            })?
             .claims;
 
         if claims.htm != request.method {
@@ -462,7 +588,9 @@ impl<'a> DpopVerifier<'a> {
                 self.config.iat_window_seconds
             )));
         }
-        if claims.ath.as_deref() != Some(access_token_hash(request.access_token).as_str()) {
+        let ath = access_token_hash(request.access_token)
+            .map_err(|error| crypto_denial(Op::DpopAth, &error))?;
+        if claims.ath.as_deref() != Some(ath.as_str()) {
             return Err(invalid(
                 "the DPoP proof's ath does not match the access token presented with it".into(),
             ));
@@ -472,7 +600,112 @@ impl<'a> DpopVerifier<'a> {
                 "the DPoP proof's jti must be 1 to {MAX_JTI_LEN} characters"
             )));
         }
-        Ok((thumbprint, claims))
+        Ok(Checked {
+            thumbprint,
+            jti: claims.jti,
+            htu: expected,
+            ath,
+        })
+    }
+
+    /// Verify the request's proof, reusing a verification this request already
+    /// made instead of consuming the proof's `jti` again.
+    ///
+    /// Every check of [`ProofOfPossession::verify`] still runs. When `ctx`
+    /// holds an unexpired record of the same proof, for the same issuer, key,
+    /// method, URL and access token, accepted through the same replay guard,
+    /// only the replay lookup is skipped. Otherwise the proof is checked
+    /// against the guard and, once accepted, recorded in `ctx`'s
+    /// `global_state`. A host that passes one request's context table from
+    /// hook to hook can therefore resolve identity more than once per request;
+    /// a fresh table, which is a new request, still hits the guard.
+    ///
+    /// # Errors
+    ///
+    /// A [`PopDenial`] naming why the proof was not accepted.
+    pub async fn verify_in(
+        &self,
+        request: &PopRequest<'_>,
+        ctx: &mut PluginContext,
+    ) -> Result<KeyBinding, PopDenial> {
+        // A zero-sized guard has no address of its own, so two of them cannot be
+        // told apart; its proofs are consumed on every resolution.
+        if std::mem::size_of_val(self.replay) == 0 {
+            return self.verify(request).await;
+        }
+        let checked = self.check(request)?;
+        let record = self.record(request, checked);
+        let key = record.key();
+        let stored = ctx
+            .get_global(&key)
+            .and_then(|value| ProofRecord::deserialize(value).ok());
+        if stored.is_some_and(|stored| record.reusable(&stored, request.now)) {
+            tracing::debug!(
+                issuer = request.issuer,
+                "DPoP proof already verified for this request; replay guard not consulted again"
+            );
+            return Ok(record.binding);
+        }
+
+        self.consume(request, &record.thumbprint, &record.jti)
+            .await?;
+        if let Ok(value) = serde_json::to_value(&record) {
+            ctx.set_global(key, value);
+        }
+        Ok(record.binding)
+    }
+
+    /// The record of `checked`, accepted for `request` through this verifier's
+    /// replay guard.
+    fn record(&self, request: &PopRequest<'_>, checked: Checked) -> ProofRecord {
+        ProofRecord {
+            issuer: request.issuer.to_owned(),
+            binding: KeyBinding {
+                method: METHOD.to_owned(),
+                thumbprint: checked.thumbprint.clone(),
+            },
+            thumbprint: checked.thumbprint,
+            jti: checked.jti,
+            htm: request.method.to_owned(),
+            htu: checked.htu,
+            ath: checked.ath,
+            replay_guard: std::ptr::from_ref(self.replay).cast::<()>().addr(),
+            expires_at: self.retained_until(request.now),
+        }
+    }
+
+    /// When the replay guard may forget a proof first used at `now`.
+    fn retained_until(&self, now: i64) -> i64 {
+        let window = i64::try_from(self.config.iat_window_seconds).unwrap_or(i64::MAX);
+        // A second gateway's clock may be behind this one's. Retain the id for
+        // the full span in which any one clock can accept this proof, even if
+        // this gateway first saw it at the end of its own window.
+        now.saturating_add(window.saturating_mul(2).saturating_add(1))
+    }
+
+    /// Record the proof's `jti` in the replay guard, denying a second use.
+    async fn consume(
+        &self,
+        request: &PopRequest<'_>,
+        thumbprint: &str,
+        jti: &str,
+    ) -> Result<(), PopDenial> {
+        let scope = format!("{}\u{1f}{thumbprint}", request.issuer);
+        let expires_at = self.retained_until(request.now);
+        match self
+            .replay
+            .first_use(&scope, jti, expires_at, request.now)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(PopDenial::new(
+                codes::DPOP_REPLAY,
+                "the DPoP proof's jti was already used",
+            )),
+            Err(ReplayUnavailable(reason)) => {
+                Err(PopDenial::new(codes::DPOP_REPLAY_UNAVAILABLE, reason))
+            },
+        }
     }
 }
 
@@ -483,33 +716,22 @@ impl ProofOfPossession for DpopVerifier<'_> {
     }
 
     async fn verify(&self, request: &PopRequest<'_>) -> Result<KeyBinding, PopDenial> {
-        let (thumbprint, claims) = self.check(request)?;
-        let window = i64::try_from(self.config.iat_window_seconds).unwrap_or(i64::MAX);
-        // A second gateway's clock may be behind this one's. Retain the id for
-        // the full span in which any one clock can accept this proof, even if
-        // this gateway first saw it at the end of its own window.
-        let expires_at = request
-            .now
-            .saturating_add(window.saturating_mul(2).saturating_add(1));
-        let scope = format!("{}\u{1f}{thumbprint}", request.issuer);
-        match self
-            .replay
-            .first_use(&scope, &claims.jti, expires_at, request.now)
-            .await
-        {
-            Ok(true) => Ok(KeyBinding {
-                method: METHOD.to_owned(),
-                thumbprint,
-            }),
-            Ok(false) => Err(PopDenial::new(
-                codes::DPOP_REPLAY,
-                "the DPoP proof's jti was already used",
-            )),
-            Err(ReplayUnavailable(reason)) => {
-                Err(PopDenial::new(codes::DPOP_REPLAY_UNAVAILABLE, reason))
-            },
-        }
+        let checked = self.check(request)?;
+        self.consume(request, &checked.thumbprint, &checked.jti)
+            .await?;
+        Ok(KeyBinding {
+            method: METHOD.to_owned(),
+            thumbprint: checked.thumbprint,
+        })
     }
+}
+
+const CRYPTO_FAILED_REASON: &str = "the DPoP proof could not be checked";
+
+/// Log a backend failure and deny without repeating its detail.
+fn crypto_denial(op: Op, error: &CryptoError) -> PopDenial {
+    crypto_failure(op, error);
+    PopDenial::new(CRYPTO_FAILED_CODE, CRYPTO_FAILED_REASON)
 }
 
 /// Whether `alg` is one a `DPoP` proof may use: asymmetric only.
@@ -533,8 +755,8 @@ mod tests {
             "kid": "2011-04-29"
         });
         assert_eq!(
-            jwk_thumbprint(&jwk).as_deref(),
-            Some("NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs")
+            jwk_thumbprint(&jwk).unwrap(),
+            "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
         );
     }
 
@@ -545,15 +767,18 @@ mod tests {
         let members = with_extras.as_object_mut().unwrap();
         members.insert("kid".into(), "k1".into());
         members.insert("use".into(), "sig".into());
-        assert_eq!(jwk_thumbprint(&ec), jwk_thumbprint(&with_extras));
         assert_eq!(
+            jwk_thumbprint(&ec).unwrap(),
+            jwk_thumbprint(&with_extras).unwrap()
+        );
+        assert!(matches!(
             jwk_thumbprint(&serde_json::json!({"kty": "oct", "k": "c2VjcmV0"})),
-            None
-        );
-        assert_eq!(
+            Err(ThumbprintError::Unsupported)
+        ));
+        assert!(matches!(
             jwk_thumbprint(&serde_json::json!({"kty": "EC", "crv": "P-256", "x": "AA"})),
-            None
-        );
+            Err(ThumbprintError::Unsupported)
+        ));
     }
 
     #[test]
@@ -585,7 +810,7 @@ mod tests {
     fn access_token_hash_is_base64url_sha256() {
         // SHA-256 of "abc", base64url without padding.
         assert_eq!(
-            access_token_hash("abc"),
+            access_token_hash("abc").unwrap(),
             "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
         );
     }

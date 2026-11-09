@@ -208,7 +208,8 @@ pub struct PluginConfig {
     /// [`cmf::constants`][crate::cmf::constants] plus
     /// [`identity::HOOK_IDENTITY_RESOLVE`][crate::identity::HOOK_IDENTITY_RESOLVE],
     /// [`delegation::HOOK_TOKEN_DELEGATE`][crate::delegation::HOOK_TOKEN_DELEGATE],
-    /// and [`elicitation::HOOK_ELICIT`][crate::elicitation::HOOK_ELICIT].
+    /// [`elicitation::HOOK_ELICIT`][crate::elicitation::HOOK_ELICIT], and
+    /// [`metadata::HOOK_METADATA_FETCH`][crate::metadata::HOOK_METADATA_FETCH].
     ///
     /// A host with its own hooks describes them through
     /// [`register_hook_metadata`][crate::hooks::register_hook_metadata]

@@ -54,7 +54,10 @@ fips = [
 # Feature names match the facade's exactly, so each facade body is a one-line
 # forward and a rename is a lockstep two-file edit rather than a translation
 # table nobody maintains.
-jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64", "dep:sha2"]
+# `jwt` verifies with AWS-LC. `jwt-openssl-fips` verifies the same plugin with
+# system OpenSSL under the FIPS provider; it requires `fips` and excludes `jwt`.
+jwt = ["_jwt", "jsonwebtoken/aws_lc_rs"]
+jwt-openssl-fips = ["_jwt", "dep:openssl"]
 api-key = ["_engine-core", "_plugins"]
 # RFC 7617 Basic authentication. `base64` decodes the credential and
 # `unicode-normalization` NFC-folds the user-id before it is used as an index
@@ -77,7 +80,6 @@ oauth = [
   "dep:base64",
   "dep:hmac",
   "dep:sha2",
-  "dep:getrandom",
   "dep:moka",
 ]
 delegator-vault = ["_engine-core", "_plugins", "dep:sha2", "dep:moka"]
@@ -124,6 +126,7 @@ _plugins = []
 _pdps = ["dep:stacker"]
 _session = []
 _secrets = []
+_jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64"]
 
 [dependencies]
 # Engine crates, optional so a consumer resolves only the layer it asked for.
@@ -162,18 +165,18 @@ limitador-cel = { workspace = true, optional = true }
 
 # --- jwt ---------------------------------------------------------------------
 
-# `jsonwebtoken` is the de facto JWT library for Rust. Supports
-# RS256/RS384/RS512, ES256/ES384, EdDSA, HS256/HS384/HS512. Default
-# features include `use_pem` (load DecodingKey from PEM strings) which
-# we want. Since v10 the crypto backend is a required feature
-# (neither `rust_crypto` nor `aws_lc_rs` is on by default) and panics
-# at first sign/verify if none is selected. We pick `aws_lc_rs`: the
-# alternative, `rust_crypto`, pulls the pure-Rust `rsa` crate as a
-# runtime dependency, and that crate carries RUSTSEC-2023-0071 (Marvin
-# timing sidechannel) with no fixed release — which then propagates the
-# advisory to every downstream consumer. aws-lc-rs keeps `rsa` out of the
-# runtime tree at the cost of a C/cmake build step.
-jsonwebtoken = { workspace = true, optional = true, features = ["aws_lc_rs"] }
+# `jsonwebtoken` parses tokens, selects JWKS keys and validates claims. Since
+# v10 the crypto backend is a separate choice, and with none selected it panics
+# at first verify. The `jwt` feature selects `aws_lc_rs`: `rust_crypto` would
+# pull the pure-Rust `rsa` crate, which carries RUSTSEC-2023-0071 (Marvin)
+# with no fixed release, into every consumer's runtime tree.
+# `jwt-openssl-fips` selects neither and installs Policy's OpenSSL provider.
+# This is the only place a backend is chosen, so no dev-dependency can pull
+# AWS-LC into a FIPS build through feature unification.
+jsonwebtoken = { workspace = true, optional = true }
+
+# OpenSSL signature verification for `jwt-openssl-fips`.
+openssl = { workspace = true, optional = true }
 
 # --- jwt, basic, oauth, elicitation-ciba -------------------------------------
 
@@ -208,10 +211,10 @@ sha-crypt = { workspace = true, optional = true }
 # by timing. Already in the tree through all three hashing crates.
 subtle = { workspace = true, optional = true }
 
-# --- api-key, oauth, valkey --------------------------------------------------
+# --- oauth, delegator-vault, valkey -----------------------------------------
 
-# `sha2` for the API-key hash index (keys compared by digest, never plaintext),
-# the OAuth cache-key HMAC, and the Valkey key derivation.
+# `sha2` for the OAuth cache-key HMAC, the Vault cache key and the Valkey key
+# derivation. JWT, DPoP and API-key hashing use Policy's selected backend.
 #
 # 0.13 `hmac` below pairs with the `digest` 0.11 that the workspace `sha2`
 # brings, so a bump to either has to move both.
@@ -231,10 +234,6 @@ sha2 = { workspace = true, optional = true }
 # Its speed advantage is real and irrelevant at this size: one hash of a
 # couple of kilobytes per delegation, against an IdP round trip.
 hmac = { workspace = true, optional = true }
-
-# 32 bytes for the per-process HMAC secret. The only runtime user; the
-# 0.3 line in the tree comes from `rand_core` under dev-only deps.
-getrandom = { version = "0.4", optional = true }
 
 # The bounded, coalescing store behind the delegated-token cache.
 #
@@ -421,6 +420,11 @@ path = "tests/jwt/main.rs"
 required-features = ["jwt"]
 
 [[test]]
+name = "jwt_fips"
+path = "tests/jwt_fips/main.rs"
+required-features = ["jwt-openssl-fips"]
+
+[[test]]
 name = "api_key"
 path = "tests/api_key/main.rs"
 required-features = ["api-key"]
@@ -486,6 +490,13 @@ name = "ratelimit_hot_path"
 path = "benches/ratelimit_hot_path.rs"
 harness = false
 required-features = ["experimental-ratelimit"]
+
+# JWT verification on either backend, for comparing AWS-LC with OpenSSL FIPS.
+[[bench]]
+name = "jwt_verify"
+path = "benches/jwt_verify.rs"
+harness = false
+required-features = ["_jwt"]
 
 # Cache hit/miss against a real CEL resolver. Kept here so
 # apl-runtime does not depend back on this crate: that cycle makes

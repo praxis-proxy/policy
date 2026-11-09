@@ -421,8 +421,10 @@ impl AplRouteHandler {
                     %error,
                     "attribute bag hashing failed; failing request closed"
                 );
-                let mut v =
-                    PluginViolation::new("policy.crypto_failed", "the request could not be hashed");
+                let mut v = PluginViolation::new(
+                    praxis_policy_core::CRYPTO_FAILED_CODE,
+                    "the request could not be hashed",
+                );
                 decorate_denial_response(&mut v, self.route.response.as_ref());
                 return Ok(Box::new(ErasedResultFields {
                     continue_processing: false,

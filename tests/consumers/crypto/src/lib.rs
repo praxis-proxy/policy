@@ -35,6 +35,44 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "fips",
+        not(feature = "api-key"),
+        not(feature = "jwt-openssl-fips")
+    ))]
+    #[test]
+    fn engine_only_fips_reports_safe() {
+        assert_report(CryptoBackend::OpenSslFips, None, true);
+    }
+
+    #[cfg(all(feature = "fips", feature = "jwt-openssl-fips"))]
+    #[test]
+    fn openssl_jwt_keeps_the_fips_profile_safe() {
+        let api_key = cfg!(feature = "api-key").then_some(CryptoBackend::OpenSslFips);
+        assert_report(CryptoBackend::OpenSslFips, api_key, true);
+        assert_eq!(
+            policy::JWT_KIND,
+            "identity/jwt",
+            "the JWT kind is the same under jwt-openssl-fips"
+        );
+    }
+
+    #[cfg(all(feature = "fips", feature = "jwt-openssl-fips"))]
+    #[test]
+    fn openssl_jwt_registers_its_factory() {
+        let engine = std::sync::Arc::new(policy::PolicyEngine::default());
+        policy::register_builtin_plugins(&engine);
+        let yaml =
+            "plugins:\n  - name: jwt\n    kind: identity/jwt\n    hooks: [identity.resolve]\n";
+        let error = engine
+            .load_config_yaml(yaml)
+            .expect_err("a JWT plugin without a config block cannot load");
+        assert!(
+            !error.to_string().contains("no factory registered"),
+            "identity/jwt must resolve to a factory: {error}"
+        );
+    }
+
     #[cfg(feature = "api-key")]
     #[test]
     fn api_key_aliases_are_the_core_types() {
