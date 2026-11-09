@@ -475,9 +475,15 @@ mod crypto_capability_tests {
         let fips = CryptoBackend::OpenSslFips;
         let rust = CryptoBackend::RustCrypto;
         let jwt = vec![BundledCryptoCapability::Jwt];
+        let basic = vec![BundledCryptoCapability::BasicPasswords];
         for (case, safe, name) in [
             (report(fips, None, vec![]), true, "engine or JWT only"),
             (report(fips, Some(fips), vec![]), true, "API-key on FIPS"),
+            (
+                report(fips, Some(fips), basic),
+                false,
+                "Basic password crypto has no OpenSSL path",
+            ),
             (
                 report(fips, Some(rust), vec![]),
                 false,
@@ -562,6 +568,7 @@ mod crypto_capability_tests {
             .split(',')
             .filter(|name| !name.is_empty())
             .map(|name| match name {
+                "basic" => BundledCryptoCapability::BasicPasswords,
                 "jwt" => BundledCryptoCapability::Jwt,
                 "oauth" => BundledCryptoCapability::OAuth,
                 "delegator-vault" => BundledCryptoCapability::VaultDelegation,

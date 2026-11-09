@@ -21,6 +21,7 @@
 //! | `jwt` | `plugins::identity_jwt`, verified with AWS-LC |
 //! | `jwt-openssl-fips` | `plugins::identity_jwt`, verified with OpenSSL FIPS; requires `fips` |
 //! | `api-key` | `plugins::identity_api_key` |
+//! | `basic` | `plugins::identity_basic`; password crypto is RustCrypto only |
 //! | `crypto-rustcrypto` | RustCrypto SHA-256 and HMAC; on by default |
 //! | `fips` | OpenSSL FIPS SHA-256, shared by Policy, API-key and DPoP; no HMAC |
 //! | `oauth` | `plugins::delegator_oauth` |
@@ -66,6 +67,8 @@ pub mod session;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BundledCryptoCapability {
+    /// Basic password verification with bcrypt, argon2 and sha-crypt.
+    BasicPasswords,
     /// JWT signature verification and `DPoP` hashing with AWS-LC. Not
     /// listed under `jwt-openssl-fips`.
     Jwt,
@@ -81,6 +84,8 @@ pub enum BundledCryptoCapability {
 #[must_use]
 pub fn bundled_crypto_capabilities() -> Vec<BundledCryptoCapability> {
     vec![
+        #[cfg(feature = "basic")]
+        BundledCryptoCapability::BasicPasswords,
         #[cfg(feature = "jwt")]
         BundledCryptoCapability::Jwt,
         #[cfg(feature = "oauth")]
