@@ -545,7 +545,7 @@ where
             .invoke_entries::<MetadataFetchHook>(
                 std::slice::from_ref(entry),
                 MetadataFetchRequest::new(),
-                current_extensions.clone(),
+                current_extensions,
                 None,
             )
             .await;
