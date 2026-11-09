@@ -326,13 +326,62 @@ fn a_ceiling_below_the_refresh_interval_fails_validation() {
 fn a_zero_staleness_ceiling_fails_validation() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let mut config = config_for(file.path());
-    config.refresh_secs = 0;
+    config.refresh_secs = 1;
     config.max_staleness_secs = 0;
     let err = HtpasswdDirectory::new(config)
         .expect_err("a zero staleness ceiling denies every lookup and must not load");
     assert!(
         err.contains("max_staleness_secs"),
         "the error should name the field an operator has to change: {err}"
+    );
+}
+
+#[test]
+fn a_zero_refresh_interval_fails_validation() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let mut config = config_for(file.path());
+    config.refresh_secs = 0;
+    config.max_staleness_secs = 30;
+    let err = HtpasswdDirectory::new(config)
+        .expect_err("a zero refresh interval reloads on every lookup and must not load");
+    assert!(
+        err.contains("refresh_secs"),
+        "the error should name the field an operator has to change: {err}"
+    );
+}
+
+#[tokio::test]
+async fn the_smallest_legal_refresh_interval_still_merges_a_burst_into_one_read() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let mut config = config_for(file.path());
+    config.refresh_secs = 1;
+    config.max_staleness_secs = 3600;
+    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..16_u32 {
+        let dir = std::sync::Arc::clone(&dir);
+        set.spawn(async move {
+            let svc = services();
+            dir.lookup("alice", &svc).await.map(|found| found.is_some())
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        assert!(
+            joined.expect("the task completes").expect("answers"),
+            "every lookup in the burst must see the record"
+        );
+    }
+
+    assert_eq!(
+        dir.reload_attempts(),
+        1,
+        "at the one-second floor a burst past the due time costs one read, so no \
+         lookup pays a file read and parse on the async worker ahead of the \
+         verification semaphore. A zero interval would re-arm the slot at the \
+         same instant and give each of these 16 lookups its own reload"
     );
 }
 
@@ -461,7 +510,7 @@ async fn a_failed_reload_keeps_the_previous_index_serving() {
 async fn past_the_staleness_ceiling_lookups_report_unavailable_not_unknown() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
     let mut config = config_for(file.path());
-    config.refresh_secs = 0;
+    config.refresh_secs = 1;
     config.max_staleness_secs = 1;
     let dir = HtpasswdDirectory::new(config).expect("the file loads");
     let svc = services();
@@ -729,17 +778,21 @@ fn reloading_a_populated_directory_does_no_hashing_work() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
     let dir = directory(&file).expect("the file loads");
 
-    let start = std::time::Instant::now();
     for _ in 0..20_u32 {
         dir.reload().expect("the reload succeeds");
     }
-    let elapsed = start.elapsed();
 
-    assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "20 reloads took {elapsed:?}; a reload must reuse a record from the file \
-         as its miss-path hash rather than minting one, because reload runs on \
-         the request path where a bcrypt mint would block an executor worker"
+    assert_eq!(
+        dir.floor_mints(),
+        0,
+        "a reload must reuse a record from the file as its miss-path hash rather \
+         than minting one, because reload runs on the request path where a \
+         bcrypt mint would block an executor worker"
+    );
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&bcrypt_line("alice", "pw", 5)),
+        "and the miss path must still cost what the stored record costs"
     );
     assert_eq!(
         dir.len(),

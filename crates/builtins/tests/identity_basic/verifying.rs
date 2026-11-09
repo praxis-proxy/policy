@@ -1049,6 +1049,18 @@ fn a_sha_crypt_profile_describes_its_own_parameters() {
     }
 }
 
+#[test]
+fn the_crypto_report_names_basic_as_doing_its_own_crypto() {
+    let reported = praxis_policy_builtins::bundled_crypto_capabilities();
+
+    assert!(
+        reported.contains(&praxis_policy_builtins::BundledCryptoCapability::BasicPasswords),
+        "compiling `basic` must put Basic in the report: bcrypt, argon2 and \
+         sha-crypt run outside the selected Policy backend, so a FIPS consumer \
+         reading `fips_profile_is_safe` has to see them. Got {reported:?}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

@@ -20,8 +20,9 @@
 // races it encodes (see `reload` and `refresh_if_due`) are subtle enough that a
 // reimplementation would reintroduce them, and extracting a shared helper
 // across two plugins is deferred until there is a second backend to generalise
-// from. Where this backend diverges -- the staleness ceiling is required, not
-// optional -- the divergence is called out at the field.
+// from. Where this backend diverges -- the staleness ceiling is required
+// rather than optional, and the refresh interval has a one-second floor --
+// the divergence is called out at the field.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,10 +52,10 @@ pub struct HtpasswdConfig {
     /// Where the file lives.
     pub path: PathBuf,
 
-    /// The required refresh interval, in seconds.
+    /// The required refresh interval, in seconds. At least one.
     ///
-    /// Zero requests a reload on every lookup. Removed records may remain usable
-    /// until a successful reload.
+    /// This is the revocation window: a record removed from the file stays
+    /// usable until the next successful reload.
     pub refresh_secs: u64,
 
     /// The required maximum index age, in seconds.
@@ -150,8 +151,9 @@ impl HtpasswdConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the staleness ceiling is zero or below the refresh
-    /// interval, or the verification capacity is outside the supported range.
+    /// Returns an error if the refresh interval is zero, the staleness ceiling
+    /// is zero or below the refresh interval, or the verification capacity is
+    /// outside the supported range.
     pub fn validate(&self) -> Result<(), String> {
         // Zero is not a usable ceiling in either reading an operator might
         // give it. As a bound it denies everything: `reload` stamps
@@ -178,6 +180,27 @@ impl HtpasswdConfig {
                  closed before the first reload is even due",
                 self.max_staleness_secs, self.refresh_secs
             ));
+        }
+        // `refresh_if_due` claims the next slot at `now + interval`, so a zero
+        // interval leaves every later lookup immediately due again. Each one
+        // then wins its own compare-exchange and calls the synchronous
+        // `reload` inline: a file read, a full parse, and a wait on
+        // `publishing` all run on the async worker, ahead of the verification
+        // semaphore that is supposed to bound this backend's work. Measured at
+        // 16 concurrent lookups, that is 16 reload attempts queueing on one
+        // mutex while every other task on those workers stalls behind them.
+        //
+        // Rejected rather than made safe. Keeping zero would mean a
+        // `spawn_blocking` hop plus a single-flight guard, and the value it
+        // buys is a revocation window no operator can use: a one-second floor
+        // already reloads as fast as the file's own mtime granularity.
+        if self.refresh_secs == 0 {
+            return Err(
+                "`refresh_secs` must be at least 1: zero makes every lookup read and parse \
+                 the file on the async worker, and one second is already the tightest \
+                 revocation window this backend can serve"
+                    .to_owned(),
+            );
         }
         if self.max_concurrent_verifications == 0 {
             return Err(
@@ -666,12 +689,18 @@ impl CredentialDirectory for HtpasswdDirectory {
             .try_acquire_owned()
             .map_err(|_at_capacity| DirectoryError::Saturated)?;
 
-        let index = self.index.load();
         // The hash to run, and whether this is a real check or a dummy. Both
         // arms hold an admitted hash *before* the branch is observable in
         // timing: the found arm takes the one the record carries and the miss
         // arm the pre-built dummy, so neither path pays a parse the other
         // skips.
+        //
+        // The miss arm loads the index inside the arm, not before the match.
+        // An `arc_swap` guard taken here would stay alive across the
+        // `spawn_blocking` await below -- milliseconds to seconds of hashing --
+        // which occupies one of the thread's debt slots for that whole span
+        // and keeps a superseded index alive past the reload that replaced it.
+        // The hit arm never reads the index at all.
         let (hash, is_dummy) = match record {
             Some(found) => found.verify_against(|verifier| match verifier {
                 StoredVerifier::Hash(admitted) => Ok((admitted.clone(), false)),
@@ -681,7 +710,7 @@ impl CredentialDirectory for HtpasswdDirectory {
                 )),
             })?,
             // No such user. Run the dummy so a miss costs what a hit costs.
-            None => (index.dummy.clone(), true),
+            None => (self.index.load().dummy.clone(), true),
         };
 
         if is_dummy {
