@@ -183,22 +183,22 @@ impl HtpasswdConfig {
         }
         // `refresh_if_due` claims the next slot at `now + interval`, so a zero
         // interval leaves every later lookup immediately due again. Each one
-        // then wins its own compare-exchange and calls the synchronous
-        // `reload` inline: a file read, a full parse, and a wait on
-        // `publishing` all run on the async worker, ahead of the verification
-        // semaphore that is supposed to bound this backend's work. Measured at
-        // 16 concurrent lookups, that is 16 reload attempts queueing on one
-        // mutex while every other task on those workers stalls behind them.
+        // then wins its own compare-exchange and dispatches its own reload.
+        // The reload runs on a blocking thread, so this no longer stalls an
+        // async worker -- but it still queues one file read and full parse per
+        // lookup onto the blocking pool, all of them serialized on
+        // `publishing` and none of them bounded by the verification semaphore.
+        // Measured at 16 concurrent lookups, that is 16 reload attempts
+        // waiting on one mutex to re-read a file nothing has changed.
         //
-        // Rejected rather than made safe. Keeping zero would mean a
-        // `spawn_blocking` hop plus a single-flight guard, and the value it
-        // buys is a revocation window no operator can use: a one-second floor
-        // already reloads as fast as the file's own mtime granularity.
+        // Rejected rather than made safe, because the value it buys is a
+        // revocation window no operator can use: a one-second floor already
+        // reloads as fast as the file's own mtime granularity.
         if self.refresh_secs == 0 {
             return Err(
                 "`refresh_secs` must be at least 1: zero makes every lookup read and parse \
-                 the file on the async worker, and one second is already the tightest \
-                 revocation window this backend can serve"
+                 the file, and one second is already the tightest revocation window this \
+                 backend can serve"
                     .to_owned(),
             );
         }
@@ -244,6 +244,25 @@ struct Index {
 /// Records read from a `.htpasswd` file, indexed by user-id.
 #[derive(Debug)]
 pub struct HtpasswdDirectory {
+    /// Everything a reload touches, shared so a blocking task can own a clone.
+    ///
+    /// Behind an `Arc` because the request-triggered reload runs on
+    /// [`tokio::task::spawn_blocking`], whose closure must be `'static`: it
+    /// cannot borrow from `self`. A dropped `JoinHandle` does not cancel the
+    /// task, so the state has to outlive the caller's future rather than be
+    /// borrowed from it.
+    state: Arc<ReloadState>,
+
+    /// The capacity limit for in-flight verifications.
+    verifications: Arc<tokio::sync::Semaphore>,
+
+    /// The number of dummy verification attempts, for regression tests.
+    dummy_runs: AtomicU64,
+}
+
+/// The index, timers and counters a reload reads and publishes.
+#[derive(Debug)]
+struct ReloadState {
     config: HtpasswdConfig,
 
     /// The most recently loaded valid index.
@@ -257,9 +276,6 @@ pub struct HtpasswdDirectory {
 
     /// The last successful load time, in milliseconds since `started`.
     loaded_at_ms: AtomicU64,
-
-    /// The capacity limit for in-flight verifications.
-    verifications: Arc<tokio::sync::Semaphore>,
 
     /// The fallback dummy hash for an empty directory, minted on first need.
     ///
@@ -278,26 +294,23 @@ pub struct HtpasswdDirectory {
     /// and publish in the reverse order, which restores a revoked record and
     /// stamps it fresh until the next refresh.
     ///
-    /// [`Self::reload`]: HtpasswdDirectory::reload
+    /// [`Self::reload`]: ReloadState::reload
     publishing: std::sync::Mutex<()>,
 
     /// The number of refresh-path file-read attempts, for regression tests.
     reload_attempts: AtomicU64,
-
-    /// The number of dummy verification attempts, for regression tests.
-    dummy_runs: AtomicU64,
 
     /// The most reloads ever observed inside [`Self::reload`] at once.
     ///
     /// Exists so a test can assert the serialization rather than infer it from
     /// a timing window it cannot control.
     ///
-    /// [`Self::reload`]: HtpasswdDirectory::reload
+    /// [`Self::reload`]: ReloadState::reload
     peak_concurrent_reloads: AtomicU64,
 
     /// How many reloads are inside [`Self::reload`] right now.
     ///
-    /// [`Self::reload`]: HtpasswdDirectory::reload
+    /// [`Self::reload`]: ReloadState::reload
     reloads_in_flight: AtomicU64,
 }
 
@@ -477,22 +490,74 @@ impl HtpasswdDirectory {
         let first_attempt = config.refresh_secs.saturating_mul(1000);
         let permits = config.max_concurrent_verifications;
         Ok(Self {
-            config,
-            empty,
-            floor_mints,
-            index: ArcSwap::from_pointee(index),
-            publishing: std::sync::Mutex::new(()),
-            started: Instant::now(),
-            next_attempt_ms: AtomicU64::new(first_attempt),
-            loaded_at_ms: AtomicU64::new(0),
+            state: Arc::new(ReloadState {
+                config,
+                empty,
+                floor_mints,
+                index: ArcSwap::from_pointee(index),
+                publishing: std::sync::Mutex::new(()),
+                started: Instant::now(),
+                next_attempt_ms: AtomicU64::new(first_attempt),
+                loaded_at_ms: AtomicU64::new(0),
+                reload_attempts: AtomicU64::new(0),
+                peak_concurrent_reloads: AtomicU64::new(0),
+                reloads_in_flight: AtomicU64::new(0),
+            }),
             verifications: Arc::new(tokio::sync::Semaphore::new(permits)),
-            reload_attempts: AtomicU64::new(0),
             dummy_runs: AtomicU64::new(0),
-            peak_concurrent_reloads: AtomicU64::new(0),
-            reloads_in_flight: AtomicU64::new(0),
         })
     }
 
+    /// How many users the running index holds.
+    pub fn len(&self) -> usize {
+        self.state.index.load().users.len()
+    }
+
+    /// Whether the running index holds no users.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The number of dummy verification attempts, for regression tests.
+    pub fn dummy_runs(&self) -> u64 {
+        self.dummy_runs.load(Ordering::Relaxed)
+    }
+
+    /// The most reloads ever in flight at once, for regression tests.
+    pub fn peak_concurrent_reloads(&self) -> u64 {
+        self.state.peak_concurrent_reloads.load(Ordering::Relaxed)
+    }
+
+    /// How many times the empty-directory floor hash was minted, for the tests.
+    pub fn floor_mints(&self) -> u64 {
+        self.state.floor_mints.load(Ordering::Relaxed)
+    }
+
+    /// The number of refresh-path file-read attempts, for regression tests.
+    pub fn reload_attempts(&self) -> u64 {
+        self.state.reload_attempts.load(Ordering::Relaxed)
+    }
+
+    /// The work factor the miss path currently runs at, for the tests.
+    pub fn miss_cost_profile(&self) -> CostProfile {
+        self.state.index.load().dummy.profile()
+    }
+
+    /// Reload the file, retaining the previous index on failure.
+    ///
+    /// Blocking and I/O-bound: call it from a blocking context, or let the
+    /// refresh interval drive it from a lookup, which runs it off the async
+    /// worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or its records fail validation.
+    pub fn reload(&self) -> Result<(), String> {
+        self.state.reload()
+    }
+}
+
+impl ReloadState {
     /// Milliseconds since this directory was built.
     fn now_ms(&self) -> u64 {
         self.started
@@ -508,47 +573,12 @@ impl HtpasswdDirectory {
         Duration::from_millis(self.now_ms().saturating_sub(loaded))
     }
 
-    /// How many users the running index holds.
-    pub fn len(&self) -> usize {
-        self.index.load().users.len()
-    }
-
-    /// Whether the running index holds no users.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// The number of dummy verification attempts, for regression tests.
-    pub fn dummy_runs(&self) -> u64 {
-        self.dummy_runs.load(Ordering::Relaxed)
-    }
-
-    /// The most reloads ever in flight at once, for regression tests.
-    pub fn peak_concurrent_reloads(&self) -> u64 {
-        self.peak_concurrent_reloads.load(Ordering::Relaxed)
-    }
-
-    /// How many times the empty-directory floor hash was minted, for the tests.
-    pub fn floor_mints(&self) -> u64 {
-        self.floor_mints.load(Ordering::Relaxed)
-    }
-
-    /// The number of refresh-path file-read attempts, for regression tests.
-    pub fn reload_attempts(&self) -> u64 {
-        self.reload_attempts.load(Ordering::Relaxed)
-    }
-
-    /// The work factor the miss path currently runs at, for the tests.
-    pub fn miss_cost_profile(&self) -> CostProfile {
-        self.index.load().dummy.profile()
-    }
-
     /// Reload the file, retaining the previous index on failure.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or its records fail validation.
-    pub fn reload(&self) -> Result<(), String> {
+    fn reload(&self) -> Result<(), String> {
         // Read, parse and publish under one lock, so concurrent reloads cannot
         // interleave. Two unserialized reloads that straddle a file
         // replacement can read opposite sides of it and then publish in the
@@ -558,12 +588,13 @@ impl HtpasswdDirectory {
         // read is the wide part of the race, so narrowing the lock to the two
         // stores would not close it.
         //
-        // Held across the file read, not across an `.await`: `reload` is
-        // synchronous and the only caller on a request path
-        // (`refresh_if_due`) is too, so no suspension point sits inside this
-        // scope. A poisoned lock means a previous holder panicked mid-reload;
-        // the index is still whatever was last published, so this recovers the
-        // guard and continues rather than propagating a panic into the host.
+        // Held across the file read, but never across an `.await`: `reload` is
+        // synchronous, and its request-path caller (`refresh_if_due`) runs the
+        // whole call inside `spawn_blocking`, so a thread that waits here is a
+        // blocking-pool thread rather than an async worker. A poisoned lock
+        // means a previous holder panicked mid-reload; the index is still
+        // whatever was last published, so this recovers the guard and
+        // continues rather than propagating a panic into the host.
         let _publishing = self
             .publishing
             .lock()
@@ -592,10 +623,13 @@ impl HtpasswdDirectory {
     }
 
     /// Attempt a reload when the refresh interval has elapsed.
-    fn refresh_if_due(&self) {
-        let interval = self.config.refresh_secs;
-        let now = self.now_ms();
-        let due = self.next_attempt_ms.load(Ordering::Acquire);
+    ///
+    /// The reload itself runs on a blocking thread. The slot claim stays here,
+    /// so losing it still costs a lookup nothing but two atomic loads.
+    async fn refresh_if_due(state: &Arc<Self>) {
+        let interval = state.config.refresh_secs;
+        let now = state.now_ms();
+        let due = state.next_attempt_ms.load(Ordering::Acquire);
         if now < due {
             return;
         }
@@ -605,7 +639,7 @@ impl HtpasswdDirectory {
         // read then fails is what keeps an unreadable file from being retried
         // on every request until it comes back.
         let next = now.saturating_add(interval.saturating_mul(1000));
-        if self
+        if state
             .next_attempt_ms
             .compare_exchange(due, next, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -613,18 +647,40 @@ impl HtpasswdDirectory {
             return;
         }
 
-        self.reload_attempts.fetch_add(1, Ordering::Relaxed);
-        if let Err(error) = self.reload() {
-            // Rate limited by the refresh interval itself: this runs once per
-            // interval, not once per request, because the slot was claimed
-            // above. The path is operator-supplied and the error carries no
-            // credential material.
-            tracing::warn!(
-                path = %self.config.path.display(),
-                %error,
-                "htpasswd file could not be reloaded; the previous index is still serving",
-            );
-        }
+        state.reload_attempts.fetch_add(1, Ordering::Relaxed);
+
+        // Off the async worker. A reload is a whole-file read, a parse of every
+        // record, a wait on `publishing`, and -- for a file with no records --
+        // a bcrypt mint at `EMPTY_DIRECTORY_COST`. None of that is bounded by
+        // the verification semaphore, which guards only the verify step, so
+        // inline it would stall every unrelated task on that worker for as long
+        // as the file takes to read. A reload running longer than the interval
+        // also makes the next claimant wait on `publishing`, and that wait
+        // belongs on a blocking thread too.
+        //
+        // The `Arc` clone is what lets this be a `'static` closure: the task
+        // outlives the caller's future, because dropping a `JoinHandle` does
+        // not cancel a blocking task. Serialization, last-good-index retention
+        // and the staleness stamp are all inside `reload`, so moving the call
+        // changes where it runs and nothing about what it guarantees.
+        let reloading = Arc::clone(state);
+        let outcome = tokio::task::spawn_blocking(move || reloading.reload()).await;
+
+        let error = match outcome {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => error,
+            Err(_join_failed) => "the reload task did not complete".to_owned(),
+        };
+
+        // Rate limited by the refresh interval itself: this runs once per
+        // interval, not once per request, because the slot was claimed above.
+        // The path is operator-supplied and the error carries no credential
+        // material.
+        tracing::warn!(
+            path = %state.config.path.display(),
+            %error,
+            "htpasswd file could not be reloaded; the previous index is still serving",
+        );
     }
 }
 
@@ -636,18 +692,18 @@ impl CredentialDirectory for HtpasswdDirectory {
         user_id: &str,
         _services: &dyn HostServices,
     ) -> Result<Option<UserRecord>, DirectoryError> {
-        self.refresh_if_due();
+        ReloadState::refresh_if_due(&self.state).await;
 
         // Past the ceiling the loaded index is not an answer this backend
         // stands behind, so it says it cannot answer. That denies as a
         // directory failure rather than as an unknown user, which is the
         // difference between an operator seeing an outage and seeing a wave of
         // bad passwords.
-        if self.staleness() > self.config.max_staleness() {
+        if self.state.staleness() > self.state.config.max_staleness() {
             return Err(DirectoryError::Stale);
         }
 
-        let index = self.index.load();
+        let index = self.state.index.load();
         // The admitted hash travels into the record as it was admitted at
         // load, so this is a map probe and a clone -- O(1) in the user count,
         // whatever the file size. What carrying it forward saves is the
@@ -710,7 +766,7 @@ impl CredentialDirectory for HtpasswdDirectory {
                 )),
             })?,
             // No such user. Run the dummy so a miss costs what a hit costs.
-            None => (self.index.load().dummy.clone(), true),
+            None => (self.state.index.load().dummy.clone(), true),
         };
 
         if is_dummy {

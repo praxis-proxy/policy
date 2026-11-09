@@ -378,11 +378,62 @@ async fn the_smallest_legal_refresh_interval_still_merges_a_burst_into_one_read(
     assert_eq!(
         dir.reload_attempts(),
         1,
-        "at the one-second floor a burst past the due time costs one read, so no \
-         lookup pays a file read and parse on the async worker ahead of the \
-         verification semaphore. A zero interval would re-arm the slot at the \
-         same instant and give each of these 16 lookups its own reload"
+        "at the one-second floor a burst past the due time costs one read, so 15 \
+         of these 16 lookups never dispatch a reload at all. A zero interval \
+         would re-arm the slot at the same instant and queue one file read and \
+         full parse per lookup onto the blocking pool, serialized on the \
+         publishing mutex and unbounded by the verification semaphore"
     );
+}
+
+#[test]
+fn a_due_reload_runs_on_the_blocking_pool_not_the_async_worker() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_time()
+        .build()
+        .expect("the test runtime builds");
+
+    runtime.block_on(async {
+        let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+        let mut config = config_for(file.path());
+        config.refresh_secs = 1;
+        config.max_staleness_secs = 3600;
+        let dir = HtpasswdDirectory::new(config).expect("the file loads");
+        let svc = services();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        let (squatter, release) = occupy_the_blocking_pool();
+
+        let mut due = Box::pin(dir.lookup("alice", &svc));
+        let first_poll = futures::poll!(&mut due);
+
+        drop(release);
+        squatter.await.expect("the squatting task completes");
+
+        let found = due.await.expect("the lookup answers");
+
+        assert!(
+            first_poll.is_pending(),
+            "the lookup that claims the due refresh must suspend on a queued \
+             blocking task. Reading and parsing the file inline would let this \
+             first poll run to completion on the async worker, stalling every \
+             other task on it for the whole read -- outside the verification \
+             semaphore, which bounds only the verify step"
+        );
+        assert!(
+            found.is_some(),
+            "moving the reload off the worker must not change the answer: the \
+             last-good index serves throughout, so alice resolves either way"
+        );
+        assert_eq!(
+            dir.reload_attempts(),
+            1,
+            "the slot claim stays on the async side, so a due lookup still \
+             records exactly one reload attempt"
+        );
+    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

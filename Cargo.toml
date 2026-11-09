@@ -119,7 +119,16 @@ unicode-normalization = "0.1.26"
 # directly in `verifier.rs`. Its `non_truncating_verify` is likewise unusable
 # here: it errors on hashes it did not mint itself, so it rejects every file
 # Apache wrote.
-argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
+# `zeroize` is not in argon2's default set and is off here because defaults
+# are disabled, so without naming it the password-derived `initial_hash`
+# and the final block hash stay on the blocking thread's stack after a
+# verify. Those are cheaper to guess from than the stored hash. Same
+# reasoning as bcrypt's `zeroize` below.
+argon2 = { version = "0.6.0", default-features = false, features = [
+  "alloc",
+  "password-hash",
+  "zeroize",
+] }
 # `zeroize` is in bcrypt's default set, so disabling defaults silently drops
 # it: `_hash` copies the plaintext into a `[u8; 72]` stack buffer and only
 # wipes it under that feature. Our `Zeroizing` password cannot reach that
