@@ -408,12 +408,6 @@ fn a_due_reload_runs_on_the_blocking_pool_not_the_async_worker() {
 
         let mut due = Box::pin(dir.lookup("alice", &svc));
         let first_poll = futures::poll!(&mut due);
-
-        drop(release);
-        squatter.await.expect("the squatting task completes");
-
-        let found = due.await.expect("the lookup answers");
-
         assert!(
             first_poll.is_pending(),
             "the lookup that claims the due refresh must suspend on a queued \
@@ -422,6 +416,12 @@ fn a_due_reload_runs_on_the_blocking_pool_not_the_async_worker() {
              other task on it for the whole read -- outside the verification \
              semaphore, which bounds only the verify step"
         );
+
+        drop(release);
+        squatter.await.expect("the squatting task completes");
+
+        let found = due.await.expect("the lookup answers");
+
         assert!(
             found.is_some(),
             "moving the reload off the worker must not change the answer: the \
