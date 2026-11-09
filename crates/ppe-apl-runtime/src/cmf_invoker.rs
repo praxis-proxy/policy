@@ -543,7 +543,7 @@ where
             .engine
             .invoke_entries::<MetadataFetchHook>(
                 std::slice::from_ref(entry),
-                MetadataFetchRequest::new(&step.plugin_name),
+                MetadataFetchRequest::new(),
                 current_extensions.clone(),
                 None,
             )
@@ -582,7 +582,10 @@ where
             });
         }
 
-        let mut updated = current_extensions;
+        // Install into the latest shared state after the source returns. The
+        // invocation snapshot may be stale if another writer ran while it was
+        // awaited.
+        let mut updated = self.extensions.lock().await;
         updated
             .install_metadata(&step.plugin_name, &source_kind, facts)
             .map_err(|error| PluginError::Dispatch(error.to_string()))?;
@@ -590,7 +593,6 @@ where
         if let Some(metadata) = updated.metadata.as_deref() {
             praxis_policy_apl_cmf::extract_metadata(metadata, &mut attributes);
         }
-        *self.extensions.lock().await = updated;
         Ok(MetadataFetchOutcome { attributes })
     }
 }

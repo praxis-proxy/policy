@@ -154,57 +154,11 @@ impl RouteDispatchPlan {
     ) -> Self {
         let mut plan = Self::default();
         for name in collect_plugin_names(route) {
-            let eff = if let Some(e) =
-                EffectivePlugin::resolve(&name, registry, &route.plugin_overrides)
-            {
-                e
-            } else {
-                tracing::warn!(
-                    plugin = %name,
-                    route = %route.route_key,
-                    "APL route references plugin not in `plugins:` block — skipping",
-                );
+            let Some(entries) =
+                build_effective_plugin_entries(&name, route, registry, engine).await
+            else {
                 continue;
             };
-
-            // Pull the three overrideable values off the effective view.
-            // `EffectivePlugin` borrows from the registry / route overrides,
-            // so the captures here are slice / Option<&Value> refs.
-            let override_block = route.plugin_overrides.get(&name);
-            let config_override = override_block.and_then(|o| o.config.as_ref());
-            let caps_override: Option<std::collections::HashSet<String>> = matches!(
-                eff.capabilities,
-                praxis_policy_apl_core::plugin_decl::CapsView::Override(_)
-            )
-            .then(|| eff.capabilities.as_slice().iter().cloned().collect());
-            let on_error_override = override_block
-                .and_then(|o| o.on_error.as_deref())
-                .and_then(parse_on_error);
-
-            // Hand the override decision to praxis-policy-core. When no overrides
-            // are declared, this returns the base entries unchanged
-            // (no allocation, no factory call). When only caps/on_error
-            // differ, it wraps the shared base plugin in a fresh
-            // `PluginRef` with merged trusted config. When config
-            // differs, it invokes the factory + initializes a brand-new
-            // instance with its own circuit breaker.
-            let entries = engine
-                .build_override_entries(
-                    &name,
-                    config_override,
-                    caps_override.as_ref(),
-                    on_error_override,
-                )
-                .await;
-            if entries.is_empty() {
-                tracing::warn!(
-                    plugin = %name,
-                    route = %route.route_key,
-                    "APL plugin not resolvable (not registered, factory missing, \
-                     or override construction failed) — skipping",
-                );
-                continue;
-            }
 
             // Store every (hook_name, HookEntry) pair the plugin
             // registered. Dispatch-time entry selection (pick_entry)
@@ -277,29 +231,11 @@ impl RouteDispatchPlan {
         }
 
         for name in collect_fetch_plugin_names(route) {
-            let Some(effective) =
-                EffectivePlugin::resolve(&name, registry, &route.plugin_overrides)
+            let Some(entries) =
+                build_effective_plugin_entries(&name, route, registry, engine).await
             else {
                 continue;
             };
-            let override_block = route.plugin_overrides.get(&name);
-            let config_override = override_block.and_then(|override_| override_.config.as_ref());
-            let caps_override: Option<std::collections::HashSet<String>> = matches!(
-                effective.capabilities,
-                praxis_policy_apl_core::plugin_decl::CapsView::Override(_)
-            )
-            .then(|| effective.capabilities.as_slice().iter().cloned().collect());
-            let on_error_override = override_block
-                .and_then(|override_| override_.on_error.as_deref())
-                .and_then(parse_on_error);
-            let entries = engine
-                .build_override_entries(
-                    &name,
-                    config_override,
-                    caps_override.as_ref(),
-                    on_error_override,
-                )
-                .await;
             if let Some((_, entry)) = entries
                 .into_iter()
                 .find(|(hook_name, _)| hook_name == HOOK_METADATA_FETCH)
@@ -343,6 +279,54 @@ impl RouteDispatchPlan {
             entries_by_hook,
         })
     }
+}
+
+/// Resolve a route plugin and materialize its route-level overrides.
+async fn build_effective_plugin_entries(
+    name: &str,
+    route: &CompiledRoute,
+    registry: &PluginRegistry,
+    engine: &PolicyEngine,
+) -> Option<Vec<(String, HookEntry)>> {
+    let Some(effective) = EffectivePlugin::resolve(name, registry, &route.plugin_overrides) else {
+        tracing::warn!(
+            plugin = %name,
+            route = %route.route_key,
+            "APL route references plugin not in `plugins:` block — skipping",
+        );
+        return None;
+    };
+
+    let override_block = route.plugin_overrides.get(name);
+    let config_override = override_block.and_then(|override_| override_.config.as_ref());
+    let capabilities_override: Option<HashSet<String>> = matches!(
+        effective.capabilities,
+        praxis_policy_apl_core::plugin_decl::CapsView::Override(_)
+    )
+    .then(|| effective.capabilities.as_slice().iter().cloned().collect());
+    let on_error_override = override_block
+        .and_then(|override_| override_.on_error.as_deref())
+        .and_then(parse_on_error);
+
+    let entries = engine
+        .build_override_entries(
+            name,
+            config_override,
+            capabilities_override.as_ref(),
+            on_error_override,
+        )
+        .await;
+    if entries.is_empty() {
+        tracing::warn!(
+            plugin = %name,
+            route = %route.route_key,
+            "APL plugin not resolvable (not registered, factory missing, \
+             or override construction failed) — skipping",
+        );
+        return None;
+    }
+
+    Some(entries)
 }
 
 fn parse_on_error(s: &str) -> Option<OnError> {

@@ -1166,12 +1166,11 @@ impl Executor {
                             }
                             if let Some(mut owned) = erased.modified_extensions {
                                 let mut immutable_ok = false;
-                                let trusted = entry.plugin_ref.trusted_config();
-                                let may_publish_metadata = trusted.kind == "builtin"
-                                    && plugin_name.starts_with("apl::")
-                                    && capabilities.contains(
-                                        crate::extensions::CAP_FRAMEWORK_PUBLISH_METADATA,
-                                    );
+                                let may_publish_metadata =
+                                    entry.plugin_ref.is_framework_registered()
+                                        && capabilities.contains(
+                                            crate::extensions::CAP_FRAMEWORK_PUBLISH_METADATA,
+                                        );
                                 let published_metadata = may_publish_metadata
                                     .then(|| owned.metadata.clone())
                                     .flatten();
@@ -1195,7 +1194,8 @@ impl Executor {
                                     // where it applies unconditionally instead
                                     // of only when `read_labels` was held.
                                     //
-                                    // Authority is re-derived from *this*
+                                    // Authority is re-derived from the internal
+                                    // framework-registration marker and *this*
                                     // plugin's declared capabilities rather than
                                     // read off the returned value. A handler is
                                     // free to build its `OwnedExtensions` any
@@ -1204,9 +1204,10 @@ impl Executor {
                                     // accumulated `Extensions`, whose tokens
                                     // `Clone` deliberately drops — so tokens
                                     // surviving the round trip is a statement
-                                    // about plumbing, not about permission. The
-                                    // capability set is the real grant, and it
-                                    // cannot be widened by the return value.
+                                    // about plumbing, not about permission. An
+                                    // ordinary registration cannot create the
+                                    // marker, and the return value cannot widen
+                                    // either grant.
                                     owned.http_write_token = capabilities
                                         .contains("write_headers")
                                         .then(WriteToken::new);
@@ -2230,6 +2231,54 @@ mod tests {
         assert!(result.modified_payload.is_some());
     }
 
+    #[tokio::test]
+    async fn ordinary_handler_cannot_publish_metadata_with_framework_config_strings() {
+        let capabilities = std::collections::HashSet::from([
+            "read_metadata".to_owned(),
+            crate::extensions::CAP_FRAMEWORK_PUBLISH_METADATA.to_owned(),
+        ]);
+        let config = crate::plugin::PluginConfig {
+            name: "apl::forger".to_owned(),
+            kind: "builtin".to_owned(),
+            capabilities,
+            mode: crate::plugin::PluginMode::Sequential,
+            ..Default::default()
+        };
+        let forger = Arc::new(MetadataForger(config.clone()));
+        let entry = HookEntry {
+            plugin_ref: Arc::new(crate::registry::PluginRef::new(forger.clone(), config)),
+            handler: forger,
+        };
+        let executor = Executor::default();
+        let tracker = tokio_util::task::TaskTracker::new();
+        let payload: Box<dyn PluginPayload> = Box::new(TestPayload {
+            value: "test".to_owned(),
+        });
+
+        let (result, _) = executor
+            .execute(
+                std::slice::from_ref(&entry),
+                payload,
+                Extensions::default(),
+                None,
+                &tracker,
+            )
+            .await;
+
+        assert!(
+            result.continue_processing,
+            "immutable-slot rejection should not deny the request: {:?}",
+            result.violation
+        );
+        assert!(
+            result
+                .modified_extensions
+                .as_ref()
+                .is_none_or(|extensions| extensions.metadata.is_none()),
+            "ordinary registration must not publish forged metadata"
+        );
+    }
+
     // =====================================================================
     // Concurrent phase: failure mode by on_error policy
     // =====================================================================
@@ -2504,6 +2553,52 @@ mod tests {
             "Debug is what a failing assertion prints"
         );
         assert!(bg.wait_for_background_tasks().await.is_empty());
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    struct MetadataForger(crate::plugin::PluginConfig);
+
+    #[async_trait::async_trait]
+    impl crate::plugin::Plugin for MetadataForger {
+        fn config(&self) -> &crate::plugin::PluginConfig {
+            &self.0
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AnyHookHandler for MetadataForger {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> Result<Box<dyn Any + Send + Sync>, Box<PluginError>> {
+            let mut forged = Extensions::default();
+            forged
+                .install_metadata(
+                    "forged",
+                    "test/source",
+                    crate::extensions::AcquiredFacts::success(
+                        serde_json::json!(true),
+                        chrono::Utc::now(),
+                        crate::extensions::MetadataCacheDisposition::Disabled,
+                    ),
+                )
+                .expect("forged test record should be structurally valid");
+            let mut modified = extensions.cow_copy();
+            modified.metadata = forged.metadata;
+
+            Ok(erase_result(
+                PluginResult::<TestPayload>::modify_extensions(modified),
+            ))
+        }
+
+        fn hook_type_name(&self) -> &'static str {
+            "test_hook"
+        }
     }
 }
 

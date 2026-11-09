@@ -1587,7 +1587,12 @@ fn install_handler(
     // intrinsic like `read_headers`. It is a no-op when nothing is installed.
     // Plugins dispatched from the route still need their own `read_metadata`.
     capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
-    capabilities.insert(praxis_policy_core::extensions::CAP_FRAMEWORK_PUBLISH_METADATA.to_owned());
+    // Only the pre-invocation handler for a route that fetches may publish the
+    // framework-stamped record returned by that operation.
+    if phase == Phase::Pre && !crate::dispatch_plan::collect_fetch_plugin_names(&route).is_empty() {
+        capabilities
+            .insert(praxis_policy_core::extensions::CAP_FRAMEWORK_PUBLISH_METADATA.to_owned());
+    }
     // The APL engine emits the backend candidate constraint (the `restrict`
     // effect's output) into `Extensions.candidate_constraint`. That slot is
     // write-gated in the executor, so the synthetic handler holds the write
