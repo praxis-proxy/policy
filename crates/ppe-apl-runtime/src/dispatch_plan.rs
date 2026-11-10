@@ -45,12 +45,13 @@ use praxis_policy_core::delegation::HOOK_TOKEN_DELEGATE;
 use praxis_policy_core::elicitation::HOOK_ELICIT;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::hooks::{HookMetadata, HookPhase, lookup_hook_metadata};
+use praxis_policy_core::metadata::HOOK_METADATA_FETCH;
 use praxis_policy_core::plugin::OnError;
 use praxis_policy_core::registry::HookEntry;
 
 use praxis_policy_apl_core::pipeline::{FieldRule, Stage};
 use praxis_policy_apl_core::plugin_decl::{EffectivePlugin, PluginRegistry};
-use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
+use praxis_policy_apl_core::rules::{CompiledRoute, Condition, Effect, Expression};
 
 /// Per-plugin pre-resolved entries for one route. Stores ALL hook
 /// entries the plugin registered (keyed by hook name) so the
@@ -132,6 +133,8 @@ pub struct RouteDispatchPlan {
     /// by plugin name, not by `(kind, channel)`. Empty when the route has
     /// no elicitation.
     pub elicitation_entries: HashMap<String, HookEntry>,
+    /// Metadata source name → resolved `metadata.fetch` entry.
+    pub metadata_entries: HashMap<String, HookEntry>,
 }
 
 impl RouteDispatchPlan {
@@ -151,57 +154,11 @@ impl RouteDispatchPlan {
     ) -> Self {
         let mut plan = Self::default();
         for name in collect_plugin_names(route) {
-            let eff = if let Some(e) =
-                EffectivePlugin::resolve(&name, registry, &route.plugin_overrides)
-            {
-                e
-            } else {
-                tracing::warn!(
-                    plugin = %name,
-                    route = %route.route_key,
-                    "APL route references plugin not in `plugins:` block — skipping",
-                );
+            let Some(entries) =
+                build_effective_plugin_entries(&name, route, registry, engine).await
+            else {
                 continue;
             };
-
-            // Pull the three overrideable values off the effective view.
-            // `EffectivePlugin` borrows from the registry / route overrides,
-            // so the captures here are slice / Option<&Value> refs.
-            let override_block = route.plugin_overrides.get(&name);
-            let config_override = override_block.and_then(|o| o.config.as_ref());
-            let caps_override: Option<std::collections::HashSet<String>> = matches!(
-                eff.capabilities,
-                praxis_policy_apl_core::plugin_decl::CapsView::Override(_)
-            )
-            .then(|| eff.capabilities.as_slice().iter().cloned().collect());
-            let on_error_override = override_block
-                .and_then(|o| o.on_error.as_deref())
-                .and_then(parse_on_error);
-
-            // Hand the override decision to praxis-policy-core. When no overrides
-            // are declared, this returns the base entries unchanged
-            // (no allocation, no factory call). When only caps/on_error
-            // differ, it wraps the shared base plugin in a fresh
-            // `PluginRef` with merged trusted config. When config
-            // differs, it invokes the factory + initializes a brand-new
-            // instance with its own circuit breaker.
-            let entries = engine
-                .build_override_entries(
-                    &name,
-                    config_override,
-                    caps_override.as_ref(),
-                    on_error_override,
-                )
-                .await;
-            if entries.is_empty() {
-                tracing::warn!(
-                    plugin = %name,
-                    route = %route.route_key,
-                    "APL plugin not resolvable (not registered, factory missing, \
-                     or override construction failed) — skipping",
-                );
-                continue;
-            }
 
             // Store every (hook_name, HookEntry) pair the plugin
             // registered. Dispatch-time entry selection (pick_entry)
@@ -273,6 +230,26 @@ impl RouteDispatchPlan {
             }
         }
 
+        for name in collect_fetch_plugin_names(route) {
+            let Some(entries) =
+                build_effective_plugin_entries(&name, route, registry, engine).await
+            else {
+                continue;
+            };
+            if let Some((_, entry)) = entries
+                .into_iter()
+                .find(|(hook_name, _)| hook_name == HOOK_METADATA_FETCH)
+            {
+                plan.metadata_entries.insert(name, entry);
+            } else {
+                tracing::warn!(
+                    plugin = %name,
+                    route = %route.route_key,
+                    "APL route references metadata source not registered under metadata.fetch",
+                );
+            }
+        }
+
         plan
     }
 
@@ -302,6 +279,54 @@ impl RouteDispatchPlan {
             entries_by_hook,
         })
     }
+}
+
+/// Resolve a route plugin and materialize its route-level overrides.
+async fn build_effective_plugin_entries(
+    name: &str,
+    route: &CompiledRoute,
+    registry: &PluginRegistry,
+    engine: &PolicyEngine,
+) -> Option<Vec<(String, HookEntry)>> {
+    let Some(effective) = EffectivePlugin::resolve(name, registry, &route.plugin_overrides) else {
+        tracing::warn!(
+            plugin = %name,
+            route = %route.route_key,
+            "APL route references plugin not in `plugins:` block — skipping",
+        );
+        return None;
+    };
+
+    let override_block = route.plugin_overrides.get(name);
+    let config_override = override_block.and_then(|override_| override_.config.as_ref());
+    let capabilities_override: Option<HashSet<String>> = matches!(
+        effective.capabilities,
+        praxis_policy_apl_core::plugin_decl::CapsView::Override(_)
+    )
+    .then(|| effective.capabilities.as_slice().iter().cloned().collect());
+    let on_error_override = override_block
+        .and_then(|override_| override_.on_error.as_deref())
+        .and_then(parse_on_error);
+
+    let entries = engine
+        .build_override_entries(
+            name,
+            config_override,
+            capabilities_override.as_ref(),
+            on_error_override,
+        )
+        .await;
+    if entries.is_empty() {
+        tracing::warn!(
+            plugin = %name,
+            route = %route.route_key,
+            "APL plugin not resolvable (not registered, factory missing, \
+             or override construction failed) — skipping",
+        );
+        return None;
+    }
+
+    Some(entries)
 }
 
 fn parse_on_error(s: &str) -> Option<OnError> {
@@ -550,6 +575,134 @@ pub(crate) fn collect_elicit_plugin_names(route: &CompiledRoute) -> Vec<String> 
     out
 }
 
+/// Return unique metadata source names reached by `fetch(name)`.
+pub(crate) fn collect_fetch_plugin_names(route: &CompiledRoute) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut visit = |effect: &Effect| {
+        if let Effect::Fetch(step) = effect
+            && seen.insert(step.plugin_name.clone())
+        {
+            out.push(step.plugin_name.clone());
+        }
+    };
+    walk_effects(&route.pre_invocation, &mut visit);
+    out
+}
+
+/// Return whether a compiled route reads acquired metadata.
+///
+/// Metadata can be consumed by a `fetch(...)` effect, a predicate at any
+/// nesting depth, a PDP argument, or a conditional field-pipeline stage.
+/// Keeping this analysis on the compiled route ensures inherited and nested
+/// policy surfaces receive the same capability treatment.
+pub(crate) fn route_uses_metadata(route: &CompiledRoute) -> bool {
+    let mut uses_metadata = false;
+    let mut visit = |effect: &Effect| {
+        uses_metadata |= effect_uses_metadata(effect);
+    };
+    walk_effects(&route.pre_invocation, &mut visit);
+    walk_effects(&route.post_invocation, &mut visit);
+
+    for field_rule in route.args.iter().chain(&route.result) {
+        uses_metadata |= stages_use_metadata(&field_rule.pipeline.stages);
+    }
+
+    uses_metadata
+}
+
+fn effect_uses_metadata(effect: &Effect) -> bool {
+    match effect {
+        Effect::Fetch(_) => true,
+        Effect::When { condition, .. } => expression_uses_metadata(condition),
+        Effect::Pdp { call, .. } => value_uses_metadata(&call.args),
+        Effect::FieldOp { stages, .. } => stages_use_metadata(stages),
+        _ => false,
+    }
+}
+
+fn stages_use_metadata(stages: &[Stage]) -> bool {
+    stages.iter().any(|stage| match stage {
+        Stage::Redact {
+            condition: Some(condition),
+        } => expression_uses_metadata(condition),
+        _ => false,
+    })
+}
+
+fn expression_uses_metadata(expression: &Expression) -> bool {
+    match expression {
+        Expression::Condition(condition) => match condition {
+            Condition::Comparison { key, .. }
+            | Condition::IsTrue { key }
+            | Condition::IsFalse { key }
+            | Condition::Exists { key } => key.starts_with("metadata."),
+            Condition::InSet {
+                value_key, set_key, ..
+            } => value_key.starts_with("metadata.") || set_key.starts_with("metadata."),
+        },
+        Expression::And(expressions) | Expression::Or(expressions) => {
+            expressions.iter().any(expression_uses_metadata)
+        },
+        Expression::Not(expression) => expression_uses_metadata(expression),
+        Expression::Always => false,
+    }
+}
+
+fn value_uses_metadata(value: &serde_yaml::Value) -> bool {
+    match value {
+        serde_yaml::Value::String(value) => string_uses_metadata(value),
+        serde_yaml::Value::Sequence(values) => values.iter().any(value_uses_metadata),
+        serde_yaml::Value::Mapping(values) => values
+            .iter()
+            .any(|(key, value)| value_uses_metadata(key) || value_uses_metadata(value)),
+        _ => false,
+    }
+}
+
+fn string_uses_metadata(value: &str) -> bool {
+    let marker = "metadata.";
+    let mut search_from = 0;
+    while let Some(relative) = value.get(search_from..).and_then(|tail| tail.find(marker)) {
+        let start = search_from + relative;
+        let preceding_is_boundary = value
+            .get(..start)
+            .and_then(|prefix| prefix.chars().next_back())
+            .is_none_or(|ch| {
+                matches!(
+                    ch,
+                    ' ' | '\t'
+                        | '\n'
+                        | '('
+                        | '['
+                        | '{'
+                        | ','
+                        | ':'
+                        | '='
+                        | '!'
+                        | '?'
+                        | '&'
+                        | '|'
+                        | '+'
+                        | '*'
+                        | '-'
+                        | '<'
+                        | '>'
+                )
+            });
+        let after_marker = start + marker.len();
+        let following_is_path = value
+            .get(after_marker..)
+            .and_then(|tail| tail.chars().next())
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '$');
+        if preceding_is_boundary && following_is_path {
+            return true;
+        }
+        search_from = after_marker;
+    }
+    false
+}
+
 /// Walk a `CompiledRoute` and return the unique plugin names referenced
 /// by any `Effect::Plugin` anywhere in `pre_invocation` / `post_invocation` (including
 /// nested) or `Stage::Plugin` (in `args` / `result` pipelines).
@@ -598,6 +751,7 @@ pub(crate) fn collect_plugin_names_by_half(route: &CompiledRoute) -> (Vec<String
                 Effect::Plugin { name } => name,
                 Effect::Delegate(ds) => &ds.plugin_name,
                 Effect::Elicit(es) => &es.plugin_name,
+                Effect::Fetch(step) => &step.plugin_name,
                 _ => return,
             };
             if seen.insert(name.clone()) {
@@ -649,6 +803,7 @@ pub(crate) fn collect_family_fixed_plugin_hooks(
         let pair = match e {
             Effect::Delegate(ds) => (ds.plugin_name.clone(), HOOK_TOKEN_DELEGATE),
             Effect::Elicit(es) => (es.plugin_name.clone(), HOOK_ELICIT),
+            Effect::Fetch(step) => (step.plugin_name.clone(), HOOK_METADATA_FETCH),
             _ => return,
         };
         if !out.contains(&pair) {
@@ -712,6 +867,13 @@ pub(crate) fn route_capability_union(
     let elicit_plugins = collect_elicit_plugin_names(route);
     for name in &elicit_plugins {
         if let Some(eff) = EffectivePlugin::resolve(name, registry, &route.plugin_overrides) {
+            for cap in eff.capabilities.as_slice() {
+                caps.insert(cap.clone());
+            }
+        }
+    }
+    for name in collect_fetch_plugin_names(route) {
+        if let Some(eff) = EffectivePlugin::resolve(&name, registry, &route.plugin_overrides) {
             for cap in eff.capabilities.as_slice() {
                 caps.insert(cap.clone());
             }
@@ -817,8 +979,12 @@ struct CachedDispatchPlan {
 
 #[cfg(test)]
 mod cache_tests {
-    use super::{CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine};
+    use super::{CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine, route_uses_metadata};
     use std::sync::Arc;
+
+    use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage};
+    use praxis_policy_apl_core::rules::{Condition, Effect, Expression};
+    use praxis_policy_apl_core::step::{FetchStep, PdpCall, PdpDialect};
 
     #[tokio::test]
     async fn stale_generation_reuses_the_newer_initialized_plan() {
@@ -846,6 +1012,106 @@ mod cache_tests {
         assert!(
             Arc::ptr_eq(&installed, &subsequent),
             "the stale request must not evict the current generation's plan"
+        );
+    }
+
+    #[test]
+    fn route_metadata_usage_covers_fetch_nested_predicates_and_pdp_arguments() {
+        let mut route = CompiledRoute::new("tool:test");
+        assert!(
+            !route_uses_metadata(&route),
+            "a route without metadata use needs no grant"
+        );
+
+        route.pre_invocation.push(Effect::When {
+            condition: Expression::And(vec![Expression::Condition(Condition::IsTrue {
+                key: "subject.active".to_owned(),
+            })]),
+            body: vec![Effect::Sequential(vec![Effect::When {
+                condition: Expression::Condition(Condition::Exists {
+                    key: "metadata.account.active".to_owned(),
+                }),
+                body: vec![Effect::Allow],
+                source: "nested".to_owned(),
+            }])],
+            source: "outer".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&route),
+            "nested metadata predicates need the grant"
+        );
+
+        let mut fetch_route = CompiledRoute::new("tool:fetch");
+        fetch_route.pre_invocation.push(Effect::Fetch(FetchStep {
+            plugin_name: "account".to_owned(),
+            source: "fetch".to_owned(),
+        }));
+        assert!(
+            route_uses_metadata(&fetch_route),
+            "fetch effects need the grant"
+        );
+
+        let mut pdp_route = CompiledRoute::new("tool:pdp");
+        pdp_route.pre_invocation.push(Effect::Pdp {
+            call: PdpCall {
+                dialect: PdpDialect::Opa,
+                args: serde_yaml::Value::String("metadata.account.active".to_owned()),
+            },
+            on_allow: Vec::new(),
+            on_deny: Vec::new(),
+        });
+        assert!(
+            route_uses_metadata(&pdp_route),
+            "PDP metadata arguments need the grant"
+        );
+
+        let mut pipeline_route = CompiledRoute::new("tool:pipeline");
+        pipeline_route.args.push(FieldRule {
+            field: "amount".to_owned(),
+            pipeline: Pipeline {
+                stages: vec![Stage::Redact {
+                    condition: Some(Expression::Condition(Condition::IsFalse {
+                        key: "metadata.account.redact".to_owned(),
+                    })),
+                }],
+            },
+            source: "pipeline".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&pipeline_route),
+            "conditional pipeline metadata references need the grant"
+        );
+
+        let mut field_op_route = CompiledRoute::new("tool:field-op");
+        field_op_route.pre_invocation.push(Effect::When {
+            condition: Expression::Always,
+            body: vec![Effect::FieldOp {
+                path: "result.account_status".to_owned(),
+                stages: vec![Stage::Redact {
+                    condition: Some(Expression::Condition(Condition::IsTrue {
+                        key: "metadata.account.sensitive".to_owned(),
+                    })),
+                }],
+            }],
+            source: "field-op".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&field_op_route),
+            "conditional field operations need the grant"
+        );
+
+        let mut literal_route = CompiledRoute::new("tool:literal");
+        literal_route.pre_invocation.push(Effect::Pdp {
+            call: PdpCall {
+                dialect: PdpDialect::Opa,
+                args: serde_yaml::Value::String("https://metadata.example".to_owned()),
+            },
+            on_allow: Vec::new(),
+            on_deny: Vec::new(),
+        });
+        assert!(
+            !route_uses_metadata(&literal_route),
+            "literal strings must not grant metadata access"
         );
     }
 }

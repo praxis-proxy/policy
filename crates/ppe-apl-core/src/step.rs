@@ -57,6 +57,9 @@ pub(crate) enum Step {
     /// `PluginResult` decision becomes the step's outcome.
     Plugin { name: String },
 
+    /// `fetch(name)` — acquire and publish one named metadata record.
+    Fetch(FetchStep),
+
     /// `delegate: { plugin: ..., ... }` — mint a downstream delegation
     /// token via a `TokenDelegateHook` plugin. Populates
     /// `delegation.granted_*` attributes in the bag so subsequent
@@ -84,6 +87,15 @@ pub(crate) enum Step {
     /// analogue of `Delegate`; resolution is dispatched to an
     /// `ElicitationHandler` plugin via praxis-policy-apl-runtime.
     Elicit(ElicitStep),
+}
+
+/// One named metadata acquisition in `authorization.pre_invocation`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchStep {
+    /// Metadata source instance registered under `metadata.fetch`.
+    pub plugin_name: String,
+    /// Human-readable policy position used for failure attribution.
+    pub source: String,
 }
 
 /// One delegation invocation inside `pre_invocation:` or `post_invocation:`.
@@ -576,6 +588,48 @@ pub trait PluginInvoker: Send + Sync {
         bag: &crate::attributes::AttributeBag,
         invocation: PluginInvocation<'_>,
     ) -> Result<PluginOutcome, PluginError>;
+
+    /// Acquire one named metadata record and return its APL projection.
+    async fn fetch_metadata(
+        &self,
+        step: &FetchStep,
+    ) -> Result<MetadataFetchOutcome, MetadataFetchError> {
+        Err(PluginError::NotFound(step.plugin_name.clone()).into())
+    }
+}
+
+/// Attributes published by one completed metadata acquisition.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataFetchOutcome {
+    /// Fresh `metadata.<instance>.*` attributes for subsequent effects.
+    pub attributes: crate::attributes::AttributeBag,
+}
+
+/// Why one metadata acquisition did not publish a record.
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum MetadataFetchError {
+    /// The source completed normally with a normalized error outcome.
+    #[error("metadata source returned `{code}`")]
+    Source {
+        /// Stable source-owned error code used as the policy denial code.
+        code: String,
+    },
+    /// Dispatch or result validation failed before a trusted source outcome
+    /// could be applied.
+    #[error(transparent)]
+    Framework(#[from] PluginError),
+}
+
+impl MetadataFetchError {
+    /// Return the stable policy denial code for a normalized source error.
+    #[must_use]
+    pub fn source_code(&self) -> Option<&str> {
+        match self {
+            Self::Source { code } => Some(code),
+            Self::Framework(_) => None,
+        }
+    }
 }
 
 /// Delegation dispatch — invokes a `TokenDelegateHook` plugin to mint

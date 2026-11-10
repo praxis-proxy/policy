@@ -3242,7 +3242,10 @@ impl PolicyEngine {
             scope,
             hook_name: hook_name.into(),
         };
-        let plugin_ref = Arc::new(crate::registry::PluginRef::new(handler.clone(), config));
+        let plugin_ref = Arc::new(crate::registry::PluginRef::new_framework(
+            handler.clone(),
+            config,
+        ));
         let entry = crate::registry::HookEntry {
             plugin_ref,
             handler,

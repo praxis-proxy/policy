@@ -11,6 +11,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+/// Internal framework authority to publish validated acquired facts.
+///
+/// Source plugins return an [`AcquiredFacts`] value; the policy runtime holds
+/// this capability while validating, stamping, and installing it.
+#[doc(hidden)]
+pub const CAP_FRAMEWORK_PUBLISH_METADATA: &str = "__framework_publish_metadata";
+
 /// Cache disposition for one metadata acquisition.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,6 +134,16 @@ impl AcquiredFacts {
             status: None,
             value: None,
         }
+    }
+
+    /// Validate the source-owned record before provenance is stamped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataInstallError`] when outcome-specific fields or value
+    /// keys cannot form one atomic metadata record.
+    pub fn validate(&self) -> Result<(), MetadataInstallError> {
+        validate_record(self)
     }
 
     /// Attach an upstream status that policy may inspect.
