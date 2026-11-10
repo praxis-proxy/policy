@@ -435,7 +435,7 @@ async fn a_credential_with_no_separator_denies_as_malformed() {
 async fn a_stale_directory_denies_distinctly_from_a_bad_password() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
     let mut block = htpasswd_block(file.path());
-    block["provider"]["refresh_secs"] = serde_json::json!(0);
+    block["provider"]["refresh_secs"] = serde_json::json!(1);
     block["provider"]["max_staleness_secs"] = serde_json::json!(1);
     let resolver = resolver(block).expect("the config loads");
     file.unlink();
@@ -526,7 +526,7 @@ async fn a_directory_that_cannot_answer_does_not_spend_the_user_ids_budget() {
     // `DirectoryError` without racing a concurrency cap.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
     let mut block = htpasswd_block(file.path());
-    block["provider"]["refresh_secs"] = serde_json::json!(0);
+    block["provider"]["refresh_secs"] = serde_json::json!(1);
     block["provider"]["max_staleness_secs"] = serde_json::json!(1);
     block["failure_limit"] =
         serde_json::json!({ "capacity": 16, "max_failures": 2, "window_secs": 300 });

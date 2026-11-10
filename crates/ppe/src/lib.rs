@@ -478,7 +478,7 @@ mod crypto_capability_tests {
         assert!(
             report
                 .default_builtin_crypto
-                .contains(&BundledCryptoCapability::BasicPasswordHashing),
+                .contains(&BundledCryptoCapability::BasicPasswords),
             "the `basic` feature compiles in argon2, bcrypt and sha-crypt, so a report that \
              omitted it would let a host preflight a graph carrying three unvalidated \
              password-hashing crates"
@@ -502,9 +502,15 @@ mod crypto_capability_tests {
         let fips = CryptoBackend::OpenSslFips;
         let rust = CryptoBackend::RustCrypto;
         let jwt = vec![BundledCryptoCapability::Jwt];
+        let basic = vec![BundledCryptoCapability::BasicPasswords];
         for (case, safe, name) in [
             (report(fips, None, vec![]), true, "engine or JWT only"),
             (report(fips, Some(fips), vec![]), true, "API-key on FIPS"),
+            (
+                report(fips, Some(fips), basic),
+                false,
+                "Basic password crypto has no OpenSSL path",
+            ),
             (
                 report(fips, Some(rust), vec![]),
                 false,
@@ -589,7 +595,6 @@ mod crypto_capability_tests {
             .split(',')
             .filter(|name| !name.is_empty())
             .map(|name| match name {
-                "basic" => BundledCryptoCapability::BasicPasswordHashing,
                 "jwt" => BundledCryptoCapability::Jwt,
                 "oauth" => BundledCryptoCapability::OAuth,
                 "delegator-vault" => BundledCryptoCapability::VaultDelegation,

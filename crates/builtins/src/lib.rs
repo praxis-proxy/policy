@@ -21,6 +21,7 @@
 //! | `jwt` | `plugins::identity_jwt`, verified with AWS-LC |
 //! | `jwt-openssl-fips` | `plugins::identity_jwt`, verified with OpenSSL FIPS; requires `fips` |
 //! | `api-key` | `plugins::identity_api_key` |
+//! | `basic` | `plugins::identity_basic`; password crypto is RustCrypto only |
 //! | `crypto-rustcrypto` | RustCrypto SHA-256 and HMAC; on by default |
 //! | `fips` | OpenSSL FIPS SHA-256, shared by Policy, API-key and DPoP; no HMAC |
 //! | `basic` | `plugins::identity_basic` |
@@ -67,19 +68,8 @@ pub mod session;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BundledCryptoCapability {
-    /// Basic `.htpasswd` password verification.
-    ///
-    /// The `basic` feature bundles argon2, bcrypt and sha-crypt, so all three
-    /// are present whichever one a directory holds. Of the three, only
-    /// sha-crypt (`$5$` / `$6$`) iterates a hash function FIPS 180-4
-    /// specifies; that approves the function and not the password scheme
-    /// built on it, and the implementation here is `RustCrypto`'s rather than
-    /// a validated provider's.
-    ///
-    /// Which scheme a directory uses is settled when its file is read, after
-    /// this report is computable, so an operator who has chosen sha-crypt
-    /// confirms it from the directory's own configuration rather than here.
-    BasicPasswordHashing,
+    /// Basic password verification with bcrypt, argon2 and sha-crypt.
+    BasicPasswords,
     /// JWT signature verification and `DPoP` hashing with AWS-LC. Not
     /// listed under `jwt-openssl-fips`.
     Jwt,
@@ -96,7 +86,7 @@ pub enum BundledCryptoCapability {
 pub fn bundled_crypto_capabilities() -> Vec<BundledCryptoCapability> {
     vec![
         #[cfg(feature = "basic")]
-        BundledCryptoCapability::BasicPasswordHashing,
+        BundledCryptoCapability::BasicPasswords,
         #[cfg(feature = "jwt")]
         BundledCryptoCapability::Jwt,
         #[cfg(feature = "oauth")]
