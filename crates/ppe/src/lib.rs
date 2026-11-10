@@ -595,6 +595,7 @@ mod crypto_capability_tests {
             .split(',')
             .filter(|name| !name.is_empty())
             .map(|name| match name {
+                "basic" => BundledCryptoCapability::BasicPasswords,
                 "jwt" => BundledCryptoCapability::Jwt,
                 "oauth" => BundledCryptoCapability::OAuth,
                 "delegator-vault" => BundledCryptoCapability::VaultDelegation,
