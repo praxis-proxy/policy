@@ -1584,10 +1584,14 @@ fn install_handler(
     // normalized parts for gated `llm.input.*` bag keys. This grant is
     // intrinsic rather than left to the replaceable baseline.
     capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_LLM_REQUEST.to_owned());
-    // Route predicates read acquired facts under `metadata.*`, so the grant is
-    // intrinsic like `read_headers`. It is a no-op when nothing is installed.
-    // Plugins dispatched from the route still need their own `read_metadata`.
-    capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
+    // Route predicates and metadata fetches read acquired facts under
+    // `metadata.*`. Grant the synthetic handler access only when this
+    // compiled route actually reaches one of those surfaces. Plugins
+    // dispatched from the route still contribute their own declared
+    // `read_metadata` capability through `route_capability_union`.
+    if crate::dispatch_plan::route_uses_metadata(&route) {
+        capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
+    }
     // Only the pre-invocation handler for a route that fetches may publish the
     // framework-stamped record returned by that operation.
     if phase == Phase::Pre && !crate::dispatch_plan::collect_fetch_plugin_names(&route).is_empty() {
