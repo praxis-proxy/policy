@@ -87,17 +87,38 @@ Default builds use RustCrypto SHA-256. A FIPS build disables defaults and
 selects `fips`, optionally with `api-key` and `jwt-openssl-fips`; see
 [FIPS](fips.md) for the supported selections, host setup and startup checks.
 
-`basic` is reported whichever hash scheme the directory holds, so
-`fips_profile_is_safe()` is false on a build that enables it. A FIPS operator
-who needs Basic should hash the file with sha256crypt (`$5$`) or sha512crypt
-(`$6$`), which iterate the hash functions FIPS 180-4 specifies, where bcrypt
-(Blowfish) and argon2 (BLAKE2b) build on other primitives. That covers the
-underlying primitive only: FIPS 180-4 approves those functions and not the
-SHA-crypt password scheme built on them, and the implementation is
-RustCrypto's rather than a validated provider's. The profile flag asserts the
-supported API-key-only FIPS slice, not a judgement on a scheme, so a build
-carrying Basic needs the plugin-level check above and its own assessment of
-what the deployment requires.
+`basic` is not part of a supported FIPS selection. It is reported whichever
+hash scheme the directory holds, so `fips_profile_is_safe()` is false on any
+build that enables it, and no choice of scheme changes that. Password
+verification runs in RustCrypto for every scheme the plugin accepts: picking
+`$5$` or `$6$` records does not move it into OpenSSL, and an empty file still
+mints a bcrypt hash for the unknown-user path. A deployment that needs both
+Basic and FIPS has to terminate Basic somewhere else.
+
+### What Basic asks of the host
+
+Basic sends a reusable password on every request, and base64 is not
+encryption ([RFC 7617 Section 4]). The plugin verifies the credential and
+stops there; four duties are the host's, and a deployment that skips them
+leaks the password whatever the policy says:
+
+- **Require TLS** on any route carrying a Basic credential.
+- **Redact** `Authorization` from access logs, traces and error reports.
+- **Remove** `Authorization` before forwarding the request to an unrelated
+  upstream. A successful resolve leaves the inbound header on the request:
+  the identity hook has no request-mutation channel, and leaving
+  `raw_credentials` unset stops the password reaching later policy steps, not
+  the header reaching the next hop. Forwarding it hands a service that never
+  authenticated the caller a credential it can replay.
+- **Render `WWW-Authenticate`** from the denial's violation details. Every
+  denial this resolver raises carries the challenge under the `http.headers`
+  key; nothing in Policy writes it to the wire, so a client gets no prompt
+  until the host does.
+
+A fuller operator recipe is planned; these are the warnings that cannot wait
+for it.
+
+[RFC 7617 Section 4]: https://datatracker.ietf.org/doc/html/rfc7617#section-4
 
 ### The HTTP transport
 

@@ -357,7 +357,7 @@ fn the_factory_surfaces_a_config_error_rather_than_building() {
 }
 
 #[test]
-fn the_failure_limiter_admits_a_fresh_user_id_when_every_slot_is_live() {
+fn the_failure_limiter_tracks_a_fresh_user_id_by_name_while_a_slot_is_live() {
     use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
 
     let limiter = FailureLimiter::new(
@@ -366,24 +366,25 @@ fn the_failure_limiter_admits_a_fresh_user_id_when_every_slot_is_live() {
         }))
         .expect("the limiter config parses"),
     );
-    limiter.record_failure("alice");
+    limiter
+        .admit("alice")
+        .expect("alice's first attempt is within budget")
+        .record_failure();
 
-    assert_eq!(
-        limiter.admit("bob"),
-        Ok(()),
-        "a full map must not deny a user-id it holds no evidence against, or a spray of junk \
-         user-ids becomes a global lockout"
-    );
-    assert_eq!(
-        limiter.admit("alice"),
-        Ok(()),
-        "alice is tracked and within budget, so she is still admitted"
-    );
+    let Ok(bob) = limiter.admit("bob") else {
+        panic!("a full map must not deny a user-id it holds no evidence against");
+    };
+    drop(bob);
+    let Ok(alice) = limiter.admit("alice") else {
+        panic!("alice is tracked and within budget, so she is still admitted");
+    };
+    drop(alice);
+
     assert_eq!(
         limiter.saturations(),
         1,
-        "the admitted-but-untracked attempt is still counted, so an operator can see that \
-         capacity is too small without a user-id reaching the logs"
+        "bob found no named slot, so his attempt is counted in the overflow table and the \
+         operator can see that capacity is too small without a user-id reaching the logs"
     );
 }
 
@@ -397,34 +398,172 @@ fn a_full_failure_limiter_does_not_displace_a_blocked_counter() {
         }))
         .expect("the limiter config parses"),
     );
-    limiter.record_failure("alice");
+    limiter
+        .admit("alice")
+        .expect("the first attempt is within budget")
+        .record_failure();
     assert_eq!(
-        limiter.admit("alice"),
-        Err(Refusal::Blocked),
+        limiter.admit("alice").err(),
+        Some(Refusal::Blocked),
         "one failure spends a budget of one"
     );
 
-    // The flood that, under an evicting limiter, would buy alice a fresh budget.
     for n in 0..32 {
         let sprayed = format!("junk{n}");
-        assert_eq!(
-            limiter.admit(&sprayed),
-            Ok(()),
-            "a sprayed user-id is admitted rather than denied"
-        );
-        limiter.record_failure(&sprayed);
+        if let Ok(admission) = limiter.admit(&sprayed) {
+            admission.record_failure();
+        }
     }
 
     assert_eq!(
-        limiter.admit("alice"),
-        Err(Refusal::Blocked),
-        "alice's counter must survive the flood: admitting untracked user-ids must not become a \
-         way to clear a blocked one"
+        limiter.admit("alice").err(),
+        Some(Refusal::Blocked),
+        "alice's counter must survive the flood: counting an untracked user-id must not become \
+         a way to clear a blocked one"
     );
     assert_eq!(
         limiter.tracked(),
         1,
-        "the flood is uncounted rather than tracked, so capacity still bounds the map"
+        "the flood is counted in the fixed overflow table rather than named, so capacity still \
+         bounds the map"
+    );
+}
+
+#[test]
+fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
+    use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 1, "max_failures": 2, "window_secs": 60,
+        }))
+        .expect("the limiter config parses"),
+    );
+    limiter
+        .admit("junk")
+        .expect("the junk name takes the only named slot")
+        .record_failure();
+
+    let mut admitted = 0_u32;
+    for _ in 0..8 {
+        match limiter.admit("alice") {
+            Ok(admission) => {
+                admitted = admitted.saturating_add(1);
+                admission.record_failure();
+            },
+            Err(_) => break,
+        }
+    }
+
+    assert_eq!(
+        admitted, 2,
+        "a user-id the saturated map cannot name must still be bounded by max_failures: \
+         filling the map with a junk name previously bought an attacker an unlimited budget \
+         against any fresh target"
+    );
+    assert!(
+        limiter.saturations() > 0,
+        "the attempts must have been counted in the overflow table, or this test is not \
+         exercising saturation"
+    );
+}
+
+#[test]
+fn an_outstanding_attempt_is_charged_against_the_budget() {
+    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 16, "max_failures": 1, "window_secs": 60,
+        }))
+        .expect("the limiter config parses"),
+    );
+
+    let held = limiter
+        .admit("alice")
+        .expect("the first attempt is within budget");
+
+    assert_eq!(
+        limiter.admit("alice").err(),
+        Some(Refusal::Blocked),
+        "a budget of one is spent by the attempt already in flight: recording failures only \
+         after verification let every parallel guess past this check at once"
+    );
+
+    drop(held);
+    let Ok(next) = limiter.admit("alice") else {
+        panic!("releasing an unsettled attempt must restore the budget it reserved");
+    };
+    drop(next);
+}
+
+#[test]
+fn a_released_reservation_records_no_failure() {
+    use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 16, "max_failures": 2, "window_secs": 60,
+        }))
+        .expect("the limiter config parses"),
+    );
+
+    for _ in 0..8 {
+        drop(limiter.admit("alice").expect("each attempt is admitted"));
+    }
+
+    assert_eq!(
+        limiter.tracked(),
+        0,
+        "an attempt that reached no verdict -- a directory error or a cancelled request -- must \
+         leave no failure behind, or anyone able to break the directory could spend a named \
+         victim's budget"
+    );
+}
+
+#[test]
+fn a_success_does_not_discharge_the_attempts_running_beside_it() {
+    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 16, "max_failures": 2, "window_secs": 60,
+        }))
+        .expect("the limiter config parses"),
+    );
+
+    let first = limiter
+        .admit("alice")
+        .expect("the first attempt is admitted");
+    let second = limiter
+        .admit("alice")
+        .expect("a second concurrent attempt is within a budget of two");
+    assert_eq!(
+        limiter.admit("alice").err(),
+        Some(Refusal::Blocked),
+        "two attempts in flight spend a budget of two"
+    );
+
+    first.record_success();
+
+    let third = limiter
+        .admit("alice")
+        .expect("the success returns its own reservation, so one slot is free again");
+    assert_eq!(
+        limiter.admit("alice").err(),
+        Some(Refusal::Blocked),
+        "the attempt still running must keep its reservation: removing the counter on a success \
+         would discard it and let the concurrent guesses past the budget they were charged \
+         against"
+    );
+
+    drop(second);
+    drop(third);
+    assert_eq!(
+        limiter.tracked(),
+        0,
+        "once every reservation is settled the counter frees its slot rather than leaking one \
+         per authenticated user-id"
     );
 }
 
@@ -439,23 +578,31 @@ fn the_failure_limiter_blocks_a_user_id_past_its_budget() {
         .expect("the limiter config parses"),
     );
 
-    assert_eq!(limiter.admit("alice"), Ok(()), "the first attempt is free");
-    limiter.record_failure("alice");
-    assert_eq!(limiter.admit("alice"), Ok(()), "one failure is in budget");
-    limiter.record_failure("alice");
+    limiter
+        .admit("alice")
+        .expect("the first attempt is free")
+        .record_failure();
+    limiter
+        .admit("alice")
+        .expect("one failure is in budget")
+        .record_failure();
 
     assert_eq!(
-        limiter.admit("alice"),
-        Err(Refusal::Blocked),
+        limiter.admit("alice").err(),
+        Some(Refusal::Blocked),
         "the budget is spent, so the next attempt costs no verification"
     );
-    limiter.record_success("alice");
+
+    limiter.tracked();
+    let Ok(cleared) = limiter.admit("bob") else {
+        panic!("bob has spent nothing, so he is admitted");
+    };
+    cleared.record_success();
     assert_eq!(
-        limiter.admit("alice"),
-        Ok(()),
-        "a success clears the counter, so the budget is restored"
+        limiter.tracked(),
+        1,
+        "a success clears its own counter and frees the slot, leaving only alice tracked"
     );
-    assert_eq!(limiter.tracked(), 0, "the cleared counter frees its slot");
 }
 
 #[test]

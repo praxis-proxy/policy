@@ -305,6 +305,83 @@ async fn a_user_id_spray_does_not_lock_out_a_legitimate_caller() {
 }
 
 #[tokio::test]
+async fn a_saturated_limiter_still_bounds_a_freshly_guessed_user_id() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["failure_limit"] =
+        serde_json::json!({ "capacity": 1, "max_failures": 2, "window_secs": 60 });
+    let resolver = resolver(block).expect("the config loads");
+
+    resolve_with_header(&resolver, &basic_header("junk", "whatever")).await;
+    assert!(
+        resolver.limiter_tracked() >= 1,
+        "the junk name must hold the only named slot, or this test is not exercising saturation"
+    );
+
+    let mut blocked = None;
+    for attempt in 1..=8_u32 {
+        let result = resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
+        if denial_code(&result).as_deref() == Some(codes::TOO_MANY_FAILURES) {
+            blocked = Some(attempt);
+            break;
+        }
+    }
+
+    assert_eq!(
+        blocked,
+        Some(3),
+        "a target the saturated map cannot name is counted in the overflow table, so its budget \
+         of two still applies: filling the map with one junk name previously bought unlimited \
+         guesses against any fresh user-id"
+    );
+    assert!(
+        resolver.limiter_saturations() > 0,
+        "the untracked attempts must be counted rather than dropped, which is what makes the \
+         bound hold"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_attempts_for_one_user_id_cannot_outrun_the_budget() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["failure_limit"] =
+        serde_json::json!({ "capacity": 16, "max_failures": 1, "window_secs": 60 });
+    let resolver = std::sync::Arc::new(resolver(block).expect("the config loads"));
+
+    let mut running = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let resolver = std::sync::Arc::clone(&resolver);
+        running.spawn(async move {
+            let result =
+                resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
+            denial_code(&result)
+        });
+    }
+
+    let mut verified = 0_u32;
+    let mut refused = 0_u32;
+    while let Some(joined) = running.join_next().await {
+        match joined.expect("no attempt task panics").as_deref() {
+            Some(codes::TOO_MANY_FAILURES) => refused = refused.saturating_add(1),
+            Some(codes::INVALID_CREDENTIALS) => verified = verified.saturating_add(1),
+            other => panic!("a wrong password denies as invalid or too-many, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        verified, 1,
+        "a budget of one must admit one guess, whether the attempts arrive in series or at \
+         once: reserving at admission is what bounds them, since recording failures only after \
+         verification let all eight pass the same pre-verification read"
+    );
+    assert_eq!(
+        refused, 7,
+        "every attempt beyond the budget is refused before it costs a verification"
+    );
+}
+
+#[tokio::test]
 async fn an_expired_limiter_entry_frees_capacity() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
     let mut block = htpasswd_block(file.path());

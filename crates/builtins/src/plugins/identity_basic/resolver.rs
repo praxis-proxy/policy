@@ -199,12 +199,13 @@ impl BasicIdentityResolver {
         })
     }
 
-    /// How many attempts the failure limiter has refused for want of a slot.
+    /// How many attempts the failure limiter counted in its overflow table
+    /// rather than by name.
     pub fn limiter_saturations(&self) -> u64 {
         self.limiter.saturations()
     }
 
-    /// How many user-ids the failure limiter currently tracks.
+    /// How many user-ids the failure limiter currently tracks by name.
     pub fn limiter_tracked(&self) -> usize {
         self.limiter.tracked()
     }
@@ -380,20 +381,22 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         // limiter keys on the normalised user-id, so two encodings of one name
         // share a bucket rather than getting a budget each.
         //
-        // Only a user-id past its own budget is refused here. A full limiter
-        // admits, because the user-ids it has no counter for are the ones it
-        // has no evidence against -- refusing those let a spray of junk
-        // user-ids lock out every legitimate caller. Saturation is surfaced
-        // through `limiter_saturations` instead.
-        match self.limiter.admit(user_id) {
-            Ok(()) => {},
+        // The guard reserves this attempt against the budget for as long as it
+        // is held, so parallel guesses for one user-id are bounded by
+        // `max_failures` rather than all passing the same pre-verification
+        // read. Every path out of this handler either settles it with a verdict
+        // or drops it, and a drop releases the reservation without recording a
+        // failure -- which is what a directory error or a cancelled request
+        // should cost.
+        let admission = match self.limiter.admit(user_id) {
+            Ok(admission) => admission,
             Err(Refusal::Blocked) => {
                 return self.deny(
                     codes::TOO_MANY_FAILURES,
                     "too many recent failures for this credential",
                 );
             },
-        }
+        };
 
         let record = match self.directory.lookup(user_id, ext).await {
             Ok(found) => found,
@@ -414,7 +417,7 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         };
 
         if !verified || record.is_none() {
-            self.limiter.record_failure(user_id);
+            admission.record_failure();
             if self.may_log_failure() {
                 // Debug, and only debug: a user-id in a warn line reaches
                 // every aggregator at default verbosity, where it is an
@@ -449,7 +452,7 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         if let Some(expires_at) = record.expires_at
             && expires_at <= Utc::now()
         {
-            self.limiter.record_failure(user_id);
+            admission.record_failure();
             return self.deny(
                 codes::CREDENTIAL_EXPIRED,
                 "the credential's record has expired",
@@ -490,7 +493,7 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
             },
         }
 
-        self.limiter.record_success(user_id);
+        admission.record_success();
         updated.resolved_at = Some(Utc::now());
         // `raw_credentials` is deliberately not populated. The password stops
         // here, so no downstream step can forward a caller's own password to an
@@ -514,7 +517,9 @@ impl BasicIdentityResolver {
     /// or stale the directory spend a named victim's budget to zero without
     /// ever guessing a password. That is the targeted-lockout shape the
     /// limiter exists to prevent, so a guess the directory never evaluated
-    /// stays uncounted. The cost is honest and bounded: the limiter bounds
+    /// stays uncounted. These paths return without settling the admission
+    /// guard, which releases the attempt's reservation rather than charging
+    /// it. The cost is honest and bounded: the limiter bounds
     /// *evaluated* guesses, and an attacker who suppresses evaluation gets no
     /// password feedback either.
     fn deny_directory(&self, error: &DirectoryError) -> PluginResult<IdentityPayload> {
@@ -544,6 +549,11 @@ impl BasicIdentityResolver {
     }
 
     /// The denial for a record the map could not project.
+    ///
+    /// No failure is charged against the user-id: the password verified, so
+    /// the credential is not what is wrong, and charging a misconfiguration to
+    /// the caller would lock out everyone presenting a correct one. Returning
+    /// without settling the admission guard releases the reservation instead.
     fn mapping_failed(&self, slot: &str) -> PluginResult<IdentityPayload> {
         self.deny(
             codes::MAPPING_FAILED,
