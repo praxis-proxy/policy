@@ -517,6 +517,76 @@ routes:
     );
 }
 
+#[tokio::test]
+async fn metadata_capability_is_recomputed_when_configuration_reloads() {
+    const WITHOUT_METADATA: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "allow"
+"#;
+    const WITH_METADATA: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "require(metadata.account.active)"
+"#;
+
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+
+    mgr.load_config_yaml(WITHOUT_METADATA)
+        .expect("the initial configuration loads");
+    mgr.initialize()
+        .await
+        .expect("the initial configuration initializes");
+    let (initial, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("initial"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+    assert!(initial.continue_processing);
+
+    mgr.load_config_yaml(WITH_METADATA)
+        .expect("the metadata configuration reloads");
+    let (with_metadata, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("with metadata"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+    assert!(
+        with_metadata.continue_processing,
+        "the reloaded metadata predicate must see the metadata slot: {:?}",
+        with_metadata.violation
+    );
+
+    mgr.load_config_yaml(WITHOUT_METADATA)
+        .expect("the non-metadata configuration reloads again");
+    let (final_result, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("final"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+    assert!(final_result.continue_processing);
+}
+
 /// Run `metadata-reader` from a route with the given plugin capabilities and
 /// return whether each dispatch saw the parent's acquired metadata.
 async fn run_metadata_reader(capabilities: &str) -> Vec<bool> {
