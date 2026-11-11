@@ -149,7 +149,8 @@ async fn a_declined_scheme_becomes_the_executors_own_unchallenged_denial() {
     );
     assert!(
         !violation.details.contains_key(DETAIL_HTTP_HEADERS),
-        "a declining plugin contributes no challenge, so a host wanting one on this path must          add it: {:?}",
+        "a declining plugin contributes no challenge, so a host wanting one on this path must add \
+         it: {:?}",
         violation.details,
     );
 

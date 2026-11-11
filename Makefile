@@ -216,12 +216,15 @@ check-fips-graph:
 	@# only. The graph must therefore stay outside FIPS_SELECTIONS *and* be
 	@# caught by the same classifier, so a later edit cannot quietly admit it.
 	@for features in $(BASIC_FIPS_REFUSED); do \
-		if $(CARGO) tree -p praxis-policy-builtins --no-default-features \
+		if out="$$( { $(CARGO) tree -p praxis-policy-builtins --no-default-features \
 			--features "$$features" -e normal,build --prefix none \
-			| { $(call check_fips_tree,praxis-policy-builtins $$features); } >/dev/null 2>&1; then \
+			| { $(call check_fips_tree,praxis-policy-builtins $$features); }; } 2>&1 )"; then \
 			echo "praxis-policy-builtins $$features passed the FIPS graph check; basic must not" >&2; \
 			exit 1; \
 		fi; \
+		grep -Fq "links non-FIPS crypto" <<< "$$out" || \
+			{ echo "praxis-policy-builtins $$features was refused for another reason:" >&2; \
+				echo "$$out" >&2; exit 1; }; \
 		echo "praxis-policy-builtins $$features: refused, as a non-FIPS selection"; \
 	done
 	@echo "FIPS graphs contain OpenSSL and no RustCrypto, ring or AWS-LC"

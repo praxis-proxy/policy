@@ -430,6 +430,128 @@ fn a_full_failure_limiter_does_not_displace_a_blocked_counter() {
 }
 
 #[test]
+fn an_unsettled_attempt_spends_the_budget_while_it_is_still_in_flight() {
+    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 16, "max_failures": 1, "window_secs": 60,
+        }))
+        .expect("the limiter config parses"),
+    );
+
+    let in_flight = limiter
+        .admit("alice")
+        .expect("the first attempt is within a budget of one");
+
+    assert_eq!(
+        limiter.admit("alice").err(),
+        Some(Refusal::Blocked),
+        "a budget of one must be spent by the attempt already in flight, before it has any \
+         verdict to record. Counting only settled failures would admit this second guess, \
+         which is how parallel attempts for one user-id used to pass the same \
+         pre-verification read"
+    );
+
+    in_flight.record_failure();
+
+    assert_eq!(
+        limiter.admit("alice").err(),
+        Some(Refusal::Blocked),
+        "and the settled failure holds the budget for the rest of the window, so the \
+         reservation is not merely swapped for the failure it became"
+    );
+}
+
+#[test]
+fn a_released_in_flight_attempt_returns_its_budget() {
+    use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 16, "max_failures": 1, "window_secs": 60,
+        }))
+        .expect("the limiter config parses"),
+    );
+
+    let abandoned = limiter
+        .admit("alice")
+        .expect("the first attempt is within a budget of one");
+    drop(abandoned);
+
+    assert!(
+        limiter.admit("alice").is_ok(),
+        "an attempt that reached no verdict must return its reservation rather than spend it: \
+         a directory error or a cancelled request is not a failed guess, and charging it would \
+         let an unreachable directory lock out every user"
+    );
+}
+
+#[tokio::test]
+async fn an_overflow_attempt_settles_on_the_bucket_it_was_charged_against() {
+    use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 1, "max_failures": 2, "window_secs": 1,
+        }))
+        .expect("the limiter config parses"),
+    );
+
+    let holder = limiter
+        .admit("junk")
+        .expect("the junk name takes the only named slot");
+    let overflow = limiter
+        .admit("alice")
+        .expect("the map is full, so alice is charged to an overflow bucket");
+    assert_eq!(
+        limiter.saturations(),
+        1,
+        "alice must have reached the overflow table, or this test proves nothing"
+    );
+
+    drop(holder);
+    let named = limiter
+        .admit("alice")
+        .expect("the freed slot now admits alice by name");
+
+    overflow.record_failure();
+    named.record_success();
+
+    assert_eq!(
+        limiter.tracked(),
+        0,
+        "the named success clears its own counter rather than leaving a failure recorded \
+         against alice by name"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+
+    let refill = limiter
+        .admit("junk")
+        .expect("junk takes the only named slot again");
+    let mut admitted = 0_u32;
+    for _ in 0..8 {
+        match limiter.admit("alice") {
+            Ok(admission) => {
+                admitted = admitted.saturating_add(1);
+                admission.record_failure();
+            },
+            Err(_) => break,
+        }
+    }
+    drop(refill);
+
+    assert_eq!(
+        admitted, 2,
+        "once the window has passed, alice's overflow bucket must offer its whole budget \
+         again. Settling the overflow failure on the named counter instead leaves the bucket \
+         holding a reservation, and a reservation never expires -- so part of the budget of \
+         every user-id sharing that bucket is spent for the life of the process"
+    );
+}
+
+#[test]
 fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
     use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
 

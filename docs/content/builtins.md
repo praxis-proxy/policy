@@ -62,11 +62,11 @@ praxis-policy = { version = "0.6.0", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all eleven below: `jwt`, `api-key`, `basic`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
+| `builtins` | all eleven below: `jwt`, `api-key`, `basic`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`. `basic` is unreleased: it is on `main` and not in 0.6.0, so a host pinned to a published version cannot select it yet |
 | `jwt` | `identity/jwt`, verified with AWS-LC |
 | `jwt-openssl-fips` | `identity/jwt` and DPoP, verified with system OpenSSL under the FIPS provider. Requires `fips`; cannot be combined with `jwt`. HMAC (HS256, HS384, HS512) and EdDSA are refused at config load |
 | `api-key` | `identity/api-key` |
-| `basic` | `identity/basic`, and the argon2, bcrypt and sha-crypt verifiers it carries |
+| `basic` | `identity/basic`, and the argon2, bcrypt and sha-crypt verifiers it carries. Unreleased; track `main` to use it |
 | `fips` | OpenSSL FIPS SHA-256 for Policy's shared hashing, used by the engine and API-key. Needs no identity builtin. Keyed content provenance is rejected because it requires HMAC. Select with `default-features = false`; other crypto-using builtins are reported and make the profile unsafe. |
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
@@ -103,17 +103,25 @@ stops there; four duties are the host's, and a deployment that skips them
 leaks the password whatever the policy says:
 
 - **Require TLS** on any route carrying a Basic credential.
-- **Redact** `Authorization` from access logs, traces and error reports.
-- **Remove** `Authorization` before forwarding the request to an unrelated
+- **Redact** the configured credential header from access logs, traces and
+  error reports. `credential.kind: header` takes a header *name*, so a
+  deployment that moved the credential off `Authorization` must redact the
+  name it chose; redacting `Authorization` alone leaves the password in the
+  logs.
+- **Remove** that same header before forwarding the request to an unrelated
   upstream. A successful resolve leaves the inbound header on the request:
-  the identity hook has no request-mutation channel, and leaving
-  `raw_credentials` unset stops the password reaching later policy steps, not
-  the header reaching the next hop. Forwarding it hands a service that never
-  authenticated the caller a credential it can replay.
+  the identity hook has no request-mutation channel. Forwarding it hands a
+  service that never authenticated the caller a credential it can replay.
 - **Render `WWW-Authenticate`** from the denial's violation details. Every
   denial this resolver raises carries the challenge under the `http.headers`
   key; nothing in Policy writes it to the wire, so a client gets no prompt
   until the host does.
+
+Basic does not populate `raw_credentials`, so the password reaches no
+authorization step, assertion or decision point. That bound stops there: a
+later identity handler in the same chain can still read the credential
+header through `IdentityPayload::headers()`. Order the chain accordingly, and
+treat any handler placed after Basic as holding the password.
 
 A fuller operator recipe is planned; these are the warnings that cannot wait
 for it.

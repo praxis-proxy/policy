@@ -341,29 +341,45 @@ async fn a_saturated_limiter_still_bounds_a_freshly_guessed_user_id() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_attempts_for_one_user_id_cannot_outrun_the_budget() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 10)));
     let mut block = htpasswd_block(file.path());
     block["failure_limit"] =
         serde_json::json!({ "capacity": 16, "max_failures": 1, "window_secs": 60 });
     let resolver = std::sync::Arc::new(resolver(block).expect("the config loads"));
 
+    let started = std::time::Instant::now();
+    resolve_with_header(&resolver, &basic_header("bob", "wrong horse")).await;
+    let one_verification = started.elapsed();
+    assert!(
+        one_verification >= std::time::Duration::from_millis(10),
+        "a cost-10 bcrypt verification must be slow enough that attempts launched together \
+         overlap it, or this test cannot tell reserve-at-admission from record-after-verify; \
+         took {one_verification:?}"
+    );
+
     let mut running = tokio::task::JoinSet::new();
+    let launched = std::time::Instant::now();
     for _ in 0..8 {
         let resolver = std::sync::Arc::clone(&resolver);
         running.spawn(async move {
             let result =
                 resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
-            denial_code(&result)
+            (denial_code(&result), launched.elapsed())
         });
     }
 
     let mut verified = 0_u32;
     let mut refused = 0_u32;
+    let mut slowest_refusal = std::time::Duration::ZERO;
     while let Some(joined) = running.join_next().await {
-        match joined.expect("no attempt task panics").as_deref() {
-            Some(codes::TOO_MANY_FAILURES) => refused = refused.saturating_add(1),
+        let (code, elapsed) = joined.expect("no attempt task panics");
+        match code.as_deref() {
+            Some(codes::TOO_MANY_FAILURES) => {
+                refused = refused.saturating_add(1);
+                slowest_refusal = slowest_refusal.max(elapsed);
+            },
             Some(codes::INVALID_CREDENTIALS) => verified = verified.saturating_add(1),
             other => panic!("a wrong password denies as invalid or too-many, got {other:?}"),
         }
@@ -378,6 +394,12 @@ async fn concurrent_attempts_for_one_user_id_cannot_outrun_the_budget() {
     assert_eq!(
         refused, 7,
         "every attempt beyond the budget is refused before it costs a verification"
+    );
+    assert!(
+        slowest_refusal < one_verification,
+        "every refusal must land before a single verification could finish, which is what \
+         proves the budget was spent at admission rather than after the first guess was \
+         verified: slowest refusal {slowest_refusal:?}, one verification {one_verification:?}"
     );
 }
 

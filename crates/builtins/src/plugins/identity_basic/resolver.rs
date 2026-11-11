@@ -177,7 +177,15 @@ impl BasicIdentityResolver {
                 {
                     return Err(Box::new(PluginError::Config {
                         message: format!(
-                            "{}: `limits.max_password_bytes` is {} on a bcrypt directory, above                              bcrypt's {BCRYPT_TRUNCATION_BYTES}-byte truncation point. A longer                              password is admitted here and then always rejected by the verifier,                              which locks out every user who chooses one with no denial an                              operator can read. Lower the ceiling to                              {BCRYPT_TRUNCATION_BYTES} or re-hash the file with argon2 or                              sha-crypt, which consume the whole password",
+                            "{}: `limits.max_password_bytes` is {} on a bcrypt \
+                             directory, above bcrypt's \
+                             {BCRYPT_TRUNCATION_BYTES}-byte truncation point. A \
+                             longer password is admitted here and then always \
+                             rejected by the verifier, which locks out every user \
+                             who chooses one with no denial an operator can read. \
+                             Lower the ceiling to {BCRYPT_TRUNCATION_BYTES} or \
+                             re-hash the file with argon2 or sha-crypt, which \
+                             consume the whole password",
                             config.name, settings.limits.max_password_bytes
                         ),
                     }));

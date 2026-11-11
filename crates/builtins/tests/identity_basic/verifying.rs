@@ -840,7 +840,9 @@ fn the_two_sha_crypt_variants_are_different_cost_profiles() {
     assert_ne!(
         sha256.profile(),
         sha512.profile(),
-        "$5$ and $6$ are different functions at the same round count, not two          parameterisations of one, so a file holding both is a mixed-cost file          and the uniformity check has to see them as different"
+        "$5$ and $6$ are different functions at the same round count, not two parameterisations of \
+         one, so a file holding both is a mixed-cost file and the uniformity check has to see them \
+         as different"
     );
 }
 
@@ -861,7 +863,9 @@ fn a_sha_crypt_record_without_an_explicit_rounds_field_loads_at_the_default() {
             variant: ShaCryptVariant::Sha512,
             rounds: SHA_CRYPT_DEFAULT_ROUNDS
         },
-        "an absent rounds field means the format's default, not zero: reading          it as anything else would make this record's profile differ from an          explicit `rounds=5000` that hashes identically"
+        "an absent rounds field means the format's default, not zero: reading it as anything else \
+         would make this record's profile differ from an explicit `rounds=5000` that hashes \
+         identically"
     );
     assert!(
         verify_password(&parsed, b"pw"),
@@ -883,7 +887,8 @@ fn a_sha_crypt_round_count_above_the_ceiling_fails_at_load() {
         )
         .err(),
         Some(HashError::ParametersTooHigh),
-        "a round count over the ceiling is refused at load, so a well-formed          but extreme record cannot turn one login into a denial of service"
+        "a round count over the ceiling is refused at load, so a well-formed but extreme record \
+         cannot turn one login into a denial of service"
     );
     assert!(
         parse_hash(
@@ -988,7 +993,8 @@ fn an_md5_crypt_record_is_not_mistaken_for_sha_crypt() {
     assert_eq!(
         parse_hash("$1$abcdefgh$0123456789012345678901", &Limits::default()).err(),
         Some(HashError::Malformed),
-        "`$1$` is md5crypt, and sits in neither the refused-outright set nor          the sha-crypt idents, so it must still not load"
+        "`$1$` is md5crypt, and sits in neither the refused-outright set nor the sha-crypt idents, \
+         so it must still not load"
     );
 }
 
@@ -1044,7 +1050,8 @@ fn a_sha_crypt_profile_describes_its_own_parameters() {
     for expected in ["$6$", "4096"] {
         assert!(
             described.contains(expected),
-            "a sha-crypt description names {expected}, since both the variant              and the round count are part of what the uniformity check              compares: {described}"
+            "a sha-crypt description names {expected}, since both the variant and the round count \
+             are part of what the uniformity check compares: {described}"
         );
     }
 }

@@ -70,25 +70,33 @@ const OVERFLOW_MASK: u64 = (OVERFLOW_BUCKETS - 1) as u64;
 #[derive(Debug)]
 pub struct Admission<'limiter> {
     limiter: &'limiter FailureLimiter,
-    user_id: String,
     /// Whether the outcome has already been recorded through this guard.
     ///
     /// `record_failure` and `record_success` consume the guard, so the drop
     /// that follows must not release a reservation they have already settled.
     settled: bool,
+    /// Which counter `admit` charged this attempt against.
+    ///
+    /// Carried rather than re-derived at settlement: a named counter can come
+    /// and go while an attempt is in flight, so re-probing the map could settle
+    /// an overflow attempt on a named counter created after it -- leaking the
+    /// overflow reservation, which never expires, and discharging the named
+    /// attempt's reservation early.
+    slot: Slot,
+    user_id: String,
 }
 
 impl Admission<'_> {
     /// Record a failed verification and release the reservation.
     pub fn record_failure(mut self) {
         self.settled = true;
-        self.limiter.settle_failure(&self.user_id);
+        self.limiter.settle_failure(&self.user_id, self.slot);
     }
 
     /// Clear the user-id's counter after a successful verification.
     pub fn record_success(mut self) {
         self.settled = true;
-        self.limiter.settle_success(&self.user_id);
+        self.limiter.settle_success(&self.user_id, self.slot);
     }
 }
 
@@ -99,7 +107,7 @@ impl Drop for Admission<'_> {
             // verdict on the credential, so it releases its reservation
             // without touching the failure count. A directory that cannot
             // answer must not spend a named victim's budget.
-            self.limiter.release(&self.user_id);
+            self.limiter.release(&self.user_id, self.slot);
         }
     }
 }
@@ -197,7 +205,7 @@ impl FailureLimiter {
                 return Err(Refusal::Blocked);
             }
             counter.reserve(now, window);
-            return Ok(self.admitted(user_id));
+            return Ok(self.admitted(user_id, Slot::Named));
         }
 
         // Room for a counter of its own, so the attempt is tracked by name and
@@ -206,7 +214,7 @@ impl FailureLimiter {
             let mut counter = Counter::default();
             counter.reserve(now, window);
             guard.named.insert(user_id.to_owned(), counter);
-            return Ok(self.admitted(user_id));
+            return Ok(self.admitted(user_id, Slot::Named));
         }
 
         self.saturations
@@ -216,15 +224,16 @@ impl FailureLimiter {
             // `overflow_bucket` masks into the table's own length, so this is
             // unreachable; taken rather than indexed because the crate denies
             // `indexing_slicing`, and admitting is the safe side of a bound
-            // that cannot be reached anyway.
-            return Ok(self.admitted(user_id));
+            // that cannot be reached anyway. Charged to no counter, so
+            // settlement finds nothing to release either.
+            return Ok(self.admitted(user_id, Slot::Uncounted));
         };
         counter.expire(now);
         if counter.spent(self.config.max_failures) {
             return Err(Refusal::Blocked);
         }
         counter.reserve(now, window);
-        Ok(self.admitted(user_id))
+        Ok(self.admitted(user_id, Slot::Overflow(bucket)))
     }
 
     /// How many attempts were counted in the overflow table.
@@ -241,11 +250,12 @@ impl FailureLimiter {
         self.read().named.len()
     }
 
-    fn admitted(&self, user_id: &str) -> Admission<'_> {
+    fn admitted(&self, user_id: &str, slot: Slot) -> Admission<'_> {
         Admission {
             limiter: self,
-            user_id: user_id.to_owned(),
             settled: false,
+            slot,
+            user_id: user_id.to_owned(),
         }
     }
 
@@ -266,18 +276,18 @@ impl FailureLimiter {
     }
 
     /// Release an attempt's reservation without recording a verdict.
-    fn release(&self, user_id: &str) {
+    fn release(&self, user_id: &str, slot: Slot) {
         let now = self.now_ms();
         let mut guard = self.write();
-        guard.with_counter(user_id, |counter| counter.release(now));
+        guard.with_counter(user_id, slot, |counter| counter.release(now));
     }
 
     /// Convert an attempt's reservation into a recorded failure.
-    fn settle_failure(&self, user_id: &str) {
+    fn settle_failure(&self, user_id: &str, slot: Slot) {
         let now = self.now_ms();
         let window = self.window_ms();
         let mut guard = self.write();
-        guard.with_counter(user_id, |counter| counter.fail(now, window));
+        guard.with_counter(user_id, slot, |counter| counter.fail(now, window));
     }
 
     /// Release an attempt's reservation and clear the user-id's failures.
@@ -290,18 +300,24 @@ impl FailureLimiter {
     /// An overflow bucket's failures are not cleared at all: the bucket may be
     /// shared, so crediting one caller's success would hand a colliding
     /// attacker a fresh budget.
-    fn settle_success(&self, user_id: &str) {
+    fn settle_success(&self, user_id: &str, slot: Slot) {
         let now = self.now_ms();
         let mut guard = self.write();
-        if let Some(counter) = guard.named.get_mut(user_id) {
-            counter.succeed(now);
-            if counter.outstanding == 0 {
-                guard.named.remove(user_id);
-            }
-            return;
-        }
-        if let Some(counter) = guard.overflow.get_mut(overflow_bucket(user_id)) {
-            counter.release(now);
+        match slot {
+            Slot::Named => {
+                if let Some(counter) = guard.named.get_mut(user_id) {
+                    counter.succeed(now);
+                    if counter.outstanding == 0 {
+                        guard.named.remove(user_id);
+                    }
+                }
+            },
+            Slot::Overflow(bucket) => {
+                if let Some(counter) = guard.overflow.get_mut(bucket) {
+                    counter.release(now);
+                }
+            },
+            Slot::Uncounted => {},
         }
     }
 
@@ -322,6 +338,17 @@ impl FailureLimiter {
 // -----------------------------------------------------------------------------
 // Private types
 // -----------------------------------------------------------------------------
+
+/// Which counter an admitted attempt was charged against.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Slot {
+    /// A counter held by name in the map.
+    Named,
+    /// A bucket in the fixed overflow table, by index.
+    Overflow(usize),
+    /// Charged to nothing, from the unreachable missing-bucket arm in `admit`.
+    Uncounted,
+}
 
 /// One user-id's failures, in-flight attempts, and when they stop counting.
 #[derive(Debug, Default)]
@@ -407,21 +434,29 @@ impl Counters {
         self.named.len() < before
     }
 
-    /// Apply `settle` to whichever counter holds `user_id`'s reservation.
+    /// Apply `settle` to the counter `admit` charged this attempt against.
     ///
-    /// The named counter if it has one, the overflow bucket otherwise, matching
-    /// where `admit` charged the attempt. A named counter that reached zero on
-    /// both fields is removed, so settling frees its slot.
-    fn with_counter(&mut self, user_id: &str, settle: impl FnOnce(&mut Counter)) {
-        if let Some(counter) = self.named.get_mut(user_id) {
-            settle(counter);
-            if counter.outstanding == 0 && counter.failures == 0 {
-                self.named.remove(user_id);
-            }
-            return;
-        }
-        if let Some(counter) = self.overflow.get_mut(overflow_bucket(user_id)) {
-            settle(counter);
+    /// Directed by the attempt's own `slot` rather than by probing the map
+    /// again: the named counter an attempt was charged against may have been
+    /// removed and recreated meanwhile, and settling on whatever holds the
+    /// user-id now would charge the wrong counter. A named counter that reached
+    /// zero on both fields is removed, so settling frees its slot.
+    fn with_counter(&mut self, user_id: &str, slot: Slot, settle: impl FnOnce(&mut Counter)) {
+        match slot {
+            Slot::Named => {
+                if let Some(counter) = self.named.get_mut(user_id) {
+                    settle(counter);
+                    if counter.outstanding == 0 && counter.failures == 0 {
+                        self.named.remove(user_id);
+                    }
+                }
+            },
+            Slot::Overflow(bucket) => {
+                if let Some(counter) = self.overflow.get_mut(bucket) {
+                    settle(counter);
+                }
+            },
+            Slot::Uncounted => {},
         }
     }
 }
