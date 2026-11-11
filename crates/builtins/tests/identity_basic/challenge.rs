@@ -304,6 +304,80 @@ async fn a_user_id_spray_does_not_lock_out_a_legitimate_caller() {
     );
 }
 
+/// A caller whose shared bucket an attacker filled must still authenticate.
+///
+/// The defect this pins: the overflow arm refused on a spent bucket before any
+/// verification. Buckets are shared and a successful login removes its named
+/// counter, so the callers routed through overflow are exactly the
+/// well-behaved ones -- a junk-user-id spray that spent every bucket denied
+/// them all while they presented correct passwords, reachable with cheap
+/// unauthenticated requests.
+#[tokio::test]
+async fn a_spent_overflow_bucket_does_not_deny_a_correct_password() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    // One slot, taken by the squatter, so alice is routed through overflow and
+    // no slot ever frees for her to be promoted into.
+    block["failure_limit"] =
+        serde_json::json!({ "capacity": 1, "max_failures": 2, "window_secs": 60 });
+    let resolver = resolver(block).expect("the config loads");
+
+    resolve_with_header(&resolver, &basic_header("squatter", "whatever")).await;
+
+    // Spend alice's bucket. Her user-id hashes to one bucket, so guessing
+    // against her own name is the cheapest way to fill the one she shares.
+    for _ in 0..4 {
+        resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
+    }
+    assert!(
+        resolver.limiter_saturations() > 0,
+        "alice's attempts must have been counted in overflow, or this test is not exercising \
+         the shared-bucket path"
+    );
+
+    let accepted = resolve_with_header(&resolver, &basic_header("alice", "correct horse")).await;
+    assert_eq!(
+        denial_code(&accepted).as_deref(),
+        None,
+        "a correct password must clear a shared bucket's refusal: the bucket's failures may \
+         belong to any user-id hashing there, so refusing on it before verification denied \
+         callers for a budget they never spent"
+    );
+}
+
+/// The bound a shared bucket still carries: a wrong password is refused.
+///
+/// The other half of the pair above. Moving the refusal after verification
+/// must not make the overflow table toothless -- while the map stays
+/// saturated it is the only thing bounding a fresh target, since promotion
+/// needs a slot to free.
+#[tokio::test]
+async fn a_spent_overflow_bucket_still_refuses_a_wrong_password() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["failure_limit"] =
+        serde_json::json!({ "capacity": 1, "max_failures": 2, "window_secs": 60 });
+    let resolver = resolver(block).expect("the config loads");
+
+    resolve_with_header(&resolver, &basic_header("squatter", "whatever")).await;
+
+    let mut refused = None;
+    for attempt in 1..=8_u32 {
+        let result = resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
+        if denial_code(&result).as_deref() == Some(codes::TOO_MANY_FAILURES) {
+            refused = Some(attempt);
+            break;
+        }
+    }
+
+    assert_eq!(
+        refused,
+        Some(3),
+        "a budget of two must refuse the third wrong guess even through a shared bucket: the \
+         refusal moves after verification, it does not go away"
+    );
+}
+
 #[tokio::test]
 async fn a_saturated_limiter_still_bounds_a_freshly_guessed_user_id() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));

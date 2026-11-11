@@ -83,10 +83,13 @@ pub struct FailureLimitConfig {
     /// A ceiling on the limiter's memory, not an admission limit. At capacity
     /// no counter is displaced -- that would let a flood of fresh user-ids
     /// clear a blocked one's counter -- and no caller is denied for want of a
-    /// slot either, since the user-ids holding no counter are the ones with no
-    /// recorded failures. What a full map costs is new counters: failures for
-    /// untracked user-ids stop being counted until a window frees a slot.
-    /// Watch the limiter's saturation count and raise this when it climbs.
+    /// slot. Failures for untracked user-ids are still counted, in a shared
+    /// overflow table, and follow the user-id into its named counter once a
+    /// slot frees. What a full map costs is per-name precision: colliding
+    /// user-ids accumulate in one bucket, so a caller sharing one with an
+    /// attacker is judged on its credential rather than refused outright, and
+    /// pays a verification an unspent bucket would have skipped. Watch the
+    /// limiter's saturation count and raise this when it climbs.
     pub capacity: usize,
 
     /// How many consecutive failures a user-id may accumulate before denial.

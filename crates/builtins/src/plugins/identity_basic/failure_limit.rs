@@ -18,7 +18,25 @@
 // - *Saturation.* A full name-keyed map used to stop counting new user-ids
 //   entirely, which let an attacker fill it with junk and then guess a fresh
 //   target unbounded. Counting now continues in a fixed overflow table that
-//   never displaces a named counter.
+//   never displaces a named counter, and a user-id promoted out of that table
+//   carries its recorded failures with it, so a freed slot is not a fresh
+//   budget.
+// - *Shared-bucket lockout.* An overflow bucket is shared, so refusing on a
+//   spent one denied callers for failures that were not theirs. Since a
+//   successful login removes its named counter, the callers routed through
+//   overflow are exactly the well-behaved ones, which made a junk-user-id
+//   spray a blanket authentication outage. A spent bucket still refuses, but
+//   as `Refusal::Unproven` rather than `Blocked`: the refusal rests on
+//   evidence that is not this caller's, and `admit_proven` clears it for one
+//   that can show a verified credential. Only the caller who knows the
+//   password can clear a bucket they share with an attacker.
+//
+// Where a refusal is decided follows from what it is keyed on. A named counter
+// names one caller, so it refuses outright and costs an attacker nothing. A
+// shared bucket cannot attribute its failures, so its refusal is recoverable
+// on proof -- the credential is the only evidence that separates the two.
+// `admit` refuses in both cases, so this type bounds a fresh target on its
+// own; the relaxation is opt-in and takes a verdict the caller must supply.
 //
 // What this is still not: it is per process, so replicas do not share it, and
 // it is keyed per user-id, so a spray across many user-ids never fills one
@@ -121,6 +139,21 @@ pub enum Refusal {
     /// Spent by completed failures, attempts in flight, or both: see
     /// [`FailureLimiter::admit`].
     Blocked,
+    /// A shared overflow bucket is spent, on failures that may not be this
+    /// caller's.
+    ///
+    /// Raised only while the name-keyed map is saturated, where a user-id has
+    /// no counter of its own and is counted in a bucket it shares with
+    /// whatever else hashes there. Refusing on it is the safe default, but it
+    /// is not a verdict on this caller: a spray of junk user-ids can spend
+    /// every bucket, and a caller who knows the password is then refused for
+    /// an attacker's failures.
+    ///
+    /// A caller that can verify the credential should re-admit the attempt
+    /// with [`FailureLimiter::admit_proven`] rather than deny on this.
+    ///
+    /// [`FailureLimiter::admit_proven`]: FailureLimiter::admit_proven
+    Unproven,
 }
 
 /// Consecutive-failure counters, keyed on the normalised user-id.
@@ -136,6 +169,8 @@ pub struct FailureLimiter {
     /// actionable: a rising count says the capacity is too small for the
     /// traffic, and nothing in it identifies a caller.
     saturations: std::sync::atomic::AtomicU64,
+    /// How many shared-bucket refusals a verified credential then cleared.
+    proven: std::sync::atomic::AtomicU64,
 }
 
 impl FailureLimiter {
@@ -151,6 +186,7 @@ impl FailureLimiter {
                     .collect(),
             }),
             saturations: std::sync::atomic::AtomicU64::new(0),
+            proven: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -211,7 +247,37 @@ impl FailureLimiter {
         // Room for a counter of its own, so the attempt is tracked by name and
         // pays no collision cost.
         if guard.named.len() < self.config.capacity || guard.reclaim(now) {
-            let mut counter = Counter::default();
+            // Seeded from the overflow bucket rather than started at zero.
+            // The arms otherwise share no failure state, so promoting a
+            // user-id out of overflow was a budget reset: a blocked attacker
+            // regained a full `max_failures` the moment any slot freed --
+            // including one freed by an unrelated caller's successful login,
+            // which an attacker needs neither to control nor to observe.
+            //
+            // `outstanding` is not carried over. Those reservations belong to
+            // attempts still in flight, possibly for colliding user-ids, and
+            // each settles on the `Slot::Overflow` it was charged against.
+            //
+            // Over-counting a collision is the imprecision the overflow table
+            // already documents, and it fails closed: an inherited count only
+            // ever bounds this user-id sooner, never later. A named counter
+            // refuses before verification, so unlike the shared bucket below
+            // this one decides on failures attributed to one caller.
+            let inherited = guard.overflow_failures(user_id, now);
+            let mut counter = Counter {
+                // Only a counter carrying failures needs a window; a fresh one
+                // takes its first from `fail`, as `reserve` opens none.
+                expires_at_ms: if inherited == 0 {
+                    0
+                } else {
+                    now.saturating_add(window)
+                },
+                failures: inherited,
+                outstanding: 0,
+            };
+            if counter.spent(self.config.max_failures) {
+                return Err(Refusal::Blocked);
+            }
             counter.reserve(now, window);
             guard.named.insert(user_id.to_owned(), counter);
             return Ok(self.admitted(user_id, Slot::Named));
@@ -230,10 +296,57 @@ impl FailureLimiter {
         };
         counter.expire(now);
         if counter.spent(self.config.max_failures) {
-            return Err(Refusal::Blocked);
+            // Refused, but recoverable: the bucket is shared, so its failures
+            // may belong to any user-id hashing here. `Refusal::Unproven` says
+            // the refusal rests on evidence that is not this caller's, and
+            // `admit_proven` re-admits one that can show a verified
+            // credential. A caller that cannot is simply refused.
+            //
+            // Kept as a refusal rather than a provisional admission so this
+            // type stays self-enforcing: `admit` alone bounds a fresh target
+            // under saturation, with no obligation on the caller to read a
+            // flag. The relaxation is opt-in and takes proof.
+            return Err(Refusal::Unproven);
         }
         counter.reserve(now, window);
         Ok(self.admitted(user_id, Slot::Overflow(bucket)))
+    }
+
+    /// Re-admit an attempt a shared bucket refused, on proof of the password.
+    ///
+    /// For a caller that received [`Refusal::Unproven`], verified the
+    /// credential anyway, and found it correct. That verdict is the evidence
+    /// the bucket could not supply: an attacker who spent the bucket by
+    /// spraying junk user-ids cannot produce it, so serving this caller does
+    /// not weaken the bound the bucket exists to hold.
+    ///
+    /// Charges nothing. The attempt succeeded, so there is no failure to
+    /// record, and the bucket's existing failures are deliberately left
+    /// standing: it is shared, so crediting one caller's success would hand a
+    /// colliding attacker a fresh budget. The caller therefore re-proves
+    /// itself on every request for as long as the map stays saturated, which
+    /// is the cost of a bucket it does not own.
+    ///
+    /// Only sound to call with a credential that actually verified. A caller
+    /// that calls it on a failed or unevaluated credential reopens the
+    /// unbounded-guessing hole the overflow table closes.
+    ///
+    /// [`Refusal::Unproven`]: Refusal::Unproven
+    pub fn admit_proven(&self) {
+        self.proven
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How many attempts a shared bucket refused and a verified credential
+    /// then cleared.
+    ///
+    /// A rising count means legitimate callers are being judged on buckets
+    /// they do not own, which is the signal to raise `failure_limit.capacity`.
+    /// Carries no user-id, for the same reason [`saturations`] does not.
+    ///
+    /// [`saturations`]: FailureLimiter::saturations
+    pub fn proven(&self) -> u64 {
+        self.proven.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// How many attempts were counted in the overflow table.
@@ -428,6 +541,20 @@ struct Counters {
 
 impl Counters {
     /// Free at least one named slot, if any counter has gone idle.
+    /// The live failures recorded for a user-id in the overflow table.
+    ///
+    /// Expires the bucket first, so a stale window contributes nothing. Reads
+    /// zero when the index cannot be taken, which `overflow_bucket`'s mask
+    /// makes unreachable; the crate denies `indexing_slicing`, so the bound is
+    /// taken rather than asserted.
+    fn overflow_failures(&mut self, user_id: &str, now: u64) -> u32 {
+        let bucket = overflow_bucket(user_id);
+        self.overflow.get_mut(bucket).map_or(0, |counter| {
+            counter.expire(now);
+            counter.failures
+        })
+    }
+
     fn reclaim(&mut self, now: u64) -> bool {
         let before = self.named.len();
         self.named.retain(|_, held| !held.idle(now));
@@ -479,4 +606,106 @@ fn overflow_bucket(user_id: &str) -> usize {
         .get_or_init(std::collections::hash_map::RandomState::new)
         .hash_one(user_id);
     usize::try_from(hash & OVERFLOW_MASK).unwrap_or(0)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::{FailureLimiter, OVERFLOW_BUCKETS, Refusal, overflow_bucket};
+    use crate::plugins::identity_basic::config::FailureLimitConfig;
+
+    fn limiter(capacity: usize, max_failures: u32) -> FailureLimiter {
+        FailureLimiter::new(FailureLimitConfig {
+            capacity,
+            max_failures,
+            window_secs: 300,
+        })
+    }
+
+    /// Spend `n` failures for one user-id, ignoring refusals.
+    fn fail(limiter: &FailureLimiter, user_id: &str, n: u32) {
+        for _ in 0..n {
+            if let Ok(admission) = limiter.admit(user_id) {
+                admission.record_failure();
+            }
+        }
+    }
+
+    /// The baseline: a user-id blocked by name is refused before verification.
+    #[test]
+    fn a_named_counter_blocks_once_its_own_budget_is_spent() {
+        let limiter = limiter(16, 3);
+        fail(&limiter, "alice", 3);
+
+        assert_eq!(
+            limiter.admit("alice").err(),
+            Some(Refusal::Blocked),
+            "three failures against a budget of three must block the fourth attempt outright: \
+             a named counter attributes its failures to one caller, so it needs no verification \
+             to decide"
+        );
+    }
+
+    /// Promotion out of overflow must not hand back a fresh budget.
+    ///
+    /// The defect: `admit`'s arms shared no failure state, so a user-id
+    /// counted in overflow got a `Counter::default()` -- zero failures -- the
+    /// moment a named slot freed. Any event freeing a slot reset the bound,
+    /// including an unrelated caller's successful login, which an attacker
+    /// needs neither to control nor to observe.
+    #[test]
+    fn failures_counted_in_overflow_follow_a_user_id_into_its_named_counter() {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        assert_eq!(limiter.tracked(), 1, "the squatter holds the only slot");
+
+        fail(&limiter, "attacker", 2);
+        assert!(
+            limiter.saturations() > 0,
+            "the attacker's attempts must have been counted in overflow, or this test is not \
+             exercising the promotion path"
+        );
+
+        // The squatter's success frees the slot, so the next attempt for
+        // `attacker` is tracked by name -- and must carry the overflow count.
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+
+        assert_eq!(
+            limiter.admit("attacker").err(),
+            Some(Refusal::Blocked),
+            "a freed slot must not reset a budget already spent in overflow: promoting onto a \
+             zeroed counter made every freed slot a fresh set of guesses, and a trickle of \
+             legitimate logins churns the map for an attacker"
+        );
+    }
+
+    /// A promoted counter with no inherited failures starts clean.
+    ///
+    /// The other side of the test above: inheriting must not block a caller
+    /// whose bucket holds nothing.
+    #[test]
+    fn promotion_without_recorded_failures_admits_normally() {
+        let limiter = limiter(1, 2);
+        let squatter = limiter.admit("squatter").expect("takes the only slot");
+        drop(squatter);
+
+        limiter
+            .admit("fresh")
+            .expect("a user-id with no recorded failures must be admitted on promotion")
+            .record_success();
+    }
+
+    /// The bucket index must stay inside the table for any input.
+    #[test]
+    fn every_user_id_hashes_into_the_table() {
+        for user_id in ["", "a", "alice", &"x".repeat(4096), "ünïcödé", "a:b"] {
+            assert!(
+                overflow_bucket(user_id) < OVERFLOW_BUCKETS,
+                "{user_id:?} must index inside the overflow table"
+            );
+        }
+    }
 }

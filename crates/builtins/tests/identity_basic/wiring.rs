@@ -551,6 +551,64 @@ async fn an_overflow_attempt_settles_on_the_bucket_it_was_charged_against() {
     );
 }
 
+/// Filling every overflow bucket must not deny a caller who knows the password.
+///
+/// The P0 this closes, at the scale that produced it: the reviewer's
+/// simulation blocked 1023 of 1024 buckets with ~10k unauthenticated requests
+/// and denied 54% of legitimate callers, rising with the spray rate. The
+/// earlier spray test filled only the *named* map, so the relocated defect
+/// passed underneath it.
+///
+/// Driven against the limiter rather than a resolver: spraying this many
+/// user-ids through real bcrypt verifications would take minutes.
+#[test]
+fn a_spray_that_blocks_every_overflow_bucket_still_lets_a_proven_caller_through() {
+    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 1, "max_failures": 2, "window_secs": 300,
+        }))
+        .expect("the limiter config parses"),
+    );
+    let _squatter = limiter
+        .admit("squatter")
+        .expect("the squatter takes the only named slot");
+
+    // Spend every bucket several times over, which is what the old refusal
+    // needed to lock the route.
+    for n in 0..8_192 {
+        let name = format!("junk{n}");
+        for _ in 0..2 {
+            if let Ok(admission) = limiter.admit(&name) {
+                admission.record_failure();
+            }
+        }
+    }
+    assert!(
+        limiter.saturations() > 0,
+        "the spray must have been counted in overflow"
+    );
+
+    // A caller the saturated map cannot name, whose bucket the spray spent.
+    // The refusal is recoverable, not a verdict on this caller.
+    assert_eq!(
+        limiter.admit("victim").err(),
+        Some(Refusal::Unproven),
+        "a spent shared bucket must refuse as unproven, not as blocked: the failures in it \
+         belong to the spray, not to this caller"
+    );
+
+    // Verifying the credential is the evidence the bucket could not supply.
+    limiter.admit_proven();
+    assert_eq!(
+        limiter.proven(),
+        1,
+        "a cleared shared-bucket refusal must be observable, so an operator can see \
+         legitimate callers paying for buckets they do not own"
+    );
+}
+
 #[test]
 fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
     use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
