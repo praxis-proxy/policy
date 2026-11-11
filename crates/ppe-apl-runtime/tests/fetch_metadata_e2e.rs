@@ -483,11 +483,45 @@ routes:
         )
         .expect("configuration loads");
     engine.initialize().await.expect("engine initializes");
+    let base_creates = creates.load(Ordering::SeqCst);
 
+    let (first_result, _) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
+        .await;
+
+    assert!(
+        first_result.continue_processing,
+        "run and fetch should both dispatch successfully: {:?}",
+        first_result.violation
+    );
+    assert!(
+        first_result
+            .modified_extensions
+            .as_ref()
+            .and_then(|extensions| extensions.metadata.as_deref())
+            .and_then(|metadata| metadata.get("account"))
+            .is_some(),
+        "fetch should publish account metadata"
+    );
     assert_eq!(
         creates.load(Ordering::SeqCst),
-        1,
-        "run and fetch must share one route-override instance"
+        base_creates + 1,
+        "run and fetch must share one newly created route-override instance"
+    );
+
+    let (second_result, _) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
+        .await;
+
+    assert!(
+        second_result.continue_processing,
+        "the cached route should continue to allow: {:?}",
+        second_result.violation
+    );
+    assert_eq!(
+        creates.load(Ordering::SeqCst),
+        base_creates + 1,
+        "the second evaluation must reuse the route-override instance"
     );
 }
 

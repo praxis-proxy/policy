@@ -374,13 +374,14 @@ where
             DispatchPhase::Post => HookPhase::Post,
         };
         let entry = resolved
-            .pick_entry(request_entity_type.as_deref(), dispatch_phase)
+            .pick_entry(H::NAME, request_entity_type.as_deref(), dispatch_phase)
             .ok_or_else(|| {
                 PluginError::Dispatch(format!(
                     "plugin '{plugin_name}' has no hook matching dispatch \
-                     context (entity_type={:?}, phase={:?}); declared hooks: {:?}; \
+                     context (family={}, entity_type={:?}, phase={:?}); declared hooks: {:?}; \
                      move the step to a route whose context the plugin serves, \
                      or use a plugin with a hook for this context",
+                    H::NAME,
                     request_entity_type,
                     dispatch_phase,
                     resolved.entries_by_hook.keys().collect::<Vec<_>>(),

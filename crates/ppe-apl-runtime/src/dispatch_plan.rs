@@ -79,7 +79,8 @@ impl RoutePluginEntry {
     /// praxis-policy-core hook metadata table for each, returns the first
     /// matching entry.
     ///
-    /// `requested_entity_type` comes from the request's
+    /// `requested_family` is the typed hook family carried by the current
+    /// invoker. `requested_entity_type` comes from the request's
     /// `MetaExtension.entity_type` (or `None` if the dispatcher
     /// doesn't have one — in which case any hook's `entity_type`
     /// matches). `requested_phase` comes from the APL invocation
@@ -96,15 +97,19 @@ impl RoutePluginEntry {
     /// plugin registered under a name nobody described still dispatches.
     pub fn pick_entry(
         &self,
+        requested_family: &str,
         requested_entity_type: Option<&str>,
         requested_phase: HookPhase,
     ) -> Option<&HookEntry> {
         self.entries_by_hook
             .iter()
             .find(|(hook_name, _)| {
-                lookup_hook_metadata(hook_name)
-                    .unwrap_or_else(HookMetadata::permissive)
-                    .matches(requested_entity_type, requested_phase)
+                let metadata =
+                    lookup_hook_metadata(hook_name).unwrap_or_else(HookMetadata::permissive);
+                metadata
+                    .family
+                    .is_none_or(|family| family == requested_family)
+                    && metadata.matches(requested_entity_type, requested_phase)
             })
             .map(|(_, entry)| entry)
     }
