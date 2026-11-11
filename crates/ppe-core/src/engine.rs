@@ -3212,6 +3212,13 @@ impl PolicyEngine {
     /// `Extensions` (praxis-policy-core's per-plugin filter still applies to the
     /// synthetic handler).
     ///
+    /// Route annotations are framework-trusted registrations. An annotated
+    /// handler granted the hidden `__framework_publish_metadata` capability
+    /// may append validated acquired-facts records to the immutable metadata
+    /// slot. External orchestrators must reserve that capability for handlers
+    /// that validate and provenance-stamp records themselves; it must never be
+    /// copied from user or plugin configuration.
+    ///
     /// The underlying `plugins:` chain for this route is *not* removed —
     /// those plugins stay discoverable via [`find_plugin_entries`](Self::find_plugin_entries)
     /// so the orchestrator can dispatch into them by name.

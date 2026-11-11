@@ -32,7 +32,9 @@ allowed inside `parallel`.
 
 ## Source errors
 
-An attempted source can return an error record with a normalized error code.
+An attempted source can return an error record with a normalized error code in
+the reserved `metadata.*` namespace. Other code namespaces are rejected so a
+source cannot impersonate a policy denial or framework control signal.
 The plugin's configured `on_error` determines publication:
 
 - `fail` stops the route and publishes no record.
@@ -43,3 +45,12 @@ The plugin's configured `on_error` determines publication:
 A conditional fetch whose predicate is false publishes no instance at all.
 That absence is distinct from an ignored source error. Malformed records,
 missing records, and framework dispatch failures always fail closed.
+
+`on_error: ignore` applies only when the source completes and returns a valid
+error record. An executor timeout, panic, or source error returns no trusted
+`AcquiredFacts`; the fetch therefore denies even under `ignore`. A source
+adapter that maps transport failures to records must set its own request
+deadline shorter than `engine_settings.plugin_timeout`, leaving enough time to
+construct and return (for example) a `metadata.timeout` record. PPE cannot
+validate this ordering at load because adapter deadlines live inside
+source-specific configuration.

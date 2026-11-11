@@ -153,12 +153,14 @@ impl RouteDispatchPlan {
         engine: &PolicyEngine,
     ) -> Self {
         let mut plan = Self::default();
+        let mut resolved_entries: HashMap<String, Vec<(String, HookEntry)>> = HashMap::new();
         for name in collect_plugin_names(route) {
             let Some(entries) =
                 build_effective_plugin_entries(&name, route, registry, engine).await
             else {
                 continue;
             };
+            resolved_entries.insert(name.clone(), entries.clone());
 
             // Store every (hook_name, HookEntry) pair the plugin
             // registered. Dispatch-time entry selection (pick_entry)
@@ -231,10 +233,15 @@ impl RouteDispatchPlan {
         }
 
         for name in collect_fetch_plugin_names(route) {
-            let Some(entries) =
-                build_effective_plugin_entries(&name, route, registry, engine).await
-            else {
-                continue;
+            let entries = if let Some(entries) = resolved_entries.remove(&name) {
+                entries
+            } else {
+                let Some(entries) =
+                    build_effective_plugin_entries(&name, route, registry, engine).await
+                else {
+                    continue;
+                };
+                entries
             };
             if let Some((_, entry)) = entries
                 .into_iter()
@@ -579,14 +586,11 @@ pub(crate) fn collect_elicit_plugin_names(route: &CompiledRoute) -> Vec<String> 
 pub(crate) fn collect_fetch_plugin_names(route: &CompiledRoute) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let mut visit = |effect: &Effect| {
-        if let Effect::Fetch(step) = effect
-            && seen.insert(step.plugin_name.clone())
-        {
-            out.push(step.plugin_name.clone());
+    for name in route.fetch_names() {
+        if seen.insert(name.clone()) {
+            out.push(name);
         }
-    };
-    walk_effects(&route.pre_invocation, &mut visit);
+    }
     out
 }
 

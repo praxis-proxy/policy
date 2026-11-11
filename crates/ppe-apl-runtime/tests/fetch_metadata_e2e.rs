@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -33,6 +35,8 @@ use praxis_policy_core::plugin::{Plugin, PluginConfig};
 enum SourceResult {
     Success,
     Error,
+    ReservedError,
+    Hang,
 }
 
 struct Source {
@@ -63,8 +67,31 @@ impl HookHandler<MetadataFetchHook> for Source {
                 "metadata.upstream_error",
                 MetadataCacheDisposition::Disabled,
             ),
+            SourceResult::ReservedError => AcquiredFacts::error(
+                "elicitation.store_unavailable",
+                MetadataCacheDisposition::Disabled,
+            ),
+            SourceResult::Hang => {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                AcquiredFacts::success(
+                    serde_json::json!({"active": true}),
+                    Utc::now(),
+                    MetadataCacheDisposition::Disabled,
+                )
+            },
         };
         PluginResult::modify_payload(request.clone().with_facts(facts))
+    }
+}
+
+impl HookHandler<CmfHook> for Source {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        _extensions: &Extensions,
+        _context: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        PluginResult::allow()
     }
 }
 
@@ -82,6 +109,35 @@ impl PluginFactory for SourceFactory {
                 "metadata.fetch",
                 Arc::new(TypedHandlerAdapter::<MetadataFetchHook, _>::new(source)),
             )],
+        })
+    }
+}
+
+struct CountingDualSourceFactory {
+    creates: Arc<AtomicUsize>,
+}
+
+impl PluginFactory for CountingDualSourceFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        self.creates.fetch_add(1, Ordering::SeqCst);
+        let source = Arc::new(Source {
+            config: config.clone(),
+            result: SourceResult::Success,
+        });
+        Ok(PluginInstance {
+            plugin: source.clone(),
+            handlers: vec![
+                (
+                    "metadata.fetch",
+                    Arc::new(TypedHandlerAdapter::<MetadataFetchHook, _>::new(
+                        source.clone(),
+                    )),
+                ),
+                (
+                    "cmf.tool_pre_invoke",
+                    Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(source)),
+                ),
+            ],
         })
     }
 }
@@ -325,6 +381,117 @@ routes:
 }
 
 #[tokio::test]
+/// Executor failures remain fail-closed even when source records are ignored.
+async fn ignored_source_timeout_without_a_record_denies() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+  plugin_timeout: 1
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    on_error: ignore
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        SourceResult::Hang,
+    )
+    .await;
+
+    let (result, _) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
+        .await;
+
+    assert!(!result.continue_processing, "a missing record must deny");
+    assert_eq!(
+        result
+            .violation
+            .as_ref()
+            .map(|violation| violation.code.as_str()),
+        Some("plugin_timeout"),
+        "the executor timeout must remain fail-closed under ignore: {:?}",
+        result.violation
+    );
+}
+
+#[tokio::test]
+/// Source codes cannot impersonate framework control signals.
+async fn reserved_source_error_code_is_rejected() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    on_error: fail
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        SourceResult::ReservedError,
+    )
+    .await;
+
+    let (result, _) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
+        .await;
+
+    let violation = result.violation.expect("invalid source code must deny");
+    assert_ne!(violation.code, "elicitation.store_unavailable");
+    assert!(violation.reason.contains("must start with `metadata.`"));
+}
+
+#[tokio::test]
+/// One overridden source shared by `run()` and `fetch()` is instantiated once.
+async fn run_and_fetch_share_one_overridden_source_instance() {
+    let creates = Arc::new(AtomicUsize::new(0));
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(
+        "dual-source",
+        Box::new(CountingDualSourceFactory {
+            creates: Arc::clone(&creates),
+        }),
+    );
+    register_apl(&engine, AplOptions::in_process());
+    engine
+        .load_config_yaml(
+            r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: dual-source
+    hooks: [cmf.tool_pre_invoke, metadata.fetch]
+routes:
+  - tool: check_account
+    plugins:
+      account:
+        config:
+          tenant: route
+    authorization:
+      pre_invocation:
+        - "run(account)"
+        - "fetch(account)"
+"#,
+        )
+        .expect("configuration loads");
+    engine.initialize().await.expect("engine initializes");
+
+    assert_eq!(
+        creates.load(Ordering::SeqCst),
+        1,
+        "run and fetch must share one route-override instance"
+    );
+}
+
+#[tokio::test]
 /// A false conditional does not dispatch or create a metadata instance.
 async fn skipped_conditional_fetch_publishes_no_instance() {
     let engine = engine(
@@ -410,7 +577,12 @@ routes:
 "#,
         )
         .expect_err("a source without metadata.fetch must fail the load");
-    assert!(error.to_string().contains("metadata.fetch"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("must declare the `metadata.fetch` hook"),
+        "{error}"
+    );
 }
 
 #[test]

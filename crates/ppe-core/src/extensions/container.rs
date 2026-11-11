@@ -367,7 +367,19 @@ impl Extensions {
             }
             && ptr_eq_opt(self.framework.as_ref(), modified.framework.as_ref())
             && ptr_eq_opt(self.meta.as_ref(), modified.meta.as_ref())
-            && (allow_metadata || ptr_eq_opt(self.metadata.as_ref(), modified.metadata.as_ref()))
+            && if allow_metadata {
+                match (&self.metadata, &modified.metadata) {
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                    (Some(current), Some(published)) => current.iter().all(|(name, facts)| {
+                        published
+                            .get(name)
+                            .is_some_and(|candidate| candidate == facts)
+                    }),
+                }
+            } else {
+                ptr_eq_opt(self.metadata.as_ref(), modified.metadata.as_ref())
+            }
         // NOTE: `raw_credentials` is INTENTIONALLY excluded from the
         // immutable check. Framework orchestrators (praxis-policy-apl-runtime's
         // DelegationPluginInvoker) legitimately write

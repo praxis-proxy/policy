@@ -1746,17 +1746,17 @@ fn validate_metadata_fetch_sources(
     registry: &PluginRegistry,
     engine: &PolicyEngine,
 ) -> Result<(), VisitorError> {
-    let mut names = Vec::new();
-    for effect in &route.pre_invocation {
-        effect.collect_fetch_names(&mut names);
-    }
+    let mut names = route.fetch_names();
     names.sort_unstable();
     names.dedup();
 
     for name in names {
         let Some(effective) = EffectivePlugin::resolve(&name, registry, &route.plugin_overrides)
         else {
-            continue;
+            return Err(format!(
+                "{location}: metadata source `{name}` is not declared in `plugins:`"
+            )
+            .into());
         };
         let on_error = effective.on_error.unwrap_or("fail");
         if !on_error.eq_ignore_ascii_case("fail") && !on_error.eq_ignore_ascii_case("ignore") {
@@ -1768,7 +1768,10 @@ fn validate_metadata_fetch_sources(
         }
 
         let Some(plugin) = engine.get_plugin(&name) else {
-            continue;
+            return Err(format!(
+                "{location}: metadata source `{name}` was declared but no plugin instance was registered"
+            )
+            .into());
         };
         if !engine
             .find_plugin_entries(&name)
@@ -1776,7 +1779,8 @@ fn validate_metadata_fetch_sources(
             .any(|(hook_name, _)| hook_name == praxis_policy_core::metadata::HOOK_METADATA_FETCH)
         {
             return Err(format!(
-                "{location}: metadata source `{name}` declares `metadata.fetch` but has no registered handler"
+                "{location}: metadata source `{name}` has no registered handler for `metadata.fetch`; \
+                 the plugin must declare that hook and install its typed handler"
             )
             .into());
         }

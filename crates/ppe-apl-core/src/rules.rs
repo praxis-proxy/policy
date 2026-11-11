@@ -642,11 +642,21 @@ impl CompiledRoute {
     /// Return the first metadata source fetched more than once in this route.
     pub fn duplicate_fetch_name(&self) -> Option<String> {
         let mut names = std::collections::HashSet::new();
-        let mut fetches = Vec::new();
+        self.fetch_names()
+            .into_iter()
+            .find(|name| !names.insert(name.clone()))
+    }
+
+    /// Return every syntactic metadata source in pre-invocation order.
+    ///
+    /// Duplicates are retained so load-time validation can reject a source
+    /// fetched from more than one branch or stacked policy layer.
+    pub fn fetch_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
         for effect in &self.pre_invocation {
-            effect.collect_fetch_names(&mut fetches);
+            effect.collect_fetch_names(&mut names);
         }
-        fetches.into_iter().find(|name| !names.insert(name.clone()))
+        names
     }
 
     /// Apply a more-specific policy layer on top of this one. Used by
