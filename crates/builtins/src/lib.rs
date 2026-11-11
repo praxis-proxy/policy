@@ -24,7 +24,6 @@
 //! | `basic` | `plugins::identity_basic`; password crypto is RustCrypto only |
 //! | `crypto-rustcrypto` | RustCrypto SHA-256 and HMAC; on by default |
 //! | `fips` | OpenSSL FIPS SHA-256, shared by Policy, API-key and DPoP; no HMAC |
-//! | `basic` | `plugins::identity_basic` |
 //! | `oauth` | `plugins::delegator_oauth` |
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
 //! | `quota/limitador` | `plugins::quota` |

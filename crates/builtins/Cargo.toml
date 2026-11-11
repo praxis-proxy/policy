@@ -22,6 +22,7 @@ features = [
   "crypto-rustcrypto",
   "jwt",
   "api-key",
+  "basic",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",

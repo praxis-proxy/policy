@@ -472,23 +472,20 @@ fn read_index(
         users.insert(normalised, Entry { hash });
     }
 
-    // Any record in the file costs what every other one does, so reusing one
-    // of them makes a miss cost exactly what a hit costs -- by construction
-    // rather than by estimate. The synthesized hash is for a file with no
-    // records at all, which otherwise answers in nanoseconds and is
-    // distinguishable from a populated one by timing alone.
-    let dummy = match reference {
-        Some(stored) => stored,
-        None => floor()?,
-    };
-
     // The scheme is only knowable once the file has been read, so the
     // resolver's password ceiling is reconciled with it here. Checked on every
     // load, which is what makes it hold across a reload: a resolver that
     // started on an argon2 file with a ceiling above bcrypt's truncation point
     // would otherwise publish a bcrypt file and then deny every password
     // longer than 72 bytes as though it were simply wrong.
-    if let CostProfile::Bcrypt { .. } = dummy.profile()
+    //
+    // Keyed on a record the file actually holds, not on `dummy` below: the
+    // miss-path hash for an empty file is a synthesized bcrypt one, and
+    // reading the ceiling off it refused an emptied argon2 directory -- the
+    // revocation reload -- with a message naming bcrypt records it does not
+    // contain. A file with no records constrains the ceiling not at all, and
+    // the first record a later reload admits re-runs this check.
+    if let Some(CostProfile::Bcrypt { .. }) = reference.as_ref().map(ParsedHash::profile)
         && let Some(ceiling) = max_password_bytes
         && ceiling > BCRYPT_TRUNCATION_BYTES
     {
@@ -503,6 +500,16 @@ fn read_index(
             config.path.display(),
         ));
     }
+
+    // Any record in the file costs what every other one does, so reusing one
+    // of them makes a miss cost exactly what a hit costs -- by construction
+    // rather than by estimate. The synthesized hash is for a file with no
+    // records at all, which otherwise answers in nanoseconds and is
+    // distinguishable from a populated one by timing alone.
+    let dummy = match reference {
+        Some(stored) => stored,
+        None => floor()?,
+    };
 
     Ok(Index { users, dummy })
 }

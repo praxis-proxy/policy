@@ -1151,6 +1151,41 @@ async fn a_reload_onto_bcrypt_is_refused_under_a_ceiling_bcrypt_cannot_honour() 
     );
 }
 
+#[test]
+fn an_empty_file_loads_under_a_ceiling_bcrypt_could_not_honour() {
+    // The miss-path hash for a file with no records is a synthesized bcrypt
+    // one, so reading the ceiling off it refused this load and told the
+    // operator to re-hash a file holding no bcrypt record at all. An empty
+    // file constrains the ceiling not at all: there is no stored hash for a
+    // long password to be silently truncated against.
+    let file = HtpasswdFile::write("# every user revoked\n");
+
+    HtpasswdDirectory::with_password_ceiling(config_for(file.path()), 128)
+        .expect("a file with no records must not be read as a bcrypt directory");
+}
+
+#[tokio::test]
+async fn revoking_every_user_publishes_the_empty_index_under_a_large_ceiling() {
+    // Truncating the file is how an operator revokes everyone. Refusing that
+    // reload left the previous index serving, so every revoked user kept
+    // authenticating until the staleness ceiling elapsed -- a failure the
+    // caller sees as success.
+    let argon2 = argon2_line("alice", "correct horse", 19_456, 2);
+    let file = HtpasswdFile::write(&format!("{argon2}\n"));
+    let dir = HtpasswdDirectory::with_password_ceiling(config_for(file.path()), 128)
+        .expect("an argon2 file loads under a ceiling above bcrypt's truncation point");
+    let svc = services();
+
+    file.rewrite("");
+    dir.reload()
+        .expect("emptying the file must publish the empty index, not refuse the reload");
+
+    assert!(
+        dir.lookup("alice", &svc).await.expect("answers").is_none(),
+        "the revoked user must be gone from the published index"
+    );
+}
+
 #[tokio::test]
 async fn a_reload_onto_bcrypt_is_accepted_under_a_ceiling_bcrypt_can_honour() {
     let argon2 = argon2_line("alice", "correct horse", 19_456, 2);
