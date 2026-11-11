@@ -11,6 +11,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+/// Internal framework authority to publish validated acquired facts.
+///
+/// Source plugins return an [`AcquiredFacts`] value; a trusted route
+/// orchestrator registered through `PolicyEngine::annotate_route` may hold
+/// this capability while validating, stamping, and installing it. Hosts must
+/// not grant it to handlers that forward source-controlled extension values.
+#[doc(hidden)]
+pub const CAP_FRAMEWORK_PUBLISH_METADATA: &str = "__framework_publish_metadata";
+
+/// Namespace reserved for normalized metadata-source failures.
+pub const METADATA_ERROR_CODE_PREFIX: &str = "metadata.";
+
 /// Cache disposition for one metadata acquisition.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,6 +139,16 @@ impl AcquiredFacts {
             status: None,
             value: None,
         }
+    }
+
+    /// Validate the source-owned record before provenance is stamped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataInstallError`] when outcome-specific fields or value
+    /// keys cannot form one atomic metadata record.
+    pub fn validate(&self) -> Result<(), MetadataInstallError> {
+        validate_record(self)
     }
 
     /// Attach an upstream status that policy may inspect.
@@ -275,6 +297,9 @@ pub enum MetadataInstallError {
     /// Outcome-specific fields do not form a complete atomic record.
     #[error("invalid metadata record shape")]
     InvalidRecordShape,
+    /// A source error code is outside the reserved metadata namespace.
+    #[error("metadata error code `{0}` must start with `metadata.` and include a name")]
+    InvalidErrorCode(String),
 }
 
 // -----------------------------------------------------------------------------
@@ -317,13 +342,19 @@ fn validate_record(facts: &AcquiredFacts) -> Result<(), MetadataInstallError> {
         (MetadataOutcome::Error, _)
             if facts.value.is_none()
                 && facts.fetched_at.is_none()
-                && facts
-                    .error_code
-                    .as_ref()
-                    .is_some_and(|code| !code.is_empty())
                 && !facts.stale
                 && facts.cache != MetadataCacheDisposition::Stale =>
         {
+            let code = facts
+                .error_code
+                .as_deref()
+                .ok_or(MetadataInstallError::InvalidRecordShape)?;
+            if code
+                .strip_prefix(METADATA_ERROR_CODE_PREFIX)
+                .is_none_or(str::is_empty)
+            {
+                return Err(MetadataInstallError::InvalidErrorCode(code.to_owned()));
+            }
             Ok(())
         },
         _ => Err(MetadataInstallError::InvalidRecordShape),
@@ -535,6 +566,27 @@ mod tests {
     }
 
     #[test]
+    fn error_codes_must_use_the_metadata_namespace() {
+        for code in [
+            "",
+            "metadata.",
+            "policy.deny",
+            "elicitation.store_unavailable",
+        ] {
+            let facts = AcquiredFacts::error(code, MetadataCacheDisposition::Disabled);
+            let mut extensions = Extensions::default();
+
+            let result = extensions.install_metadata("account", "metadata/http", facts);
+
+            assert_eq!(
+                result,
+                Err(MetadataInstallError::InvalidErrorCode(code.to_owned()))
+            );
+            assert!(extensions.metadata.is_none());
+        }
+    }
+
+    #[test]
     fn installed_extension_round_trips_without_losing_provenance() {
         let mut extensions = Extensions::default();
         extensions
@@ -706,6 +758,35 @@ mod tests {
     }
 
     #[test]
+    fn framework_publication_can_only_append_metadata_instances() {
+        let mut canonical = Extensions::default();
+        canonical
+            .install_metadata("account", "metadata/http", success(json!(true)))
+            .expect("canonical metadata installs");
+
+        let mut appended = canonical.clone();
+        appended
+            .install_metadata("region", "metadata/http", success(json!("eu")))
+            .expect("a second instance installs");
+        assert!(canonical.validate_immutable_with_metadata(&appended.cow_copy(), true));
+
+        let mut removed = Extensions::default();
+        removed
+            .install_metadata("region", "metadata/http", success(json!("eu")))
+            .expect("replacement fixture installs");
+        assert!(!canonical.validate_immutable_with_metadata(&removed.cow_copy(), true));
+
+        let mut replaced = Extensions::default();
+        replaced
+            .install_metadata("account", "metadata/http", success(json!(false)))
+            .expect("replacement fixture installs");
+        assert!(!canonical.validate_immutable_with_metadata(&replaced.cow_copy(), true));
+
+        let dropped = Extensions::default();
+        assert!(!canonical.validate_immutable_with_metadata(&dropped.cow_copy(), true));
+    }
+
+    #[test]
     fn merge_back_keeps_parent_metadata_over_plugin_view() {
         let mut parent = Extensions::default();
         parent
@@ -797,10 +878,6 @@ mod tests {
             (
                 "error with stale cache",
                 error("metadata.oops", MetadataCacheDisposition::Stale),
-            ),
-            (
-                "error without code",
-                error("", MetadataCacheDisposition::Disabled),
             ),
             ("error with fetched_at", error_with_fetched_at),
             ("error with value", error_with_value),

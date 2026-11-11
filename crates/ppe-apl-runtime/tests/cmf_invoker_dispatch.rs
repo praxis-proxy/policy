@@ -37,6 +37,7 @@ use praxis_policy_core::hooks::HookPhase;
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, HookTypeDef as _, PluginResult};
+use praxis_policy_core::metadata::HOOK_METADATA_FETCH;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::registry::{HookEntry, PluginRef};
 
@@ -62,6 +63,7 @@ fn plan_for(
         plugins,
         delegation_entries: Default::default(),
         elicitation_entries: Default::default(),
+        metadata_entries: Default::default(),
     })
 }
 
@@ -1078,6 +1080,7 @@ fn plan_with_narrowed_caps(
         plugins,
         delegation_entries: Default::default(),
         elicitation_entries: Default::default(),
+        metadata_entries: Default::default(),
     })
 }
 
@@ -1348,7 +1351,7 @@ async fn an_unregistered_hook_dispatches_through_the_permissive_fallback() {
         (None, HookPhase::Unphased),
     ] {
         assert!(
-            entry.pick_entry(entity, phase).is_some(),
+            entry.pick_entry(CmfHook::NAME, entity, phase).is_some(),
             "an unregistered hook must still dispatch for {entity:?}/{phase:?}",
         );
     }
@@ -1363,16 +1366,37 @@ async fn a_registered_hook_is_filtered_by_its_row() {
     let entry = plan.plugins.get("allow-plugin").expect("plugin in plan");
 
     assert!(
-        entry.pick_entry(Some("tool"), HookPhase::Pre).is_some(),
+        entry
+            .pick_entry(CmfHook::NAME, Some("tool"), HookPhase::Pre)
+            .is_some(),
         "cmf.tool_pre_invoke matches its own entity and phase",
     );
     assert!(
-        entry.pick_entry(Some("llm"), HookPhase::Pre).is_none(),
+        entry
+            .pick_entry(CmfHook::NAME, Some("llm"), HookPhase::Pre)
+            .is_none(),
         "cmf.tool_pre_invoke must not match the llm entity",
     );
     assert!(
-        entry.pick_entry(Some("tool"), HookPhase::Post).is_none(),
+        entry
+            .pick_entry(CmfHook::NAME, Some("tool"), HookPhase::Post)
+            .is_none(),
         "cmf.tool_pre_invoke must not match the post phase",
+    );
+
+    let mut metadata_only = entry.clone();
+    let handler = metadata_only
+        .entries_by_hook
+        .remove("cmf.tool_pre_invoke")
+        .expect("test plugin registers the CMF hook");
+    metadata_only
+        .entries_by_hook
+        .insert(HOOK_METADATA_FETCH.to_owned(), handler);
+    assert!(
+        metadata_only
+            .pick_entry(CmfHook::NAME, Some("tool"), HookPhase::Pre)
+            .is_none(),
+        "metadata.fetch must not match the CMF family",
     );
 }
 

@@ -75,6 +75,9 @@ pub struct PluginRef {
     /// is skipped by `group_by_mode()` on all subsequent invocations.
     /// Uses `Arc<AtomicBool>` so clones (in `HookEntry`) share the same flag.
     disabled: Arc<AtomicBool>,
+
+    /// Whether the engine installed this reference as a framework handler.
+    framework_registered: bool,
 }
 
 impl PluginRef {
@@ -89,6 +92,15 @@ impl PluginRef {
             trusted_config,
             id: Uuid::new_v4(),
             disabled: Arc::new(AtomicBool::new(false)),
+            framework_registered: false,
+        }
+    }
+
+    /// Create a reference for a framework-installed route handler.
+    pub(crate) fn new_framework(plugin: Arc<dyn Plugin>, trusted_config: PluginConfig) -> Self {
+        Self {
+            framework_registered: true,
+            ..Self::new(plugin, trusted_config)
         }
     }
 
@@ -145,6 +157,11 @@ impl PluginRef {
     /// `Acquire` pairs with the `Release` in `disable()` (see `mode()`).
     pub fn is_disabled(&self) -> bool {
         self.disabled.load(Ordering::Acquire)
+    }
+
+    /// Whether this reference came from framework route registration.
+    pub(crate) const fn is_framework_registered(&self) -> bool {
+        self.framework_registered
     }
 
     /// Convenience: plugin priority from the trusted config.
