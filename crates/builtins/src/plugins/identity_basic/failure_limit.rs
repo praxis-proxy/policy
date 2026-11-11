@@ -240,7 +240,7 @@ impl FailureLimiter {
             if counter.spent(self.config.max_failures) {
                 return Err(Refusal::Blocked);
             }
-            counter.reserve(now, window);
+            counter.reserve();
             return Ok(self.admitted(user_id, Slot::Named));
         }
 
@@ -278,7 +278,7 @@ impl FailureLimiter {
             if counter.spent(self.config.max_failures) {
                 return Err(Refusal::Blocked);
             }
-            counter.reserve(now, window);
+            counter.reserve();
             guard.named.insert(user_id.to_owned(), counter);
             return Ok(self.admitted(user_id, Slot::Named));
         }
@@ -308,7 +308,7 @@ impl FailureLimiter {
             // flag. The relaxation is opt-in and takes proof.
             return Err(Refusal::Unproven);
         }
-        counter.reserve(now, window);
+        counter.reserve();
         Ok(self.admitted(user_id, Slot::Overflow(bucket)))
     }
 
@@ -510,9 +510,20 @@ impl Counter {
     }
 
     /// Charge an admitted attempt against the budget.
-    fn reserve(&mut self, now: u64, window: u64) {
+    ///
+    /// Deliberately leaves `expires_at_ms` alone: `fail` is the only path that
+    /// opens a window, which is what `window_secs` documents -- how long a
+    /// counter survives its last *failure*. Pushing it forward on every
+    /// admitted attempt instead meant one in-budget attempt per window held a
+    /// partial failure count open for as long as the traffic lasted, keeping a
+    /// victim permanently one attempt from a block and pinning a named slot
+    /// against `capacity` far more cheaply than re-blocking them would.
+    ///
+    /// The in-flight attempt is still pinned without a window of its own:
+    /// `idle` requires `outstanding == 0` before a counter can be reclaimed,
+    /// and `expire` clears only `failures`, never `outstanding`.
+    fn reserve(&mut self) {
         self.outstanding = self.outstanding.saturating_add(1);
-        self.expires_at_ms = self.expires_at_ms.max(now.saturating_add(window));
     }
 
     /// Whether failures and in-flight attempts together have spent `budget`.
@@ -611,7 +622,7 @@ fn overflow_bucket(user_id: &str) -> usize {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
-    use super::{FailureLimiter, OVERFLOW_BUCKETS, Refusal, overflow_bucket};
+    use super::{Counter, FailureLimiter, OVERFLOW_BUCKETS, Refusal, overflow_bucket};
     use crate::plugins::identity_basic::config::FailureLimitConfig;
 
     fn limiter(capacity: usize, max_failures: u32) -> FailureLimiter {
@@ -696,6 +707,71 @@ mod tests {
             .admit("fresh")
             .expect("a user-id with no recorded failures must be admitted on promotion")
             .record_success();
+    }
+
+    /// An admitted attempt must not keep an earlier failure count alive.
+    ///
+    /// The defect: `reserve` pushed `expires_at_ms` to `now + window` on every
+    /// admitted attempt, while `expire` clears failures only once the counter
+    /// is not live. One in-budget attempt per window therefore held a partial
+    /// count open for as long as the traffic lasted, so an attacker who drove
+    /// a victim to `max_failures - 1` and then sent a trickle kept them
+    /// permanently one attempt from a block -- and held a named slot against
+    /// `capacity` at a fraction of the cost of re-blocking them.
+    ///
+    /// `window_secs` documents the window as surviving the last *failure*.
+    ///
+    /// Driven against `Counter` rather than the limiter: the defect is in the
+    /// window arithmetic, and `FailureLimiter`'s clock is a real `Instant`
+    /// with no injection seam, so a limiter-level test could only reach it by
+    /// sleeping out a whole window.
+    #[test]
+    fn an_admitted_attempt_does_not_extend_the_failure_window() {
+        const WINDOW: u64 = 300_000;
+
+        let mut counter = Counter::default();
+
+        // A failure at t=0 opens a window that closes at WINDOW.
+        counter.reserve();
+        counter.fail(0, WINDOW);
+        assert_eq!(counter.failures, 1, "the failure is recorded");
+
+        // An attempt admitted just before that window closes, settled without
+        // a verdict. Under the defect its reservation pushed the expiry out to
+        // `now + WINDOW`, so the failure below never expired.
+        counter.reserve();
+        counter.release(WINDOW - 1);
+
+        counter.expire(WINDOW + 1);
+        assert_eq!(
+            counter.failures, 0,
+            "a window must survive the last failure, not the last attempt: extending it on \
+             every admitted attempt let a trickle of in-budget traffic hold a partial count \
+             open indefinitely, pinning a victim one attempt from a block"
+        );
+    }
+
+    /// A reservation must still pin its counter with no live window.
+    ///
+    /// The guard that makes the change above safe: `reserve` no longer opens a
+    /// window, so `outstanding` is the only thing keeping an in-flight
+    /// attempt's counter from being reclaimed. Dropping it would return that
+    /// attempt's reservation to an empty budget and let a parallel guess past
+    /// the budget it was already charged against.
+    #[test]
+    fn an_in_flight_attempt_pins_its_counter_without_a_live_window() {
+        let mut counter = Counter::default();
+        counter.reserve();
+
+        assert!(
+            !counter.idle(1_000_000),
+            "an outstanding attempt must pin its counter however long the window has been \
+             closed"
+        );
+        assert!(
+            counter.spent(1),
+            "and must still count against the budget, which is what bounds parallel guesses"
+        );
     }
 
     /// The bucket index must stay inside the table for any input.
