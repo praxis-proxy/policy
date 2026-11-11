@@ -48,9 +48,14 @@ missing records, and framework dispatch failures always fail closed.
 
 `on_error: ignore` applies only when the source completes and returns a valid
 error record. An executor timeout, panic, or source error returns no trusted
-`AcquiredFacts`; the fetch therefore denies even under `ignore`. A source
-adapter that maps transport failures to records must set its own request
-deadline shorter than `engine_settings.plugin_timeout`, leaving enough time to
-construct and return (for example) a `metadata.timeout` record. PPE cannot
-validate this ordering at load because adapter deadlines live inside
+`AcquiredFacts`; the fetch therefore denies even under `ignore`. The same holds
+when the source denies, or returns without a record.
+
+The fetch runs inside the APL route handler, and both share
+`engine_settings.plugin_timeout`. A source adapter that maps transport failures
+to records must set its own request deadline so that it fits inside what is
+left of that budget after the route's earlier steps, with enough time to
+construct and return (for example) a `metadata.timeout` record. If the budget
+runs out first, the route times out as a whole and `ignore` does not apply. PPE
+cannot validate this ordering at load because adapter deadlines live inside
 source-specific configuration.

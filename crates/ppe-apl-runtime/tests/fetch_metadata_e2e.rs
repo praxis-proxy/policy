@@ -22,7 +22,7 @@ use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, ToolCall};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
-use praxis_policy_core::error::PluginError;
+use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::extensions::{
     AcquiredFacts, Extensions, MetaExtension, MetadataCacheDisposition,
 };
@@ -37,6 +37,8 @@ enum SourceResult {
     Error,
     ReservedError,
     Hang,
+    NoRecord,
+    Deny,
 }
 
 struct Source {
@@ -58,6 +60,13 @@ impl HookHandler<MetadataFetchHook> for Source {
         _context: &mut PluginContext,
     ) -> PluginResult<MetadataFetchRequest> {
         let facts = match self.result {
+            SourceResult::NoRecord => return PluginResult::allow(),
+            SourceResult::Deny => {
+                return PluginResult::deny(PluginViolation::new(
+                    "account.refused",
+                    "account source refused the lookup",
+                ));
+            },
             SourceResult::Success => AcquiredFacts::success(
                 serde_json::json!({"active": true}),
                 Utc::now(),
@@ -381,8 +390,79 @@ routes:
 }
 
 #[tokio::test]
-/// Executor failures remain fail-closed even when source records are ignored.
-async fn ignored_source_timeout_without_a_record_denies() {
+/// A source that returns without a record denies, even under `ignore`.
+async fn ignored_source_without_a_record_denies() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    on_error: ignore
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        SourceResult::NoRecord,
+    )
+    .await;
+
+    let (result, _) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
+        .await;
+
+    assert!(!result.continue_processing, "a missing record must deny");
+    let violation = result.violation.expect("a missing record must deny");
+    assert!(
+        violation
+            .reason
+            .contains("metadata source `account` returned no AcquiredFacts record"),
+        "{violation:?}"
+    );
+}
+
+#[tokio::test]
+/// A source that denies stops the route, even under `ignore`.
+async fn ignored_source_denial_denies() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    on_error: ignore
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        SourceResult::Deny,
+    )
+    .await;
+
+    let (result, _) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
+        .await;
+
+    assert!(!result.continue_processing, "a source denial must deny");
+    let violation = result.violation.expect("a source denial must deny");
+    assert!(
+        violation
+            .reason
+            .contains("account source refused the lookup"),
+        "{violation:?}"
+    );
+}
+
+#[tokio::test]
+/// The source shares the route handler's `plugin_timeout`, so a source that
+/// outlives it times out the whole route, and `ignore` does not apply.
+async fn a_source_outliving_plugin_timeout_denies_the_route() {
     let engine = engine(
         r#"
 engine_settings:
@@ -413,7 +493,7 @@ routes:
             .as_ref()
             .map(|violation| violation.code.as_str()),
         Some("plugin_timeout"),
-        "the executor timeout must remain fail-closed under ignore: {:?}",
+        "the route timeout must deny under ignore: {:?}",
         result.violation
     );
 }

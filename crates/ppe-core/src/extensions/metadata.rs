@@ -781,6 +781,9 @@ mod tests {
             .install_metadata("account", "metadata/http", success(json!(false)))
             .expect("replacement fixture installs");
         assert!(!canonical.validate_immutable_with_metadata(&replaced.cow_copy(), true));
+
+        let dropped = Extensions::default();
+        assert!(!canonical.validate_immutable_with_metadata(&dropped.cow_copy(), true));
     }
 
     #[test]

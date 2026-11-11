@@ -6496,6 +6496,7 @@ cedar:
             ("run(", "malformed `run(...)`"),
             ("delegate(", "malformed `delegate(...)`"),
             ("require_approval(", "malformed `require_approval(...)`"),
+            ("fetch(", "malformed `fetch(...)`"),
         ];
         for (src, needle) in cases {
             let err = parse_step(&serde_yaml::Value::String(src.into()), "test").expect_err(src);
