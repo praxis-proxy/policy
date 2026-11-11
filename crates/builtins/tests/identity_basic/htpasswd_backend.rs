@@ -13,7 +13,9 @@ use praxis_policy_builtins::plugins::identity_basic::{
 
 use praxis_policy_builtins::plugins::identity_basic::ShaCryptVariant;
 
-use crate::support::{HtpasswdFile, bcrypt_line, config_for, services, sha_crypt_line};
+use crate::support::{
+    HtpasswdFile, argon2_line, bcrypt_line, config_for, services, sha_crypt_line,
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -1105,6 +1107,67 @@ fn an_argon2_record_argon2_cannot_verify_fails_at_load() {
              error must name the line, got: {err}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_reload_onto_bcrypt_is_refused_under_a_ceiling_bcrypt_cannot_honour() {
+    let argon2 = argon2_line("alice", "correct horse", 19_456, 2);
+    let file = HtpasswdFile::write(&format!("{argon2}\n"));
+    let dir = HtpasswdDirectory::with_password_ceiling(config_for(file.path()), 128)
+        .expect("an argon2 file loads under a ceiling above bcrypt's truncation point");
+    let svc = services();
+
+    file.rewrite(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
+    let err = dir
+        .reload()
+        .expect_err("a rewrite onto bcrypt must fail the reload while the ceiling exceeds 72");
+    assert!(
+        err.contains("max_password_bytes") && err.contains("72"),
+        "the refresh path must refuse the incoherent pairing for the same reason the load path \
+         does, and name both the setting and the truncation point, got: {err}"
+    );
+
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&argon2),
+        "the refused reload must leave the argon2 index serving rather than publish a bcrypt \
+         one that would deny every password over 72 bytes as though it were simply wrong"
+    );
+
+    let retained = dir
+        .lookup("alice", &svc)
+        .await
+        .expect("answers")
+        .expect("the user from the accepted file must still be indexed");
+    assert!(
+        dir.verify(
+            Some(&retained),
+            &crate::support::password("correct horse"),
+            &svc
+        )
+        .await
+        .expect("the verify answers"),
+        "and must still authenticate against the argon2 record the refused reload left in place"
+    );
+}
+
+#[tokio::test]
+async fn a_reload_onto_bcrypt_is_accepted_under_a_ceiling_bcrypt_can_honour() {
+    let argon2 = argon2_line("alice", "correct horse", 19_456, 2);
+    let file = HtpasswdFile::write(&format!("{argon2}\n"));
+    let dir = HtpasswdDirectory::with_password_ceiling(config_for(file.path()), 72)
+        .expect("an argon2 file loads at bcrypt's truncation point");
+
+    let bcrypt = bcrypt_line("alice", "pw", 5);
+    file.rewrite(&format!("{bcrypt}\n"));
+    dir.reload()
+        .expect("a ceiling bcrypt can honour must not block a scheme change");
+
+    assert_eq!(
+        dir.miss_cost_profile(),
+        crate::support::cost_profile_of(&bcrypt),
+        "the ceiling is refused for the pairing it breaks, not for every reload onto bcrypt"
+    );
 }
 
 // -----------------------------------------------------------------------------

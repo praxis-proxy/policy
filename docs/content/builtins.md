@@ -128,6 +128,20 @@ for it.
 
 [RFC 7617 Section 4]: https://datatracker.ietf.org/doc/html/rfc7617#section-4
 
+### The password ceiling is tied to the file's scheme
+
+`limits.max_password_bytes` above 72 is refused on a bcrypt directory.
+Bcrypt truncates at 72 bytes, so a longer password would be admitted here
+and then always rejected by the verifier, locking out every user who chose
+one with no denial an operator can read. A ceiling above 72 is a legitimate
+setting on an argon2 or sha-crypt file, which consume the whole password.
+
+The check runs on every load of the record file, not only at startup. A
+refresh that rewrites an argon2 file as bcrypt under a ceiling above 72 is
+refused and the previous index keeps serving, so the file and the ceiling
+cannot drift apart between reloads. Lower the ceiling to 72 before
+re-hashing a directory to bcrypt.
+
 ### The HTTP transport
 
 `http-hyper` is the odd one. PPE performs no outbound HTTP of its own: a

@@ -33,7 +33,6 @@ use crate::plugins::identity_basic::directory::{CredentialDirectory, DirectoryEr
 use crate::plugins::identity_basic::failure_limit::{FailureLimiter, Refusal};
 use crate::plugins::identity_basic::htpasswd::HtpasswdDirectory;
 use crate::plugins::identity_basic::record_map::USER_ID_FIELD;
-use crate::plugins::identity_basic::verifier::{BCRYPT_TRUNCATION_BYTES, CostProfile};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -164,32 +163,18 @@ impl BasicIdentityResolver {
 
         let directory: Arc<dyn CredentialDirectory> = match &settings.provider {
             ProviderConfig::Htpasswd(htpasswd) => {
-                let loaded =
-                    HtpasswdDirectory::new(htpasswd.clone()).map_err(|e| PluginError::Config {
-                        message: format!("{}: {e}", config.name),
-                    })?;
-                // Checked here rather than in `validate`, which runs before
-                // the file is read and so cannot know the scheme. One cost
-                // profile per file is already enforced at load, so the miss
-                // profile speaks for every record in it.
-                if let CostProfile::Bcrypt { .. } = loaded.miss_cost_profile()
-                    && settings.limits.max_password_bytes > BCRYPT_TRUNCATION_BYTES
-                {
-                    return Err(Box::new(PluginError::Config {
-                        message: format!(
-                            "{}: `limits.max_password_bytes` is {} on a bcrypt \
-                             directory, above bcrypt's \
-                             {BCRYPT_TRUNCATION_BYTES}-byte truncation point. A \
-                             longer password is admitted here and then always \
-                             rejected by the verifier, which locks out every user \
-                             who chooses one with no denial an operator can read. \
-                             Lower the ceiling to {BCRYPT_TRUNCATION_BYTES} or \
-                             re-hash the file with argon2 or sha-crypt, which \
-                             consume the whole password",
-                            config.name, settings.limits.max_password_bytes
-                        ),
-                    }));
-                }
+                // The ceiling goes to the backend rather than being checked
+                // once here: `validate` runs before the file is read and so
+                // cannot know the scheme, and a check at this point would hold
+                // only until the first reload replaced an argon2 file with a
+                // bcrypt one. The backend re-checks it on every load.
+                let loaded = HtpasswdDirectory::with_password_ceiling(
+                    htpasswd.clone(),
+                    settings.limits.max_password_bytes,
+                )
+                .map_err(|e| PluginError::Config {
+                    message: format!("{}: {e}", config.name),
+                })?;
                 Arc::new(loaded)
             },
         };

@@ -39,7 +39,8 @@ use praxis_policy_core::host::HostServices;
 use super::BasicCredential;
 use super::directory::{CredentialDirectory, DirectoryError, StoredVerifier, UserRecord};
 use super::verifier::{
-    CostProfile, Limits, ParsedHash, empty_directory_hash, parse_hash, verify_bytes,
+    BCRYPT_TRUNCATION_BYTES, CostProfile, Limits, ParsedHash, empty_directory_hash, parse_hash,
+    verify_bytes,
 };
 
 /// The `kind:` string an operator writes under `provider:`.
@@ -265,6 +266,14 @@ pub struct HtpasswdDirectory {
 struct ReloadState {
     config: HtpasswdConfig,
 
+    /// The resolver's password-length ceiling, if it enforces one,
+    /// reconciled with the file's scheme on every load.
+    ///
+    /// Held here rather than checked once at config load because the scheme
+    /// can change under a reload: only a load that reads the file knows
+    /// whether the ceiling is still coherent with it.
+    max_password_bytes: Option<usize>,
+
     /// The most recently loaded valid index.
     index: ArcSwap<Index>,
 
@@ -358,10 +367,16 @@ fn mint_floor_hash(
 
 /// Load and validate a `.htpasswd` index.
 ///
+/// `max_password_bytes` is the resolver's credential ceiling, if it enforces
+/// one. It is checked against the file's scheme here rather than at config
+/// load so that a reload which replaces an argon2 file with a bcrypt one is
+/// refused instead of published.
+///
 /// `floor` supplies the miss-path hash for a file with no records. It is a
 /// closure rather than a value so that a populated file never mints one.
 fn read_index(
     config: &HtpasswdConfig,
+    max_password_bytes: Option<usize>,
     floor: impl FnOnce() -> Result<ParsedHash, String>,
 ) -> Result<Index, String> {
     let text = std::fs::read_to_string(&config.path)
@@ -467,6 +482,28 @@ fn read_index(
         None => floor()?,
     };
 
+    // The scheme is only knowable once the file has been read, so the
+    // resolver's password ceiling is reconciled with it here. Checked on every
+    // load, which is what makes it hold across a reload: a resolver that
+    // started on an argon2 file with a ceiling above bcrypt's truncation point
+    // would otherwise publish a bcrypt file and then deny every password
+    // longer than 72 bytes as though it were simply wrong.
+    if let CostProfile::Bcrypt { .. } = dummy.profile()
+        && let Some(ceiling) = max_password_bytes
+        && ceiling > BCRYPT_TRUNCATION_BYTES
+    {
+        return Err(format!(
+            "{}: `limits.max_password_bytes` is {ceiling} on a bcrypt \
+             directory, above bcrypt's {BCRYPT_TRUNCATION_BYTES}-byte truncation \
+             point. A longer password is admitted here and then always rejected \
+             by the verifier, which locks out every user who chooses one with no \
+             denial an operator can read. Lower the ceiling to \
+             {BCRYPT_TRUNCATION_BYTES} or re-hash the file with argon2 or \
+             sha-crypt, which consume the whole password",
+            config.path.display(),
+        ));
+    }
+
     Ok(Index { users, dummy })
 }
 
@@ -476,15 +513,45 @@ impl HtpasswdDirectory {
     /// Accepts bcrypt, argon2, sha256crypt (`$5$`), and sha512crypt (`$6$`)
     /// records, provided every record in the file shares one cost profile.
     ///
+    /// Applies no password-length ceiling of its own. A resolver that enforces
+    /// one should use [`with_password_ceiling`] so the ceiling is re-checked
+    /// against the file's scheme on every reload.
+    ///
     /// # Errors
     ///
     /// Returns an error for invalid configuration, an unreadable file, malformed
     /// records, duplicate user-ids, mixed hashing schemes, or refused hash parameters.
+    ///
+    /// [`with_password_ceiling`]: HtpasswdDirectory::with_password_ceiling
     pub fn new(config: HtpasswdConfig) -> Result<Self, String> {
+        Self::build(config, None)
+    }
+
+    /// Open a `.htpasswd` directory that also honours a password ceiling.
+    ///
+    /// `max_password_bytes` is the resolver's credential ceiling. A bcrypt file
+    /// is refused while it sits above bcrypt's truncation point, at this load
+    /// and at every reload, so a file swapped from argon2 to bcrypt is rejected
+    /// rather than published under a ceiling the verifier cannot honour.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for anything [`new`] rejects, and for a bcrypt file
+    /// under a ceiling above bcrypt's truncation point.
+    ///
+    /// [`new`]: HtpasswdDirectory::new
+    pub fn with_password_ceiling(
+        config: HtpasswdConfig,
+        max_password_bytes: usize,
+    ) -> Result<Self, String> {
+        Self::build(config, Some(max_password_bytes))
+    }
+
+    fn build(config: HtpasswdConfig, max_password_bytes: Option<usize>) -> Result<Self, String> {
         config.validate()?;
         let empty = OnceLock::new();
         let floor_mints = AtomicU64::new(0);
-        let index = read_index(&config, || {
+        let index = read_index(&config, max_password_bytes, || {
             mint_floor_hash(&config.path, &empty, &floor_mints)
         })?;
         let first_attempt = config.refresh_secs.saturating_mul(1000);
@@ -495,6 +562,7 @@ impl HtpasswdDirectory {
                 empty,
                 floor_mints,
                 index: ArcSwap::from_pointee(index),
+                max_password_bytes,
                 publishing: std::sync::Mutex::new(()),
                 started: Instant::now(),
                 next_attempt_ms: AtomicU64::new(first_attempt),
@@ -608,7 +676,7 @@ impl ReloadState {
 
         // The whole next index is built before anything is published, so a read
         // or parse that fails leaves the running index serving.
-        let index = read_index(&self.config, || {
+        let index = read_index(&self.config, self.max_password_bytes, || {
             mint_floor_hash(&self.config.path, &self.empty, &self.floor_mints)
         })?;
         // Records first, then the timestamp, and not the other way round. The
