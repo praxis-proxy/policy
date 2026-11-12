@@ -42,7 +42,9 @@
 // verification that would have cleared it.
 //
 // A recoverable refusal is still admission-controlled. It carries a
-// reservation against a fixed ceiling on concurrent unproven attempts, because
+// reservation against a ceiling on concurrent unproven attempts -- sized
+// against the backend's verification capacity, so recovery never holds every
+// permit an ordinary attempt needs -- because
 // the verification it asks for is CPU-bound work an attacker repeats for free:
 // without that ceiling a wrong-password spray on one user-id occupied the
 // backend's verification permits and turned a bounded refusal into a directory
@@ -100,15 +102,24 @@ const OVERFLOW_MASK: u64 = (OVERFLOW_BUCKETS - 1) as u64;
 /// concurrent CPU this path can hold, not how often a caller may prove
 /// itself: a correct password is always served.
 ///
-/// Fixed, not configurable: it bounds a recovery path that exists only while
-/// the name-keyed map is saturated or a promoted counter still carries
-/// inherited failures, and an operator with a saturation count to act on
-/// should raise `failure_limit.capacity` rather than tune the fallback. 8
-/// stays well below the htpasswd backend's default of 32 concurrent
-/// verifications, so unproven work cannot crowd out a caller whose own budget
-/// is unspent, while leaving several legitimate callers a recovery path at
-/// once.
+/// Not configurable but not fixed either: derived from the verifier capacity
+/// it has to stay clear of, because the number that matters is how many
+/// permits are *left*, not how many recovery slots sound reasonable. A
+/// standalone 8 held against the htpasswd default of 32 and failed everywhere
+/// below it -- `max_concurrent_verifications` is valid from 1 upward, so at a
+/// capacity of 8 or less recovery could occupy every permit the directory has
+/// and a caller with an unspent named budget was denied
+/// `auth.directory_unavailable`: the ceiling existed to prevent exactly that
+/// outage and, below the default, caused it. See
+/// [`recovery_ceiling`][FailureLimiter::recovery_ceiling].
 const MAX_UNPROVEN_IN_FLIGHT: u32 = 8;
+
+/// The largest share of verifier capacity the recovery path may hold.
+///
+/// A quarter, so ordinary attempts keep the other three: recovery is the path
+/// that costs an attacker nothing to repeat, so it gets the minority share of
+/// a contended resource.
+const RECOVERY_CAPACITY_DIVISOR: usize = 4;
 
 // -----------------------------------------------------------------------------
 // Public types
@@ -161,15 +172,28 @@ impl Admission<'_> {
 
     /// Record a failed verification and release the reservation.
     ///
-    /// An unproven attempt records nothing: the failures that refused it are
-    /// already counted where they were seen, and it spent the separate
-    /// unproven budget instead of reserving against the failure budget.
-    /// Charging a failure on top would let a colliding attacker spend one
-    /// budget twice over.
+    /// A failed *recovery* still charges a named counter. The refusal it
+    /// answered rested on evidence that was not the caller's, but the wrong
+    /// password it just produced is: a named counter attributes a failure to
+    /// one user-id, so it bounds that user-id like any other. Without this the
+    /// ceiling bounded only how many recoveries ran at once -- a promoted
+    /// counter sat at `Verdict::Unproven` with `failures` pinned at zero, and
+    /// sequential guesses reached the verifier until the window expired, with
+    /// `max_failures` bounding nothing at all for the one user-id an attacker
+    /// had already spent a bucket on.
+    ///
+    /// A shared bucket is charged nothing, for the reason it never was: its
+    /// failures already count whatever spent them, and a second charge is a
+    /// budget the colliding caller cannot clear. That caller is bounded by the
+    /// ceiling and by its own promotion, once a named slot frees.
+    ///
+    /// A *successful* recovery still costs nothing, so a legitimate caller
+    /// sharing a bucket re-proves itself without limit.
     pub fn record_failure(mut self) {
         self.settled = true;
         if self.unproven {
-            self.limiter.release_unproven();
+            self.limiter
+                .settle_unproven_failure(&self.user_id, self.slot);
             return;
         }
         self.limiter.settle_failure(&self.user_id, self.slot);
@@ -178,16 +202,24 @@ impl Admission<'_> {
     /// Clear the user-id's counter after a successful verification.
     ///
     /// For an unproven attempt this is the proof its refusal asked for, and is
-    /// counted through [`proven`]. The unattributable failures are left
-    /// standing: they may be a colliding attacker's, so crediting this
-    /// caller's success would hand that attacker a fresh budget. The caller
-    /// re-proves itself on every request for as long as those failures live.
+    /// counted through [`proven`]. The *inherited* failures are left standing:
+    /// they may be a colliding attacker's, so crediting this caller's success
+    /// would hand that attacker a fresh budget. The caller re-proves itself on
+    /// every request for as long as those failures live.
+    ///
+    /// Failures this caller recorded on its own failed recoveries are cleared,
+    /// like any other success clears its counter. They are attributable, so
+    /// the proof that clears them is this caller's to spend -- and without
+    /// this a caller that mistyped a password once while sharing a spent
+    /// bucket was blocked after `max_failures` mistakes however many correct
+    /// passwords it sent in between, which is the lockout the recoverable
+    /// refusal exists to prevent.
     ///
     /// [`proven`]: FailureLimiter::proven
     pub fn record_success(mut self) {
         self.settled = true;
         if self.unproven {
-            self.limiter.settle_proven();
+            self.limiter.settle_proven(&self.user_id, self.slot);
             return;
         }
         self.limiter.settle_success(&self.user_id, self.slot);
@@ -228,8 +260,9 @@ pub enum Refusal {
     /// The bounded recovery path for unattributable failures is itself full.
     ///
     /// An attempt refused on failures that are not the caller's own is
-    /// admitted anyway so the credential can clear it, but only up to a fixed
-    /// ceiling on how many such verifications run at once. Past that ceiling
+    /// admitted anyway so the credential can clear it, but only up to a
+    /// ceiling on how many such verifications run at once, sized against the
+    /// backend's verification capacity. Past that ceiling
     /// the attempt is refused without one, because the verification a
     /// recoverable refusal asks for is CPU-bound work an attacker repeats for
     /// free.
@@ -267,12 +300,23 @@ pub struct FailureLimiter {
     ///
     /// [`MAX_UNPROVEN_IN_FLIGHT`]: MAX_UNPROVEN_IN_FLIGHT
     unproven_in_flight: std::sync::atomic::AtomicU32,
+    /// How many unproven verifications may run at once, for this directory.
+    ///
+    /// Derived at construction from the backend's verification capacity rather
+    /// than read from a constant: see
+    /// [`recovery_ceiling`][FailureLimiter::recovery_ceiling].
+    unproven_ceiling: u32,
 }
 
 impl FailureLimiter {
     /// Build a limiter from its validated configuration.
-    pub fn new(config: FailureLimitConfig) -> Self {
+    ///
+    /// `verification_capacity` is the backend's concurrent-verification limit,
+    /// which the recovery ceiling is sized against so recovery cannot occupy
+    /// every permit an ordinary attempt needs.
+    pub fn new(config: FailureLimitConfig, verification_capacity: usize) -> Self {
         Self {
+            unproven_ceiling: Self::recovery_ceiling(verification_capacity),
             config,
             started: Instant::now(),
             counters: RwLock::new(Counters {
@@ -285,6 +329,36 @@ impl FailureLimiter {
             proven: std::sync::atomic::AtomicU64::new(0),
             unproven_in_flight: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// How many concurrent unproven verifications `capacity` permits leave
+    /// room for.
+    ///
+    /// A quarter of capacity, capped at [`MAX_UNPROVEN_IN_FLIGHT`] and floored
+    /// at one. Each bound answers a different failure:
+    ///
+    /// - The *share* keeps ordinary attempts the majority of a contended
+    ///   resource. A fixed ceiling could not: at the htpasswd default of 32 it
+    ///   left 24 permits spare, and at a configured capacity of 8 or less it
+    ///   left none, so a caller whose own budget was unspent was denied
+    ///   `auth.directory_unavailable` by recovery traffic -- the outage the
+    ///   ceiling exists to prevent.
+    /// - The *cap* keeps the absolute amount of free CPU work bounded as
+    ///   capacity grows. A quarter of a large capacity is still more
+    ///   attacker-free verification than this path needs.
+    /// - The *floor* keeps recovery reachable at a capacity of one, where a
+    ///   quarter rounds to zero. Zero would close the path outright and
+    ///   restore the blanket lockout for a saturated map: a legitimate caller
+    ///   sharing a bucket could never prove itself. One slot serialises
+    ///   recovery against that single permit rather than forbidding it, and an
+    ///   operator who configured one permit has already accepted that any two
+    ///   concurrent verifications contend.
+    ///
+    /// [`MAX_UNPROVEN_IN_FLIGHT`]: MAX_UNPROVEN_IN_FLIGHT
+    fn recovery_ceiling(capacity: usize) -> u32 {
+        let share = capacity / RECOVERY_CAPACITY_DIVISOR;
+        let bounded = u32::try_from(share).unwrap_or(MAX_UNPROVEN_IN_FLIGHT);
+        bounded.clamp(1, MAX_UNPROVEN_IN_FLIGHT)
     }
 
     /// Reserve an attempt for `user_id` against its failure budget.
@@ -522,7 +596,7 @@ impl FailureLimiter {
             .unproven_in_flight
             .load(std::sync::atomic::Ordering::Acquire);
         loop {
-            if held >= MAX_UNPROVEN_IN_FLIGHT {
+            if held >= self.unproven_ceiling {
                 return false;
             }
             match self.unproven_in_flight.compare_exchange_weak(
@@ -619,15 +693,80 @@ impl FailureLimiter {
         }
     }
 
+    /// Settle an unproven attempt whose credential did not verify.
+    ///
+    /// Returns the ceiling slot and charges the failure where it can be
+    /// attributed. A named counter can: the wrong password is this user-id's,
+    /// whatever the inherited count that refused the attempt was, so the
+    /// failure is recorded and `max_failures` wrong recoveries turn
+    /// `Verdict::Unproven` into `Verdict::Blocked`. A shared bucket cannot, so
+    /// it is left alone -- charging it would spend a budget on behalf of every
+    /// colliding user-id, which is the blanket lockout this path exists to
+    /// prevent.
+    fn settle_unproven_failure(&self, user_id: &str, slot: Slot) {
+        // Before the counter work, so the slot comes back even if the counter
+        // the attempt was charged against has since been removed.
+        self.release_unproven();
+        if slot == Slot::Named {
+            self.settle_named_unproven_failure(user_id);
+        }
+    }
+
+    /// Record a failed recovery against a named counter.
+    ///
+    /// Reaches the counter directly rather than through `with_counter`: that
+    /// helper removes a counter settling to zero on every field, and an
+    /// unproven attempt holds no reservation, so a counter carrying only
+    /// inherited failures would be removed by the very failure meant to bound
+    /// it -- handing the next attempt a fresh budget.
+    fn settle_named_unproven_failure(&self, user_id: &str) {
+        let now = self.now_ms();
+        let window = self.window_ms();
+        let mut guard = self.write();
+        if let Some(counter) = guard.named.get_mut(user_id) {
+            counter.fail_unreserved(now, window);
+        }
+    }
+
     /// Settle an unproven attempt whose credential verified.
     ///
-    /// Counts the proof and returns the ceiling slot. The failures behind the
-    /// refusal are left standing: they may be a colliding attacker's, so
-    /// clearing them would hand that attacker a fresh budget, and this caller
-    /// re-proves itself on its next request for as long as they live.
-    fn settle_proven(&self) {
+    /// Counts the proof, returns the ceiling slot, and clears the failures
+    /// this caller recorded on its own failed recoveries. The *inherited*
+    /// count is left standing: it may be a colliding attacker's, so clearing
+    /// it would hand that attacker a fresh budget, and this caller re-proves
+    /// itself on its next request for as long as it lives.
+    ///
+    /// A shared bucket is left alone for the same reason it is charged
+    /// nothing: nothing on it is this caller's to clear.
+    fn settle_proven(&self, user_id: &str, slot: Slot) {
         self.count_proven();
         self.release_unproven();
+        if slot == Slot::Named {
+            self.clear_proven_failures(user_id);
+        }
+    }
+
+    /// Clear a named counter's own failures after a proven recovery.
+    ///
+    /// Reaches the counter directly for the reason
+    /// [`settle_named_unproven_failure`] does: the attempt holds no
+    /// reservation, so `with_counter`'s zero check is not the right test, and
+    /// a counter still carrying inherited failures must survive this to keep
+    /// bounding the user-id recoverably.
+    ///
+    /// [`settle_named_unproven_failure`]: FailureLimiter::settle_named_unproven_failure
+    fn clear_proven_failures(&self, user_id: &str) {
+        let mut guard = self.write();
+        let Some(counter) = guard.named.get_mut(user_id) else {
+            return;
+        };
+        counter.clear_own_failures();
+        // Nothing left to bound the user-id: no failures of its own, no
+        // inherited count, no attempt in flight. Removed so the named slot
+        // returns to `capacity` rather than being pinned by an empty counter.
+        if counter.outstanding == 0 && counter.inherited == 0 {
+            guard.named.remove(user_id);
+        }
     }
 
     fn window_ms(&self) -> u64 {
@@ -724,6 +863,22 @@ impl Counter {
         self.expires_at_ms = now.saturating_add(window);
     }
 
+    /// Record a failure for an attempt that holds no reservation.
+    ///
+    /// The recovery path admits against the unproven ceiling rather than
+    /// reserving on the counter, so settling one must not decrement
+    /// `outstanding`: that would discharge a *different* attempt's reservation
+    /// and let a parallel guess past the budget it was already charged
+    /// against. Everything else matches [`fail`] -- the failure counts and
+    /// reopens the window from now.
+    ///
+    /// [`fail`]: Counter::fail
+    fn fail_unreserved(&mut self, now: u64, window: u64) {
+        self.expire(now);
+        self.failures = self.failures.saturating_add(1);
+        self.expires_at_ms = now.saturating_add(window);
+    }
+
     /// Whether this counter still bounds attempts.
     fn live(&self, now: u64) -> bool {
         self.expires_at_ms > now
@@ -775,6 +930,16 @@ impl Counter {
         } else {
             Verdict::Unproven
         }
+    }
+
+    /// Clear the failures this user-id recorded itself, keeping inherited ones.
+    ///
+    /// For a proven recovery, which holds no reservation: `outstanding` is
+    /// another attempt's and is left alone. The window is not closed either --
+    /// an inherited count may still be live, and it is what the caller
+    /// re-proves itself against on its next request.
+    fn clear_own_failures(&mut self) {
+        self.failures = 0;
     }
 
     /// Settle a reservation as a success, clearing the recorded failures.
@@ -873,12 +1038,29 @@ mod tests {
     };
     use crate::plugins::identity_basic::config::FailureLimitConfig;
 
+    /// A verifier capacity whose recovery ceiling is the cap.
+    ///
+    /// The htpasswd default, so the ceiling tests measure the share an
+    /// operator gets without tuning anything.
+    const DEFAULT_VERIFICATIONS: usize = 32;
+
     fn limiter(capacity: usize, max_failures: u32) -> FailureLimiter {
-        FailureLimiter::new(FailureLimitConfig {
-            capacity,
-            max_failures,
-            window_secs: 300,
-        })
+        limiter_with_verifications(capacity, max_failures, DEFAULT_VERIFICATIONS)
+    }
+
+    fn limiter_with_verifications(
+        capacity: usize,
+        max_failures: u32,
+        verifications: usize,
+    ) -> FailureLimiter {
+        FailureLimiter::new(
+            FailureLimitConfig {
+                capacity,
+                max_failures,
+                window_secs: 300,
+            },
+            verifications,
+        )
     }
 
     /// Spend `n` failures for one user-id, ignoring refusals.
@@ -1227,6 +1409,244 @@ mod tests {
                     .expect("a dropped attempt must not retire a slot permanently"),
             );
         }
+    }
+
+    /// A failed recovery must count against a named counter.
+    ///
+    /// The defect: the recovery path charged nothing on failure, so a promoted
+    /// counter sat at `Verdict::Unproven` with `failures` pinned at zero and
+    /// every wrong guess took the early return. The ceiling bounds concurrency
+    /// alone, so sequential guesses reached the verifier until the window
+    /// expired -- `max_failures` bounded nothing at all for the one user-id an
+    /// attacker had already spent a shared bucket on, which is the opposite of
+    /// what promotion is for.
+    ///
+    /// The wrong password is this user-id's own, whatever the inherited count
+    /// that admitted the attempt was, and a named counter can attribute it.
+    #[test]
+    fn a_failed_named_recovery_counts_against_the_promoted_counter() {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        fail(&limiter, "sprayer", 2);
+        assert!(
+            limiter.saturations() > 0,
+            "the spray must have been counted in overflow for this to exercise promotion"
+        );
+
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+
+        // Promotes `sprayer` onto a named counter carrying `inherited == 2`.
+        for guess in 0..2_u32 {
+            let attempt = limiter
+                .admit("sprayer")
+                .expect("an inherited count refuses recoverably, so the attempt is admitted");
+            assert!(
+                attempt.is_unproven(),
+                "guess {guess} rests on the inherited count, so it must be recoverable"
+            );
+            attempt.record_failure();
+        }
+
+        assert_eq!(
+            limiter.admit("sprayer").err(),
+            Some(Refusal::Blocked),
+            "two failed recoveries against a budget of two must block outright: a counter \
+             whose own failures have spent the budget names one caller, and leaving them \
+             uncounted gave a promoted attacker unlimited sequential guesses -- bounded only \
+             by the window, with the concurrency ceiling no obstacle to guessing one at a time"
+        );
+    }
+
+    /// A successful recovery must stay free of the failure budget.
+    ///
+    /// The other side of the test above: counting failed recoveries must not
+    /// start counting the proven ones, or a legitimate caller sharing a bucket
+    /// with a spray is cut off after `max_failures` *correct* passwords -- the
+    /// blanket lockout the recoverable refusal exists to prevent.
+    #[test]
+    fn a_proven_recovery_never_charges_the_failure_budget() {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        fail(&limiter, "sprayer", 2);
+
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+
+        for round in 0..16_u32 {
+            let attempt = limiter
+                .admit("sprayer")
+                .expect("a correct password must never be refused on a shared bucket's budget");
+            assert!(
+                attempt.is_unproven(),
+                "round {round}: the inherited count still stands, so each attempt re-proves"
+            );
+            attempt.record_success();
+        }
+    }
+
+    /// An interleaved wrong guess must not cut off a correct password early.
+    ///
+    /// The budget has to bound guessing without converting one wrong attempt
+    /// into a lockout for the caller who knows the password: a success clears
+    /// the recorded failures, so the two must not accumulate against each
+    /// other across requests.
+    #[test]
+    fn a_proven_recovery_clears_an_earlier_failed_one() {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        fail(&limiter, "sprayer", 2);
+
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+
+        for round in 0..8_u32 {
+            limiter
+                .admit("sprayer")
+                .expect("one recorded failure leaves budget for another attempt")
+                .record_failure();
+
+            let proven = limiter.admit("sprayer").expect(
+                "a single failed recovery must not block the caller who knows the password",
+            );
+            assert!(
+                proven.is_unproven(),
+                "round {round}: still judged on the bucket it shares"
+            );
+            proven.record_success();
+        }
+    }
+
+    /// A failed recovery must not discharge a parallel attempt's reservation.
+    ///
+    /// An unproven attempt is admitted against the ceiling and reserves
+    /// nothing on the counter, so settling one must leave `outstanding` alone.
+    /// Decrementing it would return a *different* attempt's reservation and
+    /// let a parallel guess past the budget it was already charged against.
+    #[test]
+    fn a_failed_recovery_leaves_a_parallel_reservation_outstanding() {
+        let mut counter = Counter {
+            expires_at_ms: 1_000,
+            failures: 0,
+            inherited: 2,
+            outstanding: 1,
+        };
+
+        counter.fail_unreserved(500, 300_000);
+
+        assert_eq!(
+            counter.outstanding, 1,
+            "the in-flight attempt still holds its reservation: an unproven settlement has \
+             none of its own to return, so taking one discharges a guess running beside it"
+        );
+        assert_eq!(
+            counter.failures, 1,
+            "and the failed recovery is recorded, which is what bounds the next guess"
+        );
+    }
+
+    /// A failed recovery must not remove the counter that bounds it.
+    ///
+    /// A counter carrying only inherited failures settles to `failures == 1`
+    /// and `outstanding == 0`. Routing the settlement through `with_counter`
+    /// would have removed it on the zero check, handing the next attempt a
+    /// fresh budget via the promotion path -- the failure meant to bound the
+    /// user-id erasing the counter that holds it.
+    #[test]
+    fn a_failed_recovery_keeps_its_counter_in_the_map() {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        fail(&limiter, "sprayer", 2);
+
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+
+        limiter
+            .admit("sprayer")
+            .expect("the inherited count admits recoverably")
+            .record_failure();
+
+        assert_eq!(
+            limiter.tracked(),
+            1,
+            "the counter must survive the failure it just recorded: removing it returns the \
+             user-id to the promotion path, where a fresh counter is a fresh budget"
+        );
+    }
+
+    /// The recovery ceiling must leave ordinary attempts room to verify.
+    ///
+    /// The defect: the ceiling was a fixed 8 while
+    /// `max_concurrent_verifications` is valid from 1 upward. At a configured
+    /// capacity of 8 or less, recovery could hold every permit the directory
+    /// had, and a caller whose own budget was unspent was denied
+    /// `auth.directory_unavailable` -- the outage the ceiling exists to
+    /// prevent, caused by the ceiling below the backend's default.
+    #[test]
+    fn the_recovery_ceiling_is_sized_against_the_verifier_capacity() {
+        for capacity in [1_usize, 2, 4, 8, 16, 32, 64, 4096] {
+            let ceiling = FailureLimiter::recovery_ceiling(capacity);
+
+            assert!(
+                ceiling >= 1,
+                "capacity {capacity} must leave a recovery path: zero slots closes it outright \
+                 and restores the blanket lockout for a saturated map"
+            );
+            assert!(
+                ceiling <= MAX_UNPROVEN_IN_FLIGHT,
+                "capacity {capacity} must not exceed the absolute cap: a share of a large \
+                 capacity is still more attacker-free verification than this path needs"
+            );
+            // A capacity of one cannot both serve an ordinary attempt and a
+            // recovery at once; the floor serialises them rather than
+            // forbidding recovery.
+            if capacity > 1 {
+                assert!(
+                    usize::try_from(ceiling).expect("the ceiling fits a usize") < capacity,
+                    "capacity {capacity} must keep a permit for an attempt whose own budget is \
+                     unspent: recovery holding all of them is the directory outage this bounds"
+                );
+            }
+        }
+    }
+
+    /// A small verifier capacity must still bound recovery below it.
+    ///
+    /// Driven through `admit` rather than the helper, so the derived ceiling is
+    /// what actually gates admission.
+    #[test]
+    fn a_small_verifier_capacity_refuses_recovery_before_the_fixed_cap() {
+        // A quarter of 8 is 2, well below the former fixed ceiling of 8.
+        let limiter = limiter_with_verifications(0, 1, 8);
+        fail(&limiter, "sprayer", 1);
+
+        let held: Vec<_> = std::iter::repeat_with(|| {
+            limiter
+                .admit("sprayer")
+                .expect("the derived ceiling must admit its share")
+        })
+        .take(2)
+        .collect();
+
+        assert_eq!(
+            limiter.admit("sprayer").err(),
+            Some(Refusal::Saturated),
+            "a capacity of 8 permits 2 concurrent recoveries, not the 8 a fixed ceiling \
+             allowed: the other 6 permits belong to callers whose own budget is unspent"
+        );
+
+        drop(held);
+        limiter
+            .admit("sprayer")
+            .expect("settling the in-flight attempts returns their slots");
     }
 
     /// The bucket index must stay inside the table for any input.

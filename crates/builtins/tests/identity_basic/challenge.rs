@@ -318,15 +318,26 @@ async fn a_user_id_spray_does_not_lock_out_a_legitimate_caller() {
 /// resolves: the overlap has to be guaranteed, and holding admissions open is
 /// what guarantees it. A resolve-level race would pass whenever the spray
 /// happened to finish first.
+///
+/// The ceiling is measured against the verifier capacity it has to stay clear
+/// of, not against a bare count. A ceiling that merely bounded concurrency
+/// still caused the outage whenever it reached the capacity it was bounding:
+/// `max_concurrent_verifications` is valid from 1 upward, and a fixed 8 held
+/// against the default of 32 but took every permit at 8 or less.
 #[tokio::test]
 async fn unproven_attempts_cannot_hold_more_than_the_ceiling_of_verifications() {
     use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+
+    // Deliberately smaller than the former fixed ceiling of 8, which is the
+    // configuration that turned the ceiling into the outage it prevents.
+    const VERIFICATIONS: usize = 8;
 
     let limiter = FailureLimiter::new(
         serde_json::from_value(serde_json::json!({
             "capacity": 0, "max_failures": 1, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        VERIFICATIONS,
     );
 
     limiter
@@ -365,6 +376,14 @@ async fn unproven_attempts_cannot_hold_more_than_the_ceiling_of_verifications() 
         "concurrent unproven verifications must be bounded: unbounded, {} of them ran at once \
          and held every verification permit the directory has, denying unrelated callers as a \
          directory failure",
+        held.len()
+    );
+    assert!(
+        held.len() < VERIFICATIONS,
+        "the ceiling must leave a verification permit for a caller whose own budget is \
+         unspent: {} recoveries against {VERIFICATIONS} permits is the directory outage this \
+         bounds, and a ceiling that only bounds concurrency reaches it whenever an operator \
+         configures a capacity at or below the ceiling",
         held.len()
     );
 }

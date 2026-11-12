@@ -11,6 +11,17 @@ use praxis_policy_core::identity::TokenSource;
 use crate::support::{HtpasswdFile, argon2_line, bcrypt_line, htpasswd_block, resolver};
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// The verifier capacity these limiter tests size their recovery ceiling from.
+///
+/// The htpasswd backend's default. These cases exercise the failure budget and
+/// the overflow table, not the recovery ceiling, so they take the capacity an
+/// operator gets without tuning anything.
+const DEFAULT_VERIFICATIONS: usize = 32;
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -394,6 +405,7 @@ fn the_failure_limiter_tracks_a_fresh_user_id_by_name_while_a_slot_is_live() {
             "capacity": 1, "max_failures": 5, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
     limiter
         .admit("alice")
@@ -426,6 +438,7 @@ fn a_full_failure_limiter_does_not_displace_a_blocked_counter() {
             "capacity": 1, "max_failures": 1, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
     limiter
         .admit("alice")
@@ -467,6 +480,7 @@ fn an_unsettled_attempt_spends_the_budget_while_it_is_still_in_flight() {
             "capacity": 16, "max_failures": 1, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
 
     let in_flight = limiter
@@ -501,6 +515,7 @@ fn a_released_in_flight_attempt_returns_its_budget() {
             "capacity": 16, "max_failures": 1, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
 
     let abandoned = limiter
@@ -525,6 +540,7 @@ async fn an_overflow_attempt_settles_on_the_bucket_it_was_charged_against() {
             "capacity": 1, "max_failures": 2, "window_secs": 1,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
 
     let holder = limiter
@@ -606,6 +622,7 @@ fn a_spray_that_blocks_every_overflow_bucket_still_lets_a_proven_caller_through(
             "capacity": 1, "max_failures": 2, "window_secs": 300,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
     let _squatter = limiter
         .admit("squatter")
@@ -658,6 +675,7 @@ fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
             "capacity": 1, "max_failures": 2, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
     limiter
         .admit("junk")
@@ -704,6 +722,7 @@ fn an_outstanding_attempt_is_charged_against_the_budget() {
             "capacity": 16, "max_failures": 1, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
 
     let held = limiter
@@ -733,6 +752,7 @@ fn a_released_reservation_records_no_failure() {
             "capacity": 16, "max_failures": 2, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
 
     for _ in 0..8 {
@@ -757,6 +777,7 @@ fn a_success_does_not_discharge_the_attempts_running_beside_it() {
             "capacity": 16, "max_failures": 2, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
 
     let first = limiter
@@ -803,6 +824,7 @@ fn the_failure_limiter_blocks_a_user_id_past_its_budget() {
             "capacity": 16, "max_failures": 2, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
+        DEFAULT_VERIFICATIONS,
     );
 
     limiter

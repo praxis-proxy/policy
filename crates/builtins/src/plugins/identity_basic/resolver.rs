@@ -161,6 +161,14 @@ impl BasicIdentityResolver {
             message: format!("{}: {e}", config.name),
         })?;
 
+        // Read before the directory is built and the config moved, and taken
+        // from the provider rather than from `failure_limit`: the recovery
+        // ceiling has to stay clear of the permits this backend actually has,
+        // and that number lives on the provider that owns the semaphore.
+        let verification_capacity = match &settings.provider {
+            ProviderConfig::Htpasswd(htpasswd) => htpasswd.max_concurrent_verifications,
+        };
+
         let directory: Arc<dyn CredentialDirectory> = match &settings.provider {
             ProviderConfig::Htpasswd(htpasswd) => {
                 // The ceiling goes to the backend rather than being checked
@@ -182,7 +190,7 @@ impl BasicIdentityResolver {
         Ok(Self {
             location: settings.location(),
             challenge: settings.challenge(),
-            limiter: FailureLimiter::new(settings.failure_limit),
+            limiter: FailureLimiter::new(settings.failure_limit, verification_capacity),
             config,
             settings,
             directory,
