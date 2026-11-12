@@ -281,7 +281,7 @@ fn the_challenge_renders_the_configured_realm() {
 fn the_challenge_appends_the_charset_when_configured() {
     let block = serde_json::json!({
         "realm": "ops",
-        "charset_utf8": true,
+        "advertise_utf8_charset": true,
         "credential": { "kind": "header", "name": "Authorization" },
         "provider": { "kind": "htpasswd", "path": "/nonexistent", "refresh_secs": 30,
                       "max_staleness_secs": 300 },
@@ -294,6 +294,35 @@ fn the_challenge_appends_the_charset_when_configured() {
         "Basic realm=\"ops\", charset=\"UTF-8\"",
         "the charset advertises the client-side expectation when asked for"
     );
+}
+
+/// The charset flag is a predicate, not the value it advertises.
+///
+/// `charset_utf8` -- and the `charset: UTF-8` string the plan sketched --
+/// must fail at load rather than deserialize into a default. `charset` could
+/// only ever take the one value RFC 7617 Section 2.1 defines, so the key is a
+/// flag; `deny_unknown_fields` is what stops a config written against either
+/// earlier spelling from loading with the charset silently dropped from the
+/// challenge.
+#[test]
+fn an_earlier_spelling_of_the_charset_flag_fails_to_load() {
+    for stale in ["charset_utf8", "charset"] {
+        let mut block = serde_json::json!({
+            "realm": "ops",
+            "credential": { "kind": "header", "name": "Authorization" },
+            "provider": { "kind": "htpasswd", "path": "/nonexistent", "refresh_secs": 30,
+                          "max_staleness_secs": 300 },
+        });
+        block[stale] = serde_json::json!(true);
+
+        let parsed = serde_json::from_value::<BasicResolverConfig>(block);
+        assert!(
+            parsed.is_err(),
+            "`{stale}` must fail at load rather than deserialize into a default: a config that \
+             loaded with the key ignored would serve a challenge missing the charset it asked \
+             for, with nothing to tell the operator why"
+        );
+    }
 }
 
 #[test]

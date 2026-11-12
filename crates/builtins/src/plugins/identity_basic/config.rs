@@ -144,8 +144,15 @@ pub struct BasicResolverConfig {
     ///
     /// Advertises the client-side expectation only. The server verifies the
     /// bytes it receives either way.
+    ///
+    /// A flag rather than the `charset: UTF-8` string the plan sketched:
+    /// RFC 7617 Section 2.1 defines exactly one valid value for the
+    /// parameter, so a string-typed key could only accept `UTF-8` or be
+    /// rejected at load, which is a key that looks configurable and is not.
+    /// Named for what it does, matching the other predicate flags in these
+    /// config blocks, so it cannot read as the value it carries.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub charset_utf8: bool,
+    pub advertise_utf8_charset: bool,
 
     /// Which fields the projected claims bag keeps or drops.
     #[serde(default)]
@@ -203,7 +210,7 @@ impl BasicResolverConfig {
     /// out of here.
     pub fn challenge(&self) -> String {
         let realm = &self.realm;
-        if self.charset_utf8 {
+        if self.advertise_utf8_charset {
             format!("Basic realm=\"{realm}\", charset=\"UTF-8\"")
         } else {
             format!("Basic realm=\"{realm}\"")

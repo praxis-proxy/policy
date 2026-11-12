@@ -45,7 +45,7 @@ async fn a_denial_carries_401_and_the_realm_challenge() {
 async fn the_configured_charset_reaches_the_challenge_on_a_denial() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
     let mut block = htpasswd_block(file.path());
-    block["charset_utf8"] = serde_json::json!(true);
+    block["advertise_utf8_charset"] = serde_json::json!(true);
     let resolver = resolver(block).expect("the config loads");
 
     let result = resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;

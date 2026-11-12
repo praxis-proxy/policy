@@ -710,7 +710,14 @@ R22, R25, R27, R28, R29, R31
 
 **Approach:** Config mirrors the api-key block — `credential`, `provider` as a
 `kind`-tagged non-exhaustive enum, `record_map`, `role`, `expiry` — plus a
-required `realm` and an optional `charset`. There is no weak-hash opt-in: see
+required `realm` and an optional `advertise_utf8_charset`. **Corrected
+2026-11-11:** this said "an optional `charset`". RFC 7617 §2.1 defines exactly
+one valid value for the parameter, so a string-typed key could only accept
+`UTF-8` or be rejected at load — a key that looks configurable and is not. It
+ships as a boolean flag named for what it does, matching the predicate flags
+in the sibling config blocks, and `deny_unknown_fields` refuses both earlier
+spellings so a stale config fails loudly rather than dropping the charset from
+the challenge. There is no weak-hash opt-in: see
 KTD5. `validate()` returns the compiled mapper so it is
 not compiled twice, and rejects the incoherent combinations the sibling rejects.
 It does **not** reject the stacked-resolver case: R22 and KTD7 settle that as
@@ -751,7 +758,8 @@ throughout; `crates/ppe/src/lib.rs:208-234` for the alias-plus-macro-row pair.
 - Covers R1. Cookie and query-param credential locations fail at config load.
 - Covers R31. `TokenSource::Basic` round-trips through serialization.
 - Covers R17. A denial carries 401 and `WWW-Authenticate: Basic realm="..."`.
-- Covers R17. With `charset: UTF-8` configured, the challenge appends it.
+- Covers R17. With `advertise_utf8_charset` set, the challenge appends
+  `charset="UTF-8"`.
 - Covers R17. A config with no `realm` fails to load.
 - Covers R18. Unknown-user and bad-password yield byte-identical denials.
 - Covers R14. `subject.id` defaults to the user-id with no `record_map` entry
