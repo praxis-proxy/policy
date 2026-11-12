@@ -304,6 +304,71 @@ async fn a_user_id_spray_does_not_lock_out_a_legitimate_caller() {
     );
 }
 
+/// Unproven verifications must not starve a caller whose budget is unspent.
+///
+/// The defect this pins: a spent shared bucket refused without reserving
+/// anything, so wrong-password attempts for one user-id reached the verifier
+/// together and without limit. They took every one of the directory's
+/// verification permits, and an unrelated caller presenting a correct password
+/// was denied `auth.directory_unavailable` -- an outage reachable with
+/// requests that cost the attacker nothing and were never going to
+/// authenticate.
+///
+/// Driven against the limiter and the directory rather than two concurrent
+/// resolves: the overlap has to be guaranteed, and holding admissions open is
+/// what guarantees it. A resolve-level race would pass whenever the spray
+/// happened to finish first.
+#[tokio::test]
+async fn unproven_attempts_cannot_hold_more_than_the_ceiling_of_verifications() {
+    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+
+    let limiter = FailureLimiter::new(
+        serde_json::from_value(serde_json::json!({
+            "capacity": 0, "max_failures": 1, "window_secs": 60,
+        }))
+        .expect("the limiter config parses"),
+    );
+
+    limiter
+        .admit("alice")
+        .expect("the first attempt is within the bucket's budget")
+        .record_failure();
+
+    // Every further attempt for alice is unproven: her bucket is spent and the
+    // map has no slot to promote her into. Held open, so they are exactly the
+    // in-flight verifications an unbounded path would let pile up.
+    let mut held = Vec::new();
+    for _ in 0..64 {
+        match limiter.admit("alice") {
+            Ok(attempt) => {
+                assert!(
+                    attempt.is_unproven(),
+                    "a spent shared bucket must admit recoverably, or this test is measuring \
+                     the failure budget instead of the recovery path"
+                );
+                held.push(attempt);
+            },
+            Err(refusal) => {
+                assert_eq!(
+                    refusal,
+                    Refusal::Saturated,
+                    "the recovery path refuses distinctly from a spent failure budget, so an \
+                     operator can tell a saturated map from a blocked user-id"
+                );
+                break;
+            },
+        }
+    }
+
+    assert!(
+        held.len() < 64,
+        "concurrent unproven verifications must be bounded: unbounded, {} of them ran at once \
+         and held every verification permit the directory has, denying unrelated callers as a \
+         directory failure",
+        held.len()
+    );
+}
+
 /// A caller whose shared bucket an attacker filled must still authenticate.
 ///
 /// The defect this pins: the overflow arm refused on a spent bucket before any

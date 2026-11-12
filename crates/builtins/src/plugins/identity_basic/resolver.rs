@@ -386,29 +386,35 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         // or drops it, and a drop releases the reservation without recording a
         // failure -- which is what a directory error or a cancelled request
         // should cost.
-        // `None` with `unproven` set means a shared overflow bucket refused
-        // the attempt on failures that may not be this caller's. The
-        // credential is verified anyway: only a correct password separates
-        // this caller from the spray that spent the bucket, and without that
-        // step a junk-user-id flood denies every caller the saturated map
-        // cannot name. No reservation is held on that path -- the bucket
-        // already counts the attempt that spent it, and the verdict below
-        // decides whether this one is served.
-        let (admission, unproven) = match self.limiter.admit(user_id) {
-            Ok(admission) => (Some(admission), false),
-            Err(Refusal::Blocked) => {
-                return self.deny(
-                    codes::TOO_MANY_FAILURES,
-                    "too many recent failures for this credential",
-                );
-            },
+        // An admitted guard whose `is_unproven` is set was refused on failures
+        // that may not be this caller's -- a shared overflow bucket's, or a
+        // count inherited from one when the user-id was promoted to a named
+        // counter. The credential is verified anyway: only a correct password
+        // separates this caller from the spray that spent the bucket, and
+        // without that step a junk-user-id flood denies every caller the
+        // saturated map cannot name. That guard reserves against a bounded
+        // recovery ceiling rather than against the user-id's budget, so the
+        // verification it asks for cannot be repeated freely enough to occupy
+        // the directory's verification permits.
+        let admission = match self.limiter.admit(user_id) {
+            Ok(admission) => admission,
             // `Refusal` is `#[non_exhaustive]` for downstream crates, but
             // within this one the compiler sees every variant -- so a variant
             // added later fails to compile here rather than silently falling
             // through to a verification this resolver has not reasoned about.
             // That is the stronger guarantee, so there is no catch-all arm.
-            Err(Refusal::Unproven) => (None, true),
+            //
+            // Both deny as too-many-failures: the distinction between a spent
+            // budget and a full recovery path is an operator's to read off the
+            // limiter's counters, not a client's to read off the wire.
+            Err(Refusal::Blocked | Refusal::Saturated) => {
+                return self.deny(
+                    codes::TOO_MANY_FAILURES,
+                    "too many recent failures for this credential",
+                );
+            },
         };
+        let unproven = admission.is_unproven();
 
         let record = match self.directory.lookup(user_id, ext).await {
             Ok(found) => found,
@@ -429,9 +435,7 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         };
 
         if !verified || record.is_none() {
-            if let Some(admission) = admission {
-                admission.record_failure();
-            }
+            admission.record_failure();
             if self.may_log_failure() {
                 // Debug, and only debug: a user-id in a warn line reaches
                 // every aggregator at default verbosity, where it is an
@@ -476,9 +480,7 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         if let Some(expires_at) = record.expires_at
             && expires_at <= Utc::now()
         {
-            if let Some(admission) = admission {
-                admission.record_failure();
-            }
+            admission.record_failure();
             return self.deny(
                 codes::CREDENTIAL_EXPIRED,
                 "the credential's record has expired",
@@ -519,13 +521,11 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
             },
         }
 
-        match admission {
-            Some(admission) => admission.record_success(),
-            // Refused by a shared bucket and cleared by the verdict. Counted
-            // so an operator can see legitimate callers paying for buckets
-            // they do not own.
-            None => self.limiter.admit_proven(),
-        }
+        // Settles the reservation either way. For an unproven attempt this is
+        // the proof its refusal asked for, and the limiter counts it so an
+        // operator can see legitimate callers paying for failures they do not
+        // own.
+        admission.record_success();
         updated.resolved_at = Some(Utc::now());
         // `raw_credentials` is deliberately not populated. The password stops
         // here, so no downstream step can forward a caller's own password to an

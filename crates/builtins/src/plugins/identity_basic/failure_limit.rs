@@ -26,17 +26,27 @@
 //   successful login removes its named counter, the callers routed through
 //   overflow are exactly the well-behaved ones, which made a junk-user-id
 //   spray a blanket authentication outage. A spent bucket still refuses, but
-//   as `Refusal::Unproven` rather than `Blocked`: the refusal rests on
-//   evidence that is not this caller's, and `admit_proven` clears it for one
-//   that can show a verified credential. Only the caller who knows the
+//   recoverably rather than outright: the refusal rests on evidence that is
+//   not this caller's, so the attempt is admitted for verification and only a
+//   caller who knows the password clears it. Only the caller who knows the
 //   password can clear a bucket they share with an attacker.
 //
-// Where a refusal is decided follows from what it is keyed on. A named counter
-// names one caller, so it refuses outright and costs an attacker nothing. A
-// shared bucket cannot attribute its failures, so its refusal is recoverable
-// on proof -- the credential is the only evidence that separates the two.
-// `admit` refuses in both cases, so this type bounds a fresh target on its
-// own; the relaxation is opt-in and takes a verdict the caller must supply.
+// Where a refusal is decided follows from what it is keyed on, and a counter
+// keeps the two kinds of failure apart for as long as it lives. Its own
+// failures name one caller, so they refuse outright and cost an attacker
+// nothing. Failures inherited from a shared bucket on promotion cannot be
+// attributed, so a counter spent only by those refuses recoverably -- the
+// unattributable evidence does not stop carrying over just because a named
+// slot opened, which is what made promotion a lockout: a user-id that reached
+// a counter of its own was judged on a spray's failures and denied without the
+// verification that would have cleared it.
+//
+// A recoverable refusal is still admission-controlled. It carries a
+// reservation against a fixed ceiling on concurrent unproven attempts, because
+// the verification it asks for is CPU-bound work an attacker repeats for free:
+// without that ceiling a wrong-password spray on one user-id occupied the
+// backend's verification permits and turned a bounded refusal into a directory
+// outage for every other caller.
 //
 // What this is still not: it is per process, so replicas do not share it, and
 // it is keyed per user-id, so a spray across many user-ids never fills one
@@ -73,6 +83,33 @@ const OVERFLOW_BUCKETS: usize = 1024;
 /// unused.
 const OVERFLOW_MASK: u64 = (OVERFLOW_BUCKETS - 1) as u64;
 
+/// How many unproven verifications may run at once, across all user-ids.
+///
+/// A recoverable refusal asks the caller to verify the credential anyway, and
+/// that verification is the expensive step. The refusal charges no failure
+/// budget -- it cannot, since the failures behind it are not the caller's to
+/// spend -- so without a ceiling of its own a wrong-password spray on one
+/// user-id held every verification permit the directory has and unrelated
+/// callers were denied `DIRECTORY_UNAVAILABLE`: a refusal that costs an
+/// attacker nothing, turned into an outage for everyone else.
+///
+/// A concurrency ceiling rather than a per-attempt budget, because the budget
+/// would have to live on the shared bucket and a spray would spend it for
+/// every colliding caller -- recreating, one layer down, the blanket lockout
+/// the recoverable refusal exists to prevent. What has to be bounded is the
+/// concurrent CPU this path can hold, not how often a caller may prove
+/// itself: a correct password is always served.
+///
+/// Fixed, not configurable: it bounds a recovery path that exists only while
+/// the name-keyed map is saturated or a promoted counter still carries
+/// inherited failures, and an operator with a saturation count to act on
+/// should raise `failure_limit.capacity` rather than tune the fallback. 8
+/// stays well below the htpasswd backend's default of 32 concurrent
+/// verifications, so unproven work cannot crowd out a caller whose own budget
+/// is unspent, while leaving several legitimate callers a recovery path at
+/// once.
+const MAX_UNPROVEN_IN_FLIGHT: u32 = 8;
+
 // -----------------------------------------------------------------------------
 // Public types
 // -----------------------------------------------------------------------------
@@ -101,25 +138,74 @@ pub struct Admission<'limiter> {
     /// overflow reservation, which never expires, and discharging the named
     /// attempt's reservation early.
     slot: Slot,
+    /// Whether unattributable failures already refused this attempt.
+    ///
+    /// Set on the recoverable path, where the attempt is charged against the
+    /// counter's separate unproven budget rather than its failure budget.
+    /// Settlement therefore records no failure and refunds a success.
+    unproven: bool,
     user_id: String,
 }
 
 impl Admission<'_> {
+    /// Whether an unattributable failure count already refused this attempt.
+    ///
+    /// True for an attempt admitted so that a verified credential can clear a
+    /// refusal resting on evidence that is not this caller's. A caller must
+    /// verify the credential before serving one, and must deny a failed
+    /// verdict as a budget refusal rather than as a wrong password: the
+    /// refusal that admitted it still stands.
+    pub fn is_unproven(&self) -> bool {
+        self.unproven
+    }
+
     /// Record a failed verification and release the reservation.
+    ///
+    /// An unproven attempt records nothing: the failures that refused it are
+    /// already counted where they were seen, and it spent the separate
+    /// unproven budget instead of reserving against the failure budget.
+    /// Charging a failure on top would let a colliding attacker spend one
+    /// budget twice over.
     pub fn record_failure(mut self) {
         self.settled = true;
+        if self.unproven {
+            self.limiter.release_unproven();
+            return;
+        }
         self.limiter.settle_failure(&self.user_id, self.slot);
     }
 
     /// Clear the user-id's counter after a successful verification.
+    ///
+    /// For an unproven attempt this is the proof its refusal asked for, and is
+    /// counted through [`proven`]. The unattributable failures are left
+    /// standing: they may be a colliding attacker's, so crediting this
+    /// caller's success would hand that attacker a fresh budget. The caller
+    /// re-proves itself on every request for as long as those failures live.
+    ///
+    /// [`proven`]: FailureLimiter::proven
     pub fn record_success(mut self) {
         self.settled = true;
+        if self.unproven {
+            self.limiter.settle_proven();
+            return;
+        }
         self.limiter.settle_success(&self.user_id, self.slot);
     }
 }
 
 impl Drop for Admission<'_> {
     fn drop(&mut self) {
+        if self.unproven {
+            if !self.settled {
+                // No reservation against the failure budget to return, but the
+                // ceiling slot must come back however the attempt ended: a
+                // leaked slot is permanent, and enough of them close the
+                // recovery path for the life of the process.
+                self.limiter.release_unproven();
+            }
+            return;
+        }
         if !self.settled {
             // Neither a failure nor a success: the attempt never produced a
             // verdict on the credential, so it releases its reservation
@@ -139,21 +225,22 @@ pub enum Refusal {
     /// Spent by completed failures, attempts in flight, or both: see
     /// [`FailureLimiter::admit`].
     Blocked,
-    /// A shared overflow bucket is spent, on failures that may not be this
-    /// caller's.
+    /// The bounded recovery path for unattributable failures is itself full.
     ///
-    /// Raised only while the name-keyed map is saturated, where a user-id has
-    /// no counter of its own and is counted in a bucket it shares with
-    /// whatever else hashes there. Refusing on it is the safe default, but it
-    /// is not a verdict on this caller: a spray of junk user-ids can spend
-    /// every bucket, and a caller who knows the password is then refused for
-    /// an attacker's failures.
+    /// An attempt refused on failures that are not the caller's own is
+    /// admitted anyway so the credential can clear it, but only up to a fixed
+    /// ceiling on how many such verifications run at once. Past that ceiling
+    /// the attempt is refused without one, because the verification a
+    /// recoverable refusal asks for is CPU-bound work an attacker repeats for
+    /// free.
     ///
-    /// A caller that can verify the credential should re-admit the attempt
-    /// with [`FailureLimiter::admit_proven`] rather than deny on this.
+    /// Denied like [`Blocked`], and kept separate from it so an operator can
+    /// tell a user-id that spent its own budget from a saturated map starving
+    /// the recovery path. The second is a signal to raise
+    /// `failure_limit.capacity`.
     ///
-    /// [`FailureLimiter::admit_proven`]: FailureLimiter::admit_proven
-    Unproven,
+    /// [`Blocked`]: Refusal::Blocked
+    Saturated,
 }
 
 /// Consecutive-failure counters, keyed on the normalised user-id.
@@ -169,8 +256,17 @@ pub struct FailureLimiter {
     /// actionable: a rising count says the capacity is too small for the
     /// traffic, and nothing in it identifies a caller.
     saturations: std::sync::atomic::AtomicU64,
-    /// How many shared-bucket refusals a verified credential then cleared.
+    /// How many refusals on unattributable failures a verified credential
+    /// then cleared.
     proven: std::sync::atomic::AtomicU64,
+    /// How many unproven verifications are running right now.
+    ///
+    /// Global rather than per-counter, and a concurrency count rather than a
+    /// spend: see [`MAX_UNPROVEN_IN_FLIGHT`] for why a budget on the shared
+    /// bucket would deny the callers this path exists to serve.
+    ///
+    /// [`MAX_UNPROVEN_IN_FLIGHT`]: MAX_UNPROVEN_IN_FLIGHT
+    unproven_in_flight: std::sync::atomic::AtomicU32,
 }
 
 impl FailureLimiter {
@@ -187,6 +283,7 @@ impl FailureLimiter {
             }),
             saturations: std::sync::atomic::AtomicU64::new(0),
             proven: std::sync::atomic::AtomicU64::new(0),
+            unproven_in_flight: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -207,12 +304,20 @@ impl FailureLimiter {
     /// why it is surfaced through [`saturations`] for an operator to act on by
     /// raising `failure_limit.capacity`.
     ///
+    /// A guard whose [`is_unproven`] is set was refused on failures that
+    /// cannot be attributed to this caller, and admitted so that the
+    /// credential can clear the refusal. Such a caller must verify the
+    /// credential and deny a failed verdict as a budget refusal rather than as
+    /// a wrong password.
+    ///
     /// # Errors
     ///
-    /// Returns [`Refusal::Blocked`] when the user-id's completed failures and
-    /// in-flight attempts together have spent its budget for the current
-    /// window.
+    /// Returns [`Refusal::Blocked`] when the user-id's own completed failures
+    /// and in-flight attempts together have spent its budget for the current
+    /// window, and [`Refusal::Saturated`] when the attempt would be
+    /// recoverable but the bounded recovery path is already full.
     ///
+    /// [`is_unproven`]: Admission::is_unproven
     /// [`saturations`]: FailureLimiter::saturations
     pub fn admit(&self, user_id: &str) -> Result<Admission<'_>, Refusal> {
         let now = self.now_ms();
@@ -237,11 +342,28 @@ impl FailureLimiter {
 
         if let Some(counter) = guard.named.get_mut(user_id) {
             counter.expire(now);
-            if counter.spent(self.config.max_failures) {
-                return Err(Refusal::Blocked);
-            }
-            counter.reserve();
-            return Ok(self.admitted(user_id, Slot::Named));
+            return match counter.verdict(self.config.max_failures) {
+                Verdict::Admit => {
+                    counter.reserve();
+                    Ok(self.admitted(user_id, Slot::Named))
+                },
+                Verdict::Blocked => Err(Refusal::Blocked),
+                // Spent, but only once the failures carried in from a shared
+                // bucket are counted. Those are not this caller's to answer
+                // for, so the refusal stays recoverable for as long as they
+                // live rather than hardening into a block the moment a named
+                // slot opened. Charged against the separate unproven budget
+                // and not the failure budget: spending the latter would deny
+                // this caller for an attacker's guesses, which is the lockout
+                // the recoverable refusal exists to prevent.
+                Verdict::Unproven => {
+                    if self.claim_unproven() {
+                        Ok(self.admitted_unproven(user_id, Slot::Named))
+                    } else {
+                        Err(Refusal::Saturated)
+                    }
+                },
+            };
         }
 
         // Room for a counter of its own, so the attempt is tracked by name and
@@ -260,9 +382,15 @@ impl FailureLimiter {
             //
             // Over-counting a collision is the imprecision the overflow table
             // already documents, and it fails closed: an inherited count only
-            // ever bounds this user-id sooner, never later. A named counter
-            // refuses before verification, so unlike the shared bucket below
-            // this one decides on failures attributed to one caller.
+            // ever bounds this user-id sooner, never later.
+            //
+            // Kept in `inherited` rather than folded into `failures`, because
+            // the two differ in what they can justify. A shared bucket cannot
+            // say which user-id failed, so counting its failures as this
+            // caller's own made promotion a lockout: a correct password was
+            // denied unverified on a junk-user-id spray's evidence, which is
+            // exactly the outage the recoverable refusal exists to prevent.
+            // They still bound this user-id, and bound it recoverably.
             let inherited = guard.overflow_failures(user_id, now);
             let mut counter = Counter {
                 // Only a counter carrying failures needs a window; a fresh one
@@ -272,15 +400,33 @@ impl FailureLimiter {
                 } else {
                     now.saturating_add(window)
                 },
-                failures: inherited,
+                failures: 0,
+                inherited,
                 outstanding: 0,
             };
-            if counter.spent(self.config.max_failures) {
-                return Err(Refusal::Blocked);
-            }
-            counter.reserve();
-            guard.named.insert(user_id.to_owned(), counter);
-            return Ok(self.admitted(user_id, Slot::Named));
+            return match counter.verdict(self.config.max_failures) {
+                Verdict::Admit => {
+                    counter.reserve();
+                    guard.named.insert(user_id.to_owned(), counter);
+                    Ok(self.admitted(user_id, Slot::Named))
+                },
+                // A counter built here records no failures of its own, so its
+                // own budget cannot be the thing that is spent.
+                Verdict::Blocked => Err(Refusal::Blocked),
+                Verdict::Unproven => {
+                    // Inserted so the inherited count lives in the named
+                    // counter and expires on its own window, rather than being
+                    // re-read from a shared bucket a colliding attacker keeps
+                    // refreshing. Nothing is reserved on it: the attempt holds
+                    // a slot on the unproven ceiling instead.
+                    guard.named.insert(user_id.to_owned(), counter);
+                    if self.claim_unproven() {
+                        Ok(self.admitted_unproven(user_id, Slot::Named))
+                    } else {
+                        Err(Refusal::Saturated)
+                    }
+                },
+            };
         }
 
         self.saturations
@@ -296,51 +442,32 @@ impl FailureLimiter {
         };
         counter.expire(now);
         if counter.spent(self.config.max_failures) {
-            // Refused, but recoverable: the bucket is shared, so its failures
-            // may belong to any user-id hashing here. `Refusal::Unproven` says
-            // the refusal rests on evidence that is not this caller's, and
-            // `admit_proven` re-admits one that can show a verified
-            // credential. A caller that cannot is simply refused.
+            // Refused, but recoverably: the bucket is shared, so its failures
+            // may belong to any user-id hashing here. Admitted against the
+            // separate unproven budget so a verified credential can clear it,
+            // since a spray of junk user-ids can spend every bucket and
+            // refusing outright denies every caller the saturated map cannot
+            // name. A caller that cannot verify is still denied, and that
+            // budget bounds what the attempts themselves cost.
             //
-            // Kept as a refusal rather than a provisional admission so this
-            // type stays self-enforcing: `admit` alone bounds a fresh target
-            // under saturation, with no obligation on the caller to read a
-            // flag. The relaxation is opt-in and takes proof.
-            return Err(Refusal::Unproven);
+            // Nothing is reserved on the bucket. Its failures already count
+            // the attempt that spent it, and a second charge here would be a
+            // budget this caller cannot clear -- on a bucket shared with
+            // whatever spent it.
+            return if self.claim_unproven() {
+                Ok(self.admitted_unproven(user_id, Slot::Overflow(bucket)))
+            } else {
+                Err(Refusal::Saturated)
+            };
         }
         counter.reserve();
         Ok(self.admitted(user_id, Slot::Overflow(bucket)))
     }
 
-    /// Re-admit an attempt a shared bucket refused, on proof of the password.
+    /// How many refusals on unattributable failures a verified credential then
+    /// cleared.
     ///
-    /// For a caller that received [`Refusal::Unproven`], verified the
-    /// credential anyway, and found it correct. That verdict is the evidence
-    /// the bucket could not supply: an attacker who spent the bucket by
-    /// spraying junk user-ids cannot produce it, so serving this caller does
-    /// not weaken the bound the bucket exists to hold.
-    ///
-    /// Charges nothing. The attempt succeeded, so there is no failure to
-    /// record, and the bucket's existing failures are deliberately left
-    /// standing: it is shared, so crediting one caller's success would hand a
-    /// colliding attacker a fresh budget. The caller therefore re-proves
-    /// itself on every request for as long as the map stays saturated, which
-    /// is the cost of a bucket it does not own.
-    ///
-    /// Only sound to call with a credential that actually verified. A caller
-    /// that calls it on a failed or unevaluated credential reopens the
-    /// unbounded-guessing hole the overflow table closes.
-    ///
-    /// [`Refusal::Unproven`]: Refusal::Unproven
-    pub fn admit_proven(&self) {
-        self.proven
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// How many attempts a shared bucket refused and a verified credential
-    /// then cleared.
-    ///
-    /// A rising count means legitimate callers are being judged on buckets
+    /// A rising count means legitimate callers are being judged on failures
     /// they do not own, which is the signal to raise `failure_limit.capacity`.
     /// Carries no user-id, for the same reason [`saturations`] does not.
     ///
@@ -368,8 +495,64 @@ impl FailureLimiter {
             limiter: self,
             settled: false,
             slot,
+            unproven: false,
             user_id: user_id.to_owned(),
         }
+    }
+
+    /// An admission for an attempt unattributable failures already refused.
+    fn admitted_unproven(&self, user_id: &str, slot: Slot) -> Admission<'_> {
+        Admission {
+            limiter: self,
+            settled: false,
+            slot,
+            unproven: true,
+            user_id: user_id.to_owned(),
+        }
+    }
+
+    /// Take a slot on the unproven-verification ceiling, if one is free.
+    ///
+    /// A compare-exchange loop rather than a fetch-add and a rollback: an add
+    /// that overshoots is briefly visible to every other attempt, so a burst
+    /// arriving together would refuse each other on slots all about to be
+    /// returned.
+    fn claim_unproven(&self) -> bool {
+        let mut held = self
+            .unproven_in_flight
+            .load(std::sync::atomic::Ordering::Acquire);
+        loop {
+            if held >= MAX_UNPROVEN_IN_FLIGHT {
+                return false;
+            }
+            match self.unproven_in_flight.compare_exchange_weak(
+                held,
+                held.saturating_add(1),
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => held = current,
+            }
+        }
+    }
+
+    /// Count a verified credential that cleared an unproven refusal.
+    fn count_proven(&self) {
+        self.proven
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Return a slot to the unproven-verification ceiling.
+    fn release_unproven(&self) {
+        // Saturating, not wrapping: a count that reached zero and underflowed
+        // would read as full and refuse every recovery for the life of the
+        // process, which is the outage this path exists to avoid.
+        let _ = self.unproven_in_flight.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |held| Some(held.saturating_sub(1)),
+        );
     }
 
     fn now_ms(&self) -> u64 {
@@ -412,7 +595,9 @@ impl FailureLimiter {
     ///
     /// An overflow bucket's failures are not cleared at all: the bucket may be
     /// shared, so crediting one caller's success would hand a colliding
-    /// attacker a fresh budget.
+    /// attacker a fresh budget. Inherited failures in a named counter are left
+    /// standing for the same reason, and are what the caller re-proves itself
+    /// against on its next request.
     fn settle_success(&self, user_id: &str, slot: Slot) {
         let now = self.now_ms();
         let mut guard = self.write();
@@ -420,7 +605,7 @@ impl FailureLimiter {
             Slot::Named => {
                 if let Some(counter) = guard.named.get_mut(user_id) {
                     counter.succeed(now);
-                    if counter.outstanding == 0 {
+                    if counter.outstanding == 0 && counter.inherited == 0 {
                         guard.named.remove(user_id);
                     }
                 }
@@ -432,6 +617,17 @@ impl FailureLimiter {
             },
             Slot::Uncounted => {},
         }
+    }
+
+    /// Settle an unproven attempt whose credential verified.
+    ///
+    /// Counts the proof and returns the ceiling slot. The failures behind the
+    /// refusal are left standing: they may be a colliding attacker's, so
+    /// clearing them would hand that attacker a fresh budget, and this caller
+    /// re-proves itself on its next request for as long as they live.
+    fn settle_proven(&self) {
+        self.count_proven();
+        self.release_unproven();
     }
 
     fn window_ms(&self) -> u64 {
@@ -463,12 +659,36 @@ enum Slot {
     Uncounted,
 }
 
+/// What a counter says about one more attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Verdict {
+    /// Budget to spare: reserve and verify.
+    Admit,
+    /// Spent by failures attributed to this user-id. Refuse outright.
+    Blocked,
+    /// Spent only once failures inherited from a shared bucket are counted.
+    ///
+    /// Those cannot be attributed, so the refusal they justify is recoverable:
+    /// a verified credential is the only evidence separating this caller from
+    /// whatever else hashed into the bucket.
+    Unproven,
+}
+
 /// One user-id's failures, in-flight attempts, and when they stop counting.
 #[derive(Debug, Default)]
 struct Counter {
     /// Milliseconds since the limiter was built, after which this is expired.
     expires_at_ms: u64,
     failures: u32,
+    /// Failures carried in from a shared overflow bucket on promotion.
+    ///
+    /// Held apart from `failures` because they justify a different refusal.
+    /// A shared bucket cannot say which user-id failed, so these bound the
+    /// user-id recoverably: they refuse an attempt, and a verified credential
+    /// clears that refusal. Folding them into `failures` made promotion out of
+    /// overflow a lockout, denying a correct password unverified on evidence
+    /// that was not the caller's.
+    inherited: u32,
     /// Attempts admitted and not yet settled.
     outstanding: u32,
 }
@@ -484,9 +704,15 @@ impl Counter {
     }
 
     /// Drop a stale window's failures, keeping any live reservation.
+    ///
+    /// Inherited failures expire on the same window as recorded ones. They are
+    /// a shared bucket's evidence against this user-id, and evidence that no
+    /// longer bounds the bucket must not keep bounding the caller it was
+    /// copied to.
     fn expire(&mut self, now: u64) {
         if !self.live(now) {
             self.failures = 0;
+            self.inherited = 0;
         }
     }
 
@@ -526,9 +752,29 @@ impl Counter {
         self.outstanding = self.outstanding.saturating_add(1);
     }
 
-    /// Whether failures and in-flight attempts together have spent `budget`.
+    /// Whether every kind of failure and the attempts in flight have spent
+    /// `budget`.
     fn spent(&self, budget: u32) -> bool {
-        self.failures.saturating_add(self.outstanding) >= budget
+        self.failures
+            .saturating_add(self.inherited)
+            .saturating_add(self.outstanding)
+            >= budget
+    }
+
+    /// What this counter says about one more attempt.
+    ///
+    /// Splits a spent budget by what spent it. Only failures this user-id is
+    /// answerable for -- its own, plus the attempts it has in flight -- justify
+    /// refusing before a verification; when inherited failures are what tipped
+    /// it, the refusal is recoverable instead.
+    fn verdict(&self, budget: u32) -> Verdict {
+        if !self.spent(budget) {
+            Verdict::Admit
+        } else if self.failures.saturating_add(self.outstanding) >= budget {
+            Verdict::Blocked
+        } else {
+            Verdict::Unproven
+        }
     }
 
     /// Settle a reservation as a success, clearing the recorded failures.
@@ -551,7 +797,6 @@ struct Counters {
 }
 
 impl Counters {
-    /// Free at least one named slot, if any counter has gone idle.
     /// The live failures recorded for a user-id in the overflow table.
     ///
     /// Expires the bucket first, so a stale window contributes nothing. Reads
@@ -584,7 +829,7 @@ impl Counters {
             Slot::Named => {
                 if let Some(counter) = self.named.get_mut(user_id) {
                     settle(counter);
-                    if counter.outstanding == 0 && counter.failures == 0 {
+                    if counter.outstanding == 0 && counter.failures == 0 && counter.inherited == 0 {
                         self.named.remove(user_id);
                     }
                 }
@@ -622,7 +867,10 @@ fn overflow_bucket(user_id: &str) -> usize {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
-    use super::{Counter, FailureLimiter, OVERFLOW_BUCKETS, Refusal, overflow_bucket};
+    use super::{
+        Counter, FailureLimiter, MAX_UNPROVEN_IN_FLIGHT, OVERFLOW_BUCKETS, Refusal, Verdict,
+        overflow_bucket,
+    };
     use crate::plugins::identity_basic::config::FailureLimitConfig;
 
     fn limiter(capacity: usize, max_failures: u32) -> FailureLimiter {
@@ -684,12 +932,120 @@ mod tests {
             .expect("the squatter is admitted")
             .record_success();
 
-        assert_eq!(
-            limiter.admit("attacker").err(),
-            Some(Refusal::Blocked),
+        let promoted = limiter
+            .admit("attacker")
+            .expect("a spent inherited count refuses recoverably, so the attempt is admitted");
+        assert!(
+            promoted.is_unproven(),
             "a freed slot must not reset a budget already spent in overflow: promoting onto a \
              zeroed counter made every freed slot a fresh set of guesses, and a trickle of \
-             legitimate logins churns the map for an attacker"
+             legitimate logins churns the map for an attacker. The inherited count must still \
+             bound the attempt, which an unproven admission is: it costs a verification and \
+             serves nothing without a correct password"
+        );
+    }
+
+    /// A promoted user-id must not be blocked on a shared bucket's failures.
+    ///
+    /// The defect: promotion folded the overflow bucket's failures into
+    /// `failures`, so a spent bucket became a spent *named* budget and `admit`
+    /// returned `Blocked`. The resolver then denied a correct password without
+    /// verifying it, on evidence belonging to whatever else hashed into that
+    /// bucket -- the blanket outage the recoverable refusal exists to prevent,
+    /// reintroduced by the one path that leaves the bucket behind.
+    #[test]
+    fn inherited_failures_refuse_recoverably_rather_than_blocking() {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        fail(&limiter, "sprayer", 2);
+        assert!(
+            limiter.saturations() > 0,
+            "the spray must have been counted in overflow for this to exercise promotion"
+        );
+
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+
+        let victim = limiter
+            .admit("sprayer")
+            .expect("an inherited count must not refuse before the credential is verified");
+        assert!(
+            victim.is_unproven(),
+            "a refusal resting on a shared bucket's failures must stay recoverable through \
+             promotion: blocking here denied a correct password unverified on evidence that \
+             could belong to any colliding user-id"
+        );
+
+        victim.record_success();
+        assert_eq!(
+            limiter.proven(),
+            1,
+            "a verified credential must clear the refusal and be counted, so an operator can \
+             see legitimate callers paying for failures they do not own"
+        );
+    }
+
+    /// Own failures must still block outright, inherited ones notwithstanding.
+    ///
+    /// The other side of the test above: making promotion recoverable must not
+    /// make a user-id's *own* spent budget recoverable too, or the bound costs
+    /// a verification per guess instead of refusing before one.
+    #[test]
+    fn a_counter_spent_by_its_own_failures_blocks_even_while_carrying_inherited_ones() {
+        let mut counter = Counter {
+            expires_at_ms: 1_000,
+            failures: 2,
+            inherited: 1,
+            outstanding: 0,
+        };
+
+        assert_eq!(
+            counter.verdict(2),
+            Verdict::Blocked,
+            "own failures reaching the budget must refuse before a verification, whatever else \
+             the counter carries: they name one caller, so no credential is needed to decide"
+        );
+
+        counter.failures = 1;
+        assert_eq!(
+            counter.verdict(2),
+            Verdict::Unproven,
+            "and once the inherited count is what tips the same budget, the refusal must be \
+             recoverable instead: that part of the evidence names no caller"
+        );
+
+        counter.inherited = 0;
+        assert_eq!(
+            counter.verdict(2),
+            Verdict::Admit,
+            "with the inherited count gone, one own failure against a budget of two still has \
+             room, so neither refusal applies"
+        );
+    }
+
+    /// Inherited failures must expire with the window, like recorded ones.
+    ///
+    /// Otherwise a single spray left every colliding user-id paying a
+    /// verification per request forever, since nothing but a correct password
+    /// clears them and `window_secs` is what bounds a failure's lifetime.
+    #[test]
+    fn inherited_failures_expire_on_the_window() {
+        let mut counter = Counter {
+            expires_at_ms: 1_000,
+            failures: 0,
+            inherited: 5,
+            outstanding: 0,
+        };
+
+        counter.expire(1_001);
+
+        assert_eq!(
+            counter.verdict(2),
+            Verdict::Admit,
+            "a window that no longer bounds the bucket must not keep bounding the user-id its \
+             count was copied to"
         );
     }
 
@@ -772,6 +1128,105 @@ mod tests {
             counter.spent(1),
             "and must still count against the budget, which is what bounds parallel guesses"
         );
+    }
+
+    /// Concurrent unproven verifications must be bounded.
+    ///
+    /// The defect: the recoverable path held no admission control at all, so
+    /// repeated wrong-password attempts for one user-id reached the
+    /// directory's verifier together. They occupied its verification permits
+    /// and unrelated callers were denied `DIRECTORY_UNAVAILABLE` -- a refusal
+    /// that costs an attacker nothing, converted into an outage for everyone
+    /// else.
+    ///
+    /// The ceiling is on concurrency, not on how often a caller may prove
+    /// itself: a per-attempt budget would have to live on the shared bucket,
+    /// where a spray would spend it for every colliding caller.
+    #[test]
+    fn concurrent_unproven_verifications_are_bounded_by_the_ceiling() {
+        let limiter = limiter(0, 1);
+        fail(&limiter, "sprayer", 1);
+
+        let held: Vec<_> = std::iter::repeat_with(|| {
+            let attempt = limiter
+                .admit("sprayer")
+                .expect("the ceiling must admit this many unproven attempts at once");
+            assert!(
+                attempt.is_unproven(),
+                "a spent shared bucket admits recoverably, which is what this bounds"
+            );
+            attempt
+        })
+        .take(usize::try_from(MAX_UNPROVEN_IN_FLIGHT).expect("the ceiling fits a usize"))
+        .collect();
+
+        assert_eq!(
+            limiter.admit("sprayer").err(),
+            Some(Refusal::Saturated),
+            "one more concurrent unproven verification must be refused without running: \
+             unbounded, they hold every verification permit the directory has and deny \
+             unrelated callers as a directory failure"
+        );
+
+        drop(held);
+
+        let recovered = limiter
+            .admit("sprayer")
+            .expect("settling the in-flight attempts must return their slots to the ceiling");
+        assert!(
+            recovered.is_unproven(),
+            "and the recovered attempt is still judged on the bucket it shares"
+        );
+    }
+
+    /// Proving a credential must stay possible however often it is asked.
+    ///
+    /// The ceiling bounds concurrency alone. A caller sharing a bucket with a
+    /// spray re-proves itself on every request, so a budget that depleted
+    /// across requests would cut it off -- the blanket lockout the recoverable
+    /// refusal exists to prevent, one layer down.
+    #[test]
+    fn a_proven_credential_can_be_reproven_without_limit() {
+        let limiter = limiter(0, 1);
+        fail(&limiter, "sprayer", 1);
+
+        let rounds = MAX_UNPROVEN_IN_FLIGHT.saturating_mul(4);
+        for _ in 0..rounds {
+            let attempt = limiter
+                .admit("sprayer")
+                .expect("a correct password must never be refused on a shared bucket's budget");
+            assert!(
+                attempt.is_unproven(),
+                "the bucket is still spent, so each attempt is still unproven"
+            );
+            attempt.record_success();
+        }
+
+        assert_eq!(
+            limiter.proven(),
+            u64::from(rounds),
+            "every cleared refusal must be counted, so an operator can see legitimate callers \
+             paying for failures they do not own"
+        );
+    }
+
+    /// An abandoned unproven attempt must return its ceiling slot.
+    ///
+    /// A leaked slot is permanent, so enough dropped attempts -- a client
+    /// disconnect or an upstream timeout is all it takes -- would close the
+    /// recovery path for the life of the process.
+    #[test]
+    fn a_dropped_unproven_attempt_returns_its_ceiling_slot() {
+        let limiter = limiter(0, 1);
+        fail(&limiter, "sprayer", 1);
+
+        for _ in 0..MAX_UNPROVEN_IN_FLIGHT.saturating_mul(4) {
+            drop(
+                limiter
+                    .admit("sprayer")
+                    .expect("a dropped attempt must not retire a slot permanently"),
+            );
+        }
     }
 
     /// The bucket index must stay inside the table for any input.

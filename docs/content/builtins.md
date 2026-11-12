@@ -138,9 +138,17 @@ setting on an argon2 or sha-crypt file, which consume the whole password.
 
 The check runs on every load of the record file, not only at startup. A
 refresh that rewrites an argon2 file as bcrypt under a ceiling above 72 is
-refused and the previous index keeps serving, so the file and the ceiling
-cannot drift apart between reloads. Lower the ceiling to 72 before
+refused and the previous index continues to serve, so the file and the
+ceiling cannot drift apart between reloads. Lower the ceiling to 72 before
 re-hashing a directory to bcrypt.
+
+That retention is bounded. The previous index serves only until it reaches
+`provider.max_staleness_secs`, after which every lookup is denied as
+`auth.directory_unavailable` rather than answered from an index the backend
+no longer stands behind. A refused refresh is therefore a countdown, not a
+steady state: restore a valid file within the staleness ceiling, or
+authentication stops for every user in the directory. The refusal is logged
+once per refresh interval with the path and the parse error.
 
 ### The HTTP transport
 

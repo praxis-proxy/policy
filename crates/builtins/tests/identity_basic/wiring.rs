@@ -559,11 +559,18 @@ async fn an_overflow_attempt_settles_on_the_bucket_it_was_charged_against() {
     let refill = limiter
         .admit("junk")
         .expect("junk takes the only named slot again");
-    let mut admitted = 0_u32;
+    // Counts only the attempts the bucket's own budget admitted. An attempt
+    // marked unproven is past that budget and judged on its credential
+    // instead, so counting it here would measure the recovery path rather than
+    // the budget this test is about.
+    let mut charged = 0_u32;
     for _ in 0..8 {
         match limiter.admit("alice") {
             Ok(admission) => {
-                admitted = admitted.saturating_add(1);
+                if admission.is_unproven() {
+                    break;
+                }
+                charged = charged.saturating_add(1);
                 admission.record_failure();
             },
             Err(_) => break,
@@ -572,7 +579,7 @@ async fn an_overflow_attempt_settles_on_the_bucket_it_was_charged_against() {
     drop(refill);
 
     assert_eq!(
-        admitted, 2,
+        charged, 2,
         "once the window has passed, alice's overflow bucket must offer its whole budget \
          again. Settling the overflow failure on the named counter instead leaves the bucket \
          holding a reservation, and a reservation never expires -- so part of the budget of \
@@ -592,7 +599,7 @@ async fn an_overflow_attempt_settles_on_the_bucket_it_was_charged_against() {
 /// user-ids through real bcrypt verifications would take minutes.
 #[test]
 fn a_spray_that_blocks_every_overflow_bucket_still_lets_a_proven_caller_through() {
-    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
+    use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
 
     let limiter = FailureLimiter::new(
         serde_json::from_value(serde_json::json!({
@@ -620,16 +627,20 @@ fn a_spray_that_blocks_every_overflow_bucket_still_lets_a_proven_caller_through(
     );
 
     // A caller the saturated map cannot name, whose bucket the spray spent.
-    // The refusal is recoverable, not a verdict on this caller.
-    assert_eq!(
-        limiter.admit("victim").err(),
-        Some(Refusal::Unproven),
-        "a spent shared bucket must refuse as unproven, not as blocked: the failures in it \
-         belong to the spray, not to this caller"
+    // The refusal is recoverable, not a verdict on this caller, so the attempt
+    // is admitted for a verification rather than denied outright.
+    let victim = limiter
+        .admit("victim")
+        .expect("a spent shared bucket must refuse recoverably, not block the attempt");
+    assert!(
+        victim.is_unproven(),
+        "a spent shared bucket must mark the attempt unproven, not serve it unconditionally: \
+         the failures in it belong to the spray, not to this caller, and only a verified \
+         credential tells the two apart"
     );
 
-    // Verifying the credential is the evidence the bucket could not supply.
-    limiter.admit_proven();
+    // Settling it as a success is the evidence the bucket could not supply.
+    victim.record_success();
     assert_eq!(
         limiter.proven(),
         1,
@@ -653,11 +664,18 @@ fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
         .expect("the junk name takes the only named slot")
         .record_failure();
 
-    let mut admitted = 0_u32;
+    // Attempts the shared bucket's budget admitted outright. Past it the
+    // attempts come back marked unproven -- bounded by the recovery ceiling
+    // and served only on a correct password -- which is a different bound and
+    // not the one this test pins.
+    let mut charged = 0_u32;
     for _ in 0..8 {
         match limiter.admit("alice") {
             Ok(admission) => {
-                admitted = admitted.saturating_add(1);
+                if admission.is_unproven() {
+                    break;
+                }
+                charged = charged.saturating_add(1);
                 admission.record_failure();
             },
             Err(_) => break,
@@ -665,7 +683,7 @@ fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
     }
 
     assert_eq!(
-        admitted, 2,
+        charged, 2,
         "a user-id the saturated map cannot name must still be bounded by max_failures: \
          filling the map with a junk name previously bought an attacker an unlimited budget \
          against any fresh target"
