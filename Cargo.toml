@@ -132,6 +132,10 @@ paste = "1"
 futures = "0.3"
 hashbrown = "0.17"
 arc-swap = "1.9"
+# Opens a secret file beneath a directory without a second path resolution, so
+# `base_dir` containment cannot be raced by a symlink swap. No `unsafe` in our
+# crates: the syscalls (`openat2` with `RESOLVE_BENEATH`) live in the crate.
+cap-std = "4"
 # Exhaustive scheduler for a tiny model of the generation / snapshot
 # pairing. Dev-only, and only compiled when a crate enables `--cfg loom`.
 loom = "0.7"

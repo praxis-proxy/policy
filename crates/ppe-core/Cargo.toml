@@ -67,6 +67,8 @@ openssl = { workspace = true, optional = true }
 # Secret material under `crypto-rustcrypto`; `fips` uses OpenSSL's DRBG.
 getrandom = { workspace = true, optional = true }
 arc-swap = { workspace = true }
+# Confines the file secret provider to its `base_dir` at open time.
+cap-std = { workspace = true }
 wildmatch = { workspace = true }
 chrono = { workspace = true }
 # Zeroizing wrapper for raw credential material in RawCredentialsExtension.

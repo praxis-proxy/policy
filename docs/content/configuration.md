@@ -371,15 +371,20 @@ a kind no registered factory provides fails there, naming the kind.
 
 | kind | `ref` is | notes |
 |---|---|---|
-| `file` | a path | With `base_dir`, a reference must be relative, may not contain `..`, and must resolve inside the directory once symlinks are followed. One trailing newline is stripped. An empty file is an error, not an empty value. |
+| `file` | a path | With `base_dir`, a reference must be relative, may not contain `..`, and is opened beneath the directory, so a symlink that leaves it is refused. One trailing newline is stripped. An empty file is an error, not an empty value. |
 | `env` | a variable name | Takes no settings; any key is refused. A process's environment is fixed at exec, so these never rotate without a restart. |
 
 `base_dir` containment holds against the file a reference reaches, not just
 against the reference as written, so a link below the directory cannot read
-outside it. Links that stay inside are followed normally, which is what a
+outside it. The file is opened beneath the directory in one step (`openat2` with
+`RESOLVE_BENEATH` on Linux, a checked component-by-component walk elsewhere), so
+a writer inside the directory cannot swap a link between a check and the read.
+A link that leaves the directory is refused with a reference error on every
+read. Relative links that stay inside are followed normally, which is what a
 Kubernetes Secret volume and a CSI-projected secret both need: their `..data`
-indirection and the timestamped directory behind it are symlinks within the
-mount. `base_dir` may itself be a symlink.
+indirection and the timestamped directory behind it are relative symlinks within
+the mount. An absolute link is refused even when its target is inside the
+directory; make it relative. `base_dir` may itself be a symlink.
 
 `file` covers Kubernetes Secret volumes, CSI-projected secrets, container
 secret mounts, and a Vault Agent sidecar templating to disk, so a
