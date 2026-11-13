@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// Providers with no dependencies beyond the standard library.
+// Providers with no network dependency.
 //
 // `env` reads a variable, `file` reads a path. Between them they cover the
 // deployments that hand a process its secrets through the platform:
@@ -17,6 +17,9 @@
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -129,20 +132,35 @@ struct FileSettings {
 ///
 /// With `base_dir` set, the set of files this provider can read is the
 /// directory an operator named: a reference must be relative and free of `..`,
-/// and the file it reaches must resolve inside the directory once symlinks are
-/// followed. Without it, a reference is any path the process can open, which is
-/// the more convenient default and the less contained one.
+/// and the file is opened *beneath* the directory, so a symlink that leaves it
+/// is refused. Links that stay inside, at any component, are followed, which is
+/// what a Kubernetes projected mount needs; an absolute link is refused even
+/// when its target is inside. Without `base_dir`, a reference is any path the
+/// process can open, which is the more convenient default and the less
+/// contained one.
 pub struct FileSecretProvider {
     base_dir: Option<PathBuf>,
 }
 
 impl FileSecretProvider {
-    /// Where a reference resolves, refusing one that leaves `base_dir`
-    /// lexically.
-    fn path_for(&self, reference: &str) -> Result<PathBuf, SecretError> {
+    /// Open the file `reference` addresses.
+    ///
+    /// With `base_dir` the file is opened through a handle on the directory,
+    /// with a single `openat2(RESOLVE_BENEATH)` call on Linux and a checked
+    /// component-by-component walk elsewhere, so the descriptor returned is the
+    /// one the containment decision was made on. Checking containment after an
+    /// open, by resolving the path a second time, leaves a window in which a
+    /// writer inside the directory swaps a link and the check passes for a file
+    /// other than the one opened.
+    ///
+    /// The directory is opened per read rather than at build time because a
+    /// projected mount may not exist yet when the factory runs, and so that a
+    /// directory replaced on disk is the one read.
+    fn open(&self, reference: &str) -> Result<std::fs::File, SecretError> {
         let candidate = Path::new(reference);
         let Some(base) = self.base_dir.as_ref() else {
-            return Ok(candidate.to_path_buf());
+            return std::fs::File::open(candidate)
+                .map_err(|e| open_error(reference, candidate, &e));
         };
         if candidate.is_absolute() {
             return Err(SecretError::reference(
@@ -159,115 +177,60 @@ impl FileSecretProvider {
                 "`..` would resolve outside `base_dir`",
             ));
         }
-        Ok(base.join(candidate))
-    }
 
-    /// Refuse a path that resolves outside `base_dir` once symlinks are
-    /// followed, and confirm `opened` is that same file.
-    ///
-    /// Opening follows symlinks, so the lexical checks in [`Self::path_for`]
-    /// bound the reference and not the file it reaches: a link below `base_dir`,
-    /// at any component or at the leaf, resolves wherever it points.
-    /// Containment has to hold against the resolved target for the directory to
-    /// be the set of files this provider can read.
-    ///
-    /// Comparing resolved paths rather than refusing links is what keeps a
-    /// Kubernetes projected mount working, since its `..data` indirection stays
-    /// inside the directory.
-    ///
-    /// `base_dir` is resolved per read rather than at build time because a
-    /// projected mount may not exist yet when the factory runs.
-    fn confirm_contained(
-        &self,
-        reference: &str,
-        path: &Path,
-        base: &Path,
-        opened: &std::fs::File,
-    ) -> Result<(), SecretError> {
-        let base = std::fs::canonicalize(base).map_err(|e| {
-            SecretError::backend(format!("resolving `base_dir` `{}`: {e}", base.display()))
+        let dir = Dir::open_ambient_dir(base, ambient_authority()).map_err(|e| {
+            SecretError::backend(format!("opening `base_dir` `{}`: {e}", base.display()))
         })?;
-        let resolved = std::fs::canonicalize(path)
-            .map_err(|e| SecretError::backend(format!("resolving `{}`: {e}", path.display())))?;
-        if !resolved.starts_with(&base) {
-            return Err(SecretError::reference(
-                reference,
-                "resolves outside `base_dir` once symlinks are followed",
-            ));
-        }
-        same_file_as_opened(reference, &resolved, opened)
+        dir.open(candidate)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|e| {
+                if left_the_directory(&e) {
+                    SecretError::reference(
+                        reference,
+                        "resolves outside `base_dir` once symlinks are followed",
+                    )
+                } else {
+                    open_error(reference, &base.join(candidate), &e)
+                }
+            })
     }
 }
 
-/// Confirm the descriptor the read will use is the file containment passed.
+/// True when `error` is the refusal `cap-std` raises for a path that leaves the
+/// directory it was opened beneath.
 ///
-/// The check resolves a path, and the read takes its bytes from a descriptor
-/// opened before that. A link swapped in between would leave the read taking
-/// bytes from a file the check never saw. Device and inode identify the file
-/// behind the descriptor, so comparing them closes that window.
-///
-/// The crate forbids `unsafe`, so `O_NOFOLLOW` and `openat2` are unreachable
-/// and this is the strongest confirmation the standard library offers.
-#[cfg(unix)]
-fn same_file_as_opened(
-    reference: &str,
-    resolved: &Path,
-    opened: &std::fs::File,
-) -> Result<(), SecretError> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let open_meta = opened
-        .metadata()
-        .map_err(|e| SecretError::backend(format!("inspecting the opened `{reference}`: {e}")))?;
-    let path_meta = std::fs::metadata(resolved)
-        .map_err(|e| SecretError::backend(format!("inspecting `{}`: {e}", resolved.display())))?;
-    if open_meta.dev() != path_meta.dev() || open_meta.ino() != path_meta.ino() {
-        return Err(SecretError::reference(
-            reference,
-            "resolved to a different file while it was being opened",
-        ));
-    }
-    Ok(())
+/// It is a `PermissionDenied` with no OS error behind it, which is what tells
+/// it from a file the process lacks permission to read, an `EACCES` that
+/// carries one.
+fn left_the_directory(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied && error.raw_os_error().is_none()
 }
 
-#[cfg(not(unix))]
-fn same_file_as_opened(
-    _reference: &str,
-    _resolved: &Path,
-    _opened: &std::fs::File,
-) -> Result<(), SecretError> {
-    Ok(())
+/// The error for a file that would not open.
+fn open_error(reference: &str, path: &Path, error: &std::io::Error) -> SecretError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        SecretError::not_found(reference)
+    } else {
+        // The path is operator-authored and safe to print; the error text comes
+        // from the OS and carries no file content.
+        SecretError::backend(format!("opening `{}`: {error}", path.display()))
+    }
 }
 
 #[async_trait]
 impl SecretProvider for FileSecretProvider {
     async fn get_secret(&self, reference: &str) -> Result<Zeroizing<String>, SecretError> {
-        let path = self.path_for(reference)?;
-        // Opened before containment is checked so the bytes read come from a
-        // descriptor the check confirmed, rather than from a second resolution
-        // of the path.
-        let mut opened = std::fs::File::open(&path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                SecretError::not_found(reference)
-            } else {
-                // The path is operator-authored and safe to print; the error
-                // text comes from the OS and carries no file content.
-                SecretError::backend(format!("opening `{}`: {e}", path.display()))
-            }
-        })?;
-        if let Some(base) = self.base_dir.as_ref() {
-            self.confirm_contained(reference, &path, base, &opened)?;
-        }
+        let mut opened = self.open(reference)?;
 
         let mut raw = Zeroizing::new(String::new());
         #[expect(
             clippy::verbose_file_reads,
-            reason = "reads the descriptor containment was checked against; `fs::read_to_string` \
+            reason = "reads the descriptor that was opened beneath `base_dir`; `fs::read_to_string` \
                       would resolve the path a second time and read whatever it resolved to then"
         )]
         opened
             .read_to_string(&mut raw)
-            .map_err(|e| SecretError::backend(format!("reading `{}`: {e}", path.display())))?;
+            .map_err(|e| SecretError::backend(format!("reading `{reference}`: {e}")))?;
 
         let value = trim_one_trailing_newline(&raw);
         if value.is_empty() {
@@ -355,27 +318,32 @@ mod tests {
     #[test]
     fn base_dir_refuses_a_reference_that_would_leave_it() {
         let provider = file_provider(Some("/etc/ppe"));
-        provider
-            .path_for("../../etc/shadow")
+        let parent = provider
+            .open("../../etc/shadow")
             .expect_err("`..` escapes base_dir");
-        provider
-            .path_for("/etc/shadow")
+        assert!(matches!(parent, SecretError::Reference { .. }), "{parent}");
+        let absolute = provider
+            .open("/etc/shadow")
             .expect_err("an absolute path ignores base_dir");
-        assert_eq!(
-            provider.path_for("upstream.key").expect("relative is fine"),
-            PathBuf::from("/etc/ppe/upstream.key")
+        assert!(
+            matches!(absolute, SecretError::Reference { .. }),
+            "{absolute}"
         );
     }
 
-    #[test]
-    fn without_base_dir_any_path_resolves() {
-        let provider = file_provider(None);
-        assert_eq!(
-            provider
-                .path_for("/etc/ppe/upstream.key")
-                .expect("absolute"),
-            PathBuf::from("/etc/ppe/upstream.key")
-        );
+    #[tokio::test]
+    async fn without_base_dir_any_path_resolves() {
+        let dir = temp_dir();
+        let file = dir.join("upstream.key");
+        std::fs::write(&file, "hunter2\n").expect("write");
+
+        let value = file_provider(None)
+            .get_secret(file.to_str().expect("utf-8 temp path"))
+            .await
+            .expect("an absolute path reads without base_dir");
+        assert_eq!(value.as_str(), "hunter2");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -429,24 +397,6 @@ mod tests {
         assert_eq!(value.as_str(), "hunter2");
     }
 
-    /// The descriptor and the resolved path must identify the same file.
-    #[cfg(unix)]
-    #[test]
-    fn an_opened_file_mismatching_the_resolved_path_is_refused() {
-        let dir = temp_dir();
-        let first = dir.join("a.key");
-        let second = dir.join("b.key");
-        std::fs::write(&first, "first").expect("write first file");
-        std::fs::write(&second, "second").expect("write second file");
-        let opened = std::fs::File::open(&first).expect("open first file");
-
-        let err = same_file_as_opened("a.key", &second, &opened)
-            .expect_err("the resolved path must match the opened descriptor");
-        assert!(matches!(err, SecretError::Reference { .. }), "{err}");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// A link below `base_dir` is the escape the lexical checks do not see:
     /// the reference is relative and `..`-free, and the file is outside.
     #[cfg(unix)]
@@ -491,9 +441,9 @@ mod tests {
     }
 
     /// The shape a Kubernetes Secret volume and a CSI-projected secret both
-    /// have: the reference is a link to `..data`, which is a link to a
-    /// timestamped directory. Every hop stays inside the mount, so refusing
-    /// links outright would break every such deployment.
+    /// have: the reference is a relative link to `..data`, which is a relative
+    /// link to a timestamped directory. Every hop stays inside the mount, so
+    /// refusing links outright would break every such deployment.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_projected_secret_symlink_farm_reads() {
@@ -501,7 +451,7 @@ mod tests {
         let generation = base.join("..2026_10_08_00_00_00.0");
         std::fs::create_dir_all(&generation).expect("generation dir");
         std::fs::write(generation.join("upstream.key"), "hunter2\n").expect("write");
-        std::os::unix::fs::symlink(&generation, base.join("..data")).expect("..data");
+        std::os::unix::fs::symlink("..2026_10_08_00_00_00.0", base.join("..data")).expect("..data");
         std::os::unix::fs::symlink(
             PathBuf::from("..data").join("upstream.key"),
             base.join("upstream.key"),
@@ -517,8 +467,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// `base_dir` itself may be a link, which is why containment compares two
-    /// resolved paths rather than resolving only the reference.
+    /// A link that stays inside `base_dir` is followed whichever component it
+    /// is, but an absolute one is refused even when its target is inside: the
+    /// confinement cannot tell where an absolute path leads without resolving it
+    /// a second time.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_absolute_symlink_is_refused_even_when_its_target_is_inside() {
+        let base = temp_dir();
+        std::fs::write(base.join("real.key"), "hunter2\n").expect("write");
+        std::os::unix::fs::symlink(base.join("real.key"), base.join("absolute.key"))
+            .expect("absolute link");
+        std::os::unix::fs::symlink("real.key", base.join("relative.key")).expect("relative link");
+
+        let provider = provider_at(&base);
+        let err = provider
+            .get_secret("absolute.key")
+            .await
+            .expect_err("an absolute link is refused");
+        assert!(matches!(err, SecretError::Reference { .. }), "{err}");
+        let value = provider
+            .get_secret("relative.key")
+            .await
+            .expect("a relative link inside reads");
+        assert_eq!(value.as_str(), "hunter2");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A relative link that climbs out with `..` is the same escape as an
+    /// absolute one, and is refused on every read rather than depending on the
+    /// state of the file it reaches, so a writer cannot make it flicker.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relative_symlink_climbing_out_is_refused_on_every_read() {
+        let root = temp_dir();
+        let base = root.join("base");
+        std::fs::create_dir_all(&base).expect("base dir");
+        std::fs::write(root.join("outside.key"), "stolen\n").expect("write");
+        std::os::unix::fs::symlink("../outside.key", base.join("escape.key")).expect("link");
+
+        let provider = provider_at(&base);
+        for _ in 0..3 {
+            let err = provider
+                .get_secret("escape.key")
+                .await
+                .expect_err("the link leaves base_dir");
+            assert!(matches!(err, SecretError::Reference { .. }), "{err}");
+        }
+
+        // The link replaced by a file and restored, the swap the open-then-check
+        // sequence was exposed to: the outside file is still never returned.
+        std::fs::remove_file(base.join("escape.key")).expect("remove link");
+        std::fs::write(base.join("escape.key"), "inside\n").expect("regular file");
+        assert_eq!(
+            provider
+                .get_secret("escape.key")
+                .await
+                .expect("reads")
+                .as_str(),
+            "inside"
+        );
+        std::fs::remove_file(base.join("escape.key")).expect("remove file");
+        std::os::unix::fs::symlink("../outside.key", base.join("escape.key")).expect("restore");
+        let err = provider
+            .get_secret("escape.key")
+            .await
+            .expect_err("the restored link still leaves base_dir");
+        assert!(matches!(err, SecretError::Reference { .. }), "{err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `base_dir` that does not exist is a backend failure, not a missing
+    /// secret and not a containment refusal.
+    #[tokio::test]
+    async fn a_missing_base_dir_is_a_backend_error() {
+        let root = temp_dir();
+        let err = provider_at(&root.join("absent"))
+            .get_secret("upstream.key")
+            .await
+            .expect_err("no directory");
+        assert!(matches!(err, SecretError::Backend { .. }), "{err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `base_dir` itself may be a link: only what lies beneath it is confined.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_symlinked_base_dir_reads() {
