@@ -909,3 +909,109 @@ async fn client_role_rejects_token_without_client_id() {
     let violation = result.violation.expect("violation surfaced");
     assert_eq!(violation.code, "auth.mapping_failed");
 }
+
+// -----------------------------------------------------------------------------
+// Delegation chain from the `act` claim
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_nested_act_claim_fills_the_delegation_chain() {
+    let token = mint_jwt(json!({
+        "sub": "alice@corp.com",
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "exp": now_unix() + 300,
+        "iat": now_unix() - 30,
+        "act": { "sub": "agent-b", "act": { "sub": "agent-a" } },
+    }));
+
+    let result = invoke_bearer(token).await;
+    assert!(result.continue_processing, "{:?}", result.violation);
+
+    let identity =
+        IdentityPayload::from_pipeline_result(&result).expect("payload should be present");
+    let delegation = identity.delegation.as_ref().expect("delegation populated");
+    assert_eq!(delegation.depth, 2);
+    assert!(delegation.delegated);
+    assert_eq!(
+        delegation.origin_subject_id.as_deref(),
+        Some("alice@corp.com")
+    );
+    assert_eq!(delegation.actor_subject_id.as_deref(), Some("agent-b"));
+    let delegators: Vec<&str> = delegation
+        .chain
+        .iter()
+        .map(|hop| hop.subject_id.as_str())
+        .collect();
+    assert_eq!(delegators, ["alice@corp.com", "agent-a"]);
+    assert!(
+        delegation.age_seconds >= 30.0 && delegation.age_seconds < 120.0,
+        "age counts from iat: {}",
+        delegation.age_seconds
+    );
+
+    // What a host reads: the chain reaches the request's extensions.
+    let ext = identity.apply_to_extensions(Default::default());
+    let applied = ext.delegation.as_ref().expect("delegation extension");
+    assert_eq!((applied.depth, applied.delegated), (2, true));
+}
+
+#[tokio::test]
+async fn a_token_without_act_leaves_the_delegation_slot_empty() {
+    let token = mint_jwt(json!({
+        "sub": "alice@corp.com",
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+    }));
+
+    let result = invoke_bearer(token).await;
+    assert!(result.continue_processing, "{:?}", result.violation);
+    let identity =
+        IdentityPayload::from_pipeline_result(&result).expect("payload should be present");
+    assert!(identity.delegation.is_none());
+}
+
+#[tokio::test]
+async fn a_malformed_act_claim_denies_instead_of_passing_as_direct() {
+    for act in [json!("agent-a"), json!({ "client_id": "agent-a" })] {
+        let token = mint_jwt(json!({
+            "sub": "alice@corp.com",
+            "iss": TEST_ISSUER,
+            "aud": TEST_AUDIENCE,
+            "exp": now_unix() + 300,
+            "iat": now_unix(),
+            "act": act,
+        }));
+
+        let result = invoke_bearer(token).await;
+        assert!(!result.continue_processing, "act must not be ignored");
+        let violation = result.violation.expect("violation surfaced");
+        assert_eq!(violation.code, "auth.mapping_failed");
+    }
+}
+
+#[tokio::test]
+async fn the_client_role_ignores_act() {
+    let token = mint_jwt(json!({
+        "sub": "alice@corp.com",
+        "client_id": "hr-copilot",
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+        "act": { "sub": "agent-a" },
+    }));
+
+    let result = invoke(
+        resolver_plugin_config_for("client", "Authorization"),
+        token,
+        TokenSource::Bearer,
+    )
+    .await;
+    assert!(result.continue_processing, "{:?}", result.violation);
+    let identity =
+        IdentityPayload::from_pipeline_result(&result).expect("payload should be present");
+    assert!(identity.delegation.is_none());
+}
