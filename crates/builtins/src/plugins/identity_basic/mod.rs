@@ -19,6 +19,8 @@ pub mod directory;
 pub mod factory;
 /// A bound on repeated failures for one user-id.
 pub mod failure_limit;
+/// The index, refresh and capacity machinery the file backends share.
+pub mod file_backend;
 /// The `.htpasswd` backend.
 pub mod htpasswd;
 /// Record fields onto the identity slots.
