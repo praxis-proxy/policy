@@ -58,6 +58,7 @@ directly:
 | Claims | `claim.<k>` |
 | OAuth client | `client.client_id`, `client.authorized_scopes`, `client.roles`, `client.permissions`, and aliases for undotted members under `client.role.<r>` / `client.perm.<p>` |
 | Workload (SPIFFE / mTLS) | `caller_workload.spiffe_id`, `caller_workload.trust_domain` |
+| Delegation chain (`role: user` with an `act` claim) | `delegation.depth`, `delegated`, `delegation.origin_subject_id`, `delegation.actor_subject_id`, `delegation.age_seconds` |
 
 `require(role.hr)` is true when the verified token carried the `hr` role, and
 `redact(!perm.view_ssn)` redacts unless it carried the `view_ssn` permission.
@@ -66,6 +67,42 @@ can interpret dotted keys as nested namespaces. Names containing `:` cannot be
 written as attribute paths. Use the canonical sets for either case:
 `subject.roles contains "admin.readonly"` or
 `subject.roles contains "system:authenticated"`.
+
+## Delegation chain from the `act` claim
+
+A token minted by RFC 8693 token exchange names the party acting for the
+subject in an `act` claim, and an actor that was itself acting for someone nests
+the earlier `act` inside its own:
+
+```json
+{ "sub": "alice", "act": { "sub": "agent-b", "act": { "sub": "agent-a" } } }
+```
+
+A `role: user` `identity/jwt` resolver reads that nesting into the delegation
+chain, so `delegation.*` predicates see the chain the token carries. Alice
+delegated to `agent-a`, which delegated to `agent-b`, so `require(delegation.depth <= 1)`
+refuses the token above (depth 2) and `require(!delegated)` refuses any token
+that carries `act`.
+
+| Attribute | Value for the token above |
+|-----------|---------------------------|
+| `delegation.depth` | `2`, one per `act` object |
+| `delegated` | `true`; `false` when the token has no `act` |
+| `delegation.origin_subject_id` | the resolved subject id (`alice`) |
+| `delegation.actor_subject_id` | the outermost `act.sub` (`agent-b`), the current actor |
+| `delegation.age_seconds` | seconds since the token's `iat`, `0` without one |
+
+The chain is trusted as presented: it is as trustworthy as the issuer, because
+the resolver reads it only from a token whose signature, issuer and audience
+verified. Depth is never capped, since a clipped chain would read shallower than
+it is. A malformed `act` (not an object, or an object without a non-empty string
+`sub`) denies the request with `auth.mapping_failed` instead of being ignored,
+so a delegated call cannot pass as direct; a JSON `null` counts as absent.
+Because the chain is whatever the issuer wrote, write depth limits against
+issuers that record `act` honestly: an issuer that never writes it leaves
+`delegation.depth` at `0`.
+
+The `client` and `caller_workload` roles ignore `act`.
 
 ## Multiple sources
 

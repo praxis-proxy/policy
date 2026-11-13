@@ -71,6 +71,7 @@ use praxis_policy_core::identity::credential::{CredentialLocation, ExtractionErr
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig, PluginMode};
 
+use crate::plugins::identity_jwt::actor_chain;
 use crate::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE;
 use crate::plugins::identity_jwt::config::DpopMode;
 use crate::plugins::identity_jwt::config::{
@@ -1074,6 +1075,19 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
             TokenRole::User => match self.claim_mapper.map_subject(&token_data.claims) {
                 Some(mut s) => {
                     s.key_binding = key_binding;
+                    // An `act` claim is the delegation chain: read it from the
+                    // verified token as presented, and refuse a malformed one
+                    // rather than let a delegated call pass as direct.
+                    match actor_chain::read(&token_data.claims, s.id.as_deref(), chrono::Utc::now())
+                    {
+                        Ok(chain) => updated.delegation = chain.or(updated.delegation),
+                        Err(e) => {
+                            return PluginResult::deny(PluginViolation::new(
+                                "auth.mapping_failed",
+                                e.reason(),
+                            ));
+                        },
+                    }
                     updated.subject = Some(s);
                 },
                 None => {

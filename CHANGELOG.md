@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Delegation chain from the `act` claim.** A `role: user` `identity/jwt`
+  resolver reads a token's RFC 8693 `act` claim into the delegation chain, so
+  `delegation.depth`, `delegated`, `delegation.origin_subject_id`,
+  `delegation.actor_subject_id` and `delegation.age_seconds` carry real values
+  instead of being constant. The chain is taken as presented from a verified
+  token and its depth is never capped. A token whose `act` is not an object, or
+  names no actor `sub`, is now denied with `auth.mapping_failed` rather than
+  passing as a direct call. Tokens without `act` are unchanged.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added
