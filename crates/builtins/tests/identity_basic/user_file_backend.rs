@@ -240,6 +240,48 @@ fn an_unparseable_expiry_fails_at_load_rather_than_meaning_no_expiry() {
 }
 
 #[test]
+fn a_present_but_empty_expiry_fails_at_load() {
+    for (spelling, value) in [("an explicit null", "~"), ("nothing at all", "")] {
+        let file = UserYamlFile::write(&format!(
+            "users:\n  - username: alice\n    password_hash: {}\n    expires_at: {value}\n",
+            bcrypt_hash("correct horse", 4)
+        ));
+
+        let Err(error) = directory(&file) else {
+            panic!(
+                "`expires_at` written as {spelling} must fail at load: it reads to a human as \
+                 an expiry that is set and to serde as absent, which is the silent \
+                 never-expires outcome R25 exists to prevent"
+            );
+        };
+        assert!(
+            error.contains("expires_at"),
+            "the error must name the field so an operator knows which key to fix: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_record_with_no_expiry_key_never_expires() {
+    let file = UserYamlFile::write(&format!(
+        "users:\n  - username: alice\n    password_hash: {}\n",
+        bcrypt_hash("correct horse", 4)
+    ));
+    let dir = directory(&file).expect("a record with no expiry key loads");
+
+    let record = dir
+        .lookup("alice", &services())
+        .await
+        .expect("the lookup answers")
+        .expect("alice is in the file");
+    assert!(
+        record.expires_at.is_none(),
+        "omitting the key is the one way to say a record does not expire, and it must keep \
+         working now that an empty value is refused"
+    );
+}
+
+#[test]
 fn an_expiry_that_is_a_date_without_a_time_fails_at_load() {
     let file = UserYamlFile::write(&format!(
         "users:\n  - username: alice\n    password_hash: {}\n    expires_at: 2020-01-01\n",
@@ -420,6 +462,71 @@ async fn arbitrary_projectable_record_fields_are_accepted() {
     );
     assert_eq!(record.fields.get("clearance"), Some(&serde_json::json!(3)));
     assert_eq!(record.fields.get("on_call"), Some(&serde_json::json!(true)));
+}
+
+#[test]
+fn no_load_error_carries_stored_hash_material() {
+    let real = bcrypt_hash("correct horse", 4);
+
+    for (shape, body) in [
+        (
+            "a record pasted as a bare `.htpasswd` line",
+            format!("users:\n  - username: alice\n    password_hash: {real}\n  - bob:{real}\n"),
+        ),
+        (
+            "a record list written as a map",
+            format!("users:\n  alice: {real}\n"),
+        ),
+        (
+            "a hash where a record was expected",
+            format!("users:\n  - {real}\n"),
+        ),
+    ] {
+        let file = UserYamlFile::write(&body);
+        let Err(error) = directory(&file) else {
+            panic!("{shape} must fail at load");
+        };
+        assert!(
+            !error.contains(&real) && !error.contains("$2"),
+            "a load error must carry no stored hash material: it is logged on every refresh \
+             interval while the previous index keeps serving, so a verifier in it reaches \
+             operator logs repeatedly and quietly. {shape} produced: {error}"
+        );
+        assert!(
+            error.contains("parsing"),
+            "the error must still name the parse so an operator can act on it: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_reload_error_carries_stored_hash_material() {
+    let real = bcrypt_hash("correct horse", 4);
+    let file = UserYamlFile::write(&format!(
+        "users:\n  - username: alice\n    password_hash: {real}\n"
+    ));
+    let dir = directory(&file).expect("the file loads");
+
+    file.rewrite(&format!(
+        "users:\n  - username: alice\n    password_hash: {real}\n  - bob:{real}\n"
+    ));
+    let Err(error) = dir.reload() else {
+        panic!("a reload onto a malformed file must fail");
+    };
+
+    assert!(
+        !error.contains(&real) && !error.contains("$2"),
+        "the reload path is the one that matters: this string goes to `tracing::warn!` once \
+         per refresh interval, forever, while authentication keeps working, so nothing \
+         prompts an operator to notice. Got: {error}"
+    );
+    assert!(
+        dir.lookup("alice", &services())
+            .await
+            .expect("the lookup answers")
+            .is_some(),
+        "the previous index must keep serving, which is what makes the leak quiet"
+    );
 }
 
 #[test]

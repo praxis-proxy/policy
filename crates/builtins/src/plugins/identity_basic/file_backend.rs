@@ -121,8 +121,15 @@ pub trait IndexSource: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// An operator-facing message for an unreadable file, a malformed record,
     /// a duplicate user-id, a refused or over-parameterised hash, or records
-    /// that do not share one cost profile. The message must carry no
-    /// credential or hash material.
+    /// that do not share one cost profile.
+    ///
+    /// The message must carry no credential or hash material, and that
+    /// obligation is the implementor's: a reload failure is logged on every
+    /// refresh interval while the previous index keeps serving, so anything
+    /// in the message reaches operator logs repeatedly and quietly. A parser
+    /// error must not be forwarded verbatim -- `serde_yaml` and friends quote
+    /// the offending input back, which for a record file is a stored hash.
+    /// Reduce such an error to its location before returning it.
     fn read(&self, max_password_bytes: Option<usize>) -> Result<HashMap<String, Entry>, String>;
 
     /// The file this source reads, for a load error and the reload warning.
@@ -816,8 +823,14 @@ impl ReloadState {
 
         // Rate limited by the refresh interval itself: this runs once per
         // interval, not once per request, because the slot was claimed above.
-        // The path is operator-supplied and the error carries no credential
-        // material.
+        //
+        // The path is operator-supplied. The error is whatever the source
+        // returned, and a source is required by `IndexSource::read` to keep
+        // credential and hash material out of it -- this line is why that is
+        // a contract rather than a courtesy: a reload error lands in operator
+        // logs on every refresh interval, post-startup, while the plugin goes
+        // on serving the previous index. A source that forwards a parser error
+        // verbatim will leak whatever that parser quotes back.
         tracing::warn!(
             backend = state.source.kind(),
             path = %state.source.path().display(),

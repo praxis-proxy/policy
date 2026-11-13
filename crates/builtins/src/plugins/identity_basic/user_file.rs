@@ -69,7 +69,14 @@ pub struct UserFileRecord {
     /// deserializing to `None` and silently meaning "never expires". R25 names
     /// that specific failure, and it is the one a `String` field would
     /// reintroduce.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// A present-but-null value is refused for the same reason. `expires_at:`
+    /// with nothing after it, or an explicit `~`, reads to a human as "an
+    /// expiry is set here" and to serde as `None`, which is the silent
+    /// never-expires outcome spelled a second way. Omitting the key is the
+    /// only way to say a record does not expire.
+    #[serde(default, deserialize_with = "required_if_present")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
 
     /// Everything else, which is what the `record_map` block projects.
@@ -83,6 +90,31 @@ pub struct UserFileRecord {
     /// into an upstream header -- is worth closing structurally.
     #[serde(flatten)]
     pub fields: HashMap<String, Value>,
+}
+
+/// Accept a timestamp, refuse a null, and leave an absent key as `None`.
+///
+/// `#[serde(default)]` supplies the absent case, so this is only reached when
+/// the key is present: a null there is an operator writing an expiry they did
+/// not write, and treating it as "no expiry" is the failure R25 exists to
+/// prevent.
+///
+/// # Errors
+///
+/// A null value, or anything that is not an RFC 3339 timestamp.
+fn required_if_present<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    match Option::<DateTime<Utc>>::deserialize(deserializer)? {
+        Some(at) => Ok(Some(at)),
+        None => Err(D::Error::custom(
+            "`expires_at` is present but empty; write a timestamp, or remove the key \
+             entirely to mean the record does not expire",
+        )),
+    }
 }
 
 /// The file as authored.
@@ -183,8 +215,44 @@ impl IndexSource for UserFileSource {
         // `username` or `password_hash`, and an `expires_at` that is not a
         // timestamp all land here, at load, rather than denying requests later
         // as though the passwords were wrong.
-        let file: UserFile = serde_yaml::from_str(&text)
-            .map_err(|e| format!("parsing {}: {e}", config.path.display()))?;
+        //
+        // The error is forwarded only when it cannot carry record content.
+        // `serde_yaml` names fields and keys in almost every message --
+        // "missing field `password_hash`", "unknown field `user`",
+        // "users[0].expires_at: input contains invalid characters" -- and that
+        // is exactly what an operator needs. The one variant that quotes the
+        // input back is `invalid type`, which a record written as a bare
+        // scalar triggers: a pasted `.htpasswd` line, the mistake a migrating
+        // operator makes, yields `invalid type: string "bob:$2b$..."` carrying
+        // a stored hash. That string reaches the refresh path's
+        // `tracing::warn!`, so a verifier would land in operator logs on every
+        // reload while the plugin kept serving and nothing prompted anyone to
+        // look. Blanket redaction was the first fix here and was wrong: it
+        // also erased the field names, so a malformed `expires_at` reported
+        // only a line and column. So the leaky variant is reduced to its
+        // location and the rest pass through.
+        let file: UserFile = serde_yaml::from_str(&text).map_err(|e| {
+            let path = config.path.display();
+            let detail = e.to_string();
+            if detail.contains("invalid type") {
+                return match e.location() {
+                    Some(at) => format!(
+                        "parsing {path}: a record at line {}, column {} is not a `username` / \
+                         `password_hash` mapping; a `.htpasswd` line pasted into the list \
+                         looks like this. The parser's own message is withheld because it \
+                         quotes the offending text, which for this file is a stored hash",
+                        at.line(),
+                        at.column(),
+                    ),
+                    None => format!(
+                        "parsing {path}: a record is not a `username` / `password_hash` \
+                         mapping; the parser's own message is withheld because it quotes the \
+                         offending text, which for this file is a stored hash"
+                    ),
+                };
+            }
+            format!("parsing {path}: {detail}")
+        })?;
         let limits = Limits::from(config.limits);
 
         let mut users: HashMap<String, Entry> = HashMap::with_capacity(file.users.len());
