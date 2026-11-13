@@ -21,7 +21,9 @@ use praxis_policy_core::plugin::PluginConfig;
 
 use praxis_policy_builtins::plugins::identity_basic::{BasicIdentityResolver, KIND};
 
-use crate::support::{HtpasswdFile, basic_header, bcrypt_line, htpasswd_block};
+use crate::support::{
+    HtpasswdFile, UserYamlFile, basic_header, bcrypt_line, htpasswd_block, user_file_block,
+};
 
 /// The hook name a host invokes identity resolution by.
 const HOOK_IDENTITY_RESOLVE: &str = "identity.resolve";
@@ -160,4 +162,92 @@ async fn a_declined_scheme_becomes_the_executors_own_unchallenged_denial() {
             "a declining resolver must not fill a slot it never authenticated"
         );
     }
+}
+
+#[tokio::test]
+async fn a_yaml_record_projects_its_roles_through_the_engine() {
+    let hash = bcrypt_line("u", "correct horse", 4)
+        .split_once(':')
+        .expect("the fixture line has a separator")
+        .1
+        .to_owned();
+    let file = UserYamlFile::write(&format!(
+        "users:
+  - username: alice
+    password_hash: {hash}
+    roles: [admin]
+    teams: [platform]
+"
+    ));
+    let mut block = user_file_block(file.path());
+    block["record_map"] = serde_json::json!({
+        "subject": { "id": "user_id", "roles": "roles", "teams": "teams" },
+    });
+
+    let result = invoke_through_engine(block, &basic_header("alice", "correct horse")).await;
+
+    assert!(
+        result.continue_processing,
+        "a correct password against a YAML record must resolve: violation = {:?}",
+        result.violation,
+    );
+    let identity = IdentityPayload::from_pipeline_result(&result)
+        .expect("the engine must thread the resolved payload back to the host");
+    let subject = identity
+        .subject
+        .as_ref()
+        .expect("the user role fills the subject slot");
+    assert_eq!(subject.id.as_deref(), Some("alice"));
+    // The capability `.htpasswd` structurally cannot provide, proven through
+    // the engine rather than only at the hook: a record's own attributes
+    // reaching the slots a policy is written against.
+    assert!(
+        subject.roles.contains("admin"),
+        "the record's roles must survive the engine's payload threading, got {:?}",
+        subject.roles
+    );
+    assert!(
+        subject.teams.contains("platform"),
+        "the record's teams must survive it too, got {:?}",
+        subject.teams
+    );
+    assert!(
+        identity.raw_credentials.is_none(),
+        "the password must stop at this plugin whichever backend verified it"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_yaml_record_denies_through_the_engine() {
+    let hash = bcrypt_line("u", "correct horse", 4)
+        .split_once(':')
+        .expect("the fixture line has a separator")
+        .1
+        .to_owned();
+    let file = UserYamlFile::write(&format!(
+        "users:
+  - username: alice
+    password_hash: {hash}
+    expires_at: 2020-01-01T00:00:00Z
+"
+    ));
+
+    let result = invoke_through_engine(
+        user_file_block(file.path()),
+        &basic_header("alice", "correct horse"),
+    )
+    .await;
+
+    assert!(
+        !result.continue_processing,
+        "an expired record must stop the pipeline even though the password is right"
+    );
+    let violation = result
+        .violation
+        .as_ref()
+        .expect("a denial must carry a violation the host can render");
+    assert_eq!(
+        violation.code, "auth.credential_expired",
+        "expiry is its own code: the credential was correct and the record is over, which is          a different operator action from a wrong password"
+    );
 }

@@ -33,6 +33,7 @@ use crate::plugins::identity_basic::directory::{CredentialDirectory, DirectoryEr
 use crate::plugins::identity_basic::failure_limit::{FailureLimiter, Refusal};
 use crate::plugins::identity_basic::htpasswd::HtpasswdDirectory;
 use crate::plugins::identity_basic::record_map::USER_ID_FIELD;
+use crate::plugins::identity_basic::user_file::UserFileDirectory;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -167,6 +168,7 @@ impl BasicIdentityResolver {
         // and that number lives on the provider that owns the semaphore.
         let verification_capacity = match &settings.provider {
             ProviderConfig::Htpasswd(htpasswd) => htpasswd.max_concurrent_verifications,
+            ProviderConfig::UserFile(users) => users.max_concurrent_verifications,
         };
 
         let directory: Arc<dyn CredentialDirectory> = match &settings.provider {
@@ -178,6 +180,19 @@ impl BasicIdentityResolver {
                 // bcrypt one. The backend re-checks it on every load.
                 let loaded = HtpasswdDirectory::with_password_ceiling(
                     htpasswd.clone(),
+                    settings.limits.max_password_bytes,
+                )
+                .map_err(|e| PluginError::Config {
+                    message: format!("{}: {e}", config.name),
+                })?;
+                Arc::new(loaded)
+            },
+            ProviderConfig::UserFile(users) => {
+                // The ceiling goes to the backend for the same reason it does
+                // above: only a load that reads the file knows its scheme, and
+                // a reload can replace that scheme.
+                let loaded = UserFileDirectory::with_password_ceiling(
+                    users.clone(),
                     settings.limits.max_password_bytes,
                 )
                 .map_err(|e| PluginError::Config {
@@ -478,13 +493,12 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
             return self.deny_invalid();
         };
 
-        // Untested, and not reachable to test today: `.htpasswd` has no native
-        // expiry field, so the only backend wired here never sets
-        // `expires_at`, and `new` builds its directory from config with no
-        // seam to inject one that does. Widening the public API to reach a
-        // branch that is dead until the YAML backend lands would be the more
-        // expensive mistake, so the gap is recorded here and the test belongs
-        // with that backend.
+        // Reachable only through a backend with a native expiry field, which
+        // is the YAML one: `.htpasswd` has nowhere to put a date, so a
+        // directory on that format never sets `expires_at` and this branch
+        // never fires for it. Enforced here rather than in each backend
+        // because R25 admits no mode that delegates expiry to the directory,
+        // and one check is one place for that to be true.
         if let Some(expires_at) = record.expires_at
             && expires_at <= Utc::now()
         {

@@ -128,6 +128,87 @@ for it.
 
 [RFC 7617 Section 4]: https://datatracker.ietf.org/doc/html/rfc7617#section-4
 
+### Choosing a Basic directory
+
+Two on-disk providers ship, and they differ in what a record can carry
+rather than in how they verify one. Both index by user-id, admit the same
+four schemes, enforce one cost profile per file, and share the refresh
+window and staleness ceiling described below.
+
+| | `htpasswd` | `user_file` |
+|---|---|---|
+| Format | Apache `.htpasswd` lines | YAML under a `users:` key |
+| Projectable fields | none: the format carries a user-id and a hash | any field the record names |
+| Expiry | none; nothing in the format can express one | `expires_at`, enforced on every request |
+| Written by | `htpasswd`, `mkpasswd`, `crypt(3)` | an operator, or whatever projects your directory |
+
+Pick `htpasswd` when an existing file is the source of truth and a policy
+needs nothing but the username. Pick `user_file` when a policy is written
+against roles, teams or other attributes, or when a credential has to stop
+working on a date.
+
+```yaml
+plugins:
+  - name: ops-basic
+    kind: identity/basic
+    hooks: [identity.resolve]
+    config:
+      realm: "ops"
+      credential:
+        kind: header
+        name: Authorization
+      provider:
+        kind: user_file
+        path: /etc/ppe/users.yaml
+        refresh_secs: 30
+        max_staleness_secs: 300
+      record_map:
+        subject:
+          id: user_id
+          roles: roles
+          teams: teams
+```
+
+<!-- validate: fragment -->
+
+```yaml
+# /etc/ppe/users.yaml -- mode 0600, owned by the PPE user.
+# Not a PPE config document: this is the directory file the provider reads.
+users:
+  - username: alice
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$..."
+    roles: [admin, auditor]
+    teams: [platform]
+  - username: contractor
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$..."
+    roles: [reader]
+    expires_at: 2026-12-31T23:59:59Z
+```
+
+`username`, `password_hash` and `expires_at` are storage fields: they are
+consumed by the backend and never reach the projected claims, so a
+`subject.claim.password_hash` assertion cannot render a verifier into an
+upstream header. Every other field in a record is yours to name and is
+projected through `record_map`. The verified user-id is injected separately
+as `user_id`, which is what the default `subject.id` anchor reads.
+
+Three things fail at load rather than at request time, because each one
+would otherwise read as an outage or, worse, as silence:
+
+- A duplicate `username`, compared after Unicode normalisation. Two
+  spellings of one name are a collision, not a last-wins overwrite that
+  hands one caller the other's identity.
+- An `expires_at` that is not a timestamp. A string-typed field would have
+  accepted it and then meant "never expires", which is the one failure an
+  expiry must not have.
+- A misspelled top-level key. `user:` for `users:` would otherwise load as
+  an empty directory that denies every request.
+
+The file holds hashes, never plaintext, so a copy that leaks hands over no
+usable credential. It is still an offline-crackable verifier: it must not be
+world-readable, and PPE never writes to it. Re-hashing and rotation belong
+to whatever tool owns your directory.
+
 ### The password ceiling is tied to the file's scheme
 
 `limits.max_password_bytes` above 72 is refused on a bcrypt directory.

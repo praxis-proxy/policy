@@ -13,6 +13,7 @@ use praxis_policy_core::identity::mapping::{ClaimMapConfig, ClaimsOverrides, Con
 use serde::{Deserialize, Serialize};
 
 use crate::plugins::identity_basic::htpasswd::HtpasswdConfig;
+use crate::plugins::identity_basic::user_file::UserFileConfig;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -54,6 +55,12 @@ const DEFAULT_FAILURE_CAPACITY: usize = 10_000;
 pub enum ProviderConfig {
     /// Records in an Apache `.htpasswd` file, indexed by user-id.
     Htpasswd(HtpasswdConfig),
+
+    /// Records in a YAML file, indexed by username.
+    ///
+    /// Carries the projectable fields and the expiry `.htpasswd` has no place
+    /// for.
+    UserFile(UserFileConfig),
 }
 
 /// Who enforces a record's expiry.

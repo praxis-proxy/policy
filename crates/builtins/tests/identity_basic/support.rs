@@ -188,6 +188,75 @@ impl Drop for HtpasswdFile {
     }
 }
 
+/// A temporary YAML user file removed when its guard drops.
+///
+/// Separate from [`HtpasswdFile`] only in its extension, so a failure naming
+/// the path says which backend's fixture it was.
+pub struct UserYamlFile {
+    path: std::path::PathBuf,
+}
+
+impl UserYamlFile {
+    /// Write `contents` to a uniquely named file.
+    pub fn write(contents: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("ppe-basic-users-{}-{n}.yaml", std::process::id()));
+        std::fs::write(&path, contents).expect("the fixture file is writable");
+        Self { path }
+    }
+
+    /// The path, as the `provider.path` config value wants it.
+    pub fn path(&self) -> &str {
+        self.path.to_str().expect("the temp path is utf-8")
+    }
+
+    /// Atomically replace the contents for reload tests.
+    pub fn rewrite(&self, contents: &str) {
+        let staging = self.path.with_extension("staging");
+        std::fs::write(&staging, contents).expect("the fixture file is writable");
+        std::fs::rename(&staging, &self.path).expect("the rename lands");
+    }
+
+    /// Delete the file while the guard is still alive, for the
+    /// unreadable-path and failed-reload cases.
+    pub fn unlink(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl Drop for UserYamlFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A YAML backend config over a fixture path, with a coherent refresh and
+/// ceiling.
+pub fn user_file_config_for(
+    path: &str,
+) -> praxis_policy_builtins::plugins::identity_basic::UserFileConfig {
+    serde_yaml::from_str(&format!(
+        "path: {path}\nrefresh_secs: 30\nmax_staleness_secs: 300\n"
+    ))
+    .expect("the backend config parses")
+}
+
+/// A config block naming the YAML backend at `path`.
+pub fn user_file_block(path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "realm": "ops",
+        "credential": { "kind": "header", "name": "Authorization" },
+        "provider": {
+            "kind": "user_file",
+            "path": path,
+            "refresh_secs": 30,
+            "max_staleness_secs": 300,
+        },
+    })
+}
+
 /// A `HostServices` that offers nothing.
 pub fn services() -> praxis_policy_core::host::InitExtensions {
     praxis_policy_core::host::InitExtensions::new()

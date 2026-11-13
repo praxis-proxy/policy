@@ -27,6 +27,8 @@ pub mod htpasswd;
 pub mod record_map;
 /// The identity hook handler.
 pub mod resolver;
+/// The username-indexed YAML backend.
+pub mod user_file;
 /// Stored-hash admission and password verification.
 pub mod verifier;
 
@@ -40,4 +42,5 @@ pub use failure_limit::{FailureLimiter, Refusal};
 pub use htpasswd::{HtpasswdConfig, HtpasswdDirectory};
 pub use praxis_policy_core::extensions::raw_credentials::Credential;
 pub use resolver::{BasicIdentityResolver, codes};
+pub use user_file::{UserFileConfig, UserFileDirectory};
 pub use verifier::{CostProfile, HashError, Limits, ParsedHash, Scheme, ShaCryptVariant};
