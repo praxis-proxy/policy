@@ -1,96 +1,213 @@
-# Issue 75: Resource and Prompt Projection Support
+# Design Proposal: Resource and Prompt Projection Support (Issue 75)
 
-## 1. Motivation: Why are we doing this work?
+**Status:** Proposed — for engineering review  
+**Related:** Issue 76 (per-view/content-part addressing)  
+**Scope:** CMF message projection, APL field evaluation, structured write-back, configuration validation, MCP host integration
 
-### The problem we need to solve
+## 1. Overview
 
-Resource and prompt routes already load and dispatch, but the APL data plane cannot inspect their structured content. A policy using `args:` or `result:` can therefore load, execute, and report an allowed request while never examining the field it was supposed to protect. This is a **silent policy bypass**: a policy operator has neither effective enforcement nor an obvious failure signal.
+Resource and prompt routes currently match and dispatch, but their structured payloads are not projected into APL-readable values. Consequently, a policy that appears properly configured may evaluate against an empty string, allow the operation, and leave sensitive content untouched. Fixing routing alone does not fix this: redactions must also be written back to the original structured content part.
 
-The desired outcome is straightforward: resource and prompt policies should be able to **inspect, deny, and rewrite** the fields they claim to address, and the consumer should receive the correctly modified structured message. Invalid field configurations should fail early instead of silently doing nothing.
+**Proposal:** Introduce stable JSON envelopes for three missing entity/phase combinations (`ResourceRef` pre-fetch, `Resource` post-fetch, and `PromptResult` post-invoke), apply APL changes back to the original structured parts, reject unsupported field configurations at load time, and document the message contract hosts must satisfy.
 
-### What is broken
+This is deliberately a **per-message** solution, not general per-part inspection. Issue 76 will address multi-content and `PromptResult.messages` coverage. Those limitations remain meaningful security gaps and are called out below.
 
-| Entity | Phase | What APL sees | What it should see |
-|---|---|---|---|
-| Resource | Pre-fetch (`args`) | Empty string | `{uri, name, resource_type, range_start, range_end, selector}` |
-| Resource | Post-fetch (`result`) | Empty string | `{uri, content, mime_type, size_bytes, name, description, ...}` |
-| Prompt | Post-invoke (`result`) | Empty string | `{prompt_name, description, content, is_error, error_message}` |
+## 2. Motivation and problem statement
 
-`message_projection.rs` only matches `ContentPart::ToolCall`, `ContentPart::ToolResult`,
-and `ContentPart::PromptRequest`. Everything else falls through to concatenated
-text parts — and resource/prompt messages have none.
+### Why this matters
 
-### Why it's dangerous
+APL enforcement must inspect the same content the downstream consumer receives. Today, `message_projection.rs` handles `ToolCall`, `ToolResult`, and `PromptRequest`, but not resource references, resource responses, or prompt results. Those parts fall back to concatenated text; structured resource/prompt messages usually have no text parts, so APL sees an empty string.
 
-A policy like this loads without error and does nothing:
+For example, a resource post-fetch policy intended to mask an SSN may load and report an allowed operation while the original `Resource.content` remains unredacted. A temporary end-to-end probe confirmed that `result == 'topsecret': deny` allowed a resource containing `topsecret`, while a comparison to the empty string denied.
 
-```yaml
-- resource: "hr://employees/compensation"
-  result:
-    content: "str | mask_pattern('\\d{3}-\\d{2}-\\d{4}', '[REDACTED]')"
+### Current behavior vs. desired behavior
+
+| Entity / phase | Today | Desired after Issue 75 |
+|---|---|---|
+| Resource pre-fetch | `args` projects as empty text | `args` exposes `ResourceRef` fields |
+| Resource post-fetch | `result` projects as empty text | `result` exposes `Resource` fields; content rewrites modify original part |
+| Prompt post-invoke | `result` projects as empty text | `result` exposes `PromptResult` fields; content rewrites modify original part |
+
+**Consequence:** Both policy decisions (deny/match) and policy transformations (redact/rewrite) can be ineffective without signaling failure.
+
+## 3. Goals and non-goals
+
+### Goals
+
+- Make `args.*` and `result.*` meaningful on the three missing entity/phase combinations.
+- Preserve structured message shape and unrelated fields during any write-back.
+- Maintain numeric/type fidelity, including unsigned 64-bit fields.
+- Reject statically invalid or read-only field paths at configuration load rather than silently accepting them.
+- Align MCP data structures and attributes with the targeted MCP 2026-07-28 specification.
+- Define a clear host integration contract and prove behavior with *deny* and *redaction* end-to-end assertions.
+
+### Non-goals
+
+- Projecting LLM message bodies into structured APL field paths.
+- Inspecting `Resource.blob` or non-text content blocks.
+- Projecting `PromptResult.messages` or scanning every content part in a multi-resource response (Issue 76).
+- Per-view addressing or new `match:` syntax (Issue 76).
+- Automatically parsing JSON inside `result.content` or adding an APL `parse` operator.
+
+## 4. Challenges and constraints
+
+1. **Projection gaps:** Existing extractors select only tool and prompt-request variants. We need a deterministic shape for three additional structured variants.
+2. **Write-back correctness:** A transformed string must replace the relevant field in the *same* `ContentPart`, never be appended as a separate `Text` part that consumers may ignore.
+3. **Type fidelity:** `u64`, optional strings, closed enums, boolean flags, annotations maps, and read-only identity fields need explicit conversion and invalid-value behavior.
+4. **Silent misconfiguration:** Some entity/phase combinations have no field paths; unknown or read-only field writes should be caught at load time.
+5. **Three-layer host contract:** `MetaExtension` controls routing, `MCPExtension` feeds PDP attributes, and `ContentPart` feeds APL. Populating one does not substitute for the others.
+6. **Partial inspection:** First-match-only extraction and flat prompt `content` leave potential bypasses until Issue 76 or an explicit host normalization step.
+
+## 5. Proposed architecture
+
+### Data flow
+
+```text
+Host event / MCP response
+    |
+    v
+CMF Message
+  ├─ MetaExtension      → entity/route matching
+  ├─ MCPExtension       → PDP mcp.* attributes
+  └─ ContentPart        → APL data-plane payload
+    |
+    v
+Projection: structured ContentPart → stable JSON envelope
+    |
+    v
+APL evaluation: inspect / deny / transform args.* or result.*
+    |
+    +---- deny → block operation
+    |
+    v
+Write-back: apply changed paths to original structured ContentPart
+    |
+    v
+CMF Message with original structure preserved
 ```
 
-The engine reports the request was allowed. The SSN passes through unredacted.
-The operator has no signal that the policy didn't fire.
+### 5.1 Stable JSON envelopes
 
-### Write-back is also broken
+Use a fixed object shape (not a bare string or opportunistically parsed JSON). Each exposed field has a one-to-one source mapping:
 
-If the projection were somehow fixed without fixing write-back, modified
-values would be appended as a new `Text` content part alongside the original
-structured `Resource` or `PromptResult`. The consumer reads the original
-unmodified part.
+| Hook | Source part | APL fields |
+|---|---|---|
+| Resource pre-fetch | `ResourceRef` | `args.{uri,name,resource_type,range_start,range_end,selector}` |
+| Resource post-fetch | `Resource` | `result.{uri,name,title,description,resource_type,content,mime_type,size_bytes,version,annotations,icons}` |
+| Prompt post-invoke | `PromptResult` | `result.{prompt_name,description,content,is_error,error_message}` |
 
-### Evidence
+`result.content` remains an **opaque string**: match, deny, or replace it as a whole; do not automatically parse nested JSON. `Resource.blob` and `PromptResult.messages` are not projected. The complete types and writeability table are in Appendix A.
 
-A temporary probe in `visitor_e2e.rs` (commit `36a2357`, since removed)
-dispatched `cmf.resource_post_fetch` against a `ContentPart::Resource` with
-`content: Some("topsecret")`:
+### 5.2 Structured write-back
 
-- `result == 'topsecret': deny` → allowed (wrong)
-- `result == '': deny` → denied (confirms APL sees empty string)
+Changes are applied to the original matching `ResourceRef`, `Resource`, or `PromptResult` part. Do not append `Text` and do not alter other content parts. Preserve fields omitted from projection (`resource_request_id`, `prompt_request_id`, `blob`).
+
+- Preserve original values when an APL-produced `u64` is negative, fractional, or out of range, an enum value is unknown, or `is_error` has the wrong type.
+- Preserve read-only `PromptResult.prompt_name` and `Resource.icons` even if a change somehow reaches write-back; reject those writes earlier at config load.
+- Merge `annotations` at addressed-key level so editing one annotation does not erase unrelated keys.
+- Handle optional strings consistently; the exact JSON-to-field conversion policy is in Appendix B.
+
+### 5.3 Configuration-time validation
+
+Extend the existing no-field-path guard from `http:` routes to `llm:` routes, for both route-level blocks and `global.defaults.llm`. For resource/prompt fixed envelopes, validate the top-level field name, reject nested access under scalar fields (e.g. `result.content.ssn`), allow nested map access under `annotations`, and reject writes to read-only fields. Tool/prompt argument maps remain dynamic and are not subject to a static field catalog.
+
+Coupling validation to a fixed field catalog creates schema drift risk. Add a test asserting that each catalog matches the keys emitted by its projection function.
+
+### 5.4 Data model and host contract
+
+Bring MCP extension metadata up to the targeted 2026-07-28 schema: shared `Icon`, metadata titles/icons/sizes as applicable, `Resource.title/icons`, and `PromptResult.description`. Map the new extension attributes into the PDP bag.
+
+A host must populate the distinct layers correctly:
+
+| Layer | Purpose | Failure if omitted |
+|---|---|---|
+| `MetaExtension` | Route matching | Wrong/missing route selection |
+| `MCPExtension` | PDP metadata predicates | Missing `mcp.*` attributes |
+| `ContentPart` | APL field projection/write-back | Route can match while APL has no effective payload |
+
+Until Issue 76, a host that emits `PromptResult` **MUST** fill its flat `content` with rendered text (ordered text parts of `messages`), or prompt content inspection will not run effectively. Hosts should emit one fetched resource content per message, or treat multi-content reads as only partially covered. The guide must explicitly explain both failure modes.
+
+## 6. Design decisions and alternatives
+
+| Decision | Alternatives | Rationale |
+|---|---|---|
+| **Fixed JSON envelope** | Raw string; auto-parse JSON | `apply_changed_paths` needs an object; fixed fields make write-back deterministic and preserve metadata. Auto-parsing makes behavior content-dependent. |
+| **Opaque `content` string** | Parse arbitrary nested JSON | Predictable policy shape and no parse-failure ambiguity; nested parsing can be an explicit later feature. |
+| **In-place write-back** | Append transformed `Text` | Downstream hosts consume the original structured part; appending text leaves unmodified data visible. |
+| **Read-only identity/display fields** | Write every projected field | `prompt_name` identity must remain correlated; `icons` are exposed for inspection but not rewritten. |
+| **Fail fast on static field errors** | Allow runtime no-ops | Prevents the failure mode that motivated this issue. |
+| **Use `ContentPart` as APL source** | Fall back to `MCPExtension` | Avoid ambiguous duplicate sources; matches existing tool behavior. |
+| **Defer per-part coverage** | Solve all message-view addressing in Issue 75 | Keeps implementation bounded and reusable for Issue 76, but retains documented security gaps. |
+
+Detailed comparison of the three envelope strategies is in Appendix C.
+
+## 7. Limitations, risks, and mitigations
+
+| Risk / limitation | Impact | Mitigation or follow-up |
+|---|---|---|
+| Only first matching resource part is inspected | Sensitive text in second/later part can bypass policy | Document host one-content-per-message guidance; pin with expected-failure test; address in Issue 76. |
+| Prompt result uses only flat `content` | `messages`-only hosts can bypass injection rules | Host **MUST** populate `content`; pin with expected-failure test; address native `messages` inspection in Issue 76. |
+| Invalid runtime types are preserved | Rewrite may silently no-op for bad data | Static type/path validation where feasible; tests for invalid conversion; consider diagnostics separately. |
+| Fixed field catalogs may drift | False rejection or unvalidated paths | Projection/catalog parity test. |
+| Mixed `ToolResult` and `Resource` parts | First-match extraction may choose wrong entity | No known builder currently produces mixed parts; consider entity-aware extraction as hardening. |
+| Host contract misconfiguration | Policy may not see expected data | Six host recipes with concrete examples and missing-layer behavior. |
+
+**Security caveat:** Issue 75 does not establish complete inspection of all content in arbitrary MCP messages. Deployments requiring that guarantee must enforce the stated host normalization constraints or await Issue 76.
+
+## 8. Open questions for review
+
+1. **Icons in the PDP attribute bag:** Publish `mcp.*.icons` as a `StringSet` of source URLs (recommended for consistency and future `contains` rules), or keep icons only on structs because they are presentation metadata?
+2. **Prompt result missing flat `content`:** Require host normalization only (recommended for Issue 75), or also derive a read-only inspection fallback from `messages`? The fallback improves *deny* coverage but cannot safely write redactions into `messages` without a broader design.
+
+## 9. Implementation strategy
+
+One PR, four independently compiling/testable commits:
+
+| Phase | Deliverable | Verification focus |
+|---|---|---|
+| **1. Schema alignment** | MCP metadata fields, `Icon`, CMF fields, PDP attributes | Attribute-bag/unit/catalog tests and compile checks |
+| **2. Projection and write-back** | Three envelope projections, extraction, in-place mutation | Round-trip invariants; deny and redact visitor E2E; known-gap tests |
+| **3. Config validation** | Reject no-field shapes, unknown paths, read-only writes | Load rejection diagnostics; valid-field acceptance; catalog parity |
+| **4. Host guide** | Six entity/phase recipes covering three message layers | Human review of contract, examples, and failure modes |
+
+Full file changes, test names, expected results, and commands are in Appendix D.
+
+## 10. Test strategy and acceptance criteria
+
+**Behavioral proof is essential:** an `allow` assertion is insufficient because the existing failure mode also allows. The E2E suite must assert *denied* decisions for matching resource/prompt content and *actual modifications* for redaction.
+
+Acceptance requires:
+
+- Every new envelope exposes correct fields on the intended entity/phase.
+- Extraction followed by write-back without changes yields an identical message.
+- Rewriting one field changes **that field only**; content-part count stays constant and no `Text` part is appended.
+- Above-2^53 unsigned integers round-trip exactly; malformed numeric, enum, or boolean writes preserve the original.
+- E2E coverage includes resource pre-fetch URI deny; resource post-fetch content deny/redact; prompt post-invoke content deny/redact and `is_error` deny.
+- Invalid field configurations are rejected with actionable entity, block, and field diagnostics; dynamic-map cases remain valid.
+- Two known holes (multi-resource; prompt `messages`-only) are pinned by explicitly named expected-failure tests pending Issue 76.
+- `make check`, `make test`, and `make lint` pass; host guide describes all six entity/phase contracts.
+
+## 11. Dependencies and rollout
+
+Issue 75 is intended to land before Issue 76. Standalone projection helpers can be reused by per-view addressing. Until that work lands, hosts must honor the flat prompt-content contract and avoid assuming complete coverage of multi-content resource responses. This proposal does not introduce an APL syntax change.
 
 ---
 
-## 2. Challenges: What makes this work difficult?
+# Detailed appendices
 
-### Challenge 1 — Structured content is not projected into APL
+The sections below preserve the implementation-level specifications and checklists from the source planning document, separated from the architectural review narrative.
 
-`message_projection.rs` handles `ToolCall`, `ToolResult`, and `PromptRequest`, but not `ResourceRef`, `Resource`, or `PromptResult`. The fallback concatenates text parts, which are absent from these structured messages. We need a predictable representation for all three missing entity/phase combinations without changing working tool and prompt-request behavior.
 
-### Challenge 2 — Projection alone does not make redaction effective
+## Appendix A — Detailed envelope and write-back specification
 
-The existing write-back fallback appends a new `Text` part rather than editing the original structured content. Policies could appear to rewrite sensitive text while downstream consumers still read the untouched `Resource` or `PromptResult`. Write-back must be field-accurate, preserve unrelated fields and content-part count, and handle invalid values safely.
-
-### Challenge 3 — Schema and type fidelity
-
-The CMF and MCP models are missing fields needed by the MCP 2026-07-28 spec. Projections also need precise handling of nullable strings, read-only identities, closed enums, `u64` values beyond 2^53, and key-level merges for `annotations`. The policy-facing field set must stay synchronized with the implementation.
-
-### Challenge 4 — Configuration mistakes currently fail silently
-
-Fields without a valid projection path, misspelled field names, or writes to read-only fields should be rejected when configuration loads. This includes extending the existing `http:` protection to `llm:` routes, as well as validating static resource and prompt field paths.
-
-### Challenge 5 — Correct host integration is essential
-
-Route matching, PDP attributes, and APL projections are supplied through distinct layers: `MetaExtension`, `MCPExtension`, and `ContentPart`. A host can supply enough metadata for routing but omit the content part APL needs. A host contract with examples and failure cases is necessary to prevent deployments that appear configured but do not enforce content policies.
-
-### Challenge 6 — Partial coverage remains until Issue 76
-
-Issue 75 operates on the first matching content part of a message and projects `PromptResult.content`, not its `messages` array. Multi-resource responses and messages-only prompt results can still escape content rules unless the host follows documented constraints. These limitations must be explicit, tested as known gaps, and clearly assigned to Issue 76 rather than overstating the protection delivered here.
-
----
-
-## 3. Proposed solution: What approach will we take?
-
-The design is to project each missing structured content part into a **fixed JSON envelope** with named `args.*` or `result.*` fields, then write permitted modifications **back into the original content part**. The content body remains an opaque string; nested JSON body parsing is deliberately deferred.
-
-This approach gives policy authors consistent field paths, allows metadata inspection, and maps edits back to one concrete struct field. A raw-string projection is incompatible with the current object-based write-back logic, while automatic JSON parsing would create inconsistent runtime shapes.
+#### Solution: JSON envelope projection
 
 Each missing entity/phase gets a fixed JSON envelope mapping struct fields
 to APL paths. The body (`result.content`) is always an opaque string — not
 auto-parsed. Two alternative approaches (raw string, auto-parse JSON) were
 evaluated and ruled out; see [Appendix C](#appendix-c-approach-comparison).
 
-### Resource pre-fetch → `args`
+#### Resource pre-fetch → `args`
 
 From `ContentPart::ResourceRef`:
 
@@ -103,7 +220,7 @@ From `ContentPart::ResourceRef`:
 | `range_end` | `args.range_end` | Number or null |
 | `selector` | `args.selector` | String or null |
 
-### Resource post-fetch → `result`
+#### Resource post-fetch → `result`
 
 From `ContentPart::Resource`:
 
@@ -126,7 +243,7 @@ rewrite the whole string but cannot address fields inside it. Body-field
 access is a planned follow-up (APL `json` operator or `content_parsed`
 sibling field).
 
-### Prompt post-invoke → `result`
+#### Prompt post-invoke → `result`
 
 From `ContentPart::PromptResult`:
 
@@ -140,12 +257,12 @@ From `ContentPart::PromptResult`:
 
 `messages` (`Vec<Message>`) is not projected — deferred to Issue 76.
 
-### Complete projection reference
+#### Complete projection reference
 
 For all six entity/phase envelopes (including the three that already work),
 see [Appendix A](#appendix-a-complete-projection-reference).
 
-### Write-back rules
+#### Write-back rules
 
 - Modify the original `ContentPart` in place. Never append a `Text` part.
 - Preserve fields excluded from projection (`resource_request_id`,
@@ -173,20 +290,55 @@ see [Appendix A](#appendix-a-complete-projection-reference).
 
 ---
 
-## 4. Implementation plan: How will we deliver it?
 
-Deliver as **one PR with four independently compilable and testable commits**, ordered so the model is ready before projection, projection exists before path validation, and documentation describes the final contract.
+## Appendix B — Write-back value conversion
 
-| Commit | Focus | Deliverable | Approximate scope |
+#### Appendix B: Write-back value-type mapping
+
+For `Option<String>` target fields (`Resource.content`, `Resource.name`,
+`PromptResult.content`, `PromptResult.error_message`, etc.):
+
+| JSON value type | Write-back behavior |
+|---|---|
+| `Value::String(s)` | `Some(s)` |
+| `Value::Null` | `None` (clears the field — needed for `drop`) |
+| `Value::Object` / `Value::Array` | Serialize to JSON string → `Some(serialized)` |
+| `Value::Bool` / `Value::Number` | Preserve original (shape mismatch — silent no-op) |
+
+---
+
+
+## Appendix C — Projection alternatives
+
+#### Appendix C: Approach comparison
+
+Three projection approaches were evaluated:
+
+| | Raw string | Auto-parse JSON | **JSON envelope (chosen)** |
 |---|---|---|---|
-| 1 | MCP spec alignment | Add missing metadata and result fields; update attribute bag and catalog | ~100 LOC + tests |
-| 2 | Projection and write-back | Implement all three missing envelopes, in-place updates, unit and visitor e2e tests | ~200 LOC + tests |
-| 3 | Config-time validation | Reject unsupported, unknown, and read-only field paths | ~100 LOC + tests |
-| 4 | Host integration guide | Document host-supplied layers, examples, and limitations for all six entity/phase combinations | ~1000 LOC docs |
+| Metadata access | No | No (unless wrapped) | **Yes** |
+| Body field access | No | Yes (JSON only) | No (future `parse`) |
+| Consistent shape | Yes (always scalar) | No (depends on mime) | **Yes (always object)** |
+| Runtime compatible | **No** (`apply_changed_paths` needs object) | Partially | **Yes** |
+| Write-back safety | Whole-value only | Ambiguous edge cases | **1:1 field mapping** |
+| Parse failure risk | None | Yes (silent or aggressive) | **None** |
 
-The following subsections preserve the original implementation instructions and verification criteria.
+**Raw string** is ruled out by a hard blocker: `apply_changed_paths` requires
+`Value::Object`.
 
-### Commit 1: MCP spec field gaps
+**Auto-parse JSON** produces inconsistent shapes — the same route yields an
+object for JSON bodies and a scalar for everything else. Policy authors cannot
+predict the shape at write time. Parse failures are runtime surprises with no
+error channel.
+
+**JSON envelope** gives a stable, predictable shape. Every field maps 1:1 to
+a struct field. No parsing, no ambiguity. Body-field access is deferred to a
+future `parse` operator that policy authors opt into explicitly.
+
+
+## Appendix D — Detailed implementation and test plan
+
+#### Commit 1: MCP spec field gaps
 
 **Goal:** Update data model to match MCP 2026-07-28 before building
 projection on top of it.
@@ -268,7 +420,7 @@ make test
 
 ---
 
-### Commit 2: Core projection and write-back
+#### Commit 2: Core projection and write-back
 
 **Goal:** Make `args.*` and `result.*` work for resources and prompts.
 
@@ -452,7 +604,7 @@ make test
 
 ---
 
-### Commit 3: Config validation
+#### Commit 3: Config validation
 
 **Goal:** Refuse field blocks that can address nothing, at load time instead
 of at runtime.
@@ -550,7 +702,7 @@ make test
 
 ---
 
-### Commit 4: Host integration guide
+#### Commit 4: Host integration guide
 
 **Goal:** Document what a host must put on a message for policy to work.
 
@@ -604,13 +756,10 @@ Prose review only.
 
 ---
 
-## 5. Scope boundaries and follow-up
 
-**Included in Issue 75:** MCP model alignment, resource pre-fetch and post-fetch projection, prompt post-invoke projection, safe write-back, config-time validation, end-to-end enforcement tests, and host integration guidance.
+## Appendix E — Issue 76 comparison and complete checklist
 
-**Out of scope:** LLM projections; byte-level inspection of `Resource.blob`; `PromptResult.messages`; per-view addressing; projecting every resource part in a multi-part message; JSON body-field parsing; and non-text blocks in tool/prompt results. The per-view and multi-part work, along with prompt `messages` projection, belongs to **Issue 76**.
-
-## Relationship with Issue 76
+#### Relationship with Issue 76
 
 | | This issue (75) | Issue 76 |
 |---|---|---|
@@ -625,7 +774,7 @@ Issue 76 can reuse them.
 
 ---
 
-## 6. Definition of done and verification
+#### Definition of done
 
 #### Commit 1: spec field gaps
 
@@ -673,7 +822,7 @@ Issue 76 can reuse them.
 - [ ] JSON examples and "what goes wrong" sections (per-field, per-layer)
 - [ ] Common mistakes: MCPExtension-only, ContentPart-only, overlapping field consistency, multi-content resource reads, `PromptResult` without `content`
 
-### Overall
+#### Overall
 
 - [ ] `make check` passes
 - [ ] `make test` passes
@@ -682,9 +831,12 @@ Issue 76 can reuse them.
 
 ---
 
-## 7. Design decisions and open questions
 
-### Settled
+## Appendix F — Existing design-decision register
+
+#### Design decisions
+
+#### Settled
 
 | Decision | Rationale |
 |---|---|
@@ -698,7 +850,7 @@ Issue 76 can reuse them.
 | **Document field consistency, don't enforce** | Tools don't enforce it either; adding it for resources only would be inconsistent |
 | **Body parsing deferred** | Two compatible future paths exist (APL `json` operator, `content_parsed` field). Neither blocks this issue. |
 
-### Open (needs team input)
+#### Open (needs team input)
 
 | Decision | Options | Recommendation |
 |---|---|---|
@@ -707,7 +859,10 @@ Issue 76 can reuse them.
 
 ---
 
-## Appendix A: Complete projection reference
+
+## Appendix G — Full six-envelope reference
+
+#### Appendix A: Complete projection reference
 
 All six entity/phase combinations:
 
@@ -722,48 +877,9 @@ All six entity/phase combinations:
 
 Bold rows are added by this issue. The first three already work.
 
-### Fallback
+#### Fallback
 
 Any content part not matched above falls through to
 `Value::String(msg.get_text_content())` — the concatenated text parts.
 
 ---
-
-## Appendix B: Write-back value-type mapping
-
-For `Option<String>` target fields (`Resource.content`, `Resource.name`,
-`PromptResult.content`, `PromptResult.error_message`, etc.):
-
-| JSON value type | Write-back behavior |
-|---|---|
-| `Value::String(s)` | `Some(s)` |
-| `Value::Null` | `None` (clears the field — needed for `drop`) |
-| `Value::Object` / `Value::Array` | Serialize to JSON string → `Some(serialized)` |
-| `Value::Bool` / `Value::Number` | Preserve original (shape mismatch — silent no-op) |
-
----
-
-## Appendix C: Approach comparison
-
-Three projection approaches were evaluated:
-
-| | Raw string | Auto-parse JSON | **JSON envelope (chosen)** |
-|---|---|---|---|
-| Metadata access | No | No (unless wrapped) | **Yes** |
-| Body field access | No | Yes (JSON only) | No (future `parse`) |
-| Consistent shape | Yes (always scalar) | No (depends on mime) | **Yes (always object)** |
-| Runtime compatible | **No** (`apply_changed_paths` needs object) | Partially | **Yes** |
-| Write-back safety | Whole-value only | Ambiguous edge cases | **1:1 field mapping** |
-| Parse failure risk | None | Yes (silent or aggressive) | **None** |
-
-**Raw string** is ruled out by a hard blocker: `apply_changed_paths` requires
-`Value::Object`.
-
-**Auto-parse JSON** produces inconsistent shapes — the same route yields an
-object for JSON bodies and a scalar for everything else. Policy authors cannot
-predict the shape at write time. Parse failures are runtime surprises with no
-error channel.
-
-**JSON envelope** gives a stable, predictable shape. Every field maps 1:1 to
-a struct field. No parsing, no ambiguity. Body-field access is deferred to a
-future `parse` operator that policy authors opt into explicitly.
