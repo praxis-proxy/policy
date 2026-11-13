@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **`file` secret provider: `base_dir` containment can no longer be raced.**
+  With `base_dir` set, the file is now opened beneath the directory in one
+  step, so a writer inside it cannot swap a symlink between the containment
+  check and the read and have a file outside the directory accepted. A link
+  that leaves the directory is refused with a reference error on every read;
+  links that stay inside, including the relative `..data` links of a Kubernetes
+  projected mount, still read. An absolute symlink is now refused even when its
+  target is inside `base_dir`. Without `base_dir`, behaviour is unchanged.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added
