@@ -15,7 +15,7 @@ CARGO ?= cargo
 # and select both mutually exclusive backends. FIPS has its own targets.
 WORKSPACE_TEST_FEATURES := \
 	praxis-policy-core/crypto-rustcrypto,praxis-policy-apl-cmf/crypto-rustcrypto,praxis-policy-apl-runtime/crypto-rustcrypto \
-	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/oauth,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
+	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/oauth,praxis-policy-builtins/basic,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
 	praxis-policy/builtins,praxis-policy/http-hyper,praxis-policy/experimental-quota,praxis-policy/experimental-ratelimit \
 	ppe-benches/dhat-heap \
 	praxis-policy-test-utils/experimental-ratelimit \
@@ -122,7 +122,7 @@ check:
 	done
 	@$(MAKE) check-fips-graph
 
-NON_FIPS_CRYPTO := sha2|hmac|ring|rustls|aws-lc-rs|aws-lc-sys
+NON_FIPS_CRYPTO := sha2|hmac|ring|rustls|aws-lc-rs|aws-lc-sys|bcrypt|argon2|sha-crypt|password-hash
 # Crates a FIPS graph may contain although they hold or call non-validated
 # randomness. Each is accepted for identifiers only, never keys or secrets;
 # secret material goes through `praxis_policy_core::crypto::random_bytes`.
@@ -136,6 +136,10 @@ CRYPTO_PATTERN := rand|rand_core|chacha20|sha1|sha3|md-5|md5|blake2|blake3|aes|a
 # Every supported FIPS selection: the shared backend, with optional identity
 # builtins.
 FIPS_SELECTIONS := fips fips,api-key fips,jwt-openssl-fips fips,api-key,jwt-openssl-fips
+# Selections a FIPS consumer must not reach for. Basic's bcrypt, argon2 and
+# sha-crypt verifiers have no OpenSSL path, so no `fips` graph may carry them,
+# whether `basic` is asked for directly or pulled in by another dependency.
+BASIC_FIPS_REFUSED := fips,basic fips,api-key,basic
 
 # Fail on a non-FIPS or unclassified crypto crate in the graph on stdin, and
 # print the allowed crates found. `$(1)` names the graph in messages; a
@@ -208,6 +212,21 @@ check-fips-graph:
 	@$(CARGO) tree -p praxis-policy-builtins --no-default-features --features fips \
 		-e normal,build --prefix none \
 		| { $(call check_fips_tree,praxis-policy-builtins fips,no-openssl); }
+	@# `basic` is not a FIPS selection: its password verifiers are RustCrypto
+	@# only. The graph must therefore stay outside FIPS_SELECTIONS *and* be
+	@# caught by the same classifier, so a later edit cannot quietly admit it.
+	@for features in $(BASIC_FIPS_REFUSED); do \
+		if out="$$( { $(CARGO) tree -p praxis-policy-builtins --no-default-features \
+			--features "$$features" -e normal,build --prefix none \
+			| { $(call check_fips_tree,praxis-policy-builtins $$features); }; } 2>&1 )"; then \
+			echo "praxis-policy-builtins $$features passed the FIPS graph check; basic must not" >&2; \
+			exit 1; \
+		fi; \
+		grep -Fq "links non-FIPS crypto" <<< "$$out" || \
+			{ echo "praxis-policy-builtins $$features was refused for another reason:" >&2; \
+				echo "$$out" >&2; exit 1; }; \
+		echo "praxis-policy-builtins $$features: refused, as a non-FIPS selection"; \
+	done
 	@echo "FIPS graphs contain OpenSSL and no RustCrypto, ring or AWS-LC"
 
 # FIPS tests split by provider availability. `test-fips-no-provider` runs
@@ -221,7 +240,12 @@ FIPS_API_KEY_TEST := fips::fips_api_key_allow_and_deny_follow_provider_availabil
 FIPS_RATELIMIT_TEST := a_crypto_failure_denies_and_logs_once_per_interval
 FIPS_ENGINE_TEST := crypto_capability_tests::initialize_checks_the_shared_backend_in_every_fips_selection
 FIPS_API_KEY := fips,api-key
-FIPS_UNSAFE_BUILTINS := oauth,delegator-vault,valkey
+FIPS_UNSAFE_BUILTINS := basic,oauth,delegator-vault,valkey
+# Basic has no facade feature, so a consumer reaches it only through another
+# dependency's edge on the builtins crate. That is the path the report has to
+# cover: the builtin name and the feature spelling differ, so it cannot join
+# the loop above.
+FIPS_BASIC_FEATURE := praxis-policy-builtins/basic
 FIPS_JWT := fips,jwt-openssl-fips
 FIPS_JWT_NO_PROVIDER_TESTS := refusals::a_missing_provider_fails_with_the_shared_backend_error
 FIPS_JWT_PROVIDER_TESTS := \
@@ -277,6 +301,9 @@ test-fips-no-provider:
 	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=$(FIPS_UNSAFE_BUILTINS) \
 		$(CARGO) test -p praxis-policy --no-default-features \
 		--features $(FIPS_API_KEY)$(,)$(FIPS_UNSAFE_BUILTINS) --lib \
+		-- --exact $(FIPS_REPORT_TEST),1)
+	@$(call run_selected,PPE_EXPECT_BUILTIN_CRYPTO=basic $(CARGO) test -p praxis-policy \
+		--no-default-features --features $(FIPS_API_KEY)$(,)$(FIPS_BASIC_FEATURE) --lib \
 		-- --exact $(FIPS_REPORT_TEST),1)
 	@$(call run_selected,$(CARGO) test -p praxis-policy-core --no-default-features \
 		--features fips --lib -- --exact \
@@ -610,7 +637,7 @@ docs-lint:
 # only per-package checks catch a feature body that omits its own `dep:` edge,
 # module-group marker or crypto backend. This is the only gate that builds a
 # partial feature set.
-BUILTIN_FEATURES := jwt api-key oauth delegator-vault elicitation-ciba \
+BUILTIN_FEATURES := jwt api-key basic oauth delegator-vault elicitation-ciba \
 	experimental-quota experimental-ratelimit cedar cel opa valkey secrets-vault
 REFERENCE_PLUGINS := praxis-policy-plugin-audit-logger praxis-policy-plugin-ocsf-audit \
 	praxis-policy-plugin-pii-scanner praxis-policy-plugin-transcript-scanner

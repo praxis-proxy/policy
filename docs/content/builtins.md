@@ -62,10 +62,11 @@ praxis-policy = { version = "0.6.0", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
+| `builtins` | all eleven below: `jwt`, `api-key`, `basic`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`. `basic` is unreleased: it is on `main` and not in 0.6.0, so a host pinned to a published version cannot select it yet |
 | `jwt` | `identity/jwt`, verified with AWS-LC |
 | `jwt-openssl-fips` | `identity/jwt` and DPoP, verified with system OpenSSL under the FIPS provider. Requires `fips`; cannot be combined with `jwt`. HMAC (HS256, HS384, HS512) and EdDSA are refused at config load |
 | `api-key` | `identity/api-key` |
+| `basic` | `identity/basic`, and the argon2, bcrypt and sha-crypt verifiers it carries. Unreleased; track `main` to use it |
 | `fips` | OpenSSL FIPS SHA-256 for Policy's shared hashing, used by the engine and API-key. Needs no identity builtin. Keyed content provenance is rejected because it requires HMAC. Select with `default-features = false`; other crypto-using builtins are reported and make the profile unsafe. |
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
@@ -85,6 +86,150 @@ runtime and its own plugins compiles nothing extra.
 Default builds use RustCrypto SHA-256. A FIPS build disables defaults and
 selects `fips`, optionally with `api-key` and `jwt-openssl-fips`; see
 [FIPS](fips.md) for the supported selections, host setup and startup checks.
+
+`basic` is not part of a supported FIPS selection. It is reported whichever
+hash scheme the directory holds, so `fips_profile_is_safe()` is false on any
+build that enables it, and no choice of scheme changes that. Password
+verification runs in RustCrypto for every scheme the plugin accepts: picking
+`$5$` or `$6$` records does not move it into OpenSSL, and an empty file still
+mints a bcrypt hash for the unknown-user path. A deployment that needs both
+Basic and FIPS has to terminate Basic somewhere else.
+
+### What Basic asks of the host
+
+Basic sends a reusable password on every request, and base64 is not
+encryption ([RFC 7617 Section 4]). The plugin verifies the credential and
+stops there; four duties are the host's, and a deployment that skips them
+leaks the password whatever the policy says:
+
+- **Require TLS** on any route carrying a Basic credential.
+- **Redact** the configured credential header from access logs, traces and
+  error reports. `credential.kind: header` takes a header *name*, so a
+  deployment that moved the credential off `Authorization` must redact the
+  name it chose; redacting `Authorization` alone leaves the password in the
+  logs.
+- **Remove** that same header before forwarding the request to an unrelated
+  upstream. A successful resolve leaves the inbound header on the request:
+  the identity hook has no request-mutation channel. Forwarding it hands a
+  service that never authenticated the caller a credential it can replay.
+- **Render `WWW-Authenticate`** from the denial's violation details. Every
+  denial this resolver raises carries the challenge under the `http.headers`
+  key; nothing in Policy writes it to the wire, so a client gets no prompt
+  until the host does.
+
+Basic does not populate `raw_credentials`, so the password reaches no
+authorization step, assertion or decision point. That bound stops there: a
+later identity handler in the same chain can still read the credential
+header through `IdentityPayload::headers()`. Order the chain accordingly, and
+treat any handler placed after Basic as holding the password.
+
+A fuller operator recipe is planned; these are the warnings that cannot wait
+for it.
+
+[RFC 7617 Section 4]: https://datatracker.ietf.org/doc/html/rfc7617#section-4
+
+### Choosing a Basic directory
+
+Two on-disk providers ship, and they differ in what a record can carry
+rather than in how they verify one. Both index by user-id, admit the same
+four schemes, enforce one cost profile per file, and share the refresh
+window and staleness ceiling described below.
+
+| | `htpasswd` | `user_file` |
+|---|---|---|
+| Format | Apache `.htpasswd` lines | YAML under a `users:` key |
+| Projectable fields | none: the format carries a user-id and a hash | any field the record names |
+| Expiry | none; nothing in the format can express one | `expires_at`, enforced on every request |
+| Written by | `htpasswd`, `mkpasswd`, `crypt(3)` | an operator, or whatever projects your directory |
+
+Pick `htpasswd` when an existing file is the source of truth and a policy
+needs nothing but the username. Pick `user_file` when a policy is written
+against roles, teams or other attributes, or when a credential has to stop
+working on a date.
+
+```yaml
+plugins:
+  - name: ops-basic
+    kind: identity/basic
+    hooks: [identity.resolve]
+    config:
+      realm: "ops"
+      credential:
+        kind: header
+        name: Authorization
+      provider:
+        kind: user_file
+        path: /etc/ppe/users.yaml
+        refresh_secs: 30
+        max_staleness_secs: 300
+      record_map:
+        subject:
+          id: user_id
+          roles: roles
+          teams: teams
+```
+
+<!-- validate: fragment -->
+
+```yaml
+# /etc/ppe/users.yaml -- mode 0600, owned by the PPE user.
+# Not a PPE config document: this is the directory file the provider reads.
+users:
+  - username: alice
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$..."
+    roles: [admin, auditor]
+    teams: [platform]
+  - username: contractor
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$..."
+    roles: [reader]
+    expires_at: 2026-12-31T23:59:59Z
+```
+
+`username`, `password_hash` and `expires_at` are storage fields: they are
+consumed by the backend and never reach the projected claims, so a
+`subject.claim.password_hash` assertion cannot render a verifier into an
+upstream header. Every other field in a record is yours to name and is
+projected through `record_map`. The verified user-id is injected separately
+as `user_id`, which is what the default `subject.id` anchor reads.
+
+Three things fail at load rather than at request time, because each one
+would otherwise read as an outage or, worse, as silence:
+
+- A duplicate `username`, compared after Unicode normalisation. Two
+  spellings of one name are a collision, not a last-wins overwrite that
+  hands one caller the other's identity.
+- An `expires_at` that is not a timestamp. A string-typed field would have
+  accepted it and then meant "never expires", which is the one failure an
+  expiry must not have.
+- A misspelled top-level key. `user:` for `users:` would otherwise load as
+  an empty directory that denies every request.
+
+The file holds hashes, never plaintext, so a copy that leaks hands over no
+usable credential. It is still an offline-crackable verifier: it must not be
+world-readable, and PPE never writes to it. Re-hashing and rotation belong
+to whatever tool owns your directory.
+
+### The password ceiling is tied to the file's scheme
+
+`limits.max_password_bytes` above 72 is refused on a bcrypt directory.
+Bcrypt truncates at 72 bytes, so a longer password would be admitted here
+and then always rejected by the verifier, locking out every user who chose
+one with no denial an operator can read. A ceiling above 72 is a legitimate
+setting on an argon2 or sha-crypt file, which consume the whole password.
+
+The check runs on every load of the record file, not only at startup. A
+refresh that rewrites an argon2 file as bcrypt under a ceiling above 72 is
+refused and the previous index continues to serve, so the file and the
+ceiling cannot drift apart between reloads. Lower the ceiling to 72 before
+re-hashing a directory to bcrypt.
+
+That retention is bounded. The previous index serves only until it reaches
+`provider.max_staleness_secs`, after which every lookup is denied as
+`auth.directory_unavailable` rather than answered from an index the backend
+no longer stands behind. A refused refresh is therefore a countdown, not a
+steady state: restore a valid file within the staleness ceiling, or
+authentication stops for every user in the directory. The refusal is logged
+once per refresh interval with the path and the parse error.
 
 ### The HTTP transport
 
