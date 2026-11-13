@@ -79,6 +79,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `chrono-tz` (RUSTSEC-2026-0543 and RUSTSEC-2026-0555), which remain runtime
   dependencies of the engine and bundled PDPs with no patched release.
 
+### Security
+
+- **`file` secret provider: `base_dir` containment can no longer be raced.**
+  With `base_dir` set, the file is now opened beneath the directory in one
+  step, so a writer inside it cannot swap a symlink between the containment
+  check and the read and have a file outside the directory accepted. A link
+  that leaves the directory is refused with a reference error on every read;
+  links that stay inside, including the relative `..data` links of a Kubernetes
+  projected mount, still read. An absolute symlink is now refused even when its
+  target is inside `base_dir`. Without `base_dir`, behaviour is unchanged.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added
@@ -832,6 +843,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - Corrected `read_labels` and `read_workload` capability namespaces to match the
   keys emitted by the CMF bridge. ([#59](https://github.com/praxis-proxy/policy/pull/59))
 
+
 ### Security
 
 - Redacted inline PEM keys and HMAC secrets from identity configuration debug
@@ -1024,6 +1036,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Unused items fail the build.** `dead_code` is denied workspace-wide, so a function with no caller is a compile error rather than something coverage work has to find by hand. Public host-facing API with no in-tree caller stays, marked with a reason naming who calls it from outside. ([#13](https://github.com/praxis-proxy/policy/issues/13))
 
+
 ### Security
 
 - **A panicking `parallel:` branch is a Deny.** Dropping it let a sibling Allow stand in for a gate that never finished, the same fail-open shape as pairing a Deny with Aborted. The Deny reason says fail-closed and names the panic. ([#16](https://github.com/praxis-proxy/policy/issues/16))
@@ -1182,6 +1195,7 @@ First release. The engine was extracted from another project rather than written
 - **A quoted argument containing a lone quote aborted the policy parser** instead of being read as a literal.
 
 - **Branch outcomes are keyed rather than positional,** so a concurrent effect's result can no longer be attributed to the wrong branch.
+
 
 ### Security
 
