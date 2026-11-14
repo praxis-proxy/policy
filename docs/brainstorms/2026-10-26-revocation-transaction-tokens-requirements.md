@@ -313,7 +313,7 @@ flowchart LR
 | REV-26 | Admin events | Revocation denials pass through `finish()` and the audit sink; feeder records each write | | 0, 2 |
 | TXN-01 | No transaction token support | `delegator/txn-token` mints; host serves JWKS | | 3 |
 | TXN-02 | | Mint happens inside `delegate`, after the check | Replacement not yet in scope | 3 |
-| TXN-03 | | Claims from verified extensions, target resolution and the decision; a fresh `jti` per token; root `sid`, agent, versioned call descriptor, `task_id`, `lineage_root`, `lineage` in `tctx` | Delegation chain not populated from `act` yet | 3 |
+| TXN-03 | | Claims from verified extensions, target resolution and the decision; a fresh `jti` per token; root `sid`, agent, versioned call descriptor, `agent_session_id`, `task_id`, `lineage_root`, `lineage` and the token's own `created_seq` in `tctx` | Delegation chain not populated from `act` yet | 3 |
 | TXN-04 | | Claim sources limited to verified extensions and the decision | | 3 |
 | TXN-05 | | Enforced when replacement is added | | later |
 | TXN-06 | | Outbound DPoP | Depends on the DPoP issue | later |
@@ -818,7 +818,7 @@ After #127.
 | `ppe-apl-runtime` | Agent sessions (REV-06): mint and bind session handles to agent, instance and grant, record parent and principal sessions, and key limits and taint by agent and grant as well as session. |
 | `ppe-apl-runtime` | Second call site in `DelegationPluginInvoker::delegate`, before a token is exchanged or served from cache: REV-16 check (2). |
 | `builtins` `delegator/oauth` | Keep lineage for obtained tokens and cached entries; add production cache flush and RFC 7009 revocation for PPE-obtained tokens. |
-| `builtins` `delegator/txn-token` (new) | Mint a JWS token per call (TXN-13), with `typ` `txntoken+jwt` and `kid`, and a unique `jti`, `txn`, `sub`, `scope`, `act`, `req_wl`, `aud`, `iat`, `exp`, `rctx`, and `tctx` (root `sid` and agent, versioned call descriptor, `task_id`, `lineage_root`, `lineage`). Rotate signing keys from a secrets source and expose public keys for the host to serve. |
+| `builtins` `delegator/txn-token` (new) | Mint a JWS token per call (TXN-13), with `typ` `txntoken+jwt` and `kid`, and a unique `jti`, `txn`, `sub`, `scope`, `act`, `req_wl`, `aud`, `iat`, `exp`, `rctx`, and `tctx` (root `sid` and agent, versioned call descriptor, `agent_session_id`, `task_id`, `lineage_root`, `lineage`, and the token's own `created_seq`; the full set is TXN-03). Rotate signing keys from a secrets source and expose public keys for the host to serve. |
 | `builtins` `identity/jwt` | Verify Delegation Records from trusted issuers (PPE, or an IdP that produces the required fields) presented by child agents alongside their own credentials (DEL-01, DEL-02); on a downstream PPE, read the `Txn-Token` header as context, never as identity (section 3.3, TXN-09). |
 | Delegation | Issue Delegation Records at governed agent-to-agent delegation (DEL-03). Depends on PPE routing agent-to-agent calls; until then, accept IdP-issued records or exclude those delegations. |
 | Downstream PPE | Routes that require a transaction token deny without one (TXN-10); match `tctx` against the resolved call and the access token's principal; keep a `jti` seen-set per route in the store, entries expiring with the token (TXN-11). |
