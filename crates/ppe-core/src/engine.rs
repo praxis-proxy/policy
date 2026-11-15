@@ -459,7 +459,7 @@ impl RateLimitOverride {
 }
 
 /// Override instances by the `rate_limits:` step they serve.
-type RateLimitOverrides = Arc<HashMap<config::RateLimitStepSite, RateLimitOverride>>;
+type RateLimitOverrides = Arc<HashMap<config::StepSite, RateLimitOverride>>;
 
 /// Overlay a step's `config:` on the plugin's own, key by key.
 fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Value) -> PluginConfig {
@@ -501,7 +501,7 @@ fn create_rate_limit_overrides(
     if !config.dispatch_mode().is_policy() {
         return Ok(Arc::new(overrides));
     }
-    for (site, step) in config::rate_limit_override_steps(config) {
+    for (site, step) in config::override_steps(config, &config::RATE_LIMITS_BLOCK) {
         let where_declared = format!(
             "`{}` rate_limits step {} (plugin '{}')",
             site.section, site.index, step.name
@@ -581,9 +581,12 @@ fn rate_limit_entries(
     unavailable_warned: &AtomicBool,
 ) -> Result<Vec<crate::registry::HookEntry>, RouteResolutionError> {
     let mut selected: Vec<crate::registry::HookEntry> = Vec::new();
-    for resolved in
-        config::rate_limit_step_refs_for_route(policy_config, matched, request_entity_type)
-    {
+    for resolved in config::step_refs_for_route(
+        policy_config,
+        &config::RATE_LIMITS_BLOCK,
+        matched,
+        request_entity_type,
+    ) {
         let step = resolved.step;
         let declares_this_stage = policy_config
             .plugins
@@ -1224,7 +1227,7 @@ fn warn_on_dropped_inherited_authentication(cfg: &PolicyConfig) {
 /// Report every route whose inherited `rate_limits:` steps a
 /// `replace_inherited: true` drops, at a section or on the route itself.
 fn warn_on_dropped_inherited_rate_limits(cfg: &PolicyConfig) {
-    for finding in crate::config::dropped_inherited_rate_limits(cfg) {
+    for finding in crate::config::dropped_inherited_steps(cfg, &crate::config::RATE_LIMITS_BLOCK) {
         warn!(
             alarm = "rate_limits_replaced_inherited",
             route = %finding.route,
@@ -1446,7 +1449,7 @@ fn snapshot_from_config(
     let http_routes_declaring_rate_limits = http_routes_declaring_rate_limits(&policy_config);
     let declares_rate_limits_at = |hook: &str| {
         policy_config.dispatch_mode().is_policy()
-            && config::declares_rate_limits_at(&policy_config, hook)
+            && config::step_list_declares_hook(&policy_config, &config::RATE_LIMITS_BLOCK, hook)
     };
     let declares_pre_identity_rate_limits =
         declares_rate_limits_at(crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY);
@@ -4051,8 +4054,9 @@ impl PolicyEngine {
             .then(|| resolve_http_route(policy_config, extensions))
             .flatten();
         let pre_identity = crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY;
-        let skipped: Vec<&str> = config::rate_limit_step_refs_for_route(
+        let skipped: Vec<&str> = config::step_refs_for_route(
             policy_config,
+            &config::RATE_LIMITS_BLOCK,
             http_matched.as_ref(),
             Some(ENTITY_HTTP),
         )

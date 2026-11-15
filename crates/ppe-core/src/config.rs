@@ -590,10 +590,17 @@ pub type RouteRateLimitConfig = crate::identity::RouteIdentityConfig;
 /// One `rate_limits:` step: a plugin name and an optional `config:` override.
 pub type RouteRateLimitStep = crate::identity::RouteIdentityStep;
 
-/// Key names and an error label for a structural step-list block.
-struct StepListBlock {
+/// A structural step-list block: its key names, its error labels, and where it
+/// sits at each of the four config levels.
+pub(crate) struct StepListBlock {
     /// The block's key, as error messages name it.
     key: &'static str,
+    /// The block at a `global.defaults.<entity>:` or `groups.<name>:` section.
+    from_bundle: fn(&PolicyGroup) -> Option<&crate::identity::RouteIdentityConfig>,
+    /// The block at `global:`.
+    from_global: fn(&GlobalConfig) -> Option<&crate::identity::RouteIdentityConfig>,
+    /// The block on a `routes[]` entry.
+    from_route: fn(&RouteEntry) -> Option<&crate::identity::RouteIdentityConfig>,
     /// The object form's key table.
     scope: ConfigScope,
     /// How an error names one step.
@@ -604,13 +611,20 @@ struct StepListBlock {
 
 const AUTHENTICATION_BLOCK: StepListBlock = StepListBlock {
     key: "authentication",
+    from_bundle: |bundle| bundle.authentication.as_ref(),
+    from_global: |global| global.authentication.as_ref(),
+    from_route: |route| route.authentication.as_ref(),
     scope: ConfigScope::Authentication,
     step_label: "authentication step",
     step_scope: ConfigScope::AuthenticationStep,
 };
 
-const RATE_LIMITS_BLOCK: StepListBlock = StepListBlock {
+/// The `rate_limits:` block.
+pub(crate) const RATE_LIMITS_BLOCK: StepListBlock = StepListBlock {
     key: "rate_limits",
+    from_bundle: |bundle| bundle.rate_limits.as_ref(),
+    from_global: |global| global.rate_limits.as_ref(),
+    from_route: |route| route.rate_limits.as_ref(),
     scope: ConfigScope::RateLimits,
     step_label: "rate_limits step",
     step_scope: ConfigScope::RateLimitsStep,
@@ -2796,18 +2810,18 @@ fn validate_rate_limits(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
         Ok(())
     };
 
-    for (scope, block) in rate_limit_blocks(config) {
+    for (scope, block) in step_list_blocks(config, &RATE_LIMITS_BLOCK) {
         let (context, non_http) = match scope {
-            RateLimitScope::Global => ("global".to_owned(), None),
-            RateLimitScope::EntityDefault(entity_type) => (
+            StepListScope::Global => ("global".to_owned(), None),
+            StepListScope::EntityDefault(entity_type) => (
                 format!("global.defaults.{entity_type}"),
                 (entity_type != ENTITY_HTTP).then(|| entity_type.to_owned()),
             ),
-            RateLimitScope::Group(group_name) => (
+            StepListScope::Group(group_name) => (
                 format!("policy group '{group_name}'"),
                 group_only_entity_types(config, group_name),
             ),
-            RateLimitScope::Route(i, route) => (
+            StepListScope::Route(i, route) => (
                 format!("route {i}"),
                 route_entity_identity(route)
                     .map(|(entity_type, _)| entity_type)
@@ -3514,33 +3528,27 @@ fn authentication_layers<'a>(
 ) -> Vec<SectionLayer<'a, crate::identity::RouteIdentityConfig>> {
     // `None`: identity layers reach a request through its route, and threading a
     // request's entity type into that chain is a change to which plugins fire.
-    section_layers(
-        config,
-        route,
-        None,
-        |global| global.authentication.as_ref(),
-        |section| section.authentication.as_ref(),
-        |route| route.authentication.as_ref(),
-    )
+    step_list_layers(config, &AUTHENTICATION_BLOCK, route, None)
 }
 
-/// The `rate_limits:` layers that apply to a route, stacked the way
+/// The layers of `block` that apply to a route, stacked the way
 /// [`authentication_layers`] stacks. `request_entity_type` lets an entity
 /// default reach a request that matched no route, as for `assertions:`.
 ///
 /// [`authentication_layers`]: authentication_layers
-fn rate_limits_layers<'a>(
+fn step_list_layers<'a>(
     config: &'a PolicyConfig,
+    block: &StepListBlock,
     route: Option<&'a RouteEntry>,
     request_entity_type: Option<&'a str>,
-) -> Vec<SectionLayer<'a, RouteRateLimitConfig>> {
+) -> Vec<SectionLayer<'a, crate::identity::RouteIdentityConfig>> {
     section_layers(
         config,
         route,
         request_entity_type,
-        |global| global.rate_limits.as_ref(),
-        |section| section.rate_limits.as_ref(),
-        |route| route.rate_limits.as_ref(),
+        block.from_global,
+        block.from_bundle,
+        block.from_route,
     )
 }
 
@@ -3612,10 +3620,10 @@ pub fn resolve_identity_plugins_for_route(
     fold_step_layers(authentication_layers(config, matched.map(|m| m.route)))
 }
 
-/// Where a `rate_limits:` step is declared. A step's override instance is keyed
-/// by it, so every route inheriting the step shares one instance.
+/// Where a step-list step is declared. A step's override instance is keyed by
+/// it, so every route inheriting the step shares one instance.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct RateLimitStepSite {
+pub(crate) struct StepSite {
     /// The step's position in that section's list.
     pub(crate) index: usize,
 
@@ -3626,18 +3634,14 @@ pub(crate) struct RateLimitStepSite {
 
 /// A request-time step keeps its source borrowed until an override lookup or
 /// error needs an owned site.
-pub(crate) struct RateLimitStepRef<'a> {
+pub(crate) struct StepRef<'a> {
     source: SectionSource<'a>,
     index: usize,
-    pub(crate) step: &'a RouteRateLimitStep,
+    pub(crate) step: &'a crate::identity::RouteIdentityStep,
 }
 
-impl RateLimitStepRef<'_> {
-    pub(crate) fn site(
-        &self,
-        config: &PolicyConfig,
-        route: Option<&RouteEntry>,
-    ) -> RateLimitStepSite {
+impl StepRef<'_> {
+    pub(crate) fn site(&self, config: &PolicyConfig, route: Option<&RouteEntry>) -> StepSite {
         let route_index = if self.source == SectionSource::Route {
             route.and_then(|route| {
                 config
@@ -3648,28 +3652,30 @@ impl RateLimitStepRef<'_> {
         } else {
             None
         };
-        RateLimitStepSite {
+        StepSite {
             index: self.index,
-            section: rate_limit_section_label(self.source, route_index),
+            section: step_section_label(self.source, route_index),
         }
     }
 }
 
-pub(crate) fn rate_limit_step_refs_for_route<'a>(
+pub(crate) fn step_refs_for_route<'a>(
     config: &'a PolicyConfig,
+    block: &StepListBlock,
     matched: Option<&MatchedRoute<'a>>,
     request_entity_type: Option<&'a str>,
-) -> Vec<RateLimitStepRef<'a>> {
-    rate_limit_step_refs(config, matched.map(|m| m.route), request_entity_type)
+) -> Vec<StepRef<'a>> {
+    step_refs(config, block, matched.map(|m| m.route), request_entity_type)
 }
 
-fn rate_limit_step_refs<'a>(
+fn step_refs<'a>(
     config: &'a PolicyConfig,
+    block: &StepListBlock,
     route: Option<&'a RouteEntry>,
     request_entity_type: Option<&'a str>,
-) -> Vec<RateLimitStepRef<'a>> {
+) -> Vec<StepRef<'a>> {
     let mut steps = Vec::new();
-    for layer in rate_limits_layers(config, route, request_entity_type) {
+    for layer in step_list_layers(config, block, route, request_entity_type) {
         if layer.config.replace_inherited {
             steps.clear();
         }
@@ -3679,7 +3685,7 @@ fn rate_limit_step_refs<'a>(
                 .steps
                 .iter()
                 .enumerate()
-                .map(|(index, step)| RateLimitStepRef {
+                .map(|(index, step)| StepRef {
                     source: layer.source,
                     index,
                     step,
@@ -3689,48 +3695,51 @@ fn rate_limit_step_refs<'a>(
     steps
 }
 
-/// The `rate_limits:` steps in force for a request, in dispatch order, each
-/// with the site it is declared at.
+/// The steps of `block` in force for a request, in dispatch order, each with
+/// the site it is declared at.
 ///
 /// `request_entity_type` lets `global.defaults.<entity>` apply to a request
 /// that matched no route.
 #[cfg(test)]
-pub(crate) fn rate_limit_steps_for_route<'a>(
+pub(crate) fn steps_for_route<'a>(
     config: &'a PolicyConfig,
+    block: &StepListBlock,
     matched: Option<&MatchedRoute<'a>>,
     request_entity_type: Option<&'a str>,
-) -> Vec<(RateLimitStepSite, &'a RouteRateLimitStep)> {
-    rate_limit_steps(config, matched.map(|m| m.route), request_entity_type)
+) -> Vec<(StepSite, &'a crate::identity::RouteIdentityStep)> {
+    steps_with_sites(config, block, matched.map(|m| m.route), request_entity_type)
 }
 
-fn rate_limit_steps<'a>(
+fn steps_with_sites<'a>(
     config: &'a PolicyConfig,
+    block: &StepListBlock,
     route: Option<&'a RouteEntry>,
     request_entity_type: Option<&'a str>,
-) -> Vec<(RateLimitStepSite, &'a RouteRateLimitStep)> {
-    rate_limit_step_refs(config, route, request_entity_type)
+) -> Vec<(StepSite, &'a crate::identity::RouteIdentityStep)> {
+    step_refs(config, block, route, request_entity_type)
         .into_iter()
         .map(|resolved| (resolved.site(config, route), resolved.step))
         .collect()
 }
 
-/// Every `rate_limits:` step that carries a `config:` override, at every scope,
+/// Every step of `block` that carries a `config:` override, at every scope,
 /// whether or not a route inherits it.
-pub(crate) fn rate_limit_override_steps(
-    config: &PolicyConfig,
-) -> Vec<(RateLimitStepSite, &RouteRateLimitStep)> {
-    rate_limit_blocks(config)
+pub(crate) fn override_steps<'a>(
+    config: &'a PolicyConfig,
+    block: &StepListBlock,
+) -> Vec<(StepSite, &'a crate::identity::RouteIdentityStep)> {
+    step_list_blocks(config, block)
         .into_iter()
-        .flat_map(|(scope, block)| {
+        .flat_map(|(scope, declared)| {
             let section = scope.site_label();
-            block
+            declared
                 .steps
                 .iter()
                 .enumerate()
                 .filter(|(_, step)| step.config_override.is_some())
                 .map(move |(index, step)| {
                     (
-                        RateLimitStepSite {
+                        StepSite {
                             index,
                             section: section.clone(),
                         },
@@ -3741,8 +3750,12 @@ pub(crate) fn rate_limit_override_steps(
         .collect()
 }
 
-/// Whether any `rate_limits:` block lists a plugin declaring `hook`.
-pub(crate) fn declares_rate_limits_at(config: &PolicyConfig, hook: &str) -> bool {
+/// Whether any `block` in the config lists a plugin declaring `hook`.
+pub(crate) fn step_list_declares_hook(
+    config: &PolicyConfig,
+    block: &StepListBlock,
+    hook: &str,
+) -> bool {
     let at_hook: HashSet<&str> = config
         .plugins
         .iter()
@@ -3750,25 +3763,27 @@ pub(crate) fn declares_rate_limits_at(config: &PolicyConfig, hook: &str) -> bool
         .map(|plugin| plugin.name.as_str())
         .collect();
     !at_hook.is_empty()
-        && rate_limit_blocks(config).into_iter().any(|(_, block)| {
-            block
-                .steps
-                .iter()
-                .any(|step| at_hook.contains(step.name.as_str()))
-        })
+        && step_list_blocks(config, block)
+            .into_iter()
+            .any(|(_, declared)| {
+                declared
+                    .steps
+                    .iter()
+                    .any(|step| at_hook.contains(step.name.as_str()))
+            })
 }
 
-/// A section that can carry a `rate_limits:` block.
+/// A section that can carry a step-list block.
 #[derive(Clone, Copy, Debug)]
-enum RateLimitScope<'a> {
+enum StepListScope<'a> {
     EntityDefault(&'a str),
     Global,
     Group(&'a str),
     Route(usize, &'a RouteEntry),
 }
 
-impl RateLimitScope<'_> {
-    /// Name the section for a rate-limit step.
+impl StepListScope<'_> {
+    /// Name the section for a step.
     fn site_label(self) -> String {
         match self {
             Self::EntityDefault(entity_type) => format!("global.defaults.{entity_type}"),
@@ -3779,34 +3794,27 @@ impl RateLimitScope<'_> {
     }
 }
 
-/// Every `rate_limits:` block in the config, at every scope, whether or not a
-/// route inherits it.
-fn rate_limit_blocks(config: &PolicyConfig) -> Vec<(RateLimitScope<'_>, &RouteRateLimitConfig)> {
-    let global = config
-        .global
-        .rate_limits
-        .as_ref()
-        .map(|block| (RateLimitScope::Global, block));
+/// Every `block` in the config, at every scope, whether or not a route
+/// inherits it.
+fn step_list_blocks<'a>(
+    config: &'a PolicyConfig,
+    block: &StepListBlock,
+) -> Vec<(StepListScope<'a>, &'a crate::identity::RouteIdentityConfig)> {
+    let global =
+        (block.from_global)(&config.global).map(|declared| (StepListScope::Global, declared));
     let defaults = config
         .global
         .defaults
         .iter()
-        .filter_map(|(entity_type, d)| {
-            d.rate_limits
-                .as_ref()
-                .map(|block| (RateLimitScope::EntityDefault(entity_type.as_str()), block))
+        .filter_map(|(entity_type, default)| {
+            (block.from_bundle)(default)
+                .map(|declared| (StepListScope::EntityDefault(entity_type.as_str()), declared))
         });
     let groups = config.global.bundles.iter().filter_map(|(name, group)| {
-        group
-            .rate_limits
-            .as_ref()
-            .map(|block| (RateLimitScope::Group(name.as_str()), block))
+        (block.from_bundle)(group).map(|declared| (StepListScope::Group(name.as_str()), declared))
     });
     let routes = config.routes.iter().enumerate().filter_map(|(i, route)| {
-        route
-            .rate_limits
-            .as_ref()
-            .map(|block| (RateLimitScope::Route(i, route), block))
+        (block.from_route)(route).map(|declared| (StepListScope::Route(i, route), declared))
     });
     global
         .into_iter()
@@ -3816,9 +3824,9 @@ fn rate_limit_blocks(config: &PolicyConfig) -> Vec<(RateLimitScope<'_>, &RouteRa
         .collect()
 }
 
-/// Name a rate-limit step's layer. A route uses its index because two routes
-/// may share one selector.
-fn rate_limit_section_label(source: SectionSource<'_>, route_index: Option<usize>) -> String {
+/// Name a step's layer. A route uses its index because two routes may share
+/// one selector.
+fn step_section_label(source: SectionSource<'_>, route_index: Option<usize>) -> String {
     match (source, route_index) {
         (SectionSource::Route, Some(i)) => format!("routes[{i}]"),
         (source, _) => source.label(),
@@ -3920,23 +3928,26 @@ pub(crate) fn dropped_inherited_authentication(
     findings
 }
 
-/// A route whose inherited `rate_limits:` steps a `replace_inherited: true`
-/// dropped, in the shape the `authentication:` report uses.
-pub(crate) type DroppedRateLimits = DroppedAuthentication;
+/// A route whose inherited steps a `replace_inherited: true` dropped, in the
+/// shape the `authentication:` report uses.
+pub(crate) type DroppedSteps = DroppedAuthentication;
 
-/// Every route that loses inherited `rate_limits:` steps to a
+/// Every route that loses inherited steps of `block` to a
 /// `replace_inherited: true`, one finding per route.
 ///
-/// A route's own flag is reported too: dropping inherited limits removes
+/// A route's own flag is reported too: dropping inherited steps removes
 /// protection the sections above intended for every route. When the route
 /// replaces, the finding names the route, since its flag decides
 /// what survives; otherwise it names the first section that dropped steps.
-pub(crate) fn dropped_inherited_rate_limits(config: &PolicyConfig) -> Vec<DroppedRateLimits> {
-    let mut findings: Vec<DroppedRateLimits> = Vec::new();
+pub(crate) fn dropped_inherited_steps(
+    config: &PolicyConfig,
+    block: &StepListBlock,
+) -> Vec<DroppedSteps> {
+    let mut findings: Vec<DroppedSteps> = Vec::new();
     for (i, route) in config.routes.iter().enumerate() {
         let mut steps: Vec<&str> = Vec::new();
         let mut finding: Option<(SectionSource<'_>, Vec<String>)> = None;
-        for layer in rate_limits_layers(config, Some(route), None) {
+        for layer in step_list_layers(config, block, Some(route), None) {
             if layer.config.replace_inherited && !steps.is_empty() {
                 let route_replaces = layer.source == SectionSource::Route;
                 if finding.is_none() || route_replaces {
@@ -3952,7 +3963,7 @@ pub(crate) fn dropped_inherited_rate_limits(config: &PolicyConfig) -> Vec<Droppe
             steps.extend(layer.config.steps.iter().map(|s| s.name.as_str()));
         }
         if let Some((source, dropped)) = finding {
-            findings.push(DroppedRateLimits {
+            findings.push(DroppedSteps {
                 route: route_display_name(route, i),
                 declared_in: source.label(),
                 dropped,
@@ -4001,12 +4012,16 @@ pub(crate) fn rate_limits_without_authentication(
             if !fold_step_layers(authentication_layers(config, Some(route))).is_empty() {
                 return None;
             }
-            let limiters: Vec<String> =
-                fold_step_layers(rate_limits_layers(config, Some(route), None))
-                    .into_iter()
-                    .map(|step| step.name)
-                    .filter(|name| post_identity.contains(name.as_str()))
-                    .collect();
+            let limiters: Vec<String> = fold_step_layers(step_list_layers(
+                config,
+                &RATE_LIMITS_BLOCK,
+                Some(route),
+                None,
+            ))
+            .into_iter()
+            .map(|step| step.name)
+            .filter(|name| post_identity.contains(name.as_str()))
+            .collect();
             (!limiters.is_empty()).then(|| UnauthenticatedRateLimits {
                 limiters,
                 route: route_display_name(route, i),
@@ -4033,7 +4048,7 @@ pub(crate) struct RepeatedRateLimits {
 /// so a repeat is never a second count; it is reported because the author
 /// likely meant something else.
 pub(crate) fn rate_limits_listed_twice(config: &PolicyConfig) -> Vec<RepeatedRateLimits> {
-    let repeated = |steps: Vec<(RateLimitStepSite, &RouteRateLimitStep)>| {
+    let repeated = |steps: Vec<(StepSite, &RouteRateLimitStep)>| {
         let mut seen: Vec<&str> = Vec::new();
         let mut repeats: Vec<String> = Vec::new();
         for (_, step) in steps.iter().filter(|(_, s)| s.config_override.is_none()) {
@@ -4047,7 +4062,7 @@ pub(crate) fn rate_limits_listed_twice(config: &PolicyConfig) -> Vec<RepeatedRat
         }
         repeats
     };
-    let global = repeated(rate_limit_steps(config, None, None));
+    let global = repeated(steps_with_sites(config, &RATE_LIMITS_BLOCK, None, None));
     let mut findings: Vec<RepeatedRateLimits> = Vec::new();
     if !global.is_empty() {
         findings.push(RepeatedRateLimits {
@@ -4058,14 +4073,24 @@ pub(crate) fn rate_limits_listed_twice(config: &PolicyConfig) -> Vec<RepeatedRat
     let mut entity_types: Vec<&String> = config.global.defaults.keys().collect();
     entity_types.sort();
     findings.extend(entity_types.into_iter().filter_map(|entity_type| {
-        let limiters = repeated(rate_limit_steps(config, None, Some(entity_type.as_str())));
+        let limiters = repeated(steps_with_sites(
+            config,
+            &RATE_LIMITS_BLOCK,
+            None,
+            Some(entity_type.as_str()),
+        ));
         (!limiters.is_empty() && limiters != global).then(|| RepeatedRateLimits {
             limiters,
             route: format!("global.defaults.{entity_type}"),
         })
     }));
     findings.extend(config.routes.iter().enumerate().filter_map(|(i, route)| {
-        let limiters = repeated(rate_limit_steps(config, Some(route), None));
+        let limiters = repeated(steps_with_sites(
+            config,
+            &RATE_LIMITS_BLOCK,
+            Some(route),
+            None,
+        ));
         (!limiters.is_empty()).then(|| RepeatedRateLimits {
             limiters,
             route: route_display_name(route, i),
@@ -4561,7 +4586,7 @@ mod tests {
     /// The rate-limit counterpart of `identity_for`, as step names.
     fn rate_limits_for(config: &PolicyConfig, entity_type: &str, entity_name: &str) -> Vec<String> {
         let matched = resolve_route(config, RouteQuery::named(entity_type, entity_name));
-        rate_limit_steps_for_route(config, matched.as_ref(), None)
+        steps_for_route(config, &RATE_LIMITS_BLOCK, matched.as_ref(), None)
             .into_iter()
             .map(|(_, step)| step.name.clone())
             .collect()
@@ -5912,11 +5937,11 @@ routes:
         )
         .expect("a step with a config override loads");
         let matched = resolve_route(&cfg, RouteQuery::named("tool", "t"));
-        let resolved = rate_limit_steps_for_route(&cfg, matched.as_ref(), None);
+        let resolved = steps_for_route(&cfg, &RATE_LIMITS_BLOCK, matched.as_ref(), None);
         assert_eq!(resolved.len(), 1, "one step resolves to one plugin");
         assert_eq!(
             resolved[0].0,
-            RateLimitStepSite {
+            StepSite {
                 index: 0,
                 section: "routes[0]".to_owned(),
             },
@@ -6095,14 +6120,14 @@ routes:
             "the group drops the global limiter",
         );
         assert_eq!(
-            dropped_inherited_rate_limits(&cfg),
+            dropped_inherited_steps(&cfg, &RATE_LIMITS_BLOCK),
             vec![
-                DroppedRateLimits {
+                DroppedSteps {
                     route: "tool:internal_tool".to_owned(),
                     declared_in: "groups.internal".to_owned(),
                     dropped: vec!["edge".to_owned()],
                 },
-                DroppedRateLimits {
+                DroppedSteps {
                     route: route_display_name(&cfg.routes[1], 1),
                     declared_in: "the route".to_owned(),
                     dropped: vec!["edge".to_owned()],
