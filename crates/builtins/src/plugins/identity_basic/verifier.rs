@@ -343,7 +343,7 @@ impl Default for Limits {
 ///     CostProfile, parse_hash,
 /// };
 ///
-/// let stored = "$6$rounds=100000$exn6tVc2j/MZD8uG$BI1Xh8qQSK9J4m14uwy7abn.\
+/// let stored = "$6$rounds=100000$exn6tVc2j/MZD8uG$BI1Xh8qQSK9J4m14uwy7abn.\ // HashiCorpIgnore
 ///               ctj/TIAzlaVCto0MQrOFIeTXsc1iwzH16XEWo/a7c7Y9eVJvufVzYAs4EsPOy0";
 /// let stored: String = stored.split_whitespace().collect();
 ///
@@ -366,7 +366,7 @@ impl Default for Limits {
 /// use praxis_policy_builtins::plugins::identity_basic::{HashError, Limits};
 /// use praxis_policy_builtins::plugins::identity_basic::verifier::parse_hash;
 ///
-/// let stored = "$6$rounds=100000$exn6tVc2j/MZD8uG$BI1Xh8qQSK9J4m14uwy7abn.\
+/// let stored = "$6$rounds=100000$exn6tVc2j/MZD8uG$BI1Xh8qQSK9J4m14uwy7abn.\ // HashiCorpIgnore
 ///               ctj/TIAzlaVCto0MQrOFIeTXsc1iwzH16XEWo/a7c7Y9eVJvufVzYAs4EsPOy0";
 /// let stored: String = stored.split_whitespace().collect();
 ///
