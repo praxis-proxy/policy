@@ -438,14 +438,15 @@ enum RateLimitStage {
     PostIdentity,
 }
 
-// A route-cache miss must not rebuild an override and reset its counters: the
-// cache is bounded and is cleared on registration changes.
-struct RateLimitOverride {
+// A route-cache miss must not rebuild an override and reset its state (a
+// limiter's counters, a checker's cache): the cache is bounded and is cleared
+// on registration changes.
+struct StepOverride {
     handlers: Vec<(&'static str, Arc<dyn AnyHookHandler>)>,
     plugin_ref: Arc<PluginRef>,
 }
 
-impl RateLimitOverride {
+impl StepOverride {
     /// The handler entry for `hook_name`, if this override serves it.
     fn entry_for(&self, hook_name: &str) -> Option<crate::registry::HookEntry> {
         self.handlers
@@ -458,8 +459,13 @@ impl RateLimitOverride {
     }
 }
 
-/// Override instances by the `rate_limits:` step they serve.
-type RateLimitOverrides = Arc<HashMap<config::StepSite, RateLimitOverride>>;
+/// Override instances by the `rate_limits:` or `revocation:` step they serve.
+type StepOverrides = Arc<HashMap<config::StepSite, StepOverride>>;
+
+/// The step-list blocks whose steps may carry a `config:` override, each with
+/// the hooks an override instance must serve.
+const OVERRIDABLE_STEP_LISTS: [(&config::StepListBlock, fn(&str) -> bool); 1] =
+    [(&config::RATE_LIMITS_BLOCK, StructuralList::is_rate_limits)];
 
 /// Overlay a step's `config:` on the plugin's own, key by key.
 fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Value) -> PluginConfig {
@@ -478,8 +484,8 @@ fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Valu
     merged
 }
 
-/// Build one instance for every `rate_limits:` step carrying a `config:`
-/// override, through the plugin's own factory.
+/// Build one instance for every `rate_limits:` or `revocation:` step carrying
+/// a `config:` override, through the plugin's own factory.
 ///
 /// Must run with no engine lock held, for the reason
 /// [`create_plugin_instances`] gives.
@@ -487,24 +493,31 @@ fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Valu
 /// # Errors
 ///
 /// A `config:` that is not a mapping fails the load, as does a factory that
-/// rejects the merged config, or an instance with no handler for a rate-limit
-/// hook the plugin declares: falling back to the base instance would run the
-/// limiter with a config nobody wrote.
+/// rejects the merged config, or an instance with no handler for a hook of
+/// that block the plugin declares: falling back to the base instance would
+/// run the plugin with a config nobody wrote.
 ///
 /// [`create_plugin_instances`]: create_plugin_instances
-fn create_rate_limit_overrides(
+fn create_step_overrides(
     config: &PolicyConfig,
     factories: &[Arc<dyn crate::factory::PluginFactory>],
     context: &crate::factory::FactoryContext,
-) -> Result<RateLimitOverrides, Box<PluginError>> {
+) -> Result<StepOverrides, Box<PluginError>> {
     let mut overrides = HashMap::new();
     if !config.dispatch_mode().is_policy() {
         return Ok(Arc::new(overrides));
     }
-    for (site, step) in config::override_steps(config, &config::RATE_LIMITS_BLOCK) {
+    let steps = OVERRIDABLE_STEP_LISTS
+        .iter()
+        .flat_map(|(block, owns_hook)| {
+            config::override_steps(config, block)
+                .into_iter()
+                .map(move |(site, step)| (site, step, *owns_hook))
+        });
+    for (site, step, owns_hook) in steps {
         let where_declared = format!(
-            "`{}` rate_limits step {} (plugin '{}')",
-            site.section, site.index, step.name
+            "`{}` {} step {} (plugin '{}')",
+            site.section, site.block, site.index, step.name
         );
         let Some((base, factory)) = config
             .plugins
@@ -531,11 +544,7 @@ fn create_rate_limit_overrides(
                 "{where_declared}: the plugin's factory rejects the step's `config:` override: {e}"
             ))
         })?;
-        for hook in base
-            .hooks
-            .iter()
-            .filter(|hook| StructuralList::is_rate_limits(hook))
-        {
+        for hook in base.hooks.iter().filter(|hook| owns_hook(hook)) {
             let Some((_, handler)) = instance.handlers.iter().find(|(name, _)| name == hook) else {
                 return Err(config_error(format!(
                     "{where_declared}: the instance built for the step's `config:` override \
@@ -547,7 +556,7 @@ fn create_rate_limit_overrides(
         }
         overrides.insert(
             site,
-            RateLimitOverride {
+            StepOverride {
                 handlers: instance.handlers,
                 plugin_ref: Arc::new(PluginRef::new(instance.plugin, merged)),
             },
@@ -558,11 +567,6 @@ fn create_rate_limit_overrides(
 
 /// The entries one rate-limit hook dispatches for a request, in `rate_limits:`
 /// order.
-///
-/// A step whose plugin declares only the other stage drops out here. A step
-/// with a `config:` override runs the snapshot's instance for it, never one
-/// built per request. A base limiter runs once per request however often the
-/// folded list names it, since each run counts the request again.
 ///
 /// # Errors
 ///
@@ -580,13 +584,62 @@ fn rate_limit_entries(
     hook_name: &str,
     unavailable_warned: &AtomicBool,
 ) -> Result<Vec<crate::registry::HookEntry>, RouteResolutionError> {
-    let mut selected: Vec<crate::registry::HookEntry> = Vec::new();
-    for resolved in config::step_refs_for_route(
+    step_entries(
+        snapshot,
         policy_config,
         &config::RATE_LIMITS_BLOCK,
+        entries,
         matched,
         request_entity_type,
-    ) {
+        hook_name,
+    )
+    .map_err(|missing| {
+        if !unavailable_warned.swap(true, Ordering::AcqRel) {
+            error!(
+                plugin = %missing.plugin,
+                section = %missing.site.section,
+                index = missing.site.index,
+                hook = hook_name,
+                "a rate_limits step has no limiter in the running snapshot, so requests it \
+                 covers are denied with ratelimit.unavailable until the plugin is registered \
+                 again or the configuration is reloaded",
+            );
+        }
+        RouteResolutionError::RateLimitUnavailable
+    })
+}
+
+/// A step whose plugin declares the hook but has no instance in the running
+/// snapshot.
+struct MissingStepInstance {
+    plugin: String,
+    site: config::StepSite,
+}
+
+/// The entries one hook dispatches for a request from `block`, in list order.
+///
+/// A step whose plugin does not declare `hook_name` drops out here. A step
+/// with a `config:` override runs the snapshot's instance for it, never one
+/// built per request. A base instance runs once per request however often the
+/// folded list names it.
+///
+/// # Errors
+///
+/// [`MissingStepInstance`] when a step's plugin declares `hook_name` but the
+/// snapshot has no instance for it, as after the plugin is unregistered. The
+/// caller decides what that denies.
+fn step_entries(
+    snapshot: &RuntimeSnapshot,
+    policy_config: &PolicyConfig,
+    block: &config::StepListBlock,
+    entries: &[crate::registry::HookEntry],
+    matched: Option<&config::MatchedRoute<'_>>,
+    request_entity_type: Option<&str>,
+    hook_name: &str,
+) -> Result<Vec<crate::registry::HookEntry>, MissingStepInstance> {
+    let mut selected: Vec<crate::registry::HookEntry> = Vec::new();
+    for resolved in config::step_refs_for_route(policy_config, block, matched, request_entity_type)
+    {
         let step = resolved.step;
         let declares_this_stage = policy_config
             .plugins
@@ -599,7 +652,7 @@ fn rate_limit_entries(
         let entry = if step.config_override.is_some() {
             let site = resolved.site(policy_config, matched.map(|m| m.route));
             snapshot
-                .rate_limit_overrides
+                .step_overrides
                 .get(&site)
                 .and_then(|instance| instance.entry_for(hook_name))
         } else {
@@ -614,19 +667,10 @@ fn rate_limit_entries(
             base.cloned()
         };
         let Some(entry) = entry else {
-            if !unavailable_warned.swap(true, Ordering::AcqRel) {
-                let site = resolved.site(policy_config, matched.map(|m| m.route));
-                error!(
-                    plugin = %step.name,
-                    section = %site.section,
-                    index = site.index,
-                    hook = hook_name,
-                    "a rate_limits step has no limiter in the running snapshot, so requests it \
-                     covers are denied with ratelimit.unavailable until the plugin is registered \
-                     again or the configuration is reloaded",
-                );
-            }
-            return Err(RouteResolutionError::RateLimitUnavailable);
+            return Err(MissingStepInstance {
+                plugin: step.name.clone(),
+                site: resolved.site(policy_config, matched.map(|m| m.route)),
+            });
         };
         selected.push(entry);
     }
@@ -802,8 +846,8 @@ struct RuntimeSnapshot {
     declares_pre_identity_rate_limits: bool,
     declares_post_identity_rate_limits: bool,
 
-    // Snapshot ownership keeps counters across route-cache and registry changes.
-    rate_limit_overrides: RateLimitOverrides,
+    // Snapshot ownership keeps state across route-cache and registry changes.
+    step_overrides: StepOverrides,
 
     /// Whether any level declares an `assertions:` block. False for every
     /// config that does not use the feature, which is what keeps the extra
@@ -1409,7 +1453,7 @@ fn snapshot_from_config(
     prev: Option<&RuntimeSnapshot>,
     content_key: Option<crate::hooks::payload::ContentKey>,
     factory_context: &crate::factory::FactoryContext,
-    rate_limit_overrides: RateLimitOverrides,
+    step_overrides: StepOverrides,
 ) -> RuntimeSnapshot {
     let mut executor = Executor::new(ExecutorConfig {
         timeout_seconds: policy_config.engine_settings.plugin_timeout,
@@ -1504,7 +1548,7 @@ fn snapshot_from_config(
         http_routes_declaring_rate_limits,
         declares_pre_identity_rate_limits,
         declares_post_identity_rate_limits,
-        rate_limit_overrides,
+        step_overrides,
         declares_assertions,
         http_routes_declaring_assertions,
         declares_glob_named_routes,
@@ -1537,7 +1581,7 @@ impl PolicyEngine {
             http_routes_declaring_rate_limits: Arc::from(Vec::new()),
             declares_pre_identity_rate_limits: false,
             declares_post_identity_rate_limits: false,
-            rate_limit_overrides: Arc::new(HashMap::new()),
+            step_overrides: Arc::new(HashMap::new()),
             declares_assertions: false,
             http_routes_declaring_assertions: Arc::from(Vec::new()),
             declares_glob_named_routes: false,
@@ -1865,8 +1909,7 @@ impl PolicyEngine {
             resolve_factories(&policy_config.plugins, &registry)?
         };
         let instances = create_plugin_instances(&policy_config.plugins, &factories, context)?;
-        let rate_limit_overrides =
-            create_rate_limit_overrides(&policy_config, &factories, context)?;
+        let step_overrides = create_step_overrides(&policy_config, &factories, context)?;
 
         // Build the new snapshot from the current one — copy-on-write so
         // concurrent invokes keep using the existing config until we swap.
@@ -1904,7 +1947,7 @@ impl PolicyEngine {
                 Some(current.as_ref()),
                 content_key,
                 context,
-                Arc::clone(&rate_limit_overrides),
+                Arc::clone(&step_overrides),
             )));
             // Same generation bump as mutate_runtime — load_config doesn't
             // go through that helper because it has to swap registry + executor
@@ -1912,7 +1955,7 @@ impl PolicyEngine {
             self.generation.fetch_add(1, Ordering::Release);
             Ok(())
         });
-        // Released before `instances`, `rate_limit_overrides`, `new_registry`
+        // Released before `instances`, `step_overrides`, `new_registry`
         // and `current` fall out of scope, the same discipline
         // try_mutate_runtime follows. A rejected load holds the only
         // references to plugins the factories just built, and dropping one
@@ -2195,7 +2238,7 @@ impl PolicyEngine {
             &resolved,
             &crate::factory::FactoryContext::default(),
         )?;
-        let rate_limit_overrides = create_rate_limit_overrides(
+        let step_overrides = create_step_overrides(
             &policy_config,
             &resolved,
             &crate::factory::FactoryContext::default(),
@@ -2210,7 +2253,7 @@ impl PolicyEngine {
             None,
             content_key,
             &crate::factory::FactoryContext::default(),
-            rate_limit_overrides,
+            step_overrides,
         )));
 
         Ok(engine)
@@ -2632,8 +2675,8 @@ impl PolicyEngine {
             }
         }
 
-        let mut initialized_overrides: Vec<&RateLimitOverride> = Vec::new();
-        for (site, instance) in snapshot.rate_limit_overrides.iter() {
+        let mut initialized_overrides: Vec<&StepOverride> = Vec::new();
+        for (site, instance) in snapshot.step_overrides.iter() {
             let init_ext =
                 self.init_extensions_for(&instance.plugin_ref.trusted_config().capabilities);
             if let Err(e) = instance
@@ -2644,8 +2687,8 @@ impl PolicyEngine {
             {
                 let plugin_name = instance.plugin_ref.name().to_owned();
                 error!(
-                    "Failed to initialize the `{}` rate_limits step {} instance of '{}': {}",
-                    site.section, site.index, plugin_name, e
+                    "Failed to initialize the `{}` {} step {} instance of '{}': {}",
+                    site.section, site.block, site.index, plugin_name, e
                 );
                 let overrides = initialized_overrides
                     .iter()
@@ -2735,10 +2778,11 @@ impl PolicyEngine {
                 }
             }
         }
-        for instance in snapshot.rate_limit_overrides.values() {
+        for (site, instance) in snapshot.step_overrides.iter() {
             if let Err(e) = instance.plugin_ref.plugin().shutdown().await {
                 error!(
-                    "Error shutting down a rate_limits override of '{}': {}",
+                    "Error shutting down a {} override of '{}': {}",
+                    site.block,
                     instance.plugin_ref.name(),
                     e
                 );
@@ -12810,7 +12854,7 @@ mod rate_limit_dispatch_tests {
              config: {{ tag: route }}\n"
         ))
         .await;
-        engine.mutate_runtime(|snap| snap.rate_limit_overrides = Arc::new(HashMap::new()));
+        engine.mutate_runtime(|snap| snap.step_overrides = Arc::new(HashMap::new()));
 
         let result = dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, named("tool", "t")).await;
 

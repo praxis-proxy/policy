@@ -3764,6 +3764,10 @@ pub fn resolve_identity_plugins_for_route(
 /// it, so every route inheriting the step shares one instance.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct StepSite {
+    /// The block's key: `rate_limits` or `revocation`. Part of the key because
+    /// two blocks in one section number their steps independently.
+    pub(crate) block: &'static str,
+
     /// The step's position in that section's list.
     pub(crate) index: usize,
 
@@ -3775,6 +3779,7 @@ pub(crate) struct StepSite {
 /// A request-time step keeps its source borrowed until an override lookup or
 /// error needs an owned site.
 pub(crate) struct StepRef<'a> {
+    block: &'static str,
     source: SectionSource<'a>,
     index: usize,
     pub(crate) step: &'a crate::identity::RouteIdentityStep,
@@ -3793,6 +3798,7 @@ impl StepRef<'_> {
             None
         };
         StepSite {
+            block: self.block,
             index: self.index,
             section: step_section_label(self.source, route_index),
         }
@@ -3826,6 +3832,7 @@ fn step_refs<'a>(
                 .iter()
                 .enumerate()
                 .map(|(index, step)| StepRef {
+                    block: block.key,
                     source: layer.source,
                     index,
                     step,
@@ -3880,6 +3887,7 @@ pub(crate) fn override_steps<'a>(
                 .map(move |(index, step)| {
                     (
                         StepSite {
+                            block: block.key,
                             index,
                             section: section.clone(),
                         },
@@ -6115,6 +6123,7 @@ routes:
         assert_eq!(
             resolved[0].0,
             StepSite {
+                block: "rate_limits",
                 index: 0,
                 section: "routes[0]".to_owned(),
             },
