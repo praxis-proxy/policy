@@ -106,6 +106,10 @@ pub enum RouteResolutionError {
     /// A `rate_limits:` step has no limiter in the running snapshot.
     #[error("a rate limit step has no limiter in the running configuration")]
     RateLimitUnavailable,
+
+    /// A `revocation:` step has no checker in the running snapshot.
+    #[error("a revocation step has no checker in the running configuration")]
+    RevocationUnavailable,
 }
 
 impl RouteResolutionError {
@@ -113,8 +117,8 @@ impl RouteResolutionError {
     /// unreadable path or an unidentified request, because the request itself
     /// is malformed rather than forbidden: the engine is missing something the
     /// host was supposed to supply, and no rule was ever reached to forbid
-    /// anything. `503` for a missing limiter, because the fault is the
-    /// engine's state, not the request.
+    /// anything. `503` for a missing limiter or checker, because the fault is
+    /// the engine's state, not the request.
     fn violation(self) -> crate::error::PluginViolation {
         match self {
             Self::UnreadablePath(cause) => crate::error::PluginViolation::new(
@@ -129,6 +133,15 @@ impl RouteResolutionError {
             Self::RateLimitUnavailable => crate::error::PluginViolation::new(
                 VIOLATION_RATE_LIMIT_UNAVAILABLE,
                 "rate limit unavailable",
+            )
+            .with_details(std::collections::HashMap::from([(
+                DETAIL_HTTP_STATUS.to_owned(),
+                serde_json::json!(503),
+            )]))
+            .with_proto_error_code(503),
+            Self::RevocationUnavailable => crate::error::PluginViolation::new(
+                crate::revocation::REVOCATION_UNAVAILABLE_CODE,
+                crate::revocation::REVOCATION_UNAVAILABLE_REASON,
             )
             .with_details(std::collections::HashMap::from([(
                 DETAIL_HTTP_STATUS.to_owned(),
@@ -409,12 +422,15 @@ enum StructuralList {
     Authentication,
     /// `rate_limits:`, for one of the two rate-limit hooks.
     RateLimits(RateLimitStage),
+    /// `revocation:`, for `revocation.check`.
+    Revocation,
 }
 
 impl StructuralList {
     fn for_hook(hook_name: &str) -> Option<Self> {
         match hook_name {
             crate::identity::HOOK_IDENTITY_RESOLVE => Some(Self::Authentication),
+            crate::revocation::HOOK_REVOCATION_CHECK => Some(Self::Revocation),
             crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY => {
                 Some(Self::RateLimits(RateLimitStage::PreIdentity))
             },
@@ -428,6 +444,11 @@ impl StructuralList {
     /// Whether `hook_name` is one of the two rate-limit hooks.
     fn is_rate_limits(hook_name: &str) -> bool {
         matches!(Self::for_hook(hook_name), Some(Self::RateLimits(_)))
+    }
+
+    /// Whether `hook_name` is the revocation hook.
+    fn is_revocation(hook_name: &str) -> bool {
+        matches!(Self::for_hook(hook_name), Some(Self::Revocation))
     }
 }
 
@@ -464,8 +485,10 @@ type StepOverrides = Arc<HashMap<config::StepSite, StepOverride>>;
 
 /// The step-list blocks whose steps may carry a `config:` override, each with
 /// the hooks an override instance must serve.
-const OVERRIDABLE_STEP_LISTS: [(&config::StepListBlock, fn(&str) -> bool); 1] =
-    [(&config::RATE_LIMITS_BLOCK, StructuralList::is_rate_limits)];
+const OVERRIDABLE_STEP_LISTS: [(&config::StepListBlock, fn(&str) -> bool); 2] = [
+    (&config::RATE_LIMITS_BLOCK, StructuralList::is_rate_limits),
+    (&config::REVOCATION_BLOCK, StructuralList::is_revocation),
+];
 
 /// Overlay a step's `config:` on the plugin's own, key by key.
 fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Value) -> PluginConfig {
@@ -845,6 +868,7 @@ struct RuntimeSnapshot {
     // path cannot allow unchecked requests.
     declares_pre_identity_rate_limits: bool,
     declares_post_identity_rate_limits: bool,
+    declares_revocation: bool,
 
     // Snapshot ownership keeps state across route-cache and registry changes.
     step_overrides: StepOverrides,
@@ -871,16 +895,17 @@ impl RuntimeSnapshot {
         hook_name: &str,
         entries: &[crate::registry::HookEntry],
     ) -> bool {
-        let lists_rate_limits = match StructuralList::for_hook(hook_name) {
+        let lists_steps = match StructuralList::for_hook(hook_name) {
             Some(StructuralList::RateLimits(RateLimitStage::PreIdentity)) => {
                 self.declares_pre_identity_rate_limits
             },
             Some(StructuralList::RateLimits(RateLimitStage::PostIdentity)) => {
                 self.declares_post_identity_rate_limits
             },
+            Some(StructuralList::Revocation) => self.declares_revocation,
             _ => false,
         };
-        entries.is_empty() && self.route_annotations.is_empty() && !lists_rate_limits
+        entries.is_empty() && self.route_annotations.is_empty() && !lists_steps
     }
 }
 
@@ -1534,6 +1559,12 @@ fn snapshot_from_config(
         declares_rate_limits_at(crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY);
     let declares_post_identity_rate_limits =
         declares_rate_limits_at(crate::ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY);
+    let declares_revocation = policy_config.dispatch_mode().is_policy()
+        && config::step_list_declares_hook(
+            &policy_config,
+            &config::REVOCATION_BLOCK,
+            crate::revocation::HOOK_REVOCATION_CHECK,
+        );
     let declares_assertions = declares_assertions(&policy_config);
     let http_routes_declaring_assertions = http_routes_declaring_assertions(&policy_config);
     let declares_glob_named_routes = declares_glob_named_routes(&policy_config);
@@ -1548,6 +1579,7 @@ fn snapshot_from_config(
         http_routes_declaring_rate_limits,
         declares_pre_identity_rate_limits,
         declares_post_identity_rate_limits,
+        declares_revocation,
         step_overrides,
         declares_assertions,
         http_routes_declaring_assertions,
@@ -1581,6 +1613,7 @@ impl PolicyEngine {
             http_routes_declaring_rate_limits: Arc::from(Vec::new()),
             declares_pre_identity_rate_limits: false,
             declares_post_identity_rate_limits: false,
+            declares_revocation: false,
             step_overrides: Arc::new(HashMap::new()),
             declares_assertions: false,
             http_routes_declaring_assertions: Arc::from(Vec::new()),
@@ -3939,6 +3972,26 @@ impl PolicyEngine {
                 let resolved = config::resolve_identity_plugins_for_route(policy_config, matched);
                 self.resolved_entries(snapshot, entries, &resolved).await
             },
+            Some(StructuralList::Revocation) => step_entries(
+                snapshot,
+                policy_config,
+                &config::REVOCATION_BLOCK,
+                entries,
+                matched,
+                Some(entity_type),
+                hook_name,
+            )
+            .map_err(|missing| {
+                error!(
+                    plugin = %missing.plugin,
+                    section = %missing.site.section,
+                    index = missing.site.index,
+                    "a revocation step has no checker in the running snapshot, so requests it \
+                     covers are denied with auth.revocation_unavailable until the plugin is \
+                     registered again or the configuration is reloaded",
+                );
+                RouteResolutionError::RevocationUnavailable
+            })?,
             None => {
                 let resolved = config::resolve_plugins_for_entity(policy_config);
                 self.resolved_entries(snapshot, entries, &resolved).await
@@ -4052,6 +4105,9 @@ impl PolicyEngine {
                 &snapshot.http_routes_declaring_rate_limits,
                 &self.route_rate_limits_unreachable_warned,
             ),
+            // Called from a route handler, for a request already routed with
+            // its request line in hand, so no route's list can be unreachable.
+            StructuralList::Revocation => return,
         };
         if unreachable.is_empty()
             || request_path.is_some_and(|path| path.starts_with('/'))
@@ -4076,6 +4132,7 @@ impl PolicyEngine {
                  The host must supply the request line on the extensions at both rate-limit \
                  hooks for a route's list to apply.",
             ),
+            StructuralList::Revocation => {},
         }
     }
 

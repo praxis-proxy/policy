@@ -7,6 +7,8 @@
 // slots they verified with an issuer, so the engine can deny a slot no
 // checker covered.
 
+/// The engine's check: run a route's checkers and decide pass or deny.
+mod check;
 /// The revocation hook.
 pub mod hook;
 /// The request a checker answers and the slots it vouched for.
