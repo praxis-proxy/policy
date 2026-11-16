@@ -87,6 +87,7 @@ use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE};
 use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
 use praxis_policy_core::plugin::PluginConfig;
 use praxis_policy_core::ratelimit_hook::RATELIMIT_HOOK_METADATA;
+use praxis_policy_core::revocation::HOOK_REVOCATION_CHECK;
 use praxis_policy_core::visitor::{ConfigVisitor, VisitorError};
 
 use praxis_policy_apl_core::attribute_source::{AttributeSource as _, AttributeTree};
@@ -578,6 +579,12 @@ fn rate_limit_step_names(yaml: &serde_yaml::Value) -> Vec<String> {
     step_list_names(yaml, "rate_limits")
 }
 
+/// The plugin names a `revocation:` block on a section lists, read the way
+/// `authentication:` is.
+fn revocation_step_names(yaml: &serde_yaml::Value) -> Vec<String> {
+    step_list_names(yaml, "revocation")
+}
+
 /// The plugin names a step-list block under `key` lists.
 fn step_list_names(yaml: &serde_yaml::Value, key: &str) -> Vec<String> {
     let Some(block) = yaml.get(key) else {
@@ -610,6 +617,19 @@ fn is_rate_limit_hook(hook: &str) -> bool {
         .iter()
         .any(|(name, _)| *name == hook)
 }
+
+/// Whether `hook` is the revocation hook.
+fn is_revocation_hook(hook: &str) -> bool {
+    hook == HOOK_REVOCATION_CHECK
+}
+
+/// The step-list blocks whose plugins run at hooks no policy step installs
+/// under: the block's key, how an error names its hooks, and which hooks it
+/// owns.
+const STEP_LIST_HOOK_FAMILIES: [(&str, &str, fn(&str) -> bool); 2] = [
+    ("rate_limits", "rate-limit", is_rate_limit_hook),
+    ("revocation", "revocation", is_revocation_hook),
+];
 
 /// Read-only baseline for APL predicates: enough to make
 /// `authenticated`, `role.*`, `perm.*`, `subject.*`, `claim.*`,
@@ -741,10 +761,10 @@ impl AplConfigVisitor {
         }
     }
 
-    /// Tally the plugins a `rate_limits:` block names, under the rate-limit
-    /// hooks each declares. Those reach a rate-limit hook, which no policy step
-    /// installs under.
-    fn record_rate_limit_names(&self, names: &[String]) {
+    /// Tally the plugins a `rate_limits:` or `revocation:` block names, under
+    /// the hooks of that block's family each declares. Those hooks are reached
+    /// from the block, and no policy step installs under them.
+    fn record_step_list_names(&self, names: &[String], owns_hook: fn(&str) -> bool) {
         if names.is_empty() {
             return;
         }
@@ -759,7 +779,7 @@ impl AplConfigVisitor {
                 .get(name)
                 .into_iter()
                 .flatten()
-                .filter(|hook| is_rate_limit_hook(hook))
+                .filter(|hook| owns_hook(hook))
                 .cloned()
                 .collect();
             state
@@ -771,9 +791,10 @@ impl AplConfigVisitor {
     }
 
     /// Refuse a `run(name)` step naming a plugin whose only hooks are rate-limit
-    /// hooks. A policy step cannot dispatch one: the plugin runs from
-    /// `rate_limits:` or not at all.
-    fn reject_rate_limit_only_runs(
+    /// hooks, or only the revocation hook. A policy step cannot dispatch one:
+    /// the plugin runs from its `rate_limits:` or `revocation:` block or not at
+    /// all.
+    fn reject_step_list_only_runs(
         &self,
         source: &str,
         layer: &CompiledRoute,
@@ -782,27 +803,33 @@ impl AplConfigVisitor {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let rate_limit_only = crate::dispatch_plan::collect_plugin_names(layer)
-            .into_iter()
-            .find(|name| {
-                state.declared_plugin_hooks.get(name).is_some_and(|hooks| {
-                    !hooks.is_empty() && hooks.iter().all(|hook| is_rate_limit_hook(hook))
-                })
-            });
-        match rate_limit_only {
-            Some(name) => Err(format!(
-                "{source}: a policy step names plugin '{name}', which declares only rate-limit \
-                 hooks, so no policy step can run it. List it under `rate_limits:` instead"
-            )
-            .into()),
-            None => Ok(()),
+        for name in crate::dispatch_plan::collect_plugin_names(layer) {
+            let Some(hooks) = state.declared_plugin_hooks.get(&name) else {
+                continue;
+            };
+            if hooks.is_empty() {
+                continue;
+            }
+            for (key, family, owns_hook) in STEP_LIST_HOOK_FAMILIES {
+                if hooks.iter().all(|hook| owns_hook(hook)) {
+                    return Err(format!(
+                        "{source}: a policy step names plugin '{name}', which declares only \
+                         {family} hooks, so no policy step can run it. List it under `{key}:` \
+                         instead"
+                    )
+                    .into());
+                }
+            }
         }
+        Ok(())
     }
 
-    /// Tally a section's structural lists, `authentication:` and `rate_limits:`.
+    /// Tally a section's structural lists: `authentication:`, `rate_limits:`
+    /// and `revocation:`.
     fn record_structural_names(&self, yaml: &serde_yaml::Value) {
         self.record_authentication_names(&authentication_step_names(yaml));
-        self.record_rate_limit_names(&rate_limit_step_names(yaml));
+        self.record_step_list_names(&rate_limit_step_names(yaml), is_rate_limit_hook);
+        self.record_step_list_names(&revocation_step_names(yaml), is_revocation_hook);
     }
 
     /// In policy dispatch, reject unreachable plugins and warn about unused hooks.
@@ -979,7 +1006,7 @@ impl ConfigVisitor for AplConfigVisitor {
         let mut compiled = compile_policy_block_value("global", &policy_only)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
         self.validate_pdp_steps("global", &compiled)?;
-        self.reject_rate_limit_only_runs("global", &compiled)?;
+        self.reject_step_list_only_runs("global", &compiled)?;
         // The global policy also runs as an entity-less HTTP catch-all.
         // Validate that path here; visit_route only covers named routes.
         self.validate_pdp_input(
@@ -1094,7 +1121,7 @@ impl ConfigVisitor for AplConfigVisitor {
         let compiled = compile_policy_block_value(&source, &apl_block)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
         self.validate_pdp_steps(&source, &compiled)?;
-        self.reject_rate_limit_only_runs(&source, &compiled)?;
+        self.reject_step_list_only_runs(&source, &compiled)?;
         // A default layer reaches only its own entity type, so a field stage
         // declared here for `http` is as unreadable as one on the route.
         reject_field_stages_without_fields(entity_type, &source, &compiled)?;
@@ -1125,7 +1152,7 @@ impl ConfigVisitor for AplConfigVisitor {
         let compiled = compile_policy_block_value(&source, &apl_block)
             .map_err(|e| -> VisitorError { Box::new(e) })?;
         self.validate_pdp_steps(&source, &compiled)?;
-        self.reject_rate_limit_only_runs(&source, &compiled)?;
+        self.reject_step_list_only_runs(&source, &compiled)?;
         // No reachability tally here, for the reason in `visit_default`. A group
         // installs no handler and matches no request on its own: a route has to
         // carry its name. Recording at compile time meant an orphan group nothing
@@ -1156,7 +1183,11 @@ impl ConfigVisitor for AplConfigVisitor {
         }
         if let Some(rate_limits) = parsed.rate_limits.as_ref() {
             let names: Vec<String> = rate_limits.steps.iter().map(|s| s.name.clone()).collect();
-            self.record_rate_limit_names(&names);
+            self.record_step_list_names(&names, is_rate_limit_hook);
+        }
+        if let Some(revocation) = parsed.revocation.as_ref() {
+            let names: Vec<String> = revocation.steps.iter().map(|s| s.name.clone()).collect();
+            self.record_step_list_names(&names, is_revocation_hook);
         }
 
         // Extract the route's APL block (if any) and the entity identity
@@ -1232,7 +1263,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 let route_layer = compile_policy_block_value(&source, block)
                     .map_err(|e| -> VisitorError { Box::new(e) })?;
                 self.validate_pdp_steps(&source, &route_layer)?;
-                self.reject_rate_limit_only_runs(&source, &route_layer)?;
+                self.reject_step_list_only_runs(&source, &route_layer)?;
                 reject_field_stages_without_fields(
                     entity_type,
                     &format!("route '{route_key}'"),

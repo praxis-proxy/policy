@@ -182,6 +182,14 @@ pub struct EngineSettings {
     #[serde(default = "default_route_cache_max_entries")]
     pub route_cache_max_entries: usize,
 
+    /// Whether every route that resolves authentication must also run a
+    /// revocation check. Off by default: revocation is opt-in, and a route
+    /// left without one is only reported. On, such a route fails the load
+    /// unless a `revocation:` block on its path excludes it explicitly with
+    /// `replace_inherited: true`.
+    #[serde(default)]
+    pub require_revocation: bool,
+
     /// Path to a durable write-ahead log for irreversible effects: token
     /// mints, approval grants.
     ///
@@ -284,6 +292,7 @@ impl Default for EngineSettings {
             audit_timeout_milliseconds: default_audit_timeout_milliseconds(),
             short_circuit_on_deny: true,
             route_cache_max_entries: default_route_cache_max_entries(),
+            require_revocation: false,
             effect_log_path: None,
             effect_log_compaction_threshold: None,
             capture_content_provenance: false,
@@ -350,6 +359,11 @@ pub struct GlobalConfig {
     #[serde(default, deserialize_with = "deserialize_rate_limits")]
     pub rate_limits: Option<RouteRateLimitConfig>,
 
+    /// Global revocation checkers (YAML key `revocation:`), the first layer
+    /// every route inherits. Same shapes and stacking as `authentication:`.
+    #[serde(default, deserialize_with = "deserialize_revocation")]
+    pub revocation: Option<RouteRevocationConfig>,
+
     /// What the engine asserts on the wire (YAML key `assertions:`), the
     /// first of the four levels a contract accumulates over. Every level
     /// stacks the way `authentication:` does, per direction.
@@ -391,6 +405,11 @@ pub struct PolicyGroup {
     /// `rate_limits:`), stacked where this section's `authentication:` is.
     #[serde(default, deserialize_with = "deserialize_rate_limits")]
     pub rate_limits: Option<RouteRateLimitConfig>,
+
+    /// Revocation checkers contributed by this section (YAML key
+    /// `revocation:`), stacked where this section's `authentication:` is.
+    #[serde(default, deserialize_with = "deserialize_revocation")]
+    pub revocation: Option<RouteRevocationConfig>,
 
     /// What the engine asserts on the wire (YAML key `assertions:`), for
     /// every route this section covers. One field serves two of the four
@@ -575,6 +594,12 @@ pub struct RouteEntry {
     #[serde(default, deserialize_with = "deserialize_rate_limits")]
     pub rate_limits: Option<RouteRateLimitConfig>,
 
+    /// Revocation checkers for this route (YAML key `revocation:`), the last
+    /// layer. Same shapes as `authentication:`. An empty list with
+    /// `replace_inherited: true` excludes the route from revocation checks.
+    #[serde(default, deserialize_with = "deserialize_revocation")]
+    pub revocation: Option<RouteRevocationConfig>,
+
     /// What the engine asserts on the wire for this route (YAML key
     /// `assertions:`), the most specific of the four levels. It stacks on
     /// what the route inherits unless the direction sets
@@ -589,6 +614,10 @@ pub type RouteRateLimitConfig = crate::identity::RouteIdentityConfig;
 
 /// One `rate_limits:` step: a plugin name and an optional `config:` override.
 pub type RouteRateLimitStep = crate::identity::RouteIdentityStep;
+
+/// A parsed `revocation:` block, with the same list and object forms as
+/// `authentication:`.
+pub type RouteRevocationConfig = crate::identity::RouteIdentityConfig;
 
 /// A structural step-list block: its key names, its error labels, and where it
 /// sits at each of the four config levels.
@@ -630,6 +659,17 @@ pub(crate) const RATE_LIMITS_BLOCK: StepListBlock = StepListBlock {
     step_scope: ConfigScope::RateLimitsStep,
 };
 
+/// The `revocation:` block.
+pub(crate) const REVOCATION_BLOCK: StepListBlock = StepListBlock {
+    key: "revocation",
+    from_bundle: |bundle| bundle.revocation.as_ref(),
+    from_global: |global| global.revocation.as_ref(),
+    from_route: |route| route.revocation.as_ref(),
+    scope: ConfigScope::Revocation,
+    step_label: "revocation step",
+    step_scope: ConfigScope::RevocationStep,
+};
+
 /// Deserialize the `authentication:` block in a `RouteEntry`. Accepts either a YAML
 /// list (treated as additive — `replace_inherited: false`) or a
 /// YAML map with `replace_inherited: bool?` + `steps: [...]`. Each
@@ -654,6 +694,17 @@ where
     D: serde::Deserializer<'de>,
 {
     deserialize_step_list(deserializer, &RATE_LIMITS_BLOCK)
+}
+
+/// Deserialize a `revocation:` block, which takes the shapes
+/// `authentication:` does.
+fn deserialize_revocation<'de, D>(
+    deserializer: D,
+) -> Result<Option<RouteRevocationConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_step_list(deserializer, &REVOCATION_BLOCK)
 }
 
 fn deserialize_step_list<'de, D>(
@@ -1432,6 +1483,7 @@ const GLOBAL_STRUCTURAL_KEYS: &[ConfigKey] = &[
     structural_key("defaults", KeyOwner::Core),
     structural_key("authentication", KeyOwner::Core),
     structural_key("rate_limits", KeyOwner::Core),
+    structural_key("revocation", KeyOwner::Core),
     structural_key("assertions", KeyOwner::Core),
     structural_key("response", KeyOwner::Apl),
 ];
@@ -1448,6 +1500,7 @@ const BUNDLE_STRUCTURAL_KEYS: &[ConfigKey] = &[
     shape_conditional_key("plugins"),
     structural_key("authentication", KeyOwner::Core),
     structural_key("rate_limits", KeyOwner::Core),
+    structural_key("revocation", KeyOwner::Core),
     structural_key("assertions", KeyOwner::Core),
     structural_key("response", KeyOwner::Apl),
 ];
@@ -1470,6 +1523,7 @@ const ROUTE_STRUCTURAL_KEYS: &[ConfigKey] = &[
     shape_conditional_key("plugins"),
     structural_key("authentication", KeyOwner::Core),
     structural_key("rate_limits", KeyOwner::Core),
+    structural_key("revocation", KeyOwner::Core),
     structural_key("assertions", KeyOwner::Core),
     structural_key("response", KeyOwner::Apl),
 ];
@@ -1492,6 +1546,7 @@ const ENGINE_SETTINGS_KEYS: &[ConfigKey] = &[
     structural_key("audit_timeout_milliseconds", KeyOwner::Core),
     structural_key("short_circuit_on_deny", KeyOwner::Core),
     structural_key("route_cache_max_entries", KeyOwner::Core),
+    structural_key("require_revocation", KeyOwner::Core),
     structural_key("effect_log_path", KeyOwner::Core),
     structural_key("effect_log_compaction_threshold", KeyOwner::Core),
     structural_key("capture_content_provenance", KeyOwner::Core),
@@ -1526,6 +1581,12 @@ const RATE_LIMITS_STEP_KEYS: &[ConfigKey] = AUTHENTICATION_STEP_KEYS;
 
 /// The keys the object form of a `rate_limits:` block carries.
 const RATE_LIMITS_KEYS: &[ConfigKey] = AUTHENTICATION_KEYS;
+
+/// The keys one map-form step of a `revocation:` block carries.
+const REVOCATION_STEP_KEYS: &[ConfigKey] = AUTHENTICATION_STEP_KEYS;
+
+/// The keys the object form of a `revocation:` block carries.
+const REVOCATION_KEYS: &[ConfigKey] = AUTHENTICATION_KEYS;
 
 /// The keys an `assertions:` block carries: one per direction.
 ///
@@ -1594,6 +1655,12 @@ pub enum ConfigScope {
     /// One map-form step of a `rate_limits:` block, at any scope.
     RateLimitsStep,
 
+    /// The object form of a `revocation:` block, at any scope.
+    Revocation,
+
+    /// One map-form step of a `revocation:` block, at any scope.
+    RevocationStep,
+
     /// An `assertions:` block, at any scope.
     Assertions,
 
@@ -1606,7 +1673,7 @@ pub enum ConfigScope {
 
 impl ConfigScope {
     /// Every scope, for a walk over the whole key model.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Document,
         Self::Global,
         Self::EntityDefault,
@@ -1617,6 +1684,8 @@ impl ConfigScope {
         Self::AuthenticationStep,
         Self::RateLimits,
         Self::RateLimitsStep,
+        Self::Revocation,
+        Self::RevocationStep,
         Self::Assertions,
         Self::AssertionsDirection,
         Self::AssertionHeader,
@@ -1636,6 +1705,8 @@ impl ConfigScope {
             Self::AuthenticationStep => "an authentication step",
             Self::RateLimits => "a rate_limits block",
             Self::RateLimitsStep => "a rate_limits step",
+            Self::Revocation => "a revocation block",
+            Self::RevocationStep => "a revocation step",
             Self::Assertions => "an assertions block",
             Self::AssertionsDirection => "an assertions request or response block",
             Self::AssertionHeader => "an assertions header entry",
@@ -1674,6 +1745,8 @@ impl ConfigScope {
             Self::AuthenticationStep => (AUTHENTICATION_STEP_KEYS, &[], &[], &[]),
             Self::RateLimits => (RATE_LIMITS_KEYS, &[], &[], &[]),
             Self::RateLimitsStep => (RATE_LIMITS_STEP_KEYS, &[], &[], &[]),
+            Self::Revocation => (REVOCATION_KEYS, &[], &[], &[]),
+            Self::RevocationStep => (REVOCATION_STEP_KEYS, &[], &[], &[]),
             Self::Assertions => (ASSERTIONS_KEYS, &[], &[], &[]),
             Self::AssertionsDirection => (ASSERTIONS_DIRECTION_KEYS, &[], &[], &[]),
             Self::AssertionHeader => (ASSERTION_HEADER_KEYS, &[], &[], &[]),
@@ -2254,7 +2327,8 @@ pub(crate) fn reject_policy_mode_with_nothing_to_dispatch(
         || !config.global.bundles.is_empty()
         || !config.global.defaults.is_empty()
         || config.global.authentication.is_some()
-        || config.global.rate_limits.is_some();
+        || config.global.rate_limits.is_some()
+        || config.global.revocation.is_some();
     if declares_a_policy_scope {
         return Ok(());
     }
@@ -2371,6 +2445,7 @@ fn reject_typed_policy_scopes(config: &PolicyConfig) -> Result<(), Box<PluginErr
             "global.authentication",
         ),
         (config.global.rate_limits.is_some(), "global.rate_limits"),
+        (config.global.revocation.is_some(), "global.revocation"),
     ]
     .into_iter()
     .filter_map(|(present, name)| present.then_some(name))
@@ -2762,6 +2837,7 @@ pub(crate) fn validate_config(config: &PolicyConfig) -> Result<(), Box<PluginErr
         }
 
         validate_rate_limits(config)?;
+        validate_revocation(config)?;
     }
 
     Ok(())
@@ -2830,6 +2906,70 @@ fn validate_rate_limits(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
             ),
         };
         check(block, &context, non_http.as_deref())?;
+    }
+    Ok(())
+}
+
+/// Check every `revocation:` step and, under `require_revocation`, coverage.
+///
+/// A checker must be able to deny and to report the slots it vouched for, so
+/// it runs `sequential`. Its failures must stop the request: under
+/// `on_error: ignore` or `disable` a failing kill list, which never vouches,
+/// would let every call through.
+fn validate_revocation(config: &PolicyConfig) -> Result<(), Box<PluginError>> {
+    use crate::plugin::{OnError, PluginMode};
+    use crate::revocation::HOOK_REVOCATION_CHECK;
+
+    for (scope, block) in step_list_blocks(config, &REVOCATION_BLOCK) {
+        let context = scope.site_label();
+        for step in &block.steps {
+            let Some(plugin) = config.plugins.iter().find(|p| p.name == step.name) else {
+                return Err(config_error(format!(
+                    "{context} revocation references unknown plugin '{}'",
+                    step.name
+                )));
+            };
+            if !plugin
+                .hooks
+                .iter()
+                .any(|hook| hook == HOOK_REVOCATION_CHECK)
+            {
+                return Err(config_error(format!(
+                    "{context} revocation lists plugin '{}', which does not declare \
+                     `{HOOK_REVOCATION_CHECK}`; add it to the plugin's `hooks:`",
+                    step.name
+                )));
+            }
+            if plugin.mode != PluginMode::Sequential {
+                return Err(config_error(format!(
+                    "{context} revocation lists plugin '{}' in mode `{:?}`; a revocation \
+                     checker must run `sequential`, the only mode that can both deny and \
+                     report the identities it vouched for",
+                    step.name, plugin.mode
+                )));
+            }
+            if plugin.on_error != OnError::Fail {
+                return Err(config_error(format!(
+                    "{context} revocation lists plugin '{}' with `on_error: {}`; a revocation \
+                     checker must use `on_error: fail`, because a check that errors must deny \
+                     the request rather than let it through",
+                    step.name, plugin.on_error
+                )));
+            }
+        }
+    }
+
+    if config.engine_settings.require_revocation {
+        let uncovered = routes_without_revocation(config);
+        if !uncovered.is_empty() {
+            return Err(config_error(format!(
+                "`engine_settings.require_revocation` is set, but these routes resolve \
+                 authentication and run no revocation check: {}. Give each a `revocation:` \
+                 checker it inherits, or exclude it explicitly with \
+                 `revocation: {{ steps: [], replace_inherited: true }}`",
+                uncovered.join(", ")
+            )));
+        }
     }
     Ok(())
 }
@@ -4026,6 +4166,38 @@ pub(crate) fn rate_limits_without_authentication(
                 limiters,
                 route: route_display_name(route, i),
             })
+        })
+        .collect()
+}
+
+/// Every route that resolves authentication but runs no revocation check and
+/// is not explicitly excluded, named for a report.
+///
+/// Empty unless revocation is in use: some `revocation:` block lists a
+/// checker, or `engine_settings.require_revocation` is set. A deployment that
+/// never configures revocation gets no finding. A route is explicitly
+/// excluded when a `revocation:` block on its path sets `replace_inherited:
+/// true` and leaves it with no checker.
+pub(crate) fn routes_without_revocation(config: &PolicyConfig) -> Vec<String> {
+    let in_use = config.engine_settings.require_revocation
+        || step_list_blocks(config, &REVOCATION_BLOCK)
+            .iter()
+            .any(|(_, block)| !block.steps.is_empty());
+    if !in_use {
+        return Vec::new();
+    }
+    config
+        .routes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, route)| {
+            if fold_step_layers(authentication_layers(config, Some(route))).is_empty() {
+                return None;
+            }
+            let layers = step_list_layers(config, &REVOCATION_BLOCK, Some(route), None);
+            let excluded = layers.iter().any(|layer| layer.config.replace_inherited);
+            let checkers = fold_step_layers(layers);
+            (checkers.is_empty() && !excluded).then(|| route_display_name(route, i))
         })
         .collect()
 }
@@ -5606,6 +5778,7 @@ plugins:
                 "global:\n  authentication: [jwt]\n",
             ),
             ("global.rate_limits", "global:\n  rate_limits: [edge]\n"),
+            ("global.revocation", "global:\n  revocation: [introspect]\n"),
         ] {
             let config = typed_config(&format!("{hooks}{yaml}"));
             let message = reject_mode_conflicts_typed(&config)
@@ -6173,6 +6346,264 @@ routes:
                 "a host-built config is checked like a document: {err}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------------
+    // revocation
+    // -----------------------------------------------------------------------------
+
+    const REVOCATION_PLUGINS: &str = r#"
+plugins:
+  - { name: jwt, kind: builtin, hooks: [identity.resolve] }
+  - { name: introspect, kind: builtin, hooks: [revocation.check] }
+  - { name: kill-list, kind: builtin, hooks: [revocation.check] }
+  - { name: plain, kind: builtin, hooks: [http.request] }
+"#;
+
+    fn revocation_config(body: &str) -> Result<PolicyConfig, Box<PluginError>> {
+        parse_config(&format!("{REVOCATION_PLUGINS}{body}"))
+    }
+
+    fn revocation_error(body: &str) -> String {
+        revocation_config(body)
+            .expect_err("the revocation block must not load")
+            .to_string()
+    }
+
+    fn revocation_for(config: &PolicyConfig, entity_type: &str, entity_name: &str) -> Vec<String> {
+        let matched = resolve_route(config, RouteQuery::named(entity_type, entity_name));
+        steps_for_route(config, &REVOCATION_BLOCK, matched.as_ref(), None)
+            .into_iter()
+            .map(|(_, step)| step.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn revocation_parses_in_both_forms_at_every_scope() {
+        let cfg = revocation_config(
+            r#"
+global:
+  revocation: [introspect]
+  defaults:
+    tool:
+      revocation: [kill-list]
+groups:
+  hr:
+    revocation:
+      replace_inherited: true
+      steps: [introspect]
+routes:
+  - tool: t
+    groups: hr
+    revocation:
+      - name: introspect
+        config: { cache_ttl: 0 }
+"#,
+        )
+        .expect("both forms load at every scope");
+        for (scope, block, replace) in [
+            ("global", cfg.global.revocation.as_ref(), false),
+            (
+                "global.defaults.tool",
+                cfg.global.defaults["tool"].revocation.as_ref(),
+                false,
+            ),
+            (
+                "groups.hr",
+                cfg.global.bundles["hr"].revocation.as_ref(),
+                true,
+            ),
+            ("routes[0]", cfg.routes[0].revocation.as_ref(), false),
+        ] {
+            let block = block.unwrap_or_else(|| panic!("{scope} must carry its block"));
+            assert_eq!(block.replace_inherited, replace, "flag at {scope}");
+            assert_eq!(block.steps.len(), 1, "steps at {scope}");
+        }
+    }
+
+    #[test]
+    fn revocation_stacks_global_then_default_then_group_then_route() {
+        let cfg = revocation_config(
+            r#"
+global:
+  revocation: [introspect]
+  defaults:
+    tool:
+      revocation: [kill-list]
+groups:
+  hr:
+    revocation: [kill-list]
+routes:
+  - tool: search
+    groups: hr
+    revocation:
+      - name: introspect
+        config: { cache_ttl: 0 }
+"#,
+        )
+        .expect("a stacked revocation config loads");
+        assert_eq!(
+            revocation_for(&cfg, "tool", "search"),
+            vec!["introspect", "kill-list", "kill-list", "introspect"],
+            "revocation stacks in the order authentication stacks",
+        );
+    }
+
+    #[test]
+    fn a_revocation_step_naming_an_unknown_plugin_is_rejected() {
+        let err = revocation_error("global:\n  revocation: [introspct]\n");
+        assert!(
+            err.contains("global revocation references unknown plugin 'introspct'"),
+            "the scope and name are reported: {err}"
+        );
+    }
+
+    #[test]
+    fn a_revocation_plugin_without_the_check_hook_is_rejected() {
+        let err = revocation_error("routes:\n  - tool: t\n    revocation: [plain]\n");
+        assert!(
+            err.contains("routes[0] revocation lists plugin 'plain'")
+                && err.contains("revocation.check"),
+            "a plugin that cannot answer the check is refused: {err}"
+        );
+    }
+
+    #[test]
+    fn a_revocation_checker_must_run_sequential_with_on_error_fail() {
+        for (setting, expected) in [
+            ("mode: concurrent", "must run `sequential`"),
+            ("mode: fire_and_forget", "must run `sequential`"),
+            ("on_error: ignore", "must use `on_error: fail`"),
+            ("on_error: disable", "must use `on_error: fail`"),
+        ] {
+            let err = parse_config(&format!(
+                "plugins:\n  - {{ name: introspect, kind: builtin, hooks: [revocation.check], \
+                 {setting} }}\nglobal:\n  revocation: [introspect]\n"
+            ))
+            .expect_err("a checker that could fail open must not load")
+            .to_string();
+            assert!(err.contains(expected), "{setting}: {err}");
+        }
+    }
+
+    #[test]
+    fn global_revocation_alone_is_a_policy_scope() {
+        let config = revocation_config("global:\n  revocation: [introspect]\n")
+            .expect("a global revocation block loads");
+        reject_policy_mode_with_nothing_to_dispatch(&config, false)
+            .expect("a global revocation block names its plugins");
+    }
+
+    #[test]
+    fn no_revocation_config_reports_no_route() {
+        let cfg = revocation_config("global:\n  authentication: [jwt]\nroutes:\n  - tool: t\n")
+            .expect("revocation is optional");
+        assert!(
+            routes_without_revocation(&cfg).is_empty(),
+            "a deployment that never configures revocation gets no finding"
+        );
+    }
+
+    #[test]
+    fn an_authenticated_route_without_a_checker_is_reported_once_revocation_is_in_use() {
+        let cfg = revocation_config(
+            r#"
+global:
+  authentication: [jwt]
+groups:
+  payments:
+    revocation: [introspect]
+routes:
+  - tool: transfer
+    groups: payments
+  - tool: search
+  - http: { path: /healthz }
+    revocation: { steps: [], replace_inherited: true }
+"#,
+        )
+        .expect("partial coverage loads without require_revocation");
+        assert_eq!(
+            routes_without_revocation(&cfg),
+            vec!["tool:search".to_owned()],
+            "only the uncovered route is reported; the covered and the excluded ones are not",
+        );
+    }
+
+    #[test]
+    fn a_route_without_authentication_needs_no_checker() {
+        let cfg = revocation_config(
+            "global:\n  revocation: [introspect]\nroutes:\n  - tool: t\n    authentication: \
+             { steps: [], replace_inherited: true }\n    revocation: { steps: [], \
+             replace_inherited: true }\n  - tool: anonymous\n",
+        )
+        .expect("loads");
+        assert!(
+            routes_without_revocation(&cfg).is_empty(),
+            "a route that resolves no identity has nothing to check"
+        );
+    }
+
+    #[test]
+    fn require_revocation_rejects_an_uncovered_route() {
+        let err = revocation_error(
+            r#"
+engine_settings:
+  require_revocation: true
+global:
+  authentication: [jwt]
+groups:
+  payments:
+    revocation: [introspect]
+routes:
+  - tool: transfer
+    groups: payments
+  - tool: search
+"#,
+        );
+        assert!(
+            err.contains("require_revocation") && err.contains("tool:search"),
+            "the uncovered route is named: {err}"
+        );
+        assert!(
+            !err.contains("tool:transfer"),
+            "the covered route is not: {err}"
+        );
+    }
+
+    #[test]
+    fn require_revocation_allows_an_explicit_exclusion() {
+        revocation_config(
+            r#"
+engine_settings:
+  require_revocation: true
+global:
+  authentication: [jwt]
+  revocation: [introspect]
+routes:
+  - tool: transfer
+  - http: { path: /healthz }
+    revocation: { steps: [], replace_inherited: true }
+"#,
+        )
+        .expect("every authenticated route is either covered or explicitly excluded");
+    }
+
+    #[test]
+    fn an_excluded_route_is_reported_as_dropping_its_checkers() {
+        let cfg = revocation_config(
+            "global:\n  revocation: [introspect]\nroutes:\n  - http: { path: /healthz }\n    \
+             revocation: { steps: [], replace_inherited: true }\n",
+        )
+        .expect("an exclusion loads");
+        assert_eq!(
+            dropped_inherited_steps(&cfg, &REVOCATION_BLOCK),
+            vec![DroppedSteps {
+                route: route_display_name(&cfg.routes[0], 0),
+                declared_in: "the route".to_owned(),
+                dropped: vec!["introspect".to_owned()],
+            }],
+            "every exclusion is visible at load",
+        );
     }
 
     #[test]

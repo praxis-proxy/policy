@@ -1240,6 +1240,41 @@ fn warn_on_dropped_inherited_rate_limits(cfg: &PolicyConfig) {
     }
 }
 
+/// Report every route whose inherited `revocation:` checkers a
+/// `replace_inherited: true` drops. Dropping them all is how a route is
+/// excluded from revocation, so every exclusion is visible at load.
+fn warn_on_dropped_inherited_revocation(cfg: &PolicyConfig) {
+    for finding in crate::config::dropped_inherited_steps(cfg, &crate::config::REVOCATION_BLOCK) {
+        warn!(
+            alarm = "revocation_replaced_inherited",
+            route = %finding.route,
+            declared_in = %finding.declared_in,
+            dropped = ?finding.dropped,
+            "`revocation.replace_inherited: true` drops the revocation checkers this route \
+             inherited, so a revoked identity is no longer stopped by them here. Remove the flag \
+             if the block meant to add checkers, or keep it if the route is meant to be excluded.",
+        );
+    }
+}
+
+/// Report every route that resolves authentication but runs no revocation
+/// check, once revocation is in use. Under `require_revocation` these routes
+/// fail validation instead, so this only reports partial coverage.
+fn warn_on_routes_without_revocation(cfg: &PolicyConfig) {
+    if cfg.engine_settings.require_revocation {
+        return;
+    }
+    for route in crate::config::routes_without_revocation(cfg) {
+        warn!(
+            alarm = "revocation_partial_coverage",
+            route = %route,
+            "this route resolves authentication but runs no revocation check, so a revoked \
+             identity is not stopped here. Give it a `revocation:` checker it inherits, or exclude \
+             it explicitly with `revocation: {{ steps: [], replace_inherited: true }}`.",
+        );
+    }
+}
+
 /// Report every route whose folded `rate_limits:` names one base limiter more
 /// than once.
 fn warn_on_rate_limits_listed_twice(cfg: &PolicyConfig) {
@@ -1813,6 +1848,8 @@ impl PolicyEngine {
         warn_on_dropped_inherited_rate_limits(&policy_config);
         warn_on_rate_limits_listed_twice(&policy_config);
         warn_on_rate_limits_without_authentication(&policy_config);
+        warn_on_dropped_inherited_revocation(&policy_config);
+        warn_on_routes_without_revocation(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
         // Resolve under the factories read lock, then drop it and
@@ -2142,6 +2179,8 @@ impl PolicyEngine {
         warn_on_dropped_inherited_rate_limits(&policy_config);
         warn_on_rate_limits_listed_twice(&policy_config);
         warn_on_rate_limits_without_authentication(&policy_config);
+        warn_on_dropped_inherited_revocation(&policy_config);
+        warn_on_routes_without_revocation(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
         let engine = Self::new(PolicyEngineConfig {
