@@ -192,22 +192,46 @@ upstream header. Every other field in a record is yours to name and is
 projected through `record_map`. The verified user-id is injected separately
 as `user_id`, which is what the default `subject.id` anchor reads.
 
-Three things fail at load rather than at request time, because each one
+Four things fail at load rather than at request time, because each one
 would otherwise read as an outage or, worse, as silence:
 
 - A duplicate `username`, compared after Unicode normalisation. Two
   spellings of one name are a collision, not a last-wins overwrite that
   hands one caller the other's identity.
+- A `username` containing `:`. [RFC 7617 Section 2] splits the credential
+  at the first colon, so no client can send that name and the record would
+  deny as a wrong password forever.
 - An `expires_at` that is not a timestamp. A string-typed field would have
   accepted it and then meant "never expires", which is the one failure an
   expiry must not have.
 - A misspelled top-level key. `user:` for `users:` would otherwise load as
   an empty directory that denies every request.
 
+[RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
+
 The file holds hashes, never plaintext, so a copy that leaks hands over no
 usable credential. It is still an offline-crackable verifier: it must not be
 world-readable, and PPE never writes to it. Re-hashing and rotation belong
 to whatever tool owns your directory.
+
+### Advertising `charset="UTF-8"`
+
+`advertise_utf8_charset: true` adds `charset="UTF-8"` to the challenge.
+Per [RFC 7617 Section 2.1], that asks the client to send `user-pass` as
+UTF-8 in Unicode Normalization Form C. The user-id is NFC-normalised on both
+sides either way. The password is not: it is verified as the bytes the
+client sent, because normalising it would break every hash minted from the
+bytes as typed.
+
+So turning the flag on is a migration step for any record whose hash was
+minted from a password that is not already in NFC, such as one typed with a
+combining accent (`a` followed by U+0301). A client that honours the
+challenge sends the precomposed form, which no longer matches that hash, and
+the user is denied as a wrong password. Before enabling the flag, re-hash
+such records from the NFC form of the password. Passwords that are plain
+ASCII, or already precomposed, are unaffected.
+
+[RFC 7617 Section 2.1]: https://datatracker.ietf.org/doc/html/rfc7617#section-2.1
 
 ### The password ceiling is tied to the file's scheme
 

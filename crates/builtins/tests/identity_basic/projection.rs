@@ -5,7 +5,8 @@
 //! never carry there.
 
 use crate::support::{
-    HtpasswdFile, basic_header, bcrypt_line, htpasswd_block, resolve_with_header, resolver,
+    HtpasswdFile, UserYamlFile, basic_header, bcrypt_line, htpasswd_block, resolve_with_header,
+    resolver, user_file_block,
 };
 
 // -----------------------------------------------------------------------------
@@ -90,7 +91,7 @@ async fn a_user_id_cannot_satisfy_the_workload_spiffe_anchor() {
 }
 
 #[tokio::test]
-async fn the_projected_identity_records_the_basic_attestor() {
+async fn a_workload_record_without_a_spiffe_field_denies() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
     let mut block = htpasswd_block(file.path());
     block["role"] = serde_json::json!("caller_workload");
@@ -104,13 +105,42 @@ async fn the_projected_identity_records_the_basic_attestor() {
     assert_eq!(
         crate::support::denial_code(&result).as_deref(),
         Some("auth.mapping_failed"),
-        "`.htpasswd` carries no SPIFFE id, so this projection cannot complete; the attestor a \
-         completed one would carry is asserted below"
+        "`.htpasswd` carries no SPIFFE id, so a workload anchor on one must decline rather than \
+         project a workload without its identifier"
+    );
+}
+
+#[tokio::test]
+async fn the_projected_workload_records_the_basic_attestor() {
+    let file = UserYamlFile::write(&format!(
+        "users:\n  - username: svc-a\n    password_hash: {}\n    spiffe: \
+         spiffe://example.org/ns/ops/sa/svc-a\n",
+        bcrypt::hash("correct horse", 4).expect("bcrypt mints at a legal cost")
+    ));
+    let mut block = user_file_block(file.path());
+    block["role"] = serde_json::json!("caller_workload");
+    block["record_map"] = serde_json::json!({
+        "workload": { "spiffe_id": "spiffe", "client_id": "user_id" },
+    });
+    let resolver = resolver(block).expect("the config loads");
+
+    let result = resolve_with_header(&resolver, &basic_header("svc-a", "correct horse")).await;
+
+    let workload = result
+        .modified_payload
+        .expect("a verified record carrying a SPIFFE field resolves")
+        .caller_workload
+        .expect("the workload slot is filled");
+    assert_eq!(
+        workload.spiffe_id.as_deref(),
+        Some("spiffe://example.org/ns/ops/sa/svc-a"),
+        "the workload anchor must come from the record's own field"
     );
     assert_eq!(
-        praxis_policy_builtins::plugins::identity_basic::record_map::ATTESTOR,
-        "basic",
-        "a policy gating on how an identity was established must be told it was a password"
+        workload.attestor.as_deref(),
+        Some("basic"),
+        "a policy gating on how an identity was established must be told it was a password, \
+         on the workload the mapper actually produced"
     );
 }
 

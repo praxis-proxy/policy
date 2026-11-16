@@ -121,6 +121,18 @@ const MAX_UNPROVEN_IN_FLIGHT: u32 = 8;
 /// a contended resource.
 const RECOVERY_CAPACITY_DIVISOR: usize = 4;
 
+/// How long a reclaim scan of the full name-keyed map holds before another
+/// may run, in milliseconds.
+///
+/// A scan visits every counter under the write lock that every admission and
+/// settlement waits on. An attacker who keeps the map full of live counters
+/// frees nothing by it, so scanning on every unnamed attempt made each one cost
+/// `capacity` probes for every caller -- and `capacity` is the setting
+/// operators are told to raise. Between scans an unnamed attempt goes straight
+/// to the overflow table, which still bounds it; the delay costs at most this
+/// long in per-name precision for a counter that has just gone idle.
+const RECLAIM_INTERVAL_MS: u64 = 1_000;
+
 // -----------------------------------------------------------------------------
 // Public types
 // -----------------------------------------------------------------------------
@@ -319,12 +331,7 @@ impl FailureLimiter {
             unproven_ceiling: Self::recovery_ceiling(verification_capacity),
             config,
             started: Instant::now(),
-            counters: RwLock::new(Counters {
-                named: HashMap::new(),
-                overflow: std::iter::repeat_with(Counter::default)
-                    .take(OVERFLOW_BUCKETS)
-                    .collect(),
-            }),
+            counters: RwLock::new(Counters::new()),
             saturations: std::sync::atomic::AtomicU64::new(0),
             proven: std::sync::atomic::AtomicU64::new(0),
             unproven_in_flight: std::sync::atomic::AtomicU32::new(0),
@@ -959,9 +966,24 @@ struct Counters {
     /// Fixed-size buckets counting attempts for user-ids the map has no room
     /// to name.
     overflow: Vec<Counter>,
+    /// The earliest time another reclaim scan may run. See
+    /// [`RECLAIM_INTERVAL_MS`].
+    ///
+    /// [`RECLAIM_INTERVAL_MS`]: RECLAIM_INTERVAL_MS
+    next_reclaim_ms: u64,
 }
 
 impl Counters {
+    fn new() -> Self {
+        Self {
+            named: HashMap::new(),
+            overflow: std::iter::repeat_with(Counter::default)
+                .take(OVERFLOW_BUCKETS)
+                .collect(),
+            next_reclaim_ms: 0,
+        }
+    }
+
     /// The live failures recorded for a user-id in the overflow table.
     ///
     /// Expires the bucket first, so a stale window contributes nothing. Reads
@@ -976,7 +998,17 @@ impl Counters {
         })
     }
 
+    /// Drop idle named counters, at most once per [`RECLAIM_INTERVAL_MS`].
+    ///
+    /// Returns whether a slot was freed; a scan that is not yet due frees
+    /// nothing.
+    ///
+    /// [`RECLAIM_INTERVAL_MS`]: RECLAIM_INTERVAL_MS
     fn reclaim(&mut self, now: u64) -> bool {
+        if now < self.next_reclaim_ms {
+            return false;
+        }
+        self.next_reclaim_ms = now.saturating_add(RECLAIM_INTERVAL_MS);
         let before = self.named.len();
         self.named.retain(|_, held| !held.idle(now));
         self.named.len() < before
@@ -1033,8 +1065,8 @@ fn overflow_bucket(user_id: &str) -> usize {
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::{
-        Counter, FailureLimiter, MAX_UNPROVEN_IN_FLIGHT, OVERFLOW_BUCKETS, Refusal, Verdict,
-        overflow_bucket,
+        Admission, Counter, Counters, FailureLimiter, MAX_UNPROVEN_IN_FLIGHT, OVERFLOW_BUCKETS,
+        RECLAIM_INTERVAL_MS, Refusal, Verdict, overflow_bucket,
     };
     use crate::plugins::identity_basic::config::FailureLimitConfig;
 
@@ -1309,6 +1341,49 @@ mod tests {
         assert!(
             counter.spent(1),
             "and must still count against the budget, which is what bounds parallel guesses"
+        );
+    }
+
+    /// Parallel attempts must be bounded at admission, not after verification.
+    ///
+    /// Every attempt holds its admission across a barrier, standing in for a
+    /// verification still running, so none settles before all eight have been
+    /// decided. A budget read before verification and written after it would
+    /// admit all of them here; reserving at admission admits one.
+    #[test]
+    fn attempts_admitted_together_cannot_outrun_the_budget() {
+        const ATTEMPTS: usize = 8;
+
+        let limiter = limiter(16, 1);
+        let barrier = std::sync::Barrier::new(ATTEMPTS);
+
+        let admitted = std::thread::scope(|scope| {
+            let running: Vec<_> = std::iter::repeat_with(|| {
+                scope.spawn(|| {
+                    let attempt = limiter.admit("alice");
+                    barrier.wait();
+                    attempt.map(Admission::record_failure).is_ok()
+                })
+            })
+            .take(ATTEMPTS)
+            .collect();
+            running
+                .into_iter()
+                .map(|handle| handle.join().expect("no attempt thread panics"))
+                .filter(|was_admitted| *was_admitted)
+                .count()
+        });
+
+        assert_eq!(
+            admitted, 1,
+            "a budget of one must admit one of eight overlapping attempts: the other seven are \
+             decided while the first is still in flight, so only a reservation taken at \
+             admission can refuse them"
+        );
+        assert_eq!(
+            limiter.admit("alice").err(),
+            Some(Refusal::Blocked),
+            "and the one admitted failure spends the budget once it settles"
         );
     }
 
@@ -1647,6 +1722,45 @@ mod tests {
         limiter
             .admit("sprayer")
             .expect("settling the in-flight attempts returns their slots");
+    }
+
+    /// A full map of live counters must not be scanned on every attempt.
+    ///
+    /// The defect: every unnamed attempt against a full map ran `reclaim`,
+    /// which visits every counter under the global write lock and, with the
+    /// map full of live junk, frees nothing. Each such attempt cost
+    /// `capacity` probes while every other admission and settlement waited.
+    #[test]
+    fn a_reclaim_scan_runs_at_most_once_per_interval() {
+        let mut counters = Counters::new();
+        counters.named.insert(
+            "junk".to_owned(),
+            Counter {
+                expires_at_ms: 1_000,
+                failures: 1,
+                inherited: 0,
+                outstanding: 0,
+            },
+        );
+
+        assert!(
+            !counters.reclaim(500),
+            "a live counter is not idle, so the first scan frees nothing"
+        );
+        assert!(
+            !counters.reclaim(
+                500_u64
+                    .saturating_add(RECLAIM_INTERVAL_MS)
+                    .saturating_sub(1)
+            ),
+            "a second scan inside the interval must not run, even with the counter now idle: \
+             that is what bounds how often an attacker holding the map full buys a full scan"
+        );
+        assert_eq!(counters.named.len(), 1, "so the idle counter is still held");
+        assert!(
+            counters.reclaim(500_u64.saturating_add(RECLAIM_INTERVAL_MS)),
+            "once the interval has passed the scan runs and frees the idle counter"
+        );
     }
 
     /// The bucket index must stay inside the table for any input.

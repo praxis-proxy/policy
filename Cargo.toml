@@ -113,10 +113,9 @@ unicode-normalization = "0.1.26"
 # carry no advisory policy worth inheriting on a runtime path.
 #
 # `bcrypt` is the one crate here that verifies the `$2a$`/`$2b$`/`$2y$` variants
-# `.htpasswd` actually contains. It exposes no public hash *parser* -- its
-# `split_hash` is private and `HashParts` cannot be built from a string -- so
-# the cost ceiling is enforced by reading bcrypt's fixed-width cost field
-# directly in `verifier.rs`. Its `non_truncating_verify` is likewise unusable
+# `.htpasswd` actually contains. `HashParts`'s `FromStr` is the parser its
+# `verify` runs, so `verifier.rs` admits a record and reads its cost through it
+# and the two cannot disagree. Its `non_truncating_verify` is unusable
 # here: it errors on hashes it did not mint itself, so it rejects every file
 # Apache wrote.
 # `zeroize` is not in argon2's default set and is off here because defaults
@@ -155,9 +154,12 @@ bcrypt = { version = "0.19.3", default-features = false, features = ["std", "zer
 # from the record rather than from the configured hasher and compares with
 # `ct_eq`. Its `Params` keeps `rounds` private with no accessor, so the
 # ceiling is enforced by reading the `rounds=` field out of the encoding in
-# `verifier.rs` -- the same shape as bcrypt's fixed-width cost field above,
-# and for the same reason.
+# `verifier.rs`.
 sha-crypt = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
+# The crypt-base64 decoder `sha-crypt` verifies the digest with, named directly
+# so admission decodes the digest the same way. Already in the tree through
+# `sha-crypt`; `sha-crypt` re-exports `PasswordHashRef` but not `Base64`.
+mcf = { version = "0.6.0", default-features = false, features = ["base64"] }
 # Constant-time primitives for the verdict comparison. Already in the tree via
 # all three hashing crates; named here because this plugin depends on it
 # directly.

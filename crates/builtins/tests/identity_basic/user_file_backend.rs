@@ -380,6 +380,25 @@ fn an_empty_username_fails_at_load() {
     );
 }
 
+/// [RFC 7617 Section 2]: a user-id containing a colon cannot be sent, since
+/// the credential splits at the first one.
+///
+/// [RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
+#[test]
+fn rfc7617_s2_a_username_with_a_colon_fails_at_load() {
+    let file = UserYamlFile::write(&format!(
+        "users:\n  - username: \"ops:eu\"\n    password_hash: {}\n",
+        bcrypt_hash("correct horse", 4)
+    ));
+
+    let error = directory(&file).expect_err("a username containing `:` must fail at load");
+    assert!(
+        error.contains("cannot contain `:`") && error.contains("record 0"),
+        "the error must name the record and the colon, since `ops:eu:pw` decodes as user \
+         `ops` and the record would otherwise load and deny forever: {error}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // The record shape (R13)
 // -----------------------------------------------------------------------------

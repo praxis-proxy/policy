@@ -935,6 +935,16 @@ fn a_sha_crypt_record_the_verifier_would_reject_cheaply_fails_at_load() {
             "a field after the digest",
             format!("$6$rounds=5000${salt}${digest}$extra"),
         ),
+        // MCF's field alphabet admits `+`; crypt-base64 does not, so these
+        // pass the width check and fail only the digest decode.
+        (
+            "a full-width sha512crypt digest outside the crypt alphabet",
+            format!("$6${salt}${}", "+".repeat(86)),
+        ),
+        (
+            "a full-width sha256crypt digest outside the crypt alphabet",
+            format!("$5${salt}${}", "+".repeat(43)),
+        ),
     ] {
         assert_eq!(
             parse_hash(&record, &Limits::default()).err(),

@@ -57,6 +57,42 @@ async fn the_configured_charset_reaches_the_challenge_on_a_denial() {
     );
 }
 
+/// The migration constraint behind `charset="UTF-8"`: [RFC 7617 Section 2.1]
+/// asks a client to send `user-pass` in NFC, and the password is verified as
+/// the bytes received, so a hash minted from a decomposed password stops
+/// matching a client that honours the challenge.
+///
+/// Pinned so the constraint the operator guide documents stays true: if the
+/// server ever normalised the password, the guidance to re-hash would be wrong
+/// and existing hashes of NFC passwords would be the ones to break instead.
+///
+/// [RFC 7617 Section 2.1]: https://datatracker.ietf.org/doc/html/rfc7617#section-2.1
+#[tokio::test]
+async fn rfc7617_s2_1_a_hash_of_a_decomposed_password_rejects_its_nfc_form() {
+    let decomposed = "pa\u{301}ssword";
+    let precomposed = "p\u{e1}ssword";
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", decomposed, 4)));
+    let mut block = htpasswd_block(file.path());
+    block["advertise_utf8_charset"] = serde_json::json!(true);
+    let resolver = resolver(block).expect("the config loads");
+
+    let nfc = resolve_with_header(&resolver, &basic_header("alice", precomposed)).await;
+    assert_eq!(
+        denial_code(&nfc).as_deref(),
+        Some(codes::INVALID_CREDENTIALS),
+        "a client sending the NFC form the challenge asks for must not match a hash minted from \
+         the decomposed form: the operator has to re-hash such a record"
+    );
+
+    let original = resolve_with_header(&resolver, &basic_header("alice", decomposed)).await;
+    assert!(
+        original.violation.is_none(),
+        "and the bytes the hash was minted from still verify, so a client that does not \
+         normalise keeps working: {:?}",
+        original.violation
+    );
+}
+
 #[tokio::test]
 async fn an_unknown_user_and_a_bad_password_deny_identically() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
@@ -499,6 +535,14 @@ async fn a_saturated_limiter_still_bounds_a_freshly_guessed_user_id() {
     );
 }
 
+/// The resolver-level half of the concurrency bound: eight parallel wrong
+/// guesses against a budget of one cost exactly one verification.
+///
+/// Counts only. Whether the attempts actually overlap here is up to the
+/// scheduler, so a wall-clock comparison could fail a correct limiter; the
+/// overlap itself is pinned deterministically by
+/// `failure_limit::tests::attempts_admitted_together_cannot_outrun_the_budget`,
+/// which holds every admission on a barrier until all have been decided.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_attempts_for_one_user_id_cannot_outrun_the_budget() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 10)));
@@ -507,37 +551,22 @@ async fn concurrent_attempts_for_one_user_id_cannot_outrun_the_budget() {
         serde_json::json!({ "capacity": 16, "max_failures": 1, "window_secs": 60 });
     let resolver = std::sync::Arc::new(resolver(block).expect("the config loads"));
 
-    let started = std::time::Instant::now();
-    resolve_with_header(&resolver, &basic_header("bob", "wrong horse")).await;
-    let one_verification = started.elapsed();
-    assert!(
-        one_verification >= std::time::Duration::from_millis(10),
-        "a cost-10 bcrypt verification must be slow enough that attempts launched together \
-         overlap it, or this test cannot tell reserve-at-admission from record-after-verify; \
-         took {one_verification:?}"
-    );
-
     let mut running = tokio::task::JoinSet::new();
-    let launched = std::time::Instant::now();
     for _ in 0..8 {
         let resolver = std::sync::Arc::clone(&resolver);
         running.spawn(async move {
             let result =
                 resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
-            (denial_code(&result), launched.elapsed())
+            denial_code(&result)
         });
     }
 
     let mut verified = 0_u32;
     let mut refused = 0_u32;
-    let mut slowest_refusal = std::time::Duration::ZERO;
     while let Some(joined) = running.join_next().await {
-        let (code, elapsed) = joined.expect("no attempt task panics");
+        let code = joined.expect("no attempt task panics");
         match code.as_deref() {
-            Some(codes::TOO_MANY_FAILURES) => {
-                refused = refused.saturating_add(1);
-                slowest_refusal = slowest_refusal.max(elapsed);
-            },
+            Some(codes::TOO_MANY_FAILURES) => refused = refused.saturating_add(1),
             Some(codes::INVALID_CREDENTIALS) => verified = verified.saturating_add(1),
             other => panic!("a wrong password denies as invalid or too-many, got {other:?}"),
         }
@@ -552,12 +581,6 @@ async fn concurrent_attempts_for_one_user_id_cannot_outrun_the_budget() {
     assert_eq!(
         refused, 7,
         "every attempt beyond the budget is refused before it costs a verification"
-    );
-    assert!(
-        slowest_refusal < one_verification,
-        "every refusal must land before a single verification could finish, which is what \
-         proves the budget was spent at admission rather than after the first guess was \
-         verified: slowest refusal {slowest_refusal:?}, one verification {one_verification:?}"
     );
 }
 

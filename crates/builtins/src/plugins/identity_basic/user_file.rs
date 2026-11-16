@@ -274,6 +274,17 @@ impl IndexSource for UserFileSource {
                     config.path.display()
                 ));
             }
+            // RFC 7617 Section 2 forbids a colon in the user-id, and the decoder
+            // splits at the first one, so no Basic header can reach this record:
+            // it would load cleanly and then deny as a wrong password forever.
+            // `.htpasswd` cannot spell such a name; YAML can.
+            if normalised.contains(':') {
+                return Err(format!(
+                    "{} record {position}: a username cannot contain `:`; RFC 7617 splits the \
+                     credential at the first colon, so this record is unreachable",
+                    config.path.display()
+                ));
+            }
 
             // The operator's own spelling of the name, for the messages below.
             // Indexed by position as well, because two records can carry the

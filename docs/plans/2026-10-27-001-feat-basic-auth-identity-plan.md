@@ -322,7 +322,13 @@ Authorino-parity escape hatch.
   two index keys — NFC addresses that. Password bytes remain unchanged to
   verify existing `.htpasswd` hashes. This narrows the issue's `charset: UTF-8`
   example, which says "user-pass as UTF-8 + NFC": the challenge advertises the
-  client expectation, while the server verifies the bytes it receives.
+  client expectation, while the server verifies the bytes it receives. The
+  consequence is a migration constraint (RFC 7617 §2.1): once the challenge
+  asks for NFC, a hash minted from a decomposed password no longer matches a
+  client that complies, so such records must be re-hashed from the NFC form
+  before the flag is enabled. The operator guide in `docs/content/builtins.md`
+  states this, and
+  `rfc7617_s2_1_a_hash_of_a_decomposed_password_rejects_its_nfc_form` pins it.
 
 - KTD7. **One Basic resolver per route in v1, enforced by documentation.**
   API-key splits populations by the leader after the scheme; Basic has no
@@ -453,7 +459,7 @@ plugin's design by implementing the new trait, not by widening the old one:
 flowchart TB
   R[BasicIdentityResolver] --> S{provider.kind}
   S -->|htpasswd| T[HtpasswdDirectory<br/>ArcSwap index + refresh]
-  S -->|file| U[UserFileDirectory<br/>ArcSwap index + refresh]
+  S -->|user_file| U[UserFileDirectory<br/>ArcSwap index + refresh]
   S -->|http| V[CachingDirectory<br/>positive/negative TTL]
   V --> W[HttpUserDirectory<br/>delegated verify]
 ```

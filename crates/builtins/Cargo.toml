@@ -77,6 +77,7 @@ basic = [
   "dep:argon2",
   "dep:bcrypt",
   "dep:sha-crypt",
+  "dep:mcf",
   "dep:subtle",
 ]
 oauth = [
@@ -204,13 +205,15 @@ unicode-normalization = { workspace = true, optional = true }
 #
 # Three crates rather than one because `.htpasswd` in the wild is bcrypt, the
 # modern alternative is argon2, and a deployment restricted to SHA-2 needs
-# sha256crypt or sha512crypt; no single crate reads all three well. None
-# exposes a public hash *parser*, so the cost ceiling in R23 is enforced by
-# reading bcrypt's fixed-width cost field, argon2's PHC params, and
-# sha-crypt's `rounds=` field directly.
+# sha256crypt or sha512crypt; no single crate reads all three well. The cost
+# ceiling in R23 is enforced through bcrypt's `HashParts` parser, argon2's PHC
+# params, and sha-crypt's `rounds=` field, which `sha-crypt` keeps private.
+# `mcf` is named for the crypt-base64 decoder `sha-crypt` verifies with, so
+# admission decodes a digest the way the verifier will.
 argon2 = { workspace = true, optional = true }
 bcrypt = { workspace = true, optional = true }
 sha-crypt = { workspace = true, optional = true }
+mcf = { workspace = true, optional = true }
 
 # Constant-time equality for the verdict, so a verify result cannot be probed
 # by timing. Already in the tree through all three hashing crates.

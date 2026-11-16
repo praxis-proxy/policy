@@ -39,7 +39,6 @@
 
 use argon2::password_hash::phc::PasswordHash;
 use argon2::{Argon2, PasswordVerifier as _};
-use base64::Engine as _;
 use sha_crypt::{PasswordHashRef, ShaCrypt};
 use subtle::ConstantTimeEq as _;
 
@@ -492,24 +491,15 @@ fn weak_scheme(stored: &str) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`HashError::Malformed`] when a bcrypt record has an invalid shape,
-/// an out-of-alphabet salt or digest, or a cost outside the library's range.
+/// Returns [`HashError::Malformed`] when a bcrypt record has an invalid shape
+/// or an undecodable salt or digest.
 ///
 /// [`HashError::Malformed`]: HashError::Malformed
 fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
-    let variant = stored.get(..4);
-    if !matches!(variant, Some("$2a$" | "$2b$" | "$2y$")) {
+    // The plugin's own allowlist, narrower than the library's: it also parses
+    // `$2x$`, the variant for the pre-2011 sign-extension bug.
+    if !matches!(stored.get(..4), Some("$2a$" | "$2b$" | "$2y$")) {
         return Ok(None);
-    }
-    // A valid bcrypt record is exactly 60 ASCII bytes. Checked before slicing
-    // so a multi-byte character cannot panic the parse, and non-ASCII is
-    // rejected rather than sliced through.
-    if stored.len() != 60 || !stored.is_ascii() {
-        return Err(HashError::Malformed);
-    }
-    let cost = stored.get(4..6).ok_or(HashError::Malformed)?;
-    if stored.as_bytes().get(6) != Some(&b'$') {
-        return Err(HashError::Malformed);
     }
 
     // The shape is not enough: `bcrypt::verify` decodes both fields and fails
@@ -521,37 +511,12 @@ fn bcrypt_cost(stored: &str) -> Result<Option<u32>, HashError> {
     // salt, so the final character's spare bits must be zero, and `z` in that
     // position is in the alphabet yet still rejected.
     //
-    // Decoded with the verifier's own engine and field widths rather than a
-    // reimplementation of that rule, so the two cannot disagree about which
-    // records are decodable.
-    decode_bcrypt_field(stored.get(7..29), &mut [0_u8; 16])?;
-    decode_bcrypt_field(stored.get(29..), &mut [0_u8; 23])?;
-
-    cost.parse::<u32>()
-        .map(Some)
-        .map_err(|_not_a_number| HashError::Malformed)
-}
-
-/// Decode one bcrypt field into a buffer sized for its plaintext width.
-///
-/// # Errors
-///
-/// Returns [`HashError::Malformed`] when the field is absent or does not decode
-/// to exactly the buffer's width.
-///
-/// [`HashError::Malformed`]: HashError::Malformed
-fn decode_bcrypt_field(field: Option<&str>, buffer: &mut [u8]) -> Result<(), HashError> {
-    let field = field.ok_or(HashError::Malformed)?;
-    let written = bcrypt::BASE_64
-        .decode_slice(field.as_bytes(), buffer)
-        .map_err(|_undecodable_field| HashError::Malformed)?;
-    // `decode_slice` is content with a short field, which would leave the tail
-    // of the buffer unwritten; the verifier's fixed-width arrays would then
-    // read bytes the record never carried.
-    if written != buffer.len() {
-        return Err(HashError::Malformed);
-    }
-    Ok(())
+    // Parsed with `HashParts`'s `FromStr`, which is the parser `verify` itself
+    // runs, so the two cannot disagree about which records are decodable.
+    stored
+        .parse::<bcrypt::HashParts>()
+        .map(|parts| Some(parts.get_cost()))
+        .map_err(|_undecodable_record| HashError::Malformed)
 }
 
 /// Read the sha-crypt variant from a record's MCF identifier.
@@ -580,12 +545,12 @@ fn admit_sha_crypt(
     variant: ShaCryptVariant,
     limits: &Limits,
 ) -> Result<ParsedHash, HashError> {
-    // MCF parsing rejects an empty field, a salt outside the crypt alphabet
-    // and an undecodable digest, so a record reaching the checks below is one
-    // whose shape the verifier can read. No empty-salt or empty-digest check
-    // below for that reason: every spelling of one (`$6$salt$`, `$6$$salt$x`)
-    // fails here as `DelimiterInvalid` or `FieldInvalid`, so such a check
-    // would be unreachable.
+    // MCF parsing rejects an empty field and a character outside its generic
+    // field alphabet. No empty-salt or empty-digest check below for that
+    // reason: every spelling of one (`$6$salt$`, `$6$$salt$x`) fails here as
+    // `DelimiterInvalid` or `FieldInvalid`, so such a check would be
+    // unreachable. That alphabet admits `+`, `=`, `,` and `-`, which
+    // crypt-base64 does not, so the digest is decoded separately below.
     let parsed = PasswordHashRef::new(stored).map_err(|_mcf_error| HashError::Malformed)?;
     let mut fields = parsed.fields();
 
@@ -620,11 +585,23 @@ fn admit_sha_crypt(
 
     // The full digest width for the variant, so a truncated record cannot be
     // admitted and then compared against fewer bytes than it claims.
-    let expected = match variant {
-        ShaCryptVariant::Sha256 => SHA256_CRYPT_DIGEST_CHARS,
-        ShaCryptVariant::Sha512 => SHA512_CRYPT_DIGEST_CHARS,
+    let (expected_chars, expected_bytes) = match variant {
+        ShaCryptVariant::Sha256 => (SHA256_CRYPT_DIGEST_CHARS, sha_crypt::BLOCK_SIZE_SHA256),
+        ShaCryptVariant::Sha512 => (SHA512_CRYPT_DIGEST_CHARS, sha_crypt::BLOCK_SIZE_SHA512),
     };
-    if digest.as_str().len() != expected {
+    if digest.as_str().len() != expected_chars {
+        return Err(HashError::Malformed);
+    }
+    // A digest of the right width can still be undecodable -- 86 `+`
+    // characters pass MCF -- and the verifier decodes it before running the
+    // KDF, so such a record answers cheaply: the oracle the bcrypt field
+    // decode closes. Decoded with the verifier's own decoder and buffer.
+    let mut decoded = [0_u8; sha_crypt::BLOCK_SIZE_SHA512];
+    let written = digest
+        .decode_base64_into(mcf::Base64::Crypt, &mut decoded)
+        .map_err(|_undecodable_digest| HashError::Malformed)?
+        .len();
+    if written != expected_bytes {
         return Err(HashError::Malformed);
     }
 
