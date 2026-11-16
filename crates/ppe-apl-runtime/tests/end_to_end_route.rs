@@ -75,6 +75,7 @@ fn session_ext_and_key(session_id: &str, subject_id: &str) -> (Extensions, Strin
         ..Default::default()
     };
     let key = praxis_policy_apl_runtime::session_resolver::resolve_session(&ext)
+        .expect("session id hashing succeeds")
         .expect("subject-bound session resolves")
         .0;
     (ext, key)

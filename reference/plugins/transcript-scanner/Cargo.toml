@@ -27,6 +27,12 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+[features]
+# A FIPS host disables defaults and enables `fips`.
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = ["praxis-policy-core/crypto-rustcrypto"]
+fips = ["praxis-policy-core/fips"]
+
 [dependencies]
 praxis-policy-core = { workspace = true }
 

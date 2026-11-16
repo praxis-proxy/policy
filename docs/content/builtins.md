@@ -20,6 +20,7 @@ name it by `kind`.
 | `valkey` | session store | `valkey` | Persist Session Taint labels across processes. CIBA can use the same server for approvals. See [Session Taint](apl/tainting.md). |
 | `vault` | secret provider | `secrets-vault` | Resolve `secret:` references from Vault KV v2. Not auto-registered: it needs an `HttpTransport` the host supplies. |
 | `quota` | policy plugin | `experimental-quota` | Enforce a per-principal token budget through Limitador. Experimental and excluded from `builtins`. |
+| `ratelimit/limitador` | rate-limit plugin | `experimental-ratelimit` | Count requests against in-process Limitador limits at `ratelimit.pre_identity` or `ratelimit.post_identity`, listed under `rate_limits:`, and deny with 429. Experimental and excluded from `builtins`. See [Rate Limiting](rate-limiting.md). |
 
 The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
@@ -50,20 +51,22 @@ stderr. Register them the way you would any host plugin.
 
 ```toml
 # engine only, the default
-praxis-policy = "0.4"
+praxis-policy = "0.6.0"
 
 # every bundled extension
-praxis-policy = { version = "0.4", features = ["builtins"] }
+praxis-policy = { version = "0.6.0", features = ["builtins"] }
 
 # a granular subset
-praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
+praxis-policy = { version = "0.6.0", features = ["jwt", "cedar"] }
 ```
 
 | Feature | Pulls in |
 |---|---|
 | `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
-| `jwt` | `identity/jwt` |
+| `jwt` | `identity/jwt`, verified with AWS-LC |
+| `jwt-openssl-fips` | `identity/jwt` and DPoP, verified with system OpenSSL under the FIPS provider. Requires `fips`; cannot be combined with `jwt`. HMAC (HS256, HS384, HS512) and EdDSA are refused at config load |
 | `api-key` | `identity/api-key` |
+| `fips` | OpenSSL FIPS SHA-256 for Policy's shared hashing, used by the engine and API-key. Needs no identity builtin. Keyed content provenance is rejected because it requires HMAC. Select with `default-features = false`; other crypto-using builtins are reported and make the profile unsafe. |
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
 | `elicitation-ciba` | `elicitation/ciba` |
@@ -73,10 +76,15 @@ praxis-policy = { version = "0.4", features = ["jwt", "cedar"] }
 | `valkey` | the Valkey session store, and the redis and TLS stack it carries |
 | `secrets-vault` | the Vault KV v2 secret provider. Not auto-registered: it needs an `HttpTransport` the host supplies |
 | `experimental-quota` | the opt-in Limitador-backed token quota plugin; excluded from `builtins` |
+| `experimental-ratelimit` | the opt-in in-process Limitador request rate limit plugin for the rate-limit hooks; excluded from `builtins` |
 | `http-hyper` | a default outbound HTTP transport, off by default |
 
 The default build is the engine alone, so a host that needs only the
 runtime and its own plugins compiles nothing extra.
+
+Default builds use RustCrypto SHA-256. A FIPS build disables defaults and
+selects `fips`, optionally with `api-key` and `jwt-openssl-fips`; see
+[FIPS](fips.md) for the supported selections, host setup and startup checks.
 
 ### The HTTP transport
 

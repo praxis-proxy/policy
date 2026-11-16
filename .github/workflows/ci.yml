@@ -36,8 +36,7 @@ jobs:
   lint:
     name: fmt and clippy
     runs-on: ubuntu-24.04
-    # Raised from 15: `make lint` gained an --all-features clippy pass, which
-    # lints the bundled extensions that a default-feature run skips.
+    # Raised from 15 for clippy across the expanded default feature set.
     timeout-minutes: 25
     permissions:
       contents: read
@@ -82,8 +81,7 @@ jobs:
   doc:
     name: docs build
     runs-on: ubuntu-24.04
-    # Raised from 15: `make doc` gained an --all-features pass, which documents
-    # the six extensions a default-feature workspace run does not reach.
+    # Raised from 15 to document the expanded default feature set.
     timeout-minutes: 25
     permissions:
       contents: read
@@ -125,7 +123,67 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-check-features-
       # `make ci` is not what CI runs — the jobs here invoke targets directly —
       # so the per-feature gate needs its own job or it never executes.
+      - run: make check-fips-graph
+      # No FIPS provider here: checks reports, refusals and fail-closed hashing.
+      - run: make test-fips-no-provider
       - run: make check-features
+      - run: make check-crypto-consumer
+
+  fips-provider-tests:
+    name: FIPS provider tests
+    runs-on: ubuntu-24.04
+    container:
+      # Match the UBI 9 OpenSSL provider used by the Praxis FIPS test setup.
+      image: registry.access.redhat.com/ubi9/ubi@sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Install Git for checkout
+        run: dnf install -y git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install OpenSSL FIPS provider and Rust build tools
+        env:
+          # A fixed rustup-init release, checked against its published SHA-256.
+          # The toolchain itself comes from rust-toolchain.toml.
+          RUSTUP_INIT_URL: https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init
+          RUSTUP_INIT_SHA256: b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+        run: |
+          set -euo pipefail
+          dnf install -y \
+            cmake gcc gcc-c++ make openssl openssl-devel \
+            openssl-fips-provider-so perl-core pkgconf-pkg-config
+          curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/rustup-init "$RUSTUP_INIT_URL"
+          echo "$RUSTUP_INIT_SHA256  /tmp/rustup-init" | sha256sum --check --strict
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Verify the FIPS provider is active
+        env:
+          OPENSSL_CONF: ${{ github.workspace }}/.github/fips-provider.cnf
+        run: |
+          set -euo pipefail
+          openssl list -providers
+          printf '' | openssl dgst -sha256 -propquery 'fips=yes'
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-fips-provider-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-fips-provider-
+      - name: Run FIPS tests with the provider enabled
+        run: make test-fips-provider
+        env:
+          OPENSSL_CONF: ${{ github.workspace }}/.github/fips-provider.cnf
+          PRAXIS_REQUIRE_FIPS_PROVIDER: "1"
 
   release-readiness:
     name: packaging + publish order

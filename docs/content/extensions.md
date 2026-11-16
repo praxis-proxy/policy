@@ -34,7 +34,7 @@ keys. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Metadata | immutable facts acquired from an external policy information source, with trusted provenance | `metadata.<instance>.*` | `read_metadata` |
 | Meta | entity metadata: type, name, tags, scope, properties | `meta.*` | unrestricted |
 | Request | environment, request id, timestamp, trace and span ids | `request.*` | unrestricted |
-| HTTP | request line (method, path, query, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*` | `read_headers` for headers and non-query request-line fields; `write_headers` for header writes; `read_query` for raw `http.query` |
+| HTTP | request line (method, path, query, host, scheme) and request/response headers (lowercased) | `http.method`, `http.path`, `http.query`, `http.host`, `http.scheme`, `http.client_address`, `http.request_headers.*`, `http.response_headers.*` | `read_headers` for headers and non-query request-line fields; `write_headers` for header writes; `read_query` for raw `http.query` |
 | LLM | model id, provider, capabilities | `llm.model.id`, `llm.model.provider`, `llm.model.capabilities` | unrestricted |
 | LLM request | the host-parsed inference request body, and its normalized parts: ordered instructions, offered tools, tool choice, sampling parameters | the body is not flattened; OPA, CEL, and Cedar read it as `llm.request`. The typed parts flatten to `llm.input.offered_tools`, `llm.input.stop_sequences`, `llm.input.tool_choice`, `llm.input.forced_tool`, `llm.input.max_tokens`, `llm.input.candidate_count`, `llm.input.temperature`, `llm.input.top_p`, `llm.input.stream`, `llm.input.instructions_digest` | `read_llm_request` |
 | MCP | tool, resource, or prompt metadata | `mcp.*` (`mcp.tool.*`, `mcp.resource.*`, `mcp.prompt.*`) | unrestricted |
@@ -135,7 +135,7 @@ plugins:
 | `read_workload` | `caller_workload.*`, `this_workload.*` |
 | `read_delegation` | `delegation.*`, `delegated` |
 | `read_agent` | `agent.*` |
-| `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.request_headers.*`, `http.response_headers.*`; excludes raw `http.query` |
+| `read_headers` | `http.method`, `http.path`, `http.host`, `http.scheme`, `http.client_address`, `http.request_headers.*`, `http.response_headers.*`; excludes raw `http.query` |
 | `read_query` | raw `http.query` only; may include credentials |
 | `read_llm_request` | `llm.input.offered_tools`, `llm.input.stop_sequences`, `llm.input.tool_choice`, `llm.input.forced_tool`, `llm.input.max_tokens`, `llm.input.candidate_count`, `llm.input.temperature`, `llm.input.top_p`, `llm.input.stream`, `llm.input.instructions_digest`; also gates the parsed request body on `Extensions.llm_request` |
 | `read_metadata` | `metadata.<instance>.*` |

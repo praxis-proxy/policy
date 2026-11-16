@@ -907,3 +907,69 @@ fn concurrent_reads_overlap_their_dependency_calls() {
         assert_shared_state(&host, &runtime, &done, k.seed);
     });
 }
+
+// -----------------------------------------------------------------------------
+// Rate limits
+// -----------------------------------------------------------------------------
+
+#[cfg(feature = "experimental-ratelimit")]
+#[test]
+fn concurrent_calls_from_one_subject_never_exceed_its_limit() {
+    use praxis_policy_builtins::plugins::ratelimit::CODE_EXCEEDED;
+    use praxis_policy_test_utils::fixtures::{USER_LIMIT, rate_limit_with};
+
+    let k = knobs("rate_limit");
+    let runtime = capture::multi_thread(k.workers);
+    runtime.block_on(async {
+        let host = RefHost::builder()
+            .transport(FakeTransport::new().with_latency(OVERLAP))
+            .start(&rate_limit_with(1_000_000, USER_LIMIT))
+            .await
+            .expect("the rate-limit fixture starts");
+        let host = Arc::new(host);
+        let tasks: Vec<_> = (0..k.tasks.max(4))
+            .map(|i| {
+                let host = Arc::clone(&host);
+                async move {
+                    let call = Call::new(Persona::Alice, "search_repos")
+                        .client_address(&format!("198.51.100.{}", i % 250));
+                    let mut planted = call.planted();
+                    planted.plant("client secret", CLIENT_SECRET);
+                    let out = host.call(call).await;
+                    out.assert_no_leaks(&planted);
+                    if !out.allowed() {
+                        assert_eq!(
+                            (out.denied_at, out.violation_code()),
+                            (Some(Stage::PostIdentityRateLimit), Some(CODE_EXCEEDED)),
+                            "task {i}: a deny is the per-user limit: {:?}",
+                            out.violation
+                        );
+                        assert!(
+                            out.upstream.is_none(),
+                            "task {i}: a rate-limited call reached the upstream"
+                        );
+                    }
+                    out.allowed()
+                }
+            })
+            .collect();
+        let allowed = join_all(k.seed, tasks)
+            .await
+            .into_iter()
+            .filter(|allowed| *allowed)
+            .count();
+        let limit = usize::try_from(USER_LIMIT).expect("fits usize");
+        assert_eq!(
+            allowed, limit,
+            "seed={}: with one address per call only the per-user counter binds, so exactly its \
+             limit was allowed",
+            k.seed
+        );
+        assert_eq!(
+            host.upstream().requests().len(),
+            limit,
+            "seed={}: the upstream saw exactly the allowed calls",
+            k.seed
+        );
+    });
+}

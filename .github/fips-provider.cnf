@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# Test-only configuration for activating the OpenSSL FIPS provider in UBI 9.
+# The API-key code selects its digest explicitly with fips=yes. The default
+# provider remains active for Cargo's TLS connections while FIPS calls are tested.
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+[provider_sect]
+fips = fips_sect
+base = base_sect
+default = default_sect
+
+[fips_sect]
+activate = 1
+
+[base_sect]
+activate = 1
+
+[default_sect]
+activate = 1

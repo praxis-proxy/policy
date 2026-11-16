@@ -532,6 +532,70 @@ visitor after its own route walk. An existing implementor needs no change.
 
 ---
 
+## 11. Rate limits move to `rate_limits:`
+
+`ratelimit/limitador` no longer runs from a `run(name)` step on
+`http.request`. It runs at one of two rate-limit hooks, from a `rate_limits:`
+list.
+
+<!-- validate: fragment -->
+```yaml
+# before
+plugins:
+  - name: app-ratelimit
+    kind: ratelimit/limitador
+    hooks: [http.request]
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: toystore
+      limits:
+        - max: 5
+          seconds: 60
+          conditions: ["subject_id == 'alice'", "http_method == 'GET'"]
+global:
+  authorization:
+    pre_invocation:
+      - "run(app-ratelimit)"
+```
+
+```yaml
+# after
+plugins:
+  - name: app-ratelimit
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: toystore
+      limits:
+        - max: 5
+          seconds: 60
+          conditions: ["subject_id == 'alice'", "http_method == 'GET'"]
+global:
+  rate_limits: [app-ratelimit]
+```
+
+Use `ratelimit.post_identity` for a limit that binds the subject or its
+claims, and `ratelimit.pre_identity` for one keyed on `http.client_address`.
+A route-level `run(...)` step becomes that route's `rate_limits:` list.
+
+A missed migration fails the load. `hooks: [http.request]` on this kind names
+a hook it does not serve, and a `run(name)` step naming a plugin whose only
+hooks are rate-limit hooks is rejected with a pointer to `rate_limits:`.
+
+The host must also call the two hooks, or nothing counts. A host that runs
+`identity.resolve` without first calling `ratelimit.pre_identity`, while a
+pre-identity limit is in force, raises alarm `rate_limit_stage_skipped`. See
+[HTTP Routing](http-routing.md#rate-limit-hooks).
+
+Some setups put rate limiting in its own HTTP-only policy filter, so that a
+global step would not reach `tool:` and `llm:` routes. That split is no
+longer needed once the host calls both hooks. A post-identity limiter under
+`global` runs for every route, and a pre-identity one runs before the request
+is classified.
+
+---
+
 ## Validate the migration
 
 Load the rewritten config through your own host binary, the one that registers

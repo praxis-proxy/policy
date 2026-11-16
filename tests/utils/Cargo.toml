@@ -4,10 +4,10 @@
 # praxis-policy-test-utils: shared harness for the integration, resilience and
 # security suites under `tests/`.
 #
-# Every dependency is declared without features, and the lib is empty unless
-# `suite` is on. Cargo unifies features across the workspace, so a feature named
-# here would reach the default `--workspace` pass and turn on builtins there.
-# The suites forward `suite`, which only `--all-features` enables.
+# RustCrypto is explicit because this harness uses ordinary JWT fixtures.
+# Builtins stay behind `suite` so the default workspace pass keeps them off.
+# The lib is empty unless `suite` is on.
+# The suites forward `suite`, which only the `make test` second pass enables.
 
 [package]
 name = "praxis-policy-test-utils"
@@ -43,10 +43,13 @@ suite = [
   "dep:tokio",
   "dep:tracing",
 ]
+# The experimental rate limiter, which `builtins` leaves out. Only
+# the `make test` second pass turns it on, as with `suite`.
+experimental-ratelimit = ["suite", "praxis-policy/experimental-ratelimit"]
 
 [dependencies]
 praxis-policy = { workspace = true }
-praxis-policy-core = { workspace = true }
+praxis-policy-core = { workspace = true, features = ["crypto-rustcrypto"] }
 praxis-policy-plugin-pii-scanner = { workspace = true }
 praxis-policy-plugin-audit-logger = { workspace = true }
 
@@ -54,7 +57,8 @@ praxis-policy-plugin-audit-logger = { workspace = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
-jsonwebtoken = { workspace = true, optional = true, features = ["aws_lc_rs"] }
+# The backend comes from the builtins `jwt` feature that `suite` enables.
+jsonwebtoken = { workspace = true, optional = true }
 # Pinned to 0.8 for rsa 0.9's rand_core; see `crates/builtins/Cargo.toml`.
 rand = { workspace = true, optional = true }
 rsa = { workspace = true, optional = true, features = ["pem"] }

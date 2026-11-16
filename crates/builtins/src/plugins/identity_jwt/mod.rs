@@ -35,6 +35,7 @@
 //! `HookHandler<IdentityHook>` instead. This module's API surface is the
 //! reference shape, and nothing prevents other resolvers coexisting with it.
 
+mod alarm;
 /// The OIDC-standard claim map.
 pub mod claim_map;
 /// Plugin configuration and its validation.
@@ -48,6 +49,8 @@ pub mod dpop;
 pub mod dpop_valkey;
 /// Constructs the resolver from configuration.
 pub mod factory;
+#[cfg(feature = "jwt-openssl-fips")]
+mod openssl_fips;
 /// The shipped claim maps, by name.
 pub mod presets;
 /// The identity hook handler.

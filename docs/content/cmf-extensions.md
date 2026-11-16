@@ -457,6 +457,7 @@ A default request slot adds nothing.
 | `http.query` | String | `Some` when the request carried a query (value excludes the leading `?`); omitted otherwise. Readable by a rule, but its value is redacted in diagnostics — see the note below |
 | `http.host` | String | `Some` |
 | `http.scheme` | String | `Some` |
+| `http.client_address` | String | `Some` when the host set a trusted client address: an IPv4 address, or an IPv6 /64 prefix such as `2001:db8:1:2::/64` |
 | `http.status` | Int | `Some` (response half) |
 | `http.request_headers.<name>` | String | each header; name lowercased |
 | `http.response_headers.<name>` | String | each header; name lowercased |

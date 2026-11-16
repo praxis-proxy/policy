@@ -122,9 +122,12 @@ policy plugin registry, whose hook-family check rejects a mismatched handler;
 a host registering a source directly uses
 `register_handler_for_names::<MetadataFetchHook, _>`.
 
-The compiled `fetch(name)` dispatch-plan entry resolves `name` to that plugin
-instance, and the evaluator invokes it through
-`PolicyEngine::invoke_named::<MetadataFetchHook>("metadata.fetch", ...)`.
+The compiled `fetch(name)` dispatch-plan entry resolves `name` through
+`PolicyEngine::find_plugin_entries(name)`, selects its `metadata.fetch` handler,
+and the evaluator invokes the resolved entry through
+`PolicyEngine::invoke_entries::<MetadataFetchHook>(...)`. Missing sources and
+hook-incompatible entries are rejected before dispatch. The payload carries
+only the returned facts, not the source selector.
 For a Praxis embedding, the security `PolicyFilter` installs the enabled PPE
 factory and drives this invocation inside PPE; `metadata.fetch` is not a Praxis
 `HttpFilter` lifecycle hook and must not be registered or dispatched as one.
@@ -864,7 +867,8 @@ the generic request, authentication, limit, and observation machinery.
    `metadata.fetch` hook metadata in the built-in hook table. Wire ordinary
    source factories through `PluginInstance`'s typed handler entry and the
    policy plugin registry (with `register_handler_for_names` for direct host
-   registration), then use typed `invoke_named` dispatch. Classify this as
+   registration), then resolve the source with `find_plugin_entries` and use
+   typed `invoke_entries` dispatch. Classify this as
    capability-filtered PPE policy dispatch rather than a Praxis `HttpFilter`
    lifecycle hook. Do not add a generic PIP backend trait yet.
 3. Add `fetch(name)` to APL parsing, route reachability, dispatch plans, and

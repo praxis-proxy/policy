@@ -176,8 +176,12 @@ where
         // header → identity-derived → none). Snapshotted before
         // hydration so the lookup is independent of the COW write
         // that hydration performs.
-        let session_id: Option<String> =
-            crate::session_resolver::resolve_session(&extensions).map(|(sid, _src)| sid);
+        let session_id: Option<String> = crate::session_resolver::resolve_session(&extensions)
+            .map_err(|error| {
+                tracing::error!(alarm = "policy_crypto_failure", op = "session_id", %error);
+                SessionStoreError::Backend("session id hashing failed".to_owned())
+            })?
+            .map(|(sid, _src)| sid);
 
         // Hydration: union the session's accumulated labels into the
         // request's security labels. Skipped when there's no session_id
@@ -370,7 +374,9 @@ where
             .ok_or_else(|| {
                 PluginError::Dispatch(format!(
                     "plugin '{plugin_name}' has no hook matching dispatch \
-                     context (entity_type={:?}, phase={:?}); declared hooks: {:?}",
+                     context (entity_type={:?}, phase={:?}); declared hooks: {:?}; \
+                     move the step to a route whose context the plugin serves, \
+                     or use a plugin with a hook for this context",
                     request_entity_type,
                     dispatch_phase,
                     resolved.entries_by_hook.keys().collect::<Vec<_>>(),

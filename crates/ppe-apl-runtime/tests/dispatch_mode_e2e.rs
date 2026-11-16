@@ -225,6 +225,79 @@ routes:
     );
 }
 
+#[test]
+fn a_plugin_reached_only_by_a_rate_limits_step_passes_at_every_scope() {
+    for scope in [
+        "global:\n  rate_limits: [edge]\nroutes:\n  - tool: t\n",
+        "global:\n  defaults:\n    http:\n      rate_limits: [edge]\nroutes:\n  - http: /v1\n",
+        "groups:\n  g:\n    rate_limits: [edge]\nroutes:\n  - http: /v1\n    groups: g\n",
+        "routes:\n  - http: /v1\n    rate_limits: [edge]\n",
+    ] {
+        let yaml = format!(
+            "plugins:\n  - name: edge\n    kind: builtin\n    hooks: [ratelimit.pre_identity]\n{scope}"
+        );
+        let alarms = alarms_raised_by_loading(&yaml);
+        assert!(
+            !alarms.contains(&NARROWED.to_owned()),
+            "a rate_limits step covers the hook the plugin declares: {alarms:?}\n{yaml}"
+        );
+    }
+}
+
+#[test]
+fn a_run_step_naming_a_rate_limit_only_plugin_fails_the_load() {
+    for (scope, policy) in [
+        (
+            "global",
+            "global:\n  authorization:\n    pre_invocation:\n      - \"run(per-user)\"\n",
+        ),
+        (
+            "routes.tool:t",
+            "routes:\n  - tool: t\n    authorization:\n      pre_invocation:\n        - \
+             \"run(per-user)\"\n",
+        ),
+        (
+            "global.defaults.tool",
+            "global:\n  defaults:\n    tool:\n      authorization:\n        pre_invocation:\n          \
+             - \"run(per-user)\"\nroutes:\n  - tool: t\n",
+        ),
+        (
+            "groups.g",
+            "groups:\n  g:\n    authorization:\n      pre_invocation:\n        - \
+             \"run(per-user)\"\nroutes:\n  - tool: t\n    groups: g\n",
+        ),
+    ] {
+        let err = load_err(&format!(
+            "plugins:\n  - name: per-user\n    kind: builtin\n    hooks: \
+             [ratelimit.post_identity]\n{policy}"
+        ));
+        for needle in [scope, "per-user", "rate_limits:"] {
+            assert!(
+                err.contains(needle),
+                "the refusal must name `{needle}` and point at rate_limits: {err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_run_step_naming_a_plugin_with_another_hook_beside_a_rate_limit_hook_loads() {
+    loads(
+        "
+plugins:
+  - name: dual
+    kind: builtin
+    hooks: [ratelimit.post_identity, cmf.tool_pre_invoke]
+routes:
+  - tool: t
+    rate_limits: [dual]
+    authorization:
+      pre_invocation:
+        - \"run(dual)\"
+",
+    );
+}
+
 /// A step under `global.authorization:` stacks onto every entity route, which
 /// is the chain-wide replacement for the activation list that used to exist.
 #[test]

@@ -164,6 +164,7 @@ const TABLE: &[CapabilityEntry] = &[
             BAG_HTTP_PATH,
             BAG_HTTP_HOST,
             BAG_HTTP_SCHEME,
+            BAG_HTTP_CLIENT_ADDRESS,
             BAG_HTTP_STATUS,
         ],
     },
@@ -300,6 +301,10 @@ mod tests {
         assert!(prefixes.contains(&BAG_HTTP_STATUS));
         assert!(!prefixes.contains(&BAG_HTTP_QUERY));
         assert_eq!(capability_namespaces(CAP_READ_QUERY), &[BAG_HTTP_QUERY]);
+        assert!(
+            prefixes.contains(&BAG_HTTP_CLIENT_ADDRESS),
+            "the client address rides read_headers"
+        );
     }
 
     /// The module header claims every `CAP_*` name matches a capability

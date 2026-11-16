@@ -18,11 +18,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::plugins::identity_api_key::crypto::hash_credential;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 
 use praxis_policy_core::host::HostServices;
 
@@ -357,10 +357,10 @@ impl FileDirectory {
     /// appears here: nothing walks the records comparing candidates, and the
     /// only value compared is a digest the caller would have to invert SHA-256
     /// to choose.
-    fn digest(&self, presented: &PresentedKey) -> String {
+    fn digest(&self, presented: &PresentedKey) -> Result<String, DirectoryError> {
         match self.config.index {
             IndexKind::Sha256 => {
-                let digest = Sha256::digest(presented.as_bytes());
+                let digest = hash_credential(presented, "api_key_index")?;
                 let mut out = String::with_capacity("sha256:".len() + SHA256_HEX_LEN);
                 out.push_str("sha256:");
                 for byte in digest {
@@ -368,7 +368,7 @@ impl FileDirectory {
                     // Writing to a String cannot fail.
                     let _ = write!(out, "{byte:02x}");
                 }
-                out
+                Ok(out)
             },
         }
     }
@@ -406,7 +406,7 @@ impl KeyDirectory for FileDirectory {
             )));
         }
 
-        let digest = self.digest(presented);
+        let digest = self.digest(presented)?;
         Ok(self.records.load().get(&digest).cloned())
     }
 

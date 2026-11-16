@@ -60,7 +60,7 @@ pub use delegation::{DelegationExtension, DelegationHop, DelegationStrategy};
 pub use filter::{SlotName, filter_extensions};
 pub use framework::FrameworkExtension;
 pub use guarded::{Guarded, WriteToken};
-pub use http::HttpExtension;
+pub use http::{ClientAddress, HttpExtension};
 pub use llm::{
     LLMExtension, LLMRequest, LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestDocument,
     LlmRequestParts, ToolChoice,

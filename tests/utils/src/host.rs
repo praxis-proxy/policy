@@ -25,9 +25,11 @@
 //!
 //! The sequence, per call:
 //!
-//! 1. Header phase: the identity gate resolves identity at the entity-less
-//!    HTTP coordinates and stops the request on a deny.
+//! 1. Header phase: `ratelimit.pre_identity` at the entity-less HTTP
+//!    coordinates, then the identity gate resolves identity there. Either
+//!    stops the request on a deny.
 //! 2. Body phase: identity again at the tool's coordinates, then
+//!    `ratelimit.post_identity` there with the resolved identity, then
 //!    `cmf.tool_pre_invoke` with identity, meta, HTTP attributes and the
 //!    `X-Session-Id` session. On allow: delegated tokens, then request
 //!    assertions, then the rewritten arguments into the body.
@@ -42,6 +44,10 @@
 //!
 //! # Not mirrored
 //!
+//! - The praxis commit above calls neither rate-limit hook. This driver calls
+//!   each once per call, when a plugin is registered on it, as the host
+//!   contract requires, and threads one context table through every hook of
+//!   the call so the engine can tell the pre-identity stage ran.
 //! - Praxis supplies no HTTP extension to `cmf.tool_post_invoke`. This driver
 //!   carries the pre-invoke view, including `secret_headers`, as required by
 //!   `docs/content/assertions.md`. Both hosts rebuild the `http.response`
@@ -85,10 +91,10 @@ use praxis_policy_core::cmf::constants::{
 };
 use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload};
 use praxis_policy_core::config::{PolicyConfig, parse_config};
-use praxis_policy_core::context::PluginContext;
+use praxis_policy_core::context::{PluginContext, PluginContextTable};
 use praxis_policy_core::error::{PluginError, PluginErrorRecord, PluginViolation};
 use praxis_policy_core::executor::{BackgroundTasks, PipelineResult};
-use praxis_policy_core::extensions::{Credential, Extensions, MetaExtension};
+use praxis_policy_core::extensions::{Credential, Extensions, HttpExtension, MetaExtension};
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::TypedHandlerAdapter;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
@@ -99,6 +105,9 @@ use praxis_policy_core::identity::{
     HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource,
 };
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
+use praxis_policy_core::ratelimit_hook::{
+    HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY,
+};
 use praxis_policy_core::registry::AnyHookHandler;
 use serde_json::{Value, json};
 
@@ -553,6 +562,7 @@ pub struct Call {
     tool: String,
     args: Value,
     headers: Vec<(String, String)>,
+    client_address: Option<String>,
 }
 
 impl Call {
@@ -578,7 +588,16 @@ impl Call {
             tool: tool.to_owned(),
             args: json!({}),
             headers: Vec::new(),
+            client_address: None,
         }
+    }
+
+    /// The client address the host takes from the TCP peer or a trusted
+    /// proxy hop, in any form the engine normalizes.
+    #[must_use]
+    pub fn client_address(mut self, address: &str) -> Self {
+        self.client_address = Some(address.to_owned());
+        self
     }
 
     /// The tool arguments.
@@ -639,13 +658,26 @@ impl Call {
         out.extend(self.headers.iter().cloned());
         out
     }
+
+    /// The HTTP view of the call, with the host-supplied client address.
+    fn http(&self, inbound: &HashMap<String, String>) -> HttpExtension {
+        let mut http = mcp::http_extension(inbound);
+        if let Some(address) = &self.client_address {
+            http.set_client_address(address);
+        }
+        http
+    }
 }
 
 /// Where a denied call stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
+    /// `ratelimit.pre_identity`. Identity did not run.
+    PreIdentityRateLimit,
     /// Identity, in the header phase or the body phase. No CMF hook ran.
     Identity,
+    /// `ratelimit.post_identity`, after identity. No CMF hook ran.
+    PostIdentityRateLimit,
     /// `cmf.tool_pre_invoke`. The upstream was not called.
     Request,
     /// The response phase. The upstream was called.
@@ -833,6 +865,8 @@ impl HostBuilder {
         let response_governed = GovernedNames::from_config(&config, Direction::Response);
         let response_hook =
             engine.has_hooks_for(HOOK_HTTP_RESPONSE) || !response_governed.is_empty();
+        let pre_identity_hook = engine.has_hooks_for(HOOK_RATELIMIT_PRE_IDENTITY);
+        let post_identity_hook = engine.has_hooks_for(HOOK_RATELIMIT_POST_IDENTITY);
         Ok(RefHost {
             issued_tokens,
             engine,
@@ -843,6 +877,8 @@ impl HostBuilder {
             request_governed,
             response_governed,
             response_hook,
+            pre_identity_hook,
+            post_identity_hook,
             next_id: AtomicU64::new(1),
         })
     }
@@ -860,6 +896,8 @@ pub struct RefHost {
     request_governed: GovernedNames,
     response_governed: GovernedNames,
     response_hook: bool,
+    pre_identity_hook: bool,
+    post_identity_hook: bool,
     next_id: AtomicU64,
 }
 
@@ -872,16 +910,24 @@ impl std::fmt::Debug for RefHost {
     }
 }
 
-/// Accumulates one call's pipeline errors.
+/// Accumulates one call's pipeline errors and carries its context table from
+/// one hook to the next.
 #[derive(Default)]
 struct Trace {
     errors: Vec<PluginErrorRecord>,
+    context: Option<PluginContextTable>,
 }
 
 impl Trace {
-    fn keep(&mut self, result: PipelineResult) -> PipelineResult {
+    fn keep(&mut self, mut result: PipelineResult) -> PipelineResult {
         self.errors.extend(result.errors.iter().cloned());
+        self.context = Some(std::mem::take(&mut result.context_table));
         result
+    }
+
+    /// The table the previous hook returned, for the next hook of the call.
+    fn context(&mut self) -> Option<PluginContextTable> {
+        self.context.take()
     }
 }
 
@@ -956,24 +1002,25 @@ impl RefHost {
     async fn resolve_identity(
         &self,
         headers: &HashMap<String, String>,
+        http: &HttpExtension,
         entity_type: &str,
         entity_name: &str,
         trace: &mut Trace,
     ) -> Result<IdentityPayload, Option<PluginViolation>> {
-        let mut ext = Extensions {
+        let ext = Extensions {
             meta: Some(Arc::new(MetaExtension {
                 entity_type: Some(entity_type.to_owned()),
                 entity_name: Some(entity_name.to_owned()),
                 ..Default::default()
             })),
+            http: Some(Arc::new(http.clone())),
             ..Default::default()
         };
-        ext.http = Some(Arc::new(mcp::http_extension(headers)));
         let payload =
             IdentityPayload::new(String::new(), TokenSource::Bearer).with_headers(headers.clone());
         let (result, bg) = self
             .engine
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, ext, None)
+            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, ext, trace.context())
             .await;
         wait_background(bg).await;
         let result = trace.keep(result);
@@ -981,6 +1028,33 @@ impl RefHost {
             return Err(result.violation);
         }
         IdentityPayload::from_pipeline_result(&result).ok_or(None)
+    }
+
+    /// Invoke one rate-limit hook, unless no plugin is registered on it.
+    async fn rate_limit(
+        &self,
+        hook: &str,
+        ext: Extensions,
+        trace: &mut Trace,
+    ) -> Result<(), Option<PluginViolation>> {
+        let registered = match hook {
+            HOOK_RATELIMIT_PRE_IDENTITY => self.pre_identity_hook,
+            _ => self.post_identity_hook,
+        };
+        if !registered {
+            return Ok(());
+        }
+        let (result, bg) = self
+            .engine
+            .invoke_named::<HttpHook>(hook, HttpPayload, ext, trace.context())
+            .await;
+        wait_background(bg).await;
+        let result = trace.keep(result);
+        if result.continue_processing {
+            Ok(())
+        } else {
+            Err(result.violation)
+        }
     }
 
     /// Drive `call` through both phases.
@@ -1014,11 +1088,27 @@ impl RefHost {
         };
 
         let inbound = call.inbound();
+        let http = call.http(&inbound);
         let tool = call.tool.as_str();
 
-        // Header phase: the early identity gate.
+        // Header phase: the edge limit, then the early identity gate.
+        let edge_ext = Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_HTTP.to_owned()),
+                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                ..Default::default()
+            })),
+            http: Some(Arc::new(http.clone())),
+            ..Default::default()
+        };
         if let Err(v) = self
-            .resolve_identity(&inbound, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &mut trace)
+            .rate_limit(HOOK_RATELIMIT_PRE_IDENTITY, edge_ext, &mut trace)
+            .await
+        {
+            return deny(outcome, Stage::PreIdentityRateLimit, v, trace);
+        }
+        if let Err(v) = self
+            .resolve_identity(&inbound, &http, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &mut trace)
             .await
         {
             return deny(outcome, Stage::Identity, v, trace);
@@ -1026,19 +1116,30 @@ impl RefHost {
 
         // Body phase.
         let identity = match self
-            .resolve_identity(&inbound, ENTITY_TOOL, tool, &mut trace)
+            .resolve_identity(&inbound, &http, ENTITY_TOOL, tool, &mut trace)
             .await
         {
             Ok(identity) => identity,
             Err(v) => return deny(outcome, Stage::Identity, v, trace),
         };
         let session = inbound.get("x-session-id").map(String::as_str);
-        let identity_ext = mcp::tool_extensions(
+        let mut identity_ext = mcp::tool_extensions(
             identity.apply_to_extensions(Extensions::default()),
             tool,
             &inbound,
             session,
         );
+        identity_ext.http = Some(Arc::new(http.clone()));
+        if let Err(v) = self
+            .rate_limit(
+                HOOK_RATELIMIT_POST_IDENTITY,
+                identity_ext.clone(),
+                &mut trace,
+            )
+            .await
+        {
+            return deny(outcome, Stage::PostIdentityRateLimit, v, trace);
+        }
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = mcp::tool_call_body(id, tool, &call.args);
@@ -1049,7 +1150,7 @@ impl RefHost {
                 HOOK_CMF_TOOL_PRE_INVOKE,
                 mcp::tool_call(&call_id, tool, &call.args),
                 identity_ext.clone(),
-                None,
+                trace.context(),
             )
             .await;
         wait_background(bg).await;
@@ -1086,13 +1187,13 @@ impl RefHost {
                 entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
                 ..Default::default()
             }));
-            let mut http = mcp::http_extension(&inbound);
+            let mut http = http.clone();
             http.response_headers = outcome.response_headers.clone().into_iter().collect();
             http.status = Some(200);
             ext.http = Some(Arc::new(http));
             let (result, bg) = self
                 .engine
-                .invoke_named::<HttpHook>(HOOK_HTTP_RESPONSE, HttpPayload, ext, None)
+                .invoke_named::<HttpHook>(HOOK_HTTP_RESPONSE, HttpPayload, ext, trace.context())
                 .await;
             wait_background(bg).await;
             let result = trace.keep(result);
@@ -1122,7 +1223,12 @@ impl RefHost {
         }
         let (post, bg) = self
             .engine
-            .invoke_named::<CmfHook>(HOOK_CMF_TOOL_POST_INVOKE, payload, post_ext, None)
+            .invoke_named::<CmfHook>(
+                HOOK_CMF_TOOL_POST_INVOKE,
+                payload,
+                post_ext,
+                trace.context(),
+            )
             .await;
         wait_background(bg).await;
         let post = trace.keep(post);

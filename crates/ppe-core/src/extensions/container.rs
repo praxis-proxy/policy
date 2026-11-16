@@ -1488,6 +1488,53 @@ mod tests {
     }
 
     #[test]
+    fn http_merge_keeps_the_canonical_client_address() {
+        let mut http = HttpExtension::default();
+        http.set_client_address("203.0.113.7");
+        let mut ext = Extensions {
+            http: Some(Arc::new(http)),
+            ..Default::default()
+        };
+        ext.http_write_token = Some(WriteToken::new());
+
+        let mut cow = ext.cow_copy();
+        let token = cow.http_write_token.take().expect("token propagated");
+        {
+            let h = cow.http.as_mut().unwrap().write(&token);
+            h.set_client_address("198.51.100.1");
+            h.set_request_header("X-Scanned", "1");
+        }
+        cow.http_write_token = Some(token);
+
+        ext.merge_owned(cow);
+
+        let merged = ext.http.as_ref().unwrap();
+        assert_eq!(
+            merged.client_address(),
+            Some("203.0.113.7"),
+            "a plugin holding write_headers must not rewrite the client address"
+        );
+        assert_eq!(
+            merged.get_request_header("X-Scanned"),
+            Some("1"),
+            "the authorized header write still lands"
+        );
+
+        let mut cleared = ext.cow_copy();
+        let token = cleared.http_write_token.take().expect("token propagated");
+        cleared.http.as_mut().unwrap().write(&token).client_address = Default::default();
+        cleared.http_write_token = Some(token);
+
+        ext.merge_owned(cleared);
+
+        assert_eq!(
+            ext.http.as_ref().unwrap().client_address(),
+            Some("203.0.113.7"),
+            "a plugin must not be able to clear the client address"
+        );
+    }
+
+    #[test]
     fn test_http_merge_preserves_the_response_status() {
         // A response-phase policy gates on the status the upstream returned, so
         // a header write must not be able to rewrite it.
