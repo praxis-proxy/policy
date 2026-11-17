@@ -56,7 +56,9 @@ use regorus::Engine;
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::route::StructuredInput;
-use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
+use praxis_policy_apl_core::step::{
+    PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver, source_references_metadata_under,
+};
 
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
@@ -117,6 +119,8 @@ pub struct OpaResolver {
     /// Upper bound on `inline_cache`. New entries past this are rejected (never
     /// evicted), per the workspace cache convention.
     max_cache_entries: usize,
+    /// Whether any configured global module may read `input.metadata`.
+    global_requires_metadata: bool,
 }
 
 impl OpaResolver {
@@ -197,11 +201,13 @@ impl OpaResolver {
 
         let mut engine = Engine::new();
         let mut policy_sources = HashSet::from([INLINE_MODULE_NAME.to_owned()]);
+        let mut global_requires_metadata = false;
 
         // 1. Global modules — inline texts first, then files. Each gets a
         //    unique virtual name so same-package modules merge (Rego
         //    semantics) rather than one overwriting another by filename.
         for (module_index, text) in read_string_seq(map, "modules")?.into_iter().enumerate() {
+            global_requires_metadata |= source_references_metadata_under(&text, "input");
             let name = format!("global-{module_index}.rego");
             engine
                 .add_policy(name.clone(), text)
@@ -216,6 +222,7 @@ impl OpaResolver {
                 path: path.clone(),
                 source,
             })?;
+            global_requires_metadata |= source_references_metadata_under(&text, "input");
             engine
                 .add_policy(path.clone(), text)
                 .map_err(|e| BuildError::ModuleParse {
@@ -267,6 +274,7 @@ impl OpaResolver {
             inline_cache: RwLock::new(HashMap::new()),
             max_cache_entries: read_usize(map, "max_cache_entries")?
                 .unwrap_or(DEFAULT_MAX_CACHE_ENTRIES),
+            global_requires_metadata,
         })
     }
 
@@ -439,6 +447,10 @@ enum EvalOutcome {
 impl PdpResolver for OpaResolver {
     fn dialect(&self) -> PdpDialect {
         self.dialect.clone()
+    }
+
+    fn requires_metadata(&self, call: &PdpCall) -> bool {
+        self.global_requires_metadata || call.references_metadata()
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
@@ -909,6 +921,40 @@ mod eval_tests {
         let mut b = AttributeBag::new();
         b.set("subject.id", subject_id);
         b
+    }
+
+    #[test]
+    fn global_policy_dependencies_report_metadata_usage() {
+        let dotted = resolver(
+            &["package authz\ndefault allow := false\nallow if input.metadata.account.active"],
+            OnError::Deny,
+        );
+        let bracketed = resolver(
+            &["package authz\ndefault allow := false\nallow if input[\"metadata\"].account.active"],
+            OnError::Deny,
+        );
+        let unrelated = resolver(
+            &[
+                "package authz\ndefault allow := false\nallow if data.metadata.enabled\nallow if input.subject.id == \"alice\"",
+            ],
+            OnError::Deny,
+        );
+        let route_call = call("data.authz.allow", None);
+
+        assert!(dotted.requires_metadata(&route_call));
+        assert!(bracketed.requires_metadata(&route_call));
+        assert!(!unrelated.requires_metadata(&route_call));
+    }
+
+    #[test]
+    fn inline_policy_dependency_reports_metadata_usage() {
+        let resolver = resolver(&[], OnError::Deny);
+        let route_call = call(
+            "data.route.allow",
+            Some("package route\ndefault allow := false\nallow if input.metadata.account.active"),
+        );
+
+        assert!(resolver.requires_metadata(&route_call));
     }
 
     const ALLOW_WITH_DEFAULT: &str = r#"package authz

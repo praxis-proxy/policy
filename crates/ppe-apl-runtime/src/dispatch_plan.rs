@@ -53,6 +53,7 @@ use praxis_policy_apl_core::constraint::{RestrictSpec, StringSetSpec};
 use praxis_policy_apl_core::pipeline::{FieldRule, Stage};
 use praxis_policy_apl_core::plugin_decl::{EffectivePlugin, PluginRegistry};
 use praxis_policy_apl_core::rules::{CompiledRoute, Condition, Effect, Expression};
+use praxis_policy_apl_core::step::PdpResolver;
 
 /// Per-plugin pre-resolved entries for one route. Stores ALL hook
 /// entries the plugin registered (keyed by hook name) so the
@@ -606,29 +607,54 @@ pub(crate) fn collect_fetch_plugin_names(route: &CompiledRoute) -> Vec<String> {
 /// nesting depth, a PDP argument, or a conditional field-pipeline stage.
 /// Keeping this analysis on the compiled route ensures inherited and nested
 /// policy surfaces receive the same capability treatment.
-pub(crate) fn route_uses_metadata(route: &CompiledRoute) -> bool {
+pub(crate) fn route_uses_metadata(
+    route: &CompiledRoute,
+    request_half: bool,
+    pdp: Option<&dyn PdpResolver>,
+) -> bool {
     let mut uses_metadata = false;
     let mut visit = |effect: &Effect| {
-        uses_metadata |= effect_uses_metadata(effect);
+        uses_metadata |= effect_uses_metadata(effect, request_half, pdp);
     };
-    walk_effects(&route.pre_invocation, &mut visit);
-    walk_effects(&route.post_invocation, &mut visit);
+    let (effects, field_rules) = if request_half {
+        (&route.pre_invocation, &route.args)
+    } else {
+        (&route.post_invocation, &route.result)
+    };
+    walk_effects(effects, &mut visit);
 
-    for field_rule in route.args.iter().chain(&route.result) {
+    for field_rule in field_rules {
         uses_metadata |= stages_use_metadata(&field_rule.pipeline.stages);
     }
 
     uses_metadata
 }
 
-fn effect_uses_metadata(effect: &Effect) -> bool {
+fn effect_uses_metadata(
+    effect: &Effect,
+    request_half: bool,
+    pdp: Option<&dyn PdpResolver>,
+) -> bool {
     match effect {
         Effect::Fetch(_) => true,
         Effect::When { condition, .. } => expression_uses_metadata(condition),
-        Effect::Pdp { call, .. } => value_uses_metadata(&call.args),
-        Effect::FieldOp { stages, .. } => stages_use_metadata(stages),
+        Effect::Pdp { call, .. } => pdp.map_or_else(
+            || call.references_metadata(),
+            |resolver| resolver.requires_metadata(call),
+        ),
+        Effect::FieldOp { path, stages } => {
+            field_op_runs_in_half(path, request_half) && stages_use_metadata(stages)
+        },
         Effect::Restrict { spec } => restrict_uses_metadata(spec),
         _ => false,
+    }
+}
+
+fn field_op_runs_in_half(path: &str, request_half: bool) -> bool {
+    if request_half {
+        path.starts_with("args.")
+    } else {
+        path.starts_with("result.")
     }
 }
 
@@ -675,18 +701,6 @@ fn expression_uses_metadata(expression: &Expression) -> bool {
     }
 }
 
-fn value_uses_metadata(value: &serde_yaml::Value) -> bool {
-    match value {
-        serde_yaml::Value::String(value) => string_uses_metadata(value),
-        serde_yaml::Value::Sequence(values) => values.iter().any(value_uses_metadata),
-        serde_yaml::Value::Mapping(values) => values
-            .iter()
-            .any(|(key, value)| value_uses_metadata(key) || value_uses_metadata(value)),
-        serde_yaml::Value::Tagged(tagged) => value_uses_metadata(&tagged.value),
-        _ => false,
-    }
-}
-
 fn attribute_path_uses_metadata(path: &str) -> bool {
     if path.starts_with("metadata.") {
         return true;
@@ -710,50 +724,6 @@ fn attribute_path_uses_metadata(path: &str) -> bool {
             return false;
         };
         rest = tail;
-    }
-    false
-}
-
-fn string_uses_metadata(value: &str) -> bool {
-    let marker = "metadata.";
-    let mut search_from = 0;
-    while let Some(relative) = value.get(search_from..).and_then(|tail| tail.find(marker)) {
-        let start = search_from + relative;
-        let preceding_is_boundary = value
-            .get(..start)
-            .and_then(|prefix| prefix.chars().next_back())
-            .is_none_or(|ch| {
-                matches!(
-                    ch,
-                    ' ' | '\t'
-                        | '\n'
-                        | '('
-                        | '['
-                        | '{'
-                        | ','
-                        | ':'
-                        | '='
-                        | '!'
-                        | '?'
-                        | '&'
-                        | '|'
-                        | '+'
-                        | '*'
-                        | '-'
-                        | '<'
-                        | '>'
-                        | '.'
-                )
-            });
-        let after_marker = start + marker.len();
-        let following_is_path = value
-            .get(after_marker..)
-            .and_then(|tail| tail.chars().next())
-            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '$');
-        if preceding_is_boundary && following_is_path {
-            return true;
-        }
-        search_from = after_marker;
     }
     false
 }
@@ -1075,7 +1045,7 @@ mod cache_tests {
     fn route_metadata_usage_covers_fetch_nested_predicates_and_pdp_arguments() {
         let mut route = CompiledRoute::new("tool:test");
         assert!(
-            !route_uses_metadata(&route),
+            !route_uses_metadata(&route, true, None),
             "a route without metadata use needs no grant"
         );
 
@@ -1093,7 +1063,7 @@ mod cache_tests {
             source: "outer".to_owned(),
         });
         assert!(
-            route_uses_metadata(&route),
+            route_uses_metadata(&route, true, None),
             "nested metadata predicates need the grant"
         );
 
@@ -1103,7 +1073,7 @@ mod cache_tests {
             source: "fetch".to_owned(),
         }));
         assert!(
-            route_uses_metadata(&fetch_route),
+            route_uses_metadata(&fetch_route, true, None),
             "fetch effects need the grant"
         );
 
@@ -1117,7 +1087,7 @@ mod cache_tests {
             on_deny: Vec::new(),
         });
         assert!(
-            route_uses_metadata(&pdp_route),
+            route_uses_metadata(&pdp_route, true, None),
             "PDP metadata arguments need the grant"
         );
 
@@ -1134,7 +1104,7 @@ mod cache_tests {
             source: "pipeline".to_owned(),
         });
         assert!(
-            route_uses_metadata(&pipeline_route),
+            route_uses_metadata(&pipeline_route, true, None),
             "conditional pipeline metadata references need the grant"
         );
 
@@ -1142,7 +1112,7 @@ mod cache_tests {
         field_op_route.pre_invocation.push(Effect::When {
             condition: Expression::Always,
             body: vec![Effect::FieldOp {
-                path: "result.account_status".to_owned(),
+                path: "args.account_status".to_owned(),
                 stages: vec![Stage::Redact {
                     condition: Some(Expression::Condition(Condition::IsTrue {
                         key: "metadata.account.sensitive".to_owned(),
@@ -1152,7 +1122,7 @@ mod cache_tests {
             source: "field-op".to_owned(),
         });
         assert!(
-            route_uses_metadata(&field_op_route),
+            route_uses_metadata(&field_op_route, true, None),
             "conditional field operations need the grant"
         );
 
@@ -1168,7 +1138,7 @@ mod cache_tests {
             source: "interpolated".to_owned(),
         });
         assert!(
-            route_uses_metadata(&interpolated_route),
+            route_uses_metadata(&interpolated_route, true, None),
             "metadata used to interpolate an attribute path needs the grant"
         );
 
@@ -1183,7 +1153,7 @@ mod cache_tests {
             },
         });
         assert!(
-            route_uses_metadata(&restrict_route),
+            route_uses_metadata(&restrict_route, true, None),
             "metadata-backed routing restrictions need the grant"
         );
 
@@ -1202,7 +1172,7 @@ mod cache_tests {
                 on_deny: Vec::new(),
             });
             assert!(
-                route_uses_metadata(&evaluator_route),
+                route_uses_metadata(&evaluator_route, true, None),
                 "documented evaluator metadata paths need the grant: {expression}"
             );
         }
@@ -1217,8 +1187,54 @@ mod cache_tests {
             on_deny: Vec::new(),
         });
         assert!(
-            !route_uses_metadata(&literal_route),
+            !route_uses_metadata(&literal_route, true, None),
             "literal strings must not grant metadata access"
+        );
+    }
+
+    #[test]
+    fn route_metadata_usage_is_scoped_to_the_active_phase() {
+        let mut route = CompiledRoute::new("tool:response-metadata");
+        route.post_invocation.push(Effect::When {
+            condition: Expression::Condition(Condition::Exists {
+                key: "metadata.account.active".to_owned(),
+            }),
+            body: vec![Effect::Allow],
+            source: "response".to_owned(),
+        });
+        route.result.push(FieldRule {
+            field: "status".to_owned(),
+            pipeline: Pipeline {
+                stages: vec![Stage::Redact {
+                    condition: Some(Expression::Condition(Condition::IsTrue {
+                        key: "metadata.account.sensitive".to_owned(),
+                    })),
+                }],
+            },
+            source: "response-pipeline".to_owned(),
+        });
+
+        assert!(
+            !route_uses_metadata(&route, true, None),
+            "response-only metadata use must not widen the request handler"
+        );
+        assert!(
+            route_uses_metadata(&route, false, None),
+            "the response handler must receive metadata used by its effects and pipeline"
+        );
+
+        let mut out_of_phase = CompiledRoute::new("tool:out-of-phase-field-op");
+        out_of_phase.pre_invocation.push(Effect::FieldOp {
+            path: "result.status".to_owned(),
+            stages: vec![Stage::Redact {
+                condition: Some(Expression::Condition(Condition::IsTrue {
+                    key: "metadata.account.sensitive".to_owned(),
+                })),
+            }],
+        });
+        assert!(
+            !route_uses_metadata(&out_of_phase, true, None),
+            "a field operation skipped in this phase must not widen the handler"
         );
     }
 }

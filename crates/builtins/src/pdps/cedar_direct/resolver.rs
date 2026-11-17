@@ -35,6 +35,7 @@ use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{
     PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver, StructuredInputAvailability,
+    source_references_metadata_under,
 };
 
 use crate::pdps::cedar_direct::decision::{translate, withheld};
@@ -63,6 +64,8 @@ pub struct CedarDirectResolver {
     /// default, since a schema must declare `args` and `llm` in each action's
     /// context type or every request fails validation.
     structured_context: bool,
+    /// Whether the loaded Cedar policy may read `context.metadata`.
+    policy_requires_metadata: bool,
 }
 
 impl CedarDirectResolver {
@@ -74,6 +77,7 @@ impl CedarDirectResolver {
     /// Returns `BuildError` when the policy text does not parse as a Cedar
     /// policy set.
     pub fn from_policy_text(policies: &str) -> Result<Self, BuildError> {
+        let policy_requires_metadata = source_references_metadata_under(policies, "context");
         let policy_set: PolicySet = policies
             .parse()
             .map_err(|e: cedar_policy::ParseErrors| BuildError::PolicyParse(e.to_string()))?;
@@ -84,6 +88,7 @@ impl CedarDirectResolver {
             dialect: PdpDialect::Cedar,
             entity_namespace: None,
             structured_context: false,
+            policy_requires_metadata,
         })
     }
 
@@ -150,6 +155,7 @@ impl CedarDirectResolver {
                 ));
             },
         };
+        let policy_requires_metadata = source_references_metadata_under(&policies, "context");
         let policy_set: PolicySet = policies
             .parse()
             .map_err(|e: cedar_policy::ParseErrors| BuildError::PolicyParse(e.to_string()))?;
@@ -194,6 +200,7 @@ impl CedarDirectResolver {
             dialect,
             entity_namespace,
             structured_context,
+            policy_requires_metadata,
         })
     }
 
@@ -240,6 +247,10 @@ impl CedarDirectResolver {
 impl PdpResolver for CedarDirectResolver {
     fn dialect(&self) -> PdpDialect {
         self.dialect.clone()
+    }
+
+    fn requires_metadata(&self, call: &PdpCall) -> bool {
+        self.policy_requires_metadata || call.references_metadata()
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {

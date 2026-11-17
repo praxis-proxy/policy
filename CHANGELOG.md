@@ -175,8 +175,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   [#184](https://github.com/praxis-proxy/policy/issues/184).
 - APL attribute paths accept one leading `$` on a segment after the first,
   so policies read provenance leaves such as `metadata.account.$outcome`.
-  Route predicates read `metadata.*` without a host grant: the synthetic APL
-  handler holds `read_metadata` intrinsically.
+  The synthetic APL handler infers `read_metadata` independently for the
+  request and response halves from compiled predicates, field pipelines,
+  restrictions, fetches, and PDP policy dependencies. Custom PDP resolvers can
+  report opaque policy dependencies through `PdpResolver::requires_metadata`.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 - **Typed credential locations for the `identity/jwt` plugin.** The plugin can
   now extract bearer JWTs from HTTP headers, cookies, or query parameters — one
