@@ -645,6 +645,7 @@ fn effect_uses_metadata(
         Effect::FieldOp { path, stages } => {
             field_op_runs_in_half(path, request_half) && stages_use_metadata(stages)
         },
+        Effect::Elicit(step) => attribute_path_uses_metadata(&step.from),
         Effect::Restrict { spec } => restrict_uses_metadata(spec),
         _ => false,
     }
@@ -840,8 +841,10 @@ pub(crate) fn collect_family_fixed_plugin_hooks(
     out
 }
 
-/// Compute the union of capabilities declared by every plugin a
-/// `CompiledRoute` can dispatch to (with per-route overrides applied).
+/// Compute the union of capabilities needed by plugins reachable from one
+/// route half (with per-route overrides applied).
+/// Delegation, elicitation, and metadata-fetch bridge capabilities remain
+/// route-wide because either handler half can dispatch those fixed-hook families.
 ///
 /// This is what the synthetic `AplRouteHandler`'s `PluginConfig.capabilities`
 /// must be set to: praxis-policy-core's executor filters the `Extensions` view
@@ -857,11 +860,18 @@ pub(crate) fn collect_family_fixed_plugin_hooks(
 pub(crate) fn route_capability_union(
     route: &CompiledRoute,
     registry: &PluginRegistry,
+    request_half: bool,
 ) -> std::collections::HashSet<String> {
     let mut caps: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Plugin steps (`run(name)` in policy / `plugin: name` in
     // args / result pipelines).
-    for name in collect_plugin_names(route) {
+    let (pre_plugins, post_plugins) = collect_plugin_names_by_half(route);
+    let half_plugins = if request_half {
+        pre_plugins
+    } else {
+        post_plugins
+    };
+    for name in half_plugins {
         if let Some(eff) = EffectivePlugin::resolve(&name, registry, &route.plugin_overrides) {
             for cap in eff.capabilities.as_slice() {
                 caps.insert(cap.clone());

@@ -63,6 +63,7 @@ use praxis_policy_apl_core::step::{
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
 use crate::pdps::opa::input::build_rego_input;
+use crate::pdps::opa::metadata::{last_module_references_metadata, source_references_metadata};
 use crate::pdps::stack;
 
 /// What to do when a query errors at runtime or yields a value that carries no
@@ -207,7 +208,6 @@ impl OpaResolver {
         //    unique virtual name so same-package modules merge (Rego
         //    semantics) rather than one overwriting another by filename.
         for (module_index, text) in read_string_seq(map, "modules")?.into_iter().enumerate() {
-            global_requires_metadata |= source_references_metadata_under(&text, "input");
             let name = format!("global-{module_index}.rego");
             engine
                 .add_policy(name.clone(), text)
@@ -215,6 +215,7 @@ impl OpaResolver {
                     name: name.clone(),
                     cause: e.to_string(),
                 })?;
+            global_requires_metadata |= last_module_references_metadata(&mut engine);
             policy_sources.insert(name);
         }
         for path in read_string_seq(map, "module_files")? {
@@ -222,13 +223,13 @@ impl OpaResolver {
                 path: path.clone(),
                 source,
             })?;
-            global_requires_metadata |= source_references_metadata_under(&text, "input");
             engine
                 .add_policy(path.clone(), text)
                 .map_err(|e| BuildError::ModuleParse {
                     name: path.clone(),
                     cause: e.to_string(),
                 })?;
+            global_requires_metadata |= last_module_references_metadata(&mut engine);
             policy_sources.insert(path);
         }
         // `add_policy` returns a lossy dot-joined string, so compare decoded
@@ -450,7 +451,19 @@ impl PdpResolver for OpaResolver {
     }
 
     fn requires_metadata(&self, call: &PdpCall) -> bool {
-        self.global_requires_metadata || call.references_metadata()
+        let Some(args) = call.args.as_mapping() else {
+            return self.global_requires_metadata || call.references_metadata();
+        };
+        let query_requires_metadata = args
+            .get(serde_yaml::Value::String("query".to_owned()))
+            .and_then(serde_yaml::Value::as_str)
+            .is_some_and(|query| source_references_metadata_under(query, "input"));
+        let inline_requires_metadata = args
+            .get(serde_yaml::Value::String("module".to_owned()))
+            .and_then(serde_yaml::Value::as_str)
+            .is_some_and(source_references_metadata);
+
+        self.global_requires_metadata || query_requires_metadata || inline_requires_metadata
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
@@ -939,10 +952,17 @@ mod eval_tests {
             ],
             OnError::Deny,
         );
+        let aliased = resolver(
+            &[
+                "package authz\ndefault allow := false\nallow if { x := input; x.metadata.account.active }",
+            ],
+            OnError::Deny,
+        );
         let route_call = call("data.authz.allow", None);
 
         assert!(dotted.requires_metadata(&route_call));
         assert!(bracketed.requires_metadata(&route_call));
+        assert!(aliased.requires_metadata(&route_call));
         assert!(!unrelated.requires_metadata(&route_call));
     }
 
@@ -955,6 +975,17 @@ mod eval_tests {
         );
 
         assert!(resolver.requires_metadata(&route_call));
+    }
+
+    #[test]
+    fn inline_policy_ignores_unrelated_metadata_namespace() {
+        let resolver = resolver(&[], OnError::Deny);
+        let route_call = call(
+            "data.route.allow",
+            Some("package route\ndefault allow := false\nallow if data.metadata.enabled"),
+        );
+
+        assert!(!resolver.requires_metadata(&route_call));
     }
 
     const ALLOW_WITH_DEFAULT: &str = r#"package authz

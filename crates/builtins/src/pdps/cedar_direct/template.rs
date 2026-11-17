@@ -92,6 +92,18 @@ pub fn resolve_refs(
     }
 }
 
+/// Return whether a Cedar call template contains a metadata placeholder.
+pub(super) fn references_metadata(value: &serde_yaml::Value) -> bool {
+    match value {
+        serde_yaml::Value::String(value) => parse_placeholder(value).is_some_and(|key| {
+            key == "metadata" || key.starts_with("metadata.") || key.starts_with("metadata[")
+        }),
+        serde_yaml::Value::Mapping(map) => map.values().any(references_metadata),
+        serde_yaml::Value::Sequence(items) => items.iter().any(references_metadata),
+        _ => false,
+    }
+}
+
 /// Return the inner bag key when `s` is exactly `${<key>}` (whole-string
 /// placeholder). Returns `None` for any other shape — including
 /// `prefix-${args.X}` (embedded), `$args.X` (no braces), or stray `${`

@@ -1562,8 +1562,9 @@ fn install_handler(
     // downstream plugins see empty views) and rejects mutations on the
     // way out (label / delegation appends fail monotonicity checks).
     //
-    // Granted caps = union of every plugin's caps (with per-route
-    // overrides applied) ∪ host-supplied baseline. The baseline
+    // Granted caps = union of this half's plugin caps plus route-wide
+    // fixed-family bridge caps (with per-route overrides applied) ∪ the
+    // host-supplied baseline. The baseline
     // typically covers read-only attributes APL predicates touch
     // (`subject.*`, `role.*`, `delegated`, …) even when no plugins are
     // referenced.
@@ -1571,6 +1572,7 @@ fn install_handler(
     capabilities.extend(crate::dispatch_plan::route_capability_union(
         &route,
         plugin_registry,
+        phase == Phase::Pre,
     ));
     // Every synthetic policy handler (the entity-less HTTP catch-all, per-entity
     // routes, and defaults) is granted `read_headers` and `read_query` so `http.*` request
