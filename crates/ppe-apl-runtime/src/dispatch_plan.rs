@@ -49,6 +49,7 @@ use praxis_policy_core::metadata::HOOK_METADATA_FETCH;
 use praxis_policy_core::plugin::OnError;
 use praxis_policy_core::registry::HookEntry;
 
+use praxis_policy_apl_core::constraint::{RestrictSpec, StringSetSpec};
 use praxis_policy_apl_core::pipeline::{FieldRule, Stage};
 use praxis_policy_apl_core::plugin_decl::{EffectivePlugin, PluginRegistry};
 use praxis_policy_apl_core::rules::{CompiledRoute, Condition, Effect, Expression};
@@ -626,8 +627,24 @@ fn effect_uses_metadata(effect: &Effect) -> bool {
         Effect::When { condition, .. } => expression_uses_metadata(condition),
         Effect::Pdp { call, .. } => value_uses_metadata(&call.args),
         Effect::FieldOp { stages, .. } => stages_use_metadata(stages),
+        Effect::Restrict { spec } => restrict_uses_metadata(spec),
         _ => false,
     }
+}
+
+fn restrict_uses_metadata(spec: &RestrictSpec) -> bool {
+    [
+        spec.allow_models.as_ref(),
+        spec.deny_models.as_ref(),
+        spec.allow_regions.as_ref(),
+        spec.allow_sites.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| match value {
+        StringSetSpec::Ref(path) => attribute_path_uses_metadata(path),
+        StringSetSpec::Literal(_) => false,
+    })
 }
 
 fn stages_use_metadata(stages: &[Stage]) -> bool {
@@ -645,10 +662,10 @@ fn expression_uses_metadata(expression: &Expression) -> bool {
             Condition::Comparison { key, .. }
             | Condition::IsTrue { key }
             | Condition::IsFalse { key }
-            | Condition::Exists { key } => key.starts_with("metadata."),
+            | Condition::Exists { key } => attribute_path_uses_metadata(key),
             Condition::InSet {
                 value_key, set_key, ..
-            } => value_key.starts_with("metadata.") || set_key.starts_with("metadata."),
+            } => attribute_path_uses_metadata(value_key) || attribute_path_uses_metadata(set_key),
         },
         Expression::And(expressions) | Expression::Or(expressions) => {
             expressions.iter().any(expression_uses_metadata)
@@ -665,8 +682,36 @@ fn value_uses_metadata(value: &serde_yaml::Value) -> bool {
         serde_yaml::Value::Mapping(values) => values
             .iter()
             .any(|(key, value)| value_uses_metadata(key) || value_uses_metadata(value)),
+        serde_yaml::Value::Tagged(tagged) => value_uses_metadata(&tagged.value),
         _ => false,
     }
+}
+
+fn attribute_path_uses_metadata(path: &str) -> bool {
+    if path.starts_with("metadata.") {
+        return true;
+    }
+
+    let mut rest = path;
+    while let Some(open) = rest.find('[') {
+        let Some(after_open) = rest.get(open + 1..) else {
+            return false;
+        };
+        let Some(close) = after_open.find(']') else {
+            return false;
+        };
+        let Some(inner) = after_open.get(..close) else {
+            return false;
+        };
+        if attribute_path_uses_metadata(inner.trim()) {
+            return true;
+        }
+        let Some(tail) = after_open.get(close + 1..) else {
+            return false;
+        };
+        rest = tail;
+    }
+    false
 }
 
 fn string_uses_metadata(value: &str) -> bool {
@@ -697,6 +742,7 @@ fn string_uses_metadata(value: &str) -> bool {
                         | '-'
                         | '<'
                         | '>'
+                        | '.'
                 )
             });
         let after_marker = start + marker.len();
@@ -991,6 +1037,7 @@ mod cache_tests {
     use super::{CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine, route_uses_metadata};
     use std::sync::Arc;
 
+    use praxis_policy_apl_core::constraint::{OnEmpty, RestrictSpec, StringSetSpec};
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage};
     use praxis_policy_apl_core::rules::{Condition, Effect, Expression};
     use praxis_policy_apl_core::step::{FetchStep, PdpCall, PdpDialect};
@@ -1108,6 +1155,57 @@ mod cache_tests {
             route_uses_metadata(&field_op_route),
             "conditional field operations need the grant"
         );
+
+        let mut interpolated_route = CompiledRoute::new("tool:interpolated");
+        interpolated_route.pre_invocation.push(Effect::When {
+            condition: Expression::Condition(Condition::IsTrue {
+                key: "data.tenants[metadata.account.id].blocked".to_owned(),
+            }),
+            body: vec![Effect::Deny {
+                reason: None,
+                code: None,
+            }],
+            source: "interpolated".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&interpolated_route),
+            "metadata used to interpolate an attribute path needs the grant"
+        );
+
+        let mut restrict_route = CompiledRoute::new("tool:restrict");
+        restrict_route.pre_invocation.push(Effect::Restrict {
+            spec: RestrictSpec {
+                allow_regions: Some(StringSetSpec::Ref(
+                    "metadata.account.allowed_regions".to_owned(),
+                )),
+                on_empty: OnEmpty::Fallback,
+                ..RestrictSpec::default()
+            },
+        });
+        assert!(
+            route_uses_metadata(&restrict_route),
+            "metadata-backed routing restrictions need the grant"
+        );
+
+        for (dialect, expression) in [
+            (PdpDialect::Cel, "metadata.account.active == true"),
+            (PdpDialect::Opa, "input.metadata.account.active == true"),
+            (PdpDialect::Cedar, "context.metadata.account.active == true"),
+        ] {
+            let mut evaluator_route = CompiledRoute::new("tool:evaluator");
+            evaluator_route.pre_invocation.push(Effect::Pdp {
+                call: PdpCall {
+                    dialect,
+                    args: serde_yaml::Value::String(expression.to_owned()),
+                },
+                on_allow: Vec::new(),
+                on_deny: Vec::new(),
+            });
+            assert!(
+                route_uses_metadata(&evaluator_route),
+                "documented evaluator metadata paths need the grant: {expression}"
+            );
+        }
 
         let mut literal_route = CompiledRoute::new("tool:literal");
         literal_route.pre_invocation.push(Effect::Pdp {
