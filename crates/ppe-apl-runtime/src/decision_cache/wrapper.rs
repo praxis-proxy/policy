@@ -158,6 +158,10 @@ impl PdpResolver for CachedPdpResolver {
         self.inner.dialect()
     }
 
+    fn requires_metadata(&self, call: &PdpCall) -> bool {
+        self.inner.requires_metadata(call)
+    }
+
     fn validate_call(&self, call: &PdpCall) -> Result<(), String> {
         self.inner.validate_call(call)
     }
@@ -263,6 +267,10 @@ mod tests {
             PdpDialect::Cel
         }
 
+        fn requires_metadata(&self, _call: &PdpCall) -> bool {
+            false
+        }
+
         async fn evaluate(
             &self,
             _call: &PdpCall,
@@ -274,6 +282,20 @@ mod tests {
                 diagnostics: Vec::new(),
             })
         }
+    }
+
+    #[test]
+    fn metadata_dependency_delegates_to_the_inner_resolver() {
+        let mgr = Arc::new(PolicyEngine::default());
+        let cache = CachedPdpResolver::wrap(
+            Arc::new(CountingResolver {
+                calls: Arc::new(AtomicU64::new(0)),
+            }),
+            config(),
+            Arc::downgrade(&mgr),
+        );
+
+        assert!(!cache.requires_metadata(&call()));
     }
 
     struct GatedResolver {

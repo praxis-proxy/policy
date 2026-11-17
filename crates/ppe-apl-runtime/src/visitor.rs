@@ -1589,7 +1589,7 @@ fn install_handler(
     // compiled route actually reaches one of those surfaces. Plugins
     // dispatched from the route still contribute their own declared
     // `read_metadata` capability through `route_capability_union`.
-    if crate::dispatch_plan::route_uses_metadata(&route) {
+    if crate::dispatch_plan::route_uses_metadata(&route, phase == Phase::Pre, pdp.as_deref()) {
         capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
     }
     // Only the pre-invocation handler for a route that fetches may publish the

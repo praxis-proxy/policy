@@ -52,6 +52,34 @@ fn alice_bag() -> AttributeBag {
 // Scenarios
 // =====================================================================
 
+#[test]
+fn policy_and_call_dependencies_report_metadata_usage() {
+    let metadata_policy = CedarDirectResolver::from_policy_text(
+        "permit(principal, action, resource) when { context.metadata.account.active };",
+    )
+    .expect("metadata policy parses");
+    let unrelated_policy = CedarDirectResolver::from_policy_text(
+        "permit(principal, action, resource) when { resource.metadata.enabled };",
+    )
+    .expect("unrelated policy parses");
+    let metadata_call = PdpCall {
+        dialect: PdpDialect::Cedar,
+        args: serde_yaml::from_str(
+            r#"
+action: 'Action::"read"'
+resource:
+  type: Document
+  id: '${metadata.account.document_id}'
+"#,
+        )
+        .unwrap(),
+    };
+
+    assert!(metadata_policy.requires_metadata(&read_doc_call()));
+    assert!(!unrelated_policy.requires_metadata(&read_doc_call()));
+    assert!(unrelated_policy.requires_metadata(&metadata_call));
+}
+
 /// One unconditional `permit` policy → request → Allow. Confirms the
 /// happy path end-to-end: parse, build entities, build request,
 /// authorize, translate decision back.
