@@ -51,10 +51,9 @@ const FAILURE_LOG_WINDOW_MS: u64 = 10_000; // 10 seconds
 /// How many of `log_budget`'s low bits hold the logged count.
 ///
 /// The one place the split is written down. The shift and the mask below are
-/// both derived from it, so they cannot drift apart -- which is the defect
-/// this replaces: a 40-bit mask paired with a `<< 40` discarded every bit of
-/// the window start above the low 24, and the budget stopped limiting after
-/// about 4.7 hours of uptime.
+/// both derived from it, so they cannot drift apart: a mask and a shift that
+/// disagree discard the high bits of the window start, and the budget stops
+/// limiting once uptime outgrows them.
 ///
 /// 24 bits holds 16,777,215 against a budget of ten, and leaves 40 bits of
 /// milliseconds for the window start: about 34 years of uptime.
@@ -121,8 +120,7 @@ pub struct BasicIdentityResolver {
     /// Packed into one word so the request path pays one atomic rather than a
     /// lock: the window start in the high 40 bits, the count in the low
     /// [`LOG_COUNT_BITS`]. Both the shift and the mask derive from that one
-    /// constant, so the halves cannot disagree -- they previously did, and the
-    /// budget stopped limiting after about 4.7 hours of uptime.
+    /// constant, so the halves cannot disagree.
     ///
     /// [`LOG_COUNT_BITS`]: LOG_COUNT_BITS
     log_budget: AtomicU64,

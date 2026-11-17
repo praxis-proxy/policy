@@ -192,7 +192,7 @@ upstream header. Every other field in a record is yours to name and is
 projected through `record_map`. The verified user-id is injected separately
 as `user_id`, which is what the default `subject.id` anchor reads.
 
-Four things fail at load rather than at request time, because each one
+Six things fail at load rather than at request time, because each one
 would otherwise read as an outage or, worse, as silence:
 
 - A duplicate `username`, compared after Unicode normalisation. Two
@@ -201,11 +201,22 @@ would otherwise read as an outage or, worse, as silence:
 - A `username` containing `:`. [RFC 7617 Section 2] splits the credential
   at the first colon, so no client can send that name and the record would
   deny as a wrong password forever.
+- A `username` containing a control character, a line or paragraph
+  separator, or a bidi control. The decoder refuses those in an inbound
+  credential, so the record would be just as unreachable.
+- A record field named `user_id`. The resolver injects the verified
+  username under that name, so the record's own value would be silently
+  replaced.
 - An `expires_at` that is not a timestamp. A string-typed field would have
   accepted it and then meant "never expires", which is the one failure an
   expiry must not have.
 - A misspelled top-level key. `user:` for `users:` would otherwise load as
   an empty directory that denies every request.
+
+Load and reload errors locate a record by its position in `users:`, such as
+`record 3`, and never quote the file: a failed reload is logged at warn on
+every refresh interval, so neither a username nor a stored hash belongs in
+that line.
 
 [RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
 

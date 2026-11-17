@@ -316,9 +316,52 @@ fn a_duplicate_username_fails_at_load() {
         "the error must say the username collided, not merely that the file is invalid: {error}"
     );
     assert!(
-        error.contains("alice"),
-        "the error must name the colliding record so an operator can find it: {error}"
+        error.contains("record 1"),
+        "the error must name the colliding record's position so an operator can find it: \
+         {error}"
     );
+    assert!(
+        !error.contains("alice"),
+        "a load error is logged at warn on every failed refresh, so it must locate the record \
+         without naming the user-id: {error}"
+    );
+}
+
+#[test]
+fn a_record_field_named_user_id_fails_at_load() {
+    let file = UserYamlFile::write(&format!(
+        "users:\n  - username: alice\n    password_hash: {}\n    user_id: bob\n",
+        bcrypt_hash("correct horse", 4)
+    ));
+
+    let error = directory(&file).expect_err("a `user_id` record field must fail at load");
+    assert!(
+        error.contains("`user_id` is reserved") && error.contains("record 0"),
+        "the resolver injects the verified user-id under `user_id`, so a record field of that \
+         name would be silently overwritten and the operator must hear about it: {error}"
+    );
+}
+
+#[test]
+fn a_username_with_a_control_character_fails_at_load() {
+    for (shape, username) in [
+        ("a C0 control", "\"ali\\u0007ce\""),
+        ("a line separator", "\"ali\\u2028ce\""),
+        ("a bidi override", "\"ali\\u202ece\""),
+    ] {
+        let file = UserYamlFile::write(&format!(
+            "users:\n  - username: {username}\n    password_hash: {}\n",
+            bcrypt_hash("correct horse", 4)
+        ));
+
+        let Err(error) = directory(&file) else {
+            panic!("a username carrying {shape} must fail at load: no credential can reach it");
+        };
+        assert!(
+            error.contains("control") && error.contains("record 0"),
+            "the error must name the record and the character class for {shape}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -453,6 +496,46 @@ fn a_missing_required_storage_field_fails_at_load() {
         assert!(
             error.contains(missing),
             "the error must name the missing field so an operator can add it: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_parse_error_is_described_from_the_document_shape_not_the_parser() {
+    let hash = bcrypt_hash("correct horse", 4);
+    for (expected, body) in [
+        (
+            "record 1 is missing `password_hash`",
+            format!("users:\n  - username: alice\n    password_hash: {hash}\n  - username: bob\n"),
+        ),
+        (
+            "record 0: `expires_at` must be an RFC 3339 timestamp",
+            format!(
+                "users:\n  - username: alice\n    password_hash: {hash}\n    expires_at: \
+                 not-a-timestamp\n"
+            ),
+        ),
+        (
+            "record 0: `username` must be a string",
+            format!("users:\n  - username: [alice]\n    password_hash: {hash}\n"),
+        ),
+        (
+            "record 0 is not a `username` / `password_hash` mapping",
+            format!("users:\n  - alice:{hash}\n"),
+        ),
+    ] {
+        let file = UserYamlFile::write(&body);
+        let Err(error) = directory(&file) else {
+            panic!("a file whose record reads as `{expected}` must fail at load");
+        };
+        assert!(
+            error.contains(expected) && error.contains("line "),
+            "the error must carry the parser's location and a description this backend owns, \
+             so no parser wording can quote record content into it: {error}"
+        );
+        assert!(
+            !error.contains("alice") && !error.contains("$2"),
+            "the error must quote nothing from the file: {error}"
         );
     }
 }
@@ -976,6 +1059,47 @@ async fn a_burst_of_lookups_triggers_one_file_read() {
         1,
         "the refresh slot is claimed by one lookup at a time, so a burst costs one file read \
          rather than one each"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_after_an_idle_period_past_the_ceiling_waits_for_the_reload() {
+    let file = UserYamlFile::write(&format!(
+        "users:\n  - username: alice\n    password_hash: {}\n",
+        bcrypt_hash("correct horse", 4)
+    ));
+    let config: UserFileConfig = serde_yaml::from_str(&format!(
+        "path: {}\nrefresh_secs: 1\nmax_staleness_secs: 2\n",
+        file.path()
+    ))
+    .expect("the backend config parses");
+    let dir = std::sync::Arc::new(UserFileDirectory::new(config).expect("the file loads"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
+
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let dir = std::sync::Arc::clone(&dir);
+        handles.push(tokio::spawn(async move {
+            dir.lookup("alice", &services())
+                .await
+                .map(|found| found.is_some())
+        }));
+    }
+    let mut outcomes = Vec::new();
+    for handle in handles {
+        outcomes.push(handle.await.expect("the lookup task completes"));
+    }
+
+    assert!(
+        outcomes.iter().all(|outcome| matches!(outcome, Ok(true))),
+        "after a quiet period past the ceiling, lookups that lose the refresh slot must wait \
+         for the in-flight reload rather than deny as `Stale`: {outcomes:?}"
+    );
+    assert_eq!(
+        dir.reload_attempts(),
+        1,
+        "the waiting lookups must share the one reload rather than each run their own"
     );
 }
 

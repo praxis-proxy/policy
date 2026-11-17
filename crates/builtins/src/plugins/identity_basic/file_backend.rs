@@ -2,15 +2,11 @@
 // Copyright (c) 2026 Praxis Contributors
 
 // What every on-disk Basic directory shares: an atomically swapped index, a
-// CAS-claimed refresh slot, a fail-closed staleness ceiling, and a bounded
+// single-flight refresh slot, a fail-closed staleness ceiling, and a bounded
 // verification pool.
 //
-// This is the shared helper KTD8 deferred. The deferral was conditional --
-// "extracting a shared helper across two plugins is deferred until there is a
-// second backend to generalise from" -- and the YAML backend is that second
-// backend. Copying the machinery a third time is the thing KTD8 was actually
-// guarding against, because the two races it encodes are not visible in the
-// code that encodes them:
+// Shared because the races it encodes are not visible in the code that encodes
+// them, so a second copy would be free to drop any of them:
 //
 //   * `reload` holds one lock across read-parse-publish. Two unserialized
 //     reloads straddling a file replacement can read opposite sides of it and
@@ -22,6 +18,11 @@
 //     and denies. The other order shows an old index under a fresh timestamp,
 //     which is a staleness ceiling that passes while serving exactly what it
 //     exists to stop serving.
+//   * A lookup that finds the index past its ceiling while a reload is in
+//     flight waits for that reload instead of denying. After a quiet period
+//     longer than the ceiling, only one lookup in a burst can run the reload,
+//     and the rest would otherwise deny as `Stale` against the index it is
+//     about to replace.
 //
 // What stays with each backend is the part that differs: how a file's bytes
 // become records. That arrives as an `IndexSource`, so this module never
@@ -230,6 +231,12 @@ struct ReloadState {
     ///
     /// [`Self::reload`]: ReloadState::reload
     reloads_in_flight: AtomicU64,
+
+    /// Held by the lookup running a request-path reload, until it completes.
+    ///
+    /// Async, because a lookup that finds the index past its ceiling awaits
+    /// it to learn when the in-flight reload has published.
+    refreshing: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Tracks how many reloads are in flight, and the most ever at once.
@@ -274,7 +281,7 @@ pub fn validate_timers(
 ) -> Result<(), String> {
     // Zero is not a usable ceiling in either reading an operator might give
     // it. As a bound it denies everything: `reload` stamps `loaded_at_ms`,
-    // `staleness()` reads the clock again, and the comparison is `>` against
+    // `is_stale()` reads the clock again, and the comparison is `>` against
     // zero, so a lookup that crosses a millisecond boundary -- or one that
     // loses the refresh slot and reads an index already 1ms old -- fails as
     // `Stale`. That is an outage from a config that loaded without complaint,
@@ -514,6 +521,7 @@ impl FileBackend {
                 next_attempt_ms: AtomicU64::new(first_attempt),
                 peak_concurrent_reloads: AtomicU64::new(0),
                 publishing: std::sync::Mutex::new(()),
+                refreshing: Arc::new(tokio::sync::Mutex::new(())),
                 reload_attempts: AtomicU64::new(0),
                 reloads_in_flight: AtomicU64::new(0),
                 source,
@@ -580,6 +588,9 @@ impl FileBackend {
 
     /// Look up a normalised user-id, refreshing the index when it is due.
     ///
+    /// A lookup that finds the index past its ceiling while a reload is in
+    /// flight waits for that reload and answers from what it publishes.
+    ///
     /// # Errors
     ///
     /// [`DirectoryError::Stale`] past the staleness ceiling, where the loaded
@@ -594,7 +605,7 @@ impl FileBackend {
         // directory failure rather than as an unknown user, which is the
         // difference between an operator seeing an outage and seeing a wave of
         // bad passwords.
-        if self.state.staleness() > Duration::from_secs(self.state.source.max_staleness_secs()) {
+        if self.state.is_stale() {
             return Err(DirectoryError::Stale);
         }
 
@@ -713,10 +724,11 @@ impl ReloadState {
             .unwrap_or(u64::MAX)
     }
 
-    /// How stale the loaded index is.
-    fn staleness(&self) -> Duration {
+    /// Whether the loaded index is past its staleness ceiling.
+    fn is_stale(&self) -> bool {
         let loaded = self.loaded_at_ms.load(Ordering::Acquire);
-        Duration::from_millis(self.now_ms().saturating_sub(loaded))
+        let age = Duration::from_millis(self.now_ms().saturating_sub(loaded));
+        age > Duration::from_secs(self.source.max_staleness_secs())
     }
 
     /// Reload the file, retaining the previous index on failure.
@@ -773,26 +785,35 @@ impl ReloadState {
 
     /// Attempt a reload when the refresh interval has elapsed.
     ///
-    /// The reload itself runs on a blocking thread. The slot claim stays here,
-    /// so losing it still costs a lookup nothing but two atomic loads.
+    /// The reload itself runs on a blocking thread. A lookup that finds a
+    /// reload already in flight returns at once while the index is inside its
+    /// ceiling, and waits for that reload once it is past it.
     async fn refresh_if_due(state: &Arc<Self>) {
-        let interval = state.source.refresh_secs();
-        let now = state.now_ms();
-        let due = state.next_attempt_ms.load(Ordering::Acquire);
-        if now < due {
+        if state.now_ms() < state.next_attempt_ms.load(Ordering::Acquire) {
             return;
         }
 
-        // Claim the slot before reading. Losing the exchange means another
-        // request is already reloading. Moving the marker forward even when
-        // the read then fails is what keeps an unreadable file from being
-        // retried on every request until it comes back.
-        let next = now.saturating_add(interval.saturating_mul(1000));
-        if state
-            .next_attempt_ms
-            .compare_exchange(due, next, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        // Losing the slot means another lookup is already reloading. Within
+        // the ceiling the running index is still an answer, so this lookup
+        // serves it. Past the ceiling the only answer is the one that reload
+        // is about to publish, and denying instead turns one quiet period into
+        // a burst of `Stale` denials.
+        let slot = match Arc::clone(&state.refreshing).try_lock_owned() {
+            Ok(slot) => slot,
+            Err(_in_flight) if state.is_stale() => {
+                tracing::debug!(
+                    backend = state.source.kind(),
+                    "index past its ceiling; waiting for the in-flight reload",
+                );
+                drop(state.refreshing.lock().await);
+                return;
+            },
+            Err(_in_flight) => return,
+        };
+
+        // A reload that finished between the due check above and the slot
+        // claim has already moved the marker.
+        if state.now_ms() < state.next_attempt_ms.load(Ordering::Acquire) {
             return;
         }
 
@@ -803,17 +824,25 @@ impl ReloadState {
         // records -- a bcrypt mint. None of that is bounded by the
         // verification semaphore, which guards only the verify step, so inline
         // it would stall every unrelated task on that worker for as long as
-        // the file takes to read. A reload running longer than the interval
-        // also makes the next claimant wait on `publishing`, and that wait
-        // belongs on a blocking thread too.
+        // the file takes to read.
         //
-        // The `Arc` clone is what lets this be a `'static` closure: the task
-        // outlives the caller's future, because dropping a `JoinHandle` does
-        // not cancel a blocking task. Serialization, last-good-index retention
-        // and the staleness stamp are all inside `reload`, so moving the call
-        // changes where it runs and nothing about what it guarantees.
+        // The slot and the marker move with the work, because dropping a
+        // `JoinHandle` does not cancel a blocking task: a caller that
+        // disconnects must not release waiters before the reload publishes.
+        // The marker moves forward even when the read fails, which is what
+        // keeps an unreadable file from being retried on every request, and it
+        // moves only once the reload is done, so a lookup arriving mid-reload
+        // still finds the slot due and waits on it when the index is stale.
+        let interval_ms = state.source.refresh_secs().saturating_mul(1000);
         let reloading = Arc::clone(state);
-        let outcome = tokio::task::spawn_blocking(move || reloading.reload()).await;
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let outcome = reloading.reload();
+            let next = reloading.now_ms().saturating_add(interval_ms);
+            reloading.next_attempt_ms.store(next, Ordering::Release);
+            outcome
+        })
+        .await;
 
         let error = match outcome {
             Ok(Ok(())) => return,

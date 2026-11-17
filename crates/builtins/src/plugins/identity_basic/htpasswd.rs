@@ -17,12 +17,10 @@
 //
 // What is left here is the file format and nothing else. The index, refresh,
 // publish-ordering, staleness and verification-capacity machinery lives in
-// `file_backend`, which this module and the YAML backend share -- the
-// extraction KTD8 deferred until a second file backend existed to generalise
-// from. Where this backend diverges from the api-key sibling the extraction
-// grew out of -- the staleness ceiling is required rather than optional, and
-// the refresh interval has a one-second floor -- the divergence is in
-// `file_backend::validate_timers`.
+// `file_backend`, which this module and the YAML backend share. Where these
+// backends diverge from the api-key file backend -- the staleness ceiling is
+// required rather than optional, and the refresh interval has a one-second
+// floor -- the divergence is in `file_backend::validate_timers`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

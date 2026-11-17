@@ -194,7 +194,7 @@ pub fn decode_basic(
 }
 
 /// Whether a credential half contains a disallowed control character.
-fn contains_disallowed(half: &str) -> bool {
+pub(crate) fn contains_disallowed(half: &str) -> bool {
     half.chars().any(|c| {
         c.is_control()
             || matches!(

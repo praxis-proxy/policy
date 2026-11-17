@@ -581,6 +581,42 @@ async fn past_the_staleness_ceiling_lookups_report_unavailable_not_unknown() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_after_an_idle_period_past_the_ceiling_waits_for_the_reload() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+    let mut config = config_for(file.path());
+    config.refresh_secs = 1;
+    config.max_staleness_secs = 2;
+    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
+
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let dir = std::sync::Arc::clone(&dir);
+        handles.push(tokio::spawn(async move {
+            dir.lookup("alice", &services())
+                .await
+                .map(|found| found.is_some())
+        }));
+    }
+    let mut outcomes = Vec::new();
+    for handle in handles {
+        outcomes.push(handle.await.expect("the lookup task completes"));
+    }
+
+    assert!(
+        outcomes.iter().all(|outcome| matches!(outcome, Ok(true))),
+        "after a quiet period past the ceiling, lookups that lose the refresh slot must wait \
+         for the in-flight reload rather than deny as `Stale`: {outcomes:?}"
+    );
+    assert_eq!(
+        dir.reload_attempts(),
+        1,
+        "the waiting lookups must share the one reload rather than each run their own"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 10)));

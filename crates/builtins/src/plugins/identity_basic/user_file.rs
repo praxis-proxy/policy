@@ -30,11 +30,13 @@ use unicode_normalization::UnicodeNormalization as _;
 use praxis_policy_core::host::HostServices;
 
 use super::BasicCredential;
+use super::credential::contains_disallowed;
 use super::directory::{CredentialDirectory, DirectoryError, UserRecord};
 use super::file_backend::{
     Entry, FileBackend, IndexSource, check_password_ceiling, enforce_uniform_cost, validate_timers,
 };
 use super::htpasswd::{DEFAULT_MAX_CONCURRENT_VERIFICATIONS, HtpasswdLimits};
+use super::record_map::USER_ID_FIELD;
 use super::verifier::{CostProfile, Limits, ParsedHash, parse_hash};
 
 /// The `kind:` string an operator writes under `provider:`.
@@ -66,9 +68,8 @@ pub struct UserFileRecord {
     /// When this record stops being valid.
     ///
     /// Typed, so a value that is not a timestamp fails at load rather than
-    /// deserializing to `None` and silently meaning "never expires". R25 names
-    /// that specific failure, and it is the one a `String` field would
-    /// reintroduce.
+    /// deserializing to `None` and silently meaning "never expires", which is
+    /// the failure a `String` field would reintroduce.
     ///
     /// A present-but-null value is refused for the same reason. `expires_at:`
     /// with nothing after it, or an explicit `~`, reads to a human as "an
@@ -96,8 +97,7 @@ pub struct UserFileRecord {
 ///
 /// `#[serde(default)]` supplies the absent case, so this is only reached when
 /// the key is present: a null there is an operator writing an expiry they did
-/// not write, and treating it as "no expiry" is the failure R25 exists to
-/// prevent.
+/// not write, and treating it as "no expiry" would let it never expire.
 ///
 /// # Errors
 ///
@@ -216,42 +216,16 @@ impl IndexSource for UserFileSource {
         // timestamp all land here, at load, rather than denying requests later
         // as though the passwords were wrong.
         //
-        // The error is forwarded only when it cannot carry record content.
-        // `serde_yaml` names fields and keys in almost every message --
-        // "missing field `password_hash`", "unknown field `user`",
-        // "users[0].expires_at: input contains invalid characters" -- and that
-        // is exactly what an operator needs. The one variant that quotes the
-        // input back is `invalid type`, which a record written as a bare
-        // scalar triggers: a pasted `.htpasswd` line, the mistake a migrating
-        // operator makes, yields `invalid type: string "bob:$2b$..."` carrying
-        // a stored hash. That string reaches the refresh path's
-        // `tracing::warn!`, so a verifier would land in operator logs on every
-        // reload while the plugin kept serving and nothing prompted anyone to
-        // look. Blanket redaction was the first fix here and was wrong: it
-        // also erased the field names, so a malformed `expires_at` reported
-        // only a line and column. So the leaky variant is reduced to its
-        // location and the rest pass through.
+        // The parser's own message is never forwarded: its wording varies by
+        // error and by `serde_yaml` release, and some of it quotes the input
+        // back, which for this file is a stored hash. The message is rebuilt
+        // from the error's location and the document's shape instead.
         let file: UserFile = serde_yaml::from_str(&text).map_err(|e| {
-            let path = config.path.display();
-            let detail = e.to_string();
-            if detail.contains("invalid type") {
-                return match e.location() {
-                    Some(at) => format!(
-                        "parsing {path}: a record at line {}, column {} is not a `username` / \
-                         `password_hash` mapping; a `.htpasswd` line pasted into the list \
-                         looks like this. The parser's own message is withheld because it \
-                         quotes the offending text, which for this file is a stored hash",
-                        at.line(),
-                        at.column(),
-                    ),
-                    None => format!(
-                        "parsing {path}: a record is not a `username` / `password_hash` \
-                         mapping; the parser's own message is withheld because it quotes the \
-                         offending text, which for this file is a stored hash"
-                    ),
-                };
-            }
-            format!("parsing {path}: {detail}")
+            format!(
+                "parsing {}: {}",
+                config.path.display(),
+                describe_parse(&text, &e)
+            )
         })?;
         let limits = Limits::from(config.limits);
 
@@ -268,9 +242,12 @@ impl IndexSource for UserFileSource {
             // differently encoded spellings of one name collapse onto one key
             // silently, handing whichever landed second the other's identity.
             let normalised: String = record.username.nfc().collect();
+            // The record position locates it without putting a user-id in a
+            // message that a failed reload logs at warn on every refresh.
+            let label = format!("record {position}");
             if normalised.is_empty() {
                 return Err(format!(
-                    "{} record {position}: an empty username",
+                    "{} {label}: an empty username",
                     config.path.display()
                 ));
             }
@@ -280,16 +257,30 @@ impl IndexSource for UserFileSource {
             // `.htpasswd` cannot spell such a name; YAML can.
             if normalised.contains(':') {
                 return Err(format!(
-                    "{} record {position}: a username cannot contain `:`; RFC 7617 splits the \
-                     credential at the first colon, so this record is unreachable",
+                    "{} {label}: a username cannot contain `:`; RFC 7617 splits the credential \
+                     at the first colon, so this record is unreachable",
                     config.path.display()
                 ));
             }
-
-            // The operator's own spelling of the name, for the messages below.
-            // Indexed by position as well, because two records can carry the
-            // same name and that is exactly the case being reported.
-            let label = format!("record {position} (`{normalised}`)");
+            // The decoder refuses these in an inbound user-id, so a stored name
+            // carrying one could never be reached.
+            if contains_disallowed(&normalised) {
+                return Err(format!(
+                    "{} {label}: a username cannot contain a control, line-separator or bidi \
+                     control character; the decoder refuses those in a credential, so this \
+                     record is unreachable",
+                    config.path.display()
+                ));
+            }
+            // The resolver injects the verified user-id under this name, which
+            // would silently replace the record's own value.
+            if record.fields.contains_key(USER_ID_FIELD) {
+                return Err(format!(
+                    "{} {label}: `{USER_ID_FIELD}` is reserved for the verified username and \
+                     cannot be a record field; rename it",
+                    config.path.display()
+                ));
+            }
 
             // The hash error deliberately carries no hash material, so the
             // message names the record and the scheme problem and nothing
@@ -308,8 +299,8 @@ impl IndexSource for UserFileSource {
             // either silently would hand one caller the other's identity.
             if users.contains_key(&normalised) {
                 return Err(format!(
-                    "{} {label}: a second record carries the same username (after Unicode \
-                     normalisation)",
+                    "{} {label}: carries the same username as an earlier record (after \
+                     Unicode normalisation)",
                     config.path.display()
                 ));
             }
@@ -479,5 +470,79 @@ impl CredentialDirectory for UserFileDirectory {
 
     fn kind(&self) -> &'static str {
         KIND
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Parse diagnostics
+// -----------------------------------------------------------------------------
+
+/// Describe a parse failure without quoting the file.
+///
+/// The location comes from the parser; the description comes from this
+/// module's own reading of the document's shape, so it names fields and record
+/// positions and never any value.
+fn describe_parse(text: &str, error: &serde_yaml::Error) -> String {
+    let problem = serde_yaml::from_str::<serde_yaml::Value>(text)
+        .ok()
+        .and_then(|document| shape_problem(&document))
+        .unwrap_or_else(|| {
+            "the document is not valid YAML or does not match the user-file schema".to_owned()
+        });
+    match error.location() {
+        Some(at) => format!("line {}, column {}: {problem}", at.line(), at.column()),
+        None => problem,
+    }
+}
+
+/// The first way a parsed document departs from the user-file schema.
+fn shape_problem(document: &serde_yaml::Value) -> Option<String> {
+    let Some(top) = document.as_mapping() else {
+        return Some("the top level must be a mapping holding `users:`".to_owned());
+    };
+    if top.keys().any(|key| key.as_str() != Some("users")) {
+        return Some("the top level accepts only `users:`".to_owned());
+    }
+    let Some(users) = top.get("users") else {
+        return Some("`users:` is missing".to_owned());
+    };
+    let Some(records) = users.as_sequence() else {
+        return Some("`users:` must be a list of records".to_owned());
+    };
+    records
+        .iter()
+        .enumerate()
+        .find_map(|(position, record)| record_problem(position, record))
+}
+
+/// The first way one record departs from the record shape.
+fn record_problem(position: usize, record: &serde_yaml::Value) -> Option<String> {
+    let Some(fields) = record.as_mapping() else {
+        return Some(format!(
+            "record {position} is not a `username` / `password_hash` mapping; a `.htpasswd` \
+             line pasted into the list looks like this"
+        ));
+    };
+    for required in ["username", "password_hash"] {
+        match fields.get(required) {
+            None => return Some(format!("record {position} is missing `{required}`")),
+            Some(value) if value.as_str().is_none() => {
+                return Some(format!("record {position}: `{required}` must be a string"));
+            },
+            Some(_) => {},
+        }
+    }
+    let expires_at = fields.get("expires_at")?;
+    if expires_at.is_null() {
+        return Some(format!(
+            "record {position}: `expires_at` is present but empty; write a timestamp, or \
+             remove the key entirely to mean the record does not expire"
+        ));
+    }
+    match expires_at.as_str().map(str::parse::<DateTime<Utc>>) {
+        Some(Ok(_)) => None,
+        _ => Some(format!(
+            "record {position}: `expires_at` must be an RFC 3339 timestamp"
+        )),
     }
 }

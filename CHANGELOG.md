@@ -21,6 +21,25 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **APL metadata fetching.** `fetch(name)` acquires immutable facts in `authorization.pre_invocation` and makes them available to subsequent predicates and PDPs under `metadata.<name>.*`. `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method has a default that rejects unsupported fetches, so existing invoker implementations still compile. `AcquiredFacts::validate()` exposes the core record validation rules. ([#287](https://github.com/praxis-proxy/policy/pull/287))
 
+- **HTTP Basic identity.** The `basic` feature adds `identity/basic`, which
+  decodes an [RFC 7617] credential, verifies it against an on-disk directory
+  and projects the record onto the identity slots through `record_map`. Two
+  providers ship: `htpasswd`, for Apache `.htpasswd` files, and `user_file`,
+  a YAML file whose records carry projectable fields and an optional
+  `expires_at`. Both admit bcrypt, argon2, sha256crypt and sha512crypt with
+  one cost profile per file, and take `path`, `refresh_secs`,
+  `max_staleness_secs`, `limits` and `max_concurrent_verifications`. The
+  resolver adds `realm`, `credential`, `limits.max_password_bytes`,
+  `limits.max_user_id_bytes`, `failure_limit` (`max_failures`,
+  `window_secs`, `capacity`), `expiry`, `claims`, `role` and
+  `advertise_utf8_charset`. The feature is non-FIPS and is refused alongside
+  `fips`. See [What Basic asks of the host] before enabling it.
+  ([#313](https://github.com/praxis-proxy/policy/pull/313),
+  [#340](https://github.com/praxis-proxy/policy/pull/340))
+
+[RFC 7617]: https://datatracker.ietf.org/doc/html/rfc7617
+[What Basic asks of the host]: docs/content/builtins.md#what-basic-asks-of-the-host
+
 ### Changed
 
 - **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive matches must handle the new variant. `RouteDispatchPlan` adds `metadata_entries`; exhaustive struct literals must initialize it or use `..Default::default()`, and exhaustive destructuring must name the field or use `..`. Both types are also reachable through the `praxis_policy` facade's crate re-exports. `RoutePluginEntry::pick_entry` takes a new leading `requested_family` argument; pass the dispatching hook's `HookTypeDef::NAME`. ([#287](https://github.com/praxis-proxy/policy/pull/287))

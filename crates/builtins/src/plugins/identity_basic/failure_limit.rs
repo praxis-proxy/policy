@@ -8,28 +8,27 @@
 // alone is not that bound: it sets the price per guess, and an operator who
 // lowers the cost to meet a latency budget lowers the price with it.
 //
-// The bound covers two things an earlier design let through:
+// The bound covers three ways a naive per-user counter fails:
 //
 // - *Concurrency.* A budget read before verification and written after it is
 //   no budget at all under load: every parallel guess for one user-id passes
 //   the same check before any of them records a failure. An attempt therefore
 //   reserves against the budget at admission and releases on its way out, so
 //   `max_failures` bounds completed failures *and* attempts in flight.
-// - *Saturation.* A full name-keyed map used to stop counting new user-ids
-//   entirely, which let an attacker fill it with junk and then guess a fresh
-//   target unbounded. Counting now continues in a fixed overflow table that
-//   never displaces a named counter, and a user-id promoted out of that table
+// - *Saturation.* A full name-keyed map that stops counting new user-ids lets
+//   an attacker fill it with junk and then guess a fresh target unbounded.
+//   Counting continues in a fixed overflow table that never displaces a named
+//   counter, and a user-id promoted out of that table
 //   carries its recorded failures with it, so a freed slot is not a fresh
 //   budget.
-// - *Shared-bucket lockout.* An overflow bucket is shared, so refusing on a
-//   spent one denied callers for failures that were not theirs. Since a
-//   successful login removes its named counter, the callers routed through
-//   overflow are exactly the well-behaved ones, which made a junk-user-id
-//   spray a blanket authentication outage. A spent bucket still refuses, but
-//   recoverably rather than outright: the refusal rests on evidence that is
-//   not this caller's, so the attempt is admitted for verification and only a
-//   caller who knows the password clears it. Only the caller who knows the
-//   password can clear a bucket they share with an attacker.
+// - *Shared-bucket lockout.* An overflow bucket is shared, so refusing
+//   outright on a spent one denies callers for failures that are not theirs.
+//   Since a successful login removes its named counter, the callers routed
+//   through overflow are exactly the well-behaved ones, so a junk-user-id
+//   spray would be a blanket authentication outage. A spent bucket still
+//   refuses, but recoverably rather than outright: the refusal rests on
+//   evidence that is not this caller's, so the attempt is admitted for
+//   verification and only a caller who knows the password clears it.
 //
 // Where a refusal is decided follows from what it is keyed on, and a counter
 // keeps the two kinds of failure apart for as long as it lives. Its own
@@ -37,17 +36,17 @@
 // nothing. Failures inherited from a shared bucket on promotion cannot be
 // attributed, so a counter spent only by those refuses recoverably -- the
 // unattributable evidence does not stop carrying over just because a named
-// slot opened, which is what made promotion a lockout: a user-id that reached
-// a counter of its own was judged on a spray's failures and denied without the
-// verification that would have cleared it.
+// slot opened, and refusing outright on them would make promotion a lockout: a
+// user-id that reached a counter of its own would be judged on a spray's
+// failures and denied without the verification that would clear it.
 //
 // A recoverable refusal is still admission-controlled. It carries a
 // reservation against a ceiling on concurrent unproven attempts -- sized
 // against the backend's verification capacity, so recovery never holds every
 // permit an ordinary attempt needs -- because
 // the verification it asks for is CPU-bound work an attacker repeats for free:
-// without that ceiling a wrong-password spray on one user-id occupied the
-// backend's verification permits and turned a bounded refusal into a directory
+// without that ceiling a wrong-password spray on one user-id would occupy the
+// backend's verification permits and turn a bounded refusal into a directory
 // outage for every other caller.
 //
 // What this is still not: it is per process, so replicas do not share it, and
