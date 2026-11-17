@@ -146,6 +146,28 @@ struct MetadataReaderFactory {
     observed: Arc<std::sync::Mutex<Vec<bool>>>,
 }
 
+struct MetadataPdpRecorder {
+    observed: Arc<std::sync::Mutex<Vec<bool>>>,
+}
+
+#[async_trait]
+impl PdpResolver for MetadataPdpRecorder {
+    fn dialect(&self) -> PdpDialect {
+        PdpDialect::Cel
+    }
+
+    async fn evaluate(&self, _call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push(bag.contains("metadata.account.active"));
+        Ok(PdpDecision {
+            decision: Decision::Allow,
+            diagnostics: Vec::new(),
+        })
+    }
+}
+
 impl PluginFactory for MetadataReaderFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<CoreError>> {
         let plugin = Arc::new(MetadataReader {
@@ -527,7 +549,8 @@ routes:
   - tool: get_weather
     authorization:
       pre_invocation:
-        - "allow"
+        - cel:
+            expr: "true"
 "#;
     const WITH_METADATA: &str = r#"
 engine_settings:
@@ -538,10 +561,17 @@ routes:
     authorization:
       pre_invocation:
         - "require(metadata.account.active)"
+        - cel:
+            expr: "true"
 "#;
 
     let mgr = Arc::new(PolicyEngine::default());
-    register_apl(&mgr, AplOptions::in_process());
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut options = AplOptions::in_process();
+    options.pdps.push(Arc::new(MetadataPdpRecorder {
+        observed: Arc::clone(&observed),
+    }));
+    register_apl(&mgr, options);
 
     mgr.load_config_yaml(WITHOUT_METADATA)
         .expect("the initial configuration loads");
@@ -557,6 +587,7 @@ routes:
         )
         .await;
     assert!(initial.continue_processing);
+    assert_eq!(*observed.lock().unwrap(), vec![false]);
 
     mgr.load_config_yaml(WITH_METADATA)
         .expect("the metadata configuration reloads");
@@ -573,6 +604,7 @@ routes:
         "the reloaded metadata predicate must see the metadata slot: {:?}",
         with_metadata.violation
     );
+    assert_eq!(*observed.lock().unwrap(), vec![false, true]);
 
     mgr.load_config_yaml(WITHOUT_METADATA)
         .expect("the non-metadata configuration reloads again");
@@ -585,6 +617,7 @@ routes:
         )
         .await;
     assert!(final_result.continue_processing);
+    assert_eq!(*observed.lock().unwrap(), vec![false, true, false]);
 }
 
 /// Run `metadata-reader` from a route with the given plugin capabilities and
