@@ -2853,6 +2853,21 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
+        self.dispatch(hook_name, payload, extensions, context_table)
+            .await
+    }
+
+    /// The dispatch behind [`invoke_by_name`](Self::invoke_by_name),
+    /// [`invoke`](Self::invoke) and [`invoke_named`](Self::invoke_named):
+    /// resolve the route's entries for `hook_name`, run them, and settle the
+    /// result through [`finish`](Self::finish) on every return path.
+    async fn dispatch(
+        &self,
+        hook_name: &str,
+        payload: Box<dyn PluginPayload>,
+        extensions: Extensions,
+        context_table: Option<PluginContextTable>,
+    ) -> (PipelineResult, BackgroundTasks) {
         // Single atomic load — own the snapshot for the rest of the call so
         // a concurrent register/load_config swapping in a new snapshot doesn't
         // change our view mid-pipeline.
@@ -2861,10 +2876,16 @@ impl PolicyEngine {
             self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
         let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        // Same caveat as `invoke_named`: route annotations can produce a
-        // dispatch entry without any plugin being registered on the
-        // hook directly, so we can only short-circuit when both the
-        // registry and the annotation map are empty.
+        // No registered entries AND no route annotations → nothing to
+        // do. Allow-and-pass-through. We can't short-circuit on
+        // `hook_entries.is_empty()` alone, because route annotations
+        // (external-orchestrator handlers from APL / future Rego /
+        // Cedar-direct) can produce a single-entry dispatch even when
+        // no plugin was registered on the hook directly.
+        //
+        // Returning here also means a request whose path cannot be read is
+        // allowed rather than denied on such a hook. Nothing would have
+        // enforced on it either way.
         if snapshot.has_nothing_to_dispatch(hook_name, hook_entries) {
             // Route filtering has not run, so the route is resolved here: a
             // contract written on a route holds whether or not this hook has a
@@ -2987,97 +3008,8 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        let snapshot = self.load_runtime();
-        let context_table =
-            self.track_rate_limit_stage(&snapshot, H::NAME, &extensions, context_table);
-        let hook_type = HookType::new(H::NAME);
-        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        // See `invoke_named` for why we don't short-circuit on
-        // `hook_entries.is_empty()` alone — route annotations can fire
-        // without a directly-registered plugin.
-        if snapshot.has_nothing_to_dispatch(H::NAME, hook_entries) {
-            let boxed: Box<dyn PluginPayload> = Box::new(payload);
-            let matched = resolve_contract_route(&snapshot, &extensions);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(H::NAME),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        boxed,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
-        }
-
-        let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, hook_entries, &extensions, H::NAME)
+        self.dispatch(H::NAME, Box::new(payload), extensions, context_table)
             .await
-        {
-            Ok(resolved) => resolved,
-            Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(H::NAME),
-                        None,
-                        Some(Box::new(payload)),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
-            },
-        };
-        if entries.is_empty() {
-            let boxed: Box<dyn PluginPayload> = Box::new(payload);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(H::NAME),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        boxed,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
-        }
-
-        let boxed: Box<dyn PluginPayload> = Box::new(payload);
-        let (result, tasks, refused) = {
-            let _boundary = self.enter_executor();
-            snapshot
-                .executor
-                .execute_audited(
-                    &entries,
-                    boxed,
-                    // Make the host's transport reachable; `filter_extensions`
-                    // applies the `perform_http` gate per plugin.
-                    self.with_host_services(extensions),
-                    context_table,
-                    &self.task_tracker,
-                )
-                .await
-        };
-        (
-            self.finish(&snapshot, Some(H::NAME), matched.as_ref(), refused, result)
-                .await,
-            tasks,
-        )
     }
 
     /// Invoke a typed hook by explicit name.
@@ -3114,110 +3046,8 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        let snapshot = self.load_runtime();
-        let context_table =
-            self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
-        let hook_type = HookType::new(hook_name);
-        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        // No registered entries AND no route annotations → nothing to
-        // do. Allow-and-pass-through. We can't short-circuit on
-        // `hook_entries.is_empty()` alone, because route annotations
-        // (external-orchestrator handlers from APL / future Rego /
-        // Cedar-direct) can produce a single-entry dispatch even when
-        // no plugin was registered on the hook directly.
-        //
-        // Returning here also means a request whose path cannot be read is
-        // allowed rather than denied on such a hook. Nothing would have
-        // enforced on it either way.
-        if snapshot.has_nothing_to_dispatch(hook_name, hook_entries) {
-            let boxed: Box<dyn PluginPayload> = Box::new(payload);
-            let matched = resolve_contract_route(&snapshot, &extensions);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(hook_name),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        boxed,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
-        }
-
-        let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, hook_entries, &extensions, hook_name)
+        self.dispatch(hook_name, Box::new(payload), extensions, context_table)
             .await
-        {
-            Ok(resolved) => resolved,
-            Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(hook_name),
-                        None,
-                        Some(Box::new(payload)),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
-            },
-        };
-        if entries.is_empty() {
-            let boxed: Box<dyn PluginPayload> = Box::new(payload);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(hook_name),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        boxed,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
-        }
-
-        let boxed: Box<dyn PluginPayload> = Box::new(payload);
-        let (result, tasks, refused) = {
-            let _boundary = self.enter_executor();
-            snapshot
-                .executor
-                .execute_audited(
-                    &entries,
-                    boxed,
-                    // Make the host's transport reachable; `filter_extensions`
-                    // applies the `perform_http` gate per plugin.
-                    self.with_host_services(extensions),
-                    context_table,
-                    &self.task_tracker,
-                )
-                .await
-        };
-        (
-            self.finish(
-                &snapshot,
-                Some(hook_name),
-                matched.as_ref(),
-                refused,
-                result,
-            )
-            .await,
-            tasks,
-        )
     }
 
     /// Find every (`hook_name`, `HookEntry`) pair belonging to the named
