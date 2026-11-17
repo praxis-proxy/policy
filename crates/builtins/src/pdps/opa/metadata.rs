@@ -25,11 +25,29 @@ pub(super) fn source_references_metadata(source: &str) -> bool {
 }
 
 fn module_references_metadata(module: &Module) -> bool {
+    let aliases = module_input_aliases(module);
+    if module
+        .imports
+        .iter()
+        .any(|import| expression_references_metadata(&import.refr, &aliases))
+    {
+        return true;
+    }
+
     module.policy.iter().any(|rule| match rule.as_ref() {
-        Rule::Spec { head, bodies, .. } => bodies.iter().any(|body| {
+        Rule::Spec { head, bodies, .. } => {
             let head_expressions = rule_head_expressions(head);
-            query_references_metadata(&body.query, &head_expressions, &input_aliases())
-        }),
+            head_expressions
+                .iter()
+                .any(|expression| expression_references_metadata(expression, &aliases))
+                || bodies.iter().any(|body| {
+                    let mut associated = rule_head_expressions(head);
+                    if let Some(assign) = &body.assign {
+                        associated.push(assign.value.as_ref());
+                    }
+                    query_references_metadata(&body.query, &associated, &aliases)
+                })
+        },
         Rule::Default {
             refr, args, value, ..
         } => {
@@ -39,7 +57,7 @@ fn module_references_metadata(module: &Module) -> bool {
             expressions.push(value.as_ref());
             expressions
                 .iter()
-                .any(|expression| expression_references_metadata(expression, &input_aliases()))
+                .any(|expression| expression_references_metadata(expression, &aliases))
         },
     })
 }
@@ -198,7 +216,7 @@ fn expression_references_metadata(expression: &Expr, aliases: &HashSet<String>) 
                 || expression_references_metadata(refr, aliases)
         },
         Expr::RefBrack { refr, index, .. } => {
-            (is_alias(refr, aliases) && expression_is_metadata(index))
+            (is_alias(refr, aliases) && index_may_select_metadata(index))
                 || expression_references_metadata(refr, aliases)
                 || expression_references_metadata(index, aliases)
         },
@@ -217,9 +235,10 @@ fn expression_references_metadata(expression: &Expr, aliases: &HashSet<String>) 
         }),
         Expr::Call { fcn, params, .. } => {
             expression_references_metadata(fcn, aliases)
-                || params
-                    .iter()
-                    .any(|parameter| expression_references_metadata(parameter, aliases))
+                || params.iter().any(|parameter| {
+                    is_alias(parameter, aliases)
+                        || expression_references_metadata(parameter, aliases)
+                })
         },
         Expr::UnaryExpr { expr, .. } => expression_references_metadata(expr, aliases),
         Expr::BinExpr { lhs, rhs, .. }
@@ -300,6 +319,18 @@ fn input_aliases() -> HashSet<String> {
     HashSet::from(["input".to_owned()])
 }
 
+fn module_input_aliases(module: &Module) -> HashSet<String> {
+    let mut aliases = input_aliases();
+    for import in &module.imports {
+        if is_alias(&import.refr, &aliases)
+            && let Some(alias) = &import.r#as
+        {
+            aliases.insert(alias.text().to_owned());
+        }
+    }
+    aliases
+}
+
 fn is_alias(expression: &Expr, aliases: &HashSet<String>) -> bool {
     variable_name(expression).is_some_and(|name| aliases.contains(name))
 }
@@ -311,10 +342,11 @@ fn variable_name(expression: &Expr) -> Option<&str> {
     }
 }
 
-fn expression_is_metadata(expression: &Expr) -> bool {
+fn index_may_select_metadata(expression: &Expr) -> bool {
     match expression {
         Expr::String { value, .. } | Expr::RawString { value, .. } => value_is_metadata(value),
-        _ => false,
+        Expr::Number { .. } | Expr::Bool { .. } | Expr::Null { .. } => false,
+        _ => true,
     }
 }
 
