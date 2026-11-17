@@ -958,23 +958,73 @@ mod eval_tests {
             ],
             OnError::Deny,
         );
+        let imported = resolver(
+            &[
+                "package authz\nimport input.metadata as facts\ndefault allow := false\nallow if facts.account.active",
+            ],
+            OnError::Deny,
+        );
+        let head = resolver(
+            &["package authz\nallow := input.metadata.account.active"],
+            OnError::Deny,
+        );
+        let alternative = resolver(
+            &[
+                "package authz\nallow := false if { input.subject.id == \"blocked\" } else := input.metadata.account.active",
+            ],
+            OnError::Deny,
+        );
+        let dynamic_index = resolver(
+            &[
+                "package authz\ndefault allow := false\nallow if { k := \"metadata\"; input[k].account.active }",
+            ],
+            OnError::Deny,
+        );
+        let whole_input = resolver(
+            &[
+                "package authz\ndefault allow := false\nallow if object.get(input, [\"metadata\", \"account\", \"active\"], false)",
+            ],
+            OnError::Deny,
+        );
+        let unrelated_index = resolver(
+            &["package authz\ndefault allow := false\nallow if input[\"subject\"].authenticated"],
+            OnError::Deny,
+        );
         let route_call = call("data.authz.allow", None);
 
         assert!(dotted.requires_metadata(&route_call));
         assert!(bracketed.requires_metadata(&route_call));
         assert!(aliased.requires_metadata(&route_call));
+        assert!(imported.requires_metadata(&route_call));
+        assert!(head.requires_metadata(&route_call));
+        assert!(alternative.requires_metadata(&route_call));
+        assert!(dynamic_index.requires_metadata(&route_call));
+        assert!(whole_input.requires_metadata(&route_call));
+        assert!(!unrelated_index.requires_metadata(&route_call));
         assert!(!unrelated.requires_metadata(&route_call));
     }
 
     #[test]
     fn inline_policy_dependency_reports_metadata_usage() {
         let resolver = resolver(&[], OnError::Deny);
-        let route_call = call(
+        let dotted = call(
             "data.route.allow",
             Some("package route\ndefault allow := false\nallow if input.metadata.account.active"),
         );
+        let head = call(
+            "data.route.allow",
+            Some("package route\nallow := input.metadata.account.active"),
+        );
+        let whole_input = call(
+            "data.route.allow",
+            Some(
+                "package route\ndefault allow := false\nallow if object.get(input, [\"metadata\", \"account\", \"active\"], false)",
+            ),
+        );
 
-        assert!(resolver.requires_metadata(&route_call));
+        assert!(resolver.requires_metadata(&dotted));
+        assert!(resolver.requires_metadata(&head));
+        assert!(resolver.requires_metadata(&whole_input));
     }
 
     #[test]
