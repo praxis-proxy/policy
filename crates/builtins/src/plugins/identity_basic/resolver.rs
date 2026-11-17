@@ -398,7 +398,8 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         // tells the two apart. See `FailureLimiter::admit`.
         //
         // The limiter keys on the normalised user-id, so two encodings of one
-        // name share a bucket rather than getting a budget each.
+        // name share a bucket rather than getting a budget each, scoped to the
+        // client source when the host supplies one: see `limiter_key`.
         //
         // The guard reserves this attempt against the budget for as long as it
         // is held, so parallel guesses for one user-id are bounded by
@@ -417,7 +418,10 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         // recovery ceiling rather than against the user-id's budget, so the
         // verification it asks for cannot be repeated freely enough to occupy
         // the directory's verification permits.
-        let admission = match self.limiter.admit(user_id) {
+        let admission = match self
+            .limiter
+            .admit(&limiter_key(user_id, payload.client_host()))
+        {
             Ok(admission) => admission,
             // `Refusal` is `#[non_exhaustive]` for downstream crates, but
             // within this one the compiler sees every variant -- so a variant
@@ -618,9 +622,57 @@ impl BasicIdentityResolver {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+/// The failure limiter's key for an attempt: the user-id, scoped to the
+/// client source when the host supplies one.
+///
+/// A user-id alone lets anyone who knows it lock that user out, since every
+/// client's failures land on one counter. Scoped to the source, a guesser
+/// spends only its own budget, and the user signing in from elsewhere keeps
+/// theirs. Without a source the key falls back to the user-id, which still
+/// bounds guessing. NUL cannot occur in a decoded user-id, so the joined key
+/// cannot collide with another user-id's.
+fn limiter_key(user_id: &str, client_host: Option<&str>) -> String {
+    match client_host.filter(|host| !host.is_empty()) {
+        Some(host) => format!("{user_id}\0{host}"),
+        None => user_id.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FAILURE_LOG_BUDGET, LOG_COUNT_BITS, LOG_COUNT_MASK};
+    use super::{FAILURE_LOG_BUDGET, LOG_COUNT_BITS, LOG_COUNT_MASK, limiter_key};
+
+    #[test]
+    fn the_limiter_key_falls_back_to_the_user_id_without_a_source() {
+        assert_eq!(
+            limiter_key("alice", None),
+            "alice",
+            "with no source the user-id alone must bound guessing"
+        );
+        assert_eq!(
+            limiter_key("alice", Some("")),
+            "alice",
+            "an empty source names no client and must not open a budget of its own"
+        );
+    }
+
+    #[test]
+    fn the_limiter_key_is_scoped_to_the_client_source() {
+        assert_ne!(
+            limiter_key("alice", Some("192.0.2.1")),
+            limiter_key("alice", Some("192.0.2.2")),
+            "two sources must spend separate budgets for one user-id"
+        );
+        assert_ne!(
+            limiter_key("alice", Some("192.0.2.1")),
+            limiter_key("alice", None),
+            "a sourced key must not share the unsourced user-id's counter"
+        );
+    }
 
     /// The window start must survive a round trip through the packed word.
     ///

@@ -238,6 +238,67 @@ async fn repeated_failures_for_one_user_id_are_bounded() {
 }
 
 #[tokio::test]
+async fn failures_from_one_source_do_not_lock_the_user_out_from_another() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["failure_limit"] = serde_json::json!({ "max_failures": 3, "window_secs": 60 });
+    let resolver = resolver(block).expect("the config loads");
+
+    for _ in 0..3 {
+        resolve_from(
+            &resolver,
+            "198.51.100.7",
+            &basic_header("alice", "wrong horse"),
+        )
+        .await;
+    }
+
+    let guesser = resolve_from(
+        &resolver,
+        "198.51.100.7",
+        &basic_header("alice", "correct horse"),
+    )
+    .await;
+    assert_eq!(
+        denial_code(&guesser).as_deref(),
+        Some(codes::TOO_MANY_FAILURES),
+        "the source that spent the budget must stay refused, even with the right password"
+    );
+
+    let user = resolve_from(
+        &resolver,
+        "192.0.2.10",
+        &basic_header("alice", "correct horse"),
+    )
+    .await;
+    assert_eq!(
+        denial_code(&user).as_deref(),
+        None,
+        "another source's failures must not lock the user out: knowing a user-id is not \
+         enough to deny it"
+    );
+}
+
+#[tokio::test]
+async fn without_a_client_source_failures_are_bounded_per_user_id() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["failure_limit"] = serde_json::json!({ "max_failures": 2, "window_secs": 60 });
+    let resolver = resolver(block).expect("the config loads");
+
+    resolve_from(&resolver, "", &basic_header("alice", "wrong horse")).await;
+    resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
+
+    let blocked = resolve_with_header(&resolver, &basic_header("alice", "correct horse")).await;
+    assert_eq!(
+        denial_code(&blocked).as_deref(),
+        Some(codes::TOO_MANY_FAILURES),
+        "with no source to scope by, the user-id alone must still bound guessing, and an \
+         empty source must share that counter"
+    );
+}
+
+#[tokio::test]
 async fn the_limiter_keys_on_the_normalised_user_id() {
     let decomposed = "jose\u{301}";
     let precomposed = "jos\u{e9}";
@@ -831,4 +892,26 @@ async fn a_directory_that_cannot_answer_does_not_spend_the_user_ids_budget() {
          otherwise anyone able to stale or saturate the directory could spend a named victim's \
          budget to zero without ever guessing a password"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// Run the resolver against an `Authorization` value from `client_host`.
+async fn resolve_from(
+    resolver: &praxis_policy_builtins::plugins::identity_basic::BasicIdentityResolver,
+    client_host: &str,
+    value: &str,
+) -> praxis_policy_core::hooks::trait_def::PluginResult<praxis_policy_core::identity::IdentityPayload>
+{
+    use praxis_policy_core::identity::{IdentityPayload, TokenSource};
+
+    let payload = IdentityPayload::new("", TokenSource::Basic)
+        .with_headers(std::collections::HashMap::from([(
+            "authorization".to_owned(),
+            value.to_owned(),
+        )]))
+        .with_client_host(client_host);
+    crate::support::resolve_with_payload(resolver, &payload).await
 }

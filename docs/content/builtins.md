@@ -99,7 +99,7 @@ Basic and FIPS has to terminate Basic somewhere else.
 
 Basic sends a reusable password on every request, and base64 is not
 encryption ([RFC 7617 Section 4]). The plugin verifies the credential and
-stops there; four duties are the host's, and a deployment that skips them
+stops there; five duties are the host's, and a deployment that skips them
 leaks the password whatever the policy says:
 
 - **Require TLS** on any route carrying a Basic credential.
@@ -112,6 +112,10 @@ leaks the password whatever the policy says:
   upstream. A successful resolve leaves the inbound header on the request:
   the identity hook has no request-mutation channel. Forwarding it hands a
   service that never authenticated the caller a credential it can replay.
+- **Supply the client host** on the `IdentityPayload`, taken from the peer
+  address or a trusted proxy, so the failure limit is scoped to the caller.
+  Without it, anyone who knows a user-id can lock that user out: see
+  [Repeated failures](#repeated-failures).
 - **Render `WWW-Authenticate`** from the denial's violation details. Every
   denial this resolver raises carries the challenge under the `http.headers`
   key; nothing in Policy writes it to the wire, so a client gets no prompt
@@ -265,6 +269,45 @@ no longer stands behind. A refused refresh is therefore a countdown, not a
 steady state: restore a valid file within the staleness ceiling, or
 authentication stops for every user in the directory. The refusal is logged
 once per refresh interval with the path and the parse error.
+
+### Repeated failures
+
+`failure_limit` bounds password guessing. Once a key has spent its budget,
+further attempts deny as `auth.too_many_failures` without running the
+verifier, until the window passes. A successful login clears the counter.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_failures` | 100 | failures a key may accumulate before denial |
+| `window_secs` | 300 | how long a counter survives its last failure |
+| `capacity` | 10,000 | keys tracked by name before overflow buckets |
+
+The key is the user-id scoped to the client host, when the host sets one on
+the `IdentityPayload` (`with_client_host`). Without a client host the key is
+the user-id alone. That difference decides who a lockout hits:
+
+- **With a client host,** a guesser spends only its own source's budget. The
+  user signing in from another source is unaffected. One user-id guessed
+  from many sources is not bounded per user-id; put an edge rate limiter in
+  front if that matters.
+- **Without one,** every client's failures land on the same counter, so
+  anyone who knows a user-id can lock that user out for the window by
+  sending `max_failures` wrong passwords, and keep it locked out by
+  repeating them. The default of 100 is the most that NIST SP 800-63B
+  Section 5.2.2 allows, which makes that lockout as expensive as the
+  standard permits, not impossible.
+
+Set the client host only from a value the client cannot choose, such as the
+peer address or one a trusted proxy wrote. Taken from a client-supplied
+header, it lets a guesser name a fresh source on every request and get a
+fresh budget each time. Behind a proxy that hides the client address, every
+caller shares one source, and the limiter behaves as if it had none.
+
+The counters live in process memory. A restart clears them, and each replica
+keeps its own: with N replicas a guesser gets about N times `max_failures`
+per window, and a lockout applies only on the replicas that counted the
+failures. A spray of one password across many user-ids never fills a single
+counter. Both need a shared or edge limiter.
 
 ### The HTTP transport
 

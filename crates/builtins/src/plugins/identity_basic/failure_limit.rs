@@ -3,6 +3,10 @@
 
 // A bound on repeated failures for one user-id.
 //
+// The resolver keys it on the user-id scoped to the client source when the
+// host supplies one, so a guesser spends its own budget rather than the user's.
+// This module sees only the key, and calls it a user-id throughout.
+//
 // Basic replays a reusable password on every request, so an attacker who can
 // reach the route can test guesses as fast as the verifier runs. Hash cost
 // alone is not that bound: it sets the price per guess, and an operator who
@@ -32,8 +36,8 @@
 //
 // Where a refusal is decided follows from what it is keyed on, and a counter
 // keeps the two kinds of failure apart for as long as it lives. Its own
-// failures name one caller, so they refuse outright and cost an attacker
-// nothing. Failures inherited from a shared bucket on promotion cannot be
+// failures were recorded against its key, so they refuse outright and cost an
+// attacker nothing. Failures inherited from a shared bucket on promotion cannot be
 // attributed, so a counter spent only by those refuses recoverably -- the
 // unattributable evidence does not stop carrying over just because a named
 // slot opened, and refusing outright on them would make promotion a lockout: a
@@ -49,10 +53,10 @@
 // backend's verification permits and turn a bounded refusal into a directory
 // outage for every other caller.
 //
-// What this is still not: it is per process, so replicas do not share it, and
-// it is keyed per user-id, so a spray across many user-ids never fills one
-// counter. Both gaps need an edge or shared counter and are stated in the
-// operator documentation rather than implied away here.
+// What this is still not: it is per process, so replicas do not share it; a
+// source-scoped key does not bound one user-id guessed from many sources; and
+// a spray across many user-ids never fills one counter. Each gap needs an edge
+// or shared counter, and the operator documentation states them.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher as _;
@@ -1218,7 +1222,8 @@ mod tests {
             counter.verdict(2),
             Verdict::Blocked,
             "own failures reaching the budget must refuse before a verification, whatever else \
-             the counter carries: they name one caller, so no credential is needed to decide"
+             the counter carries: they were recorded against this key, so no credential is \
+             needed to decide"
         );
 
         counter.failures = 1;

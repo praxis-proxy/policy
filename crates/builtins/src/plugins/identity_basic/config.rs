@@ -35,8 +35,13 @@ const DEFAULT_MAX_USER_ID_BYTES: usize = 255;
 /// An argon2-only or sha-crypt-only deployment can raise this.
 const DEFAULT_MAX_PASSWORD_BYTES: usize = 72;
 
-/// The default number of consecutive failures one user-id may accumulate.
-const DEFAULT_MAX_FAILURES: u32 = 10;
+/// The default number of consecutive failures one user-id may accumulate from
+/// one client source.
+///
+/// NIST SP 800-63B Section 5.2.2 allows up to 100. A lower default makes the
+/// limiter easier to trip deliberately: where the host supplies no source, any
+/// client that knows a user-id spends that user's budget.
+const DEFAULT_MAX_FAILURES: u32 = 100;
 
 /// The default window a failure counter survives, in seconds.
 const DEFAULT_FAILURE_WINDOW_SECS: u64 = 300; // 5 minutes
@@ -80,8 +85,11 @@ pub enum ExpiryPolicy {
 
 /// How repeated failures for one user-id are bounded.
 ///
-/// Per process, and per user-id. It does not coordinate replicas and does not
-/// see a spray across many user-ids; both need an edge or shared counter.
+/// Per process, and per user-id from one client source when the host supplies
+/// the client host, or per user-id alone when it does not. It does not
+/// coordinate replicas, does not bound one user-id guessed from many sources,
+/// and does not see a spray across many user-ids; each of those needs an edge
+/// or shared counter.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FailureLimitConfig {
@@ -99,7 +107,8 @@ pub struct FailureLimitConfig {
     /// limiter's saturation count and raise this when it climbs.
     pub capacity: usize,
 
-    /// How many consecutive failures a user-id may accumulate before denial.
+    /// How many consecutive failures a user-id may accumulate, from one client
+    /// source, before denial.
     pub max_failures: u32,
 
     /// How long a counter survives its last failure, in seconds.

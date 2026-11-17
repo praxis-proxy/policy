@@ -254,6 +254,11 @@ fn the_failure_limiter_defaults_are_bounded() {
         limits.capacity > 0 && limits.max_failures > 0 && limits.window_secs > 0,
         "the default limiter must be active, not inert"
     );
+    assert_eq!(
+        limits.max_failures, 100,
+        "the default sits at the NIST SP 800-63B ceiling, so tripping it on purpose costs a \
+         guesser as much as the standard allows"
+    );
 }
 
 /// `TokenSource` round-trips the Basic variant per RFC 7617, so a payload
