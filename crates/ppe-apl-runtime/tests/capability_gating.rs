@@ -143,6 +143,7 @@ impl HookHandler<CmfHook> for MetadataReader {
 }
 
 struct MetadataReaderFactory {
+    hook: &'static str,
     observed: Arc<std::sync::Mutex<Vec<bool>>>,
 }
 
@@ -182,7 +183,7 @@ impl PluginFactory for MetadataReaderFactory {
         Ok(PluginInstance {
             plugin: plugin.clone(),
             handlers: vec![(
-                "cmf.tool_pre_invoke",
+                self.hook,
                 Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(plugin)),
             )],
         })
@@ -730,6 +731,70 @@ routes:
 }
 
 #[tokio::test]
+async fn response_plugin_capability_does_not_widen_request_handler() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: metadata-reader
+    kind: metadata-reader
+    hooks: [cmf.tool_post_invoke]
+    capabilities: [read_metadata]
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "true"
+      post_invocation:
+        - "run(metadata-reader)"
+"#;
+
+    let plugin_observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pdp_observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory(
+        "metadata-reader",
+        Box::new(MetadataReaderFactory {
+            hook: "cmf.tool_post_invoke",
+            observed: Arc::clone(&plugin_observed),
+        }),
+    );
+    let mut options = AplOptions::in_process();
+    options.pdps.push(Arc::new(MetadataPdpRecorder {
+        observed: Arc::clone(&pdp_observed),
+        requires_metadata: false,
+    }));
+    register_apl(&mgr, options);
+    mgr.load_config_yaml(YAML).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    let (result, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("phase-specific plugin capability"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the request handler should allow: {:?}",
+        result.violation
+    );
+    assert_eq!(
+        *pdp_observed.lock().unwrap(),
+        vec![false],
+        "a response-only plugin must not grant metadata to the request handler"
+    );
+    assert!(
+        plugin_observed.lock().unwrap().is_empty(),
+        "the response-only plugin must not run on the request hook"
+    );
+}
+
+#[tokio::test]
 async fn metadata_capability_is_recomputed_when_configuration_reloads() {
     const WITHOUT_METADATA: &str = r#"
 engine_settings:
@@ -835,6 +900,7 @@ routes:
     mgr.register_factory(
         "metadata-reader",
         Box::new(MetadataReaderFactory {
+            hook: "cmf.tool_pre_invoke",
             observed: Arc::clone(&observed),
         }),
     );

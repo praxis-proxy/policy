@@ -250,7 +250,8 @@ impl PdpResolver for CedarDirectResolver {
     }
 
     fn requires_metadata(&self, call: &PdpCall) -> bool {
-        self.policy_requires_metadata || call.references_metadata()
+        self.policy_requires_metadata
+            || crate::pdps::cedar_direct::template::references_metadata(&call.args)
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {

@@ -27,13 +27,18 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use praxis_policy_core::cmf::enums::Role;
+use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::elicitation::{
     ElicitationHook, ElicitationOp, ElicitationOutcomeKind, ElicitationPayload,
     ElicitationStatusKind, HOOK_ELICIT,
 };
 use praxis_policy_core::engine::PolicyEngine;
-use praxis_policy_core::error::PluginViolation;
+use praxis_policy_core::error::{PluginError, PluginViolation};
+use praxis_policy_core::extensions::{AcquiredFacts, MetaExtension, MetadataCacheDisposition};
+use praxis_policy_core::factory::{PluginFactory, PluginInstance};
+use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::plugin::{OnError, Plugin, PluginConfig, PluginMode};
@@ -42,7 +47,9 @@ use praxis_policy_apl_core::{
     ElicitKind, ElicitStep, ElicitationInvoker as _, ElicitationOutcome, ElicitationStatus,
     test_util::compile_test_policy,
 };
-use praxis_policy_apl_runtime::{ElicitationPluginInvoker, RouteDispatchPlan};
+use praxis_policy_apl_runtime::{
+    AplOptions, ElicitationPluginInvoker, RouteDispatchPlan, register_apl,
+};
 
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -71,6 +78,30 @@ struct FakeApprover {
     validate_valid: bool,
     /// When `Some`, the handler denies (any op) with this violation code.
     deny_code: Option<String>,
+}
+
+struct FakeApproverFactory {
+    ledger: Arc<Mutex<Vec<OpRecord>>>,
+}
+
+impl PluginFactory for FakeApproverFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(FakeApprover {
+            cfg: config.clone(),
+            ledger: Arc::clone(&self.ledger),
+            check_status: ElicitationStatusKind::Pending,
+            check_outcome: None,
+            validate_valid: true,
+            deny_code: None,
+        });
+        Ok(PluginInstance {
+            plugin: plugin.clone(),
+            handlers: vec![(
+                HOOK_ELICIT,
+                Arc::new(TypedHandlerAdapter::<ElicitationHook, _>::new(plugin)),
+            )],
+        })
+    }
 }
 
 #[async_trait]
@@ -233,6 +264,87 @@ async fn dispatch_maps_payload_outputs_and_passes_resolved_from() {
     assert_eq!(rec.from, "alice@example.com");
     assert_eq!(rec.purpose.as_deref(), Some("Approve raise"));
     assert!(rec.elicitation_id.is_none());
+}
+
+#[tokio::test]
+async fn metadata_recipient_reaches_elicitation_dispatch() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: manager-approver
+    kind: fake-approver
+    hooks: [elicit]
+routes:
+  - tool: payroll_adjust
+    authorization:
+      pre_invocation:
+        - "require_approval(manager-approver, from: metadata.account.approver, channel: \"ciba\", purpose: \"Approve raise\")"
+"#;
+
+    let ledger = Arc::new(Mutex::new(Vec::new()));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory(
+        "fake-approver",
+        Box::new(FakeApproverFactory {
+            ledger: Arc::clone(&ledger),
+        }),
+    );
+    let mut options = AplOptions::in_process();
+    options.base_capabilities = Some(std::collections::HashSet::new());
+    register_apl(&mgr, options);
+    mgr.load_config_yaml(YAML).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    let meta = MetaExtension {
+        entity_type: Some("tool".to_owned()),
+        entity_name: Some("payroll_adjust".to_owned()),
+        ..Default::default()
+    };
+    let mut extensions = Extensions {
+        meta: Some(Arc::new(meta)),
+        ..Default::default()
+    };
+    extensions
+        .install_metadata(
+            "account",
+            "metadata/http",
+            AcquiredFacts::success(
+                serde_json::json!({"approver": "alice@example.com"}),
+                "2026-10-19T12:00:00Z"
+                    .parse()
+                    .expect("a literal RFC3339 instant"),
+                MetadataCacheDisposition::Disabled,
+            ),
+        )
+        .expect("metadata fixture installs");
+
+    let _ = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            MessagePayload {
+                message: Message::text(Role::User, "adjust payroll"),
+            },
+            extensions,
+            None,
+        )
+        .await;
+
+    let records = ledger.lock().unwrap();
+    let dispatches: Vec<&OpRecord> = records
+        .iter()
+        .filter(|record| record.op == ElicitationOp::Dispatch)
+        .collect();
+    let record = dispatches
+        .first()
+        .expect("elicitation dispatch reaches the plugin");
+    assert_eq!(dispatches.len(), 1, "only one initial dispatch should run");
+    assert_eq!(record.op, ElicitationOp::Dispatch);
+    assert_eq!(record.from, "alice@example.com");
+    assert!(
+        !record.saw_metadata,
+        "recipient resolution must not expose metadata to the channel plugin"
+    );
 }
 
 #[tokio::test]
