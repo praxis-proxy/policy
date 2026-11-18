@@ -27,10 +27,18 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = [
+  "praxis-policy-apl-cmf/crypto-rustcrypto",
+  "praxis-policy-core/crypto-rustcrypto",
+]
+fips = ["praxis-policy-apl-cmf/fips", "praxis-policy-core/fips"]
+
 [dependencies]
 praxis-policy-apl-core = { workspace = true }
-praxis-policy-apl-cmf = { workspace = true }
-praxis-policy-core = { workspace = true }
+praxis-policy-apl-cmf = { workspace = true, default-features = false }
+praxis-policy-core = { workspace = true, default-features = false }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
@@ -38,11 +46,6 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-# Stable hash for tier-3 (identity-derived) session id. `DefaultHasher`
-# is explicitly documented as not-stable-across-Rust-versions; session
-# keys persist across process restarts (SessionStore), so we need an
-# algorithmically fixed hash.
-sha2 = { workspace = true }
 
 [dev-dependencies]
 serde = { workspace = true }

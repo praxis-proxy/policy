@@ -2465,6 +2465,15 @@ fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<Plug
     let refuse = |message: String| Err(Box::new(PluginError::Config { message }));
     let Some(key) = settings.content_provenance_key.as_deref() else {
         if settings.capture_content_provenance {
+            #[cfg(feature = "fips")]
+            return refuse(format!(
+                "engine_settings.capture_content_provenance is on but no \
+                 content_provenance_key is set. Keyed content provenance is unavailable with \
+                 the `fips` feature: set it to `{UNKEYED_CONTENT_PROVENANCE}` for plain \
+                 SHA-256, which anyone holding a record can test guesses at the payload \
+                 against, or disable capture_content_provenance"
+            ));
+            #[cfg(not(feature = "fips"))]
             return refuse(format!(
                 "engine_settings.capture_content_provenance is on but no \
                  content_provenance_key is set. Name a value from secrets.values to digest \
@@ -2491,6 +2500,16 @@ fn validate_content_provenance_key(config: &PolicyConfig) -> Result<(), Box<Plug
             ));
         }
         return Ok(());
+    }
+    #[cfg(feature = "fips")]
+    if settings.capture_content_provenance {
+        return refuse(format!(
+            "engine_settings.capture_content_provenance uses named key `{key}`, but keyed \
+             content provenance requires HMAC and is unavailable with the `fips` feature. \
+             Set content_provenance_key to `{UNKEYED_CONTENT_PROVENANCE}` for plain SHA-256, \
+             which anyone holding a record can test guesses at the payload against, or \
+             disable capture_content_provenance"
+        ));
     }
     if !declared {
         return refuse(format!(
@@ -10507,6 +10526,9 @@ routes:
     /// is the half that rejects: a typed parse drops a key the table omits and
     /// succeeds, so only the loader catches the doc and `ENGINE_SETTINGS_KEYS`
     /// disagreeing.
+    ///
+    /// The documented key is keyed provenance, which `fips` refuses.
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn the_documented_auditing_config_loads() {
         let yaml = "
@@ -10600,9 +10622,39 @@ plugins:
         validate_config(&provenance_config(Some("unkeyed"), &[])).unwrap();
     }
 
+    #[cfg(feature = "crypto-rustcrypto")]
     #[test]
     fn a_key_naming_a_declared_value_loads() {
         validate_config(&provenance_config(Some("pk"), &["pk"])).unwrap();
+    }
+
+    #[cfg(feature = "fips")]
+    #[test]
+    fn fips_refuses_a_declared_provenance_key() {
+        let msg = validate_config(&provenance_config(Some("pk"), &["pk"]))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("`pk`") && msg.contains("`fips`"), "{msg}");
+        assert!(
+            msg.contains("unkeyed") && msg.contains("test guesses"),
+            "the message must name the remedy and its tradeoff: {msg}"
+        );
+    }
+
+    #[cfg(feature = "fips")]
+    #[test]
+    fn fips_refuses_provenance_without_a_key_and_offers_only_unkeyed() {
+        let msg = validate_config(&provenance_config(None, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("`fips`") && msg.contains("unkeyed") && msg.contains("test guesses"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("HMAC key"),
+            "fips must not suggest a keyed digest: {msg}"
+        );
     }
 
     #[test]

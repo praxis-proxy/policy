@@ -305,7 +305,8 @@ fn fully_populated() -> Extensions {
 
 fn emitted() -> AttributeBag {
     let mut bag = AttributeBag::new();
-    extract_extensions(&fully_populated(), &mut bag);
+    extract_extensions(&fully_populated(), &mut bag)
+        .expect("selected SHA-256 backend is available");
     bag
 }
 
@@ -753,7 +754,7 @@ fn bag_visible_to(capabilities: &[&str]) -> AttributeBag {
     let caps: HashSet<String> = capabilities.iter().map(|c| (*c).to_owned()).collect();
     let filtered = praxis_policy_core::extensions::filter_extensions(&fully_populated(), &caps);
     let mut bag = AttributeBag::new();
-    extract_extensions(&filtered, &mut bag);
+    extract_extensions(&filtered, &mut bag).expect("selected SHA-256 backend is available");
     bag
 }
 
@@ -772,7 +773,8 @@ fn bag_visible_to(capabilities: &[&str]) -> AttributeBag {
 /// produces.
 fn bag_unfiltered() -> AttributeBag {
     let mut bag = AttributeBag::new();
-    extract_extensions(&fully_populated(), &mut bag);
+    extract_extensions(&fully_populated(), &mut bag)
+        .expect("selected SHA-256 backend is available");
     bag
 }
 

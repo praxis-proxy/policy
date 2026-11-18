@@ -46,4 +46,4 @@ jobs:
       # Without this the MSRV claim is unproven against cedar-policy,
       # regorus, redis and jsonwebtoken: they sit behind features that a
       # default-feature check does not enable.
-      - run: cargo check --workspace --all-targets --all-features
+      - run: make check

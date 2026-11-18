@@ -114,8 +114,14 @@ Order and count. Call `ratelimit.pre_identity` before the first
 `identity.resolve` of a request, and `ratelimit.post_identity` after the last.
 Call each once per inbound request, even when identity is resolved more than
 once, as a tool call resolving at the HTTP route and again at the tool does.
-Identity can run twice without side effects; a counter cannot. A host may skip
-a hook when `PolicyEngine::has_hooks_for` reports nothing on it.
+Identity can run twice without side effects, provided the host passes the
+returned context table into the second call (see below); a counter cannot.
+`DPoP` proofs depend on this. The resolver records each accepted proof in the
+table, so a second resolution reuses the proof instead of denying it as a
+replay; see [Resolving identity more than once per request][dpop-twice]. A
+host may skip a hook when `PolicyEngine::has_hooks_for` reports nothing on it.
+
+[dpop-twice]: identity-delegation.md#resolving-identity-more-than-once-per-request
 
 Request context. At both calls, set the entity metadata (`entity_type` and
 `entity_name`) and the request line (method and path) on the extensions, as
@@ -126,7 +132,10 @@ identity attached.
 
 One context table. Pass the `PipelineResult.context_table` each call returns
 into the next hook of the same request, starting with the pre-identity call.
-That is how the engine knows the pre-identity stage ran. When
+That is how the engine knows the pre-identity stage ran, and how a second
+`identity.resolve` knows a `DPoP` proof was already verified. The table is
+request-scoped host state: start each request with `None` and never build one
+from client input. When
 `identity.resolve` runs on a table that never reached
 `ratelimit.pre_identity`, while a pre-identity limit is in force for the
 request, the engine warns once with alarm `rate_limit_stage_skipped`.

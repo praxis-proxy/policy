@@ -12,8 +12,11 @@ Every lint that could silently change an enforcement decision is denied.
 From the compiler, not from reading the source:
 
 ```console
-cargo clippy --workspace --all-targets --all-features -- -W <lint>
+make clippy
 ```
+
+For individual lint counts, use the corresponding full-profile `cargo clippy`
+invocation in the Makefile and replace `-D warnings` with `-W <lint>`.
 
 A hit inside a `#[cfg(test)]` region, or in a `tests/`, `examples/`, or `benches/`
 target, is not a production site. Test code is scope-allowed at the module or

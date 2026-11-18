@@ -74,6 +74,8 @@ history.
   projecting derived identity onto upstream requests
 - [Auditing](auditing.md):
   decision records, write-ahead effect records, and writing a sink
+- [FIPS](fips.md):
+  OpenSSL FIPS selections, host setup, and startup checks
 - [Deployment](deployment.md):
   the same policy at a gateway, a sidecar, or in-framework
 - [Patterns](patterns.md):

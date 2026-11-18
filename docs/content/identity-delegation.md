@@ -1235,6 +1235,43 @@ policy reloads; the factory retains the guard. The generic host-managed store
 service remains tracked by
 [#127](https://github.com/praxis-proxy/policy/issues/127).
 
+### Resolving identity more than once per request
+
+A host may resolve identity twice for one request, for example at the HTTP
+gate and again at the tool. The proof is the same both times, so a second
+`first_use` would deny it as `auth.dpop_replay`. To avoid that, the resolver
+records each proof it accepts in the request's `PluginContextTable`, under a
+key in `global_state` that only `identity/jwt` writes. When identity is
+resolved again with that table, every check runs again: signature, `iat`,
+method, URL, `ath` and key. If an unexpired record matches the issuer, key,
+`jti`, method, normalized URL, access-token hash and replay guard, the replay
+guard is not consulted a second time. A failed verification records nothing.
+
+A route `authentication:` step with its own `config:` builds a second
+resolver instance. The record is shared through the table rather than kept
+per instance, so the route's instance reuses the gate's verification when the
+two share a replay guard. That is the case when the host registered the
+factory with `JwtIdentityFactory::with_replay_guard`. With the default
+factory each instance has its own in-memory guard, and the record does not
+cross between them.
+
+This holds only when the host passes the `PipelineResult.context_table` from
+one `identity.resolve` of the request into the next, as
+[HTTP routing](http-routing.md#rate-limit-hooks) asks. A fresh table is a new
+request, and the same proof in it is a replay. The table is request-scoped
+host state. Never build it from client input, such as a header or a cookie:
+a forged record would let a captured proof be replayed.
+
+Only the serial modes, `sequential` and `transform`, commit context back to
+the table. A resolver with `DPoP` turned on in any other mode is refused at
+load.
+
+Another plugin in the same pipeline can also write `global_state`. A plugin
+that writes a forged record could make the resolver skip the replay guard for
+a proof whose other checks pass. It still could not produce a valid proof, a
+binding for a key it does not hold, or an identity. Plugins are trusted
+configuration, so run only plugins you trust ahead of the resolver.
+
 Server-issued nonces (`DPoP-Nonce`) are not supported yet.
 
 A request must carry one `DPoP` header. A host that receives several should

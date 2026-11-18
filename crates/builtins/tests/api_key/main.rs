@@ -24,6 +24,8 @@ mod caching;
 mod expiry;
 mod extraction;
 mod file_backend;
+#[cfg(feature = "fips")]
+mod fips;
 mod http_backend;
 mod populations;
 mod projection;

@@ -301,6 +301,7 @@ async fn run_route(outcome: ElicitationOutcomeKind) -> (Decision, usize) {
 
     let mut bag = praxis_policy_apl_cmf::BagBuilder::new()
         .with_extensions(&invoker.current_extensions().await)
+        .expect("selected SHA-256 backend is available")
         .with_route_key(&route.route_key)
         .build();
     // Seed the two attributes the gate reads: `from` must resolve to an

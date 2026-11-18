@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# Test-only configuration that makes the OpenSSL FIPS provider the process
+# default, as a FIPS-mode host does. JWT signature verification and random
+# generation select their implementation from these default properties, so
+# the jwt-openssl-fips suites run under this file. The default provider is
+# loaded for nothing else: `fips=yes` keeps every implicit fetch on FIPS.
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+alg_section = algorithm_sect
+
+[provider_sect]
+fips = fips_sect
+base = base_sect
+
+[fips_sect]
+activate = 1
+
+[base_sect]
+activate = 1
+
+[algorithm_sect]
+default_properties = fips=yes

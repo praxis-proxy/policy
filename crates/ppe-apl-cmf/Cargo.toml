@@ -17,15 +17,18 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["crypto-rustcrypto"]
+crypto-rustcrypto = ["praxis-policy-core/crypto-rustcrypto"]
+fips = ["praxis-policy-core/fips"]
+
 [dependencies]
 praxis-policy-apl-core = { workspace = true }
-praxis-policy-core = { workspace = true }
+praxis-policy-core = { workspace = true, default-features = false }
 serde_json = { workspace = true }
 # Only to render `WorkloadIdentity.attested_at` in a canonical, orderable form.
 # The typed value is core's; the formatting choice is the bridge's.
 chrono = { workspace = true }
-# `llm.input.instructions_digest`.
-sha2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

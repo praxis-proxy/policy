@@ -21,7 +21,7 @@ Requirements are listed in [docs/development.md].
 
 `make test` runs both feature passes. The integration,
 resilience and security suites under `tests/` run in the
-`--all-features` pass, or alone with `make
+second pass, or alone with `make
 test-integration` (all three), `make test-resilience` and
 `make test-security`. A test exposing an open defect is
 named `known_gap_*` and marked

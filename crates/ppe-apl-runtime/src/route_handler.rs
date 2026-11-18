@@ -411,8 +411,30 @@ impl AplRouteHandler {
         // `route.key` lets default/policy-bundle predicates branch on
         // which route they're attached to.
         let post_extensions = invoker.current_extensions().await;
-        let mut bag = BagBuilder::new()
-            .with_extensions(&post_extensions)
+        let builder = match BagBuilder::new().with_extensions(&post_extensions) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::error!(
+                    alarm = "policy_crypto_failure",
+                    op = "attribute_bag",
+                    route = %self.route.route_key,
+                    %error,
+                    "attribute bag hashing failed; failing request closed"
+                );
+                let mut v = PluginViolation::new(
+                    praxis_policy_core::CRYPTO_FAILED_CODE,
+                    "the request could not be hashed",
+                );
+                decorate_denial_response(&mut v, self.route.response.as_ref());
+                return Ok(Box::new(ErasedResultFields {
+                    continue_processing: false,
+                    modified_payload: None,
+                    modified_extensions: None,
+                    violation: Some(v),
+                }));
+            },
+        };
+        let mut bag = builder
             .with_route_key(&self.route.route_key)
             .with_data(&self.attribute_tree)
             .build();
@@ -886,6 +908,11 @@ fn decorate_denial_response(violation: &mut PluginViolation, response: Option<&D
 /// the executor would care about. False positives (claiming a change
 /// when there isn't one) are cheap — the executor re-validates anyway.
 fn extensions_changed(before: &Extensions, after: &Extensions) -> bool {
+    let metadata_changed = match (before.metadata.as_ref(), after.metadata.as_ref()) {
+        (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+        (None, None) => false,
+        _ => true,
+    };
     let security_changed = match (before.security.as_ref(), after.security.as_ref()) {
         (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
         (None, None) => false,
@@ -922,7 +949,12 @@ fn extensions_changed(before: &Extensions, after: &Extensions) -> bool {
         (None, None) => false,
         _ => true,
     };
-    security_changed || delegation_changed || raw_creds_changed || http_changed || custom_changed
+    metadata_changed
+        || security_changed
+        || delegation_changed
+        || raw_creds_changed
+        || http_changed
+        || custom_changed
 }
 
 /// Extract the elicitation id an agent echoes on retry from the

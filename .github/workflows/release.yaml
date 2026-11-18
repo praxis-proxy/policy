@@ -68,15 +68,13 @@ jobs:
           --config 'patch.crates-io.praxis-policy.path="crates/ppe"'
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-package-target
-      # Packaging alone does not compile bundled extensions, so check the
-      # whole release source with them enabled.
-      - run: cargo check --workspace --all-features --locked
+      # Packaging alone does not compile bundled extensions; check the expanded
+      # default feature set and the FIPS profile as well.
+      - run: make check CARGO="cargo --locked"
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-package-target
-      # Scoped to the facade and run with all features: the facade is
-      # `default = []`, so a default-feature run inspects none of the
-      # re-exports this check exists to protect. A floor, not a proof —
-      # cross-crate re-export coverage in semver-checks is incomplete.
+      # Enable the expanded default feature set so builtin re-exports are included.
+      # semver-checks only partially covers re-exports across crate boundaries.
       - run: make semver-facade
 
   tag-matches-manifest:

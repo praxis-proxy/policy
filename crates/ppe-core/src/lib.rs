@@ -27,6 +27,7 @@
 //                     minting for downstream calls)
 // - [`elicitation`] — Elicitation hook family (human-in-the-loop:
 //                     approval, confirmation, step-up, …)
+// - [`metadata`] — named policy-information source dispatch
 // - [`error`] — Error types, violations, and result types
 
 //! The plugin runtime: engine, executor, hook registry, and config parser.
@@ -34,6 +35,11 @@
 //! Pure Rust with no FFI, WASM, or Python bindings. Plugins register against
 //! named hooks and the executor dispatches them in five phases, reading every
 //! scheduling decision from trusted config rather than from the plugin.
+
+#[cfg(all(feature = "crypto-rustcrypto", feature = "fips"))]
+compile_error!("select one Policy crypto backend: crypto-rustcrypto or fips");
+#[cfg(not(any(feature = "crypto-rustcrypto", feature = "fips")))]
+compile_error!("select a Policy crypto backend: crypto-rustcrypto or fips");
 
 /// What the engine asserts on a request and a response, as headers.
 pub mod assertions;
@@ -45,6 +51,9 @@ pub mod cmf;
 pub mod config;
 /// Per-plugin state carried across hook invocations.
 pub mod context;
+/// Feature-selected SHA-256 and HMAC operations shared by Policy crates.
+#[doc(hidden)]
+pub mod crypto;
 /// What each plugin did to a request, and how the pipeline ruled on it.
 pub mod decision;
 /// The token delegation hook and its payload.
@@ -90,6 +99,8 @@ pub mod http_retry;
 pub mod http_testing;
 /// The identity resolution hook and its payload.
 pub mod identity;
+/// Typed metadata-source hook and request/result contract.
+pub mod metadata;
 /// The `Plugin` trait and its trusted configuration.
 pub mod plugin;
 /// Curated re-exports for plugin authors.
@@ -106,3 +117,7 @@ pub mod secrets;
 mod trace_capture;
 /// Config visitors, which let a dialect compile its own route blocks at load time.
 pub mod visitor;
+
+pub use crypto::{
+    CRYPTO_FAILED_CODE, CryptoBackend, CryptoError, crypto_backend, validate_crypto_backend,
+};

@@ -728,6 +728,20 @@ async fn dispatch_effect(
             }
         },
 
+        Effect::Fetch(fetch_step) => match plugins.fetch_metadata(fetch_step).await {
+            Ok(outcome) => {
+                bag.extend(outcome.attributes);
+                EffectOutcome::Continue
+            },
+            Err(error) => EffectOutcome::Halt(Decision::Deny {
+                reason: Some(format!(
+                    "metadata fetch `{}` failed: {error}",
+                    fetch_step.plugin_name
+                )),
+                rule_source: error.source_code().unwrap_or(&fetch_step.source).to_owned(),
+            }),
+        },
+
         Effect::Delegate(delegate_step) => {
             match delegations.delegate(delegate_step).await {
                 Ok(outcome) => match &outcome.decision {
@@ -1419,6 +1433,7 @@ fn parallel_branch_label(effect: &Effect) -> String {
         Effect::Allow => "allow".to_owned(),
         Effect::Deny { .. } => "deny".to_owned(),
         Effect::Plugin { name } => format!("plugin({name})"),
+        Effect::Fetch(step) => format!("fetch({})", step.plugin_name),
         Effect::Delegate(_) => "delegate".to_owned(),
         Effect::Elicit(_) => "elicit".to_owned(),
         Effect::Taint { label, .. } => format!("taint({label})"),

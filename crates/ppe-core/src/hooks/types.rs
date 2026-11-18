@@ -143,6 +143,7 @@ mod tests {
             "http.request",
             "http.response",
             "elicit",
+            "metadata.fetch",
             // The old list spelled the prompt pair `_fetch`.
             "cmf.prompt_pre_invoke",
             "cmf.prompt_post_invoke",

@@ -493,6 +493,7 @@ impl DecodingKeySource {
             },
             Self::Secret { secret } => DecodingKey::from_secret(secret.as_bytes()),
         };
+        check_key(&key)?;
         Ok(KeyStore::single_fallback(key))
     }
 
@@ -688,7 +689,10 @@ impl DecodingKeySource {
                             continue;
                         },
                     };
-                    match DecodingKey::from_jwk(k) {
+                    match DecodingKey::from_jwk(k)
+                        .map_err(|e| e.to_string())
+                        .and_then(|key| check_key(&key).map(|()| key))
+                    {
                         Ok(key) => entries.push((kid, key)),
                         Err(e) => skipped_unusable.push(format!("{kid}: {e}")),
                     }
@@ -806,13 +810,25 @@ impl JwksFetchBudget {
     }
 }
 
-/// PEM helper used by both `Pem` and `PemFile`. Tries RSA, then EC,
-/// then `EdDSA` — covers the algorithms `jsonwebtoken` supports.
+/// PEM helper used by both `Pem` and `PemFile`. Tries RSA, then EC, then
+/// `EdDSA` except under `jwt-openssl-fips`, which has no Ed25519.
 fn build_from_pem_bytes(bytes: &[u8], origin: &str) -> Result<DecodingKey, String> {
-    DecodingKey::from_rsa_pem(bytes)
-        .or_else(|_| DecodingKey::from_ec_pem(bytes))
-        .or_else(|_| DecodingKey::from_ed_pem(bytes))
-        .map_err(|e| format!("{origin} PEM key failed to parse: {e}"))
+    let key = DecodingKey::from_rsa_pem(bytes).or_else(|_| DecodingKey::from_ec_pem(bytes));
+    #[cfg(not(feature = "jwt-openssl-fips"))]
+    let key = key.or_else(|_| DecodingKey::from_ed_pem(bytes));
+    key.map_err(|e| format!("{origin} PEM key failed to parse: {e}"))
+}
+
+/// Refuse a key the selected backend will not verify with.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "only jwt-openssl-fips refuses keys at load"
+)]
+fn check_key(key: &DecodingKey) -> Result<(), String> {
+    #[cfg(feature = "jwt-openssl-fips")]
+    crate::plugins::identity_jwt::openssl_fips::check_key(key)?;
+    let _ = key;
+    Ok(())
 }
 
 fn build_from_jwk_value(jwk: &serde_json::Value) -> Result<DecodingKey, String> {
@@ -937,7 +953,26 @@ impl TrustedIssuerConfig {
                 self.issuer
             ));
         }
+        #[cfg(feature = "jwt-openssl-fips")]
+        self.validate_fips()?;
         self.dpop.validate(&self.issuer)
+    }
+
+    /// Refuse algorithms and key kinds outside the FIPS profile. `DPoP`
+    /// algorithms are checked even when `DPoP` is off, so enabling it later
+    /// cannot bring in an unapproved default.
+    #[cfg(feature = "jwt-openssl-fips")]
+    fn validate_fips(&self) -> Result<(), String> {
+        use crate::plugins::identity_jwt::openssl_fips::check_algorithms;
+        if matches!(self.decoding_key, DecodingKeySource::Secret { .. }) {
+            return Err(format!(
+                "trusted_issuer '{}': decoding_key kind `secret` (HMAC) is not supported with \
+                 jwt-openssl-fips",
+                self.issuer
+            ));
+        }
+        check_algorithms(&self.issuer, "algorithms", &self.algorithms)?;
+        check_algorithms(&self.issuer, "dpop.algorithms", &self.dpop.algorithms)
     }
 
     /// Synchronously build a runtime `TrustedIssuer`. Works for

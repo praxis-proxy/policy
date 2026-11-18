@@ -4,8 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use limitador::RateLimiter;
 use limitador::counter::Counter;
@@ -15,7 +14,9 @@ use praxis_policy_apl_cmf::constants::{
     BAG_HTTP_CLIENT_ADDRESS, BAG_HTTP_METHOD, BAG_SUBJECT_ID, DETAIL_HTTP_STATUS,
 };
 use praxis_policy_apl_cmf::{BagBuilder, capability_namespaces, known_read_capabilities};
+use praxis_policy_core::CryptoError;
 use praxis_policy_core::context::PluginContext;
+use praxis_policy_core::crypto::IntervalLog;
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
 use praxis_policy_core::http_hook::{HttpHook, HttpPayload};
@@ -84,6 +85,7 @@ pub(super) struct RateLimit {
     config: PluginConfig,
     condition_rules: Vec<Vec<ConditionCheck>>,
     computed_rules: Vec<ComputedCounterRule>,
+    crypto_failure_log: IntervalLog,
     has_limit_conditions: bool,
     limiter: RateLimiter,
     macro_locals: BTreeSet<String>,
@@ -100,37 +102,6 @@ struct ComputedCounterRule {
 struct ConditionCheck {
     predicate: Predicate,
     with_limit: Option<limitador_cel::IdedExpr>,
-}
-
-/// Admits one log line per interval and counts the ones it holds back.
-#[derive(Default)]
-struct IntervalLog {
-    next_at: AtomicU64,
-    suppressed: AtomicU64,
-}
-
-impl IntervalLog {
-    /// The count held back since the last admitted line, when a line is due.
-    fn admit(&self) -> Option<u64> {
-        let now = unix_seconds();
-        let next = self.next_at.load(Ordering::Relaxed);
-        let due = now >= next
-            && self
-                .next_at
-                .compare_exchange(
-                    next,
-                    now.saturating_add(FAILURE_LOG_INTERVAL_SECS),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok();
-        if due {
-            Some(self.suppressed.swap(0, Ordering::Relaxed))
-        } else {
-            self.suppressed.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-    }
 }
 
 impl RateLimit {
@@ -268,16 +239,17 @@ impl RateLimit {
 
         Ok(Self {
             bindings: typed.bindings,
-            check_failure_log: IntervalLog::default(),
+            check_failure_log: IntervalLog::new(FAILURE_LOG_INTERVAL_SECS),
             check_lock: Mutex::new(()),
             config,
             condition_rules,
             computed_rules,
+            crypto_failure_log: IntervalLog::new(FAILURE_LOG_INTERVAL_SECS),
             has_limit_conditions,
             limiter,
             macro_locals,
             namespace,
-            unbound_log: IntervalLog::default(),
+            unbound_log: IntervalLog::new(FAILURE_LOG_INTERVAL_SECS),
         })
     }
 
@@ -442,14 +414,27 @@ impl RateLimit {
                 error = %cause,
                 suppressed,
                 interval_seconds = FAILURE_LOG_INTERVAL_SECS,
-                "ratelimit: Limitador check failed, so the request is denied; repeats are \
+                "ratelimit: rate limit check failed, so the request is denied; repeats are \
                  counted in `suppressed` and logged once per interval",
             );
         }
-        PluginResult::deny(with_status(
-            PluginViolation::new(CODE_CHECK_FAILED, "request rate limit check failed"),
-            STATUS_SERVICE_UNAVAILABLE,
-        ))
+        check_failed_denial()
+    }
+
+    fn deny_crypto_failed(&self, error: &CryptoError) -> PluginResult<HttpPayload> {
+        if let Some(suppressed) = self.crypto_failure_log.admit() {
+            tracing::error!(
+                alarm = "policy_crypto_failure",
+                op = "attribute_bag",
+                plugin = %self.config.name,
+                %error,
+                suppressed,
+                interval_seconds = FAILURE_LOG_INTERVAL_SECS,
+                "ratelimit: attribute bag hashing failed, so the request is denied; repeats are \
+                 counted in `suppressed` and logged once per interval",
+            );
+        }
+        check_failed_denial()
     }
 
     /// Deny an over-limit request with the client-safe view of its most
@@ -512,7 +497,12 @@ impl HookHandler<HttpHook> for RateLimit {
     ) -> PluginResult<HttpPayload> {
         // Limitador's Context takes only flat string variables, so each CEL
         // name is bound to one bag attribute.
-        let bag = BagBuilder::new().with_extensions(extensions).build();
+        let bag = match BagBuilder::new().with_extensions(extensions) {
+            Ok(builder) => builder.build(),
+            Err(error) => {
+                return self.deny_crypto_failed(&error);
+            },
+        };
         let mut values = HashMap::with_capacity(self.bindings.len());
         for (variable, attribute) in &self.bindings {
             let Some(value) = bag.get_string(attribute) else {
@@ -580,6 +570,13 @@ impl HookHandler<HttpHook> for RateLimit {
 // Private Utilities
 // -----------------------------------------------------------------------------
 
+fn check_failed_denial() -> PluginResult<HttpPayload> {
+    PluginResult::deny(with_status(
+        PluginViolation::new(CODE_CHECK_FAILED, "request rate limit check failed"),
+        STATUS_SERVICE_UNAVAILABLE,
+    ))
+}
+
 fn with_status(violation: PluginViolation, status: i64) -> PluginViolation {
     violation
         .with_details(HashMap::from([(
@@ -604,12 +601,6 @@ fn ceil_seconds(duration: Duration) -> u64 {
     duration
         .as_secs()
         .saturating_add(u64::from(duration.subsec_nanos() > 0))
-}
-
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// The read capabilities that expose `attribute` in the bag.

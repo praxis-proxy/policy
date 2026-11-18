@@ -1371,7 +1371,8 @@ async fn llm_route_pins_the_system_prompt_by_digest() {
         role: praxis_policy_core::extensions::LlmInstructionRole::System,
         text: PROMPT.into(),
     }];
-    let digest = praxis_policy_apl_cmf::llm::instruction_digest(&instructions);
+    let digest = praxis_policy_apl_cmf::llm::instruction_digest(&instructions)
+        .expect("selected SHA-256 backend is available");
     let yaml = format!(
         r#"
 engine_settings:

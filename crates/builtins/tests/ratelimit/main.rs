@@ -24,6 +24,10 @@ use praxis_policy_builtins::plugins::ratelimit::{
 use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL, ENTITY_TOOL};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError, PluginViolation};
+#[cfg(feature = "fips")]
+use praxis_policy_core::extensions::llm::{
+    LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestParts,
+};
 use praxis_policy_core::extensions::{
     Extensions, HttpExtension, MetaExtension, SecurityExtension, SubjectExtension,
 };
@@ -37,6 +41,9 @@ use praxis_policy_core::ratelimit_hook::{
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
+
+#[cfg(feature = "fips")]
+const CRYPTO_FAILURE_INSTRUCTION: &str = "private instruction for crypto failure coverage";
 
 const POLICY: &str = r#"
 plugins:
@@ -1128,6 +1135,89 @@ async fn a_missing_binding_logs_its_hint_and_keeps_it_out_of_the_response() {
     }
 }
 
+#[cfg(feature = "fips")]
+#[tokio::test]
+async fn a_crypto_failure_denies_and_logs_once_per_interval() {
+    let policy = POLICY
+        .replace(
+            "[read_subject, read_headers]",
+            "[read_subject, read_headers, read_llm_request]",
+        )
+        .replace("subject_id == 'alice'", "int(subject_id) > 1");
+    let config = praxis_policy_core::config::parse_config(&policy).expect("valid policy");
+    let instance = RateLimitFactory
+        .create(&config.plugins[0])
+        .expect("limiter builds");
+    instance
+        .plugin
+        .initialize()
+        .await
+        .expect("limiter initializes");
+    let handler = &instance.handlers[0].1;
+
+    start_capture();
+    let violation = direct_violation(handler.as_ref(), request(Some("alice"), Some("GET"))).await;
+    assert_eq!(
+        (violation.code, violation.proto_error_code),
+        (CODE_CHECK_FAILED.to_owned(), Some(503)),
+        "a generic evaluation error must not suppress the first crypto alarm"
+    );
+    for number in 1..=20 {
+        let mut extensions = request(Some("alice"), Some("GET"));
+        extensions.llm_request = Some(LlmRequest::from_parts(LlmRequestParts {
+            instructions: vec![LlmInstruction {
+                role: LlmInstructionRole::System,
+                text: CRYPTO_FAILURE_INSTRUCTION.to_owned(),
+            }],
+            ..Default::default()
+        }));
+        let violation = direct_violation(handler.as_ref(), extensions).await;
+
+        assert_eq!(
+            violation.code, CODE_CHECK_FAILED,
+            "request #{number} denies"
+        );
+        assert_eq!(violation.proto_error_code, Some(503));
+        assert_eq!(
+            violation.details.get(DETAIL_HTTP_STATUS),
+            Some(&serde_json::json!(503))
+        );
+        let rendered = format!("{} {:?}", violation.reason, violation.details);
+        for leaked in [
+            "OpenSSL",
+            "fips=yes",
+            CRYPTO_FAILURE_INSTRUCTION,
+            "app-ratelimit",
+        ] {
+            assert!(
+                !rendered.contains(leaked),
+                "request #{number} must not expose {leaked}: {rendered}"
+            );
+        }
+    }
+    let errors = finish_capture(tracing::Level::ERROR);
+    let crypto_failures: Vec<&String> = errors
+        .iter()
+        .filter(|event| event.contains("policy_crypto_failure"))
+        .collect();
+    assert_eq!(
+        crypto_failures.len(),
+        1,
+        "twenty hashing failures log one crypto alarm despite a prior generic failure: {errors:?}"
+    );
+    for field in [
+        "attribute_bag",
+        "app-ratelimit",
+        "suppressed=0",
+        "interval_seconds=60",
+    ] {
+        assert!(
+            crypto_failures[0].contains(field),
+            "the crypto alarm includes {field}: {crypto_failures:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_check_failure_is_a_503_without_the_raw_error() {
     let policy = POLICY.replace("subject_id == 'alice'", "int(subject_id) > 1");
@@ -1171,9 +1261,15 @@ async fn a_persistent_check_failure_logs_once_per_interval() {
     }
     let errors = finish_capture(tracing::Level::ERROR);
 
+    assert!(
+        errors
+            .iter()
+            .all(|event| !event.contains("policy_crypto_failure")),
+        "generic evaluation errors are not crypto failures: {errors:?}"
+    );
     let failures: Vec<&String> = errors
         .iter()
-        .filter(|event| event.contains("Limitador check failed"))
+        .filter(|event| event.contains("rate limit check failed"))
         .collect();
     assert_eq!(
         failures.len(),
@@ -1605,6 +1701,23 @@ async fn engine_with(policy: &str) -> Arc<PolicyEngine> {
         .await
         .expect("rate limiter initializes");
     manager
+}
+
+#[cfg(feature = "fips")]
+async fn direct_violation(
+    handler: &dyn praxis_policy_core::registry::AnyHookHandler,
+    extensions: Extensions,
+) -> PluginViolation {
+    let result = handler
+        .invoke(&HttpPayload, &extensions, &mut Default::default())
+        .await
+        .expect("handler returns a result");
+    let result = praxis_policy_core::executor::extract_erased(result).expect("handler result");
+    assert!(
+        !result.continue_processing,
+        "hashing failure halts processing"
+    );
+    result.violation.expect("handler denies")
 }
 
 async fn engine() -> Arc<PolicyEngine> {

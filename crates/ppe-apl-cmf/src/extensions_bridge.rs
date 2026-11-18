@@ -10,6 +10,7 @@
 // shows up in the bag automatically.
 
 use praxis_policy_apl_core::AttributeBag;
+use praxis_policy_core::crypto::CryptoError;
 use praxis_policy_core::extensions::Extensions;
 
 use crate::{
@@ -34,7 +35,10 @@ use crate::{
 /// absent-value contract in `docs/content/cmf-extensions.md`: `StringSet`
 /// keys are present-empty, optional scalars are omitted, flattened member
 /// booleans are presence-only.
-pub fn extract_extensions(ext: &Extensions, bag: &mut AttributeBag) {
+///
+/// # Errors
+/// Returns an error if the selected SHA-256 provider cannot digest LLM instructions.
+pub fn extract_extensions(ext: &Extensions, bag: &mut AttributeBag) -> Result<(), CryptoError> {
     if let Some(v) = &ext.security {
         extract_security(v, bag);
     }
@@ -60,7 +64,7 @@ pub fn extract_extensions(ext: &Extensions, bag: &mut AttributeBag) {
         extract_llm(v, bag);
     }
     if let Some(parts) = ext.llm_request.as_ref().and_then(|request| request.parts()) {
-        extract_llm_request(parts, bag);
+        extract_llm_request(parts, bag)?;
     }
     if let Some(v) = &ext.mcp {
         extract_mcp(v, bag);
@@ -77,6 +81,7 @@ pub fn extract_extensions(ext: &Extensions, bag: &mut AttributeBag) {
     if let Some(v) = &ext.custom {
         extract_custom(v, bag);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -128,7 +133,7 @@ mod tests {
         ext.llm_request = Some(LlmRequest::from_parts(LlmRequestParts::default()));
 
         let mut bag = AttributeBag::new();
-        extract_extensions(&ext, &mut bag);
+        extract_extensions(&ext, &mut bag).expect("selected SHA-256 backend is available");
 
         // One assertion per namespace — proves the dispatch reached each.
         assert_eq!(bag.get_string("subject.id"), Some("alice"));
@@ -145,7 +150,7 @@ mod tests {
     fn absent_slots_skipped_no_panic() {
         let ext = Extensions::default();
         let mut bag = AttributeBag::new();
-        extract_extensions(&ext, &mut bag);
+        extract_extensions(&ext, &mut bag).expect("selected SHA-256 backend is available");
         assert!(bag.is_empty());
     }
 
@@ -155,7 +160,7 @@ mod tests {
 
     fn bag_of(ext: Extensions) -> AttributeBag {
         let mut bag = AttributeBag::new();
-        extract_extensions(&ext, &mut bag);
+        extract_extensions(&ext, &mut bag).expect("selected SHA-256 backend is available");
         bag
     }
 
