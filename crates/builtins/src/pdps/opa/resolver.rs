@@ -56,9 +56,7 @@ use regorus::Engine;
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::route::StructuredInput;
-use praxis_policy_apl_core::step::{
-    PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver, source_references_metadata_under,
-};
+use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
@@ -454,16 +452,12 @@ impl PdpResolver for OpaResolver {
         let Some(args) = call.args.as_mapping() else {
             return self.global_requires_metadata || call.references_metadata();
         };
-        let query_requires_metadata = args
-            .get(serde_yaml::Value::String("query".to_owned()))
-            .and_then(serde_yaml::Value::as_str)
-            .is_some_and(|query| source_references_metadata_under(query, "input"));
         let inline_requires_metadata = args
             .get(serde_yaml::Value::String("module".to_owned()))
             .and_then(serde_yaml::Value::as_str)
             .is_some_and(source_references_metadata);
 
-        self.global_requires_metadata || query_requires_metadata || inline_requires_metadata
+        self.global_requires_metadata || inline_requires_metadata
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
@@ -992,16 +986,46 @@ mod eval_tests {
         );
         let route_call = call("data.authz.allow", None);
 
-        assert!(dotted.requires_metadata(&route_call));
-        assert!(bracketed.requires_metadata(&route_call));
-        assert!(aliased.requires_metadata(&route_call));
-        assert!(imported.requires_metadata(&route_call));
-        assert!(head.requires_metadata(&route_call));
-        assert!(alternative.requires_metadata(&route_call));
-        assert!(dynamic_index.requires_metadata(&route_call));
-        assert!(whole_input.requires_metadata(&route_call));
-        assert!(!unrelated_index.requires_metadata(&route_call));
-        assert!(!unrelated.requires_metadata(&route_call));
+        assert!(
+            dotted.requires_metadata(&route_call),
+            "dotted input.metadata access must require metadata"
+        );
+        assert!(
+            bracketed.requires_metadata(&route_call),
+            "bracketed input metadata access must require metadata"
+        );
+        assert!(
+            aliased.requires_metadata(&route_call),
+            "a local alias of input must carry its metadata dependency"
+        );
+        assert!(
+            imported.requires_metadata(&route_call),
+            "an imported input.metadata alias must require metadata"
+        );
+        assert!(
+            head.requires_metadata(&route_call),
+            "metadata in a rule head must require metadata"
+        );
+        assert!(
+            alternative.requires_metadata(&route_call),
+            "metadata in an alternative body must require metadata"
+        );
+        assert!(
+            dynamic_index.requires_metadata(&route_call),
+            "a dynamic input index must conservatively require metadata"
+        );
+        assert!(
+            whole_input.requires_metadata(&route_call),
+            "passing whole input to a builtin must conservatively require metadata"
+        );
+        assert!(
+            !unrelated_index.requires_metadata(&route_call),
+            "a known unrelated input index must not require metadata"
+        );
+        assert!(
+            !unrelated.requires_metadata(&route_call),
+            "data.metadata and input.subject are unrelated to acquired metadata"
+        );
     }
 
     #[test]
@@ -1042,9 +1066,18 @@ deny contains "suspended" if { o := {"i": input}; o.i.metadata.account.suspended
             ),
         );
 
-        assert!(resolver.requires_metadata(&dotted));
-        assert!(resolver.requires_metadata(&head));
-        assert!(resolver.requires_metadata(&whole_input));
+        assert!(
+            resolver.requires_metadata(&dotted),
+            "inline dotted input.metadata access must require metadata"
+        );
+        assert!(
+            resolver.requires_metadata(&head),
+            "inline rule-head metadata access must require metadata"
+        );
+        assert!(
+            resolver.requires_metadata(&whole_input),
+            "inline whole-input builtin use must conservatively require metadata"
+        );
     }
 
     #[test]
@@ -1056,6 +1089,17 @@ deny contains "suspended" if { o := {"i": input}; o.i.metadata.account.suspended
         );
 
         assert!(!resolver.requires_metadata(&route_call));
+    }
+
+    #[test]
+    fn static_rule_path_is_not_scanned_as_an_input_expression() {
+        let resolver = resolver(&["package routes.input\nmetadata := true"], OnError::Deny);
+        let route_call = call("data.routes.input.metadata", None);
+
+        assert!(
+            !resolver.requires_metadata(&route_call),
+            "a static data rule path named input.metadata does not read acquired metadata"
+        );
     }
 
     const ALLOW_WITH_DEFAULT: &str = r#"package authz

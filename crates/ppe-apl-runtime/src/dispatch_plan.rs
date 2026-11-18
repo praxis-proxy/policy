@@ -703,7 +703,7 @@ fn expression_uses_metadata(expression: &Expression) -> bool {
 }
 
 fn attribute_path_uses_metadata(path: &str) -> bool {
-    if path.starts_with("metadata.") {
+    if path == "metadata" || path.starts_with("metadata.") || path.starts_with("metadata[") {
         return true;
     }
 
@@ -769,20 +769,40 @@ pub(crate) fn collect_plugin_names(route: &CompiledRoute) -> Vec<String> {
 /// Delegation and elicitation names join both sides: their effects carry a
 /// plugin the route dispatches to the same way a step does.
 pub(crate) fn collect_plugin_names_by_half(route: &CompiledRoute) -> (Vec<String>, Vec<String>) {
-    fn names_in(effects: &[Effect]) -> Vec<String> {
+    fn names_in(effects: &[Effect], request_half: bool) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut visit = |e: &Effect| {
-            let name = match e {
-                Effect::Plugin { name } => name,
-                Effect::Delegate(ds) => &ds.plugin_name,
-                Effect::Elicit(es) => &es.plugin_name,
-                Effect::Fetch(step) => &step.plugin_name,
-                _ => return,
-            };
-            if seen.insert(name.clone()) {
-                out.push(name.clone());
-            }
+        let mut visit = |e: &Effect| match e {
+            Effect::Plugin { name } => {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
+            },
+            Effect::Delegate(ds) => {
+                if seen.insert(ds.plugin_name.clone()) {
+                    out.push(ds.plugin_name.clone());
+                }
+            },
+            Effect::Elicit(es) => {
+                if seen.insert(es.plugin_name.clone()) {
+                    out.push(es.plugin_name.clone());
+                }
+            },
+            Effect::Fetch(step) => {
+                if seen.insert(step.plugin_name.clone()) {
+                    out.push(step.plugin_name.clone());
+                }
+            },
+            Effect::FieldOp { path, stages } if field_op_runs_in_half(path, request_half) => {
+                for stage in stages {
+                    if let Stage::Plugin { name } = stage
+                        && seen.insert(name.clone())
+                    {
+                        out.push(name.clone());
+                    }
+                }
+            },
+            _ => {},
         };
         walk_effects(effects, &mut visit);
         out
@@ -810,9 +830,9 @@ pub(crate) fn collect_plugin_names_by_half(route: &CompiledRoute) -> (Vec<String
         }
     }
 
-    let mut pre = names_in(&route.pre_invocation);
+    let mut pre = names_in(&route.pre_invocation, true);
     extend_unique(&mut pre, stage_names(&route.args));
-    let mut post = names_in(&route.post_invocation);
+    let mut post = names_in(&route.post_invocation, false);
     extend_unique(&mut post, stage_names(&route.result));
     (pre, post)
 }
@@ -1014,7 +1034,10 @@ struct CachedDispatchPlan {
 
 #[cfg(test)]
 mod cache_tests {
-    use super::{CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine, route_uses_metadata};
+    use super::{
+        CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine, collect_plugin_names_by_half,
+        route_uses_metadata,
+    };
     use std::sync::Arc;
 
     use praxis_policy_apl_core::constraint::{OnEmpty, RestrictSpec, StringSetSpec};
@@ -1152,6 +1175,22 @@ mod cache_tests {
             "metadata used to interpolate an attribute path needs the grant"
         );
 
+        let mut metadata_source_route = CompiledRoute::new("tool:metadata-source");
+        metadata_source_route.pre_invocation.push(Effect::When {
+            condition: Expression::Condition(Condition::IsTrue {
+                key: "metadata[args.source].suspended".to_owned(),
+            }),
+            body: vec![Effect::Deny {
+                reason: None,
+                code: None,
+            }],
+            source: "metadata-source".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&metadata_source_route, true, None),
+            "a subscript directly under the metadata root needs the grant"
+        );
+
         let mut restrict_route = CompiledRoute::new("tool:restrict");
         restrict_route.pre_invocation.push(Effect::Restrict {
             spec: RestrictSpec {
@@ -1244,6 +1283,52 @@ mod cache_tests {
         assert!(
             !route_uses_metadata(&out_of_phase, true, None),
             "a field operation skipped in this phase must not widen the handler"
+        );
+    }
+
+    #[test]
+    fn field_operation_plugins_are_collected_only_for_the_half_that_runs_them() {
+        let mut route = CompiledRoute::new("tool:field-op-plugins");
+        route.pre_invocation.extend([
+            Effect::FieldOp {
+                path: "args.card_number".to_owned(),
+                stages: vec![Stage::Plugin {
+                    name: "request-luhn".to_owned(),
+                }],
+            },
+            Effect::FieldOp {
+                path: "result.card_number".to_owned(),
+                stages: vec![Stage::Plugin {
+                    name: "skipped-response-luhn".to_owned(),
+                }],
+            },
+        ]);
+        route.post_invocation.extend([
+            Effect::FieldOp {
+                path: "result.card_number".to_owned(),
+                stages: vec![Stage::Plugin {
+                    name: "response-luhn".to_owned(),
+                }],
+            },
+            Effect::FieldOp {
+                path: "args.card_number".to_owned(),
+                stages: vec![Stage::Plugin {
+                    name: "skipped-request-luhn".to_owned(),
+                }],
+            },
+        ]);
+
+        let (request, response) = collect_plugin_names_by_half(&route);
+
+        assert_eq!(
+            request,
+            ["request-luhn"],
+            "only the request field operation runs on the request half"
+        );
+        assert_eq!(
+            response,
+            ["response-luhn"],
+            "only the response field operation runs on the response half"
         );
     }
 }
