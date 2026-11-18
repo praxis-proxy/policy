@@ -187,7 +187,8 @@ impl FileSecretProvider {
                 if left_the_directory(&e) {
                     SecretError::reference(
                         reference,
-                        "resolves outside `base_dir` once symlinks are followed",
+                        "leaves `base_dir` once symlinks are followed (links beneath \
+                         `base_dir` must be relative)",
                     )
                 } else {
                     open_error(reference, &base.join(candidate), &e)
