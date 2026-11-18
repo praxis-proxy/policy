@@ -957,10 +957,11 @@ impl ConfigVisitor for AplConfigVisitor {
         yaml: &serde_yaml::Value,
     ) -> Result<(), VisitorError> {
         self.record_structural_names(yaml);
+        let global_assertions = assertions_block(yaml)?;
         self.state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .global_assertions = assertions_block(yaml)?;
+            .global_assertions = global_assertions.clone();
         let Some(apl_block) = apl_subblock(yaml) else {
             // No policy term, so this load declares no PDPs. Drop config-owned
             // resolvers from the previous load; code-supplied ones stay.
@@ -977,6 +978,13 @@ impl ConfigVisitor for AplConfigVisitor {
                     "APL visitor: global.response is set but global declares no authorization \
                      block — the entity-less HTTP catch-all handler will not install, so this response can never fire",
                 );
+            }
+            if let Some(assertions) = global_assertions.as_ref() {
+                validate_assertion_fetch_reachability(
+                    "global catch-all",
+                    &[assertions],
+                    &CompiledRoute::new("global"),
+                )?;
             }
             return Ok(());
         };
@@ -1042,6 +1050,9 @@ impl ConfigVisitor for AplConfigVisitor {
             .plugin_registry
             .clone();
         validate_metadata_fetch_sources("global", &compiled, &plugin_registry, mgr)?;
+        if let Some(assertions) = global_assertions.as_ref() {
+            validate_assertion_fetch_reachability("global catch-all", &[assertions], &compiled)?;
+        }
 
         // Install catch-all handlers so the global policy also evaluates for
         // generic (non-MCP/A2A) HTTP requests, which carry no entity.
@@ -1546,8 +1557,15 @@ fn validate_assertion_fetch_reachability(
                 AuthoredSource::Members(members) => members.values().map(String::as_str).collect(),
             };
             for path in paths {
-                let Ok(SourcePath::Metadata { instance, .. }) = SourcePath::parse(path) else {
-                    continue;
+                let instance = match SourcePath::parse(path) {
+                    Ok(SourcePath::Metadata { instance, .. }) => instance,
+                    Ok(_) => continue,
+                    Err(error) => {
+                        return Err(format!(
+                            "route '{route_key}': assertion source `{path}` passed core validation but APL could not parse it: {error}"
+                        )
+                        .into());
+                    },
                 };
                 if !fetched.contains(instance.as_str()) {
                     return Err(format!(

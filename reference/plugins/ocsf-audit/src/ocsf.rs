@@ -548,6 +548,9 @@ pub fn apply_decision(ev: &mut Value, decisions: &DecisionLog) {
         decision.insert("deny_ignored".into(), json!(true));
     }
     un.insert("aid.decision".into(), Value::Object(decision));
+    if !decisions.warnings().is_empty() {
+        un.insert("aid.warnings".into(), json!(decisions.warnings()));
+    }
 
     // The invocation's node identity in the decision graph (W3C ids;
     // child-span model, where the parent is the causal edge).

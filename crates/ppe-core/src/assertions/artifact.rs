@@ -305,24 +305,7 @@ fn render_contract(
                     capability_label(path.capability()),
                     encoding_note(header),
                 );
-                if let source::SourcePath::Metadata { instance, .. } = path {
-                    let plugin = config
-                        .plugins
-                        .iter()
-                        .find(|plugin| plugin.name == *instance);
-                    let kind = plugin.map_or("<undeclared>", |plugin| plugin.kind.as_str());
-                    let cache = plugin
-                        .and_then(|plugin| plugin.config.as_ref())
-                        .and_then(|config| config.get("cache"))
-                        .map_or("not configured", |_| "configured");
-                    let _ = writeln!(
-                        out,
-                        "        externally acquired; producing plugin {instance} ({kind}); cache eligibility: {cache}"
-                    );
-                }
-                if header.allow_credential_target {
-                    out.push_str("        credential target explicitly allowed on this entry\n");
-                }
+                render_metadata_disclosure(config, path, out, "        ");
             },
             ResolvedSource::Members(members) => {
                 let _ = writeln!(out, "      {:<22}one JSON object {provenance}", header.name);
@@ -333,6 +316,7 @@ fn render_contract(
                         path.authored(),
                         capability_label(path.capability())
                     );
+                    render_metadata_disclosure(config, path, out, "          ");
                 }
             },
             ResolvedSource::Unresolvable => {
@@ -343,6 +327,9 @@ fn render_contract(
                     header.name
                 );
             },
+        }
+        if header.allow_credential_target {
+            out.push_str("        credential target explicitly allowed on this entry\n");
         }
     }
     out.push_str("      removed before injection\n");
@@ -370,6 +357,26 @@ fn render_contract(
             .collect();
         let _ = writeln!(out, "        {} (strip:)", patterns.join(", "));
     }
+}
+
+fn render_metadata_disclosure(
+    config: &PolicyConfig,
+    path: &source::SourcePath,
+    out: &mut String,
+    indent: &str,
+) {
+    let source::SourcePath::Metadata { instance, .. } = path else {
+        return;
+    };
+    let plugin = config
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == *instance);
+    let kind = plugin.map_or("<undeclared>", |plugin| plugin.kind.as_str());
+    let _ = writeln!(
+        out,
+        "{indent}externally acquired; producing plugin {instance} ({kind}); cache eligibility: unknown (producer-owned)"
+    );
 }
 
 /// What a `replace_inherited: true` above this route dropped, so the artifact
@@ -487,6 +494,42 @@ mod tests {
         let rendered = render(WORKED_EXAMPLE);
         for expected in ["read_subject", "read_claims", "read_roles"] {
             assert!(rendered.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn metadata_members_disclose_trust_cache_and_credential_opt_in() {
+        let rendered = render(
+            "
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: metadata/http
+    hooks: [metadata.fetch]
+    config:
+      cache:
+        enabled: true
+global:
+  assertions:
+    request:
+      headers:
+        - name: Authorization
+          members:
+            plan: metadata.account.plan
+          allow_credential_target: true
+",
+        );
+        for expected in [
+            "externally acquired",
+            "producing plugin account (metadata/http)",
+            "cache eligibility: unknown (producer-owned)",
+            "credential target explicitly allowed",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}:\n{rendered}"
+            );
         }
     }
 

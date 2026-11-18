@@ -60,6 +60,20 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   to rejecting unsupported fetches, preserving existing implementations.
   `AcquiredFacts::validate()` exposes the core record validation rules.
   ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Acquired-metadata policy projections.** CEL and OPA receive lossless JSON
+  metadata, while Cedar receives its documented value and provenance records.
+  Empty top-level metadata objects are always present for absence checks.
+  ([#243](https://github.com/praxis-proxy/policy/issues/243))
+- **Metadata-backed assertions.** Request and response assertions can project
+  exact `metadata.<instance>.<path>` values with scalar, CSV, JSON, and member
+  encodings. Load validation requires a reachable earlier `fetch(instance)`;
+  credential-bearing targets require explicit opt-in and produce structured
+  load and decision-audit warnings.
+  ([#245](https://github.com/praxis-proxy/policy/issues/245))
+- **Framework decision warnings.** `DecisionLog` can carry structured
+  `DecisionWarning` entries. The reference JSON and OCSF audit sinks serialize
+  them in the decision record.
+  ([#245](https://github.com/praxis-proxy/policy/issues/245))
 
 - **HTTP Basic identity.** The `basic` feature adds `identity/basic`, which
   decodes an [RFC 7617] credential, verifies it against an on-disk directory
@@ -100,6 +114,15 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   typed record required for publication. Sources must declare `metadata.fetch`
   and use `on_error: fail` or `ignore`.
   ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for Rust callers:** `MetadataFetchOutcome` adds `metadata`,
+  `cedar_metadata`, and `metadata_provenance`; `HeaderEntry` and
+  `ResolvedHeader` add `allow_credential_target`. Struct literals and
+  exhaustive destructuring must include the new fields. `SourceRejection` adds
+  metadata-specific variants and is now non-exhaustive. Cedar schemas for
+  metadata-reading policies must declare `context.metadata` and
+  `context.metadata_provenance`.
+  ([#243](https://github.com/praxis-proxy/policy/issues/243),
+  [#245](https://github.com/praxis-proxy/policy/issues/245))
 - **Breaking for route capability grants:** ordinary `run()` and field-pipeline
   plugin capabilities now contribute only to the request or response handler
   half where that plugin runs. Delegation, elicitation, and metadata-fetch
@@ -130,6 +153,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - Added supply-chain maintenance exceptions for unmaintained `chrono` and
   `chrono-tz` (RUSTSEC-2026-0543 and RUSTSEC-2026-0555), which remain runtime
   dependencies of the engine and bundled PDPs with no patched release.
+
+### Security
+
+- **CEL acquired-metadata diagnostics are redacted.** Denials retain useful
+  expression and type information without serializing metadata values,
+  provenance, or normalized source errors into downstream audit records.
+  ([#244](https://github.com/praxis-proxy/policy/issues/244))
 
 ## [0.6.0] - 2026-11-06
 

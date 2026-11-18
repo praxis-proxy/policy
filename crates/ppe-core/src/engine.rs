@@ -3325,7 +3325,11 @@ impl PolicyEngine {
             // record with no span or input hash and no arrival taint to diff
             // the final labels against.
             if result.decision_log.verdict().is_none() {
+                let warnings = result.decision_log.warnings().to_vec();
                 result.decision_log = snapshot.executor.entry_decisions(payload, &extensions);
+                for warning in warnings {
+                    result.decision_log.record_warning(warning);
+                }
             }
             snapshot
                 .executor
@@ -3413,7 +3417,6 @@ impl PolicyEngine {
         ) else {
             return (result, None);
         };
-
         if denied {
             // Removal still happens: it costs nothing, is never wrong, and keeps
             // a client-supplied value out of the extensions the audit path sees.
@@ -3436,8 +3439,39 @@ impl PolicyEngine {
         };
         match rendered {
             Ok(rendered) => {
+                let has_http_slot = result
+                    .modified_extensions
+                    .as_ref()
+                    .is_some_and(|extensions| extensions.http.is_some());
                 if let Some(extensions) = result.modified_extensions.as_mut() {
                     crate::assertions::apply(&contract, &rendered, extensions, direction);
+                }
+                if has_http_slot {
+                    for header in contract.headers.iter().filter(|header| {
+                        header.allow_credential_target
+                            && rendered
+                                .iter()
+                                .any(|(name, _value)| name.eq_ignore_ascii_case(&header.name))
+                    }) {
+                        let source =
+                            crate::assertions::render::resolved_source_label(&header.source);
+                        tracing::warn!(
+                            alarm = "assertion_credential_target_used",
+                            header = %header.name,
+                            source,
+                            "an assertion replaced a credential-bearing header"
+                        );
+                        result
+                            .decision_log
+                            .record_warning(crate::decision::DecisionWarning::new(
+                                "assertion_credential_target_used",
+                                [
+                                    ("direction".to_owned(), direction.label().to_owned()),
+                                    ("header".to_owned(), header.name.clone()),
+                                    ("source".to_owned(), source),
+                                ],
+                            ));
+                    }
                 }
                 (result, None)
             },
