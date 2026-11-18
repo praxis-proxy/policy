@@ -20,15 +20,56 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **APL metadata fetching.** `fetch(name)` acquires immutable facts in `authorization.pre_invocation` and makes them available to subsequent predicates and PDPs under `metadata.<name>.*`. `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method has a default that rejects unsupported fetches, so existing invoker implementations still compile. `AcquiredFacts::validate()` exposes the core record validation rules. ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Acquired-metadata policy projections.** CEL and OPA receive lossless JSON
+  metadata, while Cedar receives its documented value and provenance records.
+  Empty top-level metadata objects are always present for absence checks.
+  ([#243](https://github.com/praxis-proxy/policy/issues/243))
+- **Metadata-backed assertions.** Request and response assertions can project
+  exact `metadata.<instance>.<path>` values with scalar, CSV, JSON, and member
+  encodings. Load validation requires a reachable earlier `fetch(instance)`;
+  credential-bearing targets require explicit opt-in and produce structured
+  load and decision-audit warnings. ([#245](https://github.com/praxis-proxy/policy/issues/245))
+- **Framework decision warnings.** `DecisionLog` can carry structured
+  `DecisionWarning` entries. The reference JSON and OCSF audit sinks serialize
+  them in the decision record. ([#245](https://github.com/praxis-proxy/policy/issues/245))
 
 ### Changed
 
 - **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive matches must handle the new variant. `RouteDispatchPlan` adds `metadata_entries`; exhaustive struct literals must initialize it or use `..Default::default()`, and exhaustive destructuring must name the field or use `..`. Both types are also reachable through the `praxis_policy` facade's crate re-exports. `RoutePluginEntry::pick_entry` takes a new leading `requested_family` argument; pass the dispatching hook's `HookTypeDef::NAME`. ([#287](https://github.com/praxis-proxy/policy/pull/287))
 - **Breaking for metadata sources:** a plugin reached by APL `fetch(name)` must use `mode: sequential`; `transform` and other modes cannot return the awaited typed record required for publication. ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for Rust callers:** `MetadataFetchOutcome` adds `metadata`,
+  `cedar_metadata`, and `metadata_provenance`; `HeaderEntry` and
+  `ResolvedHeader` add `allow_credential_target`. Struct literals and
+  exhaustive destructuring must include the new fields. `SourceRejection` adds
+  metadata-specific variants and is now non-exhaustive. Cedar schemas for
+  metadata-reading policies must declare `context.metadata` and
+  `context.metadata_provenance`. Every existing assertion targeting
+  `Authorization`, `Proxy-Authorization`, `Cookie`, or `Set-Cookie` must now
+  set `allow_credential_target: true`, including assertions sourced from
+  subjects, claims, clients, or declared secrets rather than metadata.
+  `SourcePath::Metadata` now contains a validated `MetadataPath` wrapper;
+  callers matching the old public `instance` and `path` fields must use
+  `MetadataPath::instance()` and `MetadataPath::segments()`.
+  ([#243](https://github.com/praxis-proxy/policy/issues/243),
+  [#245](https://github.com/praxis-proxy/policy/issues/245))
+- **Breaking for route capability grants:** ordinary `run()` and field-pipeline
+  plugin capabilities now contribute only to the request or response handler
+  half where that plugin runs. Delegation, elicitation, and metadata-fetch
+  plugins still contribute their declared capabilities to both halves.
+  Predicates on the other half that read `client.*`, `caller.workload.*`, or
+  `this.workload.*` need `read_client` or `read_workload` in the host baseline.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 ### Fixed
 
 - **APL step dispatch picked hooks across families.** A plugin that registered a CMF hook alongside an unphased hook such as `metadata.fetch`, `identity.resolve` or `token.delegate` could have a `run()` step dispatched to the unphased hook, depending on hash order, and denied with a payload type mismatch. Step dispatch now also matches the hook family. ([#287](https://github.com/praxis-proxy/policy/pull/287))
+
+### Security
+
+- **CEL acquired-metadata diagnostics are redacted.** Denials retain useful
+  expression and type information without serializing metadata values,
+  provenance, or normalized source errors into downstream audit records.
+  ([#244](https://github.com/praxis-proxy/policy/issues/244))
 
 ## [0.6.0] - 2026-11-06
 
@@ -175,8 +216,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   [#184](https://github.com/praxis-proxy/policy/issues/184).
 - APL attribute paths accept one leading `$` on a segment after the first,
   so policies read provenance leaves such as `metadata.account.$outcome`.
-  Route predicates read `metadata.*` without a host grant: the synthetic APL
-  handler holds `read_metadata` intrinsically.
+  The synthetic APL handler infers `read_metadata` independently for the
+  request and response halves from compiled predicates, field pipelines,
+  restrictions, fetches, and PDP policy dependencies. Custom PDP resolvers can
+  report opaque policy dependencies through `PdpResolver::requires_metadata`.
+  `source_references_metadata` and `source_references_metadata_under` are
+  available to resolver implementations that need conservative source scans.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 - **Typed credential locations for the `identity/jwt` plugin.** The plugin can
   now extract bearer JWTs from HTTP headers, cookies, or query parameters — one

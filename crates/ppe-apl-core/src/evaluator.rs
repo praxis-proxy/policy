@@ -731,6 +731,11 @@ async fn dispatch_effect(
         Effect::Fetch(fetch_step) => match plugins.fetch_metadata(fetch_step).await {
             Ok(outcome) => {
                 bag.extend(outcome.attributes);
+                payload.structured.set_metadata(
+                    std::sync::Arc::new(outcome.metadata),
+                    std::sync::Arc::new(outcome.cedar_metadata),
+                    std::sync::Arc::new(outcome.metadata_provenance),
+                );
                 EffectOutcome::Continue
             },
             Err(error) => EffectOutcome::Halt(Decision::Deny {

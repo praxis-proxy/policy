@@ -95,6 +95,8 @@ pub struct AcquiredFacts {
     error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fetched_at: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    numbers_validated: bool,
     outcome: MetadataOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<MetadataSource>,
@@ -118,12 +120,39 @@ impl AcquiredFacts {
             cache,
             error_code: None,
             fetched_at: Some(fetched_at),
+            numbers_validated: false,
             outcome: MetadataOutcome::Success,
             source: None,
             stale: false,
             status: None,
             value: Some(value),
         }
+    }
+
+    /// Parse a successful record while validating original JSON number tokens.
+    ///
+    /// Metadata sources parsing an HTTP response should use this constructor
+    /// instead of parsing into [`Value`] first. Once a decimal has rounded to
+    /// binary64, later validation cannot recover its original token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataInstallError::InvalidNumber`] when any number is
+    /// outside the common lossless evaluator domain, or
+    /// [`MetadataInstallError::InvalidJson`] when `json` is malformed.
+    pub fn success_json(
+        json: &str,
+        fetched_at: DateTime<Utc>,
+        cache: MetadataCacheDisposition,
+    ) -> Result<Self, MetadataInstallError> {
+        let _syntax: &serde_json::value::RawValue = serde_json::from_str(json)
+            .map_err(|error| MetadataInstallError::InvalidJson(error.to_string()))?;
+        validate_json_number_tokens(json)?;
+        let value = serde_json::from_str(json)
+            .map_err(|error| MetadataInstallError::InvalidJson(error.to_string()))?;
+        let mut facts = Self::success(value, fetched_at, cache);
+        facts.numbers_validated = true;
+        Ok(facts)
     }
 
     /// Create an error record containing no partial acquired value.
@@ -133,6 +162,7 @@ impl AcquiredFacts {
             cache,
             error_code: Some(error_code.into()),
             fetched_at: None,
+            numbers_validated: false,
             outcome: MetadataOutcome::Error,
             source: None,
             stale: false,
@@ -288,6 +318,9 @@ pub enum MetadataInstallError {
     /// A JSON object key would make the dotted projection ambiguous.
     #[error("metadata response key `{0}` is reserved or ambiguous")]
     InvalidResponseKey(String),
+    /// A source response is not valid JSON.
+    #[error("metadata response is not valid JSON: {0}")]
+    InvalidJson(String),
     /// The plugin instance name cannot safely form a namespace segment.
     #[error("invalid metadata instance name `{0}`")]
     InvalidInstanceName(String),
@@ -300,6 +333,9 @@ pub enum MetadataInstallError {
     /// A source error code is outside the reserved metadata namespace.
     #[error("metadata error code `{0}` must start with `metadata.` and include a name")]
     InvalidErrorCode(String),
+    /// A JSON number is outside the common lossless evaluator domain.
+    #[error("metadata number is not a signed i64 or exactly representable finite binary64")]
+    InvalidNumber(String),
 }
 
 // -----------------------------------------------------------------------------
@@ -337,7 +373,7 @@ fn validate_record(facts: &AcquiredFacts) -> Result<(), MetadataInstallError> {
                 && facts.error_code.is_none()
                 && facts.stale == (facts.cache == MetadataCacheDisposition::Stale) =>
         {
-            validate_keys(value, true)
+            validate_keys(value, true, facts.numbers_validated)
         },
         (MetadataOutcome::Error, _)
             if facts.value.is_none()
@@ -362,7 +398,11 @@ fn validate_record(facts: &AcquiredFacts) -> Result<(), MetadataInstallError> {
 }
 
 /// Reject response keys that collide in the derived dotted projection.
-fn validate_keys(value: &Value, root: bool) -> Result<(), MetadataInstallError> {
+fn validate_keys(
+    value: &Value,
+    root: bool,
+    numbers_validated: bool,
+) -> Result<(), MetadataInstallError> {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
@@ -373,17 +413,228 @@ fn validate_keys(value: &Value, root: bool) -> Result<(), MetadataInstallError> 
                 {
                     return Err(MetadataInstallError::InvalidResponseKey(key.clone()));
                 }
-                validate_keys(child, false)?;
+                validate_keys(child, false, numbers_validated)?;
             }
             Ok(())
         },
         Value::Array(items) => {
             for item in items {
-                validate_keys(item, false)?;
+                validate_keys(item, false, numbers_validated)?;
             }
             Ok(())
         },
+        Value::Number(number) if !numbers_validated => validate_number(number),
         _ => Ok(()),
+    }
+}
+
+/// Enforce the numeric intersection CEL and OPA can project without rounding.
+fn validate_number(number: &serde_json::Number) -> Result<(), MetadataInstallError> {
+    if number.as_i64().is_some() {
+        return Ok(());
+    }
+    if number.as_u64().is_some() {
+        return Err(MetadataInstallError::InvalidNumber(number.to_string()));
+    }
+    let text = number.to_string();
+    let candidate = number.as_f64();
+    if candidate.is_some_and(|candidate| decimal_is_exact_binary64(&text, candidate)) {
+        Ok(())
+    } else {
+        Err(MetadataInstallError::InvalidNumber(text))
+    }
+}
+
+/// Validate every raw numeric lexeme instead of its parser-rounded value.
+fn validate_json_number_tokens(json: &str) -> Result<(), MetadataInstallError> {
+    let bytes = json.as_bytes();
+    let mut index = 0;
+    while let Some(byte) = bytes.get(index).copied() {
+        match byte {
+            b'"' => {
+                index += 1;
+                while let Some(string_byte) = bytes.get(index).copied() {
+                    index += 1;
+                    match string_byte {
+                        b'\\' => index = index.saturating_add(1),
+                        b'"' => break,
+                        _ => {},
+                    }
+                }
+            },
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                index = number_token_end(bytes, index);
+                let Some(token) = json.get(start..index) else {
+                    return Err(MetadataInstallError::InvalidJson(
+                        "number token is not on a character boundary".to_owned(),
+                    ));
+                };
+                validate_number_token(token)?;
+            },
+            _ => index += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Return the end of one JSON number-shaped token.
+fn number_token_end(bytes: &[u8], mut index: usize) -> usize {
+    if bytes.get(index) == Some(&b'-') {
+        index += 1;
+    }
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+    }
+    if bytes
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+    {
+        index += 1;
+        if bytes
+            .get(index)
+            .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+        {
+            index += 1;
+        }
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+    }
+    index
+}
+
+/// Enforce the numeric domain against one unmodified JSON lexeme.
+fn validate_number_token(token: &str) -> Result<(), MetadataInstallError> {
+    if !token.contains(['.', 'e', 'E']) {
+        return token
+            .parse::<i64>()
+            .map(|_| ())
+            .map_err(|_error| MetadataInstallError::InvalidNumber(token.to_owned()));
+    }
+    let candidate = token.parse::<f64>();
+    if candidate.is_ok_and(|candidate| decimal_is_exact_binary64(token, candidate)) {
+        Ok(())
+    } else {
+        Err(MetadataInstallError::InvalidNumber(token.to_owned()))
+    }
+}
+
+/// Whether a decimal token is the exact value of its binary64 candidate.
+fn decimal_is_exact_binary64(text: &str, candidate: f64) -> bool {
+    if !candidate.is_finite() {
+        return false;
+    }
+    let Some((token_digits, token_exponent)) = normalized_decimal_token(text) else {
+        return false;
+    };
+    let candidate_is_zero = matches!(candidate.classify(), std::num::FpCategory::Zero);
+    if token_digits == "0" {
+        return candidate_is_zero;
+    }
+    if candidate_is_zero {
+        return false;
+    }
+
+    let (candidate_digits, candidate_exponent) = exact_binary64_decimal(candidate);
+    token_digits == candidate_digits && token_exponent == candidate_exponent
+}
+
+/// Normalize a decimal as integer digits multiplied by a power of ten.
+fn normalized_decimal_token(text: &str) -> Option<(String, i32)> {
+    let (mantissa, exponent) = text
+        .split_once(['e', 'E'])
+        .map_or((text, None), |(mantissa, exponent)| {
+            (mantissa, Some(exponent))
+        });
+    let unsigned = mantissa.strip_prefix(['-', '+']).unwrap_or(mantissa);
+    let fractional = unsigned
+        .split_once('.')
+        .map_or(Some(0_i32), |(_whole, fraction)| {
+            i32::try_from(fraction.len()).ok()
+        })?;
+    let mut digits: String = unsigned
+        .chars()
+        .filter(|character| *character != '.')
+        .collect::<String>()
+        .trim_start_matches('0')
+        .to_owned();
+    if digits.is_empty() {
+        return Some(("0".to_owned(), 0));
+    }
+    let exponent = exponent.map_or(Some(0_i32), |value| value.parse::<i32>().ok())?;
+    let mut decimal_exponent = exponent.checked_sub(fractional)?;
+    while digits.ends_with('0') {
+        digits.pop();
+        decimal_exponent = decimal_exponent.checked_add(1)?;
+    }
+    Some((digits, decimal_exponent))
+}
+
+/// Render one finite nonzero binary64 as exact normalized decimal digits.
+fn exact_binary64_decimal(candidate: f64) -> (String, i32) {
+    const FRACTION_BITS: u32 = 52;
+    const FRACTION_EXPONENT: i32 = 52;
+    const FRACTION_MASK: u64 = (1_u64 << FRACTION_BITS) - 1;
+    const EXPONENT_BIAS: i32 = 1023;
+    const SUBNORMAL_EXPONENT: i32 = -1074;
+
+    let bits = candidate.abs().to_bits();
+    let stored_exponent = i32::try_from((bits >> FRACTION_BITS) & 0x7ff).unwrap_or_default();
+    let fraction = bits & FRACTION_MASK;
+    let (significand, binary_exponent) = if stored_exponent == 0 {
+        (fraction, SUBNORMAL_EXPONENT)
+    } else {
+        (
+            (1_u64 << FRACTION_BITS) | fraction,
+            stored_exponent - EXPONENT_BIAS - FRACTION_EXPONENT,
+        )
+    };
+    let mut digits: Vec<u8> = significand
+        .to_string()
+        .bytes()
+        .rev()
+        .map(|byte| byte - b'0')
+        .collect();
+    let mut decimal_exponent = 0_i32;
+    if binary_exponent < 0 {
+        for _ in 0..binary_exponent.unsigned_abs() {
+            multiply_decimal_digits(&mut digits, 5);
+        }
+        decimal_exponent = binary_exponent;
+    } else {
+        for _ in 0..binary_exponent.unsigned_abs() {
+            multiply_decimal_digits(&mut digits, 2);
+        }
+    }
+    let mut text: String = digits
+        .into_iter()
+        .rev()
+        .map(|digit| char::from(b'0' + digit))
+        .collect();
+    while text.ends_with('0') {
+        text.pop();
+        decimal_exponent += 1;
+    }
+    (text, decimal_exponent)
+}
+
+/// Multiply little-endian base-ten digits by one small factor.
+fn multiply_decimal_digits(digits: &mut Vec<u8>, factor: u8) {
+    let mut carry = 0_u16;
+    for digit in &mut *digits {
+        let product = u16::from(*digit) * u16::from(factor) + carry;
+        *digit = u8::try_from(product % 10).unwrap_or_default();
+        carry = product / 10;
+    }
+    if carry != 0 {
+        digits.push(u8::try_from(carry).unwrap_or_default());
     }
 }
 
@@ -395,6 +646,10 @@ mod tests {
     use serde_json::json;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    const EXACT_BINARY64_ONE_TENTH: &str =
+        "0.1000000000000000055511151231257827021181583404541015625";
+    const SENSITIVE_NUMBER: &str = "9007199254740993.0";
 
     #[test]
     fn framework_install_stamps_source_and_keeps_instances_separate() {
@@ -536,6 +791,159 @@ mod tests {
                 "invalid install must be atomic"
             );
         }
+    }
+
+    #[test]
+    fn numeric_domain_accepts_i64_and_exact_binary64_values() {
+        for value in [json!(i64::MIN), json!(i64::MAX), json!(0.5), json!(1.25)] {
+            let mut extensions = Extensions::default();
+            extensions
+                .install_metadata("account", "metadata/http", success(value))
+                .expect("the numeric value is lossless in CEL and OPA");
+        }
+    }
+
+    #[test]
+    fn numeric_domain_rejects_unsigned_and_rounding_values_atomically() {
+        for value in [json!(u64::MAX), json!(0.1)] {
+            let mut extensions = Extensions::default();
+            let result = extensions.install_metadata("account", "metadata/http", success(value));
+            assert!(matches!(
+                result,
+                Err(MetadataInstallError::InvalidNumber(_))
+            ));
+            assert!(extensions.metadata.is_none(), "a rejected record is atomic");
+        }
+    }
+
+    #[test]
+    fn numeric_domain_validates_the_original_json_token_before_rounding() {
+        for token in [
+            "9007199254740993.0",
+            "1.0000000000000001",
+            "0.50000000000000001",
+        ] {
+            let result =
+                AcquiredFacts::success_json(token, instant(), MetadataCacheDisposition::Disabled);
+            assert!(
+                matches!(result, Err(MetadataInstallError::InvalidNumber(_))),
+                "{token} requires binary64 rounding"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_rejection_messages_do_not_disclose_the_rejected_value() {
+        let error = AcquiredFacts::success_json(
+            SENSITIVE_NUMBER,
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        )
+        .expect_err("the rounded account identifier is rejected");
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("metadata number"), "{rendered}");
+        assert!(
+            !rendered.contains(SENSITIVE_NUMBER),
+            "the rejection category must not disclose the metadata value: {rendered}"
+        );
+    }
+
+    #[test]
+    fn raw_json_number_validation_is_recursive_and_atomic() {
+        let result = AcquiredFacts::success_json(
+            r#"{"safe": 0.5, "nested": [1, {"unsafe": 1.0000000000000001}]}"#,
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        );
+
+        assert!(matches!(
+            result,
+            Err(MetadataInstallError::InvalidNumber(token))
+                if token == "1.0000000000000001"
+        ));
+    }
+
+    #[test]
+    fn raw_json_constructor_accepts_exact_numbers_and_reports_malformed_json() {
+        let facts = AcquiredFacts::success_json(
+            &format!(
+                r#"{{
+                "minimum": -9223372036854775808,
+                "ratio": 5e-1,
+                "exact_one_tenth": {EXACT_BINARY64_ONE_TENTH},
+                "numeric_text": "9007199254740993.0",
+                "escaped": "quoted: \"1.0000000000000001\""
+            }}"#
+            ),
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        )
+        .expect("exact numbers are accepted");
+        let value = facts.value().expect("a successful value");
+        assert_eq!(value["minimum"], json!(i64::MIN));
+        assert_eq!(value["ratio"], json!(0.5));
+        assert_eq!(value["exact_one_tenth"], json!(0.1));
+        assert_eq!(value["numeric_text"], json!("9007199254740993.0"));
+        assert_eq!(value["escaped"], json!("quoted: \"1.0000000000000001\""));
+        facts
+            .validate()
+            .expect("the validated raw numeric representation remains trusted");
+        let mut extensions = Extensions::default();
+        extensions
+            .install_metadata("account", "metadata/http", facts)
+            .expect("raw-number validation survives framework installation");
+
+        let malformed = AcquiredFacts::success_json(
+            r#"{"ratio": 0.5"#,
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        );
+        assert!(matches!(
+            malformed,
+            Err(MetadataInstallError::InvalidJson(_))
+        ));
+
+        for malformed_number in ["-", "1.", "1e"] {
+            let result = AcquiredFacts::success_json(
+                malformed_number,
+                instant(),
+                MetadataCacheDisposition::Disabled,
+            );
+            assert!(
+                matches!(result, Err(MetadataInstallError::InvalidJson(_))),
+                "malformed number `{malformed_number}` is invalid JSON"
+            );
+        }
+    }
+
+    #[test]
+    fn syntactically_valid_out_of_range_numbers_report_the_numeric_domain() {
+        let result = AcquiredFacts::success_json(
+            r#"{"ratio":1e400}"#,
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        );
+
+        assert!(matches!(
+            result,
+            Err(MetadataInstallError::InvalidNumber(token)) if token == "1e400"
+        ));
+    }
+
+    #[test]
+    fn zero_accepts_an_exponent_outside_the_nonzero_normalization_range() {
+        let facts = AcquiredFacts::success_json(
+            r#"{"ratio":0e2147483648}"#,
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        )
+        .expect("every exponent spelling of exact zero is lossless");
+
+        assert_eq!(
+            facts.value().and_then(|value| value.get("ratio")),
+            Some(&json!(0.0))
+        );
     }
 
     #[test]

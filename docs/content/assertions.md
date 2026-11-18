@@ -89,10 +89,35 @@ Slot paths, addressed the way the rest of the config addresses request state:
     client.permissions  client.teams  client.authorized_scopes
     client.authorized_audiences  client.claim.<name>
     secret.<name>
+    metadata.<instance>.<path>
 
 A claim name is taken whole, so a provider spelling one with dots needs no
 escaping. A bare `claim` names the whole map rather than one claim and is
 refused: a provider's claim set is not something to render wholesale.
+
+### `metadata.<instance>.<path>`
+
+An exact metadata path reads the immutable `AcquiredFacts` value directly. It
+does not reconstruct structured data from APL's dotted attributes. Objects and
+arrays can use `encode: json`; string arrays can use `encode: csv`; JSON null
+is missing and follows `on_missing`. A non-object root is addressed through
+`metadata.<instance>.value`.
+
+Whole-instance projection and reserved `$` provenance paths are refused. The
+route must reach `fetch(instance)` in `authorization.pre_invocation` before a
+request or response assertion can render. Conditional fetches are allowed;
+their absence follows the entry's `on_missing` rule. A response assertion may
+reuse the request phase's record.
+
+Targets named `Authorization`, `Proxy-Authorization`, `Cookie`, or
+`Set-Cookie`, in any casing, require `allow_credential_target: true` on that
+exact entry, whatever source kind supplies the value. Existing subject,
+claim, client, secret, and metadata-backed entries must opt in individually.
+`Proxy-Authorization` is request-only: response assertions cannot target it,
+because it authenticates the next inbound proxy hop. Loading and using an
+allowed credential target emits a warning. Before injection PPE
+removes every case-insensitive occurrence of the target, so a spoofed fallback
+cannot survive when the source is absent.
 
 ### `secret.<name>`
 

@@ -94,10 +94,14 @@ Acquired metadata belongs to one policy invocation. The metadata PIP fetch
 step ([#184](https://github.com/praxis-proxy/policy/issues/184)), or a host
 that resolves facts before dispatch, installs one record per source instance
 with `Extensions::install_metadata`; ordinary plugin merge-back cannot add,
-replace, or remove it. Route predicates always read `metadata.*`, because the
-synthetic APL handler holds `read_metadata` intrinsically. Plugins dispatched within
-the same invocation (`run`, delegation, elicitation) see the records read-only
-when they declare `read_metadata`. A host starting a child policy invocation
+replace, or remove it. The capability grant inferred from APL is added only for
+the active request or response half when its compiled predicates, field
+pipelines, restrictions, fetches, or PDP policy dependencies can read the
+namespace. That inferred grant is not the only source: a dispatched plugin's
+declaration or the host's baseline capabilities can also grant
+`read_metadata`. Plugins dispatched within the same invocation (`run`,
+delegation, elicitation) see the records read-only when they declare it. A host
+starting a child policy invocation
 uses `Extensions::for_child_request`, which retains the ordinary request
 context but clears acquired metadata. The child may install its own records,
 and those records are not merged into the parent.

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use praxis_policy_apl_core::{AttributeBag, AttributeValue};
 use praxis_policy_core::extensions::{AcquiredFacts, MetadataExtension};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::constants::BAG_METADATA_PREFIX;
 
@@ -19,6 +19,77 @@ pub fn extract_metadata(metadata: &MetadataExtension, bag: &mut AttributeBag) {
         extract_value(facts, &prefix, bag);
         extract_provenance(facts, &prefix, bag);
     }
+}
+
+/// Build direct structured evaluator projections from immutable records.
+pub fn project_structured_metadata(metadata: Option<&MetadataExtension>) -> (Value, Value, Value) {
+    let mut lossless = Map::new();
+    let mut cedar = Map::new();
+    let mut provenance = Map::new();
+    let Some(metadata) = metadata else {
+        return (
+            Value::Object(lossless),
+            Value::Object(cedar),
+            Value::Object(provenance),
+        );
+    };
+
+    for (instance, facts) in metadata.iter() {
+        let mut projected = match facts.value() {
+            Some(Value::Object(fields)) => fields.clone(),
+            Some(value) => Map::from_iter([("value".to_owned(), value.clone())]),
+            None => Map::new(),
+        };
+        let mut trusted = Map::new();
+        if let Some(source) = facts.source() {
+            trusted.insert("source".to_owned(), Value::String(source.kind.clone()));
+        }
+        trusted.insert(
+            "outcome".to_owned(),
+            Value::String(facts.outcome().as_str().to_owned()),
+        );
+        trusted.insert(
+            "cache".to_owned(),
+            Value::String(facts.cache().as_str().to_owned()),
+        );
+        if let Some(fetched_at) = facts.fetched_at() {
+            trusted.insert(
+                "fetched_at".to_owned(),
+                Value::String(fetched_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            );
+        }
+        if let Some(status) = facts.status() {
+            trusted.insert("status".to_owned(), Value::from(status));
+        }
+        if facts.stale() {
+            trusted.insert("stale".to_owned(), Value::Bool(true));
+        }
+        if let Some(error_code) = facts.error_code() {
+            trusted.insert(
+                "error_code".to_owned(),
+                Value::String(error_code.to_owned()),
+            );
+        }
+        for (name, value) in &trusted {
+            projected.insert(format!("${name}"), value.clone());
+        }
+        lossless.insert(instance.to_owned(), Value::Object(projected));
+        provenance.insert(instance.to_owned(), Value::Object(trusted));
+        if let Some(value) = facts.value() {
+            cedar.insert(
+                instance.to_owned(),
+                match value {
+                    Value::Object(_) => value.clone(),
+                    _ => Value::Object(Map::from_iter([("value".to_owned(), value.clone())])),
+                },
+            );
+        }
+    }
+    (
+        Value::Object(lossless),
+        Value::Object(cedar),
+        Value::Object(provenance),
+    )
 }
 
 /// Project a successful structured value below one instance prefix.
@@ -216,20 +287,6 @@ mod tests {
         assert!(!bag.contains("metadata.account.$stale"));
         assert!(!bag.contains("metadata.account.value"));
         assert!(!bag.contains("metadata.account.$fetched_at"));
-    }
-
-    #[test]
-    fn integers_outside_the_apl_domain_remain_present_without_rounding() {
-        let metadata = installed("lookup", success(json!(u64::MAX)));
-        let mut bag = AttributeBag::new();
-
-        extract_metadata(&metadata, &mut bag);
-
-        assert_eq!(
-            bag.get("metadata.lookup.value"),
-            Some(&AttributeValue::NonScalar),
-            "an out-of-range integer must not become a rounded float"
-        );
     }
 
     #[test]

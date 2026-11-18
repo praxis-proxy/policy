@@ -153,6 +153,8 @@ where
     /// the additions to the session store. Empty when there was no
     /// `session_id` (so no hydration happened).
     initial_labels: HashSet<String>,
+    /// Whether this phase has a PDP consumer for structured metadata.
+    project_structured_metadata: bool,
 }
 
 impl<H: HookTypeDef> HookPluginInvoker<H>
@@ -212,7 +214,15 @@ where
             session_id,
             session_store,
             initial_labels,
+            project_structured_metadata: true,
         })
+    }
+
+    /// Enable structured metadata projection only for phases containing PDPs.
+    #[must_use]
+    pub fn with_structured_metadata_projection(mut self, enabled: bool) -> Self {
+        self.project_structured_metadata = enabled;
+        self
     }
 
     /// Snapshot the current payload. Call after route evaluation to
@@ -595,7 +605,21 @@ where
         if let Some(metadata) = updated.metadata.as_deref() {
             praxis_policy_apl_cmf::extract_metadata(metadata, &mut attributes);
         }
-        Ok(MetadataFetchOutcome { attributes })
+        let (metadata, cedar_metadata, metadata_provenance) = if self.project_structured_metadata {
+            praxis_policy_apl_cmf::project_structured_metadata(updated.metadata.as_deref())
+        } else {
+            (
+                serde_json::json!({}),
+                serde_json::json!({}),
+                serde_json::json!({}),
+            )
+        };
+        Ok(MetadataFetchOutcome {
+            attributes,
+            metadata,
+            cedar_metadata,
+            metadata_provenance,
+        })
     }
 }
 

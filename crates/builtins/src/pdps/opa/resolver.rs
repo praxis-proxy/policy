@@ -61,6 +61,7 @@ use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, P
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
 use crate::pdps::opa::input::build_rego_input;
+use crate::pdps::opa::metadata::MetadataDependencies;
 use crate::pdps::stack;
 
 /// What to do when a query errors at runtime or yields a value that carries no
@@ -117,6 +118,8 @@ pub struct OpaResolver {
     /// Upper bound on `inline_cache`. New entries past this are rejected (never
     /// evicted), per the workspace cache convention.
     max_cache_entries: usize,
+    /// Per-rule metadata dependencies across configured global modules.
+    metadata_dependencies: MetadataDependencies,
 }
 
 impl OpaResolver {
@@ -257,6 +260,8 @@ impl OpaResolver {
             merge_data(&mut engine, &path, &parsed)?;
         }
 
+        let metadata_dependencies = MetadataDependencies::from_engine(&mut engine);
+
         Ok(Self {
             dialect: PdpDialect::Opa,
             on_error,
@@ -267,6 +272,7 @@ impl OpaResolver {
             inline_cache: RwLock::new(HashMap::new()),
             max_cache_entries: read_usize(map, "max_cache_entries")?
                 .unwrap_or(DEFAULT_MAX_CACHE_ENTRIES),
+            metadata_dependencies,
         })
     }
 
@@ -439,6 +445,32 @@ enum EvalOutcome {
 impl PdpResolver for OpaResolver {
     fn dialect(&self) -> PdpDialect {
         self.dialect.clone()
+    }
+
+    fn requires_metadata(&self, call: &PdpCall) -> bool {
+        let Some(args) = call.args.as_mapping() else {
+            return true;
+        };
+        let Some(query) = args
+            .get(serde_yaml::Value::String("query".to_owned()))
+            .and_then(serde_yaml::Value::as_str)
+        else {
+            return true;
+        };
+        let inline = args
+            .get(serde_yaml::Value::String("module".to_owned()))
+            .and_then(serde_yaml::Value::as_str);
+        let Some(inline) = inline else {
+            return self.metadata_dependencies.query_requires_metadata(query);
+        };
+        let mut engine = self.base_engine.clone();
+        if engine
+            .add_policy(INLINE_MODULE_NAME.to_owned(), inline.to_owned())
+            .is_err()
+        {
+            return true;
+        }
+        MetadataDependencies::from_engine(&mut engine).query_requires_metadata(query)
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
@@ -909,6 +941,202 @@ mod eval_tests {
         let mut b = AttributeBag::new();
         b.set("subject.id", subject_id);
         b
+    }
+
+    #[test]
+    fn global_policy_dependencies_report_metadata_usage() {
+        let dotted = resolver(
+            &["package authz\ndefault allow := false\nallow if input.metadata.account.active"],
+            OnError::Deny,
+        );
+        let bracketed = resolver(
+            &["package authz\ndefault allow := false\nallow if input[\"metadata\"].account.active"],
+            OnError::Deny,
+        );
+        let unrelated = resolver(
+            &[
+                "package authz\ndefault allow := false\nallow if data.metadata.enabled\nallow if input.subject.id == \"alice\"",
+            ],
+            OnError::Deny,
+        );
+        let aliased = resolver(
+            &[
+                "package authz\ndefault allow := false\nallow if { x := input; x.metadata.account.active }",
+            ],
+            OnError::Deny,
+        );
+        let imported = resolver(
+            &[
+                "package authz\nimport input.metadata as facts\ndefault allow := false\nallow if facts.account.active",
+            ],
+            OnError::Deny,
+        );
+        let head = resolver(
+            &["package authz\nallow := input.metadata.account.active"],
+            OnError::Deny,
+        );
+        let alternative = resolver(
+            &[
+                "package authz\nallow := false if { input.subject.id == \"blocked\" } else := input.metadata.account.active",
+            ],
+            OnError::Deny,
+        );
+        let dynamic_index = resolver(
+            &[
+                "package authz\ndefault allow := false\nallow if { k := \"metadata\"; input[k].account.active }",
+            ],
+            OnError::Deny,
+        );
+        let whole_input = resolver(
+            &[
+                "package authz\ndefault allow := false\nallow if object.get(input, [\"metadata\", \"account\", \"active\"], false)",
+            ],
+            OnError::Deny,
+        );
+        let unrelated_index = resolver(
+            &["package authz\ndefault allow := false\nallow if input[\"subject\"].authenticated"],
+            OnError::Deny,
+        );
+        let route_call = call("data.authz.allow", None);
+
+        assert!(
+            dotted.requires_metadata(&route_call),
+            "dotted input.metadata access must require metadata"
+        );
+        assert!(
+            bracketed.requires_metadata(&route_call),
+            "bracketed input metadata access must require metadata"
+        );
+        assert!(
+            aliased.requires_metadata(&route_call),
+            "a local alias of input must carry its metadata dependency"
+        );
+        assert!(
+            imported.requires_metadata(&route_call),
+            "an imported input.metadata alias must require metadata"
+        );
+        assert!(
+            head.requires_metadata(&route_call),
+            "metadata in a rule head must require metadata"
+        );
+        assert!(
+            alternative.requires_metadata(&route_call),
+            "metadata in an alternative body must require metadata"
+        );
+        assert!(
+            dynamic_index.requires_metadata(&route_call),
+            "a dynamic input index must conservatively require metadata"
+        );
+        assert!(
+            whole_input.requires_metadata(&route_call),
+            "passing whole input to a builtin must conservatively require metadata"
+        );
+        assert!(
+            !unrelated_index.requires_metadata(&route_call),
+            "a known unrelated input index must not require metadata"
+        );
+        assert!(
+            !unrelated.requires_metadata(&route_call),
+            "data.metadata and input.subject are unrelated to acquired metadata"
+        );
+    }
+
+    #[test]
+    fn whole_input_uses_conservatively_report_metadata_usage() {
+        for source in [
+            r#"package authz
+whole := input
+deny contains "suspended" if whole.metadata.account.suspended"#,
+            r#"package authz
+deny contains "suspended" if { first := input; second := first; second.metadata.account.suspended }"#,
+            r#"package authz
+deny contains "suspended" if { some k, v in input; k == "metadata"; v.account.suspended }"#,
+            r#"package authz
+deny contains "suspended" if { o := {"i": input}; o.i.metadata.account.suspended }"#,
+            r#"package authz
+deny contains "suspended" if { values := [x | x := input]; values[0].metadata.account.suspended }"#,
+        ] {
+            let resolver = resolver(&[source], OnError::Deny);
+
+            assert!(
+                resolver.requires_metadata(&call("data.authz.deny", None)),
+                "whole-input use must conservatively require metadata: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_metadata_dependency_is_scoped_to_the_selected_rule_graph() {
+        let resolver = resolver(
+            &[
+                "package helpers\nmetadata_gate if input.metadata.account.active",
+                "package authz\nconstant := true\nallow if data.helpers.metadata_gate",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            !resolver.requires_metadata(&call("data.authz.constant", None)),
+            "an independent constant rule must not inherit another rule's metadata dependency"
+        );
+        assert!(
+            resolver.requires_metadata(&call("data.authz.allow", None)),
+            "the selected rule must inherit metadata use from a reachable cross-module helper"
+        );
+    }
+
+    #[test]
+    fn inline_policy_dependency_reports_metadata_usage() {
+        let resolver = resolver(&[], OnError::Deny);
+        let dotted = call(
+            "data.route.allow",
+            Some("package route\ndefault allow := false\nallow if input.metadata.account.active"),
+        );
+        let head = call(
+            "data.route.allow",
+            Some("package route\nallow := input.metadata.account.active"),
+        );
+        let whole_input = call(
+            "data.route.allow",
+            Some(
+                "package route\ndefault allow := false\nallow if object.get(input, [\"metadata\", \"account\", \"active\"], false)",
+            ),
+        );
+
+        assert!(
+            resolver.requires_metadata(&dotted),
+            "inline dotted input.metadata access must require metadata"
+        );
+        assert!(
+            resolver.requires_metadata(&head),
+            "inline rule-head metadata access must require metadata"
+        );
+        assert!(
+            resolver.requires_metadata(&whole_input),
+            "inline whole-input builtin use must conservatively require metadata"
+        );
+    }
+
+    #[test]
+    fn inline_policy_ignores_unrelated_metadata_namespace() {
+        let resolver = resolver(&[], OnError::Deny);
+        let route_call = call(
+            "data.route.allow",
+            Some("package route\ndefault allow := false\nallow if data.metadata.enabled"),
+        );
+
+        assert!(!resolver.requires_metadata(&route_call));
+    }
+
+    #[test]
+    fn static_rule_path_is_not_scanned_as_an_input_expression() {
+        let resolver = resolver(&["package routes.input\nmetadata := true"], OnError::Deny);
+        let route_call = call("data.routes.input.metadata", None);
+
+        assert!(
+            !resolver.requires_metadata(&route_call),
+            "a static data rule path named input.metadata does not read acquired metadata"
+        );
     }
 
     const ALLOW_WITH_DEFAULT: &str = r#"package authz

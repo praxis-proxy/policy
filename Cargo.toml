@@ -111,10 +111,12 @@ serde_yaml = { package = "yaml_serde", version = "0.10.4" }
 # re-serializes: a verifier that re-parses an emitted record and recomputes
 # an RFC 8785 fingerprint (the OCSF audit sink's, for one) then canonicalizes
 # different bytes and reports an untouched record as tampered.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 # Shortest round-trip float digits with ties broken to even, the ES6
 # `Number::toString` rule RFC 8785 mandates and Rust's own `{:e}` does not
-# follow (it prints `1424953923781206.3` for the Appendix B tie vector). Already
+# follow (it prints `1424953923781206.3` for the Appendix B tie vector). The
+# raw-value parser lets metadata distinguish invalid JSON syntax from a valid
+# numeric token outside the shared evaluator domain. Already
 # in the graph through `serde_json`, so no new crate.
 ryu = "1.0.23"
 async-trait = "0.1"

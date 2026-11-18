@@ -72,6 +72,9 @@ pub struct ResolvedHeader {
     /// How a value that is not a scalar renders.
     pub encode: Option<Encoding>,
 
+    /// Whether this exact entry acknowledged a credential-bearing target.
+    pub allow_credential_target: bool,
+
     /// The level that declared this entry, as a diagnostic names it.
     pub declared_in: String,
 
