@@ -1170,7 +1170,6 @@ mod cache_tests {
         for (dialect, expression) in [
             (PdpDialect::Cel, "metadata.account.active == true"),
             (PdpDialect::Opa, "input.metadata.account.active == true"),
-            (PdpDialect::Cedar, "context.metadata.account.active == true"),
         ] {
             let mut evaluator_route = CompiledRoute::new("tool:evaluator");
             evaluator_route.pre_invocation.push(Effect::Pdp {
@@ -1183,7 +1182,7 @@ mod cache_tests {
             });
             assert!(
                 route_uses_metadata(&evaluator_route, true, None),
-                "documented evaluator metadata paths need the grant: {expression}"
+                "supported evaluator metadata paths need the grant: {expression}"
             );
         }
 

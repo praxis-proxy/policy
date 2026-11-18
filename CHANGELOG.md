@@ -25,6 +25,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive matches must handle the new variant. `RouteDispatchPlan` adds `metadata_entries`; exhaustive struct literals must initialize it or use `..Default::default()`, and exhaustive destructuring must name the field or use `..`. Both types are also reachable through the `praxis_policy` facade's crate re-exports. `RoutePluginEntry::pick_entry` takes a new leading `requested_family` argument; pass the dispatching hook's `HookTypeDef::NAME`. ([#287](https://github.com/praxis-proxy/policy/pull/287))
 - **Breaking for metadata sources:** a plugin reached by APL `fetch(name)` must use `mode: sequential`; `transform` and other modes cannot return the awaited typed record required for publication. ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for route capability grants:** plugin capabilities now contribute
+  only to the request or response handler half where that plugin runs.
+  Predicates on the other half that read `client.*`, `caller.workload.*`, or
+  `this.workload.*` need `read_client` or `read_workload` in the host baseline.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 ### Fixed
 
@@ -179,6 +184,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   request and response halves from compiled predicates, field pipelines,
   restrictions, fetches, and PDP policy dependencies. Custom PDP resolvers can
   report opaque policy dependencies through `PdpResolver::requires_metadata`.
+  `source_references_metadata` and `source_references_metadata_under` are
+  available to resolver implementations that need conservative source scans.
   ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 - **Typed credential locations for the `identity/jwt` plugin.** The plugin can

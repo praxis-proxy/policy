@@ -1005,6 +1005,26 @@ mod eval_tests {
     }
 
     #[test]
+    fn whole_input_uses_conservatively_report_metadata_usage() {
+        for source in [
+            r#"package authz
+whole := input
+deny contains "suspended" if whole.metadata.account.suspended"#,
+            r#"package authz
+deny contains "suspended" if { some k, v in input; k == "metadata"; v.account.suspended }"#,
+            r#"package authz
+deny contains "suspended" if { o := {"i": input}; o.i.metadata.account.suspended }"#,
+        ] {
+            let resolver = resolver(&[source], OnError::Deny);
+
+            assert!(
+                resolver.requires_metadata(&call("data.authz.deny", None)),
+                "whole-input use must conservatively require metadata: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn inline_policy_dependency_reports_metadata_usage() {
         let resolver = resolver(&[], OnError::Deny);
         let dotted = call(
