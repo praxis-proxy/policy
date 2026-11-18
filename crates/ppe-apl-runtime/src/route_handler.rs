@@ -383,7 +383,7 @@ impl AplRouteHandler {
         )
         .await
         {
-            Ok(inv) => Arc::new(inv),
+            Ok(inv) => Arc::new(inv.with_structured_metadata_projection(self.structured_input)),
             Err(e) => {
                 tracing::error!(
                     alarm = "session_store_failure",

@@ -365,13 +365,11 @@ fn render_metadata_disclosure(
     out: &mut String,
     indent: &str,
 ) {
-    let source::SourcePath::Metadata { instance, .. } = path else {
+    let source::SourcePath::Metadata(metadata) = path else {
         return;
     };
-    let plugin = config
-        .plugins
-        .iter()
-        .find(|plugin| plugin.name == *instance);
+    let instance = metadata.instance();
+    let plugin = config.plugins.iter().find(|plugin| plugin.name == instance);
     let kind = plugin.map_or("<undeclared>", |plugin| plugin.kind.as_str());
     let _ = writeln!(
         out,

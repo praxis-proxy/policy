@@ -108,8 +108,8 @@ fn render_one(
     secrets: Option<&SecretStore>,
 ) -> Rendered {
     match &header.source {
-        ResolvedSource::From(path) => match path.resolve(ext, secrets) {
-            Some(value) => match encode(&value, header.encode) {
+        ResolvedSource::From(path) => match path.resolve_borrowed(ext, secrets) {
+            Some(value) => match encode(value.as_ref(), header.encode) {
                 Some(text) => emit(&header.name, text),
                 None => Rendered::Skip,
             },
@@ -124,7 +124,8 @@ fn render_one(
             let mut resolved: Vec<(&String, Value)> = members
                 .iter()
                 .filter_map(|(member, path)| {
-                    path.resolve(ext, secrets).map(|value| (member, value))
+                    path.resolve_borrowed(ext, secrets)
+                        .map(|value| (member, value.into_owned()))
                 })
                 .collect();
             resolved.sort_by_key(|(member, _)| *member);

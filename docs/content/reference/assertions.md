@@ -111,7 +111,11 @@ reuse the request phase's record.
 
 Targets named `Authorization`, `Proxy-Authorization`, `Cookie`, or
 `Set-Cookie`, in any casing, require `allow_credential_target: true` on that
-exact entry. Loading and using one emits a warning. Before injection PPE
+exact entry, whatever source kind supplies the value. Existing subject,
+claim, client, secret, and metadata-backed entries must opt in individually.
+`Proxy-Authorization` is request-only: response assertions cannot target it,
+because it authenticates the next inbound proxy hop. Loading and using an
+allowed credential target emits a warning. Before injection PPE
 removes every case-insensitive occurrence of the target, so a spoofed fallback
 cannot survive when the source is absent.
 

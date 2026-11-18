@@ -523,6 +523,14 @@ fn validate_block(
         }
         targeted.push(lower.clone());
 
+        if direction == Direction::Response && lower == "proxy-authorization" {
+            return Err(format!(
+                "{level}: `{label}` header `{}` cannot be asserted toward the client; \
+                 Proxy-Authorization carries credentials for the next inbound proxy hop",
+                entry.name
+            ));
+        }
+
         if is_credential_target(&lower) {
             if !entry.allow_credential_target {
                 return Err(format!(
@@ -777,6 +785,21 @@ global:
                 "    request:\n      headers:\n        - name: {name}\n          from: subject.id\n          allow_credential_target: true\n"
             )));
         }
+    }
+
+    /// A proxy consumes `Proxy-Authorization`; forwarding one in a response
+    /// would aim credentials at the wrong hop per [RFC 9110 Section 11.7.2].
+    ///
+    /// [RFC 9110 Section 11.7.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-11.7.2
+    #[test]
+    fn rfc_9110_section_11_7_2_refuses_response_proxy_authorization() {
+        let refused = refuse(&global(
+            "    response:\n      headers:\n        - name: Proxy-Authorization\n          from: subject.id\n          allow_credential_target: true\n",
+        ));
+        assert!(
+            refused.contains("cannot be asserted toward the client"),
+            "{refused}"
+        );
     }
 
     #[test]

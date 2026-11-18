@@ -95,6 +95,8 @@ pub struct AcquiredFacts {
     error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fetched_at: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    numbers_validated: bool,
     outcome: MetadataOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<MetadataSource>,
@@ -118,6 +120,7 @@ impl AcquiredFacts {
             cache,
             error_code: None,
             fetched_at: Some(fetched_at),
+            numbers_validated: false,
             outcome: MetadataOutcome::Success,
             source: None,
             stale: false,
@@ -142,10 +145,14 @@ impl AcquiredFacts {
         fetched_at: DateTime<Utc>,
         cache: MetadataCacheDisposition,
     ) -> Result<Self, MetadataInstallError> {
-        let value = serde_json::from_str(json)
+        let _syntax: &serde_json::value::RawValue = serde_json::from_str(json)
             .map_err(|error| MetadataInstallError::InvalidJson(error.to_string()))?;
         validate_json_number_tokens(json)?;
-        Ok(Self::success(value, fetched_at, cache))
+        let value = serde_json::from_str(json)
+            .map_err(|error| MetadataInstallError::InvalidJson(error.to_string()))?;
+        let mut facts = Self::success(value, fetched_at, cache);
+        facts.numbers_validated = true;
+        Ok(facts)
     }
 
     /// Create an error record containing no partial acquired value.
@@ -155,6 +162,7 @@ impl AcquiredFacts {
             cache,
             error_code: Some(error_code.into()),
             fetched_at: None,
+            numbers_validated: false,
             outcome: MetadataOutcome::Error,
             source: None,
             stale: false,
@@ -365,7 +373,7 @@ fn validate_record(facts: &AcquiredFacts) -> Result<(), MetadataInstallError> {
                 && facts.error_code.is_none()
                 && facts.stale == (facts.cache == MetadataCacheDisposition::Stale) =>
         {
-            validate_keys(value, true)
+            validate_keys(value, true, facts.numbers_validated)
         },
         (MetadataOutcome::Error, _)
             if facts.value.is_none()
@@ -390,7 +398,11 @@ fn validate_record(facts: &AcquiredFacts) -> Result<(), MetadataInstallError> {
 }
 
 /// Reject response keys that collide in the derived dotted projection.
-fn validate_keys(value: &Value, root: bool) -> Result<(), MetadataInstallError> {
+fn validate_keys(
+    value: &Value,
+    root: bool,
+    numbers_validated: bool,
+) -> Result<(), MetadataInstallError> {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
@@ -401,17 +413,17 @@ fn validate_keys(value: &Value, root: bool) -> Result<(), MetadataInstallError> 
                 {
                     return Err(MetadataInstallError::InvalidResponseKey(key.clone()));
                 }
-                validate_keys(child, false)?;
+                validate_keys(child, false, numbers_validated)?;
             }
             Ok(())
         },
         Value::Array(items) => {
             for item in items {
-                validate_keys(item, false)?;
+                validate_keys(item, false, numbers_validated)?;
             }
             Ok(())
         },
-        Value::Number(number) => validate_number(number),
+        Value::Number(number) if !numbers_validated => validate_number(number),
         _ => Ok(()),
     }
 }
@@ -538,9 +550,9 @@ fn decimal_is_exact_binary64(text: &str, candidate: f64) -> bool {
 fn normalized_decimal_token(text: &str) -> Option<(String, i32)> {
     let (mantissa, exponent) = text
         .split_once(['e', 'E'])
-        .map_or(Some((text, 0_i32)), |(mantissa, exponent)| {
-            exponent.parse::<i32>().ok().map(|value| (mantissa, value))
-        })?;
+        .map_or((text, None), |(mantissa, exponent)| {
+            (mantissa, Some(exponent))
+        });
     let unsigned = mantissa.strip_prefix(['-', '+']).unwrap_or(mantissa);
     let fractional = unsigned
         .split_once('.')
@@ -556,6 +568,7 @@ fn normalized_decimal_token(text: &str) -> Option<(String, i32)> {
     if digits.is_empty() {
         return Some(("0".to_owned(), 0));
     }
+    let exponent = exponent.map_or(Some(0_i32), |value| value.parse::<i32>().ok())?;
     let mut decimal_exponent = exponent.checked_sub(fractional)?;
     while digits.ends_with('0') {
         digits.pop();
@@ -873,6 +886,13 @@ mod tests {
         assert_eq!(value["exact_one_tenth"], json!(0.1));
         assert_eq!(value["numeric_text"], json!("9007199254740993.0"));
         assert_eq!(value["escaped"], json!("quoted: \"1.0000000000000001\""));
+        facts
+            .validate()
+            .expect("the validated raw numeric representation remains trusted");
+        let mut extensions = Extensions::default();
+        extensions
+            .install_metadata("account", "metadata/http", facts)
+            .expect("raw-number validation survives framework installation");
 
         let malformed = AcquiredFacts::success_json(
             r#"{"ratio": 0.5"#,
@@ -895,6 +915,35 @@ mod tests {
                 "malformed number `{malformed_number}` is invalid JSON"
             );
         }
+    }
+
+    #[test]
+    fn syntactically_valid_out_of_range_numbers_report_the_numeric_domain() {
+        let result = AcquiredFacts::success_json(
+            r#"{"ratio":1e400}"#,
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        );
+
+        assert!(matches!(
+            result,
+            Err(MetadataInstallError::InvalidNumber(token)) if token == "1e400"
+        ));
+    }
+
+    #[test]
+    fn zero_accepts_an_exponent_outside_the_nonzero_normalization_range() {
+        let facts = AcquiredFacts::success_json(
+            r#"{"ratio":0e2147483648}"#,
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        )
+        .expect("every exponent spelling of exact zero is lossless");
+
+        assert_eq!(
+            facts.value().and_then(|value| value.get("ratio")),
+            Some(&json!(0.0))
+        );
     }
 
     #[test]

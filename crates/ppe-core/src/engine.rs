@@ -1995,6 +1995,14 @@ impl PolicyEngine {
         // a cold path rather than a behavior difference.
         policy_config = normalize_and_validate(policy_config, !visitors.is_empty())?;
 
+        for visitor in &visitors {
+            visitor.validate_before_load(&raw).map_err(|e| {
+                Box::new(PluginError::Config {
+                    message: format!("visitor '{}' validate_before_load: {}", visitor.name(), e),
+                })
+            })?;
+        }
+
         // Snapshot the parsed routes + plugin declarations before
         // load_config moves the config — visitors get the typed
         // structures side-by-side with the raw YAML so they don't have

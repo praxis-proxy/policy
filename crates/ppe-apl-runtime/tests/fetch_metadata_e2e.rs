@@ -625,6 +625,9 @@ routes:
 async fn global_catchall_metadata_assertions_require_a_global_fetch() {
     let engine = Arc::new(PolicyEngine::default());
     register_apl(&engine, AplOptions::in_process());
+    engine
+        .load_config_yaml("engine_settings:\n  dispatch: hooks\n")
+        .expect("the initial runtime snapshot loads");
     let error = engine
         .load_config_yaml(
             "
@@ -642,6 +645,11 @@ global:
     let rendered = error.to_string();
     assert!(rendered.contains("global catch-all"), "{rendered}");
     assert!(rendered.contains("fetch(account)"), "{rendered}");
+    assert_eq!(
+        engine.dispatch_mode(),
+        praxis_policy_core::config::DispatchMode::Hooks,
+        "a failed preflight must leave the prior runtime snapshot active"
+    );
 }
 
 #[tokio::test]

@@ -140,7 +140,10 @@ enum Node {
 fn build_tree(bag: &AttributeBag) -> BTreeMap<String, Node> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
-        if matches!(value, AttributeValue::NonScalar) {
+        if key == "metadata"
+            || key.starts_with("metadata.")
+            || matches!(value, AttributeValue::NonScalar)
+        {
             continue;
         }
         let segments: Vec<&str> = key.split('.').collect();
@@ -370,7 +373,10 @@ mod tests {
                 "$outcome": "success"
             }
         }));
-        let ctx = structured_ctx(&AttributeBag::new(), &input);
+        let mut bag = AttributeBag::new();
+        bag.set("metadata.account.stale", true);
+        bag.set("metadata_extra.keep", "bag-owned");
+        let ctx = structured_ctx(&bag, &input);
         assert!(holds("metadata.account.missing == null", &ctx));
         assert!(holds(
             "metadata.account.mixed == ['reader', 2, 'reader']",
@@ -378,6 +384,8 @@ mod tests {
         ));
         assert!(holds("metadata.account.nested.ratio == 0.5", &ctx));
         assert!(holds("metadata.account['$outcome'] == 'success'", &ctx));
+        assert!(holds("!has(metadata.account.stale)", &ctx));
+        assert!(holds("metadata_extra.keep == 'bag-owned'", &ctx));
     }
 
     #[test]

@@ -1329,7 +1329,7 @@ mod tests {
 
     #[test]
     fn decision_warnings_are_serialized_in_the_tamper_evident_block() {
-        let e = OcsfAuditEmitter::new(sink_cfg(json!({ "chain": false }))).unwrap();
+        let e = OcsfAuditEmitter::new(sink_cfg(json!({ "chain": true }))).unwrap();
         let mut log = finalized(Vec::new(), Verdict::Allow);
         log.record_warning(DecisionWarning::new(
             "assertion_credential_target_used",
@@ -1357,6 +1357,27 @@ mod tests {
         assert_eq!(
             ev["unmapped"]["aid.warnings"][0]["fields"]["header"],
             "Set-Cookie"
+        );
+
+        let signing_input = crate::sign::signing_input(&ev);
+        let fingerprint = ev["attestation_list"][0]["fingerprint"]["value"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            crate::sign::fingerprint_value(&signing_input),
+            fingerprint,
+            "the emitted fingerprint must cover the complete warning"
+        );
+
+        let mut without_warning = ev.clone();
+        without_warning["unmapped"]
+            .as_object_mut()
+            .unwrap()
+            .remove("aid.warnings");
+        assert_ne!(
+            crate::sign::fingerprint_value(&crate::sign::signing_input(&without_warning)),
+            fingerprint,
+            "removing the warning must invalidate the emitted fingerprint"
         );
     }
 
