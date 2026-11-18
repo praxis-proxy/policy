@@ -52,6 +52,51 @@ fn alice_bag() -> AttributeBag {
 // Scenarios
 // =====================================================================
 
+#[test]
+fn only_call_placeholders_report_metadata_usage() {
+    let policy_context = CedarDirectResolver::from_policy_text(
+        "permit(principal, action, resource) when { context.metadata.account.active };",
+    )
+    .expect("policy context parses");
+    let metadata_call = PdpCall {
+        dialect: PdpDialect::Cedar,
+        args: serde_yaml::from_str(
+            r#"
+action: 'Action::"read"'
+resource:
+  type: Document
+  id: '${metadata.account.document_id}'
+"#,
+        )
+        .unwrap(),
+    };
+    let literal_metadata_call = PdpCall {
+        dialect: PdpDialect::Cedar,
+        args: serde_yaml::from_str(
+            r#"
+action: 'Action::"read"'
+resource:
+  type: Document
+  id: metadata.account
+"#,
+        )
+        .unwrap(),
+    };
+
+    assert!(
+        !policy_context.requires_metadata(&read_doc_call()),
+        "Cedar policy context is not acquired metadata"
+    );
+    assert!(
+        policy_context.requires_metadata(&metadata_call),
+        "Cedar reads the metadata placeholder value from the attribute bag"
+    );
+    assert!(
+        !policy_context.requires_metadata(&literal_metadata_call),
+        "Cedar leaves the literal metadata.account resource ID unchanged"
+    );
+}
+
 /// One unconditional `permit` policy → request → Allow. Confirms the
 /// happy path end-to-end: parse, build entities, build request,
 /// authorize, translate decision back.

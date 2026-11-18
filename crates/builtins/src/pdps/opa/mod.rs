@@ -66,6 +66,7 @@ pub mod error;
 pub mod factory;
 /// Maps the attribute bag and structured input to the Rego `input` document.
 pub mod input;
+mod metadata;
 /// The `PdpResolver` implementation, including the prepared-engine cache.
 pub mod resolver;
 
