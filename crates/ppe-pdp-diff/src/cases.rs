@@ -83,7 +83,61 @@ pub(crate) fn catalog() -> Vec<Case> {
         null_field(),
         float_field(),
         duplicate_elements(),
+        metadata_scalar(),
+        metadata_string_set(),
     ]
+}
+
+fn with_metadata(mut case: Case, metadata: Value) -> Case {
+    case.structured = case.structured.with_metadata(
+        Arc::new(metadata.clone()),
+        Arc::new(metadata),
+        Arc::new(json!({})),
+    );
+    case
+}
+
+fn metadata_scalar() -> Case {
+    let mut bag = alice();
+    bag.set("metadata.account.active", true);
+    with_metadata(
+        with_apl(
+            case(
+                "metadata-scalar",
+                bag,
+                "context.metadata.account.active",
+                "metadata.account.active",
+                "allow if input.metadata.account.active",
+                true,
+                Expect::AgreeAllow,
+            ),
+            "require(metadata.account.active)",
+        ),
+        json!({"account": {"active": true}}),
+    )
+}
+
+fn metadata_string_set() -> Case {
+    let mut bag = alice();
+    bag.set(
+        "metadata.account.roles",
+        HashSet::from(["reader".to_owned(), "writer".to_owned()]),
+    );
+    with_metadata(
+        with_apl(
+            case(
+                "metadata-string-set",
+                bag,
+                r#"context.metadata.account.roles.contains("reader")"#,
+                r#""reader" in metadata.account.roles"#,
+                r#"allow if "reader" in input.metadata.account.roles"#,
+                true,
+                Expect::AgreeAllow,
+            ),
+            r#"require(metadata.account.roles contains "reader")"#,
+        ),
+        json!({"account": {"roles": ["reader", "writer"]}}),
+    )
 }
 
 fn alice() -> AttributeBag {

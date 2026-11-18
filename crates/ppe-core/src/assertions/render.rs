@@ -59,6 +59,14 @@ pub fn render(
 ) -> Result<Vec<(String, String)>, MissingSource> {
     let mut rendered = Vec::with_capacity(contract.headers.len());
     for header in &contract.headers {
+        if header.allow_credential_target {
+            warn!(
+                alarm = "assertion_credential_target_used",
+                header = %header.name,
+                source = %resolved_source_label(&header.source),
+                "an assertion is replacing a credential-bearing header"
+            );
+        }
         match render_one(header, ext, secrets) {
             Rendered::Value(value) => rendered.push((header.name.clone(), value)),
             Rendered::Skip => {},
@@ -73,6 +81,18 @@ pub fn render(
         }
     }
     Ok(rendered)
+}
+
+fn resolved_source_label(source: &ResolvedSource) -> String {
+    match source {
+        ResolvedSource::From(path) => path.authored(),
+        ResolvedSource::Members(members) => members
+            .iter()
+            .map(|(_, path)| path.authored())
+            .collect::<Vec<_>>()
+            .join(", "),
+        ResolvedSource::Unresolvable => "unresolvable".to_owned(),
+    }
 }
 
 /// What rendering one entry produced.
@@ -237,6 +257,7 @@ mod tests {
             source,
             on_missing: OnMissing::Omit,
             encode: None,
+            allow_credential_target: false,
             declared_in: "global".to_owned(),
             level: AssertionLevel::Global,
             overrode: None,

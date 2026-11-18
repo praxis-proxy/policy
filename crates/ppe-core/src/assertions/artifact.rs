@@ -270,7 +270,7 @@ fn render_scope(
             resolve_assertions_for_route(config, matched, request_entity_type, direction)
         {
             any = true;
-            render_contract(&contract, direction, out);
+            render_contract(config, &contract, direction, out);
         }
     }
     if !any {
@@ -280,7 +280,12 @@ fn render_scope(
 }
 
 /// One direction's accumulated contract.
-fn render_contract(contract: &ResolvedContract, direction: Direction, out: &mut String) {
+fn render_contract(
+    config: &PolicyConfig,
+    contract: &ResolvedContract,
+    direction: Direction,
+    out: &mut String,
+) {
     let _ = writeln!(out, "    {}", direction.label());
     if contract.headers.is_empty() {
         out.push_str("      asserts nothing\n");
@@ -300,6 +305,24 @@ fn render_contract(contract: &ResolvedContract, direction: Direction, out: &mut 
                     capability_label(path.capability()),
                     encoding_note(header),
                 );
+                if let source::SourcePath::Metadata { instance, .. } = path {
+                    let plugin = config
+                        .plugins
+                        .iter()
+                        .find(|plugin| plugin.name == *instance);
+                    let kind = plugin.map_or("<undeclared>", |plugin| plugin.kind.as_str());
+                    let cache = plugin
+                        .and_then(|plugin| plugin.config.as_ref())
+                        .and_then(|config| config.get("cache"))
+                        .map_or("not configured", |_| "configured");
+                    let _ = writeln!(
+                        out,
+                        "        externally acquired; producing plugin {instance} ({kind}); cache eligibility: {cache}"
+                    );
+                }
+                if header.allow_credential_target {
+                    out.push_str("        credential target explicitly allowed on this entry\n");
+                }
             },
             ResolvedSource::Members(members) => {
                 let _ = writeln!(out, "      {:<22}one JSON object {provenance}", header.name);

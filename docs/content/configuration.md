@@ -67,7 +67,7 @@ its scope's set is a load error naming the scope and the set.
 | a `rate_limits:` step | `name`, `config` |
 | an `assertions:` block | `request`, `response` |
 | an `assertions:` direction | `headers`, `strip`, `replace_inherited` |
-| an `assertions:` header entry | `name`, `from`, `members`, `on_missing`, `encode` |
+| an `assertions:` header entry | `name`, `from`, `members`, `on_missing`, `encode`, `allow_credential_target` |
 
 Three scopes require additional constraints.
 

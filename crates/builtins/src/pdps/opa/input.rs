@@ -52,6 +52,12 @@ pub fn bag_to_input(bag: &AttributeBag) -> Value {
 /// object (an empty bag with no structured input yields `{}`).
 pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
     let mut root = bag_to_map(bag);
+    root.insert(
+        "metadata".to_owned(),
+        structured
+            .metadata()
+            .map_or_else(|| Value::Object(Map::new()), |value| Value::clone(value)),
+    );
     if let Some(document) = structured.llm_request() {
         let llm = root
             .entry("llm")
@@ -77,12 +83,20 @@ pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
 /// Build Regorus input without cloning structured JSON into an intermediate tree.
 pub fn build_rego_input(bag: &AttributeBag, structured: &StructuredInput) -> regorus::Value {
     let mut root = bag_to_map(bag);
+    root.remove("metadata");
     let bag_args = root.remove("args");
     let bag_llm = root.remove("llm");
     let mut output = root
         .iter()
         .map(|(key, value)| (regorus::Value::from(key.as_str()), json_to_rego(value)))
         .collect::<BTreeMap<_, _>>();
+    output.insert(
+        regorus::Value::from("metadata"),
+        structured.metadata().map_or_else(
+            || regorus::Value::from(BTreeMap::<regorus::Value, regorus::Value>::new()),
+            |value| json_to_rego(value),
+        ),
+    );
 
     match structured.llm_request() {
         Some(document) => {
@@ -309,6 +323,14 @@ mod tests {
         StructuredInput::new(None, Some(Arc::new(args)))
     }
 
+    fn with_metadata(metadata: Value) -> StructuredInput {
+        StructuredInput::default().with_metadata(
+            Arc::new(metadata),
+            Arc::new(json!({})),
+            Arc::new(json!({})),
+        )
+    }
+
     /// Read `input` back out of regorus as JSON after the engine has parsed it.
     fn rego_input_roundtrip(bag: &AttributeBag, structured: &StructuredInput) -> Value {
         let mut engine = Engine::new();
@@ -327,6 +349,38 @@ mod tests {
         bag.set("subject.type", "user");
         assert!(rego_eval("input.subject.id == \"alice\"", &bag));
         assert!(rego_eval("input.subject.type == \"user\"", &bag));
+    }
+
+    #[test]
+    fn structured_metadata_preserves_json_shape_and_empty_absence_semantics() {
+        let input = with_metadata(json!({
+            "account": {
+                "missing": null,
+                "mixed": ["reader", 2, "reader"],
+                "nested": {"ratio": 0.5},
+                "$outcome": "success"
+            }
+        }));
+        let bag = AttributeBag::new();
+        assert!(rego_eval_structured(
+            "input.metadata.account.missing == null",
+            &bag,
+            &input
+        ));
+        assert!(rego_eval_structured(
+            "input.metadata.account.mixed == [\"reader\", 2, \"reader\"]",
+            &bag,
+            &input
+        ));
+        assert!(rego_eval_structured(
+            "input.metadata.account[\"$outcome\"] == \"success\"",
+            &bag,
+            &input
+        ));
+        assert_eq!(
+            build_input(&bag, &StructuredInput::default())["metadata"],
+            json!({})
+        );
     }
 
     #[test]
@@ -395,9 +449,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_bag_is_empty_object() {
+    fn empty_bag_still_registers_empty_metadata() {
         let bag = AttributeBag::new();
-        assert_eq!(bag_to_input(&bag), serde_json::json!({}));
+        assert_eq!(bag_to_input(&bag), serde_json::json!({"metadata": {}}));
     }
 
     #[test]

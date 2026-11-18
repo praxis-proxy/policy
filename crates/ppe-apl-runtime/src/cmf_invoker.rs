@@ -595,7 +595,14 @@ where
         if let Some(metadata) = updated.metadata.as_deref() {
             praxis_policy_apl_cmf::extract_metadata(metadata, &mut attributes);
         }
-        Ok(MetadataFetchOutcome { attributes })
+        let (metadata, cedar_metadata, metadata_provenance) =
+            praxis_policy_apl_cmf::project_structured_metadata(updated.metadata.as_deref());
+        Ok(MetadataFetchOutcome {
+            attributes,
+            metadata,
+            cedar_metadata,
+            metadata_provenance,
+        })
     }
 }
 
