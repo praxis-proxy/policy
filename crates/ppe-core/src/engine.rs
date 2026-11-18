@@ -238,7 +238,7 @@ fn is_glob_selector(selector: &config::StringOrList) -> bool {
 fn deny_missing_assertion(
     missing: crate::assertions::MissingSource,
     direction: crate::assertions::Direction,
-    mut result: PipelineResult,
+    result: PipelineResult,
 ) -> PipelineResult {
     let mut details = std::collections::HashMap::new();
     details.insert(
@@ -266,13 +266,38 @@ fn deny_missing_assertion(
     .with_details(details)
     .with_proto_error_code(403);
 
+    deny_allowed(violation, result)
+}
+
+/// One dispatch's outcome before [`PolicyEngine::finish`] settles it.
+struct Dispatched<'snapshot> {
+    result: PipelineResult,
+    tasks: BackgroundTasks,
+
+    /// The route the request matched, which the `assertions:` contract
+    /// resolves from.
+    matched: Option<config::MatchedRoute<'snapshot>>,
+
+    /// The payload for the audit emit when `result` carries none.
+    refused: Option<Box<dyn PluginPayload>>,
+}
+
+/// Turn a pipeline result the executor allowed into a denial with `violation`,
+/// for a check the engine runs after the pipeline.
+///
+/// Keeps what the pipeline recorded: its extensions, context table, errors,
+/// metadata, and the steps in its decision log. `finish` sets the verdict
+/// afterwards, so the log must carry those steps through. The payload is
+/// dropped; a caller that reports it takes it out first.
+fn deny_allowed(
+    violation: crate::error::PluginViolation,
+    mut result: PipelineResult,
+) -> PipelineResult {
     let extensions = result.modified_extensions.take().unwrap_or_default();
     let context_table = std::mem::take(&mut result.context_table);
     let mut denied = PipelineResult::denied(violation, extensions, context_table);
     denied.errors = std::mem::take(&mut result.errors);
     denied.metadata = result.metadata.take();
-    // Preserve the pipeline steps that explain this denial. `finish` sets the
-    // verdict after assertions, so the log must carry those steps through.
     denied.decision_log = std::mem::take(&mut result.decision_log);
     denied
 }
@@ -2853,27 +2878,142 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        self.dispatch(hook_name, payload, extensions, context_table)
-            .await
+        self.dispatch(
+            &self.load_runtime(),
+            hook_name,
+            payload,
+            extensions,
+            context_table,
+        )
+        .await
     }
 
     /// The dispatch behind [`invoke_by_name`](Self::invoke_by_name),
     /// [`invoke`](Self::invoke) and [`invoke_named`](Self::invoke_named):
-    /// resolve the route's entries for `hook_name`, run them, and settle the
-    /// result through [`finish`](Self::finish) on every return path.
+    /// check revocation, resolve the route's entries for `hook_name` and run
+    /// them, check revocation again on an allow, and settle the result through
+    /// [`finish`](Self::finish).
+    ///
+    /// `snapshot` is loaded once by the caller and held for the whole call, so
+    /// a concurrent `register` or `load_config` swapping in a new snapshot
+    /// doesn't change its view mid-pipeline. The revocation checks dispatch on the
+    /// same one, so the checkers come from the configuration the request's
+    /// route was matched against.
+    ///
+    /// Revocation is checked here rather than in a route's policy handler
+    /// because only the engine holds the host's unfiltered extensions. Each
+    /// checker still sees them through its own capabilities.
     async fn dispatch(
         &self,
+        snapshot: &RuntimeSnapshot,
         hook_name: &str,
         payload: Box<dyn PluginPayload>,
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        // Single atomic load — own the snapshot for the rest of the call so
-        // a concurrent register/load_config swapping in a new snapshot doesn't
-        // change our view mid-pipeline.
-        let snapshot = self.load_runtime();
         let context_table =
-            self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
+            self.track_rate_limit_stage(snapshot, hook_name, &extensions, context_table);
+        // Gated on the snapshot, not left to the revocation dispatch to find
+        // nothing: that dispatch settles through `finish` like any other and
+        // would emit an audit record per check point on every request.
+        let (check_before, check_after) = if snapshot.declares_revocation {
+            crate::revocation::check_points(hook_name)
+        } else {
+            (None, None)
+        };
+
+        // Before the route's entries are resolved, so a revoked identity is
+        // refused whether or not the route has a plugin on this hook.
+        if let Some(check_point) = check_before
+            && let Some(violation) = self
+                .check_revocation(snapshot, &extensions, check_point)
+                .await
+        {
+            let matched = resolve_contract_route(snapshot, &extensions);
+            return (
+                self.finish(
+                    snapshot,
+                    Some(hook_name),
+                    matched.as_ref(),
+                    Some(payload),
+                    PipelineResult::denied(
+                        violation,
+                        extensions,
+                        context_table.unwrap_or_default(),
+                    ),
+                )
+                .await,
+                BackgroundTasks::empty(),
+            );
+        }
+
+        let Dispatched {
+            mut result,
+            tasks,
+            matched,
+            mut refused,
+        } = self
+            .route_and_execute(snapshot, hook_name, payload, extensions, context_table)
+            .await;
+
+        // On the extensions the pipeline finished with, so a check after a
+        // delegation step sees the identities that step left behind.
+        if let Some(check_point) = check_after
+            && !result.is_denied()
+            && let Some(extensions) = result.modified_extensions.as_ref()
+            && let Some(violation) = self
+                .check_revocation(snapshot, extensions, check_point)
+                .await
+        {
+            refused = result.modified_payload.take();
+            result = deny_allowed(violation, result);
+        }
+
+        (
+            self.finish(snapshot, Some(hook_name), matched.as_ref(), refused, result)
+                .await,
+            tasks,
+        )
+    }
+
+    /// Check whether the identities `extensions` carries still hold authority
+    /// on the request's route, at `check_point`: `None` to pass, or the
+    /// violation to deny with.
+    ///
+    /// Dispatches the revocation hook on `snapshot`, the snapshot of the
+    /// dispatch being checked, so a reload landing between the two cannot
+    /// swap in another configuration's checkers. The route is resolved from
+    /// `extensions` exactly as the checked dispatch resolved it.
+    async fn check_revocation(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        extensions: &Extensions,
+        check_point: crate::revocation::CheckPoint,
+    ) -> Option<crate::error::PluginViolation> {
+        let asked = crate::revocation::question(extensions, check_point)?;
+        // Boxed because the dispatch this enters is the one that called here.
+        let (result, _background) = Box::pin(self.dispatch(
+            snapshot,
+            crate::revocation::HOOK_REVOCATION_CHECK,
+            Box::new(asked.clone()),
+            extensions.clone(),
+            None,
+        ))
+        .await;
+        crate::revocation::verdict(&asked, result)
+    }
+
+    /// Resolve the route's entries for `hook_name` and run them, without
+    /// settling the result: [`dispatch`](Self::dispatch) still checks it and
+    /// passes it through [`finish`](Self::finish).
+    async fn route_and_execute<'snapshot>(
+        &self,
+        snapshot: &'snapshot RuntimeSnapshot,
+        hook_name: &str,
+        payload: Box<dyn PluginPayload>,
+        extensions: Extensions,
+        context_table: Option<PluginContextTable>,
+    ) -> Dispatched<'snapshot> {
         let hook_type = HookType::new(hook_name);
         let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
         // No registered entries AND no route annotations → nothing to
@@ -2890,63 +3030,47 @@ impl PolicyEngine {
             // Route filtering has not run, so the route is resolved here: a
             // contract written on a route holds whether or not this hook has a
             // plugin on it.
-            let matched = resolve_contract_route(&snapshot, &extensions);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(hook_name),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        payload,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
+            return Dispatched {
+                matched: resolve_contract_route(snapshot, &extensions),
+                result: PipelineResult::allowed_with(
+                    payload,
+                    extensions,
+                    context_table.unwrap_or_default(),
+                ),
+                tasks: BackgroundTasks::empty(),
+                refused: None,
+            };
         }
 
         let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, hook_entries, &extensions, hook_name)
+            .filter_entries_by_route(snapshot, hook_entries, &extensions, hook_name)
             .await
         {
             Ok(resolved) => resolved,
             Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(hook_name),
-                        None,
-                        Some(payload),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
-            },
-        };
-        if entries.is_empty() {
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(hook_name),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        payload,
+                return Dispatched {
+                    result: PipelineResult::denied(
+                        cause.violation(),
                         extensions,
                         context_table.unwrap_or_default(),
                     ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
+                    tasks: BackgroundTasks::empty(),
+                    matched: None,
+                    refused: Some(payload),
+                };
+            },
+        };
+        if entries.is_empty() {
+            return Dispatched {
+                result: PipelineResult::allowed_with(
+                    payload,
+                    extensions,
+                    context_table.unwrap_or_default(),
+                ),
+                tasks: BackgroundTasks::empty(),
+                matched,
+                refused: None,
+            };
         }
 
         let (result, tasks, refused) = {
@@ -2964,17 +3088,12 @@ impl PolicyEngine {
                 )
                 .await
         };
-        (
-            self.finish(
-                &snapshot,
-                Some(hook_name),
-                matched.as_ref(),
-                refused,
-                result,
-            )
-            .await,
+        Dispatched {
+            result,
             tasks,
-        )
+            matched,
+            refused,
+        }
     }
 
     /// Invoke a typed hook.
@@ -3008,8 +3127,14 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        self.dispatch(H::NAME, Box::new(payload), extensions, context_table)
-            .await
+        self.dispatch(
+            &self.load_runtime(),
+            H::NAME,
+            Box::new(payload),
+            extensions,
+            context_table,
+        )
+        .await
     }
 
     /// Invoke a typed hook by explicit name.
@@ -3046,8 +3171,14 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        self.dispatch(hook_name, Box::new(payload), extensions, context_table)
-            .await
+        self.dispatch(
+            &self.load_runtime(),
+            hook_name,
+            Box::new(payload),
+            extensions,
+            context_table,
+        )
+        .await
     }
 
     /// Find every (`hook_name`, `HookEntry`) pair belonging to the named

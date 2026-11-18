@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// The engine's revocation check: run the route's checkers through the
-// ordinary hook pipeline and turn their answer into pass or deny.
+// The engine's revocation check: where it runs, what it asks a route's
+// checkers, and how their answer becomes pass or deny. The engine dispatches
+// the question itself, on the snapshot of the dispatch being checked.
 //
 // The pipeline is sequential and chained, so the first checker to deny, in
 // list order, stops it, and on allow the final payload's `vouched` holds every
@@ -12,12 +13,12 @@
 
 use tracing::warn;
 
-use super::hook::{HOOK_REVOCATION_CHECK, RevocationHook};
 use super::payload::{CheckPoint, IdentitySlot, RevocationCheck};
 use super::{REVOCATION_UNAVAILABLE_CODE, REVOCATION_UNAVAILABLE_REASON, REVOKED_CODE};
-use crate::engine::PolicyEngine;
 use crate::error::PluginViolation;
+use crate::executor::PipelineResult;
 use crate::extensions::Extensions;
+use crate::hooks::HookPhase;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -28,57 +29,86 @@ use crate::extensions::Extensions;
 /// underlying failure, so they are replaced before reaching the caller.
 const EXECUTION_FAILURE_CODES: [&str; 3] = ["plugin_error", "plugin_timeout", "plugin_panic"];
 
-impl PolicyEngine {
-    /// Check whether the identities `extensions` carries still hold authority
-    /// on this route, at `check_point`.
-    ///
-    /// Returns `None` to pass and the violation to deny with otherwise. Passes
-    /// without dispatching when the request resolved no identity or the route
-    /// runs no checker. Denies when a checker denies, when a checker fails
-    /// ([`REVOCATION_UNAVAILABLE_CODE`], with a fixed reason), and when a
-    /// populated identity slot was vouched for by no checker.
-    ///
-    /// [`REVOCATION_UNAVAILABLE_CODE`]: super::REVOCATION_UNAVAILABLE_CODE
-    pub async fn check_revocation(
-        &self,
-        extensions: &Extensions,
-        check_point: CheckPoint,
-        route_key: &str,
-    ) -> Option<PluginViolation> {
-        let slots = IdentitySlot::populated(extensions.security.as_deref());
-        if slots.is_empty() {
-            return None;
-        }
+// -----------------------------------------------------------------------------
+// Check Points
+// -----------------------------------------------------------------------------
 
-        let check = RevocationCheck::new(check_point, route_key, slots.iter().copied());
-        let (result, _background) = self
-            .invoke_named::<RevocationHook>(HOOK_REVOCATION_CHECK, check, extensions.clone(), None)
-            .await;
-
-        if let Some(violation) = result.violation {
-            return Some(caller_facing(violation, check_point, route_key));
-        }
-        if result.decision_log.steps().is_empty() {
-            return None;
-        }
-
-        let vouched = RevocationCheck::from_pipeline_result(&result)
-            .map(RevocationCheck::vouched)
-            .cloned()
-            .unwrap_or_default();
-        let unclaimed: Vec<IdentitySlot> = slots.difference(&vouched).copied().collect();
-        if unclaimed.is_empty() {
-            return None;
-        }
-        warn!(
-            route = route_key,
-            check_point = ?check_point,
-            slots = ?unclaimed,
-            "no revocation checker vouched for these identities, so the request is denied; \
-             the route needs a checker that covers how they authenticate, or an exclusion",
-        );
-        Some(unavailable())
+/// Where the engine checks revocation around one dispatch of `hook_name`:
+/// before its pipeline runs, and after the pipeline allowed.
+///
+/// Keyed on the hook's registered phase, so no hook is named here. A `Pre`
+/// hook is the request on its way to the upstream and is checked on both
+/// sides of its pipeline. A `Post` hook is the response on its way back and
+/// is checked once it allowed. Any other hook (identity resolution, rate
+/// limits, delegation, the revocation hook itself) is not a wire boundary and
+/// is not checked.
+pub(crate) fn check_points(hook_name: &str) -> (Option<CheckPoint>, Option<CheckPoint>) {
+    match crate::hooks::lookup_hook_metadata(hook_name).map(|meta| meta.phase) {
+        Some(HookPhase::Pre) => (
+            Some(CheckPoint::AfterAuthentication),
+            Some(CheckPoint::BeforeDispatch),
+        ),
+        Some(HookPhase::Post) => (None, Some(CheckPoint::BeforeRelease)),
+        Some(HookPhase::Unphased) | None => (None, None),
     }
+}
+
+// -----------------------------------------------------------------------------
+// Question and Verdict
+// -----------------------------------------------------------------------------
+
+/// The question to put to a route's checkers at `check_point`: every identity
+/// slot `extensions` has populated. `None` when the request resolved no
+/// identity, which passes without asking.
+pub(crate) fn question(
+    extensions: &Extensions,
+    check_point: CheckPoint,
+) -> Option<RevocationCheck> {
+    let slots = IdentitySlot::populated(extensions.security.as_deref());
+    if slots.is_empty() {
+        return None;
+    }
+    Some(RevocationCheck::new(check_point, slots))
+}
+
+/// Turn the checkers' answer to `asked` into pass (`None`) or the violation to
+/// deny with.
+///
+/// Passes when no checker ran, because the route runs none. Denies when a
+/// checker denies, when a checker fails ([`REVOCATION_UNAVAILABLE_CODE`], with
+/// a fixed reason), and when a slot `asked` names was vouched for by no
+/// checker.
+pub(crate) fn verdict(asked: &RevocationCheck, result: PipelineResult) -> Option<PluginViolation> {
+    let check_point = asked.check_point();
+    let no_checker_ran = result.decision_log.steps().is_empty();
+    if let Some(violation) = result.violation {
+        // No checker ran, so the engine refused the dispatch itself, for a
+        // route it could not resolve or a checker missing from the snapshot.
+        // That violation is already the caller's.
+        if no_checker_ran {
+            return Some(violation);
+        }
+        return Some(caller_facing(violation, check_point));
+    }
+    if no_checker_ran {
+        return None;
+    }
+
+    let vouched = RevocationCheck::from_pipeline_result(&result)
+        .map(RevocationCheck::vouched)
+        .cloned()
+        .unwrap_or_default();
+    let unclaimed: Vec<IdentitySlot> = asked.slots().difference(&vouched).copied().collect();
+    if unclaimed.is_empty() {
+        return None;
+    }
+    warn!(
+        check_point = ?check_point,
+        slots = ?unclaimed,
+        "no revocation checker vouched for these identities, so the request is denied; the \
+         route needs a checker that covers how they authenticate, or an exclusion",
+    );
+    Some(unavailable())
 }
 
 // -----------------------------------------------------------------------------
@@ -91,14 +121,9 @@ impl PolicyEngine {
 /// [`REVOCATION_UNAVAILABLE_CODE`] with the fixed reason, logged with what the
 /// executor reported. A deny under any code but the two revocation codes still
 /// denies, with a warning.
-fn caller_facing(
-    violation: PluginViolation,
-    check_point: CheckPoint,
-    route_key: &str,
-) -> PluginViolation {
+fn caller_facing(violation: PluginViolation, check_point: CheckPoint) -> PluginViolation {
     if EXECUTION_FAILURE_CODES.contains(&violation.code.as_str()) {
         warn!(
-            route = route_key,
             check_point = ?check_point,
             plugin = violation.plugin_name.as_deref().unwrap_or_default(),
             code = %violation.code,
@@ -111,7 +136,7 @@ fn caller_facing(
     }
     if violation.code != REVOKED_CODE && violation.code != REVOCATION_UNAVAILABLE_CODE {
         warn!(
-            route = route_key,
+            check_point = ?check_point,
             plugin = violation.plugin_name.as_deref().unwrap_or_default(),
             code = %violation.code,
             "a revocation checker denied with a code other than auth.revoked or \
@@ -142,7 +167,7 @@ mod tests {
             let mut failed = PluginViolation::new(code, "Plugin 'kc' failed: https://kc.internal");
             failed.plugin_name = Some("kc".to_owned());
 
-            let shown = caller_facing(failed, CheckPoint::AfterAuthentication, "tool:t");
+            let shown = caller_facing(failed, CheckPoint::AfterAuthentication);
 
             assert_eq!(shown.code, REVOCATION_UNAVAILABLE_CODE, "{code}");
             assert_eq!(shown.reason, REVOCATION_UNAVAILABLE_REASON, "{code}");
@@ -155,7 +180,7 @@ mod tests {
         for code in [REVOKED_CODE, REVOCATION_UNAVAILABLE_CODE, "custom.blocked"] {
             let denied = PluginViolation::new(code, "reason");
 
-            let shown = caller_facing(denied.clone(), CheckPoint::BeforeDispatch, "tool:t");
+            let shown = caller_facing(denied.clone(), CheckPoint::BeforeDispatch);
 
             assert_eq!(shown, denied, "{code} denies as the checker wrote it");
         }
@@ -312,6 +337,145 @@ mod tests {
         assert_eq!(denied.code, REVOCATION_UNAVAILABLE_CODE, "missing checker");
     }
 
+    /// Every built-in hook, and where revocation is checked around it. A hook
+    /// added to the metadata tables fails this until someone decides whether
+    /// it is a request, a response, or internal to the engine, because an
+    /// unphased boundary would let a revoked identity through unchecked.
+    #[test]
+    fn every_built_in_hook_has_its_check_points_decided() {
+        const REQUEST: (Option<CheckPoint>, Option<CheckPoint>) = (
+            Some(CheckPoint::AfterAuthentication),
+            Some(CheckPoint::BeforeDispatch),
+        );
+        const RESPONSE: (Option<CheckPoint>, Option<CheckPoint>) =
+            (None, Some(CheckPoint::BeforeRelease));
+        const INTERNAL: (Option<CheckPoint>, Option<CheckPoint>) = (None, None);
+
+        let decided: Vec<_> = BUILTIN_HOOK_METADATA
+            .iter()
+            .map(|(name, _)| (*name, check_points(name)))
+            .collect();
+
+        assert_eq!(
+            decided,
+            vec![
+                ("cmf.tool_pre_invoke", REQUEST),
+                ("cmf.tool_post_invoke", RESPONSE),
+                ("cmf.llm_input", REQUEST),
+                ("cmf.llm_output", RESPONSE),
+                ("cmf.prompt_pre_invoke", REQUEST),
+                ("cmf.prompt_post_invoke", RESPONSE),
+                ("cmf.resource_pre_fetch", REQUEST),
+                ("cmf.resource_post_fetch", RESPONSE),
+                ("http.request", REQUEST),
+                ("http.response", RESPONSE),
+                ("identity.resolve", INTERNAL),
+                ("token.delegate", INTERNAL),
+                ("elicit", INTERNAL),
+                ("metadata.fetch", INTERNAL),
+                ("ratelimit.pre_identity", INTERNAL),
+                ("ratelimit.post_identity", INTERNAL),
+                ("revocation.check", INTERNAL),
+            ],
+            "the revocation check points of the built-in hooks changed"
+        );
+        assert_eq!(
+            check_points("no.such.hook"),
+            INTERNAL,
+            "a hook with no metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revoked_request_is_denied_on_a_hook_with_no_plugin() {
+        let (engine, calls) = engine(&format!(
+            "{}global:\n  revocation: [kill-list]\nroutes:\n  - tool: t\n",
+            checker("kill-list", "{ deny: auth.revoked }")
+        ))
+        .await;
+
+        let result = invoke(&engine, HOOK_CMF_TOOL_PRE_INVOKE).await;
+
+        assert_eq!(
+            result.violation.map(|v| v.code).as_deref(),
+            Some(REVOKED_CODE),
+            "the route has no plugin on the hook, and the request is still refused"
+        );
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            1,
+            "refused before the pipeline"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowed_request_is_checked_before_and_after_its_pipeline() {
+        let (engine, calls) = engine(&format!(
+            "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
+            checker("kc", "{ vouch: [subject, client] }")
+        ))
+        .await;
+
+        let result = invoke(&engine, HOOK_CMF_TOOL_PRE_INVOKE).await;
+
+        assert!(!result.is_denied(), "both slots vouched at both points");
+        assert_eq!(calls.load(Ordering::Acquire), 2, "two check points");
+    }
+
+    #[tokio::test]
+    async fn a_revocation_during_the_pipeline_is_caught_before_dispatch() {
+        let (engine, calls) = engine(&format!(
+            "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
+            checker("kc", "{ vouch: [subject, client], revoke_from_call: 2 }")
+        ))
+        .await;
+
+        let result = invoke(&engine, HOOK_CMF_TOOL_PRE_INVOKE).await;
+
+        assert_eq!(
+            result.violation.map(|v| v.code).as_deref(),
+            Some(REVOKED_CODE),
+            "the pipeline allowed, and the check after it denied"
+        );
+        assert!(
+            result.modified_payload.is_none(),
+            "a denial carries no payload"
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 2, "two check points");
+    }
+
+    #[tokio::test]
+    async fn a_response_is_checked_once_before_release() {
+        let (engine, calls) = engine(&format!(
+            "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
+            checker("kc", "{ vouch: [subject, client], revoke_from_call: 1 }")
+        ))
+        .await;
+
+        let result = invoke(&engine, HOOK_CMF_TOOL_POST_INVOKE).await;
+
+        assert_eq!(
+            result.violation.map(|v| v.code).as_deref(),
+            Some(REVOKED_CODE),
+            "the response is withheld"
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1, "one check point");
+    }
+
+    #[tokio::test]
+    async fn an_unphased_hook_is_never_checked() {
+        let (engine, calls) = engine(&format!(
+            "{}global:\n  revocation: [kill-list]\nroutes:\n  - tool: t\n",
+            checker("kill-list", "{ deny: auth.revoked }")
+        ))
+        .await;
+
+        let result = invoke(&engine, HOOK_IDENTITY_RESOLVE).await;
+
+        assert!(!result.is_denied(), "identity resolution is not a boundary");
+        assert_eq!(calls.load(Ordering::Acquire), 0, "never asked");
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -321,15 +485,20 @@ mod tests {
 
     use async_trait::async_trait;
 
+    use crate::cmf::constants::{HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE};
     use crate::context::PluginContext;
+    use crate::engine::PolicyEngine;
     use crate::error::PluginError;
     use crate::extensions::MetaExtension;
     use crate::extensions::security::{ClientExtension, SecurityExtension, SubjectExtension};
     use crate::factory::{PluginFactory, PluginInstance};
+    use crate::hooks::metadata::BUILTIN_HOOK_METADATA;
     use crate::hooks::payload::PluginPayload;
     use crate::hooks::trait_def::{HookTypeDef as _, PluginResult};
+    use crate::identity::HOOK_IDENTITY_RESOLVE;
     use crate::plugin::{Plugin, PluginConfig};
     use crate::registry::AnyHookHandler;
+    use crate::revocation::{HOOK_REVOCATION_CHECK, RevocationHook};
 
     const KIND: &str = "test/checker";
 
@@ -371,10 +540,27 @@ mod tests {
             .collect()
     }
 
+    /// Run one check point, the one a response gets, for `extensions`.
     async fn check(engine: &PolicyEngine, extensions: Extensions) -> Option<PluginViolation> {
-        engine
-            .check_revocation(&extensions, CheckPoint::AfterAuthentication, "tool:t")
+        dispatch(engine, HOOK_CMF_TOOL_POST_INVOKE, extensions)
             .await
+            .violation
+    }
+
+    /// Dispatch `hook` for a request on `tool:t` carrying a subject and a
+    /// client.
+    async fn invoke(engine: &PolicyEngine, hook: &str) -> PipelineResult {
+        dispatch(engine, hook, both_slots()).await
+    }
+
+    /// Dispatch `hook` with `extensions`, as a host would. No plugin reads the
+    /// payload, so any will do.
+    async fn dispatch(engine: &PolicyEngine, hook: &str, extensions: Extensions) -> PipelineResult {
+        let payload = RevocationCheck::new(CheckPoint::AfterAuthentication, []);
+        engine
+            .invoke_by_name(hook, Box::new(payload), extensions, None)
+            .await
+            .0
     }
 
     /// A request on `tool:t` carrying a subject and a client.
@@ -435,7 +621,19 @@ mod tests {
             _ctx: &mut PluginContext,
         ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
             let checker = &self.0;
-            checker.calls.fetch_add(1, Ordering::AcqRel);
+            let call = checker.calls.fetch_add(1, Ordering::AcqRel) + 1;
+            let revoked_by_now = checker
+                .setting("revoke_from_call")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|from| call as u64 >= from);
+            if revoked_by_now {
+                return Ok(crate::executor::erase_result(
+                    PluginResult::<RevocationCheck>::deny(PluginViolation::new(
+                        REVOKED_CODE,
+                        "revoked",
+                    )),
+                ));
+            }
             if checker.setting("fail") == Some(&serde_json::Value::Bool(true)) {
                 return Err(Box::new(PluginError::Config {
                     message: "introspection endpoint https://kc.internal unreachable".to_owned(),

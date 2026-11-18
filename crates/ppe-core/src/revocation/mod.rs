@@ -14,6 +14,7 @@ pub mod hook;
 /// The request a checker answers and the slots it vouched for.
 pub mod payload;
 
+pub(crate) use check::{check_points, question, verdict};
 pub use hook::{HOOK_REVOCATION_CHECK, RevocationHook};
 pub use payload::{CheckPoint, IdentitySlot, RevocationCheck};
 

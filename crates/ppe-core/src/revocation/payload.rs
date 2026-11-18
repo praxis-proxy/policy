@@ -78,32 +78,37 @@ impl IdentitySlot {
 }
 
 /// Where in a request the engine is checking revocation.
+///
+/// The engine checks at the hooks whose registered phase is `Pre` or `Post`:
+/// the request on its way to the upstream and the response on its way back.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckPoint {
-    /// After caller authentication and session load, before policy runs.
+    /// Before a request-phase hook runs its pipeline. Authentication has
+    /// resolved the identities; no policy has run on them yet.
     AfterAuthentication,
 
-    /// After policy allowed the call, immediately before dispatch. Catches a
-    /// revocation that landed while a policy step or approval was running.
+    /// After a request-phase pipeline allowed the call, before it goes to the
+    /// upstream. Catches a revocation that landed while a policy step ran.
     BeforeDispatch,
 
-    /// After the response phase allowed the result, before it is released.
+    /// After a response-phase pipeline allowed the result, before it is
+    /// released to the caller.
     BeforeRelease,
 }
 
 /// The question the engine puts to one revocation checker, and its answer.
 ///
-/// The engine sets the slots, check point and route. A checker returns a
-/// clone with [`Self::vouch`] applied to each slot whose credential it
-/// verified with its issuer, through `PluginResult::modify_payload`, or
-/// denies with a violation.
+/// The engine sets the slots and check point. A checker returns a clone with
+/// [`Self::vouch`] applied to each slot whose credential it verified with its
+/// issuer, through `PluginResult::modify_payload`, or denies with a
+/// violation. The checker is resolved per route and reads its route's
+/// `config:`, so the route is not repeated here.
 ///
 /// ```
 /// use praxis_policy_core::revocation::{CheckPoint, IdentitySlot, RevocationCheck};
 ///
 /// let check = RevocationCheck::new(
 ///     CheckPoint::AfterAuthentication,
-///     "tool:transfer_funds",
 ///     [IdentitySlot::Subject, IdentitySlot::Client],
 /// );
 ///
@@ -115,23 +120,16 @@ pub enum CheckPoint {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RevocationCheck {
     check_point: CheckPoint,
-    route_key: String,
     slots: BTreeSet<IdentitySlot>,
     vouched: BTreeSet<IdentitySlot>,
 }
 
 impl RevocationCheck {
-    /// A check of `slots` at `check_point` on the route `route_key`, with
-    /// nothing vouched for yet.
+    /// A check of `slots` at `check_point`, with nothing vouched for yet.
     #[must_use]
-    pub fn new(
-        check_point: CheckPoint,
-        route_key: impl Into<String>,
-        slots: impl IntoIterator<Item = IdentitySlot>,
-    ) -> Self {
+    pub fn new(check_point: CheckPoint, slots: impl IntoIterator<Item = IdentitySlot>) -> Self {
         Self {
             check_point,
-            route_key: route_key.into(),
             slots: slots.into_iter().collect(),
             vouched: BTreeSet::new(),
         }
@@ -153,12 +151,6 @@ impl RevocationCheck {
             .modified_payload
             .as_ref()
             .and_then(|payload| payload.as_any().downcast_ref::<Self>())
-    }
-
-    /// The route being checked, for logs.
-    #[must_use]
-    pub fn route_key(&self) -> &str {
-        &self.route_key
     }
 
     /// The populated slots the checker is asked about.
@@ -266,11 +258,7 @@ mod tests {
 
     #[test]
     fn a_new_check_has_nothing_vouched() {
-        let check = RevocationCheck::new(
-            CheckPoint::BeforeDispatch,
-            "tool:search",
-            [IdentitySlot::Subject],
-        );
+        let check = RevocationCheck::new(CheckPoint::BeforeDispatch, [IdentitySlot::Subject]);
 
         assert!(
             check.vouched().is_empty(),
@@ -281,7 +269,6 @@ mod tests {
             CheckPoint::BeforeDispatch,
             "check point"
         );
-        assert_eq!(check.route_key(), "tool:search", "route key");
         assert_eq!(
             check.slots().iter().copied().collect::<Vec<_>>(),
             vec![IdentitySlot::Subject],
@@ -291,12 +278,8 @@ mod tests {
 
     #[test]
     fn vouching_an_unrequested_slot_is_ignored() {
-        let check = RevocationCheck::new(
-            CheckPoint::AfterAuthentication,
-            "tool:search",
-            [IdentitySlot::Client],
-        )
-        .vouch(IdentitySlot::Subject);
+        let check = RevocationCheck::new(CheckPoint::AfterAuthentication, [IdentitySlot::Client])
+            .vouch(IdentitySlot::Subject);
 
         assert!(
             check.vouched().is_empty(),
@@ -306,12 +289,8 @@ mod tests {
 
     #[test]
     fn the_answer_is_read_back_from_a_pipeline_result() {
-        let answered = RevocationCheck::new(
-            CheckPoint::BeforeRelease,
-            "tool:search",
-            [IdentitySlot::Client],
-        )
-        .vouch(IdentitySlot::Client);
+        let answered = RevocationCheck::new(CheckPoint::BeforeRelease, [IdentitySlot::Client])
+            .vouch(IdentitySlot::Client);
         let allowed = PipelineResult::allowed_with(
             Box::new(answered.clone()),
             Extensions::default(),
