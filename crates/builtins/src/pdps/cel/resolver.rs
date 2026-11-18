@@ -447,7 +447,7 @@ impl PdpResolver for CelResolver {
         else {
             return true;
         };
-        self.get_or_compile(expr).map_or(true, |program| {
+        Program::compile(expr).map_or(true, |program| {
             program.references().has_variable("metadata")
         })
     }
@@ -574,7 +574,9 @@ impl CelResolver {
 /// never reads is not converted.
 fn referenced_structured(program: &Program, structured: &StructuredInput) -> StructuredInput {
     let refs = program.references();
-    structured.retain(refs.has_variable("llm"), refs.has_variable("args"))
+    structured
+        .retain(refs.has_variable("llm"), refs.has_variable("args"))
+        .retain_metadata(refs.has_variable("metadata"))
 }
 
 /// Snapshot the values under every top-level name the expression references,
@@ -770,6 +772,13 @@ mod tests {
         assert!(resolver.requires_metadata(&cel_call("size(metadata) > 0")));
         assert!(!resolver.requires_metadata(&cel_call("subject.note == 'metadata.account'")));
         assert!(!resolver.requires_metadata(&cel_call("subject.active == true")));
+    }
+
+    #[test]
+    fn metadata_dependency_analysis_does_not_consume_execution_cache_capacity() {
+        let resolver = CelResolver::new().with_max_cache_entries(0);
+        assert!(resolver.requires_metadata(&cel_call("metadata.account.active")));
+        assert!(!resolver.requires_metadata(&cel_call("subject.active")));
     }
 
     #[test]
@@ -1639,18 +1648,28 @@ mod tests {
         let structured = StructuredInput::new(
             Some(Arc::new(serde_json::json!({"model": "m"}))),
             Some(Arc::new(serde_json::json!({"a": 1}))),
+        )
+        .with_metadata(
+            Arc::new(serde_json::json!({"account": {"active": true}})),
+            Arc::new(serde_json::json!({"account": {"active": true}})),
+            Arc::new(serde_json::json!({"account": {"source": "http"}})),
         );
         let kept = |expr: &str| {
             let program = Program::compile(expr).unwrap();
             let out = referenced_structured(&program, &structured);
-            (out.llm_request().is_some(), out.args().is_some())
+            (
+                out.llm_request().is_some(),
+                out.args().is_some(),
+                out.metadata().is_some(),
+            )
         };
-        assert_eq!(kept("subject.id == 'alice'"), (false, false));
-        assert_eq!(kept("args.a == 1"), (false, true));
-        assert_eq!(kept("has(llm.request.model)"), (true, false));
+        assert_eq!(kept("subject.id == 'alice'"), (false, false, false));
+        assert_eq!(kept("args.a == 1"), (false, true, false));
+        assert_eq!(kept("metadata.account.active"), (false, false, true));
+        assert_eq!(kept("has(llm.request.model)"), (true, false, false));
         assert_eq!(
             kept("[1].all(x, x == args.a) && llm.request.model == 'm'"),
-            (true, true)
+            (true, true, false)
         );
     }
 

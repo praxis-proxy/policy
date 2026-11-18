@@ -23,9 +23,10 @@ maximum-db-staleness = "P30D"
 # rustls-pemfile entry below, which is retained for a different reason.
 ignore = [
     # --- Runtime: date/time support across the engine and bundled PDPs ---
-    # `chrono` and `chrono-tz` are unmaintained, with no fixed release. They are
-    # used directly by the engine and transitively by Cedar, CEL, and Regorus;
-    # replacing them requires coordinated changes across those dependencies.
+    # `chrono` and `chrono-tz` are unmaintained, with no fixed release. The
+    # engine uses `chrono` directly; Cedar brings it through `datetime`, while
+    # CEL's `chrono` support and Regorus's `time` support bring `chrono-tz`.
+    # Replacing them requires coordinated changes across those dependencies.
     "RUSTSEC-2026-0543",
     "RUSTSEC-2026-0555",
     # --- Dev-only: RSA keypair generation in the JWT extension's tests ---

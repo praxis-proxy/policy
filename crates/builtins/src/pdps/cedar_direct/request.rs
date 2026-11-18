@@ -74,6 +74,7 @@ pub struct CedarStructured {
     args: Option<Value>,
     metadata: Value,
     metadata_provenance: Value,
+    include_metadata: bool,
 }
 
 impl Default for CedarStructured {
@@ -83,6 +84,7 @@ impl Default for CedarStructured {
             args: None,
             metadata: Value::Object(Map::new()),
             metadata_provenance: Value::Object(Map::new()),
+            include_metadata: true,
         }
     }
 }
@@ -97,21 +99,55 @@ pub struct Withheld;
 ///
 /// Returns [`Withheld`] when any object in either entry has a Cedar escape key.
 pub fn sanitize_structured(structured: &StructuredInput) -> Result<CedarStructured, Withheld> {
+    sanitize_selected(structured, true, true)
+}
+
+/// Sanitize payload input without inspecting acquired metadata.
+///
+/// # Errors
+///
+/// Returns [`Withheld`] when payload input contains a Cedar escape key.
+pub fn sanitize_payload(structured: &StructuredInput) -> Result<CedarStructured, Withheld> {
+    sanitize_selected(structured, true, false)
+}
+
+fn sanitize_selected(
+    structured: &StructuredInput,
+    include_payload: bool,
+    include_metadata: bool,
+) -> Result<CedarStructured, Withheld> {
     let convert = |entry: Option<&std::sync::Arc<Value>>| match entry {
         Some(value) => sanitize(value),
         None => Ok(None),
     };
     Ok(CedarStructured {
-        llm_request: convert(structured.llm_request())?,
-        args: convert(structured.args())?,
-        metadata: structured.cedar_metadata().map_or_else(
-            || Ok(Value::Object(Map::new())),
-            |value| sanitize(value).map(|value| value.unwrap_or_else(|| Value::Object(Map::new()))),
-        )?,
-        metadata_provenance: structured.metadata_provenance().map_or_else(
-            || Ok(Value::Object(Map::new())),
-            |value| sanitize(value).map(|value| value.unwrap_or_else(|| Value::Object(Map::new()))),
-        )?,
+        llm_request: include_payload
+            .then(|| convert(structured.llm_request()))
+            .transpose()?
+            .flatten(),
+        args: include_payload
+            .then(|| convert(structured.args()))
+            .transpose()?
+            .flatten(),
+        metadata: include_metadata
+            .then(|| structured.cedar_metadata())
+            .flatten()
+            .map_or_else(
+                || Ok(Value::Object(Map::new())),
+                |value| {
+                    sanitize(value).map(|value| value.unwrap_or_else(|| Value::Object(Map::new())))
+                },
+            )?,
+        metadata_provenance: include_metadata
+            .then(|| structured.metadata_provenance())
+            .flatten()
+            .map_or_else(
+                || Ok(Value::Object(Map::new())),
+                |value| {
+                    sanitize(value).map(|value| value.unwrap_or_else(|| Value::Object(Map::new())))
+                },
+            )?,
+        include_metadata,
     })
 }
 
@@ -121,14 +157,15 @@ pub fn sanitize_structured(structured: &StructuredInput) -> Result<CedarStructur
 ///
 /// Returns [`Withheld`] when acquired metadata contains a Cedar escape key.
 pub fn sanitize_metadata(structured: &StructuredInput) -> Result<CedarStructured, Withheld> {
-    let mut output = CedarStructured::default();
-    if let Some(value) = structured.cedar_metadata() {
-        output.metadata = sanitize(value)?.unwrap_or_else(|| Value::Object(Map::new()));
+    sanitize_selected(structured, false, true)
+}
+
+/// Produce an empty projection without inspecting any structured input.
+pub fn omit_structured() -> CedarStructured {
+    CedarStructured {
+        include_metadata: false,
+        ..CedarStructured::default()
     }
-    if let Some(value) = structured.metadata_provenance() {
-        output.metadata_provenance = sanitize(value)?.unwrap_or_else(|| Value::Object(Map::new()));
-    }
-    Ok(output)
 }
 
 /// Sanitize one JSON value. `None` means the value was `null` and is dropped.
@@ -143,9 +180,7 @@ fn sanitize(value: &Value) -> Result<Option<Value>, Withheld> {
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                if let Some(v) = sanitize(item)?
-                    && !out.contains(&v)
-                {
+                if let Some(v) = sanitize(item)? {
                     out.push(v);
                 }
             }
@@ -287,11 +322,13 @@ pub fn parse<'a>(
         return Err(PdpError::Dispatch(reserved_key_message(key)));
     }
     if let Value::Object(root) = &mut merged {
-        root.insert("metadata".to_owned(), structured.metadata);
-        root.insert(
-            "metadata_provenance".to_owned(),
-            structured.metadata_provenance,
-        );
+        if structured.include_metadata {
+            root.insert("metadata".to_owned(), structured.metadata);
+            root.insert(
+                "metadata_provenance".to_owned(),
+                structured.metadata_provenance,
+            );
+        }
         if let Some(request) = structured.llm_request {
             let llm = root.entry("llm").or_insert_with(|| json!({}));
             if let Value::Object(fields) = llm {
@@ -554,36 +591,6 @@ mod tests {
         for expected in ["llm", "request", "m-under-test", "args", "eu-under-test"] {
             assert!(ctx.contains(expected), "missing {expected}: {ctx}");
         }
-    }
-
-    #[test]
-    fn metadata_and_identifier_safe_provenance_are_always_in_context() {
-        let input = StructuredInput::default().with_metadata(
-            Arc::new(json!({})),
-            Arc::new(json!({
-                "account": {"missing": null, "roles": ["reader", "reader", "writer"], "ratio": 0.5}
-            })),
-            Arc::new(json!({
-                "account": {"source": "metadata/http", "outcome": "success"}
-            })),
-        );
-        let ctx = context_debug(sanitize_structured(&input).unwrap());
-        for expected in [
-            "metadata",
-            "metadata_provenance",
-            "account",
-            "roles",
-            "reader",
-            "writer",
-            "ratio",
-            "0.5",
-            "source",
-            "metadata/http",
-            "outcome",
-        ] {
-            assert!(ctx.contains(expected), "missing {expected}: {ctx}");
-        }
-        assert!(!ctx.contains("missing"), "null fields are omitted: {ctx}");
     }
 
     #[test]

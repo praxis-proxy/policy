@@ -83,7 +83,6 @@ pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
 /// Build Regorus input without cloning structured JSON into an intermediate tree.
 pub fn build_rego_input(bag: &AttributeBag, structured: &StructuredInput) -> regorus::Value {
     let mut root = bag_to_map(bag);
-    root.remove("metadata");
     let bag_args = root.remove("args");
     let bag_llm = root.remove("llm");
     let mut output = root
@@ -158,7 +157,10 @@ fn json_to_rego(value: &Value) -> regorus::Value {
 fn bag_to_map(bag: &AttributeBag) -> Map<String, Value> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
-        if matches!(value, AttributeValue::NonScalar) {
+        if key == "metadata"
+            || key.starts_with("metadata.")
+            || matches!(value, AttributeValue::NonScalar)
+        {
             continue;
         }
         let segments: Vec<&str> = key.split('.').collect();
@@ -361,7 +363,34 @@ mod tests {
                 "$outcome": "success"
             }
         }));
-        let bag = AttributeBag::new();
+        let mut bag = AttributeBag::new();
+        bag.set("metadata.account.stale", true);
+        bag.set("metadata_extra.keep", "bag-owned");
+        let roundtrip = rego_input_roundtrip(&bag, &input);
+        assert_eq!(
+            roundtrip["metadata"],
+            json!({
+                "account": {
+                    "missing": null,
+                    "mixed": ["reader", 2, "reader"],
+                    "nested": {"ratio": 0.5},
+                    "$outcome": "success"
+                }
+            }),
+            "structured metadata must replace the entire spoofable bag namespace"
+        );
+        assert_eq!(
+            roundtrip["metadata_extra"]["keep"], "bag-owned",
+            "an unrelated metadata-prefixed namespace must remain available"
+        );
+        assert!(
+            roundtrip["metadata"]["account"].get("stale").is_none(),
+            "bag-derived stale fields must not survive the structured overlay"
+        );
+        assert_eq!(
+            roundtrip["metadata"]["account"]["nested"]["ratio"], 0.5,
+            "nested structured values must survive Regorus conversion"
+        );
         assert!(rego_eval_structured(
             "input.metadata.account.missing == null",
             &bag,
@@ -377,9 +406,11 @@ mod tests {
             &bag,
             &input
         ));
+        let absent = rego_input_roundtrip(&bag, &StructuredInput::default());
         assert_eq!(
-            build_input(&bag, &StructuredInput::default())["metadata"],
-            json!({})
+            absent["metadata"],
+            json!({}),
+            "absent structured metadata must be exactly an empty object"
         );
     }
 

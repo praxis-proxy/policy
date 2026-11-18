@@ -61,7 +61,7 @@ use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, P
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
 use crate::pdps::opa::input::build_rego_input;
-use crate::pdps::opa::metadata::{last_module_references_metadata, source_references_metadata};
+use crate::pdps::opa::metadata::MetadataDependencies;
 use crate::pdps::stack;
 
 /// What to do when a query errors at runtime or yields a value that carries no
@@ -118,8 +118,8 @@ pub struct OpaResolver {
     /// Upper bound on `inline_cache`. New entries past this are rejected (never
     /// evicted), per the workspace cache convention.
     max_cache_entries: usize,
-    /// Whether any configured global module may read `input.metadata`.
-    global_requires_metadata: bool,
+    /// Per-rule metadata dependencies across configured global modules.
+    metadata_dependencies: MetadataDependencies,
 }
 
 impl OpaResolver {
@@ -200,7 +200,6 @@ impl OpaResolver {
 
         let mut engine = Engine::new();
         let mut policy_sources = HashSet::from([INLINE_MODULE_NAME.to_owned()]);
-        let mut global_requires_metadata = false;
 
         // 1. Global modules — inline texts first, then files. Each gets a
         //    unique virtual name so same-package modules merge (Rego
@@ -213,7 +212,6 @@ impl OpaResolver {
                     name: name.clone(),
                     cause: e.to_string(),
                 })?;
-            global_requires_metadata |= last_module_references_metadata(&mut engine);
             policy_sources.insert(name);
         }
         for path in read_string_seq(map, "module_files")? {
@@ -227,7 +225,6 @@ impl OpaResolver {
                     name: path.clone(),
                     cause: e.to_string(),
                 })?;
-            global_requires_metadata |= last_module_references_metadata(&mut engine);
             policy_sources.insert(path);
         }
         // `add_policy` returns a lossy dot-joined string, so compare decoded
@@ -263,6 +260,8 @@ impl OpaResolver {
             merge_data(&mut engine, &path, &parsed)?;
         }
 
+        let metadata_dependencies = MetadataDependencies::from_engine(&mut engine);
+
         Ok(Self {
             dialect: PdpDialect::Opa,
             on_error,
@@ -273,7 +272,7 @@ impl OpaResolver {
             inline_cache: RwLock::new(HashMap::new()),
             max_cache_entries: read_usize(map, "max_cache_entries")?
                 .unwrap_or(DEFAULT_MAX_CACHE_ENTRIES),
-            global_requires_metadata,
+            metadata_dependencies,
         })
     }
 
@@ -450,14 +449,28 @@ impl PdpResolver for OpaResolver {
 
     fn requires_metadata(&self, call: &PdpCall) -> bool {
         let Some(args) = call.args.as_mapping() else {
-            return self.global_requires_metadata || call.references_metadata();
+            return true;
         };
-        let inline_requires_metadata = args
-            .get(serde_yaml::Value::String("module".to_owned()))
+        let Some(query) = args
+            .get(serde_yaml::Value::String("query".to_owned()))
             .and_then(serde_yaml::Value::as_str)
-            .is_some_and(source_references_metadata);
-
-        self.global_requires_metadata || inline_requires_metadata
+        else {
+            return true;
+        };
+        let inline = args
+            .get(serde_yaml::Value::String("module".to_owned()))
+            .and_then(serde_yaml::Value::as_str);
+        let Some(inline) = inline else {
+            return self.metadata_dependencies.query_requires_metadata(query);
+        };
+        let mut engine = self.base_engine.clone();
+        if engine
+            .add_policy(INLINE_MODULE_NAME.to_owned(), inline.to_owned())
+            .is_err()
+        {
+            return true;
+        }
+        MetadataDependencies::from_engine(&mut engine).query_requires_metadata(query)
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
@@ -1035,9 +1048,13 @@ mod eval_tests {
 whole := input
 deny contains "suspended" if whole.metadata.account.suspended"#,
             r#"package authz
+deny contains "suspended" if { first := input; second := first; second.metadata.account.suspended }"#,
+            r#"package authz
 deny contains "suspended" if { some k, v in input; k == "metadata"; v.account.suspended }"#,
             r#"package authz
 deny contains "suspended" if { o := {"i": input}; o.i.metadata.account.suspended }"#,
+            r#"package authz
+deny contains "suspended" if { values := [x | x := input]; values[0].metadata.account.suspended }"#,
         ] {
             let resolver = resolver(&[source], OnError::Deny);
 
@@ -1046,6 +1063,26 @@ deny contains "suspended" if { o := {"i": input}; o.i.metadata.account.suspended
                 "whole-input use must conservatively require metadata: {source}"
             );
         }
+    }
+
+    #[test]
+    fn global_metadata_dependency_is_scoped_to_the_selected_rule_graph() {
+        let resolver = resolver(
+            &[
+                "package helpers\nmetadata_gate if input.metadata.account.active",
+                "package authz\nconstant := true\nallow if data.helpers.metadata_gate",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            !resolver.requires_metadata(&call("data.authz.constant", None)),
+            "an independent constant rule must not inherit another rule's metadata dependency"
+        );
+        assert!(
+            resolver.requires_metadata(&call("data.authz.allow", None)),
+            "the selected rule must inherit metadata use from a reachable cross-module helper"
+        );
     }
 
     #[test]

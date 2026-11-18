@@ -905,6 +905,25 @@ impl ConfigVisitor for AplConfigVisitor {
         "apl"
     }
 
+    fn validate_before_load(&self, yaml: &serde_yaml::Value) -> Result<(), VisitorError> {
+        let Some(global) = yaml.get("global") else {
+            return Ok(());
+        };
+        let Some(assertions) = assertions_block(global)? else {
+            return Ok(());
+        };
+        let compiled = if let Some(apl_block) = apl_subblock(global) {
+            let policy_only = strip_wiring_keys(&apl_block);
+            compile_policy_block_value("global", &policy_only)
+                .map_err(|error| -> VisitorError { Box::new(error) })?
+        } else {
+            CompiledRoute::new("global")
+        };
+
+        validate_assertion_fetch_reachability("global catch-all", &[&assertions], &compiled)?;
+        Ok(())
+    }
+
     fn visit_plugins(
         &self,
         _mgr: &Arc<PolicyEngine>,
@@ -926,6 +945,9 @@ impl ConfigVisitor for AplConfigVisitor {
         state.declared_plugin_hooks.clear();
         state.reached_plugin_hooks.clear();
         state.reached_plugin_names.clear();
+        state.global_layer = None;
+        state.default_layers.clear();
+        state.tag_layers.clear();
         state.global_assertions = None;
         state.default_assertions.clear();
         state.tag_assertions.clear();
@@ -978,13 +1000,6 @@ impl ConfigVisitor for AplConfigVisitor {
                     "APL visitor: global.response is set but global declares no authorization \
                      block — the entity-less HTTP catch-all handler will not install, so this response can never fire",
                 );
-            }
-            if let Some(assertions) = global_assertions.as_ref() {
-                validate_assertion_fetch_reachability(
-                    "global catch-all",
-                    &[assertions],
-                    &CompiledRoute::new("global"),
-                )?;
             }
             return Ok(());
         };
@@ -1050,10 +1065,6 @@ impl ConfigVisitor for AplConfigVisitor {
             .plugin_registry
             .clone();
         validate_metadata_fetch_sources("global", &compiled, &plugin_registry, mgr)?;
-        if let Some(assertions) = global_assertions.as_ref() {
-            validate_assertion_fetch_reachability("global catch-all", &[assertions], &compiled)?;
-        }
-
         // Install catch-all handlers so the global policy also evaluates for
         // generic (non-MCP/A2A) HTTP requests, which carry no entity.
         // Entity routes still stack `global` via apply_layer in visit_route;
@@ -1558,7 +1569,7 @@ fn validate_assertion_fetch_reachability(
             };
             for path in paths {
                 let instance = match SourcePath::parse(path) {
-                    Ok(SourcePath::Metadata { instance, .. }) => instance,
+                    Ok(SourcePath::Metadata(metadata)) => metadata.instance().to_owned(),
                     Ok(_) => continue,
                     Err(error) => {
                         return Err(format!(
@@ -3058,6 +3069,50 @@ routes:
         assert_eq!(
             resolver_label(&visitor, PdpDialect::Cedar).await.unwrap(),
             "from-code"
+        );
+    }
+
+    #[test]
+    fn a_new_load_clears_every_compiled_hierarchy_layer() {
+        let engine = Arc::new(PolicyEngine::default());
+        let visitor = AplConfigVisitor::new(
+            Arc::new(DispatchCache::new()),
+            Arc::new(MemorySessionStore::new()),
+            Arc::downgrade(&engine),
+        );
+        {
+            let mut state = visitor
+                .state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.global_layer = Some(CompiledRoute::new("global"));
+            state
+                .default_layers
+                .insert("tool".to_owned(), CompiledRoute::new("default:tool"));
+            state
+                .tag_layers
+                .insert("sensitive".to_owned(), CompiledRoute::new("tag:sensitive"));
+        }
+
+        visitor
+            .visit_plugins(&engine, &[])
+            .expect("a reload with no plugins starts cleanly");
+
+        let state = visitor
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            state.global_layer.is_none(),
+            "the old global layer is stale"
+        );
+        assert!(
+            state.default_layers.is_empty(),
+            "old entity defaults must not survive reload"
+        );
+        assert!(
+            state.tag_layers.is_empty(),
+            "old policy bundles must not survive reload"
         );
     }
 

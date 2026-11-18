@@ -733,6 +733,7 @@ mod tests {
             [
                 ("direction".to_owned(), "request".to_owned()),
                 ("header".to_owned(), "Authorization".to_owned()),
+                ("source".to_owned(), "metadata.account.token".to_owned()),
             ],
         ));
         log.finalize(Verdict::Allow);
@@ -741,16 +742,16 @@ mod tests {
             plugin.build_decision_record(Some(&empty_payload()), &Extensions::default(), &log);
 
         assert_eq!(
-            record["decision_warnings"][0]["code"],
-            "assertion_credential_target_used"
-        );
-        assert_eq!(
-            record["decision_warnings"][0]["fields"]["direction"],
-            "request"
-        );
-        assert_eq!(
-            record["decision_warnings"][0]["fields"]["header"],
-            "Authorization"
+            record["decision_warnings"],
+            serde_json::json!([{
+                "code": "assertion_credential_target_used",
+                "fields": {
+                    "direction": "request",
+                    "header": "Authorization",
+                    "source": "metadata.account.token"
+                }
+            }]),
+            "the audit record must preserve the complete framework warning"
         );
     }
 

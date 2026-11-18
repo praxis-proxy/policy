@@ -238,8 +238,52 @@ when { context.metadata has account && context.metadata.account.suspended };
         result
             .violation
             .as_ref()
-            .is_some_and(|violation| violation.reason.contains("suspended")),
+            .is_some_and(|violation| violation.reason == "denied by Cedar policy: suspended"),
         "the metadata-backed forbid should be attributed: {:?}",
+        result.violation
+    );
+}
+
+#[tokio::test]
+async fn parenthesized_cedar_provenance_read_is_granted_without_a_fetch() {
+    let yaml = route_yaml(
+        "tool: get_document",
+        r#"
+@id("allow")
+permit(principal, action, resource);
+@id("has-provenance")
+forbid(principal, action, resource)
+when { (context).metadata_provenance has account };
+"#,
+        "",
+    );
+    let mgr = build_manager_with_yaml(&yaml).await.expect("config loads");
+    let mut ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_document"))),
+        security: Some(Arc::new(security_with_roles("alice", &[]))),
+        ..Default::default()
+    };
+    ext.install_metadata(
+        "account",
+        "metadata/http",
+        AcquiredFacts::success(
+            serde_json::json!({"active": true}),
+            Utc::now(),
+            MetadataCacheDisposition::Miss,
+        ),
+    )
+    .expect("trusted host metadata installs");
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), ext, None)
+        .await;
+
+    assert!(
+        result
+            .violation
+            .as_ref()
+            .is_some_and(|violation| violation.reason == "denied by Cedar policy: has-provenance"),
+        "the parsed provenance read must receive installed metadata: {:?}",
         result.violation
     );
 }
@@ -303,8 +347,8 @@ global:
           principal: User,
           resource: Document,
           context: {{
-            metadata: {{}},
-            metadata_provenance: {{}},
+            metadata?: {{}},
+            metadata_provenance?: {{}},
             args?: {{}},
             llm?: {{ request: {{}} }},
             meta?: {{ entity_type?: String, entity_name?: String, scope?: String, tags?: Set<String> }},
@@ -414,7 +458,7 @@ global:
         action read appliesTo {
           principal: User,
           resource: Document,
-          context: { metadata: {}, metadata_provenance: {}, llm?: { request: {} } },
+          context: { metadata?: {}, metadata_provenance?: {}, llm?: { request: {} } },
         };
   authorization:
     pre_invocation:

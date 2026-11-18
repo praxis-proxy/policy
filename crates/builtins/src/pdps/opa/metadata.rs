@@ -1,51 +1,117 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use regorus::Engine;
 use regorus::unstable::{Expr, Literal, Module, Query, Rule, RuleHead};
 
-/// Return whether the most recently loaded Rego module reads
-/// `input.metadata`, including through a variable bound to `input`.
-pub(super) fn last_module_references_metadata(engine: &mut Engine) -> bool {
-    engine
-        .get_modules()
-        .last()
-        .is_some_and(|module| module_references_metadata(module))
+#[derive(Clone, Debug, Default)]
+pub(super) struct MetadataDependencies {
+    direct: HashSet<String>,
+    edges: HashMap<String, HashSet<String>>,
 }
 
-/// Parse one Rego module and inspect its input dependencies.
-pub(super) fn source_references_metadata(source: &str) -> bool {
-    let mut engine = Engine::new();
-    engine
-        .add_policy("metadata-analysis.rego".to_owned(), source.to_owned())
-        .is_ok()
-        && last_module_references_metadata(&mut engine)
-}
-
-fn module_references_metadata(module: &Module) -> bool {
-    let aliases = module_input_aliases(module);
-    if module
-        .imports
-        .iter()
-        .any(|import| expression_references_metadata(&import.refr, &aliases))
-    {
-        return true;
+impl MetadataDependencies {
+    pub(super) fn from_engine(engine: &mut Engine) -> Self {
+        let modules = engine.get_modules();
+        let mut analysis = Self::default();
+        let mut known = HashSet::new();
+        for module in modules {
+            let package = expression_path(&module.package.refr).unwrap_or_default();
+            for rule in &module.policy {
+                if let Some(name) = rule_name(rule, &package) {
+                    known.insert(name);
+                }
+            }
+        }
+        for module in modules {
+            analysis.add_module(module, &known);
+        }
+        analysis
     }
 
-    module.policy.iter().any(|rule| match rule.as_ref() {
+    pub(super) fn query_requires_metadata(&self, query: &str) -> bool {
+        let Some(root) = normalize_query_path(query) else {
+            return true;
+        };
+        let mut pending = vec![root];
+        let mut seen = HashSet::new();
+        while let Some(rule) = pending.pop() {
+            if !seen.insert(rule.clone()) {
+                continue;
+            }
+            if self.direct.contains(&rule) {
+                return true;
+            }
+            if let Some(dependencies) = self.edges.get(&rule) {
+                pending.extend(dependencies.iter().cloned());
+            }
+        }
+        false
+    }
+
+    fn add_module(&mut self, module: &Module, known: &HashSet<String>) {
+        let package = expression_path(&module.package.refr).unwrap_or_default();
+        let input_aliases = module_input_aliases(module);
+        let import_aliases = module_import_aliases(module);
+        for rule in &module.policy {
+            let Some(name) = rule_name(rule, &package) else {
+                continue;
+            };
+            if rule_references_metadata(rule, &input_aliases) {
+                self.direct.insert(name.clone());
+            }
+            let mut references = HashSet::new();
+            collect_rule_references(rule, &package, &import_aliases, &mut references);
+            if references.iter().any(|reference| {
+                reference == "input.metadata" || reference.starts_with("input.metadata.")
+            }) {
+                self.direct.insert(name.clone());
+            }
+            references.retain(|candidate| known.contains(candidate));
+            self.edges.entry(name).or_default().extend(references);
+        }
+    }
+}
+
+fn normalize_query_path(query: &str) -> Option<String> {
+    let query = query.trim();
+    (query.starts_with("data.")
+        && query.split('.').all(|part| {
+            !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        }))
+    .then(|| query.to_owned())
+}
+
+fn rule_name(rule: &Rule, package: &[String]) -> Option<String> {
+    let head = match rule {
+        Rule::Spec { head, .. } => match head {
+            RuleHead::Compr { refr, .. }
+            | RuleHead::Set { refr, .. }
+            | RuleHead::Func { refr, .. } => refr.as_ref(),
+        },
+        Rule::Default { refr, .. } => refr.as_ref(),
+    };
+    let mut path = vec!["data".to_owned()];
+    path.extend(package.iter().cloned());
+    path.extend(expression_path(head)?);
+    Some(path.join("."))
+}
+
+fn rule_references_metadata(rule: &Rule, aliases: &HashSet<String>) -> bool {
+    match rule {
         Rule::Spec { head, bodies, .. } => {
             let head_expressions = rule_head_expressions(head);
             head_expressions
                 .iter()
-                .any(|expression| expression_references_metadata(expression, &aliases))
+                .any(|expression| expression_references_metadata(expression, aliases))
                 || bodies.iter().any(|body| {
                     let mut associated = rule_head_expressions(head);
                     if let Some(assign) = &body.assign {
                         associated.push(assign.value.as_ref());
                     }
-                    query_references_metadata(&body.query, &associated, &aliases)
+                    query_references_metadata(&body.query, &associated, aliases)
                 })
         },
         Rule::Default {
@@ -57,9 +123,9 @@ fn module_references_metadata(module: &Module) -> bool {
             expressions.push(value.as_ref());
             expressions
                 .iter()
-                .any(|expression| expression_references_metadata(expression, &aliases))
+                .any(|expression| expression_references_metadata(expression, aliases))
         },
-    })
+    }
 }
 
 fn query_references_metadata(
@@ -67,113 +133,13 @@ fn query_references_metadata(
     associated: &[&Expr],
     inherited_aliases: &HashSet<String>,
 ) -> bool {
-    let mut aliases = inherited_aliases.clone();
-    let mut alias_pairs = Vec::new();
-
-    for expression in associated {
-        collect_alias_pairs(expression, &mut alias_pairs);
-    }
-    for statement in &query.stmts {
-        collect_statement_alias_pairs(statement, &mut alias_pairs);
-    }
-    close_aliases(&mut aliases, &alias_pairs);
-
     associated
         .iter()
-        .any(|expression| expression_references_metadata(expression, &aliases))
+        .any(|expression| expression_references_metadata(expression, inherited_aliases))
         || query
             .stmts
             .iter()
-            .any(|statement| statement_references_metadata(statement, &aliases))
-}
-
-fn collect_statement_alias_pairs(
-    statement: &regorus::unstable::LiteralStmt,
-    pairs: &mut Vec<(String, String)>,
-) {
-    match &statement.literal {
-        Literal::SomeVars { .. } => {},
-        Literal::SomeIn {
-            key,
-            value,
-            collection,
-            ..
-        } => {
-            if let Some(key) = key {
-                collect_alias_pairs(key, pairs);
-            }
-            collect_alias_pairs(value, pairs);
-            collect_alias_pairs(collection, pairs);
-        },
-        Literal::Expr { expr, .. } | Literal::NotExpr { expr, .. } => {
-            collect_alias_pairs(expr, pairs);
-        },
-        Literal::Every { domain, .. } => collect_alias_pairs(domain, pairs),
-    }
-    for modifier in &statement.with_mods {
-        collect_alias_pairs(&modifier.refr, pairs);
-        collect_alias_pairs(&modifier.r#as, pairs);
-    }
-}
-
-fn collect_alias_pairs(expression: &Expr, pairs: &mut Vec<(String, String)>) {
-    match expression {
-        Expr::ArrayCompr { .. } | Expr::SetCompr { .. } | Expr::ObjectCompr { .. } => {},
-        Expr::AssignExpr { lhs, rhs, .. } => {
-            if let (Some(lhs), Some(rhs)) = (variable_name(lhs), variable_name(rhs)) {
-                pairs.push((lhs.to_owned(), rhs.to_owned()));
-            }
-            collect_alias_pairs(lhs, pairs);
-            collect_alias_pairs(rhs, pairs);
-        },
-        Expr::Array { items, .. } | Expr::Set { items, .. } => {
-            for item in items {
-                collect_alias_pairs(item, pairs);
-            }
-        },
-        Expr::Object { fields, .. } => {
-            for (_, key, value) in fields {
-                collect_alias_pairs(key, pairs);
-                collect_alias_pairs(value, pairs);
-            }
-        },
-        Expr::Call { fcn, params, .. } => {
-            collect_alias_pairs(fcn, pairs);
-            for parameter in params {
-                collect_alias_pairs(parameter, pairs);
-            }
-        },
-        Expr::UnaryExpr { expr, .. } => collect_alias_pairs(expr, pairs),
-        Expr::RefDot { refr, .. } => collect_alias_pairs(refr, pairs),
-        Expr::RefBrack { refr, index, .. } => {
-            collect_alias_pairs(refr, pairs);
-            collect_alias_pairs(index, pairs);
-        },
-        Expr::BinExpr { lhs, rhs, .. }
-        | Expr::BoolExpr { lhs, rhs, .. }
-        | Expr::ArithExpr { lhs, rhs, .. } => {
-            collect_alias_pairs(lhs, pairs);
-            collect_alias_pairs(rhs, pairs);
-        },
-        Expr::Membership {
-            key,
-            value,
-            collection,
-            ..
-        } => {
-            if let Some(key) = key {
-                collect_alias_pairs(key, pairs);
-            }
-            collect_alias_pairs(value, pairs);
-            collect_alias_pairs(collection, pairs);
-        },
-        Expr::String { .. }
-        | Expr::RawString { .. }
-        | Expr::Number { .. }
-        | Expr::Bool { .. }
-        | Expr::Null { .. }
-        | Expr::Var { .. } => {},
-    }
+            .any(|statement| statement_references_metadata(statement, inherited_aliases))
 }
 
 fn statement_references_metadata(
@@ -306,20 +272,203 @@ fn rule_head_expressions(head: &RuleHead) -> Vec<&Expr> {
     }
 }
 
-fn close_aliases(aliases: &mut HashSet<String>, pairs: &[(String, String)]) {
-    loop {
-        let mut changed = false;
-        for (left, right) in pairs {
-            if aliases.contains(left) {
-                changed |= aliases.insert(right.clone());
+fn expression_path(expression: &Expr) -> Option<Vec<String>> {
+    match expression {
+        Expr::Var { value, .. } => value.as_string().ok().map(|name| vec![name.to_string()]),
+        Expr::RefDot { refr, field, .. } => {
+            let mut path = expression_path(refr)?;
+            path.push(field.1.as_string().ok()?.to_string());
+            Some(path)
+        },
+        Expr::RefBrack { refr, index, .. } => {
+            let mut path = expression_path(refr)?;
+            let part = match index.as_ref() {
+                Expr::String { value, .. } | Expr::RawString { value, .. } => {
+                    value.as_string().ok()?.to_string()
+                },
+                _ => return Some(path),
+            };
+            path.push(part);
+            Some(path)
+        },
+        _ => None,
+    }
+}
+
+fn module_import_aliases(module: &Module) -> HashMap<String, Vec<String>> {
+    module
+        .imports
+        .iter()
+        .filter_map(|import| {
+            let path = expression_path(&import.refr)?;
+            let alias = import
+                .r#as
+                .as_ref()
+                .map_or_else(|| path.last().cloned(), |span| Some(span.text().to_owned()))?;
+            Some((alias, path))
+        })
+        .collect()
+}
+
+fn collect_rule_references(
+    rule: &Rule,
+    package: &[String],
+    imports: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<String>,
+) {
+    match rule {
+        Rule::Spec { head, bodies, .. } => {
+            for expression in rule_head_expressions(head) {
+                collect_expression_references(expression, package, imports, out);
             }
-            if aliases.contains(right) {
-                changed |= aliases.insert(left.clone());
+            for body in bodies {
+                if let Some(assign) = &body.assign {
+                    collect_expression_references(&assign.value, package, imports, out);
+                }
+                collect_query_references(&body.query, package, imports, out);
+            }
+        },
+        Rule::Default {
+            refr, args, value, ..
+        } => {
+            collect_expression_references(refr, package, imports, out);
+            for arg in args {
+                collect_expression_references(arg, package, imports, out);
+            }
+            collect_expression_references(value, package, imports, out);
+        },
+    }
+}
+
+fn collect_query_references(
+    query: &Query,
+    package: &[String],
+    imports: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<String>,
+) {
+    for statement in &query.stmts {
+        match &statement.literal {
+            Literal::SomeVars { .. } => {},
+            Literal::SomeIn {
+                key,
+                value,
+                collection,
+                ..
+            } => {
+                if let Some(key) = key {
+                    collect_expression_references(key, package, imports, out);
+                }
+                collect_expression_references(value, package, imports, out);
+                collect_expression_references(collection, package, imports, out);
+            },
+            Literal::Expr { expr, .. } | Literal::NotExpr { expr, .. } => {
+                collect_expression_references(expr, package, imports, out);
+            },
+            Literal::Every { domain, query, .. } => {
+                collect_expression_references(domain, package, imports, out);
+                collect_query_references(query, package, imports, out);
+            },
+        }
+        for modifier in &statement.with_mods {
+            collect_expression_references(&modifier.refr, package, imports, out);
+            collect_expression_references(&modifier.r#as, package, imports, out);
+        }
+    }
+}
+
+fn collect_expression_references(
+    expression: &Expr,
+    package: &[String],
+    imports: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<String>,
+) {
+    if let Some(path) = expression_path(expression) {
+        let resolved = if path.first().is_some_and(|part| part == "data") {
+            Some(path)
+        } else if let Some(imported) = path.first().and_then(|head| imports.get(head)) {
+            let mut resolved = imported.clone();
+            resolved.extend(path.into_iter().skip(1));
+            Some(resolved)
+        } else if path
+            .first()
+            .is_some_and(|head| !matches!(head.as_str(), "input" | "data"))
+        {
+            let mut resolved = vec!["data".to_owned()];
+            resolved.extend(package.iter().cloned());
+            resolved.extend(path);
+            Some(resolved)
+        } else {
+            None
+        };
+        if let Some(mut resolved) = resolved {
+            while resolved.len() > 1 {
+                out.insert(resolved.join("."));
+                resolved.pop();
             }
         }
-        if !changed {
-            break;
-        }
+    }
+
+    match expression {
+        Expr::ArrayCompr { term, query, .. } | Expr::SetCompr { term, query, .. } => {
+            collect_expression_references(term, package, imports, out);
+            collect_query_references(query, package, imports, out);
+        },
+        Expr::ObjectCompr {
+            key, value, query, ..
+        } => {
+            collect_expression_references(key, package, imports, out);
+            collect_expression_references(value, package, imports, out);
+            collect_query_references(query, package, imports, out);
+        },
+        Expr::Array { items, .. } | Expr::Set { items, .. } => {
+            for item in items {
+                collect_expression_references(item, package, imports, out);
+            }
+        },
+        Expr::Object { fields, .. } => {
+            for (_, key, value) in fields {
+                collect_expression_references(key, package, imports, out);
+                collect_expression_references(value, package, imports, out);
+            }
+        },
+        Expr::Call { fcn, params, .. } => {
+            collect_expression_references(fcn, package, imports, out);
+            for parameter in params {
+                collect_expression_references(parameter, package, imports, out);
+            }
+        },
+        Expr::UnaryExpr { expr, .. } | Expr::RefDot { refr: expr, .. } => {
+            collect_expression_references(expr, package, imports, out);
+        },
+        Expr::RefBrack { refr, index, .. } => {
+            collect_expression_references(refr, package, imports, out);
+            collect_expression_references(index, package, imports, out);
+        },
+        Expr::BinExpr { lhs, rhs, .. }
+        | Expr::BoolExpr { lhs, rhs, .. }
+        | Expr::ArithExpr { lhs, rhs, .. }
+        | Expr::AssignExpr { lhs, rhs, .. } => {
+            collect_expression_references(lhs, package, imports, out);
+            collect_expression_references(rhs, package, imports, out);
+        },
+        Expr::Membership {
+            key,
+            value,
+            collection,
+            ..
+        } => {
+            if let Some(key) = key {
+                collect_expression_references(key, package, imports, out);
+            }
+            collect_expression_references(value, package, imports, out);
+            collect_expression_references(collection, package, imports, out);
+        },
+        Expr::String { .. }
+        | Expr::RawString { .. }
+        | Expr::Number { .. }
+        | Expr::Bool { .. }
+        | Expr::Null { .. }
+        | Expr::Var { .. } => {},
     }
 }
 

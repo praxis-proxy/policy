@@ -43,7 +43,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   exhaustive destructuring must include the new fields. `SourceRejection` adds
   metadata-specific variants and is now non-exhaustive. Cedar schemas for
   metadata-reading policies must declare `context.metadata` and
-  `context.metadata_provenance`. ([#243](https://github.com/praxis-proxy/policy/issues/243),
+  `context.metadata_provenance`. Every existing assertion targeting
+  `Authorization`, `Proxy-Authorization`, `Cookie`, or `Set-Cookie` must now
+  set `allow_credential_target: true`, including assertions sourced from
+  subjects, claims, clients, or declared secrets rather than metadata.
+  `SourcePath::Metadata` now contains a validated `MetadataPath` wrapper;
+  callers matching the old public `instance` and `path` fields must use
+  `MetadataPath::instance()` and `MetadataPath::segments()`.
+  ([#243](https://github.com/praxis-proxy/policy/issues/243),
   [#245](https://github.com/praxis-proxy/policy/issues/245))
 - **Breaking for route capability grants:** ordinary `run()` and field-pipeline
   plugin capabilities now contribute only to the request or response handler

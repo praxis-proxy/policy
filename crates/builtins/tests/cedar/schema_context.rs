@@ -20,13 +20,6 @@ const MARKER: &str = "SECRET-MARKER";
 /// A schema declaring every principal attribute the resolver builds, with the
 /// given context type for `read`.
 fn schema(context: &str) -> String {
-    let inner = context
-        .strip_prefix('{')
-        .and_then(|value| value.strip_suffix('}'))
-        .unwrap_or(context)
-        .trim();
-    let separator = if inner.is_empty() { "" } else { ", " };
-    let context = format!("{{ metadata: {{}}, metadata_provenance: {{}}{separator}{inner} }}");
     format!(
         r#"
 entity User = {{
@@ -89,6 +82,54 @@ async fn schema_without_the_flag_ignores_structured_input() {
         .await
         .expect("an undeclared structured input must not fail validation");
     assert_eq!(decision.decision, Decision::Allow);
+}
+
+#[tokio::test]
+async fn metadata_free_policy_keeps_an_existing_empty_context_schema_compatible() {
+    let structured = StructuredInput::default().with_metadata(
+        Arc::new(serde_json::json!({"account": {"active": true}})),
+        Arc::new(serde_json::json!({"account": {"active": true}})),
+        Arc::new(serde_json::json!({"account": {"source": "http"}})),
+    );
+    let decision = resolver(PERMIT_ALL, "{}", None)
+        .evaluate_structured(&read_doc(), &alice(), &structured)
+        .await
+        .expect("unused metadata must not add undeclared schema fields");
+    assert_eq!(decision.decision, Decision::Allow);
+}
+
+#[tokio::test]
+async fn cedar_policy_reads_exact_metadata_and_provenance_projection() {
+    let policy = r#"permit(principal, action, resource) when {
+        context.metadata.account.roles.contains("reader") &&
+        context.metadata.account.roles.contains("writer") &&
+        context.metadata.account.ratio == "0.5" &&
+        !(context.metadata.account has missing) &&
+        context.metadata_provenance.account.source == "metadata/http" &&
+        context.metadata_provenance.account.outcome == "success"
+    };"#;
+    let context = "{
+        metadata: { account: { roles: Set<String>, ratio: String, missing?: String } },
+        metadata_provenance: { account: { source: String, outcome: String } }
+    }";
+    let structured = StructuredInput::default().with_metadata(
+        Arc::new(serde_json::json!({})),
+        Arc::new(serde_json::json!({
+            "account": {
+                "roles": ["reader", "reader", "writer"],
+                "ratio": 0.5,
+                "missing": null
+            }
+        })),
+        Arc::new(serde_json::json!({
+            "account": {"source": "metadata/http", "outcome": "success"}
+        })),
+    );
+    let decision = resolver(policy, context, None)
+        .evaluate_structured(&read_doc(), &alice(), &structured)
+        .await
+        .expect("declared metadata context must validate and evaluate");
+    assert_eq!(decision.decision, Decision::Allow, "{decision:?}");
 }
 
 /// Without the flag nothing is sanitized, so an escape key is not withheld.

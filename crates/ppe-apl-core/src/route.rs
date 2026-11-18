@@ -148,6 +148,20 @@ impl StructuredInput {
         }
     }
 
+    /// Keep or drop every acquired-metadata projection as one namespace.
+    ///
+    /// The three values are derived from the same immutable facts and must
+    /// never be retained independently.
+    #[must_use]
+    pub fn retain_metadata(mut self, keep: bool) -> Self {
+        if !keep {
+            self.metadata = None;
+            self.cedar_metadata = None;
+            self.metadata_provenance = None;
+        }
+        self
+    }
+
     /// Whether either entry is deeper than [`MAX_STRUCTURED_DEPTH`].
     ///
     /// Depth is one more than the number of arrays and objects on the
@@ -977,6 +991,19 @@ mod tests {
         assert!(kept.llm_request().is_some());
         assert!(kept.args().is_none());
         assert!(kept.too_deep());
+    }
+
+    #[test]
+    fn retain_metadata_drops_all_derived_projections_together() {
+        let input = StructuredInput::default().with_metadata(
+            Arc::new(json!({"account": true})),
+            Arc::new(json!({"account": true})),
+            Arc::new(json!({"account": {"source": "http"}})),
+        );
+        let dropped = input.retain_metadata(false);
+        assert!(dropped.metadata().is_none());
+        assert!(dropped.cedar_metadata().is_none());
+        assert!(dropped.metadata_provenance().is_none());
     }
 
     struct AllowPdp;

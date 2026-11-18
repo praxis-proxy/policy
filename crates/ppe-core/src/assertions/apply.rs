@@ -230,6 +230,9 @@ mod tests {
         );
     }
 
+    /// HTTP field names are case-insensitive per [RFC 9110 Section 5.1].
+    ///
+    /// [RFC 9110 Section 5.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-5.1
     #[test]
     fn credential_targets_remove_every_case_variant_before_injection() {
         for target_name in [

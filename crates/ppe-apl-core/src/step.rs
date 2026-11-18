@@ -563,7 +563,9 @@ fn identifier_end(bytes: &[u8], mut index: usize) -> usize {
 }
 
 fn metadata_accessor_after(bytes: &[u8], index: usize) -> bool {
-    if bracketed_metadata_after(bytes, index) {
+    if bracketed_named_after(bytes, index, "metadata")
+        || bracketed_named_after(bytes, index, "metadata_provenance")
+    {
         return true;
     }
     let mut index = skip_whitespace(bytes, index);
@@ -571,16 +573,21 @@ fn metadata_accessor_after(bytes: &[u8], index: usize) -> bool {
         return false;
     }
     index = skip_whitespace(bytes, index + 1);
-    let Some(end) = index.checked_add("metadata".len()) else {
-        return false;
-    };
-    bytes.get(index..end) == Some(b"metadata")
-        && bytes
-            .get(end)
-            .is_none_or(|byte| !is_identifier_continue(*byte))
+    ["metadata", "metadata_provenance"].iter().any(|name| {
+        index.checked_add(name.len()).is_some_and(|end| {
+            bytes.get(index..end) == Some(name.as_bytes())
+                && bytes
+                    .get(end)
+                    .is_none_or(|byte| !is_identifier_continue(*byte))
+        })
+    })
 }
 
-fn bracketed_metadata_after(bytes: &[u8], mut index: usize) -> bool {
+fn bracketed_metadata_after(bytes: &[u8], index: usize) -> bool {
+    bracketed_named_after(bytes, index, "metadata")
+}
+
+fn bracketed_named_after(bytes: &[u8], mut index: usize, name: &str) -> bool {
     index = skip_whitespace(bytes, index);
     if bytes.get(index) != Some(&b'[') {
         return false;
@@ -591,10 +598,10 @@ fn bracketed_metadata_after(bytes: &[u8], mut index: usize) -> bool {
         return false;
     };
     index += 1;
-    let Some(end) = index.checked_add("metadata".len()) else {
+    let Some(end) = index.checked_add(name.len()) else {
         return false;
     };
-    if bytes.get(index..end) != Some(b"metadata") || bytes.get(end) != Some(&quote) {
+    if bytes.get(index..end) != Some(name.as_bytes()) || bytes.get(end) != Some(&quote) {
         return false;
     }
     index = end + 1;
@@ -1538,6 +1545,14 @@ query:
         assert!(source_references_metadata_under(
             "input [ `metadata` ].account.active",
             "input"
+        ));
+        assert!(source_references_metadata_under(
+            "context.metadata_provenance.account.source",
+            "context"
+        ));
+        assert!(source_references_metadata_under(
+            "context['metadata_provenance'].account.source",
+            "context"
         ));
         assert!(!source_references_metadata_under(
             "data.metadata.account.active",

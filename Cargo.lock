@@ -3199,6 +3199,7 @@ dependencies = [
 name = "praxis-policy-pdp-diff"
 version = "0.6.0"
 dependencies = [
+ "chrono",
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
  "praxis-policy-builtins",
