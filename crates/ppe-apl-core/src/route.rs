@@ -55,6 +55,9 @@ pub const LLM_REQUEST_MISSING_CODE: &str = "pdp.llm_request_missing";
 pub struct StructuredInput {
     llm_request: Option<Arc<serde_json::Value>>,
     args: Option<Arc<serde_json::Value>>,
+    metadata: Option<Arc<serde_json::Value>>,
+    cedar_metadata: Option<Arc<serde_json::Value>>,
+    metadata_provenance: Option<Arc<serde_json::Value>>,
     too_deep: bool,
 }
 
@@ -72,8 +75,38 @@ impl StructuredInput {
         Self {
             llm_request,
             args,
+            metadata: None,
+            cedar_metadata: None,
+            metadata_provenance: None,
             too_deep,
         }
+    }
+
+    /// Attach evaluator-ready acquired metadata derived directly from its
+    /// immutable source records.
+    #[must_use]
+    pub fn with_metadata(
+        mut self,
+        metadata: Arc<serde_json::Value>,
+        cedar_metadata: Arc<serde_json::Value>,
+        metadata_provenance: Arc<serde_json::Value>,
+    ) -> Self {
+        self.metadata = Some(metadata);
+        self.cedar_metadata = Some(cedar_metadata);
+        self.metadata_provenance = Some(metadata_provenance);
+        self
+    }
+
+    /// Replace metadata after a `fetch(...)` step publishes a new record.
+    pub fn set_metadata(
+        &mut self,
+        metadata: Arc<serde_json::Value>,
+        cedar_metadata: Arc<serde_json::Value>,
+        metadata_provenance: Arc<serde_json::Value>,
+    ) {
+        self.metadata = Some(metadata);
+        self.cedar_metadata = Some(cedar_metadata);
+        self.metadata_provenance = Some(metadata_provenance);
     }
 
     /// The host-parsed LLM request body, when the route handler can read it.
@@ -86,6 +119,21 @@ impl StructuredInput {
         self.args.as_ref()
     }
 
+    /// Lossless CEL/OPA metadata, including reserved provenance siblings.
+    pub fn metadata(&self) -> Option<&Arc<serde_json::Value>> {
+        self.metadata.as_ref()
+    }
+
+    /// Cedar-safe value records before Cedar's value-model conversion.
+    pub fn cedar_metadata(&self) -> Option<&Arc<serde_json::Value>> {
+        self.cedar_metadata.as_ref()
+    }
+
+    /// Identifier-safe Cedar provenance records.
+    pub fn metadata_provenance(&self) -> Option<&Arc<serde_json::Value>> {
+        self.metadata_provenance.as_ref()
+    }
+
     /// A copy holding only the chosen entries. The depth result carries over
     /// unchanged, so dropping an entry never clears a refusal.
     #[must_use]
@@ -93,6 +141,9 @@ impl StructuredInput {
         Self {
             llm_request: self.llm_request.clone().filter(|_| keep_llm_request),
             args: self.args.clone().filter(|_| keep_args),
+            metadata: self.metadata.clone(),
+            cedar_metadata: self.cedar_metadata.clone(),
+            metadata_provenance: self.metadata_provenance.clone(),
             too_deep: self.too_deep,
         }
     }
@@ -131,6 +182,7 @@ impl std::fmt::Debug for StructuredInput {
         f.debug_struct("StructuredInput")
             .field("llm_request", &self.llm_request.as_ref().map(|_| "<set>"))
             .field("args", &self.args.as_ref().map(|_| "<set>"))
+            .field("metadata", &self.metadata.as_ref().map(|_| "<set>"))
             .field("too_deep", &self.too_deep)
             .finish()
     }

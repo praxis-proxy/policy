@@ -98,6 +98,7 @@ mod tests {
             source: ResolvedSource::From(SourcePath::SubjectId),
             on_missing: OnMissing::Omit,
             encode: None,
+            allow_credential_target: false,
             declared_in: "global".to_owned(),
             level: AssertionLevel::Global,
             overrode: None,

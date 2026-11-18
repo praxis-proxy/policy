@@ -41,8 +41,8 @@ use crate::pdps::cedar_direct::decision::{translate, withheld};
 use crate::pdps::cedar_direct::entities::build as build_entities;
 use crate::pdps::cedar_direct::error::BuildError;
 use crate::pdps::cedar_direct::request::{
-    CedarStructured, parse as parse_call, request_error_category, reserved_context_key,
-    reserved_key_message, sanitize_structured,
+    parse as parse_call, request_error_category, reserved_context_key, reserved_key_message,
+    sanitize_metadata, sanitize_structured,
 };
 use crate::pdps::stack;
 
@@ -307,12 +307,12 @@ impl PdpResolver for CedarDirectResolver {
         // so it is neither sanitized nor checked.
         stack::guarded(|| {
             let sanitized = if self.injects_structured() {
-                let Ok(sanitized) = sanitize_structured(structured) else {
-                    return Ok(withheld());
-                };
-                sanitized
+                sanitize_structured(structured)
             } else {
-                CedarStructured::default()
+                sanitize_metadata(structured)
+            };
+            let Ok(sanitized) = sanitized else {
+                return Ok(withheld());
             };
             let parsed = parse_call(&resolved_call, bag, sanitized, self.schema.as_deref())?;
             let entities = build_entities(

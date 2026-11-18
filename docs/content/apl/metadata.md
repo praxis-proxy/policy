@@ -25,6 +25,25 @@ The source returns one typed `AcquiredFacts` record. PPE validates it, stamps
 the configured source name and kind, installs it in the request extensions,
 and refreshes the APL bag. A source cannot forge another source's provenance.
 
+CEL and OPA receive the original JSON value directly at `metadata.<name>`;
+nulls, object shape, array order, duplicate elements, and mixed arrays are
+preserved. Provenance is available through the reserved `$source`, `$outcome`,
+`$fetched_at`, `$cache`, `$status`, `$stale`, and `$error_code` sibling fields.
+The top-level `metadata` object is always present, including when no fetch ran.
+CEL deny diagnostics report only `metadata=map`, never fetched values or raw
+source errors.
+
+Cedar receives values at `context.metadata` and identifier-safe provenance at
+`context.metadata_provenance`. Cedar omits nulls, converts arrays to sets
+(collapsing duplicates), and renders numbers outside `Long` as strings. A
+schema-backed Cedar resolver must declare both records in the action context,
+including when they are empty.
+
+The common accepted numeric domain is signed 64-bit integers and exactly
+representable finite binary64 decimals. Values such as `0.5` and `1.25` are
+accepted; unsigned values beyond `i64::MAX` and rounding decimals such as
+`0.1` reject the entire acquired record.
+
 Each source name may occur syntactically only once in a compiled route. This
 also applies across mutually exclusive `when` branches: use one fetch followed
 by conditional predicates instead. Fetches are sequential effects and are not

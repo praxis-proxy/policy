@@ -20,6 +20,13 @@ const MARKER: &str = "SECRET-MARKER";
 /// A schema declaring every principal attribute the resolver builds, with the
 /// given context type for `read`.
 fn schema(context: &str) -> String {
+    let inner = context
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .unwrap_or(context)
+        .trim();
+    let separator = if inner.is_empty() { "" } else { ", " };
+    let context = format!("{{ metadata: {{}}, metadata_provenance: {{}}{separator}{inner} }}");
     format!(
         r#"
 entity User = {{

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 use praxis_policy_apl_core::{AttributeBag, Decision};
 use praxis_policy_apl_runtime::{AplOptions, register_apl};
@@ -229,6 +230,29 @@ impl PdpResolver for MetadataPdp {
             diagnostics: Vec::new(),
         })
     }
+
+    async fn evaluate_structured(
+        &self,
+        call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
+        let projected = structured
+            .metadata()
+            .and_then(|metadata| metadata.pointer("/account/active"))
+            .and_then(serde_json::Value::as_bool);
+        if projected == Some(true) {
+            self.evaluate(call, bag).await
+        } else {
+            Ok(PdpDecision {
+                decision: Decision::Deny {
+                    reason: Some("structured fetched metadata missing".to_owned()),
+                    rule_source: "metadata-check".to_owned(),
+                },
+                diagnostics: Vec::new(),
+            })
+        }
+    }
 }
 
 #[tokio::test]
@@ -305,6 +329,89 @@ routes:
         result.continue_processing,
         "PDP should see the freshly fetched account record"
     );
+}
+
+#[tokio::test]
+async fn metadata_assertions_require_a_reachable_prior_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+routes:
+  - tool: check_account
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
+    authorization:
+      pre_invocation: [allow]
+",
+        )
+        .expect_err("an assertion cannot read a source the route never fetches");
+    assert!(error.to_string().contains("fetch(account)"), "{error}");
+}
+
+#[tokio::test]
+async fn metadata_assertions_accept_a_conditional_prior_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(
+        "test-source",
+        Box::new(SourceFactory(SourceResult::Success)),
+    );
+    register_apl(&engine, AplOptions::in_process());
+    engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+routes:
+  - tool: check_account
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
+            on_missing: omit
+    authorization:
+      pre_invocation:
+        - when: args.fetch
+          do: fetch(account)
+",
+        )
+        .expect("conditional absence is handled by on_missing");
+}
+
+#[tokio::test]
+async fn inherited_metadata_assertions_are_checked_against_the_effective_route() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-account-active
+          from: metadata.account.active
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: [allow]
+",
+        )
+        .expect_err("an inherited assertion still needs a fetch on the effective route");
+    assert!(error.to_string().contains("fetch(account)"), "{error}");
 }
 
 #[tokio::test]

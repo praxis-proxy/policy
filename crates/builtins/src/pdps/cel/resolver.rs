@@ -600,6 +600,10 @@ fn snapshot_referenced_values(
         if !referenced_set.contains(head) {
             continue;
         }
+        if head == "metadata" {
+            snapshot.insert(format!("metadata={}", TypeLabel::Map));
+            continue;
+        }
         match payload_namespace(key) {
             None => {
                 snapshot.insert(format!("{key}={value:?}"));
@@ -623,6 +627,9 @@ fn snapshot_referenced_values(
     {
         snapshot.insert(format!("llm.request={}", TypeLabel::of_json(document)));
     }
+    if referenced_set.contains("metadata") {
+        snapshot.insert(format!("metadata={}", TypeLabel::Map));
+    }
     snapshot.into_iter().collect()
 }
 
@@ -630,6 +637,7 @@ fn snapshot_referenced_values(
 /// structured input? Classifies referenced variables in eval-error causes.
 fn variable_present(bag: &AttributeBag, structured: &StructuredInput, name: &str) -> bool {
     match name {
+        "metadata" => return true,
         "args" if structured.args().is_some() => return true,
         "llm" if structured.llm_request().is_some() => return true,
         _ => {},
@@ -1350,6 +1358,41 @@ mod tests {
             out.diagnostics
                 .contains(&"http.response_headers=map".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn metadata_diagnostics_redact_values_and_reserved_provenance() {
+        let r = CelResolver::new();
+        let structured = StructuredInput::default().with_metadata(
+            Arc::new(serde_json::json!({
+                "account": {
+                    "nested": {"secret": MARKER},
+                    "$error_code": format!("metadata.{MARKER}")
+                }
+            })),
+            Arc::new(serde_json::json!({})),
+            Arc::new(serde_json::json!({})),
+        );
+        for expr in [
+            "metadata.account.nested.secret == 'other'",
+            "metadata.account['$error_code'] == 'metadata.other'",
+            "subject.id == 'alice' && metadata.account.nested.secret == 'other'",
+        ] {
+            let call = cel_call(expr);
+            let bag = bag_with(&[("subject.id", "alice")]);
+            let out = r
+                .evaluate_structured(&call, &bag, &structured)
+                .await
+                .unwrap();
+            assert_no_leak(&out);
+            assert!(out.diagnostics.contains(&"metadata=map".to_owned()));
+            if expr.starts_with("subject") {
+                assert!(
+                    out.diagnostics
+                        .contains(&"subject.id=String(\"alice\")".to_owned())
+                );
+            }
+        }
     }
 
     #[tokio::test]

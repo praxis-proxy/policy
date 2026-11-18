@@ -300,6 +300,9 @@ pub enum MetadataInstallError {
     /// A source error code is outside the reserved metadata namespace.
     #[error("metadata error code `{0}` must start with `metadata.` and include a name")]
     InvalidErrorCode(String),
+    /// A JSON number is outside the common lossless evaluator domain.
+    #[error("metadata number `{0}` is not a signed i64 or exactly representable finite binary64")]
+    InvalidNumber(String),
 }
 
 // -----------------------------------------------------------------------------
@@ -383,8 +386,67 @@ fn validate_keys(value: &Value, root: bool) -> Result<(), MetadataInstallError> 
             }
             Ok(())
         },
+        Value::Number(number) => validate_number(number),
         _ => Ok(()),
     }
+}
+
+/// Enforce the numeric intersection CEL and OPA can project without rounding.
+fn validate_number(number: &serde_json::Number) -> Result<(), MetadataInstallError> {
+    if number.as_i64().is_some() {
+        return Ok(());
+    }
+    if number.as_u64().is_some() {
+        return Err(MetadataInstallError::InvalidNumber(number.to_string()));
+    }
+    let text = number.to_string();
+    let finite = number.as_f64().is_some_and(f64::is_finite);
+    if finite && decimal_is_exact_binary64(&text) {
+        Ok(())
+    } else {
+        Err(MetadataInstallError::InvalidNumber(text))
+    }
+}
+
+/// Whether a decimal token's exact rational value fits a binary64 significand.
+fn decimal_is_exact_binary64(text: &str) -> bool {
+    let (mantissa, exponent) = text
+        .split_once(['e', 'E'])
+        .map_or((text, 0_i32), |(mantissa, exponent)| {
+            (mantissa, exponent.parse::<i32>().unwrap_or(i32::MAX))
+        });
+    let unsigned = mantissa.strip_prefix(['-', '+']).unwrap_or(mantissa);
+    let fractional = unsigned.split_once('.').map_or(0_i32, |(_, fraction)| {
+        i32::try_from(fraction.len()).unwrap_or(i32::MAX)
+    });
+    let digits: String = unsigned.chars().filter(|ch| *ch != '.').collect();
+    let Ok(mut coefficient) = digits.parse::<u128>() else {
+        return false;
+    };
+    if coefficient == 0 {
+        return true;
+    }
+    let decimal_exponent = exponent.saturating_sub(fractional);
+    if decimal_exponent < 0 {
+        for _ in 0..decimal_exponent.unsigned_abs() {
+            if !coefficient.is_multiple_of(5) {
+                return false;
+            }
+            coefficient /= 5;
+        }
+    } else {
+        for _ in 0..u32::try_from(decimal_exponent).unwrap_or(u32::MAX) {
+            let Some(product) = coefficient.checked_mul(5) else {
+                return false;
+            };
+            coefficient = product;
+        }
+    }
+    while coefficient.is_multiple_of(2) {
+        coefficient /= 2;
+    }
+    let significant_bits = u128::BITS - coefficient.leading_zeros();
+    significant_bits <= 53
 }
 
 #[cfg(test)]
@@ -535,6 +597,29 @@ mod tests {
                 extensions.metadata.is_none(),
                 "invalid install must be atomic"
             );
+        }
+    }
+
+    #[test]
+    fn numeric_domain_accepts_i64_and_exact_binary64_values() {
+        for value in [json!(i64::MIN), json!(i64::MAX), json!(0.5), json!(1.25)] {
+            let mut extensions = Extensions::default();
+            extensions
+                .install_metadata("account", "metadata/http", success(value))
+                .expect("the numeric value is lossless in CEL and OPA");
+        }
+    }
+
+    #[test]
+    fn numeric_domain_rejects_unsigned_and_rounding_values_atomically() {
+        for value in [json!(u64::MAX), json!(0.1)] {
+            let mut extensions = Extensions::default();
+            let result = extensions.install_metadata("account", "metadata/http", success(value));
+            assert!(matches!(
+                result,
+                Err(MetadataInstallError::InvalidNumber(_))
+            ));
+            assert!(extensions.metadata.is_none(), "a rejected record is atomic");
         }
     }
 

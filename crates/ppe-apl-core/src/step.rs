@@ -786,10 +786,27 @@ pub trait PluginInvoker: Send + Sync {
 }
 
 /// Attributes published by one completed metadata acquisition.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MetadataFetchOutcome {
     /// Fresh `metadata.<instance>.*` attributes for subsequent effects.
     pub attributes: crate::attributes::AttributeBag,
+    /// Complete CEL/OPA projection after this acquisition.
+    pub metadata: serde_json::Value,
+    /// Complete Cedar value projection after this acquisition.
+    pub cedar_metadata: serde_json::Value,
+    /// Complete identifier-safe Cedar provenance projection.
+    pub metadata_provenance: serde_json::Value,
+}
+
+impl Default for MetadataFetchOutcome {
+    fn default() -> Self {
+        Self {
+            attributes: crate::attributes::AttributeBag::new(),
+            metadata: serde_json::json!({}),
+            cedar_metadata: serde_json::json!({}),
+            metadata_provenance: serde_json::json!({}),
+        }
+    }
 }
 
 /// Why one metadata acquisition did not publish a record.

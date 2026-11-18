@@ -73,6 +73,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, Weak};
 
+use praxis_policy_core::assertions::{
+    AssertionsConfig, AuthoredSource, Direction, HeaderEntry, SourcePath,
+};
 use praxis_policy_core::cmf::constants::{
     ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL,
     HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_POST_INVOKE,
@@ -142,6 +145,9 @@ struct VisitorState {
     global_layer: Option<CompiledRoute>,
     default_layers: HashMap<String, CompiledRoute>,
     tag_layers: HashMap<String, CompiledRoute>,
+    global_assertions: Option<AssertionsConfig>,
+    default_assertions: HashMap<String, AssertionsConfig>,
+    tag_assertions: HashMap<String, AssertionsConfig>,
     pdp_router: PdpRouter,
     /// Each declared plugin's name against the hooks its own `hooks:` names.
     /// Filled by `visit_plugins`, which runs before any section is walked.
@@ -920,6 +926,9 @@ impl ConfigVisitor for AplConfigVisitor {
         state.declared_plugin_hooks.clear();
         state.reached_plugin_hooks.clear();
         state.reached_plugin_names.clear();
+        state.global_assertions = None;
+        state.default_assertions.clear();
+        state.tag_assertions.clear();
         for cfg in plugins {
             state
                 .declared_plugin_hooks
@@ -948,6 +957,10 @@ impl ConfigVisitor for AplConfigVisitor {
         yaml: &serde_yaml::Value,
     ) -> Result<(), VisitorError> {
         self.record_structural_names(yaml);
+        self.state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .global_assertions = assertions_block(yaml)?;
         let Some(apl_block) = apl_subblock(yaml) else {
             // No policy term, so this load declares no PDPs. Drop config-owned
             // resolvers from the previous load; code-supplied ones stay.
@@ -1124,6 +1137,13 @@ impl ConfigVisitor for AplConfigVisitor {
         // entity default's `authentication:` list reaches its plugins whether
         // or not the block carries a policy body.
         self.record_structural_names(yaml);
+        if let Some(assertions) = assertions_block(yaml)? {
+            self.state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .default_assertions
+                .insert(entity_type.to_owned(), assertions);
+        }
         warn_if_response_at_unsupported_scope(yaml, &source);
         let Some(apl_block) = apl_subblock(yaml) else {
             return Ok(());
@@ -1155,6 +1175,13 @@ impl ConfigVisitor for AplConfigVisitor {
     ) -> Result<(), VisitorError> {
         let source = format!("groups.{tag}");
         self.record_structural_names(yaml);
+        if let Some(assertions) = assertions_block(yaml)? {
+            self.state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .tag_assertions
+                .insert(tag.to_owned(), assertions);
+        }
         warn_if_response_at_unsupported_scope(yaml, &source);
         let Some(apl_block) = apl_subblock(yaml) else {
             return Ok(());
@@ -1260,6 +1287,18 @@ impl ConfigVisitor for AplConfigVisitor {
             for bundle in &bundles {
                 if let Some(layer) = state.tag_layers.get(bundle).cloned() {
                     effective.apply_layer(layer);
+                }
+            }
+            let mut assertion_layers: Vec<AssertionsConfig> = Vec::new();
+            if let Some(assertions) = state.global_assertions.clone() {
+                assertion_layers.push(assertions);
+            }
+            if let Some(assertions) = state.default_assertions.get(entity_type).cloned() {
+                assertion_layers.push(assertions);
+            }
+            for bundle in &bundles {
+                if let Some(assertions) = state.tag_assertions.get(bundle).cloned() {
+                    assertion_layers.push(assertions);
                 }
             }
             drop(state);
@@ -1400,6 +1439,11 @@ impl ConfigVisitor for AplConfigVisitor {
                 .into());
             }
             validate_metadata_fetch_sources(&route_key, &effective, plugin_registry.as_ref(), mgr)?;
+            if let Some(assertions) = parsed.assertions.clone() {
+                assertion_layers.push(assertions);
+            }
+            let assertion_layer_refs: Vec<&AssertionsConfig> = assertion_layers.iter().collect();
+            validate_assertion_fetch_reachability(&route_key, &assertion_layer_refs, &effective)?;
 
             // Each half installs only when the effective route declares steps
             // for it, the way the global catch-all already decides.
@@ -1485,6 +1529,78 @@ impl ConfigVisitor for AplConfigVisitor {
 
         Ok(())
     }
+}
+
+/// Refuse an exact metadata assertion when its source cannot run before render.
+fn validate_assertion_fetch_reachability(
+    route_key: &str,
+    layers: &[&AssertionsConfig],
+    effective: &CompiledRoute,
+) -> Result<(), VisitorError> {
+    let fetched_names = effective.fetch_names();
+    let fetched: HashSet<&str> = fetched_names.iter().map(String::as_str).collect();
+    for direction in [Direction::Request, Direction::Response] {
+        for header in effective_assertion_headers(layers, direction) {
+            let paths: Vec<&str> = match &header.source {
+                AuthoredSource::From(path) => vec![path],
+                AuthoredSource::Members(members) => members.values().map(String::as_str).collect(),
+            };
+            for path in paths {
+                let Ok(SourcePath::Metadata { instance, .. }) = SourcePath::parse(path) else {
+                    continue;
+                };
+                if !fetched.contains(instance.as_str()) {
+                    return Err(format!(
+                        "route '{route_key}': {} header `{}` reads `{path}`, but `fetch({instance})` is not reachable in authorization.pre_invocation before assertion rendering",
+                        direction.label(),
+                        header.name
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the header layering needed for fetch reachability validation.
+fn effective_assertion_headers(
+    layers: &[&AssertionsConfig],
+    direction: Direction,
+) -> Vec<HeaderEntry> {
+    let mut headers: Vec<HeaderEntry> = Vec::new();
+    for assertions in layers {
+        let Some(block) = direction.block_of(assertions) else {
+            continue;
+        };
+        if block.replace_inherited {
+            headers.clear();
+        }
+        for entry in &block.headers {
+            if let Some(existing) = headers
+                .iter_mut()
+                .find(|existing| existing.name.eq_ignore_ascii_case(&entry.name))
+            {
+                *existing = entry.clone();
+            } else {
+                headers.push(entry.clone());
+            }
+        }
+    }
+    headers
+}
+
+/// Read the assertions block already validated by the core config loader.
+fn assertions_block(yaml: &serde_yaml::Value) -> Result<Option<AssertionsConfig>, VisitorError> {
+    let Some(value) = yaml.get("assertions").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    serde_yaml::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| {
+            format!("assertions block passed core validation but could not be read by APL: {error}")
+                .into()
+        })
 }
 
 /// Refuse an `args:` or `result:` block declared at a scope that reaches only

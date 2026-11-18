@@ -68,6 +68,10 @@ pub struct HeaderEntry {
     /// How a value that is not a scalar renders into one header value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encode: Option<Encoding>,
+
+    /// Explicit trust promotion for credential-bearing target names.
+    #[serde(default)]
+    pub allow_credential_target: bool,
 }
 
 /// An entry's source, as authored. Parsed at resolution rather than here so a
@@ -373,11 +377,21 @@ fn parse_entry(raw: &serde_yaml::Value, index: usize, label: &str) -> Result<Hea
         },
     };
 
+    let allow_credential_target = match map.get(serde_yaml::Value::String(
+        "allow_credential_target".to_owned(),
+    )) {
+        None | Some(serde_yaml::Value::Null) => false,
+        Some(value) => value.as_bool().ok_or_else(|| {
+            format!("`{label}` header `{name}`: `allow_credential_target:` must be a boolean")
+        })?,
+    };
+
     Ok(HeaderEntry {
         name: name.to_owned(),
         source,
         on_missing,
         encode,
+        allow_credential_target,
     })
 }
 
@@ -509,6 +523,26 @@ fn validate_block(
         }
         targeted.push(lower.clone());
 
+        if is_credential_target(&lower) {
+            if !entry.allow_credential_target {
+                return Err(format!(
+                    "{level}: `{label}` header `{}` is a credential target; set `allow_credential_target: true` on this exact entry to acknowledge the trust promotion",
+                    entry.name
+                ));
+            }
+            tracing::warn!(
+                alarm = "assertion_credential_target_configured",
+                header = %entry.name,
+                source = ?entry.source,
+                "an assertion is configured to replace a credential-bearing header"
+            );
+        } else if entry.allow_credential_target {
+            return Err(format!(
+                "{level}: `{label}` header `{}` sets `allow_credential_target: true`, but the target is not Authorization, Proxy-Authorization, Cookie, or Set-Cookie",
+                entry.name
+            ));
+        }
+
         // An entry whose source resolves to nothing still removes its target,
         // so an entry aimed at a floor header could remove one without a
         // `strip:` entry naming it. True in either direction, so the check runs
@@ -590,6 +624,14 @@ fn validate_block(
         }
     }
     Ok(())
+}
+
+/// Whether a normalized header name conventionally carries credentials.
+pub(crate) fn is_credential_target(lowercase: &str) -> bool {
+    matches!(
+        lowercase,
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+    )
 }
 
 #[cfg(test)]
@@ -713,6 +755,36 @@ global:
             .headers;
         assert_eq!(headers[0].on_missing, OnMissing::Omit);
         assert_eq!(headers[1].on_missing, OnMissing::Deny);
+    }
+
+    #[test]
+    fn credential_targets_need_an_exact_case_insensitive_opt_in() {
+        for name in [
+            "Authorization",
+            "PROXY-AUTHORIZATION",
+            "Cookie",
+            "set-cookie",
+        ] {
+            let refused = refuse(&global(&format!(
+                "    request:\n      headers:\n        - name: {name}\n          from: subject.id\n"
+            )));
+            assert!(
+                refused.contains("allow_credential_target: true"),
+                "{refused}"
+            );
+
+            load(&global(&format!(
+                "    request:\n      headers:\n        - name: {name}\n          from: subject.id\n          allow_credential_target: true\n"
+            )));
+        }
+    }
+
+    #[test]
+    fn credential_opt_in_is_rejected_on_an_unrelated_target() {
+        let refused = refuse(&global(
+            "    request:\n      headers:\n        - name: x-account\n          from: subject.id\n          allow_credential_target: true\n",
+        ));
+        assert!(refused.contains("target is not Authorization"), "{refused}");
     }
 
     /// The flag is read per direction, so a level can replace what it inherits

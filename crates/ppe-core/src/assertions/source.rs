@@ -42,6 +42,12 @@ pub enum SourceRejection {
 
     /// The path names the claim map rather than one claim.
     ClaimRoot,
+
+    /// A metadata instance was named without an exact value path.
+    MetadataRoot,
+
+    /// Acquired provenance cannot be promoted into an asserted header.
+    MetadataProvenance,
 }
 
 /// A rejected source, carrying the path and why it was refused.
@@ -77,6 +83,16 @@ impl std::fmt::Display for SourceError {
                  provider's claim set cannot be rendered wholesale",
                 self.path
             ),
+            SourceRejection::MetadataRoot => write!(
+                f,
+                "`{}` names a whole metadata instance; write an exact `metadata.<instance>.<path>` source",
+                self.path
+            ),
+            SourceRejection::MetadataProvenance => write!(
+                f,
+                "`{}` names reserved metadata provenance, which is never an assertion source",
+                self.path
+            ),
         }
     }
 }
@@ -101,6 +117,7 @@ pub const ADDRESSABLE_SOURCES: &[&str] = &[
     "client.authorized_audiences",
     "client.claim.<name>",
     "secret.<name>",
+    "metadata.<instance>.<path>",
 ];
 
 /// The slot prefixes no entry may ever name, with the reason each is refused.
@@ -172,6 +189,13 @@ pub enum SourcePath {
     /// declared name rather than the value, so a resolved contract carries no
     /// secret material and neither does anything that clones or prints one.
     Secret(String),
+    /// One exact value path in an immutable acquired-facts record.
+    Metadata {
+        /// Metadata source instance.
+        instance: String,
+        /// Object fields or array indices below the instance.
+        path: Vec<String>,
+    },
 }
 
 impl SourcePath {
@@ -220,6 +244,27 @@ impl SourcePath {
         {
             return Ok(Self::Secret(name.to_owned()));
         }
+        if path == "metadata" || path == "metadata." {
+            return rejected(SourceRejection::MetadataRoot);
+        }
+        if let Some(rest) = path.strip_prefix("metadata.") {
+            let mut segments = rest.split('.');
+            let instance = segments.next().unwrap_or_default();
+            let value_path: Vec<String> = segments.map(str::to_owned).collect();
+            if instance.is_empty()
+                || value_path.is_empty()
+                || value_path.iter().any(String::is_empty)
+            {
+                return rejected(SourceRejection::MetadataRoot);
+            }
+            if value_path.iter().any(|segment| segment.starts_with('$')) {
+                return rejected(SourceRejection::MetadataProvenance);
+            }
+            return Ok(Self::Metadata {
+                instance: instance.to_owned(),
+                path: value_path,
+            });
+        }
         match path {
             "subject.id" => Ok(Self::SubjectId),
             "subject.type" => Ok(Self::SubjectType),
@@ -261,6 +306,9 @@ impl SourcePath {
             Self::ClientAudiences => "client.authorized_audiences".to_owned(),
             Self::ClientClaim(name) => format!("client.claim.{name}"),
             Self::Secret(name) => format!("secret.{name}"),
+            Self::Metadata { instance, path } => {
+                format!("metadata.{instance}.{}", path.join("."))
+            },
         }
     }
 
@@ -296,6 +344,7 @@ impl SourcePath {
             | Self::ClientAudiences
             | Self::ClientClaim(_) => Some(Capability::ReadClient),
             Self::Secret(_) => None,
+            Self::Metadata { .. } => Some(Capability::ReadMetadata),
         }
     }
 
@@ -347,6 +396,22 @@ impl SourcePath {
             return secrets
                 .and_then(|store| store.value(name).map(|v| Value::String(v.to_string())));
         }
+        if let Self::Metadata { instance, path } = self {
+            let facts = ext.metadata.as_deref()?.get(instance)?;
+            let mut value = facts.value()?;
+            let mut segments = path.iter();
+            if !value.is_object() && segments.next().map(String::as_str) != Some("value") {
+                return None;
+            }
+            for segment in segments {
+                value = match value {
+                    Value::Object(fields) => fields.get(segment)?,
+                    Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+                    _ => return None,
+                };
+            }
+            return (!value.is_null()).then(|| value.clone());
+        }
         let security = ext.security.as_deref()?;
         match self {
             Self::SubjectId => security.subject.as_ref()?.id.clone().map(Value::String),
@@ -381,6 +446,7 @@ impl SourcePath {
             // out rather than folded into a wildcard so a slot added later
             // still has to say where it reads from.
             Self::Secret(_) => None,
+            Self::Metadata { .. } => None,
         }
     }
 }
@@ -428,6 +494,7 @@ fn sorted_list(values: &[String]) -> Value {
     reason = "tests"
 )]
 mod tests {
+    use chrono::{TimeZone as _, Utc};
     use std::sync::Arc;
 
     use serde_json::json;
@@ -453,6 +520,46 @@ mod tests {
 
     fn parse(path: &str) -> SourcePath {
         SourcePath::parse(path).expect("the path is a source")
+    }
+
+    #[test]
+    fn metadata_sources_require_an_exact_non_provenance_path() {
+        assert!(matches!(
+            parse("metadata.account.profile.roles"),
+            SourcePath::Metadata { instance, path }
+                if instance == "account" && path == ["profile", "roles"]
+        ));
+        assert_eq!(rejection("metadata.account"), SourceRejection::MetadataRoot);
+        assert_eq!(
+            rejection("metadata.account.$source"),
+            SourceRejection::MetadataProvenance
+        );
+    }
+
+    #[test]
+    fn metadata_sources_resolve_structured_values_and_treat_null_as_missing() {
+        let mut ext = Extensions::default();
+        ext.install_metadata(
+            "account",
+            "metadata/http",
+            crate::extensions::AcquiredFacts::success(
+                json!({"profile": {"roles": ["reader", "writer"], "empty": null}}),
+                Utc.with_ymd_and_hms(2026, 10, 19, 12, 0, 0)
+                    .single()
+                    .expect("valid instant"),
+                crate::extensions::MetadataCacheDisposition::Miss,
+            ),
+        )
+        .expect("metadata installs");
+
+        assert_eq!(
+            parse("metadata.account.profile.roles").resolve(&ext, None),
+            Some(json!(["reader", "writer"]))
+        );
+        assert_eq!(
+            parse("metadata.account.profile.empty").resolve(&ext, None),
+            None
+        );
     }
 
     fn rejection(path: &str) -> SourceRejection {

@@ -255,6 +255,8 @@ global:
           principal: User,
           resource: Document,
           context: {{
+            metadata: {{}},
+            metadata_provenance: {{}},
             args?: {{}},
             llm?: {{ request: {{}} }},
             meta?: {{ entity_type?: String, entity_name?: String, scope?: String, tags?: Set<String> }},
@@ -364,7 +366,7 @@ global:
         action read appliesTo {
           principal: User,
           resource: Document,
-          context: { llm?: { request: {} } },
+          context: { metadata: {}, metadata_provenance: {}, llm?: { request: {} } },
         };
   authorization:
     pre_invocation:
