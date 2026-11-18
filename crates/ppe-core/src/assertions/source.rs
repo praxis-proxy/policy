@@ -32,6 +32,7 @@ use crate::extensions::{Capability, Extensions};
 use crate::secrets::SecretStore;
 
 /// Why an authored string is not a source.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceRejection {
     /// The path names no addressable slot.

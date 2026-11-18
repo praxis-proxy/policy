@@ -53,11 +53,13 @@ fn alice_bag() -> AttributeBag {
 // =====================================================================
 
 #[test]
-fn only_call_placeholders_report_metadata_usage() {
+fn policy_context_and_call_placeholders_report_metadata_usage() {
     let policy_context = CedarDirectResolver::from_policy_text(
         "permit(principal, action, resource) when { context.metadata.account.active };",
     )
     .expect("policy context parses");
+    let call_only = CedarDirectResolver::from_policy_text("permit(principal, action, resource);")
+        .expect("policy parses");
     let metadata_call = PdpCall {
         dialect: PdpDialect::Cedar,
         args: serde_yaml::from_str(
@@ -84,15 +86,15 @@ resource:
     };
 
     assert!(
-        !policy_context.requires_metadata(&read_doc_call()),
-        "Cedar policy context is not acquired metadata"
+        policy_context.requires_metadata(&read_doc_call()),
+        "Cedar policy context reads acquired metadata directly"
     );
     assert!(
-        policy_context.requires_metadata(&metadata_call),
+        call_only.requires_metadata(&metadata_call),
         "Cedar reads the metadata placeholder value from the attribute bag"
     );
     assert!(
-        !policy_context.requires_metadata(&literal_metadata_call),
+        !call_only.requires_metadata(&literal_metadata_call),
         "Cedar leaves the literal metadata.account resource ID unchanged"
     );
 }

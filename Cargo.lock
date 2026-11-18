@@ -3214,11 +3214,14 @@ version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "praxis-policy-apl-core",
+ "praxis-policy-builtins",
  "praxis-policy-core",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]

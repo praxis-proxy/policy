@@ -1306,7 +1306,7 @@ mod tests {
 
     // --- decision-audit sink ----------------------------------------------
 
-    use praxis_policy_core::decision::{DecisionLog, PluginAction, Span, Verdict};
+    use praxis_policy_core::decision::{DecisionLog, DecisionWarning, PluginAction, Span, Verdict};
     use praxis_policy_core::error::PluginViolation;
 
     /// Sink-mode config: no `hooks:`, so the factory registers no post-hook
@@ -1340,6 +1340,39 @@ mod tests {
         assert!(
             observer.as_audit_handler().is_none(),
             "hooks listed -> post-hook observer only, no double emission"
+        );
+    }
+
+    #[test]
+    fn decision_warnings_are_serialized_in_the_tamper_evident_block() {
+        let e = OcsfAuditEmitter::new(sink_cfg(json!({ "chain": false }))).unwrap();
+        let mut log = finalized(Vec::new(), Verdict::Allow);
+        log.record_warning(DecisionWarning::new(
+            "assertion_credential_target_used",
+            [
+                ("direction".to_owned(), "response".to_owned()),
+                ("header".to_owned(), "Set-Cookie".to_owned()),
+            ],
+        ));
+
+        let ev = e.build_decision(
+            Some(&tool_payload()),
+            &subject_ext(),
+            &log,
+            "2026-08-18T12:00:00.000Z",
+        );
+
+        assert_eq!(
+            ev["unmapped"]["aid.warnings"][0]["code"],
+            "assertion_credential_target_used"
+        );
+        assert_eq!(
+            ev["unmapped"]["aid.warnings"][0]["fields"]["direction"],
+            "response"
+        );
+        assert_eq!(
+            ev["unmapped"]["aid.warnings"][0]["fields"]["header"],
+            "Set-Cookie"
         );
     }
 
