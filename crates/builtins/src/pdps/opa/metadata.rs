@@ -210,15 +210,23 @@ fn statement_references_metadata(
 }
 
 fn expression_references_metadata(expression: &Expr, aliases: &HashSet<String>) -> bool {
+    // Keep this match exhaustive so new Regorus expression forms require an
+    // explicit metadata-dependency decision instead of silently failing open.
     match expression {
         Expr::RefDot { refr, field, .. } => {
-            (is_alias(refr, aliases) && value_is_metadata(&field.1))
-                || expression_references_metadata(refr, aliases)
+            if is_alias(refr, aliases) {
+                value_is_metadata(&field.1)
+            } else {
+                expression_references_metadata(refr, aliases)
+            }
         },
         Expr::RefBrack { refr, index, .. } => {
-            (is_alias(refr, aliases) && index_may_select_metadata(index))
-                || expression_references_metadata(refr, aliases)
-                || expression_references_metadata(index, aliases)
+            if is_alias(refr, aliases) {
+                index_may_select_metadata(index)
+            } else {
+                expression_references_metadata(refr, aliases)
+                    || expression_references_metadata(index, aliases)
+            }
         },
         Expr::ArrayCompr { term, query, .. } | Expr::SetCompr { term, query, .. } => {
             query_references_metadata(query, &[term.as_ref()], aliases)
@@ -263,8 +271,8 @@ fn expression_references_metadata(expression: &Expr, aliases: &HashSet<String>) 
         | Expr::RawString { .. }
         | Expr::Number { .. }
         | Expr::Bool { .. }
-        | Expr::Null { .. }
-        | Expr::Var { .. } => false,
+        | Expr::Null { .. } => false,
+        Expr::Var { .. } => is_alias(expression, aliases),
     }
 }
 

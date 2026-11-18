@@ -53,15 +53,11 @@ fn alice_bag() -> AttributeBag {
 // =====================================================================
 
 #[test]
-fn policy_and_call_dependencies_report_metadata_usage() {
-    let metadata_policy = CedarDirectResolver::from_policy_text(
+fn only_call_placeholders_report_metadata_usage() {
+    let policy_context = CedarDirectResolver::from_policy_text(
         "permit(principal, action, resource) when { context.metadata.account.active };",
     )
-    .expect("metadata policy parses");
-    let unrelated_policy = CedarDirectResolver::from_policy_text(
-        "permit(principal, action, resource) when { resource.metadata.enabled };",
-    )
-    .expect("unrelated policy parses");
+    .expect("policy context parses");
     let metadata_call = PdpCall {
         dialect: PdpDialect::Cedar,
         args: serde_yaml::from_str(
@@ -87,10 +83,12 @@ resource:
         .unwrap(),
     };
 
-    assert!(metadata_policy.requires_metadata(&read_doc_call()));
-    assert!(!unrelated_policy.requires_metadata(&read_doc_call()));
-    assert!(unrelated_policy.requires_metadata(&metadata_call));
-    assert!(!unrelated_policy.requires_metadata(&literal_metadata_call));
+    assert!(
+        !policy_context.requires_metadata(&read_doc_call()),
+        "Cedar policy context is not acquired metadata"
+    );
+    assert!(policy_context.requires_metadata(&metadata_call));
+    assert!(!policy_context.requires_metadata(&literal_metadata_call));
 }
 
 /// One unconditional `permit` policy → request → Allow. Confirms the

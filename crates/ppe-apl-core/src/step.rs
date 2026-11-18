@@ -317,7 +317,6 @@ impl PdpCall {
     ///
     /// This is a conservative fallback for resolvers that cannot expose
     /// parsed dependency information. It recognizes dotted, whole-namespace,
-    /// and bracketed evaluator forms while ignoring quoted literals and line
     /// and bracketed evaluator forms while ignoring quoted literals and
     /// comments.
     pub fn references_metadata(&self) -> bool {
