@@ -87,8 +87,14 @@ resource:
         !policy_context.requires_metadata(&read_doc_call()),
         "Cedar policy context is not acquired metadata"
     );
-    assert!(policy_context.requires_metadata(&metadata_call));
-    assert!(!policy_context.requires_metadata(&literal_metadata_call));
+    assert!(
+        policy_context.requires_metadata(&metadata_call),
+        "Cedar reads the metadata placeholder value from the attribute bag"
+    );
+    assert!(
+        !policy_context.requires_metadata(&literal_metadata_call),
+        "Cedar leaves the literal metadata.account resource ID unchanged"
+    );
 }
 
 /// One unconditional `permit` policy → request → Allow. Confirms the

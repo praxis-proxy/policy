@@ -55,8 +55,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   typed record required for publication. Sources must declare `metadata.fetch`
   and use `on_error: fail` or `ignore`.
   ([#287](https://github.com/praxis-proxy/policy/pull/287))
-- **Breaking for route capability grants:** plugin capabilities now contribute
-  only to the request or response handler half where that plugin runs.
+- **Breaking for route capability grants:** ordinary `run()` and field-pipeline
+  plugin capabilities now contribute only to the request or response handler
+  half where that plugin runs. Delegation, elicitation, and metadata-fetch
+  plugins still contribute their declared capabilities to both halves.
   Predicates on the other half that read `client.*`, `caller.workload.*`, or
   `this.workload.*` need `read_client` or `read_workload` in the host baseline.
   ([#242](https://github.com/praxis-proxy/policy/issues/242))
