@@ -20,6 +20,8 @@ APL enforcement must inspect the same content the downstream consumer receives. 
 
 For example, a resource post-fetch policy intended to mask an SSN may load and report an allowed operation while the original `Resource.content` remains unredacted. A temporary end-to-end probe confirmed that `result == 'topsecret': deny` allowed a resource containing `topsecret`, while a comparison to the empty string denied.
 
+The gap is on both sides of the host boundary. Praxis, the reference host, builds response content parts and re-serializes response bodies for `tools/call` only. For `resources/read` and `prompts/get` it builds no `Resource` or `PromptResult` part, so APL sees an empty message (part of why the probe saw an empty string). A part that PPE rewrites is also never written back into the response body. Fixing PPE projection alone therefore does not stop the leak through the proxy; see [§11](#11-dependencies-and-rollout).
+
 ### Current behavior vs. desired behavior
 
 | Entity / phase | Today | Desired after Issue 75 |
@@ -53,10 +55,11 @@ For example, a resource post-fetch policy intended to mask an SSN may load and r
 
 1. **Projection gaps:** Existing extractors select only tool and prompt-request variants. We need a deterministic shape for three additional structured variants.
 2. **Write-back correctness:** A transformed string must replace the relevant field in the *same* `ContentPart`, never be appended as a separate `Text` part that consumers may ignore.
-3. **Type fidelity:** `u64`, optional strings, closed enums, boolean flags, annotations maps, and read-only identity fields need explicit conversion and invalid-value behavior.
+3. **Type fidelity:** `u64`, optional strings, and annotations maps need explicit conversion and invalid-value behavior; read-only fields (`uri`, `resource_type`, `prompt_name`, `is_error`, `icons`) must be preserved.
 4. **Silent misconfiguration:** Some entity/phase combinations have no field paths; unknown or read-only field writes should be caught at load time.
 5. **Three-layer host contract:** `MetaExtension` controls routing, `MCPExtension` feeds PDP attributes, and `ContentPart` feeds APL. Populating one does not substitute for the others.
 6. **Partial inspection:** First-match-only extraction and flat prompt `content` leave potential bypasses until Issue 76 or an explicit host normalization step.
+7. **Host-side dependency:** PPE only sees what the host builds and only affects what the host serializes. Enforcement for resources and prompts needs matching Praxis changes, verified on the bytes sent to the client, not just on the PPE `Message`.
 
 ## 5. Proposed architecture
 
@@ -102,8 +105,9 @@ Use a fixed object shape (not a bare string or opportunistically parsed JSON). E
 
 Changes are applied to the original matching `ResourceRef`, `Resource`, or `PromptResult` part. Do not append `Text` and do not alter other content parts. Preserve fields omitted from projection (`resource_request_id`, `prompt_request_id`, `blob`).
 
-- Preserve original values when an APL-produced `u64` is negative, fractional, or out of range, an enum value is unknown, or `is_error` has the wrong type.
-- Preserve read-only `PromptResult.prompt_name` and `Resource.icons` even if a change somehow reaches write-back; reject those writes earlier at config load.
+- Preserve original values when an APL-produced `u64` is negative, fractional, or out of range.
+- Identity and classification fields are **read-only**: `ResourceRef.uri`, `Resource.uri`, `ResourceRef.resource_type`, `Resource.resource_type`, `PromptResult.prompt_name`, `PromptResult.is_error`, and the display field `Resource.icons`. Writes to them are refused at config load and, as a backstop, the original is preserved if a change reaches write-back.
+- `uri` is read-only because Praxis writes `ResourceRef.uri` back into `params.uri`. A writable `args.uri` would let a pipeline step change which resource is fetched after route matching and the PDP decided on the original URI, with nothing re-authorizing the new one. On the post-fetch side, a rewritten `result.uri` would tell the client the content came from somewhere it did not.
 - Merge `annotations` at addressed-key level so editing one annotation does not erase unrelated keys.
 - Handle optional strings consistently; the exact JSON-to-field conversion policy is in Appendix B.
 
@@ -115,7 +119,7 @@ Coupling validation to a fixed field catalog creates schema drift risk. Add a te
 
 ### 5.4 Data model and host contract
 
-Bring MCP extension metadata up to the targeted 2026-07-28 schema: shared `Icon`, metadata titles/icons/sizes as applicable, `Resource.title/icons`, and `PromptResult.description`. Map the new extension attributes into the PDP bag.
+Bring MCP extension metadata up to the targeted 2026-07-28 schema: shared `Icon`, metadata titles/icons/sizes as applicable, `Resource.title/icons`, and `PromptResult.description`. Map the new extension attributes into the PDP bag, except icons: they are display metadata and stay on the structs only.
 
 A host must populate the distinct layers correctly:
 
@@ -125,18 +129,35 @@ A host must populate the distinct layers correctly:
 | `MCPExtension` | PDP metadata predicates | Missing `mcp.*` attributes |
 | `ContentPart` | APL field projection/write-back | Route can match while APL has no effective payload |
 
-Until Issue 76, a host that emits `PromptResult` **MUST** fill its flat `content` with rendered text (ordered text parts of `messages`), or prompt content inspection will not run effectively. Hosts should emit one fetched resource content per message, or treat multi-content reads as only partially covered. The guide must explicitly explain both failure modes.
+**The layers are views, not duplicates.** `ContentPart` and `MCPExtension` can both carry a name, namespace or `uri` for the same entity, but they describe different things:
+
+- **`ContentPart` is the wire view:** the request as the agent sent it. `ToolCall.name` comes from `params.name`, `ResourceRef.uri` from `params.uri`, and write-back serializes them back into the body.
+- **`MCPExtension` is the resolved identity:** the host's view of the entity from its own catalog. It carries data the agent never sends (`server_id`, schemas, annotations).
+
+A gateway is exactly where the two differ. A federating gateway may expose a tool to the agent as `hr__get_salary` (`ToolCall.name`) while the upstream tool is `get_salary` on `hr-server` (`ToolMetadata.name`, `server_id`). Likewise, `ResourceRef.uri` is what the agent asked for and `ResourceMetadata.uri` can be what the host resolved it to. PPE therefore **does not require the layers to be equal**, and no equality check is added: it would reject every federated setup.
+
+**`ToolCall.namespace` is the agent-facing namespace.** The field is not part of MCP: `tools/call` params are only `name` and `arguments` (2025-11-25, 2026-07-28 and draft). It came over from the CPEX CMF, where it forms the `tool://{namespace}/{name}` view identity. PPE never reads it and Praxis always leaves it `None`, so until now its meaning was undefined. Following the wire-view definition above, it is defined as the namespace the agent sees, if the agent sees one (for example `hr` in `hr__get_salary`), and `None` otherwise. The upstream server's namespace belongs in `ToolMetadata.namespace` (PDP attribute `mcp.tool.namespace`), not here.
+
+**`MetaExtension.entity_name` is the name routes are matched against**, so it is the copy of the name that matters most. Today it holds the name the agent sent: in Praxis it is `mcp.name`, taken from `params.name` / `params.uri` of the request. Which name a host that renames entities should set (the agent-facing name or the resolved name from its catalog) is an open question; see [§8](#8-open-questions-for-review).
+
+**`MCPExtension` MUST come from the host's own catalog**, never from values the agent sent. A host that copies `params.name` or `params.uri` into it lets the agent choose the name the PDP authorizes. A host without a catalog leaves `MCPExtension` unset; `mcp.*` attributes are then absent and authorization relies on route matching (`entity_name`) and identity. Praxis does this today: it does not set `MCPExtension` for MCP calls.
+
+**Which layer each kind of rule uses:** authorization keys on the resolved identity in `MCPExtension` (`mcp.tool.name`, `mcp.resource.uri`, …); content rules key on the content part (`args.*`, `result.*`).
+
+Until Issue 76, a host that emits `PromptResult` **MUST** fill its flat `content` with rendered text (ordered text parts of `messages`), or prompt content inspection will not run effectively. This MUST lasts only until Issue 76 projects `messages`. Until then, **`content` is the authoritative copy on the way out**: it is the copy policy inspected and rewrote, so a host serializes the response from `content`, not from the original `messages`. Otherwise a redaction applied to `content` would not reach the client. Hosts should emit one fetched resource content per message, or treat multi-content reads as only partially covered. The guide must explicitly explain both failure modes.
 
 ## 6. Design decisions and alternatives
 
 | Decision | Alternatives | Rationale |
 |---|---|---|
-| **Fixed JSON envelope** | Raw string; auto-parse JSON | `apply_changed_paths` needs an object; fixed fields make write-back deterministic and preserve metadata. Auto-parsing makes behavior content-dependent. |
-| **Opaque `content` string** | Parse arbitrary nested JSON | Predictable policy shape and no parse-failure ambiguity; nested parsing can be an explicit later feature. |
+| **Fixed JSON envelope** | Raw string; auto-parse JSON | Only the envelope exposes metadata (`uri`, `mime_type`, `size_bytes`, …) to policy; fixed fields make write-back deterministic. A raw string works at runtime but hides all metadata. Auto-parsing makes behavior content-dependent. |
+| **Opaque `content` string** | Parse arbitrary nested JSON | Predictable policy shape and no parse-failure ambiguity; nested parsing can be an explicit later feature, through an opt-in APL operator. |
 | **In-place write-back** | Append transformed `Text` | Downstream hosts consume the original structured part; appending text leaves unmodified data visible. |
-| **Read-only identity/display fields** | Write every projected field | `prompt_name` identity must remain correlated; `icons` are exposed for inspection but not rewritten. |
+| **Read-only identity/classification fields** | Write every projected field | `prompt_name` and `uri` identify what was authorized and must stay correlated with the PDP decision; a writable `uri` would redirect a fetch without re-authorization. `resource_type` and `is_error` have no known write use case and are more likely to cause mistakes. `icons` are exposed for inspection but not rewritten. Loosening a field later is additive; locking one down after use is breaking. |
+| **No fetch redirection in Issue 75** | Allow `args.uri` rewrites | Redirection (geo routing, tenant pinning, versioned mirrors) is a real use case but needs its own design: an explicit effect that re-enters route matching and authorization for the new URI, or a routing decision in the gateway. |
 | **Fail fast on static field errors** | Allow runtime no-ops | Prevents the failure mode that motivated this issue. |
-| **Use `ContentPart` as APL source** | Fall back to `MCPExtension` | Avoid ambiguous duplicate sources; matches existing tool behavior. |
+| **Use `ContentPart` as APL source** | Fall back to `MCPExtension` | The layers are different views (wire view vs resolved identity, see §5.4), so a fallback would quietly swap the agent's name for the resolved one. Matches existing tool behavior. |
+| **Layers are views, not duplicates** | Treat overlapping fields as copies and require them to be equal | `ContentPart` is what the agent sent; `MCPExtension` is what the host resolved. A gateway may legitimately make them differ, so an equality check would reject every federated setup. Each layer's meaning is documented instead. |
 | **Defer per-part coverage** | Solve all message-view addressing in Issue 75 | Keeps implementation bounded and reusable for Issue 76, but retains documented security gaps. |
 
 Detailed comparison of the three envelope strategies is in Appendix C.
@@ -145,9 +166,10 @@ Detailed comparison of the three envelope strategies is in Appendix C.
 
 | Risk / limitation | Impact | Mitigation or follow-up |
 |---|---|---|
-| Only first matching resource part is inspected | Sensitive text in second/later part can bypass policy | Document host one-content-per-message guidance; pin with expected-failure test; address in Issue 76. |
+| PPE tests pass while the proxy leaks | Redaction is applied to the PPE `Message` but never reaches the client; resource/prompt rules see an empty message | Praxis dependency with its own acceptance criteria, asserted on response bytes ([§11](#11-dependencies-and-rollout)). |
+| Only first matching resource part is inspected | Sensitive text in second/later part can bypass policy | Proposed: Praxis folds all text entries of a `resources/read` into one `Resource` part, as it already does for tool text blocks. Other hosts get one-content-per-message guidance; pin with expected-failure test; address in Issue 76. |
 | Prompt result uses only flat `content` | `messages`-only hosts can bypass injection rules | Host **MUST** populate `content`; pin with expected-failure test; address native `messages` inspection in Issue 76. |
-| Invalid runtime types are preserved | Rewrite may silently no-op for bad data | Static type/path validation where feasible; tests for invalid conversion; consider diagnostics separately. |
+| Invalid numeric values are preserved | A `u64` rewrite may silently no-op for bad data (string fields convert every value type instead, see Appendix B) | Static type/path validation where feasible; tests for invalid conversion; consider diagnostics separately. |
 | Fixed field catalogs may drift | False rejection or unvalidated paths | Projection/catalog parity test. |
 | Mixed `ToolResult` and `Resource` parts | First-match extraction may choose wrong entity | No known builder currently produces mixed parts; consider entity-aware extraction as hardening. |
 | Host contract misconfiguration | Policy may not see expected data | Six host recipes with concrete examples and missing-layer behavior. |
@@ -156,8 +178,13 @@ Detailed comparison of the three envelope strategies is in Appendix C.
 
 ## 8. Open questions for review
 
-1. **Icons in the PDP attribute bag:** Publish `mcp.*.icons` as a `StringSet` of source URLs (recommended for consistency and future `contains` rules), or keep icons only on structs because they are presentation metadata?
-2. **Prompt result missing flat `content`:** Require host normalization only (recommended for Issue 75), or also derive a read-only inspection fallback from `messages`? The fallback improves *deny* coverage but cannot safely write redactions into `messages` without a broader design.
+1. **Icons in the PDP attribute bag:** *Resolved:* icons stay out of the PDP bag (see Appendix F).
+2. **Prompt result missing flat `content`:** *Resolved:* option (a), host MUST set `content`, scoped to "until Issue 76" (see §5.4 and Appendix F).
+3. **Which name should `entity_name` carry on a host that renames entities?**
+   - **Agent-facing name:** what hosts do today. Each alias or prefix needs its own route, and a new alias can silently miss a route written for the canonical name.
+   - **Resolved name** from the host's catalog: sturdier, since every alias hits the same route, and it matches authorization, which keys on the resolved identity in `MCPExtension`. But it needs a host that resolves before policy runs.
+
+   Not needed for Issue 75: resources and prompts are not renamed by any known host. The answer belongs in the host guide.
 
 ## 9. Implementation strategy
 
@@ -168,7 +195,7 @@ One PR, four independently compiling/testable commits:
 | **1. Schema alignment** | MCP metadata fields, `Icon`, CMF fields, PDP attributes | Attribute-bag/unit/catalog tests and compile checks |
 | **2. Projection and write-back** | Three envelope projections, extraction, in-place mutation | Round-trip invariants; deny and redact visitor E2E; known-gap tests |
 | **3. Config validation** | Reject no-field shapes, unknown paths, read-only writes | Load rejection diagnostics; valid-field acceptance; catalog parity |
-| **4. Host guide** | Six entity/phase recipes covering three message layers | Human review of contract, examples, and failure modes |
+| **4. Host contract** | Short contract section in `cmf-extensions.md`: MUSTs, layer definitions, two known gaps (full six-recipe guide in a follow-up PR) | Human review of the contract |
 
 Full file changes, test names, expected results, and commands are in Appendix D.
 
@@ -176,20 +203,59 @@ Full file changes, test names, expected results, and commands are in Appendix D.
 
 **Behavioral proof is essential:** an `allow` assertion is insufficient because the existing failure mode also allows. The E2E suite must assert *denied* decisions for matching resource/prompt content and *actual modifications* for redaction.
 
+**Scope of the PPE tests:** the PPE suite proves that the PPE `Message` is denied or modified. It cannot prove that the client receives the redacted bytes; that is a host property. Delivery is proven by the Praxis acceptance criteria in [§11](#11-dependencies-and-rollout), and #75 is not done until both pass.
+
 Acceptance requires:
 
 - Every new envelope exposes correct fields on the intended entity/phase.
 - Extraction followed by write-back without changes yields an identical message.
 - Rewriting one field changes **that field only**; content-part count stays constant and no `Text` part is appended.
-- Above-2^53 unsigned integers round-trip exactly; malformed numeric, enum, or boolean writes preserve the original.
+- Above-2^53 unsigned integers round-trip exactly; malformed numeric writes preserve the original.
+- Writes to read-only fields (`uri` in both envelopes, `resource_type`, `prompt_name`, `is_error`, `icons`) are refused at load and preserved at write-back.
 - E2E coverage includes resource pre-fetch URI deny; resource post-fetch content deny/redact; prompt post-invoke content deny/redact and `is_error` deny.
 - Invalid field configurations are rejected with actionable entity, block, and field diagnostics; dynamic-map cases remain valid.
 - Two known holes (multi-resource; prompt `messages`-only) are pinned by explicitly named expected-failure tests pending Issue 76.
-- `make check`, `make test`, and `make lint` pass; host guide describes all six entity/phase contracts.
+- `make check`, `make test`, and `make lint` pass; the host contract section states the MUSTs, the layer definitions and the two known gaps.
 
 ## 11. Dependencies and rollout
 
-Issue 75 is intended to land before Issue 76. Standalone projection helpers can be reused by per-view addressing. Until that work lands, hosts must honor the flat prompt-content contract and avoid assuming complete coverage of multi-content resource responses. This proposal does not introduce an APL syntax change.
+Issue 75 is intended to land before Issue 76. Standalone per-part projection and write-back helpers (`project_*` / `write_*`) can be reused by per-view addressing. Until that work lands, hosts must honor the flat prompt-content contract and avoid assuming complete coverage of multi-content resource responses. This proposal does not introduce an APL syntax change.
+
+### 11.1 Host dependency: Praxis response handling
+
+PPE projection is necessary but not sufficient. Today Praxis builds response content parts and re-serializes the response body for `tools/call` only. Issue 75 is not complete until Praxis also handles `resources/read` and `prompts/get`. This is tracked as a separate Praxis change with its own acceptance criteria.
+
+**Required Praxis behavior:**
+
+- Build `ContentPart::Resource` from `result.contents[]` of a `resources/read` response.
+- Build `ContentPart::PromptResult` from `result.messages[]` of a `prompts/get` response, with `content` set to the text parts of `messages` joined in order (the host MUST in §5.4).
+- Re-serialize the fields policy changed into the response body sent to the client.
+- Fail closed on a malformed response when post-phase `resource:` or `prompt:` rules are active, as is already done for `tools/call`.
+
+**Multi-resource responses (to settle with Praxis):** how Praxis builds `Resource` parts decides whether the first-part-only gap (Appendix D) is reachable through Praxis.
+
+| Option | Behavior | Trade-off |
+|---|---|---|
+| **(a) Fold (proposed)** | All text entries of one `resources/read` are folded into a single `Resource` part; a rewrite emits one entry | Nothing goes uninspected, consistent with how Praxis folds tool text blocks. Per-entry `uri`/`mimeType` are not preserved on a rewrite. |
+| (b) One part per entry | Each entry becomes its own `Resource` part | Keeps structure, but PPE inspects only the first part until Issue 76, so later entries bypass policy. |
+
+With (a), the first-part-only gap stays a documented limitation for hosts that emit several `Resource` parts, but is closed for Praxis. Non-text blocks (for example blobs, which PPE does not project) are dropped on a rewrite, matching current `tools/call` behavior, so the emitted bytes are exactly what policy vetted.
+
+**Praxis acceptance criteria (asserted on the bytes sent to the client, not on the PPE `Message`):**
+
+| Test | Assertion |
+|---|---|
+| Resource post-fetch redact | An SSN in `result.contents[].text` is masked in the response body the client receives |
+| Prompt post-invoke redact | An SSN in `result.messages[].content` text is masked in the response body the client receives |
+| Resource / prompt deny | A matching deny rule replaces the response with a JSON-RPC error |
+| Multi-entry resource deny | A secret only in the **second** `contents[]` entry is denied |
+| Malformed response | A malformed `resources/read` / `prompts/get` response with active post-phase rules fails closed |
+
+**Sequencing:** Praxis depends on a published `praxis-policy` release, so the byte-level `result.*` tests can only pass once a PPE release includes this issue.
+
+1. PPE: land this issue (projection and write-back) and release.
+2. Praxis: response builders, re-serialization and fail-closed handling. Attribute-only post rules (identity, subject/meta predicates) work before step 1; `result.*` rules need it.
+3. Praxis: adopt the PPE release and add the byte-level acceptance tests above.
 
 ---
 
@@ -211,14 +277,14 @@ evaluated and ruled out; see [Appendix C](#appendix-c-approach-comparison).
 
 From `ContentPart::ResourceRef`:
 
-| Struct field | APL path | Type |
-|---|---|---|
-| `uri` | `args.uri` | String |
-| `name` | `args.name` | String or null |
-| `resource_type` | `args.resource_type` | String (snake_case enum) |
-| `range_start` | `args.range_start` | Number or null |
-| `range_end` | `args.range_end` | Number or null |
-| `selector` | `args.selector` | String or null |
+| Struct field | APL path | Type | Writable |
+|---|---|---|---|
+| `uri` | `args.uri` | String | No (read-only) |
+| `name` | `args.name` | String or null | Yes |
+| `resource_type` | `args.resource_type` | String (snake_case enum) | No (read-only) |
+| `range_start` | `args.range_start` | Number or null | Yes |
+| `range_end` | `args.range_end` | Number or null | Yes |
+| `selector` | `args.selector` | String or null | Yes |
 
 #### Resource post-fetch → `result`
 
@@ -226,11 +292,11 @@ From `ContentPart::Resource`:
 
 | Struct field | APL path | Type | Writable |
 |---|---|---|---|
-| `uri` | `result.uri` | String | Yes |
+| `uri` | `result.uri` | String | No (read-only) |
 | `name` | `result.name` | String or null | Yes |
 | `title` | `result.title` | String or null | Yes |
 | `description` | `result.description` | String or null | Yes |
-| `resource_type` | `result.resource_type` | String (snake_case enum) | Yes |
+| `resource_type` | `result.resource_type` | String (snake_case enum) | No (read-only) |
 | `content` | `result.content` | String or null | Yes |
 | `mime_type` | `result.mime_type` | String or null | Yes |
 | `size_bytes` | `result.size_bytes` | Number or null | Yes |
@@ -240,8 +306,10 @@ From `ContentPart::Resource`:
 
 `result.content` is the body as an opaque string. APL can match, deny, or
 rewrite the whole string but cannot address fields inside it. Body-field
-access is a planned follow-up (APL `json` operator or `content_parsed`
-sibling field).
+access is a planned follow-up through an opt-in APL operator (e.g. `json`).
+A `content_parsed` sibling field is not planned: it would put the body in the
+envelope twice, so a redaction applied to one copy and not the other would
+leak, with no clear rule for which copy is written back.
 
 #### Prompt post-invoke → `result`
 
@@ -252,7 +320,7 @@ From `ContentPart::PromptResult`:
 | `prompt_name` | `result.prompt_name` | String | No (read-only) |
 | `description` | `result.description` | String or null | Yes |
 | `content` | `result.content` | String or null | Yes |
-| `is_error` | `result.is_error` | Boolean | Yes |
+| `is_error` | `result.is_error` | Boolean | No (read-only) |
 | `error_message` | `result.error_message` | String or null | Yes |
 
 `messages` (`Vec<Message>`) is not projected — deferred to Issue 76.
@@ -267,20 +335,20 @@ see [Appendix A](#appendix-a-complete-projection-reference).
 - Modify the original `ContentPart` in place. Never append a `Text` part.
 - Preserve fields excluded from projection (`resource_request_id`,
   `prompt_request_id`, `blob`).
-- `prompt_name` and `icons` are read-only. A config that writes them is
-  refused at load ([Commit 3b](#3b-unknown-and-read-only-field-paths-beyond-ac3)).
-  Write-back also preserves the original, as defence in depth.
+- Read-only fields: `uri` (both `ResourceRef` and `Resource`),
+  `resource_type` (both), `prompt_name`, `is_error`, and `icons`. A config
+  that writes them is refused at load
+  ([Commit 3b](#3b-unknown-and-read-only-field-paths-beyond-ac3)).
+  Write-back also preserves the original, as defence in depth. They remain
+  readable, so rules such as `args.uri matches 'restricted': deny` and
+  `result.is_error == true: deny` still work.
 - `u64` fields (`range_start`, `range_end`, `size_bytes`): convert via
   `serde_json::Number::from()` on projection; reject negative, fractional,
   or out-of-range values on write-back (preserve original).
 - `resource_type` is a closed enum (`File`, `Blob`, `Uri`, `Database`, `Api`,
-  `Memory`, `Artifact`). If APL produces a string that doesn't match a valid
-  variant, preserve the original value (same pattern as invalid `u64`). This
-  applies on both the pre-fetch `args` envelope (`ResourceRef.resource_type`)
-  and the post-fetch `result` envelope (`Resource.resource_type`).
-- `is_error` is a `bool`. If APL produces a non-boolean value (string,
-  number, null), preserve the original (shape mismatch — silent no-op,
-  consistent with the general wrong-type pattern).
+  `Memory`, `Artifact`) projected as a snake_case string, and `is_error` is a
+  `bool`. Both are read-only, so write-back never converts a value into them;
+  it always keeps the original.
 - `annotations` is a `HashMap<String, Value>`. Write-back uses **key-level
   merge** — only keys the pipeline addressed are updated; unmentioned keys
   are preserved. This is consistent with how `apply_changed_paths` already
@@ -302,8 +370,17 @@ For `Option<String>` target fields (`Resource.content`, `Resource.name`,
 |---|---|
 | `Value::String(s)` | `Some(s)` |
 | `Value::Null` | `None` (clears the field — needed for `drop`) |
-| `Value::Object` / `Value::Array` | Serialize to JSON string → `Some(serialized)` |
-| `Value::Bool` / `Value::Number` | Preserve original (shape mismatch — silent no-op) |
+| `Value::Object` / `Value::Array` / `Value::Bool` / `Value::Number` | Serialize to JSON string → `Some(serialized)` (e.g. `true` → `"true"`, `42` → `"42"`) |
+
+Every non-null, non-string value is converted the same way. A write is never
+dropped: preserving the original on a type mismatch would let a redaction that
+produced an unexpected type silently send the unredacted original, which is
+the failure this issue exists to remove. Rejecting the write is not possible
+at load (the value's type is only known at runtime), and failing the request
+would turn a slightly wrong rule into an outage.
+
+`null` on a non-optional field (`uri`, `prompt_name`) does not arise: both are
+read-only, so writes to them are refused at load and preserved at write-back.
 
 ---
 
@@ -319,12 +396,14 @@ Three projection approaches were evaluated:
 | Metadata access | No | No (unless wrapped) | **Yes** |
 | Body field access | No | Yes (JSON only) | No (future `parse`) |
 | Consistent shape | Yes (always scalar) | No (depends on mime) | **Yes (always object)** |
-| Runtime compatible | **No** (`apply_changed_paths` needs object) | Partially | **Yes** |
+| Runtime compatible | Yes (whole-value replace) | Partially | **Yes** |
 | Write-back safety | Whole-value only | Ambiguous edge cases | **1:1 field mapping** |
 | Parse failure risk | None | Yes (silent or aggressive) | **None** |
 
-**Raw string** is ruled out by a hard blocker: `apply_changed_paths` requires
-`Value::Object`.
+**Raw string** works at runtime: for a non-object value, `apply_changed_paths`
+replaces the whole value when it changed. It is ruled out because it exposes
+only the content: `uri`, `mime_type`, `size_bytes` and the other metadata
+would be invisible to policy.
 
 **Auto-parse JSON** produces inconsistent shapes — the same route yields an
 object for JSON bodies and a scalar for everything else. Policy authors cannot
@@ -385,22 +464,22 @@ Re-export `Icon`.
 **`crates/ppe-apl-cmf/src/mcp.rs`:**
 
 Wire into attribute bag:
-- `mcp.tool.icons` → StringSet of src URLs
 - `mcp.resource.title` → String
 - `mcp.resource.size` → Int (u64 cast to i64)
-- `mcp.resource.icons` → StringSet of src URLs
 - `mcp.prompt.title` → String
-- `mcp.prompt.icons` → StringSet of src URLs
 
-Add tests: `tool_icons_flatten_as_src_set`,
-`resource_title_flattens`, `resource_size_flattens`,
-`resource_icons_flatten_as_src_set`, `prompt_title_flattens`,
-`prompt_icons_flatten_as_src_set`,
+Icons are **not** published to the attribute bag: they are display metadata
+and no known rule keys on an icon URL. They stay on the structs (and in the
+read-only `result.icons` envelope field). If a use case turns up, a
+`StringSet` of `src` values can be added later without breaking anything.
+
+Add tests: `resource_title_flattens`, `resource_size_flattens`,
+`prompt_title_flattens`, `icons_are_not_in_the_attribute_bag`,
 `prompt_result_description_projects` (after commit 2 wires it).
 
 **`crates/ppe-apl-cmf/tests/key_catalog/`:**
 
-Add 6 catalog entries. Update test fixtures.
+Add 3 catalog entries (`mcp.resource.title`, `mcp.resource.size`, `mcp.prompt.title`). Update test fixtures.
 
 **`docs/content/cmf-extensions.md`:**
 
@@ -449,11 +528,38 @@ Update extraction:
   `ContentPart::PromptResult` arms
 
 Update write-back:
-- `write_args_back_to_message`: add `ContentPart::ResourceRef` arm
-- `write_result_back_to_message`: add `ContentPart::Resource` and
-  `ContentPart::PromptResult` arms — modify in place, never append Text
 
-Add doc comment with the six-envelope projection table.
+Add three standalone per-part write-back functions, the inverses of the
+projection functions above:
+
+```rust
+write_resource_ref(&mut ResourceReference, &Value)
+write_resource(&mut Resource, &Value)
+write_prompt_result(&mut PromptResult, &Value)
+```
+
+Each applies the write-back rules (read-only fields preserved, `u64` and
+`Option<String>` conversion, annotations key-level merge) to one part.
+
+- `write_args_back_to_message`: add `ContentPart::ResourceRef` arm
+  that calls `write_resource_ref`
+- `write_result_back_to_message`: add `ContentPart::Resource` and
+  `ContentPart::PromptResult` arms that call `write_resource` /
+  `write_prompt_result` — modify in place, never append Text
+
+The message-level functions still select the first matching part (Issue 75
+behavior). Issue 76 reuses the per-part functions to write back every part
+it inspects.
+
+Add doc comment with the six-envelope projection table. The doc comment
+also states the convention that **every projection is an object**: a
+text-like part (for example `text` or `thinking`) is projected as
+`{"text": ...}`, never as a bare string. A field path never resolves on a bare
+string, so this keeps a `text` field path working the same way on every kind
+of part. Praxis already wraps a non-JSON tool result as `{"text": ...}`, and
+every envelope in this issue is an object. Stating it here lets Issue 76
+(proposal #201, which asks how a `match:` entry addresses a scalar part)
+inherit the convention instead of choosing again.
 
 #### Unit tests
 
@@ -463,17 +569,22 @@ In `message_projection.rs`:
 |---|---|
 | `args_round_trip_leaves_a_resource_ref_unchanged` | Extract → write back → message identical |
 | `a_resource_ref_projects_its_fields_not_its_text` | `args.uri` is the URI, not empty string |
-| `a_rewritten_resource_ref_field_differs_in_that_field_only` | Rewrite `args.uri` → write back → message equals the original with only `uri` replaced |
+| `a_rewritten_resource_ref_field_differs_in_that_field_only` | Rewrite `args.selector` → write back → message equals the original with only `selector` replaced |
+| `resource_ref_uri_is_not_overwritten_on_write_back` | Mutate `args.uri` → original preserved (fetch target cannot change after authorization) |
+| `resource_ref_resource_type_is_not_overwritten_on_write_back` | Mutate `args.resource_type` → original preserved |
 | `resource_ref_range_u64_fidelity_above_2_53` | Value above 2^53 round-trips exactly |
 | `resource_ref_range_rejects_negative_and_fractional` | Original preserved on invalid input |
 | `result_round_trip_leaves_a_resource_unchanged` | Extract → write back → identical |
 | `a_resource_projects_its_envelope_not_its_text` | `result.content` is the body, `result.uri` is the URI |
 | `a_redacted_resource_content_differs_in_that_field_only` | Rewrite `result.content` → message equals the original with only `content` replaced |
+| `resource_uri_and_type_are_not_overwritten_on_write_back` | Mutate `result.uri` and `result.resource_type` → originals preserved |
 | `result_round_trip_leaves_a_prompt_result_unchanged` | Extract → write back → identical |
 | `a_prompt_result_projects_its_fields_not_its_text` | `result.content` is rendered text, not empty string |
 | `a_redacted_prompt_result_content_differs_in_that_field_only` | Rewrite `result.content` → message equals the original with only `content` replaced |
 | `prompt_name_is_not_overwritten_on_write_back` | Mutate `result.prompt_name` → original preserved |
+| `prompt_is_error_is_not_overwritten_on_write_back` | Mutate `result.is_error` → original preserved |
 | `prompt_result_description_differs_in_that_field_only` | Rewrite `result.description` → message equals the original with only `description` replaced |
+| `string_field_write_back_converts_every_value_type` | Write `true`, `42`, an object and an array into `result.content` → stored as `"true"`, `"42"` and their JSON strings; never preserved |
 
 **"In that field and nowhere else."** The issue's round-trip criterion is
 that the message differs in the mutated field *and nowhere else*. Checking
@@ -523,6 +634,11 @@ These tests must assert on **deny decisions or modified message content**,
 never on allow — an allow is indistinguishable from the broken behavior this
 issue fixes.
 
+These tests prove the PPE side only: the `Message` handed back to the host is
+denied or modified. They pass even if the host never serializes the change
+into the response. Delivery to the client is covered by the Praxis acceptance
+criteria in [§11.1](#111-host-dependency-praxis-response-handling).
+
 #### Known gap: multi-resource messages
 
 `extract_args_from_message`, `extract_result_from_message` and their
@@ -546,6 +662,11 @@ case, so the exposure is higher here.
 **Decision:** this issue projects the first matching part only. Projecting
 every part needs per-part addressing, which is Issue 76's scope. The gap is
 pinned by a test and documented in the host guide rather than left silent.
+
+Whether the gap is reachable depends on the host. If Praxis folds every text
+entry of a `resources/read` into one `Resource` part (option (a) in
+[§11.1](#111-host-dependency-praxis-response-handling)), it is closed for
+Praxis and remains only for hosts that emit several `Resource` parts.
 
 | Test | Setup | Assertion |
 |---|---|---|
@@ -581,7 +702,11 @@ silent bypass this issue fixes, limited to hosts that don't fill `content`.
 1. The host guide makes it a **MUST** that a host set `PromptResult.content` to
    the rendered text whenever it sends a `PromptResult` (the text parts of
    `messages`, joined in order). It also names the failure mode if the host
-   leaves it out (see Commit 4).
+   leaves it out (see Commit 4). The MUST lasts until Issue 76, and until then
+   `content` is the authoritative copy: the host serializes the response from
+   `content`, not from the original `messages`. Once Issue 76 projects
+   `messages`, carrying the text in both places would let a redaction of one
+   copy leak through the other, so Issue 76 must say which copy wins.
 2. The gap is pinned by a test, so it is not silent in the codebase either:
 
 | Test | Setup | Assertion |
@@ -592,7 +717,8 @@ A read-only fallback, where `content` is derived from `messages` when it is
 `None`, would close the hole without waiting for Issue 76. But a redaction of
 the derived value has nowhere to be written back, which is the
 "write-back appends or drops" problem this issue exists to avoid. It is
-listed under [Open decisions](#open-needs-team-input) rather than adopted.
+not adopted: a deny on the derived value would pass the tests while a
+redaction of the same text silently does nothing (see Appendix F).
 
 #### Verify
 
@@ -642,14 +768,20 @@ The issue does not require this. It is the same principle (a block that can
 never take effect should not load) applied to field names, now that resource
 and prompt envelopes have a fixed set of fields.
 
-Define static valid-field sets:
+Define static valid-field sets, keyed by **content kind** rather than by
+entity and phase, so Issue 76 `match:` entries (which select parts by kind on
+any route) can reuse them:
 
 ```
-resource args:   {uri, name, resource_type, range_start, range_end, selector}
-resource result: {uri, name, title, description, resource_type, content,
-                  mime_type, size_bytes, version, annotations, icons}
-prompt result:   {prompt_name, description, content, is_error, error_message}
+ResourceRef:  {uri, name, resource_type, range_start, range_end, selector}
+Resource:     {uri, name, title, description, resource_type, content,
+               mime_type, size_bytes, version, annotations, icons}
+PromptResult: {prompt_name, description, content, is_error, error_message}
 ```
+
+For Issue 75 the config check maps each route and phase to its content kind
+(resource `args` → `ResourceRef`, resource `result` → `Resource`, prompt
+`result` → `PromptResult`) and uses that set.
 
 Rules:
 
@@ -658,11 +790,22 @@ Rules:
   segment is in the set". Deeper segments are checked only for scalar fields
   (`result.content.ssn` is refused: `content` is an opaque string, see
   [body parsing](#resource-post-fetch--result)).
-- **Writes to read-only fields are refused.** A `result:` block that writes
-  `prompt_name` or `icons` is refused at load, rather than silently preserved
-  at write-back. This keeps the "silent no-op" behaviour for cases only
-  runtime can detect (invalid enum, out-of-range `u64`, wrong JSON type).
-  Write-back still preserves `prompt_name` and `icons` as defence in depth.
+- **Writes to read-only fields are refused.** An `args:` or `result:` block
+  that writes `uri`, `resource_type`, `prompt_name`, `is_error` or `icons` is
+  refused at load, rather than silently preserved at write-back. This keeps
+  the "silent no-op" behaviour for cases only runtime can detect
+  (out-of-range or non-numeric `u64`). Write-back still preserves these
+  fields as defence in depth.
+
+  ```
+  ResourceRef read-only:  {uri, resource_type}
+  Resource read-only:     {uri, resource_type, icons}
+  PromptResult read-only: {prompt_name, is_error}
+  ```
+
+  The read-only check needs only these small sets, not the full field
+  catalog. If the unknown-field part of 3b moves to a follow-up, the
+  read-only refusal stays in this issue.
 - **Dynamic-key envelopes are not checked.** Tool `args` / `result` and prompt
   `args` take their keys from the host's arguments map, so they have no static
   set.
@@ -691,6 +834,11 @@ the matching `project_*` function emits, so the two cannot drift.
 | `result:` with `content.ssn` on resource route | Rejected (`content` is opaque) |
 | `result:` writing `prompt_name` on prompt route | Rejected as read-only |
 | `result:` writing `icons` on resource route | Rejected as read-only |
+| `args:` writing `uri` on resource route | Rejected as read-only |
+| `result:` writing `uri` on resource route | Rejected as read-only |
+| `args:` / `result:` writing `resource_type` on resource route | Rejected as read-only |
+| `result:` writing `is_error` on prompt route | Rejected as read-only |
+| Predicate reading `args.uri` / `result.is_error` | Accepted (read-only fields stay readable) |
 | Static field sets match `project_*` output keys | Pass (drift guard) |
 
 #### Verify
@@ -702,9 +850,11 @@ make test
 
 ---
 
-#### Commit 4: Host integration guide
+#### Commit 4: Host contract section
 
 **Goal:** Document what a host must put on a message for policy to work.
+The **contract** ships with the code in this PR; the full guide with worked
+recipes follows in a separate PR.
 
 The issue requires a contract covering what goes on the message **and in
 MCPExtension**. Three layers feed policy, and the guide must cover all of them:
@@ -719,7 +869,31 @@ A host that sets only MCPExtension but no ContentPart gets route matching and
 PDP predicates but empty APL envelopes. This is the most likely
 misconfiguration and must be called out explicitly.
 
-#### File
+#### In this PR: contract section
+
+A short "Host contract" section added to an existing doc,
+`docs/content/cmf-extensions.md`, covering:
+
+- **The MUSTs:**
+  - `PromptResult.content` set to the rendered text (until Issue 76), and
+    `content` is authoritative on the way out;
+  - `MCPExtension` comes from the host's own catalog, never from values the
+    agent sent;
+  - read-only fields (`uri`, `resource_type`, `prompt_name`, `is_error`,
+    `icons`).
+- **The layer definitions:**
+  - `ContentPart` = wire view, `MCPExtension` = resolved identity, no
+    equality required;
+  - `entity_name` (today: the name the agent sent);
+  - `ToolCall.namespace` (agent-facing namespace);
+  - which layer authorization rules and content rules key on.
+- **The two known gaps:** multi-resource messages (first part only) and
+  prompt results carried only in `messages`.
+
+#### Follow-up PR: full host integration guide
+
+The worked recipes below follow in a separate PR. They build on the contract
+section and do not change it.
 
 `docs/content/host-integration-guide.md` — new, ~1000 lines.
 
@@ -737,15 +911,30 @@ Step 5 — What goes wrong if skipped    (per-field, per-layer consequences)
 ```
 
 Plus a common-mistakes section covering:
-- Overlapping fields across layers (MetaExtension, MCPExtension, ContentPart)
+- Layer meanings: `ContentPart` is the wire view (what the agent sent),
+  `MCPExtension` is the resolved identity (from the host's catalog). They may
+  differ, for example behind a federating gateway, and PPE does not require
+  them to be equal
+- `ToolCall.namespace` vs `ToolMetadata.namespace`: the first is the namespace
+  the agent sees (if any, otherwise `None`); the second is the upstream
+  server's namespace from the host's catalog. Do not copy one into the other
+- `entity_name` is the name the agent sent today: write routes against the
+  names agents actually call, including any gateway prefix
+- Filling `MCPExtension` from the agent's request lets the agent choose what
+  is authorized. Fill it from the host's catalog, or leave it unset
+- On a host that does not set `MCPExtension` (Praxis today), `mcp.*` rules
+  have nothing to read; use route matching and identity instead
 - Missing ContentPart with MCPExtension-only (route matches but APL sees null)
 - Missing MCPExtension with ContentPart-only (APL works but PDP predicates are empty)
-- The `prompt_name` read-only contract
+- The read-only contract (`uri`, `resource_type`, `prompt_name`, `is_error`,
+  `icons`), and that fetch redirection is not a policy-pipeline write
 - `PromptResult` with `messages` but no `content`: hosts **MUST** set
   `content` to the rendered text (text parts of `messages`, joined in order).
   Otherwise `result.content` is null and content rules on the prompt route,
   injection scanning included, never match. Pinned by
-  `known_gap_prompt_result_messages_are_not_projected` until Issue 76
+  `known_gap_prompt_result_messages_are_not_projected` until Issue 76.
+  Until then `content` is authoritative on the way out: serialize the
+  response from `content`, not from the original `messages`
 - Multi-content resource reads: only the first `Resource` part is projected
   until Issue 76. Hosts should map one fetched content per message, or treat
   multi-content reads as only partly covered by policy
@@ -784,7 +973,7 @@ Issue 76 can reuse them.
 - [ ] `PromptMetadata` has `title`, `icons`
 - [ ] CMF `Resource` has `title`, `icons`
 - [ ] CMF `PromptResult` has `description`
-- [ ] Attribute bag keys wired: `mcp.tool.icons`, `mcp.resource.{title,size,icons}`, `mcp.prompt.{title,icons}`
+- [ ] Attribute bag keys wired: `mcp.resource.{title,size}`, `mcp.prompt.title`; icons not published
 - [ ] Key catalog and `cmf-extensions.md` updated
 - [ ] Tests pass
 
@@ -794,9 +983,10 @@ Issue 76 can reuse them.
 - [ ] `Resource` fields available through `result`
 - [ ] `PromptResult` fields available through `result`
 - [ ] Write-back modifies original structured part (no appended Text)
+- [ ] Per-part write-back functions (`write_resource_ref`, `write_resource`, `write_prompt_result`) exist and are called by the message-level arms
 - [ ] `u64` fields round-trip above 2^53; invalid values preserve original
-- [ ] `prompt_name` and `icons` are read-only on write-back
-- [ ] Doc comment on `message_projection.rs` with six-envelope table
+- [ ] `uri` (both envelopes), `resource_type` (both), `prompt_name`, `is_error` and `icons` are read-only on write-back
+- [ ] Doc comment on `message_projection.rs` with six-envelope table and the "every projection is an object" convention
 - [ ] Unit tests: round-trip, rewrite, wrong-shape, u64 fidelity
 - [ ] Every rewrite test asserts the whole message equals the original with only the mutated field changed, part count unchanged, no `Text` part added (shared `assert_differs_only_in` helper)
 - [ ] PromptRequest regression guard: args round-trip verified for prompt pre-invoke
@@ -810,17 +1000,30 @@ Issue 76 can reuse them.
 - [ ] (3a) Existing HTTP route rejection preserved
 - [ ] (3a) No existing config or demo declares field blocks on `llm:` routes (checked before landing)
 - [ ] (3b) Unknown field paths rejected at load time with diagnostic; nested paths under `annotations` accepted
-- [ ] (3b) Writes to read-only fields (`prompt_name`, `icons`) rejected at load
+- [ ] (3b) Writes to read-only fields (`uri`, `resource_type`, `prompt_name`, `is_error`, `icons`) rejected at load
 - [ ] (3b) Valid field paths accepted for resource and prompt routes
 - [ ] (3b) Static field sets match `project_*` output keys (drift test)
 
-#### Commit 4: host integration guide
+#### Commit 4: host contract section
+
+- [ ] "Host contract" section in `docs/content/cmf-extensions.md` covers the MUSTs, the layer definitions and the two known gaps
+
+#### Follow-up PR: full host integration guide
 
 - [ ] `docs/content/host-integration-guide.md` covers all six entity/phase combinations
 - [ ] Each recipe covers all three layers: MetaExtension, MCPExtension, ContentPart
 - [ ] MUST/SHOULD/MAY field requirements per entity/phase
 - [ ] JSON examples and "what goes wrong" sections (per-field, per-layer)
-- [ ] Common mistakes: MCPExtension-only, ContentPart-only, overlapping field consistency, multi-content resource reads, `PromptResult` without `content`
+- [ ] Common mistakes: MCPExtension-only, ContentPart-only, layer meanings (wire view vs resolved identity), multi-content resource reads, `PromptResult` without `content`
+
+#### Host dependency (Praxis, tracked separately)
+
+- [ ] Praxis change opened and linked from Issue 75
+- [ ] Multi-resource option agreed with Praxis maintainers (fold proposed)
+- [ ] `resources/read` and `prompts/get` responses build `Resource` / `PromptResult` parts
+- [ ] Changed fields re-serialized into the response body
+- [ ] Malformed resource/prompt responses fail closed when post-phase rules are active
+- [ ] Byte-level acceptance tests from §11.1 pass against a PPE release that includes this issue
 
 #### Overall
 
@@ -840,22 +1043,27 @@ Issue 76 can reuse them.
 
 | Decision | Rationale |
 |---|---|
-| **JSON envelope** over raw string or auto-parse | Raw string blocked by `apply_changed_paths` requiring Object. Auto-parse has non-deterministic shape. See [Appendix C](#appendix-c-approach-comparison). |
+| **JSON envelope** over raw string or auto-parse | Raw string hides all metadata from policy (it would work at runtime via whole-value replace). Auto-parse has non-deterministic shape. See [Appendix C](#appendix-c-approach-comparison). |
 | **`Resource.blob` excluded** | Byte-level inspection is not a policy engine concern |
 | **`prompt_name` read-only** | Mutating identity breaks correlation. Writes refused at load (3b) and preserved at write-back |
+| **`uri` read-only (both envelopes)** | Same kind of identity field as `prompt_name`. A writable `args.uri` redirects the fetch after authorization; a writable `result.uri` misreports the source. Fetch redirection needs its own design (re-authorizing effect or gateway routing) |
+| **`resource_type`, `is_error` read-only** | No known write use case; more likely to cause a mistake than to serve one. Can be loosened later without breaking configs |
 | **Refuse field blocks on `llm:` routes** | AC3: a shape with no field path is refused at load, as `http:` is today |
 | **Reject unknown and read-only fields at load** | Goes beyond AC3, same principle: silence caused this bug. Drift test keeps the sets in step with the envelopes |
-| **`PromptResult.content` is a host MUST** | `messages` is Issue 76; until then a host that fills only `messages` defeats content rules. Documented and pinned by a known-gap test |
-| **ContentPart only, no MCPExtension fallback** | Two-source ambiguity; consistent with how tools work |
-| **Document field consistency, don't enforce** | Tools don't enforce it either; adding it for resources only would be inconsistent |
-| **Body parsing deferred** | Two compatible future paths exist (APL `json` operator, `content_parsed` field). Neither blocks this issue. |
+| **`PromptResult.content` is a host MUST, until Issue 76** | `messages` is Issue 76; until then a host that fills only `messages` defeats content rules. `content` is the authoritative copy on the way out. Documented and pinned by a known-gap test. A read-only `content` derived from `messages` was rejected: a deny on it would pass the tests while a redaction of the same text silently does nothing |
+| **ContentPart only, no MCPExtension fallback** | `ContentPart` and `MCPExtension` are different views (wire view vs resolved identity), so falling back would quietly swap the agent's name for the resolved one. Consistent with how tools work |
+| **Layers are views; no consistency check** | `ContentPart` is the wire view (what the agent sent) and `MCPExtension` is the resolved identity (from the host's catalog). A gateway may legitimately make them differ, so equality is neither enforced nor expected. The guide documents what each layer means |
+| **`ToolCall.namespace` = agent-facing namespace** | Not in MCP and never read by PPE, so its meaning was undefined. Kept rather than removed (it is a public CMF field shared with CPEX) and defined to match the wire view: the namespace the agent sees, if any. The upstream namespace stays in `ToolMetadata.namespace` |
+| **Host contract ships with the code; full guide follows** | The code depends on hosts honoring the MUSTs, so the contract (MUSTs, layer definitions, two known gaps) lands in this PR as a short section of `cmf-extensions.md`. The six worked recipes follow in a separate PR |
+| **Icons not in the PDP attribute bag** | Display metadata; no known rule keys on an icon URL. Kept on structs (struct-only, like `inputSchema`). A `StringSet` of `src` values can be added later if a use case turns up; adding is non-breaking, removing would be |
+| **`MCPExtension` from host catalog only** | Authorization keys on it, so agent-supplied values would let the agent choose what is authorized. Hosts without a catalog leave it unset |
+| **Body parsing deferred; operator preferred** | The future path is an opt-in APL operator (e.g. `json`), used per rule, which leaves the envelope unchanged. A `content_parsed` sibling field is not planned: two copies of the body let a redaction of one copy leak through the other. Neither blocks this issue. |
 
 #### Open (needs team input)
 
-| Decision | Options | Recommendation |
-|---|---|---|
-| **Icons in attribute bag** | (a) StringSet of src URLs — lets rules do `contains` (b) Skip the bag — icons are display metadata, struct-only like `inputSchema` | (a) StringSet — consistent with scalar-array walker pattern, useful if ever needed, cheap |
-| **`PromptResult` with `content: None`** | (a) Host MUST set `content`; pin the gap with a test (b) Also derive a read-only `result.content` from the text parts of `messages` when `content` is `None`, so deny rules work and redaction is refused at write-back | (a) for this issue. (b) closes the deny case early but adds a derived, non-writable value; better designed alongside Issue 76's `messages` projection |
+None in this register. The remaining open question, which name
+`entity_name` carries on a host that renames entities, is
+[§8 question 3](#8-open-questions-for-review).
 
 ---
 
