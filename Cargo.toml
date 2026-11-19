@@ -159,7 +159,9 @@ p256 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
 # its in-memory store.
 # Temporary pin until a crate release includes Kuadrant/limitador#552, which
 # disables postcard's default features and removes unmaintained atomic-polyfill.
-limitador = { git = "https://github.com/Kuadrant/limitador", rev = "964ede8e94f2560c5d5edddcdbb23f5d866d4e09", version = "0.15.0-dev", default-features = false }
+# The range accepts published 0.14.x and this commit's 0.15.0-dev. Cargo packages
+# use the registry version; workspace builds use the Git pin.
+limitador = { git = "https://github.com/Kuadrant/limitador", rev = "964ede8e94f2560c5d5edddcdbb23f5d866d4e09", version = ">=0.14.0, <=0.15.0-dev", default-features = false }
 # Limitador's own CEL parser, a different major than the `cel` PDP, so the
 # limiter validates its expressions exactly as Limitador will evaluate them.
 limitador-cel = { package = "cel", version = "0.12.0" }
