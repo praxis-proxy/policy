@@ -27,6 +27,7 @@
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
 //! | `quota/limitador` | `plugins::quota` |
 //! | `ratelimit/limitador` | `plugins::ratelimit` |
+//! | `revocation-introspection` | `plugins::revocation_introspection` |
 //! | `cedar` | `pdps::cedar_direct` |
 //! | `cel` | `pdps::cel` |
 //! | `opa` | `pdps::opa` |
@@ -92,5 +93,9 @@ pub fn bundled_crypto_capabilities() -> Vec<BundledCryptoCapability> {
     ]
 }
 
-#[cfg(any(feature = "valkey", feature = "elicitation-ciba"))]
+#[cfg(any(
+    feature = "valkey",
+    feature = "elicitation-ciba",
+    feature = "revocation-introspection"
+))]
 mod env_secret;

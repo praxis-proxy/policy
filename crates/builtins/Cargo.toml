@@ -69,6 +69,9 @@ oauth = [
 ]
 delegator-vault = ["_engine-core", "_plugins", "dep:sha2", "dep:moka"]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
+# RFC 7662 revocation checker. `base64` reads the token's issuer before the
+# token is sent anywhere.
+revocation-introspection = ["_engine-core", "_plugins", "dep:base64"]
 # Experimental per-consumer token quota against a standalone Limitador. Calls go
 # through the host transport, so no direct HTTP dependency is needed here.
 experimental-quota = ["_engine-core", "_plugins"]
@@ -163,11 +166,12 @@ jsonwebtoken = { workspace = true, optional = true }
 # OpenSSL signature verification for `jwt-openssl-fips`.
 openssl = { workspace = true, optional = true }
 
-# --- jwt, oauth, elicitation-ciba -------------------------------------------
+# --- jwt, oauth, elicitation-ciba, revocation-introspection ------------------
 
-# `base64` for the peek-at-iss helper in the JWT resolver, the read-only `act`
-# claim interop check in the OAuth delegator, and the approver-claim decode in
-# CIBA. None of the three verifies a signature with it. jsonwebtoken 11 still
+# `base64` for the peek-at-iss helpers in the JWT resolver and the
+# introspection checker, the read-only `act` claim interop check in the OAuth
+# delegator, and the approver-claim decode in CIBA. None of them verifies a
+# signature with it. jsonwebtoken 11 still
 # pulls 0.22, so both versions sit in the tree until it catches up.
 base64 = { workspace = true, optional = true }
 
