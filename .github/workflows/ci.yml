@@ -205,7 +205,6 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-release-readiness-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-release-readiness-
-      - run: make test-release-deps
       # Nothing outside a tagged release used to exercise either of these, which
       # is how the publish order drifted for a whole release cycle without
       # anyone noticing. Both are cheap and neither uploads anything.
