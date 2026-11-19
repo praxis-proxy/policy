@@ -487,6 +487,17 @@ async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_rec
     }
 
     writer.await.expect("the revoking rename completes");
+    // The barrier does not order the rename before any reload: on a loaded
+    // runner all 16 racing reloads can read the pre-revocation file before
+    // the writer thread is scheduled. These reloads start only after the
+    // rename has landed, and they still overlap any racers that are running.
+    // A serialized racer that publishes after one of them must also have
+    // read after it, so the settled index has to come from the
+    // post-revocation file. An unserialized one could still publish bob last.
+    for _ in 0..4_u32 {
+        let dir = std::sync::Arc::clone(&dir);
+        set.spawn_blocking(move || dir.reload());
+    }
     while let Some(joined) = set.join_next().await {
         joined
             .expect("the reload task completes")
@@ -496,7 +507,7 @@ async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_rec
     assert_eq!(
         dir.peak_concurrent_reloads(),
         1,
-        "16 reloads racing a file replacement must take the read-parse-publish \
+        "reloads racing a file replacement must take the read-parse-publish \
          path one at a time. Overlapping reloads read opposite sides of the \
          replacement and then publish in completion order rather than read \
          order, so the one holding the pre-revocation file can store on top of \
@@ -506,8 +517,9 @@ async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_rec
 
     assert!(
         dir.lookup("bob", &svc).await.expect("answers").is_none(),
-        "the last reload to run read a file without bob, so the settled index \
-         must not carry him"
+        "a reload that started after the rename read a file without bob, and \
+         every later publish read later still, so the settled index must not \
+         carry him"
     );
     assert_eq!(
         dir.len(),
