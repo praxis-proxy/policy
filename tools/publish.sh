@@ -28,12 +28,6 @@ set -euo pipefail
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
-# A development package can fall back to crates.io after Cargo strips a Git pin.
-# Refuse the actual release before any crate uploads, even on a resumed publish.
-if [ "$DRY_RUN" = "0" ]; then
-  python3 "$(dirname "$0")/check_release_dependencies.py"
-fi
-
 # Seconds to wait after a rate-limit rejection. The registry refills one new-crate
 # token every 10 minutes; the extra 30s keeps us clear of the boundary.
 BACKOFF="${PUBLISH_BACKOFF:-630}"

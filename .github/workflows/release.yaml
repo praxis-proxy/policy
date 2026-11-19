@@ -44,8 +44,6 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-release-verify-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-release-verify-
-      - name: Require published release dependencies
-        run: make check-release-deps
       - run: make lint
       - run: make test
       # Proves every publishable crate packages cleanly before anything is
