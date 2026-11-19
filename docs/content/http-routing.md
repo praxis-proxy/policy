@@ -104,6 +104,13 @@ absent for a request carrying no entity.
 Response bodies are not modeled. The response half covers headers and
 extensions.
 
+Revocation checks need nothing new from the host. The engine runs them
+while it handles `http.request`, before and after the policy pipeline, and
+`http.response`, after the pipeline allows the response. The response check
+only happens if the host calls `http.response`. If it never does, responses
+go back unchecked. See
+[Revocation](identity-delegation.md#where-the-engine-checks).
+
 ## Rate-limit hooks
 
 A configuration with a `rate_limits:` list needs the host to call the two

@@ -17,6 +17,30 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Revocation checks.** A new `revocation:` list names plugins on the
+  `revocation.check` hook that check whether a caller's credentials have
+  been revoked. It can be set at `global:`, `global.defaults.<entity>:`,
+  `groups.<name>:` and on routes, and combines the same way as
+  `rate_limits:`. The engine runs the checks on every `Pre` and `Post` hook,
+  before and after the request's policy pipeline and before the response
+  goes back, so hosts call nothing new. A checker denies with `auth.revoked`
+  or `auth.revocation_unavailable`, or vouches for the identities it
+  confirmed with the issuer. A request is denied if any of its identities
+  was not vouched for. Checkers must use `mode: sequential` and
+  `on_error: fail`. Configurations without a `revocation:` block behave as
+  before. Setting `engine_settings.require_revocation` makes a route that
+  authenticates callers but has no checker fail the load, instead of only
+  raising `revocation_partial_coverage`.
+  ([#205](https://github.com/praxis-proxy/policy/issues/205))
+- **`revocation/introspection` checker.** The `revocation-introspection`
+  feature, part of `builtins`, asks the issuer through RFC 7662
+  introspection whether a JWT from the configured `issuer` is still active.
+  Answers can be cached with `cache_ttl_seconds`, which defaults to `0`, so
+  every check is a live call. The cache key is the token's SHA-256 from
+  Policy's shared hashing, so the feature works under `fips`.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added

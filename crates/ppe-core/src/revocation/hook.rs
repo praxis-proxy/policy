@@ -2,9 +2,11 @@
 // Copyright (c) 2026 Praxis Contributors
 
 // `RevocationHook`: the `HookTypeDef` marker for the revocation family.
-// The engine, not the host, invokes it at each check point on a route whose
-// `revocation:` stack is non-empty. Each checker is invoked on its own with
-// a fresh payload, so no checker sees or overwrites another's `vouched`.
+// The engine, not the host, dispatches it inside the dispatch of every `Pre`
+// and `Post` hook whose route stacks a checker. The checkers run in stack
+// order as one sequential pipeline, each handed the payload the one before
+// returned, so `vouched` accumulates. `vouch` only adds, so a checker cannot
+// withdraw a slot another vouched for.
 
 use crate::hooks::trait_def::PluginResult;
 
@@ -23,9 +25,9 @@ crate::define_hooks! {
 crate::define_hook! {
     /// Revocation check: does each resolved identity still hold authority?
     ///
-    /// **Payload** ([`RevocationCheck`]): the populated identity slots, the
-    /// check point and the route, set by the engine and read through
-    /// accessors, plus the `vouched` set the checker fills on a clone. The
+    /// **Payload** ([`RevocationCheck`]): the populated identity slots and
+    /// the check point, set by the engine and read through accessors, plus
+    /// the `vouched` set the checker adds to on a clone. The
     /// identities and raw tokens themselves are read from `Extensions`,
     /// filtered by the checker's capabilities.
     ///
