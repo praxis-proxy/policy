@@ -135,7 +135,8 @@ FIPS_GRAPH_ALLOWED := uuid|getrandom|signature
 CRYPTO_PATTERN := rand|rand_core|chacha20|sha1|sha3|md-5|md5|blake2|blake3|aes|aes-gcm|p256|p384|p521|rsa|ed25519-dalek|curve25519-dalek|ecdsa|elliptic-curve|digest|signature|$(NON_FIPS_CRYPTO)|$(FIPS_GRAPH_ALLOWED)
 # Every supported FIPS selection: the shared backend, with optional identity
 # builtins.
-FIPS_SELECTIONS := fips fips,api-key fips,jwt-openssl-fips fips,api-key,jwt-openssl-fips
+FIPS_SELECTIONS := fips fips,api-key fips,jwt-openssl-fips fips,api-key,jwt-openssl-fips \
+	fips,revocation-introspection
 
 # Fail on a non-FIPS or unclassified crypto crate in the graph on stdin, and
 # print the allowed crates found. `$(1)` names the graph in messages; a

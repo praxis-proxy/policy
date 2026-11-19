@@ -68,6 +68,7 @@ builtins = [
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
+  "revocation-introspection",
   "cedar",
   "cel",
   "opa",
@@ -91,6 +92,10 @@ delegator-vault = ["_builtin", "praxis-policy-builtins/delegator-vault"]
 elicitation-ciba = [
   "_builtin",
   "praxis-policy-builtins/elicitation-ciba",
+]
+revocation-introspection = [
+  "_builtin",
+  "praxis-policy-builtins/revocation-introspection",
 ]
 cedar = ["_builtin", "praxis-policy-builtins/cedar"]
 cel = ["_builtin", "praxis-policy-builtins/cel"]

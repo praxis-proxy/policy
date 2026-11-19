@@ -22,6 +22,7 @@ fips = ["policy/fips", "audit/fips", "pii/fips", "transcript/fips"]
 api-key = ["policy/api-key"]
 jwt = ["policy/jwt"]
 jwt-openssl-fips = ["policy/jwt-openssl-fips"]
+revocation-introspection = ["policy/revocation-introspection"]
 plugin-defaults = ["audit/default"]
 
 [dependencies]

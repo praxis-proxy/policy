@@ -14,6 +14,7 @@ name it by `kind`.
 | `delegator/oauth` | delegator | `oauth` | RFC 8693 token exchange, with optional caching. See [Delegation](apl/delegation.md). |
 | `delegator/vault` | delegator | `delegator-vault` | Resolve caller-scoped or workload-owned downstream credentials from Vault KV v2. See [Vault delegation recipes](identity-delegation.md#recipe-8-a-users-vault-stored-credential). |
 | `elicitation/ciba` | elicitation | `elicitation-ciba` | OIDC CIBA human approval. See [Elicitation](apl/elicitation.md). |
+| `revocation/introspection` | revocation checker | `revocation-introspection` | Ask the issuer through RFC 7662 introspection whether each resolved identity's token is still active. Listed under `revocation:`. |
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
@@ -62,7 +63,7 @@ praxis-policy = { version = "0.6.0", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
+| `builtins` | all eleven below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `revocation-introspection`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
 | `jwt` | `identity/jwt`, verified with AWS-LC |
 | `jwt-openssl-fips` | `identity/jwt` and DPoP, verified with system OpenSSL under the FIPS provider. Requires `fips`; cannot be combined with `jwt`. HMAC (HS256, HS384, HS512) and EdDSA are refused at config load |
 | `api-key` | `identity/api-key` |
@@ -70,6 +71,7 @@ praxis-policy = { version = "0.6.0", features = ["jwt", "cedar"] }
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
 | `elicitation-ciba` | `elicitation/ciba` |
+| `revocation-introspection` | `revocation/introspection`. Hashes its cache keys with Policy's shared SHA-256, so it is safe under `fips` |
 | `cedar` | the `cedar-direct` decision point |
 | `cel` | the `cel` decision point |
 | `opa` | the `opa` decision point |
