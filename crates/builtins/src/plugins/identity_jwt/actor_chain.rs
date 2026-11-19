@@ -52,6 +52,11 @@ impl ActorChainError {
     }
 }
 
+/// Whether `claims` carries an `act` claim. A JSON null counts as absent.
+pub(crate) fn is_present(claims: &ClaimMap) -> bool {
+    claims.get("act").is_some_and(|act| !act.is_null())
+}
+
 /// Read the `act` chain from `claims`.
 ///
 /// Returns `Ok(None)` when the token carries no `act`, a direct call.
@@ -63,17 +68,21 @@ impl ActorChainError {
 ///
 /// `origin` is the subject id the claim map produced, so the chain is anchored
 /// to the same identity every other policy attribute reads. `iat` dates the
-/// chain: the token carries one issue time, so each hop keeps the default
-/// timestamp and the chain's age is measured from `iat` instead.
+/// chain. The token does not say when each earlier hop happened, so every hop
+/// is stamped with `iat`, a true upper bound on when it was minted, or with
+/// `now` when the token has no usable `iat`. The chain's age is measured from
+/// the same instant. On an exchanged token `iat` is the time of the latest
+/// exchange, so each re-exchange resets it.
 pub(crate) fn read(
     claims: &ClaimMap,
     origin: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<Option<DelegationExtension>, ActorChainError> {
     // A JSON null names no actor, the same as the claim being absent.
-    let Some(outer) = claims.get("act").filter(|act| !act.is_null()) else {
+    if !is_present(claims) {
         return Ok(None);
-    };
+    }
+    let outer = claims.get("act").ok_or(ActorChainError::NotAnObject)?;
 
     // Outermost first: the current actor, then each earlier one.
     let mut actors: Vec<&str> = Vec::new();
@@ -93,35 +102,51 @@ pub(crate) fn read(
         .filter(|id| !id.is_empty())
         .ok_or(ActorChainError::NoOrigin)?;
     let current = actors.first().map(|actor| (*actor).to_owned());
+    let issued_at = issued_at(claims, now);
     let delegators = std::iter::once(origin).chain(actors.iter().skip(1).rev().copied());
 
     let mut chain = DelegationExtension {
         origin_subject_id: Some(origin.to_owned()),
         actor_subject_id: current,
-        age_seconds: age_seconds(claims, now),
+        age_seconds: age_seconds(issued_at, now),
         ..DelegationExtension::default()
     };
     for delegator in delegators {
         chain.append_hop(DelegationHop {
             subject_id: delegator.to_owned(),
+            timestamp: issued_at,
             ..DelegationHop::default()
         });
     }
     Ok(Some(chain))
 }
 
-/// Seconds since the token's `iat`, or zero when it has none, is not a number,
-/// or lies ahead of the clock by skew. `iat` is a `NumericDate`, so it may carry
-/// a fraction.
+/// The token's `iat`, or `now` when it has none, is not a number, or lies
+/// ahead of the clock by skew. `iat` is a `NumericDate`, so it may carry a
+/// fraction, which is kept.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "the value is clamped to the clock, so it fits in i64, and epoch milliseconds stay far below 2^53"
+)]
+fn issued_at(claims: &ClaimMap, now: DateTime<Utc>) -> DateTime<Utc> {
+    let Some(iat) = claims.get("iat").and_then(Value::as_f64) else {
+        return now;
+    };
+    let millis = (iat * 1000.0).floor();
+    if !millis.is_finite() || millis > now.timestamp_millis() as f64 {
+        return now;
+    }
+    DateTime::from_timestamp_millis(millis as i64).unwrap_or(now)
+}
+
+/// Seconds from `issued_at` to `now`.
 #[allow(
     clippy::cast_precision_loss,
-    reason = "epoch seconds stay far below 2^53"
+    reason = "epoch milliseconds stay far below 2^53"
 )]
-fn age_seconds(claims: &ClaimMap, now: DateTime<Utc>) -> f64 {
-    let Some(issued_at) = claims.get("iat").and_then(Value::as_f64) else {
-        return 0.0;
-    };
-    (now.timestamp() as f64 - issued_at).max(0.0)
+fn age_seconds(issued_at: DateTime<Utc>, now: DateTime<Utc>) -> f64 {
+    (now.timestamp_millis() - issued_at.timestamp_millis()) as f64 / 1000.0
 }
 
 #[cfg(test)]
@@ -202,6 +227,32 @@ mod tests {
             .unwrap();
         assert_eq!(chain.depth, 100);
         assert_eq!(chain.chain.len(), 100);
+    }
+
+    #[test]
+    fn every_hop_is_stamped_with_iat() {
+        let claims = claims(&json!({
+            "iat": 1_000,
+            "act": {"sub": "agent-b", "act": {"sub": "agent-a"}},
+        }));
+        let chain = read(&claims, Some("alice"), at(1_090)).unwrap().unwrap();
+        assert_eq!(chain.chain.len(), 2);
+        assert!(chain.chain.iter().all(|hop| hop.timestamp == at(1_000)));
+    }
+
+    #[test]
+    fn a_missing_or_future_iat_stamps_hops_with_now() {
+        for iat in [json!({}), json!({"iat": 5_000}), json!({"iat": "soon"})] {
+            let mut value = json!({"act": {"sub": "agent-a"}});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(iat.as_object().unwrap().clone());
+            let chain = read(&claims(&value), Some("alice"), at(1_000))
+                .unwrap()
+                .unwrap();
+            assert_eq!(chain.chain[0].timestamp, at(1_000));
+        }
     }
 
     #[test]

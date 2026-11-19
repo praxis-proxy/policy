@@ -1080,7 +1080,10 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                     // rather than let a delegated call pass as direct.
                     match actor_chain::read(&token_data.claims, s.id.as_deref(), chrono::Utc::now())
                     {
-                        Ok(chain) => updated.delegation = chain.or(updated.delegation),
+                        // The slot is replaced, not merged: this resolver owns the
+                        // delegation of the subject it resolves, so a token without
+                        // `act` clears a chain an earlier resolver left behind.
+                        Ok(chain) => updated.delegation = chain,
                         Err(e) => {
                             return PluginResult::deny(PluginViolation::new(
                                 "auth.mapping_failed",
@@ -1099,6 +1102,19 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
                          which paths were tried",
                     ));
                 },
+            },
+            TokenRole::Client | TokenRole::CallerWorkload
+                if actor_chain::is_present(&token_data.claims) =>
+            {
+                // Only a `user` token carries a delegation chain. Reading
+                // `delegated = false` from a token that names an actor would
+                // let a delegated call pass as direct.
+                return PluginResult::deny(PluginViolation::new(
+                    "auth.mapping_failed",
+                    "the token carries an `act` claim, which only a `role: user` resolver \
+                     reads as a delegation chain. Resolve it with `role: user`, or present a \
+                     token without `act`",
+                ));
             },
             TokenRole::Client => match self.claim_mapper.map_client(&token_data.claims) {
                 Some(mut c) => {

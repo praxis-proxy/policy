@@ -25,8 +25,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `delegation.actor_subject_id` and `delegation.age_seconds` carry real values
   instead of being constant. The chain is taken as presented from a verified
   token and its depth is never capped. A token whose `act` is not an object, or
-  names no actor `sub`, is now denied with `auth.mapping_failed` rather than
-  passing as a direct call. Tokens without `act` are unchanged.
+  names no actor `sub`, and a `client` or `caller_workload` token that carries
+  `act`, is now denied with `auth.mapping_failed` rather than passing as a
+  direct call. Tokens without `act` are unchanged. `delegation.depth` counts
+  nested `act` claims that RFC 8693 calls informational and only reflects what
+  the issuing STS nested, so treat a depth limit as best effort and enforce a
+  hard limit at the STS.
 - **APL metadata fetching.** `fetch(name)` acquires immutable facts in `authorization.pre_invocation` and makes them available to subsequent predicates and PDPs under `metadata.<name>.*`. `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method has a default that rejects unsupported fetches, so existing invoker implementations still compile. `AcquiredFacts::validate()` exposes the core record validation rules. ([#287](https://github.com/praxis-proxy/policy/pull/287))
 
 ### Changed
