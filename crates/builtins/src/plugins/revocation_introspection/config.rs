@@ -33,6 +33,19 @@ pub struct IntrospectionConfig {
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 
+    /// How long an `active` or inactive answer is reused, in seconds.
+    ///
+    /// **This is the revocation window.** A token revoked at the issuer keeps
+    /// passing until its cached answer expires. Default 0: every check asks
+    /// the issuer. A failed lookup is never cached.
+    #[serde(default)]
+    pub cache_ttl_seconds: u64,
+
+    /// How many answers are held. Must be nonzero when caching. Default
+    /// 10 000.
+    #[serde(default = "default_cache_max_entries")]
+    pub cache_max_entries: u64,
+
     /// Allow a plaintext `http://` endpoint. Default false: the call carries
     /// the client secret and the caller's token. Set true only for a
     /// localhost or demo issuer.
@@ -65,11 +78,21 @@ const fn default_timeout_ms() -> u64 {
     500
 }
 
+const fn default_cache_max_entries() -> u64 {
+    10_000
+}
+
 impl IntrospectionConfig {
     /// The per-call timeout.
     #[must_use]
     pub const fn timeout(&self) -> Duration {
         Duration::from_millis(self.timeout_ms)
+    }
+
+    /// How long an answer is reused. Zero means not at all.
+    #[must_use]
+    pub const fn cache_ttl(&self) -> Duration {
+        Duration::from_secs(self.cache_ttl_seconds)
     }
 }
 
@@ -116,6 +139,8 @@ mod tests {
 
         assert_eq!(config.timeout(), Duration::from_millis(500), "timeout");
         assert!(!config.insecure_http, "plaintext is off by default");
+        assert_eq!(config.cache_ttl(), Duration::ZERO, "every check is live");
+        assert_eq!(config.cache_max_entries, 10_000, "cache bound");
     }
 
     #[test]

@@ -70,8 +70,9 @@ oauth = [
 delegator-vault = ["_engine-core", "_plugins", "dep:sha2", "dep:moka"]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
 # RFC 7662 revocation checker. `base64` reads the token's issuer before the
-# token is sent anywhere.
-revocation-introspection = ["_engine-core", "_plugins", "dep:base64"]
+# token is sent anywhere; `moka` holds the answer cache, keyed by the Policy
+# crypto backend's SHA-256.
+revocation-introspection = ["_engine-core", "_plugins", "dep:base64", "dep:moka"]
 # Experimental per-consumer token quota against a standalone Limitador. Calls go
 # through the host transport, so no direct HTTP dependency is needed here.
 experimental-quota = ["_engine-core", "_plugins"]
@@ -214,7 +215,10 @@ hmac = { workspace = true, optional = true }
 # inserted into, never pruned, so the structure protecting the cache
 # grows without the bound that protects the cache. moka's coalescing
 # lives inside the bounded map, so `max_entries` covers both.
-moka = { version = "0.12", optional = true, features = ["future"] }
+#
+# The Vault delegator's credential cache and the introspection checker's
+# answer cache rely on the same two guarantees.
+moka ={ version = "0.12", optional = true, features = ["future"] }
 
 # --- cedar -------------------------------------------------------------------
 

@@ -46,6 +46,11 @@ compile_error!("select one Policy crypto backend: crypto-rustcrypto or fips");
     not(any(feature = "crypto-rustcrypto", feature = "fips"))
 ))]
 compile_error!("api-key requires crypto-rustcrypto or fips");
+#[cfg(all(
+    feature = "revocation-introspection",
+    not(any(feature = "crypto-rustcrypto", feature = "fips"))
+))]
+compile_error!("revocation-introspection requires crypto-rustcrypto or fips");
 #[cfg(all(feature = "jwt", feature = "jwt-openssl-fips"))]
 compile_error!("select one JWT backend: jwt or jwt-openssl-fips");
 #[cfg(all(feature = "jwt-openssl-fips", not(feature = "fips")))]

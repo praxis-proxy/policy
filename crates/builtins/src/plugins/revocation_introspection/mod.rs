@@ -15,6 +15,8 @@
 //! Needs `perform_http` for the call and `read_inbound_credentials` for the
 //! tokens.
 
+/// The answer cache in front of the introspection endpoint.
+mod cache;
 /// The revocation hook handler.
 pub mod checker;
 /// Plugin configuration and its validation.

@@ -26,6 +26,7 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::plugins::revocation_introspection::KIND;
+use crate::plugins::revocation_introspection::cache::StatusCache;
 use crate::plugins::revocation_introspection::config::IntrospectionConfig;
 
 // -----------------------------------------------------------------------------
@@ -66,6 +67,7 @@ pub struct IntrospectionChecker {
     typed: IntrospectionConfig,
     authorization: Zeroizing<String>,
     timeout: Duration,
+    cache: Option<StatusCache>,
 }
 
 impl std::fmt::Debug for IntrospectionChecker {
@@ -75,6 +77,7 @@ impl std::fmt::Debug for IntrospectionChecker {
             .field("issuer", &self.typed.issuer)
             .field("introspection_endpoint", &self.typed.introspection_endpoint)
             .field("authorization", &"<elided>")
+            .field("cache_ttl_seconds", &self.typed.cache_ttl_seconds)
             .finish_non_exhaustive()
     }
 }
@@ -86,8 +89,8 @@ impl IntrospectionChecker {
     ///
     /// Returns [`PluginError::Config`] when the `config:` block is missing or
     /// malformed, a required field is empty, the endpoint is not `https://`
-    /// without `insecure_http`, the timeout is zero, or the client secret
-    /// cannot be read.
+    /// without `insecure_http`, the timeout is zero, caching is on with a zero
+    /// bound, or the client secret cannot be read.
     pub fn new(cfg: PluginConfig) -> Result<Self, Box<PluginError>> {
         let fail = |message: String| {
             PluginError::Config {
@@ -111,17 +114,26 @@ impl IntrospectionChecker {
         if typed.timeout_ms == 0 {
             return Err(fail("timeout_ms must be nonzero".to_owned()));
         }
+        if typed.cache_ttl_seconds > 0 && typed.cache_max_entries == 0 {
+            return Err(fail(
+                "cache_max_entries is zero, which caches nothing; set cache_ttl_seconds to 0 \
+                 to turn caching off"
+                    .to_owned(),
+            ));
+        }
         require_https(&typed.introspection_endpoint, typed.insecure_http)
             .map_err(|e| fail(format!("introspection_endpoint {e}")))?;
         let secret = Zeroizing::new(typed.client_secret_source.resolve().map_err(fail)?);
         let authorization = basic_authorization(&typed.client_id, &secret);
         let timeout = typed.timeout();
+        let cache = StatusCache::new(typed.cache_ttl(), typed.cache_max_entries);
 
         Ok(Self {
             config: cfg,
             typed,
             authorization,
             timeout,
+            cache,
         })
     }
 
@@ -139,7 +151,11 @@ impl IntrospectionChecker {
     /// Ask the issuer about one slot's token, logging what the caller is
     /// not told.
     async fn status(&self, ext: &Extensions, slot: IdentitySlot, token: &str) -> Status {
-        match self.introspect(ext, token).await {
+        let answer = match &self.cache {
+            Some(cache) => cache.get_or_fetch(token, self.introspect(ext, token)).await,
+            None => self.introspect(ext, token).await,
+        };
+        match answer {
             Ok(true) => Status::Active,
             Ok(false) => {
                 tracing::info!(plugin = %self.config.name, ?slot, "credential revoked");
@@ -600,6 +616,104 @@ mod tests {
 
         assert_eq!(vouched(&result), vec![IdentitySlot::Client], "vouched");
         assert_eq!(transport.call_count(), 1, "one slot, one call");
+    }
+
+    // -------------------------------------------------------------------------
+    // Cache
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn with_no_cache_window_every_check_asks_the_issuer() {
+        let transport = Arc::new(
+            FakeTransport::new()
+                .json("/introspect", 200, r#"{"active":true}"#)
+                .json("/introspect", 200, r#"{"active":false}"#),
+        );
+        let ext = ext(&transport, &[(IdentitySlot::Client, jwt(ISSUER))]);
+        let checker = checker(json!({}));
+
+        let first = run(&checker, &asked(&[IdentitySlot::Client]), &ext).await;
+        let second = run(&checker, &asked(&[IdentitySlot::Client]), &ext).await;
+
+        assert_eq!(vouched(&first), vec![IdentitySlot::Client], "first");
+        assert_eq!(denied_with(&second).0, REVOKED_CODE, "the revocation lands");
+        assert_eq!(transport.call_count(), 2, "both checks were live");
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_reused_within_the_window() {
+        for (body, expect_vouched) in [(r#"{"active":true}"#, true), (r#"{"active":false}"#, false)]
+        {
+            let transport = Arc::new(FakeTransport::new().json("/introspect", 200, body));
+            let ext = ext(&transport, &[(IdentitySlot::Client, jwt(ISSUER))]);
+            let checker = checker(json!({ "cache_ttl_seconds": 60 }));
+
+            for _ in 0..3 {
+                let result = run(&checker, &asked(&[IdentitySlot::Client]), &ext).await;
+                assert_eq!(result.violation.is_none(), expect_vouched, "{body}");
+            }
+
+            assert_eq!(transport.call_count(), 1, "{body}: one call, then cached");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_lookup_is_asked_again() {
+        let transport = Arc::new(FakeTransport::new().json("/introspect", 500, "").json(
+            "/introspect",
+            200,
+            r#"{"active":true}"#,
+        ));
+        let ext = ext(&transport, &[(IdentitySlot::Client, jwt(ISSUER))]);
+        let checker = checker(json!({ "cache_ttl_seconds": 60 }));
+
+        let failed = run(&checker, &asked(&[IdentitySlot::Client]), &ext).await;
+        let retried = run(&checker, &asked(&[IdentitySlot::Client]), &ext).await;
+
+        assert_eq!(denied_with(&failed).0, REVOCATION_UNAVAILABLE_CODE, "first");
+        assert_eq!(vouched(&retried), vec![IdentitySlot::Client], "retried");
+        assert_eq!(transport.call_count(), 2, "the failure was not stored");
+    }
+
+    #[tokio::test]
+    async fn concurrent_checks_of_one_token_share_one_call() {
+        let transport = Arc::new(
+            FakeTransport::new()
+                .json("/introspect", 200, r#"{"active":true}"#)
+                .with_latency(Duration::from_millis(50)),
+        );
+        let ext = ext(&transport, &[(IdentitySlot::Client, jwt(ISSUER))]);
+        let checker = checker(json!({ "cache_ttl_seconds": 60 }));
+        let check = asked(&[IdentitySlot::Client]);
+
+        let results =
+            join_all(std::iter::repeat_with(|| run(&checker, &check, &ext)).take(4)).await;
+
+        assert!(
+            results.iter().all(|result| result.violation.is_none()),
+            "all pass"
+        );
+        assert_eq!(transport.call_count(), 1, "coalesced");
+    }
+
+    #[test]
+    fn caching_with_a_zero_bound_is_rejected() {
+        let error = IntrospectionChecker::new(PluginConfig {
+            name: "introspect".into(),
+            kind: KIND.into(),
+            config: Some(json!({
+                "issuer": ISSUER,
+                "introspection_endpoint": "https://idp.example/introspect",
+                "client_id": "ppe",
+                "client_secret_source": { "kind": "literal", "secret": "s" },
+                "cache_ttl_seconds": 10,
+                "cache_max_entries": 0,
+            })),
+            ..Default::default()
+        })
+        .expect_err("a cache that holds nothing");
+
+        assert!(matches!(*error, PluginError::Config { .. }), "{error}");
     }
 
     // -------------------------------------------------------------------------
