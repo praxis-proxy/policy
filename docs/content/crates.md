@@ -127,6 +127,13 @@ ordinary features so the feature-gated re-exports are visible.
 
 The crates are versioned and released together.
 
+Development builds may pin Limitador to Git while `make publish-dry` checks
+packaging against a compatible crates.io version. Releases require Limitador
+to resolve from crates.io: `make check-release-deps` blocks Git and local path
+sources, including patches. The local release/tag commands, release workflow,
+and publish script run this check before releasing. Replace the Git pin with
+a published crate version before tagging a release.
+
 ## Validate shared hashing at startup
 
 `PolicyEngine::initialize()` checks that Policy's selected backend can

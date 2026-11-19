@@ -88,6 +88,7 @@ help:
 	@echo "                     plus a dhat-heap pass; make bench is on-demand)"
 	@echo ""
 	@echo "Release:"
+	@echo "  check-release-deps Require Limitador to resolve from crates.io"
 	@echo "  release-dry       Preview a release (no changes)"
 	@echo "  release-version   Rewrite versions only; no commit, no tag"
 	@echo "  release           Bump + commit + tag, then stop"
@@ -671,7 +672,7 @@ check-features:
 	@echo "check-features passed"
 
 .PHONY: ci
-ci: lint check-features test
+ci: lint check-features test test-release-deps
 
 # =============================================================================
 # Release
@@ -679,13 +680,20 @@ ci: lint check-features test
 #
 # CI publishes on tag push. The local mechanics stop at the tag.
 
+.PHONY: check-release-deps test-release-deps
+check-release-deps:
+	@python3 tools/check_release_dependencies.py
+
+test-release-deps:
+	@python3 -m unittest discover -s tools/tests
+
 .PHONY: release-tool
 release-tool:
 	@command -v cargo-release >/dev/null 2>&1 || $(CARGO) install cargo-release --locked
 
 # Preview only. cargo-release makes no changes without --execute.
 .PHONY: release-dry
-release-dry: release-tool
+release-dry: check-release-deps release-tool
 	@$(CARGO) release $(RELEASE_ARG) --workspace
 
 # Rewrite the version in [workspace.package] and [workspace.dependencies] only;
@@ -699,7 +707,7 @@ release-version: release-tool
 # does not depend on release.toml being parsed as expected. Afterwards run
 # `make tag` or push the tag directly.
 .PHONY: release
-release: release-tool
+release: check-release-deps release-tool
 	@$(CARGO) release $(RELEASE_ARG) --workspace --no-publish --no-push --execute
 
 # Build a .crate for every publishable member without uploading, then check
@@ -720,7 +728,7 @@ publish-dry:
 # triggers on. VERSION must be semver with no leading `v`.
 #   make tag VERSION=0.1.0
 .PHONY: tag
-tag:
+tag: check-release-deps
 	@test -n "$(VERSION)" || { echo "usage: make tag VERSION=X.Y.Z[-prerelease]"; exit 1; }
 	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$$' \
 		|| { echo "error: VERSION '$(VERSION)' is not semver (e.g. 0.1.0; no leading 'v')"; exit 1; }
