@@ -65,6 +65,7 @@ fips = [
 builtins = [
   "jwt",
   "api-key",
+  "basic",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
@@ -86,6 +87,7 @@ jwt = ["_jwt", "praxis-policy-builtins/jwt"]
 # `fips`; cannot be combined with `jwt`.
 jwt-openssl-fips = ["_jwt", "praxis-policy-builtins/jwt-openssl-fips"]
 api-key = ["_builtin", "praxis-policy-builtins/api-key"]
+basic = ["_builtin", "praxis-policy-builtins/basic"]
 oauth = ["_builtin", "praxis-policy-builtins/oauth"]
 delegator-vault = ["_builtin", "praxis-policy-builtins/delegator-vault"]
 elicitation-ciba = [
