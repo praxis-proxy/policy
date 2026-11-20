@@ -11,6 +11,7 @@ and they run in sequence until one denies.
 | `allow` | No-op. Continue to the next effect. |
 | `deny` / `deny('reason')` / `deny('reason', 'code')` | Halt the phase and all later phases with a violation. |
 | `run(name)` | Invoke a registered plugin (PII scan, audit log, custom check). `plugin(name)` is refused, naming this as its replacement. |
+| `fetch(name)` | Invoke one named metadata source and refresh `metadata.<name>.*` for subsequent effects. See [Fetched Metadata](metadata.md). |
 | `delegate(name, ...)` | Mint a downstream credential via a delegator plugin. See [Delegation](delegation.md). |
 | `require_approval(name, ...)` / `confirm(...)` / `require_step_up(...)` / `require_attestation(...)` / `request_info(...)` / `require_review(...)` | Ask a human and suspend the operation until they respond. See [Elicitation](elicitation.md). |
 | `taint(label[, scope])` | Attach a label to the session or message. See [Session Taint](tainting.md). |
@@ -85,7 +86,7 @@ are members; a predicate rule such as `require(...)`, or a PDP call, is
 not, and nesting one is a load error. Gate first and group second, as
 above, rather than trying to run the gates concurrently.
 
-`parallel` also rejects field operations and delegation, because a
+`parallel` also rejects field operations, delegation, and metadata fetches, because a
 discarded branch would silently lose those effects. Use `sequential`
 (the default for a `pre_invocation:` list) whenever one effect depends
 on another.
