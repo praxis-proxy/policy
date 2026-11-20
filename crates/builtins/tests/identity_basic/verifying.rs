@@ -1,0 +1,1078 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+//! Hash-scheme admission, the parameter ceiling, and the properties that keep
+//! a verify from leaking which users exist.
+
+use praxis_policy_builtins::plugins::identity_basic::ShaCryptVariant;
+use praxis_policy_builtins::plugins::identity_basic::verifier::{
+    BCRYPT_TRUNCATION_BYTES, CostProfile, HashError, Limits, SHA_CRYPT_DEFAULT_ROUNDS, Scheme,
+    empty_directory_hash, parse_hash,
+};
+
+use crate::support::{sha_crypt_at, verify_password};
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn bcrypt_records_load_in_every_spelling() {
+    let minted = bcrypt_at(4, "pw");
+    for variant in ["$2a$", "$2b$", "$2y$"] {
+        let tail = minted
+            .get(4..)
+            .expect("a bcrypt record is longer than its variant marker");
+        let swapped = format!("{variant}{tail}");
+        let parsed = parse_hash(&swapped, &Limits::default())
+            .unwrap_or_else(|e| panic!("{variant} should load: {e}"));
+        assert_eq!(
+            parsed.scheme(),
+            Scheme::Bcrypt,
+            "{variant} is a bcrypt spelling and must be read as one"
+        );
+    }
+}
+
+#[test]
+fn an_argon2_record_loads() {
+    let phc = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+               MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+    let parsed = parse_hash(phc, &Limits::default()).expect("an argon2 record loads");
+    assert_eq!(
+        parsed.scheme(),
+        Scheme::Argon2,
+        "a PHC argon2 record reads as argon2"
+    );
+}
+
+#[test]
+fn des_crypt_and_plaintext_are_refused() {
+    for stored in ["abJnggxhB/yWI", "hunter2", ""] {
+        assert_eq!(
+            parse_hash(stored, &Limits::default()).err(),
+            Some(HashError::RefusedScheme),
+            "{stored:?} must be refused"
+        );
+    }
+}
+
+#[test]
+fn md5_and_sha1_grade_schemes_are_refused_with_an_actionable_reason() {
+    for stored in [
+        "$apr1$abcdefgh$1234567890123456789012",
+        "{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=",
+    ] {
+        let err = parse_hash(stored, &Limits::default())
+            .expect_err("an MD5/SHA-1 grade scheme is not verified here");
+        assert_eq!(
+            err,
+            HashError::WeakSchemeUnsupported,
+            "an MD5/SHA-1 grade scheme is refused as weak, not as corrupt"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("re-hash"),
+            "the error should name the fix, got: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_bcrypt_record_fails_at_load() {
+    for (stored, reason) in [
+        (
+            "$2y$ZZ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "nonnumeric cost",
+        ),
+        ("$2y$04$tooshort", "incorrect length"),
+        (
+            "$2y$04$aaaaaaaaaaaaaaaaaaaaa£aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "non-ASCII bytes",
+        ),
+    ] {
+        assert_eq!(
+            parse_hash(stored, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a bcrypt record with {reason} must fail at load"
+        );
+    }
+}
+
+#[test]
+fn a_bcrypt_record_the_verifier_cannot_decode_fails_at_load() {
+    let minted = bcrypt_at(4, "pw");
+    let prefix = minted
+        .get(..7)
+        .expect("a bcrypt record is longer than its cost prefix");
+    let salt = minted.get(7..29).expect("a bcrypt salt is 22 characters");
+    let digest = minted.get(29..).expect("a bcrypt digest is 31 characters");
+    let salt_head = salt
+        .get(..21)
+        .expect("the salt is longer than one character");
+    let digest_head = digest
+        .get(..30)
+        .expect("the digest is longer than one character");
+
+    for (forged, reason) in [
+        (
+            format!("{prefix}{}", "!".repeat(53)),
+            "a character in no base alphabet",
+        ),
+        (
+            format!("{prefix}{}", "+".repeat(53)),
+            "a standard-base64 character bcrypt does not use",
+        ),
+        (
+            format!("{prefix}{}", "=".repeat(53)),
+            "base64 padding, which bcrypt never emits",
+        ),
+        (
+            format!("{prefix}{salt_head}z{digest}"),
+            "an in-alphabet salt character whose spare bits are not zero",
+        ),
+        (
+            format!("{prefix}{salt}{digest_head}z"),
+            "an in-alphabet digest character whose spare bits are not zero",
+        ),
+    ] {
+        assert_eq!(
+            forged.len(),
+            60,
+            "the forged record carrying {reason} must be the right length, so \
+             only the encoding check can reject it"
+        );
+        assert!(
+            bcrypt::verify("pw", &forged).is_err(),
+            "precondition: bcrypt itself refuses {reason} before running the KDF"
+        );
+        assert_eq!(
+            parse_hash(&forged, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a bcrypt record carrying {reason} must fail at load: the verifier \
+             rejects it before the KDF, so admitting it would answer in \
+             nanoseconds where a real record takes milliseconds and reveal \
+             that the user-id exists"
+        );
+    }
+}
+
+#[test]
+fn a_bcrypt_cost_above_the_ceiling_fails_at_load() {
+    let limits = Limits {
+        max_bcrypt_cost: 10,
+        ..Limits::default()
+    };
+    let hot = bcrypt_at(12, "pw");
+    assert_eq!(
+        parse_hash(&hot, &limits).err(),
+        Some(HashError::ParametersTooHigh),
+        "a well-formed cost above the ceiling is an availability risk, not a \
+         parse problem, so it must be refused at load rather than at verify"
+    );
+    parse_hash(&hot, &Limits::default()).expect("the same record loads once the ceiling admits it");
+}
+
+#[test]
+fn argon2_parameters_above_the_ceiling_fail_at_load() {
+    let phc = "$argon2id$v=19$m=1048576,t=8,p=1$c2FsdHNhbHRzYWx0$\
+               MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+    let tight = Limits {
+        max_argon2_memory_kib: 65536,
+        ..Limits::default()
+    };
+    assert_eq!(
+        parse_hash(phc, &tight).err(),
+        Some(HashError::ParametersTooHigh),
+        "argon2 memory above the ceiling is refused at load"
+    );
+
+    let tight_time = Limits {
+        max_argon2_time_cost: 2,
+        ..Limits::default()
+    };
+    assert_eq!(
+        parse_hash(phc, &tight_time).err(),
+        Some(HashError::ParametersTooHigh),
+        "and so is an argon2 time cost above the ceiling"
+    );
+}
+
+#[test]
+fn the_empty_directory_hash_is_a_real_record_that_verifies_in_full() {
+    let dummy = empty_directory_hash().expect("the empty-directory hash mints");
+    assert_eq!(
+        dummy.scheme(),
+        Scheme::Bcrypt,
+        "the dummy is a real bcrypt record the verifier runs in full"
+    );
+    assert_eq!(
+        dummy.profile(),
+        CostProfile::Bcrypt { cost: 10 },
+        "and it carries the work factor it was asked for"
+    );
+}
+
+#[test]
+fn a_password_past_bcrypts_truncation_point_is_rejected() {
+    let seventy_two = "A".repeat(BCRYPT_TRUNCATION_BYTES);
+    let longer = format!("{seventy_two}COMPLETELY-DIFFERENT-TAIL");
+
+    let stored = bcrypt_at(4, &seventy_two);
+    assert_eq!(
+        bcrypt::verify(&longer, &stored).ok(),
+        Some(true),
+        "precondition: bcrypt itself accepts the over-length password"
+    );
+
+    let parsed = parse_hash(&stored, &Limits::default()).expect("loads");
+    assert!(
+        !crate::support::verify_password(&parsed, longer.as_bytes()),
+        "an over-length password must not authenticate on a 72-byte prefix match"
+    );
+    assert!(
+        crate::support::verify_password(&parsed, seventy_two.as_bytes()),
+        "the password that was actually hashed still verifies"
+    );
+}
+
+#[test]
+fn a_correct_password_verifies_and_a_wrong_one_does_not() {
+    let parsed = parse_hash(&bcrypt_at(4, "correct horse"), &Limits::default()).expect("loads");
+    assert!(
+        crate::support::verify_password(&parsed, b"correct horse"),
+        "the password the hash was minted from must verify"
+    );
+    assert!(
+        !crate::support::verify_password(&parsed, b"wrong horse"),
+        "and any other password must not"
+    );
+}
+
+#[test]
+fn a_correct_argon2_password_verifies_and_a_wrong_one_does_not() {
+    let parsed = parse_hash(
+        &crate::support::argon2_at(19_456, 2, "correct horse"),
+        &Limits::default(),
+    )
+    .expect("loads");
+    assert!(
+        crate::support::verify_password(&parsed, b"correct horse"),
+        "the password the argon2 record was minted from must verify, or the \
+         argon2 arm is not running a real KDF comparison"
+    );
+    assert!(
+        !crate::support::verify_password(&parsed, b"wrong horse"),
+        "and any other password must not: an arm that returned a constant \
+         would pass one of these two assertions and fail the other"
+    );
+}
+
+#[test]
+fn argon2_verification_is_specific_to_the_records_own_parameters() {
+    let cheap = parse_hash(
+        &crate::support::argon2_at(19_456, 2, "pw"),
+        &Limits::default(),
+    )
+    .expect("loads");
+    let dearer = parse_hash(
+        &crate::support::argon2_at(32_768, 3, "pw"),
+        &Limits::default(),
+    )
+    .expect("loads");
+
+    assert_ne!(
+        cheap.profile(),
+        dearer.profile(),
+        "precondition: these records differ in their parameters"
+    );
+    for (label, parsed) in [("m=19456,t=2", &cheap), ("m=32768,t=3", &dearer)] {
+        assert!(
+            crate::support::verify_password(parsed, b"pw"),
+            "{label} must verify against the password it was minted from, so \
+             the parameters are read from the record rather than assumed"
+        );
+        assert!(
+            !crate::support::verify_password(parsed, b"pw "),
+            "{label} must reject a near-miss password"
+        );
+    }
+}
+
+#[test]
+fn a_debug_formatted_record_redacts_the_stored_hash() {
+    use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
+
+    let stored = bcrypt_at(4, "correct horse");
+    let verifier =
+        StoredVerifier::hash(&stored, &Limits::default()).expect("a real bcrypt record admits");
+    let record = UserRecord::verifier_only(verifier);
+
+    let printed = format!("{record:?}");
+    let salt_and_digest = stored
+        .get(7..)
+        .expect("a bcrypt record carries a salt and digest past its prefix");
+    assert!(
+        !printed.contains(salt_and_digest),
+        "a Debug-formatted record must not carry the stored hash, got: {printed}"
+    );
+    assert!(
+        !printed.contains("$2b$") && !printed.contains("$2y$"),
+        "nor the scheme prefix, which narrows an offline attack, got: {printed}"
+    );
+    assert!(
+        printed.contains("redacted"),
+        "and it should say the value was withheld rather than look absent, got: {printed}"
+    );
+
+    let delegated = UserRecord::verifier_only(StoredVerifier::Delegated { valid: true });
+    assert!(
+        format!("{delegated:?}").contains("true"),
+        "a delegated verdict carries nothing crackable and should stay visible"
+    );
+}
+
+#[test]
+fn a_record_holder_cannot_read_the_stored_hash() {
+    use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
+
+    let stored = bcrypt_at(4, "correct horse");
+    let verifier =
+        StoredVerifier::hash(&stored, &Limits::default()).expect("a real bcrypt record admits");
+    let record = UserRecord::verifier_only(verifier);
+
+    assert!(
+        record.fields.is_empty(),
+        "the projectable half of a record stays readable, and carries nothing here"
+    );
+    assert_eq!(
+        record.expires_at, None,
+        "as does the expiry the resolver enforces"
+    );
+
+    let profile = record.verify_against(|verifier| match verifier {
+        StoredVerifier::Hash(admitted) => Some(admitted.profile()),
+        _not_a_local_hash => None,
+    });
+    assert_eq!(
+        profile,
+        Some(CostProfile::Bcrypt { cost: 4 }),
+        "the backend that produced the record still reaches its parameters, \
+         which is what the uniform-cost check and the miss path need"
+    );
+
+    let printed = format!("{record:?}");
+    assert!(
+        !printed.contains(
+            stored
+                .get(7..)
+                .expect("a bcrypt record carries a salt and digest past its prefix")
+        ),
+        "and no public path yields the encoding: `ParsedHash` exposes the \
+         profile and the scheme and keeps the record itself unreadable, got: \
+         {printed}"
+    );
+}
+
+#[test]
+fn an_unadmitted_hash_cannot_become_a_verifier() {
+    use praxis_policy_builtins::plugins::identity_basic::StoredVerifier;
+
+    assert_eq!(
+        StoredVerifier::hash("plaintext-password", &Limits::default()).err(),
+        Some(HashError::RefusedScheme),
+        "a verifier slot that took any string could carry a record the KDF \
+         would refuse, which is the state this constructor exists to prevent"
+    );
+    assert_eq!(
+        StoredVerifier::hash(
+            &bcrypt_at(10, "pw"),
+            &Limits {
+                max_bcrypt_cost: 9,
+                ..Limits::default()
+            }
+        )
+        .err(),
+        Some(HashError::ParametersTooHigh),
+        "and the configured ceiling applies on the way in, not at verify time"
+    );
+}
+
+/// An out-of-tree backend, implemented from outside the plugin's module tree.
+#[derive(Debug)]
+struct OutOfTreeDirectory {
+    expected_user: String,
+    expected_password: Vec<u8>,
+}
+
+#[async_trait::async_trait]
+impl praxis_policy_builtins::plugins::identity_basic::CredentialDirectory for OutOfTreeDirectory {
+    async fn lookup(
+        &self,
+        user_id: &str,
+        _services: &dyn praxis_policy_core::host::HostServices,
+    ) -> Result<
+        Option<praxis_policy_builtins::plugins::identity_basic::UserRecord>,
+        praxis_policy_builtins::plugins::identity_basic::DirectoryError,
+    > {
+        use praxis_policy_builtins::plugins::identity_basic::{StoredVerifier, UserRecord};
+        Ok((user_id == self.expected_user)
+            .then(|| UserRecord::verifier_only(StoredVerifier::Delegated { valid: true })))
+    }
+
+    async fn verify(
+        &self,
+        record: Option<&praxis_policy_builtins::plugins::identity_basic::UserRecord>,
+        credential: &praxis_policy_builtins::plugins::identity_basic::BasicCredential,
+        _services: &dyn praxis_policy_core::host::HostServices,
+    ) -> Result<bool, praxis_policy_builtins::plugins::identity_basic::DirectoryError> {
+        use praxis_policy_builtins::plugins::identity_basic::StoredVerifier;
+
+        let presented = credential.to_zeroized_password();
+        let delegated = record.is_some_and(|found| {
+            found.verify_against(|verifier| {
+                matches!(verifier, StoredVerifier::Delegated { valid: true })
+            })
+        });
+        Ok(delegated && presented.as_slice() == self.expected_password.as_slice())
+    }
+
+    fn kind(&self) -> &'static str {
+        "out-of-tree-test"
+    }
+}
+
+#[tokio::test]
+async fn the_directory_trait_is_implementable_from_outside_the_plugin() {
+    use praxis_policy_builtins::plugins::identity_basic::CredentialDirectory as _;
+
+    let dir = OutOfTreeDirectory {
+        expected_user: "alice".to_owned(),
+        expected_password: b"pw".to_vec(),
+    };
+    let svc = crate::support::services();
+
+    let found = dir.lookup("alice", &svc).await.expect("the lookup answers");
+    assert!(found.is_some(), "a public-API backend can return a record");
+    assert!(
+        dir.verify(found.as_ref(), &crate::support::password("pw"), &svc)
+            .await
+            .expect("the verify answers"),
+        "and can verify a credential using only public API"
+    );
+    assert!(
+        !dir.verify(found.as_ref(), &crate::support::password("wrong"), &svc)
+            .await
+            .expect("the verify answers"),
+        "and rejects a wrong password"
+    );
+}
+
+/// An out-of-tree backend carrying its own stored hash, not a delegated verdict.
+#[derive(Debug)]
+struct OutOfTreeHashDirectory {
+    user_id: String,
+    stored: String,
+}
+
+#[async_trait::async_trait]
+impl praxis_policy_builtins::plugins::identity_basic::CredentialDirectory
+    for OutOfTreeHashDirectory
+{
+    async fn lookup(
+        &self,
+        user_id: &str,
+        _services: &dyn praxis_policy_core::host::HostServices,
+    ) -> Result<
+        Option<praxis_policy_builtins::plugins::identity_basic::UserRecord>,
+        praxis_policy_builtins::plugins::identity_basic::DirectoryError,
+    > {
+        use praxis_policy_builtins::plugins::identity_basic::{
+            DirectoryError, StoredVerifier, UserRecord,
+        };
+
+        if user_id != self.user_id {
+            return Ok(None);
+        }
+        let verifier = StoredVerifier::hash(&self.stored, &Limits::default())
+            .map_err(|e| DirectoryError::Malformed(e.to_string()))?;
+        Ok(Some(UserRecord::verifier_only(verifier)))
+    }
+
+    async fn verify(
+        &self,
+        record: Option<&praxis_policy_builtins::plugins::identity_basic::UserRecord>,
+        credential: &praxis_policy_builtins::plugins::identity_basic::BasicCredential,
+        _services: &dyn praxis_policy_core::host::HostServices,
+    ) -> Result<bool, praxis_policy_builtins::plugins::identity_basic::DirectoryError> {
+        use praxis_policy_builtins::plugins::identity_basic::StoredVerifier;
+
+        Ok(record.is_some_and(|found| {
+            found.verify_against(|verifier| match verifier {
+                StoredVerifier::Hash(admitted) => {
+                    praxis_policy_builtins::plugins::identity_basic::verifier::verify_credential(
+                        admitted, credential,
+                    )
+                },
+                StoredVerifier::Delegated { valid } => *valid,
+                _unknown_to_this_backend => false,
+            })
+        }))
+    }
+
+    fn kind(&self) -> &'static str {
+        "out-of-tree-hash-test"
+    }
+}
+
+#[tokio::test]
+async fn an_out_of_tree_backend_round_trips_its_own_stored_hash() {
+    use praxis_policy_builtins::plugins::identity_basic::CredentialDirectory as _;
+
+    let dir = OutOfTreeHashDirectory {
+        user_id: "alice".to_owned(),
+        stored: bcrypt_at(4, "correct horse"),
+    };
+    let svc = crate::support::services();
+
+    let found = dir.lookup("alice", &svc).await.expect("the lookup answers");
+    assert!(
+        found.is_some(),
+        "a backend outside this plugin must be able to admit its own stored \
+         hash into a record, or the opaque verifier has shut out the hosts the \
+         trait is public for"
+    );
+    assert!(
+        dir.verify(
+            found.as_ref(),
+            &crate::support::password("correct horse"),
+            &svc
+        )
+        .await
+        .expect("the verify answers"),
+        "and must be able to recover it to verify a correct password"
+    );
+    assert!(
+        !dir.verify(
+            found.as_ref(),
+            &crate::support::password("wrong horse"),
+            &svc
+        )
+        .await
+        .expect("the verify answers"),
+        "while a wrong password still fails"
+    );
+    assert!(
+        dir.lookup("bob", &svc)
+            .await
+            .expect("the lookup answers")
+            .is_none(),
+        "and an unknown user is still absent"
+    );
+}
+
+#[test]
+fn a_debug_formatted_parsed_hash_redacts_the_stored_record() {
+    let stored = bcrypt_at(4, "pw");
+    let parsed = parse_hash(&stored, &Limits::default()).expect("loads");
+
+    let printed = format!("{parsed:?}");
+    assert!(
+        !printed.contains(&stored),
+        "the stored record must not appear in Debug output, got: {printed}"
+    );
+    assert!(
+        !printed.contains("$2"),
+        "nor any part of the modular-crypt record, got: {printed}"
+    );
+    assert!(
+        printed.contains("redacted"),
+        "and the field should read as withheld rather than absent, got: {printed}"
+    );
+    assert!(
+        printed.contains("Bcrypt"),
+        "the scheme stays visible for diagnostics, got: {printed}"
+    );
+}
+
+#[test]
+fn a_cost_profile_compares_by_equality_not_by_order() {
+    let four = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
+    let four_again = parse_hash(&bcrypt_at(4, "pw"), &Limits::default()).expect("loads");
+    let twelve = parse_hash(&bcrypt_at(12, "pw"), &Limits::default()).expect("loads");
+
+    assert_eq!(
+        four.profile(),
+        four_again.profile(),
+        "two records minted at the same cost share a profile"
+    );
+    assert_ne!(
+        four.profile(),
+        twelve.profile(),
+        "records at different costs must not share a profile, since that is \
+         what the load-time uniformity check compares; CostProfile offers no \
+         ordering because argon2 trades memory against passes, so m=4096,t=10 \
+         (14ms) would rank above m=65536,t=2 (37ms) on any single number"
+    );
+}
+
+#[test]
+fn argon2_records_differing_in_any_parameter_have_different_profiles() {
+    let base = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+                MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+    let reference = parse_hash(base, &Limits::default()).expect("the base record loads");
+
+    for (label, variant) in [
+        ("memory", base.replace("m=19456", "m=8192")),
+        ("passes", base.replace("t=2", "t=3")),
+        ("parallelism", base.replace("p=1", "p=2")),
+        ("variant", base.replace("argon2id", "argon2i")),
+    ] {
+        let other = parse_hash(&variant, &Limits::default())
+            .unwrap_or_else(|e| panic!("the {label} variant should load: {e}"));
+        assert_ne!(
+            reference.profile(),
+            other.profile(),
+            "a record differing in {label} must not share the base profile: \
+             every parameter affects verify cost, and the variant and version \
+             change the function rather than only its tuning"
+        );
+    }
+}
+
+#[test]
+fn a_hash_exactly_at_the_parameter_ceiling_is_accepted() {
+    let at_limit = Limits {
+        max_bcrypt_cost: 6,
+        ..Limits::default()
+    };
+    parse_hash(&bcrypt_at(6, "pw"), &at_limit)
+        .expect("a cost equal to the ceiling is within it, not over");
+
+    assert_eq!(
+        parse_hash(&bcrypt_at(7, "pw"), &at_limit).err(),
+        Some(HashError::ParametersTooHigh),
+        "one above the ceiling is refused, so the boundary is inclusive"
+    );
+}
+
+#[test]
+fn argon2_parameters_exactly_at_each_ceiling_are_accepted() {
+    let base = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+                MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+    let at_limit = Limits {
+        max_argon2_memory_kib: 19_456,
+        max_argon2_time_cost: 2,
+        ..Limits::default()
+    };
+    parse_hash(base, &at_limit).expect("memory and passes equal to their ceilings are within them");
+
+    let over_memory = Limits {
+        max_argon2_memory_kib: 19_455,
+        ..at_limit
+    };
+    assert_eq!(
+        parse_hash(base, &over_memory).err(),
+        Some(HashError::ParametersTooHigh),
+        "one KiB above the memory ceiling is refused"
+    );
+
+    let over_time = Limits {
+        max_argon2_time_cost: 1,
+        ..at_limit
+    };
+    assert_eq!(
+        parse_hash(base, &over_time).err(),
+        Some(HashError::ParametersTooHigh),
+        "and one pass above the time ceiling is refused, so each dimension is \
+         checked against its own limit rather than the pair being conflated"
+    );
+}
+
+#[test]
+fn a_bcrypt_cost_outside_the_library_range_fails_at_load() {
+    let minted = bcrypt_at(4, "pw");
+    let tail = minted
+        .get(7..)
+        .expect("a bcrypt record is longer than its cost prefix");
+
+    for (label, cost) in [("below the minimum", "03"), ("above the maximum", "32")] {
+        let record = format!("$2b${cost}${tail}");
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a cost {label} of the library's accepted range must fail at load, \
+             since the verifier would otherwise reject it before the KDF and \
+             make that user-id faster to probe"
+        );
+    }
+}
+
+#[test]
+fn an_argon2_record_missing_its_salt_or_digest_fails_at_load() {
+    for (label, record) in [
+        (
+            "no digest",
+            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0".to_owned(),
+        ),
+        (
+            "no salt or digest",
+            "$argon2id$v=19$m=19456,t=2,p=1".to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a record with {label} must fail at load: argon2 errors out before \
+             the KDF without them, which is the same timing signal as any other \
+             early rejection"
+        );
+    }
+}
+
+#[test]
+fn an_argon2_record_below_argon2s_salt_or_digest_floor_fails_at_load() {
+    use base64::Engine as _;
+
+    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD;
+    for (label, salt_bytes, digest_bytes) in [
+        ("a salt one byte under argon2's 8-byte minimum", 7, 32),
+        ("a digest one byte under argon2's 10-byte minimum", 16, 9),
+    ] {
+        let record = format!(
+            "$argon2id$v=19$m=19456,t=2,p=1${}${}",
+            b64.encode(vec![b'A'; salt_bytes]),
+            b64.encode(vec![b'B'; digest_bytes]),
+        );
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "{label} must fail at load: argon2 refuses it before the KDF, so \
+             admitting it would make that user-id measurably faster to probe \
+             than an unknown one. The floor is enforced by `password-hash` \
+             upstream of this call, and this pins it -- if a dependency bump \
+             ever relaxed it, admission would silently reopen that oracle"
+        );
+    }
+}
+
+#[test]
+fn a_cost_profile_describes_its_own_parameters() {
+    let bcrypt = parse_hash(&bcrypt_at(9, "pw"), &Limits::default()).expect("loads");
+    let described = bcrypt.profile().describe();
+    assert!(
+        described.contains('9'),
+        "a bcrypt description names its cost, which an operator reconciling two \
+         records needs to see: {described}"
+    );
+    assert!(
+        described.contains("bcrypt"),
+        "and names the scheme: {described}"
+    );
+
+    let argon2 = parse_hash(
+        "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
+         MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI",
+        &Limits::default(),
+    )
+    .expect("loads");
+    let described = argon2.profile().describe();
+    for expected in ["19456", "t=2", "p=1", "argon2id"] {
+        assert!(
+            described.contains(expected),
+            "an argon2 description names {expected}, since every parameter is \
+             part of what the uniformity check compares: {described}"
+        );
+    }
+}
+
+#[test]
+fn sha_crypt_records_load_and_verify_in_both_variants() {
+    for (variant, ident) in [
+        (ShaCryptVariant::Sha256, "$5$"),
+        (ShaCryptVariant::Sha512, "$6$"),
+    ] {
+        let minted = sha_crypt_at(variant, 1_000, "pw");
+        assert!(
+            minted.starts_with(ident),
+            "the fixture should be spelled {ident}, got: {minted}"
+        );
+
+        let parsed = parse_hash(&minted, &Limits::default())
+            .unwrap_or_else(|e| panic!("{ident} should load: {e}"));
+        assert_eq!(
+            parsed.scheme(),
+            Scheme::ShaCrypt,
+            "{ident} is a sha-crypt spelling and must be read as one"
+        );
+        assert_eq!(
+            parsed.profile(),
+            CostProfile::ShaCrypt {
+                variant,
+                rounds: 1_000
+            },
+            "{ident} must carry the round count it was minted at"
+        );
+        assert!(
+            verify_password(&parsed, b"pw"),
+            "{ident} must verify the password it was minted from"
+        );
+        assert!(
+            !verify_password(&parsed, b"wrong"),
+            "{ident} must not verify a different password"
+        );
+    }
+}
+
+#[test]
+fn the_two_sha_crypt_variants_are_different_cost_profiles() {
+    let sha256 = parse_hash(
+        &sha_crypt_at(ShaCryptVariant::Sha256, 1_000, "pw"),
+        &Limits::default(),
+    )
+    .expect("the $5$ fixture loads");
+    let sha512 = parse_hash(
+        &sha_crypt_at(ShaCryptVariant::Sha512, 1_000, "pw"),
+        &Limits::default(),
+    )
+    .expect("the $6$ fixture loads");
+
+    assert_ne!(
+        sha256.profile(),
+        sha512.profile(),
+        "$5$ and $6$ are different functions at the same round count, not two parameterisations of \
+         one, so a file holding both is a mixed-cost file and the uniformity check has to see them \
+         as different"
+    );
+}
+
+#[test]
+fn a_sha_crypt_record_without_an_explicit_rounds_field_loads_at_the_default() {
+    let minted = sha_crypt_at(ShaCryptVariant::Sha512, 5_000, "pw");
+    let implicit = minted.replace("rounds=5000$", "");
+    assert!(
+        !implicit.contains("rounds="),
+        "the fixture should carry no rounds field, got: {implicit}"
+    );
+
+    let parsed = parse_hash(&implicit, &Limits::default())
+        .expect("the no-rounds spelling is what crypt(3) and mkpasswd write");
+    assert_eq!(
+        parsed.profile(),
+        CostProfile::ShaCrypt {
+            variant: ShaCryptVariant::Sha512,
+            rounds: SHA_CRYPT_DEFAULT_ROUNDS
+        },
+        "an absent rounds field means the format's default, not zero: reading it as anything else \
+         would make this record's profile differ from an explicit `rounds=5000` that hashes \
+         identically"
+    );
+    assert!(
+        verify_password(&parsed, b"pw"),
+        "and it must verify, since it is the same digest with the field elided"
+    );
+}
+
+#[test]
+fn a_sha_crypt_round_count_above_the_ceiling_fails_at_load() {
+    let minted = sha_crypt_at(ShaCryptVariant::Sha512, 2_000, "pw");
+
+    assert_eq!(
+        parse_hash(
+            &minted,
+            &Limits {
+                max_sha_crypt_rounds: 1_999,
+                ..Limits::default()
+            }
+        )
+        .err(),
+        Some(HashError::ParametersTooHigh),
+        "a round count over the ceiling is refused at load, so a well-formed but extreme record \
+         cannot turn one login into a denial of service"
+    );
+    assert!(
+        parse_hash(
+            &minted,
+            &Limits {
+                max_sha_crypt_rounds: 2_000,
+                ..Limits::default()
+            }
+        )
+        .is_ok(),
+        "and the ceiling is inclusive"
+    );
+}
+
+#[test]
+fn a_sha_crypt_record_the_verifier_would_reject_cheaply_fails_at_load() {
+    let valid = sha_crypt_at(ShaCryptVariant::Sha512, 5_000, "pw");
+    let (_, tail) = valid
+        .split_once("rounds=5000$")
+        .expect("the fixture carries an explicit rounds field");
+    let (salt, digest) = tail
+        .split_once('$')
+        .expect("the fixture carries a salt and a digest");
+
+    for (label, record) in [
+        ("no digest field at all", format!("$6${salt}")),
+        ("an empty digest", format!("$6${salt}$")),
+        (
+            "a digest shorter than the variant's width",
+            format!("$6${salt}$tooshort"),
+        ),
+        (
+            "a sha256crypt-width digest under a sha512crypt ident",
+            format!(
+                "$6${salt}${}",
+                digest.get(..43).expect("the $6$ digest is longer than 43")
+            ),
+        ),
+        (
+            "a salt longer than the format allows",
+            format!("$6$abcdefghijklmnopq${digest}"),
+        ),
+        (
+            "a field after the digest",
+            format!("$6$rounds=5000${salt}${digest}$extra"),
+        ),
+    ] {
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "{label} must fail at load. The salt and digest here come from a \
+             record that does load, so each case differs from a valid one only \
+             in the property it names. The verifier rejects all of these \
+             before running the digest, so admitting one would make that \
+             user-id measurably faster to probe than an unknown one -- the \
+             cheap-reject oracle uniform cost exists to close"
+        );
+    }
+}
+
+#[test]
+fn a_sha_crypt_rounds_field_outside_the_formats_range_fails_at_load() {
+    let valid = sha_crypt_at(ShaCryptVariant::Sha512, 5_000, "pw");
+    let (prefix, tail) = valid
+        .split_once("rounds=5000$")
+        .expect("the fixture carries an explicit rounds field");
+    assert_eq!(prefix, "$6$", "the split should leave the bare ident");
+
+    for (label, rounds) in [
+        ("below the format's minimum", "999"),
+        ("above the format's maximum", "1000000000"),
+        ("not a number", "abc"),
+        ("zero", "0"),
+        ("empty", ""),
+        ("negative", "-1"),
+        ("wider than a u32", "4294967296"),
+    ] {
+        let record = format!("$6$rounds={rounds}${tail}");
+
+        assert_eq!(
+            parse_hash(&record, &Limits::default()).err(),
+            Some(HashError::Malformed),
+            "a rounds field {label} must fail at load. Everything else about \
+             this record is valid -- salt and digest are the ones from a \
+             record that loads -- so only the rounds bound can reject it. The \
+             verifier does not: a `rounds=` field it cannot parse falls \
+             through to being read as the salt, so the record answers `false` \
+             cheaply without ever running its real parameters, which makes \
+             that user-id measurably faster to probe than an unknown one"
+        );
+    }
+
+    assert!(
+        parse_hash(&format!("$6$rounds=1000${tail}"), &Limits::default()).is_ok(),
+        "and the format's minimum itself is admitted, so the bound rejects \
+         only what is actually out of range"
+    );
+}
+
+#[test]
+fn an_md5_crypt_record_is_not_mistaken_for_sha_crypt() {
+    assert_eq!(
+        parse_hash("$1$abcdefgh$0123456789012345678901", &Limits::default()).err(),
+        Some(HashError::Malformed),
+        "`$1$` is md5crypt, and sits in neither the refused-outright set nor the sha-crypt idents, \
+         so it must still not load"
+    );
+}
+
+#[test]
+fn published_sha_crypt_vectors_verify_against_their_known_password() {
+    for (label, record) in [
+        (
+            "$5$ at the default rounds",
+            "$5$9aEeVXnCiCNHUjO/$FrVBcjyJukRaE6inMYazyQv1DBnwaKfom.71ebgQR/0",
+        ),
+        (
+            "$5$ at rounds=100000",
+            "$5$rounds=100000$PhW/wpSsmgIMKsTW$d9kDD8dQNu3r0Ky.xcOEhdin6EQRebrHfNKDRwWP/pB",
+        ),
+        (
+            "$6$ at the default rounds",
+            "$6$bbe605c2cce4c642$BiBOywFAm9kdv6ZPpj2GaKVqeh/.c21pf1uFBaq.e59KEE2Ej74iJleX\
+             aLXURYV6uh5LF4K7dDc4vtRtPiiKB/",
+        ),
+        (
+            "$6$ at rounds=100000",
+            "$6$rounds=100000$exn6tVc2j/MZD8uG$BI1Xh8qQSK9J4m14uwy7abn.ctj/TIAzlaVCto0MQrOF\
+             IeTXsc1iwzH16XEWo/a7c7Y9eVJvufVzYAs4EsPOy0",
+        ),
+    ] {
+        let record: String = record.split_whitespace().collect();
+        let parsed = parse_hash(&record, &Limits::default())
+            .unwrap_or_else(|e| panic!("{label} is a published record and must load: {e}"));
+
+        assert!(
+            verify_password(&parsed, b"foobar"),
+            "{label} must verify its published password. These four records \
+             were written by another implementation, so they are what proves \
+             this backend agrees with the tool that wrote the file rather than \
+             only with its own minting helper"
+        );
+        assert!(
+            !verify_password(&parsed, b"foobas"),
+            "{label} must not verify a password one byte different"
+        );
+    }
+}
+
+#[test]
+fn a_sha_crypt_profile_describes_its_own_parameters() {
+    let parsed = parse_hash(
+        &sha_crypt_at(ShaCryptVariant::Sha512, 4_096, "pw"),
+        &Limits::default(),
+    )
+    .expect("the fixture loads");
+
+    let described = parsed.profile().describe();
+    for expected in ["$6$", "4096"] {
+        assert!(
+            described.contains(expected),
+            "a sha-crypt description names {expected}, since both the variant and the round count \
+             are part of what the uniformity check compares: {described}"
+        );
+    }
+}
+
+#[test]
+fn the_crypto_report_names_basic_as_doing_its_own_crypto() {
+    let reported = praxis_policy_builtins::bundled_crypto_capabilities();
+
+    assert!(
+        reported.contains(&praxis_policy_builtins::BundledCryptoCapability::BasicPasswords),
+        "compiling `basic` must put Basic in the report: bcrypt, argon2 and \
+         sha-crypt run outside the selected Policy backend, so a FIPS consumer \
+         reading `fips_profile_is_safe` has to see them. Got {reported:?}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// A bcrypt record at a given cost, minted rather than checked in.
+fn bcrypt_at(cost: u32, password: &str) -> String {
+    bcrypt::hash(password, cost).expect("bcrypt mints at a legal cost")
+}

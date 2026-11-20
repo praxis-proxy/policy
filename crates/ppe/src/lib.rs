@@ -56,7 +56,7 @@
 //! `crypto-rustcrypto` is the default Policy SHA-256 backend; a build without
 //! defaults must select it or `fips`. `builtins`
 //! enables every bundled extension, including the Valkey session
-//! store; or pick a granular subset (`jwt`, `api-key`, `oauth`, `elicitation-ciba`,
+//! store; or pick a granular subset (`jwt`, `api-key`, `basic`, `oauth`, `elicitation-ciba`,
 //! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`; or `jwt-openssl-fips` in
 //! place of `jwt`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
@@ -234,6 +234,10 @@ pub use praxis_policy_builtins::plugins::identity_api_key::{
     ApiKeyCryptoBackend, ApiKeyCryptoError, ApiKeyIdentityFactory, KIND as API_KEY_KIND,
     api_key_crypto_backend,
 };
+#[cfg(feature = "basic")]
+pub use praxis_policy_builtins::plugins::identity_basic::{
+    BasicIdentityFactory, KIND as BASIC_KIND,
+};
 #[cfg(feature = "_jwt")]
 pub use praxis_policy_builtins::plugins::identity_jwt::{
     JwtIdentityFactory, JwtIdentityFactoryWithReplay, KIND as JWT_KIND,
@@ -277,9 +281,9 @@ pub use praxis_policy_builtins::session::valkey::{
 macro_rules! register_builtins {
     ( $( feature $feat:literal => $krate:ident :: $factory:ident ),* $(,)? ) => {
         /// Register every enabled by-kind plugin factory on `mgr`: identity
-        /// (`jwt`), delegators (`oauth`), and elicitation approvers
-        /// (`elicitation-ciba`). Call before loading a config so the engine can
-        /// instantiate plugins whose YAML `kind:` matches.
+        /// (`jwt`, `api-key`, `basic`), delegators (`oauth`), and elicitation
+        /// approvers (`elicitation-ciba`). Call before loading a config so the
+        /// engine can instantiate plugins whose YAML `kind:` matches.
         ///
         /// A host adds its own with [`PolicyEngine::register_factory`], after
         /// this call so a host registration wins on a shared `kind`.
@@ -309,6 +313,8 @@ use praxis_policy_builtins::plugins::delegator_vault as vault_delegator_builtin;
 use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
 #[cfg(feature = "api-key")]
 use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
+#[cfg(feature = "basic")]
+use praxis_policy_builtins::plugins::identity_basic as basic_builtin;
 #[cfg(feature = "_jwt")]
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 #[cfg(feature = "experimental-quota")]
@@ -320,6 +326,7 @@ use praxis_policy_builtins::plugins::ratelimit as ratelimit_builtin;
 register_builtins! {
     feature "_jwt"               => jwt_builtin::JwtIdentityFactory,
     feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
+    feature "basic"              => basic_builtin::BasicIdentityFactory,
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
     feature "delegator-vault"    => vault_delegator_builtin::VaultDelegatorFactory,
     feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
@@ -463,6 +470,26 @@ mod crypto_capability_tests {
         assert!(!report.fips_profile_is_safe());
     }
 
+    #[cfg(feature = "basic")]
+    #[test]
+    fn basic_reports_its_bundled_password_hashing() {
+        let report = crypto_capability_report();
+
+        assert!(
+            report
+                .default_builtin_crypto
+                .contains(&BundledCryptoCapability::BasicPasswords),
+            "the `basic` feature compiles in argon2, bcrypt and sha-crypt, so a report that \
+             omitted it would let a host preflight a graph carrying three unvalidated \
+             password-hashing crates"
+        );
+        assert!(
+            !report.fips_profile_is_safe(),
+            "the profile flag asserts the supported API-key-only FIPS slice, which a build \
+             carrying Basic is not, whichever hash scheme its directory holds"
+        );
+    }
+
     #[test]
     fn an_absent_api_key_backend_does_not_bypass_the_other_checks() {
         let report = |policy_backend, api_key_backend, default_builtin_crypto| {
@@ -475,9 +502,15 @@ mod crypto_capability_tests {
         let fips = CryptoBackend::OpenSslFips;
         let rust = CryptoBackend::RustCrypto;
         let jwt = vec![BundledCryptoCapability::Jwt];
+        let basic = vec![BundledCryptoCapability::BasicPasswords];
         for (case, safe, name) in [
             (report(fips, None, vec![]), true, "engine or JWT only"),
             (report(fips, Some(fips), vec![]), true, "API-key on FIPS"),
+            (
+                report(fips, Some(fips), basic),
+                false,
+                "Basic password crypto has no OpenSSL path",
+            ),
             (
                 report(fips, Some(rust), vec![]),
                 false,
@@ -562,6 +595,7 @@ mod crypto_capability_tests {
             .split(',')
             .filter(|name| !name.is_empty())
             .map(|name| match name {
+                "basic" => BundledCryptoCapability::BasicPasswords,
                 "jwt" => BundledCryptoCapability::Jwt,
                 "oauth" => BundledCryptoCapability::OAuth,
                 "delegator-vault" => BundledCryptoCapability::VaultDelegation,
@@ -667,6 +701,7 @@ mod tests {
         let expected = [
             (cfg!(feature = "_jwt"), "identity/jwt"),
             (cfg!(feature = "api-key"), "identity/api-key"),
+            (cfg!(feature = "basic"), "identity/basic"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "delegator-vault"), "delegator/vault"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),
