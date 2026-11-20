@@ -8,6 +8,10 @@
 //!
 //! - `identity_jwt` (`jwt` or `jwt-openssl-fips`): kind `identity/jwt`
 //! - `identity_api_key` (`api-key`) — kind `identity/api-key`
+//! - `identity_basic` (`basic`): kind `identity/basic`, not yet registered.
+//!   The module publishes the decode, directory and verifier APIs a host
+//!   can drive directly; the by-kind factory lands with the resolver
+//!   wiring, so a config naming this kind does not load yet.
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `delegator_vault` (`delegator-vault`) — kind `delegator/vault`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
@@ -19,6 +23,9 @@ pub mod identity_jwt;
 
 #[cfg(feature = "api-key")]
 pub mod identity_api_key;
+
+#[cfg(feature = "basic")]
+pub mod identity_basic;
 
 #[cfg(feature = "oauth")]
 pub mod delegator_oauth;
