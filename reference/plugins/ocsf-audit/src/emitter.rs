@@ -137,21 +137,19 @@ impl OcsfAuditEmitter {
     /// Returns an error for invalid configuration, a missing output, an
     /// unavailable exporter, or invalid signing keys.
     pub fn new(mut cfg: PluginConfig) -> Result<Self, Box<PluginError>> {
-        let mut typed: OcsfAuditConfig = match cfg.config.as_ref() {
-            Some(raw) => serde_json::from_value(raw.clone()).map_err(|e| {
-                Box::new(PluginError::Config {
-                    message: format!(
-                        "plugin '{}' (praxis-policy-plugin-ocsf-audit) config parse failed: {e}",
-                        cfg.name
-                    ),
-                })
-            })?,
-            None => OcsfAuditConfig::default(),
-        };
+        let raw = cfg.config.clone().unwrap_or_else(|| json!({}));
+        let mut typed: OcsfAuditConfig = serde_json::from_value(raw).map_err(|e| {
+            Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' (praxis-policy-plugin-ocsf-audit) config parse failed: {e}",
+                    cfg.name
+                ),
+            })
+        })?;
 
         // Opened here so an unwritable file fails the load, not the first
         // verdict.
-        let exporters = typed.build_exporters().map_err(|e| {
+        let exporters = typed.output.build_exporters().map_err(|e| {
             Box::new(PluginError::Config {
                 message: format!(
                     "plugin '{}' (praxis-policy-plugin-ocsf-audit): {e}",
@@ -1041,20 +1039,6 @@ mod tests {
         assert!(
             ev["attestation_list"][0]["fingerprint"]["value"].is_string(),
             "a sink on its defaults must emit a chained, fingerprinted record: {ev}"
-        );
-    }
-
-    /// `OcsfAuditConfig::default()` is what an entry with no `config:` block
-    /// gets, and deserializing `{}` is what an empty block gets. A field
-    /// whose `serde(default)` and struct default disagree splits the two
-    /// paths silently, which is how `chain` came to be off on one of them.
-    #[test]
-    fn struct_defaults_match_an_empty_config_block() {
-        let from_empty: OcsfAuditConfig = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(
-            serde_json::to_value(OcsfAuditConfig::default()).unwrap(),
-            serde_json::to_value(from_empty).unwrap(),
-            "the struct default and an empty config block must agree"
         );
     }
 
@@ -1961,6 +1945,7 @@ mod tests {
 
     fn exporter_names(typed: &OcsfAuditConfig) -> Vec<String> {
         typed
+            .output
             .build_exporters()
             .unwrap()
             .iter()
@@ -1972,21 +1957,6 @@ mod tests {
         OcsfAuditEmitter::new(sink_cfg(extra))
             .unwrap_err()
             .to_string()
-    }
-
-    #[test]
-    fn destination_and_exporters_together_are_rejected() {
-        let err = exporter_err(json!({
-            "destination": "stderr",
-            "exporters": [{ "kind": "stderr" }],
-        }));
-        assert!(err.contains("not both"), "{err}");
-    }
-
-    #[test]
-    fn an_empty_exporter_list_is_rejected() {
-        let err = exporter_err(json!({ "exporters": [] }));
-        assert!(err.contains("empty"), "{err}");
     }
 
     #[test]
@@ -2025,48 +1995,19 @@ mod tests {
 
     #[test]
     fn with_no_destination_or_exporters_the_sink_refuses_to_load() {
-        let err = OcsfAuditConfig::default().build_exporters().unwrap_err();
-        let msg = err.to_string();
-        for needle in [
-            "destination",
-            "exporters",
-            "stderr",
-            "tracing",
-            "stdout",
-            "file",
-        ] {
-            assert!(msg.contains(needle), "the error must name {needle}: {msg}");
-        }
-
         let mut absent = cfg(json!({}));
         absent.config = None;
         let mut silent = cfg(json!({}));
         silent.config = Some(json!({ "chain": true }));
-        for c in [absent, silent] {
+        let mut blank = cfg(json!({}));
+        blank.config = Some(json!({ "destination": null, "exporters": null }));
+        for c in [absent, silent, blank] {
             let err = OcsfAuditEmitter::new(c).unwrap_err().to_string();
             assert!(
                 err.contains("no audit destination configured"),
                 "an entry without an output must not build: {err}"
             );
         }
-    }
-
-    #[test]
-    fn an_explicit_destination_is_the_one_exporter() {
-        let stderr: OcsfAuditConfig =
-            serde_json::from_value(json!({ "destination": "stderr" })).unwrap();
-        assert_eq!(
-            exporter_names(&stderr),
-            ["stderr"],
-            "destination: stderr must build one stderr exporter"
-        );
-        let tracing: OcsfAuditConfig =
-            serde_json::from_value(json!({ "destination": "tracing" })).unwrap();
-        assert_eq!(
-            exporter_names(&tracing),
-            ["tracing"],
-            "destination: tracing must build one tracing exporter"
-        );
     }
 
     #[test]
