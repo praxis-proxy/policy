@@ -38,6 +38,8 @@ use praxis_policy_core::http_hook::HttpPayload;
 
 use praxis_policy_apl_core::step::DispatchPhase;
 
+use crate::message_projection::Projection;
+
 /// Reads one pipeline field off a hook payload.
 ///
 /// The invoker is bound to a payload implementing this trait, and calls it
@@ -53,17 +55,29 @@ pub trait PayloadFields: PluginPayload + Clone {
     ///
     /// `field` is relative to the args or result root, never prefixed with
     /// `args.` / `result.`. Pre addresses args, Post addresses result.
+    /// `projection` names which content parts the route reads, so the
+    /// readback sees the same part the route's pipeline wrote.
     ///
     /// Defaults to `None`, which is the whole answer for a payload that
     /// carries no fields.
-    fn field_value(&self, _field: &str, _phase: DispatchPhase) -> Option<serde_json::Value> {
+    fn field_value(
+        &self,
+        _field: &str,
+        _phase: DispatchPhase,
+        _projection: Projection,
+    ) -> Option<serde_json::Value> {
         None
     }
 }
 
 impl PayloadFields for MessagePayload {
-    fn field_value(&self, field: &str, phase: DispatchPhase) -> Option<serde_json::Value> {
-        field_value_from_message(&self.message, field, phase)
+    fn field_value(
+        &self,
+        field: &str,
+        phase: DispatchPhase,
+        projection: Projection,
+    ) -> Option<serde_json::Value> {
+        field_value_from_message(&self.message, field, phase, projection)
     }
 }
 
@@ -91,15 +105,20 @@ fn field_value_from_message(
     message: &praxis_policy_core::cmf::Message,
     field: &str,
     phase: DispatchPhase,
+    projection: Projection,
 ) -> Option<serde_json::Value> {
-    let projection = match phase {
-        DispatchPhase::Pre => crate::message_projection::extract_args_from_message(message),
-        DispatchPhase::Post => crate::message_projection::extract_result_from_message(message),
+    let projected = match phase {
+        DispatchPhase::Pre => {
+            crate::message_projection::extract_args_from_message(message, projection)
+        },
+        DispatchPhase::Post => {
+            crate::message_projection::extract_result_from_message(message, projection)
+        },
     };
-    if projection.is_object() {
-        praxis_policy_apl_core::get_dotted(&projection, field).cloned()
+    if projected.is_object() {
+        praxis_policy_apl_core::get_dotted(&projected, field).cloned()
     } else {
-        Some(projection)
+        Some(projected)
     }
 }
 
@@ -137,10 +156,13 @@ mod tests {
     fn a_message_projects_the_named_argument() {
         let payload = tool_call_payload();
         assert_eq!(
-            payload.field_value("city", DispatchPhase::Pre),
+            payload.field_value("city", DispatchPhase::Pre, Projection::Tool),
             Some(serde_json::json!("Boston")),
         );
-        assert_eq!(payload.field_value("absent", DispatchPhase::Pre), None);
+        assert_eq!(
+            payload.field_value("absent", DispatchPhase::Pre, Projection::Tool),
+            None
+        );
     }
 
     #[test]
@@ -149,8 +171,83 @@ mod tests {
             message: Message::text(Role::User, "hello"),
         };
         assert_eq!(
-            payload.field_value("anything", DispatchPhase::Pre),
+            payload.field_value("anything", DispatchPhase::Pre, Projection::Tool),
             Some(serde_json::json!("hello")),
+        );
+    }
+
+    fn resource_payload() -> MessagePayload {
+        use praxis_policy_core::cmf::enums::ResourceType;
+        use praxis_policy_core::cmf::Resource;
+        MessagePayload {
+            message: Message::with_content(
+                Role::Tool,
+                vec![ContentPart::Resource {
+                    content: Resource {
+                        resource_request_id: "rr_001".to_owned(),
+                        uri: "hr://employees/42".to_owned(),
+                        content: Some("SSN 123-45-6789".to_owned()),
+                        mime_type: Some("text/plain".to_owned()),
+                        size_bytes: Some(15),
+                        resource_type: ResourceType::Uri,
+                        ..Resource::default()
+                    },
+                }],
+            ),
+        }
+    }
+
+    fn prompt_result_payload() -> MessagePayload {
+        use praxis_policy_core::cmf::PromptResult;
+        MessagePayload {
+            message: Message::with_content(
+                Role::Assistant,
+                vec![ContentPart::PromptResult {
+                    content: PromptResult {
+                        prompt_request_id: "pr_001".to_owned(),
+                        prompt_name: "summarize".to_owned(),
+                        description: Some("Summary prompt".to_owned()),
+                        messages: vec![],
+                        content: Some("The summary text".to_owned()),
+                        is_error: false,
+                        error_message: None,
+                    },
+                }],
+            ),
+        }
+    }
+
+    #[test]
+    fn a_resource_projects_its_result_content_field() {
+        let payload = resource_payload();
+        assert_eq!(
+            payload.field_value("content", DispatchPhase::Post, Projection::Resource),
+            Some(serde_json::json!("SSN 123-45-6789")),
+        );
+        assert_eq!(
+            payload.field_value("uri", DispatchPhase::Post, Projection::Resource),
+            Some(serde_json::json!("hr://employees/42")),
+        );
+        assert_eq!(
+            payload.field_value("nonexistent", DispatchPhase::Post, Projection::Resource),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_prompt_result_projects_its_result_content_field() {
+        let payload = prompt_result_payload();
+        assert_eq!(
+            payload.field_value("content", DispatchPhase::Post, Projection::Prompt),
+            Some(serde_json::json!("The summary text")),
+        );
+        assert_eq!(
+            payload.field_value("prompt_name", DispatchPhase::Post, Projection::Prompt),
+            Some(serde_json::json!("summarize")),
+        );
+        assert_eq!(
+            payload.field_value("nonexistent", DispatchPhase::Post, Projection::Prompt),
+            None,
         );
     }
 
@@ -160,7 +257,13 @@ mod tests {
         // `args:` / `result:` stage would read if one could reach an HTTP
         // route. The load-time refusal is what keeps it unreachable.
         let payload = HttpPayload;
-        assert_eq!(payload.field_value("city", DispatchPhase::Pre), None);
-        assert_eq!(payload.field_value("city", DispatchPhase::Post), None);
+        assert_eq!(
+            payload.field_value("city", DispatchPhase::Pre, Projection::Tool),
+            None
+        );
+        assert_eq!(
+            payload.field_value("city", DispatchPhase::Post, Projection::Tool),
+            None
+        );
     }
 }

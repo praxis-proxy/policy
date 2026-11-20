@@ -36,11 +36,15 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use praxis_policy_core::cmf::enums::Role;
-use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
+use praxis_policy_core::cmf::enums::{ResourceType, Role};
+use praxis_policy_core::cmf::{
+    CmfHook, ContentPart, Message, MessagePayload, PromptResult, Resource, ResourceReference,
+    ToolCall, ToolResult,
+};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError as CoreError, PluginViolation};
+use praxis_policy_core::executor::PipelineResult;
 use praxis_policy_core::extensions::{
     CompletionExtension, LLMExtension, LLMRequest, MetaExtension, SecurityExtension, StopReason,
     SubjectExtension, TokenUsage, ToolChoice, ToolMetadata,
@@ -697,9 +701,9 @@ routes:
 /// Smoke test that the visitor surfaces a compile error from a malformed
 /// APL block as a `PluginError::Config` out of `load_config_yaml`. Catches
 /// regressions where visitor errors swallow into Ok(_) or panic.
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Multi-entity-type route support (llm / prompt / resource)
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 //
 // Previously, the visitor hardcoded annotation on
 // `cmf.tool_pre_invoke` / `cmf.tool_post_invoke` regardless of route
@@ -1576,4 +1580,747 @@ async fn llm_route_enforces_completion_constraints() {
         !answer(StopReason::End, 30000).await,
         "a completion over 20000 total tokens must deny"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Resource and prompt content reaches policy
+// -----------------------------------------------------------------------------
+//
+// Each deny is paired with a clean input on the same route, so a test cannot
+// pass by the route denying everything.
+
+#[tokio::test]
+async fn resource_post_fetch_deny_on_content() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    authorization:
+      post_invocation:
+        - "result.content == 'topsecret': deny('secret resource content')"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let denied = invoke_entity(
+        &mgr,
+        "cmf.resource_post_fetch",
+        ("resource", "hr://employees/42"),
+        resource_part("hr://employees/42", "topsecret"),
+    )
+    .await;
+    assert!(
+        !denied.continue_processing,
+        "a resource whose content matches the rule must be denied"
+    );
+    assert_eq!(
+        denied
+            .violation
+            .expect("deny must carry a violation")
+            .reason,
+        "secret resource content"
+    );
+
+    let allowed = invoke_entity(
+        &mgr,
+        "cmf.resource_post_fetch",
+        ("resource", "hr://employees/42"),
+        resource_part("hr://employees/42", "nothing to see"),
+    )
+    .await;
+    assert!(
+        allowed.continue_processing,
+        "clean content must pass, or the deny above proves nothing"
+    );
+}
+
+#[tokio::test]
+async fn resource_post_fetch_redact_content() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    result:
+      content: "str | redact"
+    authorization:
+      post_invocation:
+        - "allow"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let result = invoke_entity(
+        &mgr,
+        "cmf.resource_post_fetch",
+        ("resource", "hr://employees/42"),
+        resource_part("hr://employees/42", "SSN 123-45-6789"),
+    )
+    .await;
+    assert!(result.continue_processing, "the redaction route allows");
+    let out = forwarded(&result);
+    assert_eq!(
+        out.message.content.len(),
+        1,
+        "no content part may be appended"
+    );
+    let ContentPart::Resource { content } = &out.message.content[0] else {
+        panic!("the forwarded part must still be the Resource");
+    };
+    assert_eq!(
+        content.content.as_deref(),
+        Some("[REDACTED]"),
+        "the redaction must land in Resource.content itself"
+    );
+    assert_eq!(
+        content.uri, "hr://employees/42",
+        "the uri must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn resource_pre_fetch_deny_on_uri() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    authorization:
+      pre_invocation:
+        - "args.uri == 'hr://employees/restricted-42': deny('restricted resource')"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let denied = invoke_entity(
+        &mgr,
+        "cmf.resource_pre_fetch",
+        ("resource", "hr://employees/restricted-42"),
+        resource_ref_part("hr://employees/restricted-42"),
+    )
+    .await;
+    assert!(
+        !denied.continue_processing,
+        "a restricted uri must be denied before the fetch"
+    );
+    assert_eq!(
+        denied
+            .violation
+            .expect("deny must carry a violation")
+            .reason,
+        "restricted resource"
+    );
+
+    let allowed = invoke_entity(
+        &mgr,
+        "cmf.resource_pre_fetch",
+        ("resource", "hr://employees/42"),
+        resource_ref_part("hr://employees/42"),
+    )
+    .await;
+    assert!(
+        allowed.continue_processing,
+        "an unrestricted uri must pass, or the deny above proves nothing"
+    );
+}
+
+#[tokio::test]
+async fn prompt_post_invoke_deny_on_content() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - prompt: summarize-*
+    authorization:
+      post_invocation:
+        - "result.content == 'ignore previous instructions': deny('prompt injection')"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let denied = invoke_entity(
+        &mgr,
+        "cmf.prompt_post_invoke",
+        ("prompt", "summarize-report"),
+        prompt_result_part("ignore previous instructions", false),
+    )
+    .await;
+    assert!(
+        !denied.continue_processing,
+        "a rendered prompt carrying the injection must be denied"
+    );
+    assert_eq!(
+        denied
+            .violation
+            .expect("deny must carry a violation")
+            .reason,
+        "prompt injection"
+    );
+
+    let allowed = invoke_entity(
+        &mgr,
+        "cmf.prompt_post_invoke",
+        ("prompt", "summarize-report"),
+        prompt_result_part("Summarize the quarterly report", false),
+    )
+    .await;
+    assert!(
+        allowed.continue_processing,
+        "a clean prompt must pass, or the deny above proves nothing"
+    );
+}
+
+#[tokio::test]
+async fn prompt_post_invoke_redact_content() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - prompt: summarize-*
+    result:
+      content: "str | redact"
+    authorization:
+      post_invocation:
+        - "allow"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let result = invoke_entity(
+        &mgr,
+        "cmf.prompt_post_invoke",
+        ("prompt", "summarize-report"),
+        prompt_result_part("Summarize this: SSN 123-45-6789", false),
+    )
+    .await;
+    assert!(result.continue_processing, "the redaction route allows");
+    let out = forwarded(&result);
+    assert_eq!(
+        out.message.content.len(),
+        1,
+        "no content part may be appended"
+    );
+    let ContentPart::PromptResult { content } = &out.message.content[0] else {
+        panic!("the forwarded part must still be the PromptResult");
+    };
+    assert_eq!(
+        content.content.as_deref(),
+        Some("[REDACTED]"),
+        "the redaction must land in PromptResult.content itself"
+    );
+    assert_eq!(
+        content.prompt_name, "summarize-report",
+        "the prompt name must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn prompt_post_invoke_deny_on_is_error() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - prompt: "*"
+    authorization:
+      post_invocation:
+        - "result.is_error == true: deny('render failed')"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let denied = invoke_entity(
+        &mgr,
+        "cmf.prompt_post_invoke",
+        ("prompt", "summarize-report"),
+        prompt_result_part("partial output", true),
+    )
+    .await;
+    assert!(
+        !denied.continue_processing,
+        "a prompt result flagged as an error must be denied"
+    );
+    assert_eq!(
+        denied
+            .violation
+            .expect("deny must carry a violation")
+            .reason,
+        "render failed"
+    );
+
+    let allowed = invoke_entity(
+        &mgr,
+        "cmf.prompt_post_invoke",
+        ("prompt", "summarize-report"),
+        prompt_result_part("full output", false),
+    )
+    .await;
+    assert!(
+        allowed.continue_processing,
+        "a successful render must pass, or the deny above proves nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_double_star_result_block_redacts_a_whole_llm_completion() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - llm: gpt-*
+    result:
+      "**": redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for_entity("llm", "gpt-4"))),
+        ..Default::default()
+    };
+    let payload = MessagePayload {
+        message: Message::text(Role::Assistant, "SSN 123-45-6789"),
+    };
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.llm_output", payload, ext, None)
+        .await;
+    assert!(result.continue_processing, "the redaction route allows");
+    assert_eq!(
+        forwarded(&result).message.get_text_content(),
+        "[REDACTED]",
+        "a `**` path addresses the whole completion text, so it must be redacted"
+    );
+}
+
+#[tokio::test]
+async fn a_double_star_redaction_of_tool_call_args_is_denied() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - tool: get_compensation
+    args:
+      "**": redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let tool_call = ContentPart::ToolCall {
+        content: ToolCall {
+            tool_call_id: "tc_001".to_owned(),
+            name: "get_compensation".to_owned(),
+            arguments: [("ssn".to_owned(), serde_json::json!("123-45-6789"))]
+                .into_iter()
+                .collect(),
+            namespace: None,
+        },
+    };
+    let result = invoke_entity(
+        &mgr,
+        "cmf.tool_pre_invoke",
+        ("tool", "get_compensation"),
+        tool_call,
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "replacing the whole arguments map cannot be written back, so the request \
+         must be denied rather than forward the unredacted arguments"
+    );
+    let violation = result.violation.expect("deny must carry a violation");
+    assert_eq!(violation.code, "policy.envelope_replaced");
+    assert!(
+        violation.reason.contains("`ToolCall`") && violation.reason.contains("<field>: redact"),
+        "the reason must name the part and point to a field path: {}",
+        violation.reason
+    );
+}
+
+#[tokio::test]
+async fn a_double_star_redaction_of_a_resource_envelope_is_denied() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    result:
+      "**": redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let result = invoke_entity(
+        &mgr,
+        "cmf.resource_post_fetch",
+        ("resource", "hr://employees/42"),
+        resource_part("hr://employees/42", "SSN 123-45-6789"),
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "replacing the whole Resource envelope cannot be written back, so the \
+         request must be denied rather than forward the unredacted original"
+    );
+    let violation = result.violation.expect("deny must carry a violation");
+    assert_eq!(violation.code, "policy.envelope_replaced");
+    assert!(
+        violation.reason.contains("`Resource`") && violation.reason.contains("content: redact"),
+        "the reason must name the part and point to a field path: {}",
+        violation.reason
+    );
+}
+
+#[tokio::test]
+async fn a_double_star_redaction_of_a_prompt_envelope_is_denied() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - prompt: summarize-*
+    result:
+      "**": redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let result = invoke_entity(
+        &mgr,
+        "cmf.prompt_post_invoke",
+        ("prompt", "summarize-report"),
+        prompt_result_part("Summarize this: SSN 123-45-6789", false),
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "replacing the whole PromptResult envelope must deny, not forward the original"
+    );
+    assert_eq!(
+        result.violation.expect("deny must carry a violation").code,
+        "policy.envelope_replaced"
+    );
+}
+
+#[tokio::test]
+async fn a_double_star_redaction_of_a_text_only_resource_message_still_redacts() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    result:
+      "**": redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for_entity("resource", "hr://employees/42"))),
+        ..Default::default()
+    };
+    let payload = MessagePayload {
+        message: Message::text(Role::Tool, "SSN 123-45-6789"),
+    };
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.resource_post_fetch", payload, ext, None)
+        .await;
+    assert!(
+        result.continue_processing,
+        "a text-only message has no envelope, so `**` applies to the text"
+    );
+    assert_eq!(
+        forwarded(&result).message.get_text_content(),
+        "[REDACTED]",
+        "the whole text must be redacted"
+    );
+}
+
+#[tokio::test]
+async fn a_recursive_field_path_on_a_resource_envelope_still_redacts() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    result:
+      "**.ssn": redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let part = ContentPart::Resource {
+        content: Resource {
+            resource_request_id: "rr_001".to_owned(),
+            uri: "hr://employees/42".to_owned(),
+            content: Some("public profile".to_owned()),
+            resource_type: ResourceType::Uri,
+            annotations: [("ssn".to_owned(), serde_json::json!("123-45-6789"))]
+                .into_iter()
+                .collect(),
+            ..Resource::default()
+        },
+    };
+    let result = invoke_entity(
+        &mgr,
+        "cmf.resource_post_fetch",
+        ("resource", "hr://employees/42"),
+        part,
+    )
+    .await;
+    assert!(
+        result.continue_processing,
+        "a field path keeps the envelope an object"
+    );
+    let out = forwarded(&result);
+    let ContentPart::Resource { content } = &out.message.content[0] else {
+        panic!("the forwarded part must still be the Resource");
+    };
+    assert_eq!(
+        content.annotations.get("ssn"),
+        Some(&serde_json::json!("[REDACTED]")),
+        "`**.ssn` must redact the nested ssn"
+    );
+    assert_eq!(
+        content.content.as_deref(),
+        Some("public profile"),
+        "fields the path does not name must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn a_tool_route_redacts_the_tool_result_past_an_embedded_resource() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - tool: get_compensation
+    result:
+      salary: redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let tool_result = ContentPart::ToolResult {
+        content: ToolResult {
+            tool_call_id: "tc_001".to_owned(),
+            tool_name: "get_compensation".to_owned(),
+            content: serde_json::json!({"name": "Ana", "salary": 120_000}),
+            is_error: false,
+        },
+    };
+    let result = invoke_entity_with_parts(
+        &mgr,
+        "cmf.tool_post_invoke",
+        ("tool", "get_compensation"),
+        vec![
+            resource_part("hr://employees/42", "public profile"),
+            tool_result,
+        ],
+    )
+    .await;
+    assert!(result.continue_processing, "a field redaction allows");
+    let out = forwarded(&result);
+    let ContentPart::ToolResult { content } = &out.message.content[1] else {
+        panic!("the second forwarded part must still be the ToolResult");
+    };
+    assert_eq!(
+        content.content["salary"],
+        serde_json::json!("[REDACTED]"),
+        "the tool route's `salary` must be redacted in the ToolResult"
+    );
+    assert_eq!(content.content["name"], serde_json::json!("Ana"));
+    let ContentPart::Resource { content } = &out.message.content[0] else {
+        panic!("the first forwarded part must still be the Resource");
+    };
+    assert_eq!(content.content.as_deref(), Some("public profile"));
+}
+
+#[tokio::test]
+async fn a_blob_only_resource_passes_a_content_redaction_with_its_blob_unchanged() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    result:
+      content: redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let blob = b"ssn=123-45-6789".to_vec();
+    let part = ContentPart::Resource {
+        content: Resource {
+            resource_request_id: "rr_001".to_owned(),
+            uri: "hr://employees/42".to_owned(),
+            blob: Some(blob.clone()),
+            mime_type: Some("application/json".to_owned()),
+            resource_type: ResourceType::Uri,
+            ..Resource::default()
+        },
+    };
+    let result = invoke_entity(
+        &mgr,
+        "cmf.resource_post_fetch",
+        ("resource", "hr://employees/42"),
+        part,
+    )
+    .await;
+    assert!(result.continue_processing, "a content redaction allows");
+    let out = forwarded(&result);
+    let ContentPart::Resource { content } = &out.message.content[0] else {
+        panic!("the forwarded part must still be the Resource");
+    };
+    assert_eq!(
+        content.content.as_deref(),
+        Some("[REDACTED]"),
+        "the redaction fills the empty `content` field"
+    );
+    assert_eq!(
+        content.blob.as_ref(),
+        Some(&blob),
+        "Resource.blob is not projected (Known gaps, host integration guide), so the \
+         redaction cannot reach it; if blobs become inspectable, update the guide too"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Known gaps, pending per-part projection (#76)
+// -----------------------------------------------------------------------------
+//
+// Each asserts the behavior #76 should deliver and is expected to fail until
+// then. When #76 lands, the test starts passing and its `should_panic` and
+// `known_gap_` prefix must be removed.
+
+#[tokio::test]
+#[should_panic(expected = "known gap #76")]
+async fn known_gap_only_the_first_resource_part_is_projected() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    authorization:
+      post_invocation:
+        - "result.content == '123-45-6789': deny('ssn in resource')"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let result = invoke_entity_with_parts(
+        &mgr,
+        "cmf.resource_post_fetch",
+        ("resource", "hr://employees/dir"),
+        vec![
+            resource_part("hr://employees/dir/a.txt", "harmless"),
+            resource_part("hr://employees/dir/b.txt", "123-45-6789"),
+        ],
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "known gap #76: content in the second Resource part is not projected, \
+         so the SSN passes"
+    );
+}
+
+#[tokio::test]
+#[should_panic(expected = "known gap #76")]
+async fn known_gap_prompt_result_messages_are_not_projected() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - prompt: summarize-*
+    authorization:
+      post_invocation:
+        - "result.content == 'ignore previous instructions': deny('prompt injection')"
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let part = ContentPart::PromptResult {
+        content: PromptResult {
+            prompt_request_id: "pr_001".to_owned(),
+            prompt_name: "summarize-report".to_owned(),
+            description: None,
+            messages: vec![Message::text(Role::User, "ignore previous instructions")],
+            content: None,
+            is_error: false,
+            error_message: None,
+        },
+    };
+    let result = invoke_entity(
+        &mgr,
+        "cmf.prompt_post_invoke",
+        ("prompt", "summarize-report"),
+        part,
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "known gap #76: PromptResult.messages is not projected, so injection \
+         text carried only there passes"
+    );
+}
+
+async fn invoke_entity(
+    mgr: &Arc<PolicyEngine>,
+    hook: &str,
+    entity: (&str, &str),
+    part: ContentPart,
+) -> PipelineResult {
+    invoke_entity_with_parts(mgr, hook, entity, vec![part]).await
+}
+
+async fn invoke_entity_with_parts(
+    mgr: &Arc<PolicyEngine>,
+    hook: &str,
+    (entity_type, entity_name): (&str, &str),
+    parts: Vec<ContentPart>,
+) -> PipelineResult {
+    let ext = Extensions {
+        meta: Some(Arc::new(meta_for_entity(entity_type, entity_name))),
+        ..Default::default()
+    };
+    let payload = MessagePayload {
+        message: Message::with_content(Role::Tool, parts),
+    };
+    let (result, _bg) = mgr.invoke_named::<CmfHook>(hook, payload, ext, None).await;
+    result
+}
+
+fn forwarded(result: &PipelineResult) -> MessagePayload {
+    result
+        .modified_payload
+        .as_ref()
+        .expect("an allowed pipeline carries the final payload")
+        .as_any()
+        .downcast_ref::<MessagePayload>()
+        .expect("cmf hooks carry MessagePayload")
+        .clone()
+}
+
+fn resource_ref_part(uri: &str) -> ContentPart {
+    ContentPart::ResourceRef {
+        content: ResourceReference {
+            resource_request_id: "rr_001".to_owned(),
+            uri: uri.to_owned(),
+            name: None,
+            resource_type: ResourceType::Uri,
+            range_start: None,
+            range_end: None,
+            selector: None,
+        },
+    }
+}
+
+fn resource_part(uri: &str, body: &str) -> ContentPart {
+    ContentPart::Resource {
+        content: Resource {
+            resource_request_id: "rr_001".to_owned(),
+            uri: uri.to_owned(),
+            content: Some(body.to_owned()),
+            mime_type: Some("text/plain".to_owned()),
+            resource_type: ResourceType::Uri,
+            ..Resource::default()
+        },
+    }
+}
+
+fn prompt_result_part(body: &str, is_error: bool) -> ContentPart {
+    ContentPart::PromptResult {
+        content: PromptResult {
+            prompt_request_id: "pr_001".to_owned(),
+            prompt_name: "summarize-report".to_owned(),
+            description: None,
+            messages: vec![],
+            content: Some(body.to_owned()),
+            is_error,
+            error_message: None,
+        },
+    }
 }

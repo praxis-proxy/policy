@@ -43,7 +43,7 @@ use praxis_policy_core::cmf::{Message, Role};
 use praxis_policy_core::extensions::{
     AgentExtension, ClientAddress, ClientExtension, ClientTrustLevel, CompletionExtension,
     ConversationContext, DelegationExtension, DelegationHop, Extensions, FrameworkExtension,
-    HttpExtension, KeyBinding, LLMExtension, LlmInstruction, LlmInstructionRole, LlmRequest,
+    HttpExtension, Icon, KeyBinding, LLMExtension, LlmInstruction, LlmInstructionRole, LlmRequest,
     LlmRequestParts, MCPExtension, MetaExtension, MetadataCacheDisposition, MonotonicSet,
     PromptMetadata, ProvenanceExtension, RequestExtension, ResourceMetadata, SecurityExtension,
     StopReason, SubjectExtension, SubjectType, TokenUsage, ToolChoice, ToolMetadata,
@@ -201,6 +201,11 @@ fn fully_populated() -> Extensions {
         stop_sequences: vec!["END".to_owned()],
         stream: Some(true),
     };
+    let icon = Icon {
+        src: "https://example.com/icon.png".to_owned(),
+        mime_type: Some("image/png".to_owned()),
+        sizes: Some(vec!["48x48".to_owned()]),
+    };
     let mcp = MCPExtension {
         tool: Some(ToolMetadata {
             name: "search".to_owned(),
@@ -211,21 +216,27 @@ fn fully_populated() -> Extensions {
             output_schema: Some(serde_json::json!({"type": "object"})),
             server_id: Some("srv".to_owned()),
             namespace: Some("ns".to_owned()),
+            icons: Some(vec![icon.clone()]),
             annotations: annotations.clone(),
         }),
         resource: Some(ResourceMetadata {
             uri: "file:///x".to_owned(),
             name: Some("x".to_owned()),
+            title: Some("X".to_owned()),
             description: Some("d".to_owned()),
             mime_type: Some("text/plain".to_owned()),
+            size: Some(42),
             server_id: Some("srv".to_owned()),
+            icons: Some(vec![icon.clone()]),
             annotations: annotations.clone(),
         }),
         prompt: Some(PromptMetadata {
             name: "p".to_owned(),
+            title: Some("P".to_owned()),
             description: Some("d".to_owned()),
             arguments: Some(vec![serde_json::json!({"name": "a"})]),
             server_id: Some("srv".to_owned()),
+            icons: Some(vec![icon]),
             annotations,
         }),
     };

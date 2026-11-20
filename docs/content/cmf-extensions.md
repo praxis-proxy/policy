@@ -538,8 +538,10 @@ bag keys without inventing a body.
 |---|---|---|
 | `mcp.resource.uri` | String | always |
 | `mcp.resource.name` | String | `Some` |
+| `mcp.resource.title` | String | `Some` |
 | `mcp.resource.description` | String | `Some` |
 | `mcp.resource.mime_type` | String | `Some` |
+| `mcp.resource.size` | Int | `Some` (saturates at `i64::MAX`) |
 | `mcp.resource.server_id` | String | `Some` |
 | `mcp.resource.annotations.<name>` | flattened JSON | each map entry |
 
@@ -548,6 +550,7 @@ bag keys without inventing a body.
 | Key | Type | When |
 |---|---|---|
 | `mcp.prompt.name` | String | always |
+| `mcp.prompt.title` | String | `Some` |
 | `mcp.prompt.description` | String | `Some` |
 | `mcp.prompt.server_id` | String | `Some` |
 | `mcp.prompt.annotations.<name>` | flattened JSON | each map entry |
@@ -563,6 +566,12 @@ than a fact about this one, so a rule over them would assert something about
 the contract instead of the request. The argument values themselves reach
 policy as `args.*`; see
 [Payloads that are not slots](#payloads-that-are-not-slots).
+
+`icons` on all three stay off as well. They are display metadata, and no rule
+keys on an icon URL.
+
+A host must fill `MCPExtension` from its own catalog, never from what the agent
+sent; see the [Host integration guide](host-integration-guide.md).
 
 ### 10. `completion` — `CompletionExtension`
 

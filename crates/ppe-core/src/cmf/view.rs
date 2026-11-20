@@ -1196,6 +1196,7 @@ mod tests {
                     content: crate::cmf::content::PromptResult {
                         prompt_request_id: "pr_1".into(),
                         prompt_name: "summarize".into(),
+                        description: None,
                         messages: vec![],
                         content: Some("a summary".into()),
                         is_error: false,
@@ -1414,6 +1415,7 @@ mod tests {
             content: crate::cmf::content::PromptResult {
                 prompt_request_id: "pr".into(),
                 prompt_name: "summarize".into(),
+                description: None,
                 messages: vec![],
                 content: None,
                 is_error: true,

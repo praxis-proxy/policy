@@ -273,3 +273,425 @@ routes:
 "#,
     );
 }
+
+// ---- writes to read-only envelope fields ------------------------------------
+
+#[test]
+fn an_args_block_writing_uri_on_a_resource_route_is_refused_as_read_only() {
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    args:
+      uri: "str | redact"
+"#,
+    );
+    assert!(
+        e.contains("`args:`") && e.contains("`uri`") && e.contains("read-only"),
+        "writing args.uri must be refused as read-only: {e}"
+    );
+}
+
+#[test]
+fn a_result_block_writing_uri_on_a_resource_route_is_refused_as_read_only() {
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      uri: "str | hash"
+"#,
+    );
+    assert!(
+        e.contains("`result:`") && e.contains("`uri`") && e.contains("read-only"),
+        "writing result.uri must be refused as read-only: {e}"
+    );
+}
+
+#[test]
+fn writing_resource_type_on_a_resource_route_is_refused_in_either_block() {
+    for block in ["args", "result"] {
+        let e = load_err(&format!(
+            "routes:\n  - resource: hr://employees/*\n    {block}:\n      resource_type: omit\n"
+        ));
+        assert!(
+            e.contains(&format!("`{block}:`"))
+                && e.contains("`resource_type`")
+                && e.contains("read-only"),
+            "writing {block}.resource_type must be refused as read-only: {e}"
+        );
+    }
+}
+
+#[test]
+fn a_result_block_writing_icons_on_a_resource_route_is_refused_as_read_only() {
+    let e = load_err(
+        "routes:
+  - resource: hr://employees/*
+    result:
+      icons: omit
+",
+    );
+    assert!(
+        e.contains("`icons`") && e.contains("read-only"),
+        "writing result.icons must be refused as read-only: {e}"
+    );
+}
+
+#[test]
+fn a_result_block_writing_prompt_name_on_a_prompt_route_is_refused_as_read_only() {
+    let e = load_err(
+        "routes:
+  - prompt: summarize-*
+    result:
+      prompt_name: redact
+",
+    );
+    assert!(
+        e.contains("`prompt_name`") && e.contains("`prompt:`") && e.contains("read-only"),
+        "writing result.prompt_name must be refused as read-only: {e}"
+    );
+}
+
+#[test]
+fn a_result_block_writing_is_error_on_a_prompt_route_is_refused_as_read_only() {
+    let e = load_err(
+        r#"routes:
+  - prompt: summarize-*
+    result:
+      is_error: "run(error-scrubber)"
+"#,
+    );
+    assert!(
+        e.contains("`is_error`") && e.contains("read-only"),
+        "a plugin stage on result.is_error must be refused, since a plugin may rewrite it: {e}"
+    );
+}
+
+#[test]
+fn a_read_only_write_under_global_defaults_is_refused_naming_the_scope() {
+    let e = load_err(
+        "global:
+  defaults:
+    resource:
+      result:
+        uri: redact
+routes:
+  - resource: hr://employees/*
+",
+    );
+    assert!(
+        e.contains("global.defaults.resource") && e.contains("read-only"),
+        "the refusal must name the defaults scope: {e}"
+    );
+}
+
+#[test]
+fn rules_reading_read_only_fields_still_load() {
+    loads(
+        r#"routes:
+  - resource: hr://employees/*
+    authorization:
+      pre_invocation:
+        - "args.uri == 'hr://employees/restricted': deny"
+  - prompt: summarize-*
+    authorization:
+      post_invocation:
+        - "result.is_error == true: deny"
+"#,
+    );
+}
+
+#[test]
+fn a_check_only_stage_on_a_read_only_field_still_loads() {
+    loads(
+        r#"routes:
+  - resource: hr://employees/*
+    args:
+      uri: "str | taint(hr_access)"
+    result:
+      uri: "str"
+      content: "str | redact"
+"#,
+    );
+}
+
+#[test]
+fn a_recursive_path_ending_in_a_read_only_field_is_refused() {
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      "**.uri": redact
+"#,
+    );
+    assert!(
+        e.contains("`**.uri`") && e.contains("read-only"),
+        "a recursive path that can reach uri must be refused as read-only: {e}"
+    );
+}
+
+#[test]
+fn a_recursive_path_naming_a_read_only_field_in_another_case_is_refused() {
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      "**.URI": redact
+"#,
+    );
+    assert!(
+        e.contains("`**.URI`") && e.contains("read-only"),
+        "redact matches keys without case, so `**.URI` reaches uri: {e}"
+    );
+    let e = load_err(
+        r#"routes:
+  - prompt: summarize-*
+    result:
+      "**.Is_Error": redact
+"#,
+    );
+    assert!(
+        e.contains("`**.Is_Error`") && e.contains("read-only"),
+        "redact matches keys without case, so `**.Is_Error` reaches is_error: {e}"
+    );
+}
+
+#[test]
+fn a_rule_writing_uri_on_a_resource_route_is_refused_as_read_only() {
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    authorization:
+      post_invocation:
+        - when: "!perm.view_uri"
+          do: "result.uri | redact"
+"#,
+    );
+    assert!(
+        e.contains("`post_invocation:` rule") && e.contains("`uri`") && e.contains("read-only"),
+        "a rule's field operation on result.uri must be refused as read-only: {e}"
+    );
+}
+
+#[test]
+fn a_nested_rule_writing_prompt_name_is_refused_as_read_only() {
+    let e = load_err(
+        r#"routes:
+  - prompt: summarize-*
+    authorization:
+      post_invocation:
+        - when: "!perm.view_prompt"
+          do:
+            - "result.content | redact"
+            - "result.prompt_name | redact"
+"#,
+    );
+    assert!(
+        e.contains("`prompt_name`") && e.contains("read-only"),
+        "a field operation inside a do list must be checked too: {e}"
+    );
+}
+
+// ---- unknown field paths on fixed envelopes ---------------------------------
+
+#[test]
+fn an_unknown_args_field_on_a_resource_route_is_refused_with_the_valid_fields() {
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    args:
+      path: "str | redact"
+"#,
+    );
+    assert!(
+        e.contains("`args:`") && e.contains("`path`") && e.contains("selector"),
+        "the refusal must name the block, the unknown field and the valid fields: {e}"
+    );
+}
+
+#[test]
+fn an_unknown_result_field_on_a_prompt_route_is_refused_with_the_valid_fields() {
+    let e = load_err(
+        r#"routes:
+  - prompt: summarize-*
+    result:
+      body: "str | redact"
+"#,
+    );
+    assert!(
+        e.contains("`result:`")
+            && e.contains("`body`")
+            && e.contains("`prompt:`")
+            && e.contains("error_message"),
+        "the refusal must name the block, the field, the entity and the valid fields: {e}"
+    );
+}
+
+#[test]
+fn a_path_inside_resource_content_is_refused() {
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      content.ssn: "str | redact"
+"#,
+    );
+    assert!(
+        e.contains("`content.ssn`") && e.contains("single value"),
+        "content is an opaque string, so a path inside it must be refused: {e}"
+    );
+}
+
+#[test]
+fn a_path_inside_annotations_loads() {
+    loads(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      annotations.audience: "str | redact"
+"#,
+    );
+}
+
+#[test]
+fn a_rule_naming_an_unknown_result_field_on_a_resource_route_is_refused() {
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    authorization:
+      post_invocation:
+        - when: "!perm.view_ssn"
+          do: "result.ssn | redact"
+"#,
+    );
+    assert!(
+        e.contains("`post_invocation:` rule") && e.contains("`ssn`") && e.contains("content"),
+        "the refusal must name the rule, the unknown field and the valid fields: {e}"
+    );
+}
+
+#[test]
+fn a_group_naming_an_unknown_field_is_refused_on_a_resource_route_that_joins_it() {
+    let e = load_err(
+        r#"groups:
+  pii:
+    result:
+      ssn: "str | redact"
+routes:
+  - resource: hr://employees/*
+    groups: [pii]
+"#,
+    );
+    assert!(
+        e.contains("group 'pii'") && e.contains("resource:hr://employees/*") && e.contains("`ssn`"),
+        "the refusal must name the group, the joining route and the field: {e}"
+    );
+}
+
+#[test]
+fn a_group_writing_a_read_only_field_is_refused_on_a_resource_route_that_joins_it() {
+    let e = load_err(
+        r#"groups:
+  hide-uri:
+    authorization:
+      post_invocation:
+        - when: "!perm.view_uri"
+          do: "result.uri | redact"
+routes:
+  - resource: hr://employees/*
+    meta:
+      tags: [hide-uri]
+"#,
+    );
+    assert!(
+        e.contains("group 'hide-uri'") && e.contains("`uri`") && e.contains("read-only"),
+        "a group joined through meta.tags must be checked too: {e}"
+    );
+}
+
+#[test]
+fn a_group_naming_a_tool_field_still_loads_on_a_tool_route() {
+    loads(
+        r#"groups:
+  pii:
+    result:
+      ssn: "str | redact"
+routes:
+  - tool: get_compensation
+    groups: [pii]
+"#,
+    );
+}
+
+#[test]
+fn rules_writing_valid_fields_on_resource_and_prompt_routes_load() {
+    loads(
+        r#"routes:
+  - resource: hr://employees/*
+    authorization:
+      pre_invocation:
+        - when: "!perm.view_selector"
+          do: "args.selector | redact"
+      post_invocation:
+        - when: "!perm.view_ssn"
+          do:
+            - "result.content | redact"
+            - "result.annotations.audience | redact"
+  - prompt: summarize-*
+    authorization:
+      pre_invocation:
+        - when: "!perm.raw"
+          do: "args.topic | redact"
+      post_invocation:
+        - when: "!perm.raw"
+          do: "result.content | redact"
+"#,
+    );
+}
+
+#[test]
+fn valid_fields_on_resource_and_prompt_routes_load() {
+    loads(
+        r#"routes:
+  - resource: hr://employees/*
+    args:
+      selector: "str | redact"
+      range_start: "int"
+    result:
+      content: "str | redact"
+      mime_type: "str"
+      size_bytes: "int"
+  - prompt: summarize-*
+    result:
+      description: "str | redact"
+      content: "str | redact"
+      error_message: "str | redact"
+"#,
+    );
+}
+
+#[test]
+fn a_recursive_path_loads_on_a_resource_route() {
+    loads(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      "**.ssn": redact
+"#,
+    );
+}
+
+#[test]
+fn dynamic_argument_maps_are_not_checked_against_a_field_set() {
+    loads(
+        r#"routes:
+  - prompt: summarize-*
+    args:
+      tone: "str | enum(terse, formal)"
+  - tool: get_weather
+    args:
+      city: "str | redact"
+    result:
+      anything_at_all: "str | redact"
+"#,
+    );
+}

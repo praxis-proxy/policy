@@ -374,6 +374,7 @@ mod tests {
                         resource_request_id: "rr_001".into(),
                         uri: "file:///data.txt".into(),
                         name: Some("Data File".into()),
+                        title: None,
                         description: None,
                         resource_type: super::super::enums::ResourceType::File,
                         content: Some("file contents".into()),
@@ -382,6 +383,7 @@ mod tests {
                         size_bytes: None,
                         annotations: std::collections::HashMap::new(),
                         version: None,
+                        icons: None,
                     },
                 },
                 ContentPart::ResourceRef {
@@ -539,6 +541,7 @@ mod tests {
                     content: PromptResult {
                         prompt_request_id: "pr_1".into(),
                         prompt_name: "summarize".into(),
+                        description: None,
                         messages: vec![],
                         content: None,
                         is_error: false,
