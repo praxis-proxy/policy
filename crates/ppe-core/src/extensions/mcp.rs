@@ -7,6 +7,21 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Display icon for an MCP tool, resource, or prompt.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Icon {
+    /// MIME type of the icon image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+
+    /// Sizes the icon is available in (for example `48x48` or `any`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<Vec<String>>,
+
+    /// Icon URL or data URI.
+    pub src: String,
+}
+
 /// MCP tool metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolMetadata {
@@ -37,6 +52,10 @@ pub struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 
+    /// Display icons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
+
     /// Tool annotations.
     #[serde(default)]
     pub annotations: HashMap<String, serde_json::Value>,
@@ -52,6 +71,10 @@ pub struct ResourceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
+    /// Human-readable title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
     /// Resource description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -60,9 +83,17 @@ pub struct ResourceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
 
+    /// Size of the raw resource content in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+
     /// Source server ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
+
+    /// Display icons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
 
     /// Resource annotations.
     #[serde(default)]
@@ -75,6 +106,10 @@ pub struct PromptMetadata {
     /// Prompt name.
     pub name: String,
 
+    /// Human-readable title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
     /// Prompt description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -86,6 +121,10 @@ pub struct PromptMetadata {
     /// Source server ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
+
+    /// Display icons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
 
     /// Prompt annotations.
     #[serde(default)]

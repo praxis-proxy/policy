@@ -69,8 +69,8 @@ use crate::delegation_invoker::DelegationPluginInvoker;
 use crate::dispatch_plan::DispatchCache;
 use crate::elicitation_invoker::ElicitationPluginInvoker;
 use crate::message_projection::{
-    apply_changed_paths, extract_args_from_message, extract_result_from_message,
-    write_args_back_to_message, write_result_back_to_message,
+    EnvelopeReplaced, Projection, apply_changed_paths, extract_args_from_message,
+    extract_result_from_message, write_args_back_to_message, write_result_back_to_message,
 };
 use crate::payload_fields::PayloadFields;
 use crate::pdp_router::PdpRouter;
@@ -107,6 +107,10 @@ pub const ELICITATION_UNAVAILABLE_CODE: i64 = -32122;
 /// approval — resolve its status without committing the action. Truthy
 /// value ("1"/"true"/anything non-empty) enables it.
 pub const ELICITATION_PEEK_HEADER: &str = "X-Policy-Elicitation-Peek";
+
+/// Violation code for a request denied because an `args:` / `result:`
+/// pipeline replaced a whole resource or prompt envelope.
+const ENVELOPE_REPLACED_CODE: &str = "policy.envelope_replaced";
 
 /// Which APL phase this handler runs. Pre covers `args` + `pre_invocation`; Post
 /// covers `result` + `post_invocation`. Set once at construction and never
@@ -175,6 +179,10 @@ pub struct AplRouteHandler {
     /// The hook family this handler dispatches. Decides which payload
     /// `invoke` expects and which typed invoker a request builds.
     family: HookFamily,
+    /// Which content parts `args.*` / `result.*` read, from the route's
+    /// entity type. Shared with the plugin invoker so a field stage's
+    /// readback reads the same part.
+    projection: Projection,
     plugin_registry: Arc<PluginRegistry>,
     dispatch_cache: Arc<DispatchCache>,
     session_store: Arc<dyn SessionStore>,
@@ -224,6 +232,7 @@ impl AplRouteHandler {
             route,
             phase,
             family,
+            projection: Projection::default(),
             plugin_registry,
             dispatch_cache,
             session_store,
@@ -239,6 +248,14 @@ impl AplRouteHandler {
     /// visitor enables it on `tool:` routes. Off by default.
     pub fn with_structured_args(mut self, enabled: bool) -> Self {
         self.structured_args = enabled;
+        self
+    }
+
+    /// Read `args.*` / `result.*` from the content parts `projection` names.
+    /// The visitor sets it from the route's entity type. Defaults to
+    /// [`Projection::Tool`].
+    pub fn with_projection(mut self, projection: Projection) -> Self {
+        self.projection = projection;
         self
     }
 
@@ -383,7 +400,7 @@ impl AplRouteHandler {
         )
         .await
         {
-            Ok(inv) => Arc::new(inv),
+            Ok(inv) => Arc::new(inv.with_projection(self.projection)),
             Err(e) => {
                 tracing::error!(
                     alarm = "session_store_failure",
@@ -466,7 +483,9 @@ impl AplRouteHandler {
         // is the whole of what a field stage could read there, and a field
         // stage on such a route is refused at load rather than left to read
         // it.
-        let args_value = message.map_or(Value::Null, extract_args_from_message);
+        let args_value = message.map_or(Value::Null, |m| {
+            extract_args_from_message(m, self.projection)
+        });
         // Structured input for PDPs, captured before any pipeline runs so it
         // matches the bag. The request body comes from this handler's
         // filtered view and shares the host's `Arc`. Arguments count only
@@ -494,7 +513,9 @@ impl AplRouteHandler {
                 // `Value::Null` when the message has no ToolResult /
                 // PromptResult / Resource content (e.g. for hooks that
                 // fire on entities without a structured result).
-                let result_value = message.map_or(Value::Null, extract_result_from_message);
+                let result_value = message.map_or(Value::Null, |m| {
+                    extract_result_from_message(m, self.projection)
+                });
                 RoutePayload::with_result(args_value, result_value)
             },
         }
@@ -641,13 +662,16 @@ impl AplRouteHandler {
         // never sets `args_modified`, so the other projection would be
         // unread work on every request.
         let pre_args = match self.phase {
-            Phase::Pre => message.map(extract_args_from_message),
+            Phase::Pre => message.map(|m| extract_args_from_message(m, self.projection)),
             Phase::Post => None,
         };
         let pre_result = match self.phase {
             Phase::Pre => None,
-            Phase::Post => message.map(extract_result_from_message),
+            Phase::Post => message.map(|m| extract_result_from_message(m, self.projection)),
         };
+        // Set when a pipeline replaced a whole resource or prompt envelope,
+        // which write-back cannot apply; the request then fails closed below.
+        let mut envelope_replaced: Option<(&'static str, EnvelopeReplaced)> = None;
         // Which of the three sources changed the payload, in precedence
         // order. Each condition is a signal from the code that performed
         // the change: the decision's flags are set when a pipeline's
@@ -682,9 +706,13 @@ impl AplRouteHandler {
             if let Some(pre) = pre_args.as_ref()
                 && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
             {
-                let mut merged = extract_args_from_message(&target.message);
+                let mut merged = extract_args_from_message(&target.message, self.projection);
                 apply_changed_paths(&mut merged, pre, &route_payload.args);
-                write_args_back_to_message(&mut target.message, &merged);
+                if let Err(e) =
+                    write_args_back_to_message(&mut target.message, &merged, self.projection)
+                {
+                    envelope_replaced = Some(("args", e));
+                }
             }
             Some::<Box<dyn PluginPayload>>(Box::new(updated))
         } else if decision.result_modified {
@@ -704,9 +732,13 @@ impl AplRouteHandler {
                 (route_payload.result.as_ref(), pre_result.as_ref())
                 && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
             {
-                let mut merged = extract_result_from_message(&target.message);
+                let mut merged = extract_result_from_message(&target.message, self.projection);
                 apply_changed_paths(&mut merged, pre, result_value);
-                write_result_back_to_message(&mut target.message, &merged);
+                if let Err(e) =
+                    write_result_back_to_message(&mut target.message, &merged, self.projection)
+                {
+                    envelope_replaced = Some(("result", e));
+                }
             }
             Some::<Box<dyn PluginPayload>>(Box::new(updated))
         } else if invoker.payload_was_modified() {
@@ -838,6 +870,39 @@ impl AplRouteHandler {
                 let mut v = PluginViolation::new(
                     "session.persist_failed",
                     "session state could not be persisted",
+                );
+                decorate_denial_response(&mut v, self.route.response.as_ref());
+                violation = Some(v);
+            }
+        }
+
+        // Fail closed: a pipeline replaced a whole resource or prompt
+        // envelope, so the change cannot be written back. Forwarding the
+        // original would send what the pipeline meant to change, such as an
+        // unredacted body. An already-denied request keeps its own
+        // attribution, as above.
+        if let Some((block, replaced)) = envelope_replaced {
+            tracing::warn!(
+                route = %self.route.route_key,
+                block,
+                part = replaced.part,
+                "pipeline replaced a whole envelope; failing request closed"
+            );
+            if continue_processing {
+                continue_processing = false;
+                // Only the result envelopes have a `content` field to point at.
+                let example = match replaced.part {
+                    "Resource" | "PromptResult" => "content",
+                    _ => "<field>",
+                };
+                let mut v = PluginViolation::new(
+                    ENVELOPE_REPLACED_CODE,
+                    format!(
+                        "the `{block}:` pipeline replaced the whole `{part}` envelope, which \
+                         cannot be applied; address a field instead, such as `{example}: redact` \
+                         or `\"**.<field>\": redact`",
+                        part = replaced.part,
+                    ),
                 );
                 decorate_denial_response(&mut v, self.route.response.as_ref());
                 violation = Some(v);

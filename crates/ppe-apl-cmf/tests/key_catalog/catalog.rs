@@ -836,6 +836,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
         Slot::Mcp,
     ),
     exact(
+        "mcp.resource.title",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Mcp,
+    ),
+    exact(
         "mcp.resource.description",
         KeyType::String,
         Gating::Ungated,
@@ -844,6 +850,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
     exact(
         "mcp.resource.mime_type",
         KeyType::String,
+        Gating::Ungated,
+        Slot::Mcp,
+    ),
+    exact(
+        "mcp.resource.size",
+        KeyType::Int,
         Gating::Ungated,
         Slot::Mcp,
     ),
@@ -861,6 +873,12 @@ pub(crate) const CATALOG: &[KeyEntry] = &[
     ),
     exact(
         "mcp.prompt.name",
+        KeyType::String,
+        Gating::Ungated,
+        Slot::Mcp,
+    ),
+    exact(
+        "mcp.prompt.title",
         KeyType::String,
         Gating::Ungated,
         Slot::Mcp,

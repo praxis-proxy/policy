@@ -9,8 +9,11 @@ and resources without depending on the transport protocol.
 
 Without CMF, tool-result redaction and LLM-output redaction require separate code
 for separate payload types. CMF gives every interception point the same
-representation. The same APL field pipeline can redact a field from either a
-tool result or a model completion.
+representation. The same APL policy can inspect a tool result, a fetched
+resource, a rendered prompt, or a model completion. Field pipelines (`args:` /
+`result:`) address the fields of structured parts; on a model completion, which
+reaches policy as plain text, a `**` path applies to the whole text, and
+`llm.*` attributes cover the rest.
 
 ## Message structure
 
@@ -65,5 +68,7 @@ gives policy the content; the extensions give it the context; APL decides.
   carried alongside each message.
 - [CMF extensions and the attribute bag](cmf-extensions.md): the keys APL
   reads and what a missing key means in each engine.
+- [Host integration guide](host-integration-guide.md): what a host must put on
+  a message for policy to take effect.
 - [Crates](crates.md): locate the CMF and runtime implementations in the
   workspace.

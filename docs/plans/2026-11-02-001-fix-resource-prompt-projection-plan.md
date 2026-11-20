@@ -113,7 +113,7 @@ Changes are applied to the original matching `ResourceRef`, `Resource`, or `Prom
 
 ### 5.3 Configuration-time validation
 
-Extend the existing no-field-path guard from `http:` routes to `llm:` routes, for both route-level blocks and `global.defaults.llm`. For resource/prompt fixed envelopes, validate the top-level field name, reject nested access under scalar fields (e.g. `result.content.ssn`), allow nested map access under `annotations`, and reject writes to read-only fields. Tool/prompt argument maps remain dynamic and are not subject to a static field catalog.
+The existing no-field-path guard stays on `http:` routes only. Field blocks on `llm:` routes are out of scope for this issue (see Appendix D, 3a). For resource/prompt fixed envelopes, validate the top-level field name, reject nested access under scalar fields (e.g. `result.content.ssn`), allow nested map access under `annotations`, and reject writes to read-only fields. Tool/prompt argument maps remain dynamic and are not subject to a static field catalog.
 
 Coupling validation to a fixed field catalog creates schema drift risk. Add a test asserting that each catalog matches the keys emitted by its projection function.
 
@@ -195,7 +195,7 @@ One PR, four independently compiling/testable commits:
 | **1. Schema alignment** | MCP metadata fields, `Icon`, CMF fields, PDP attributes | Attribute-bag/unit/catalog tests and compile checks |
 | **2. Projection and write-back** | Three envelope projections, extraction, in-place mutation | Round-trip invariants; deny and redact visitor E2E; known-gap tests |
 | **3. Config validation** | Reject no-field shapes, unknown paths, read-only writes | Load rejection diagnostics; valid-field acceptance; catalog parity |
-| **4. Host contract** | Short contract section in `cmf-extensions.md`: MUSTs, layer definitions, two known gaps (full six-recipe guide in a follow-up PR) | Human review of the contract |
+| **4. Host contract** | New `host-integration-guide.md` holding the contract: MUSTs, layer definitions, two known gaps (the follow-up PR adds the six recipes to the same file) | Human review of the contract |
 
 Full file changes, test names, expected results, and commands are in Appendix D.
 
@@ -340,8 +340,8 @@ see [Appendix A](#appendix-a-complete-projection-reference).
   that writes them is refused at load
   ([Commit 3b](#3b-unknown-and-read-only-field-paths-beyond-ac3)).
   Write-back also preserves the original, as defence in depth. They remain
-  readable, so rules such as `args.uri matches 'restricted': deny` and
-  `result.is_error == true: deny` still work.
+  readable, so rules such as `args.uri == 'hr://employees/restricted': deny`
+  and `result.is_error == true: deny` still work.
 - `u64` fields (`range_start`, `range_end`, `size_bytes`): convert via
   `serde_json::Number::from()` on projection; reject negative, fractional,
   or out-of-range values on write-back (preserve original).
@@ -381,6 +381,62 @@ would turn a slightly wrong rule into an outage.
 
 `null` on a non-optional field (`uri`, `prompt_name`) does not arise: both are
 read-only, so writes to them are refused at load and preserved at write-back.
+
+#### Removed fields, nested maps and numbers
+
+Write-back receives the whole envelope after `apply_changed_paths` has merged
+in the pipeline's changes (`route_handler.rs:685-709`). A field is missing from
+it only when the pipeline removed it.
+
+| Case | Example | Write-back behavior |
+|---|---|---|
+| Pipeline removes a field (`omit`) | `content: "SSN 123-45-6789"` → `result: { content: omit }` | Field cleared (`None`). Keeping the old value would leak exactly what the pipeline removed |
+| Pipeline changes one `annotations` key | `{tier: "gold", owner: "hr"}` → `annotations: { tier: "silver" }` | `{tier: "silver", owner: "hr"}`. `apply_changed_paths` already merges nested objects key by key, so write-back replaces the map with the merged object. `null` or removal clears the map, like any other removed field; any other non-object value keeps the original map |
+| `u64` field gets an invalid value | `size_bytes: 2048` → `"-5"`, `-5`, `1.5`, or above `u64::MAX` | Original kept. `null` or removal clears it |
+
+**Same as tools.** A tool call's `arguments` and a tool result's `content` are
+replaced whole with the merged value (`message_projection.rs:94-98`, `138-140`),
+so a key the pipeline removed is gone and nested objects merge key by key. The
+only difference is the `u64` row: tool values accept any JSON, while these
+envelope fields have fixed types.
+
+#### A whole envelope replaced by a non-object
+
+The rows above apply per field. A pipeline can also replace the **whole**
+envelope. A bare `**` path matches the root (`**` can match zero levels,
+`crates/ppe-apl-core/src/route.rs`, `expand_for_pipeline`), so
+`result: { "**": redact }` turns `{ uri, content, ... }` into the string
+`"[REDACTED]"`. A plugin stage can do the same.
+
+The first implementation followed the older tool-call convention, "silently
+no-op when the shape does not match", and kept the original part. That rule
+came from the existing code, not from this plan, and it breaks the principle
+above: a redaction that produced an unexpected type silently sent the
+unredacted original. A probe confirmed it: the config loaded, the request was
+allowed, and `Resource.content` reached the client unredacted.
+
+It cannot be refused at load. The same route sees an envelope when the host
+sends a `Resource` / `PromptResult` / `ResourceRef` part and plain text when it
+sends a text part, and `**` works on the text.
+
+**Interim rule:** when write-back receives a non-object for a `ResourceRef`,
+`Resource` or `PromptResult` part, the request is **denied** with code
+`policy.envelope_replaced` and a reason pointing to `content: redact` or
+`"**.<field>": redact`. This keeps the "never send the original" principle
+while leaving the meaning of a bare `**` undecided. Denying rather than
+guessing (for example, applying the string to `content`) avoids deciding what
+the pipeline meant.
+
+| Case | Result |
+|---|---|
+| `"**": redact`, or a plugin returning a non-object, on a message with an envelope part | Denied (`policy.envelope_replaced`) |
+| `"**": redact` on a text-only resource or prompt message | Text redacted (unchanged) |
+| `"**.<field>"`, `content: redact`, other named paths | Work (unchanged) |
+| `llm:`, tool result | Unchanged |
+| Tool call args, prompt request args | Unchanged: still a silent no-op, tracked in the follow-up |
+
+The precise meaning of a bare `**` on structured payloads, and the tool / prompt
+argument case, are tracked as a follow-up (`policy-bare-double-star-semantics`).
 
 ---
 
@@ -623,16 +679,27 @@ deny or redacted content. These go in `crates/ppe-apl-runtime/tests/visitor_e2e.
 
 | Test | Setup | Assertion |
 |---|---|---|
-| `resource_post_fetch_deny_on_content` | Route: `resource: hr://employees/*`, policy: `result.content matches 'topsecret': deny`. Message: `ContentPart::Resource` with `content: Some("topsecret")` | **Denied** (not allowed) |
-| `resource_post_fetch_redact_content` | Route: `resource: hr://employees/*`, policy: `result: { content: "str \| mask_pattern('\\d{3}-\\d{2}-\\d{4}', '[REDACTED]')" }`. Message: resource with SSN in content | Content modified, no appended Text part, SSN replaced |
-| `resource_pre_fetch_deny_on_uri` | Route: `resource: hr://employees/*`, policy: `args.uri matches 'restricted': deny`. Message: `ContentPart::ResourceRef` with restricted URI | **Denied** |
-| `prompt_post_invoke_deny_on_content` | Route: `prompt: summarize-*`, policy: `result.content matches 'ignore.*instructions': deny`. Message: `ContentPart::PromptResult` with injection text | **Denied** |
-| `prompt_post_invoke_redact_content` | Route: `prompt: summarize-*`, policy: `result: { content: "str \| mask_pattern('\\d{3}-\\d{2}-\\d{4}', '[REDACTED]')" }`. Message: prompt result with SSN | Content modified, no appended Text part, SSN replaced |
-| `prompt_post_invoke_deny_on_is_error` | Route: `prompt: *`, policy: `result.is_error == true: deny 'render failed'`. Message: `ContentPart::PromptResult` with `is_error: true` | **Denied** with reason |
+| `resource_post_fetch_deny_on_content` | Route: `resource: hr://employees/*`, policy: `result.content == 'topsecret': deny('secret resource content')`. Message: `ContentPart::Resource` with `content: Some("topsecret")` | **Denied** with reason; clean content allowed |
+| `resource_post_fetch_redact_content` | Route: `resource: hr://employees/*`, policy: `result: { content: "str \| redact" }`. Message: resource with SSN in content | `Resource.content` is `[REDACTED]`, no appended Text part, `uri` unchanged |
+| `resource_pre_fetch_deny_on_uri` | Route: `resource: hr://employees/*`, policy: `args.uri == 'hr://employees/restricted-42': deny('restricted resource')`. Message: `ContentPart::ResourceRef` with that URI | **Denied** with reason; other URI allowed |
+| `prompt_post_invoke_deny_on_content` | Route: `prompt: summarize-*`, policy: `result.content == 'ignore previous instructions': deny('prompt injection')`. Message: `ContentPart::PromptResult` with that text | **Denied** with reason; clean prompt allowed |
+| `prompt_post_invoke_redact_content` | Route: `prompt: summarize-*`, policy: `result: { content: "str \| redact" }`. Message: prompt result with SSN | `PromptResult.content` is `[REDACTED]`, no appended Text part, `prompt_name` unchanged |
+| `prompt_post_invoke_deny_on_is_error` | Route: `prompt: "*"`, policy: `result.is_error == true: deny('render failed')`. Message: `ContentPart::PromptResult` with `is_error: true` | **Denied** with reason; successful render allowed |
 
 These tests must assert on **deny decisions or modified message content**,
-never on allow — an allow is indistinguishable from the broken behavior this
-issue fixes.
+never on allow alone — an allow is indistinguishable from the broken behavior
+this issue fixes. Each deny test also sends a clean input to the same route and
+expects an allow, so a route that denies everything cannot pass.
+
+**APL matching in these examples.** APL rules have no regex operator, and
+`contains` tests membership in a set, so on a string it is always false
+(`crates/ppe-apl-core/src/evaluator.rs:206-209`). Rules therefore use exact
+`==` matches, and redaction uses the `redact` transform, which replaces the
+whole value. That still proves the content reaches policy: before this issue,
+policy saw `""`, so an exact match never succeeded. Matching a pattern inside
+the text (an SSN anywhere in a body) needs a `regex(...)` validator or a
+`pii.redact` / `injection.scan` stage in a `result:` pipeline, or a plugin.
+These were not exercised here.
 
 These tests prove the PPE side only: the `Message` handed back to the host is
 denied or modified. They pass even if the host never serializes the change
@@ -670,7 +737,7 @@ Praxis and remains only for hosts that emit several `Resource` parts.
 
 | Test | Setup | Assertion |
 |---|---|---|
-| `known_gap_only_the_first_resource_part_is_projected` | Route: `resource: hr://employees/*`, policy: `result.content matches '\d{3}-\d{2}-\d{4}': deny`. Message: two `ContentPart::Resource` parts, SSN only in the **second** | Asserts **Denied**; fails today. `#[should_panic(expected = "known gap #76")]`, with the assertion message containing `known gap #76` |
+| `known_gap_only_the_first_resource_part_is_projected` | Route: `resource: hr://employees/*`, policy: `result.content == '123-45-6789': deny('ssn in resource')`. Message: two `ContentPart::Resource` parts, SSN only in the **second** | Asserts **Denied**; fails today. `#[should_panic(expected = "known gap #76")]`, with the assertion message containing `known gap #76` |
 
 When Issue 76 lands, this test starts passing and its `should_panic` must be
 removed, which flags the fix.
@@ -693,8 +760,8 @@ That leaves a hole in the main prompt-side use case. The issue says scanning
 a rendered prompt for injected instructions is "precisely the use case". MCP
 `prompts/get` returns `messages`, so a host that maps the response faithfully
 may fill `messages` and leave `content` as `None`. Then `result.content` is
-null, an injection rule like `result.content matches 'ignore.*instructions':
-deny` never matches, and the prompt passes with no signal. This is the same
+null, an injection rule like `result.content == 'ignore previous
+instructions': deny` never matches, and the prompt passes with no signal. This is the same
 silent bypass this issue fixes, limited to hosts that don't fill `content`.
 
 **Decision:** for this issue:
@@ -711,7 +778,7 @@ silent bypass this issue fixes, limited to hosts that don't fill `content`.
 
 | Test | Setup | Assertion |
 |---|---|---|
-| `known_gap_prompt_result_messages_are_not_projected` | Route: `prompt: summarize-*`, policy: `result.content matches 'ignore.*instructions': deny`. Message: `ContentPart::PromptResult` with `content: None` and the injection text only inside `messages` | Asserts **Denied**; fails today. `#[should_panic(expected = "known gap #76")]` |
+| `known_gap_prompt_result_messages_are_not_projected` | Route: `prompt: summarize-*`, policy: `result.content == 'ignore previous instructions': deny('prompt injection')`. Message: `ContentPart::PromptResult` with `content: None` and the injection text only inside `messages` | Asserts **Denied**; fails today. `#[should_panic(expected = "known gap #76")]` |
 
 A read-only fallback, where `content` is derived from `messages` when it is
 `None`, would close the hole without waiting for Issue 76. But a redaction of
@@ -735,38 +802,41 @@ make test
 **Goal:** Refuse field blocks that can address nothing, at load time instead
 of at runtime.
 
-Two pieces of work. Only the first is required by the issue.
+Two pieces of work were planned. 3a is deferred; 3b ships, and it is what meets AC3 for the resource and prompt routes the issue is about.
 
-#### 3a. Shapes with no field path (issue AC3)
+#### 3a. Shapes with no field path on `llm:` routes (deferred)
 
-AC3: *"An `args:` or `result:` block that addresses a shape with no field path
-is refused at load with a message naming the block and the entity type, the
-way an `http:` route's is today."*
+Planned: extend `reject_field_stages_without_fields` from `http:` to `llm:`,
+refusing named field paths (`args: { prompt: ... }`) on a payload that projects
+as plain text, and keeping `**`-only paths.
 
-`reject_field_stages_without_fields` (`crates/ppe-apl-runtime/src/visitor.rs`)
-checks `ENTITY_HTTP` only. Once commit 2 lands, resource and prompt routes have
-field paths, so they correctly pass. The entity left with no field path is
-**`llm:`**. Both LLM hooks still project the concatenated `Text` parts as a
-scalar string (see [Appendix A](#appendix-a-complete-projection-reference),
-Fallback), so `args: { foo: ... }` on an `llm:` route loads today and does
-nothing. That is the same silence this issue is about.
+Deferred out of this issue, to the separate LLM issue, because:
 
-Change: extend the guard from `entity_type != ENTITY_HTTP` to cover
-`ENTITY_LLM`. The refusal message names the block and `llm:`, and points to
-the `llm.*` attributes under `pre_invocation:` / `post_invocation:`, matching
-the existing `http:` wording. The check already runs for a route's own block
-and for `global.defaults.<entity>`. Both scopes pick up the new arm.
+- **The issue scopes LLM out.** Its projection table reads "llm, both: the
+  concatenated Text parts. See the separate LLM issue".
+- **AC3's own case is met by 3b.** The issue's example is `result: { ssn: ... }`
+  on a *resource* route, which 3b now refuses at load
+  (`reject_unknown_field_paths`).
+- **It is a breaking change** for `llm:` configs that load today, and it fails
+  two Praxis tests that declare named fields on an `llm:` route on purpose
+  (`a_field_mutator_leaves_an_inference_request_untouched` / `..._response_untouched`).
+  The workspace search planned here ("found none") did not cover Praxis's tests.
+- **The `**` exception does not hold through Praxis.** The probe that returned
+  `[REDACTED]` ran against PPE alone; Praxis does not rewrite inference bodies
+  and sends the original (`praxis/.../policy/filter.rs`, "Policy field mutators
+  do not rewrite inference bodies"). So the design question is broader than
+  named fields, and belongs with `policy-bare-double-star-semantics`.
 
-Before landing, confirm that no config, test fixture or demo in the workspace
-declares `args:` / `result:` on an `llm:` route. A search of `crates/`,
-`tests/` and `docs/content/` found none, but the demos under `../demos` should
-be checked too.
+In this issue: `reject_field_stages_without_fields` is unchanged from `main`
+(`http:` only). `llm:` field blocks keep loading and keep having no effect, as
+before; this is not a regression.
 
-#### 3b. Unknown and read-only field paths (beyond AC3)
+#### 3b. Unknown and read-only field paths (meets AC3 for resources and prompts)
 
-The issue does not require this. It is the same principle (a block that can
-never take effect should not load) applied to field names, now that resource
-and prompt envelopes have a fixed set of fields.
+AC3's principle (a block that can never take effect should not load) applied
+to field names, now that resource and prompt envelopes have a fixed set of
+fields. This is what refuses the issue's own example, `result: { ssn: ... }` on
+a resource route.
 
 Define static valid-field sets, keyed by **content kind** rather than by
 entity and phase, so Issue 76 `match:` entries (which select parts by kind on
@@ -809,7 +879,7 @@ Rules:
 - **Dynamic-key envelopes are not checked.** Tool `args` / `result` and prompt
   `args` take their keys from the host's arguments map, so they have no static
   set.
-- **Same scopes as 3a.** The route's own block and `global.defaults.<entity>`.
+- **Same scopes as the `http:` guard.** The route's own block and `global.defaults.<entity>`.
 
 The error message names the block (`args` or `result`), the entity type, the
 offending path, and either the valid set or "read-only".
@@ -823,9 +893,11 @@ the matching `project_*` function emits, so the two cannot drift.
 | Test | Expected |
 |---|---|
 | `result:` on HTTP route | Rejected (existing, regression guard) |
-| `args:` on LLM route | Rejected, message names `args` and `llm` |
-| `result:` on LLM route | Rejected, message names `result` and `llm` |
-| `args:` on LLM route under `global.defaults.llm` | Rejected |
+| `args:` with a named field on LLM route | Rejected, message names `args` and `llm` |
+| `result:` with a named field on LLM route | Rejected, message names `result` and `llm` |
+| `args:` with a named field under `global.defaults.llm` | Rejected |
+| `"**"` on LLM route, route and `global.defaults.llm` | Accepted; e2e shows the whole completion redacted |
+| `"**"` with a named field on LLM route | Rejected, message names the field and suggests `**` |
 | `args:` with valid fields on resource route | Accepted |
 | `result:` with valid fields on resource route | Accepted |
 | `result:` with `annotations.audience` on resource route | Accepted (nested path under an open map) |
@@ -869,10 +941,11 @@ A host that sets only MCPExtension but no ContentPart gets route matching and
 PDP predicates but empty APL envelopes. This is the most likely
 misconfiguration and must be called out explicitly.
 
-#### In this PR: contract section
+#### In this PR: the contract, in a new guide
 
-A short "Host contract" section added to an existing doc,
-`docs/content/cmf-extensions.md`, covering:
+A new doc, `docs/content/host-integration-guide.md`, holding only the
+contract for now. It is linked from `docs/content/index.md`, from `cmf.md`, and
+from the `mcp` slot section of `cmf-extensions.md`. It covers:
 
 - **The MUSTs:**
   - `PromptResult.content` set to the rendered text (until Issue 76), and
@@ -890,12 +963,16 @@ A short "Host contract" section added to an existing doc,
 - **The two known gaps:** multi-resource messages (first part only) and
   prompt results carried only in `messages`.
 
+A separate doc was chosen over a section of `cmf-extensions.md`: that doc is
+the attribute-bag contract, while this one is about the message a host builds,
+and the follow-up guide already had this file name. Starting the file now means
+the contract does not move when the recipes arrive.
+
 #### Follow-up PR: full host integration guide
 
-The worked recipes below follow in a separate PR. They build on the contract
-section and do not change it.
-
-`docs/content/host-integration-guide.md` — new, ~1000 lines.
+The worked recipes below follow in a separate PR. They are added to
+`docs/content/host-integration-guide.md`, build on the contract already there,
+and do not change it.
 
 #### Structure
 
@@ -988,6 +1065,7 @@ Issue 76 can reuse them.
 - [ ] `uri` (both envelopes), `resource_type` (both), `prompt_name`, `is_error` and `icons` are read-only on write-back
 - [ ] Doc comment on `message_projection.rs` with six-envelope table and the "every projection is an object" convention
 - [ ] Unit tests: round-trip, rewrite, wrong-shape, u64 fidelity
+- [ ] A whole envelope replaced by a non-object is refused at write-back and the request denied (`policy.envelope_replaced`), never sending the original; text-only messages and `"**.<field>"` unchanged
 - [ ] Every rewrite test asserts the whole message equals the original with only the mutated field changed, part count unchanged, no `Text` part added (shared `assert_differs_only_in` helper)
 - [ ] PromptRequest regression guard: args round-trip verified for prompt pre-invoke
 - [ ] Integration tests: resource deny, resource redact, resource pre-fetch deny, prompt deny, prompt redact, prompt is_error deny — all asserting on deny/modified content, not on allow
@@ -996,9 +1074,8 @@ Issue 76 can reuse them.
 
 #### Commit 3: config validation
 
-- [ ] (3a, AC3) `args:` / `result:` on an `llm:` route refused at load, naming the block and entity type, in both route and `global.defaults.llm` scope
+- [ ] (3a) Deferred to the LLM issue; `reject_field_stages_without_fields` unchanged from `main`
 - [ ] (3a) Existing HTTP route rejection preserved
-- [ ] (3a) No existing config or demo declares field blocks on `llm:` routes (checked before landing)
 - [ ] (3b) Unknown field paths rejected at load time with diagnostic; nested paths under `annotations` accepted
 - [ ] (3b) Writes to read-only fields (`uri`, `resource_type`, `prompt_name`, `is_error`, `icons`) rejected at load
 - [ ] (3b) Valid field paths accepted for resource and prompt routes
@@ -1006,7 +1083,7 @@ Issue 76 can reuse them.
 
 #### Commit 4: host contract section
 
-- [ ] "Host contract" section in `docs/content/cmf-extensions.md` covers the MUSTs, the layer definitions and the two known gaps
+- [ ] `docs/content/host-integration-guide.md` holds the contract (MUSTs, layer definitions, two known gaps) and is linked from `index.md`, `cmf.md` and `cmf-extensions.md`
 
 #### Follow-up PR: full host integration guide
 
@@ -1048,13 +1125,14 @@ Issue 76 can reuse them.
 | **`prompt_name` read-only** | Mutating identity breaks correlation. Writes refused at load (3b) and preserved at write-back |
 | **`uri` read-only (both envelopes)** | Same kind of identity field as `prompt_name`. A writable `args.uri` redirects the fetch after authorization; a writable `result.uri` misreports the source. Fetch redirection needs its own design (re-authorizing effect or gateway routing) |
 | **`resource_type`, `is_error` read-only** | No known write use case; more likely to cause a mistake than to serve one. Can be loosened later without breaking configs |
-| **Refuse field blocks on `llm:` routes** | AC3: a shape with no field path is refused at load, as `http:` is today |
+| **Deny a whole-envelope replacement** | A bare `**` (or a plugin) can replace a resource / prompt envelope with a string, which write-back cannot apply. Keeping the original leaked; refusing at load is impossible because the shape is known only at runtime. Deny until the meaning of `**` is defined (follow-up `policy-bare-double-star-semantics`) |
+| **Defer field paths on `llm:` routes** | The issue scopes LLM out ("see the separate LLM issue"); AC3's resource example is met by 3b. Refusing `llm:` named fields would break configs and two Praxis tests, and the `**` exception does not take effect through Praxis, which does not rewrite inference bodies. Tracked with the LLM issue and `policy-bare-double-star-semantics` |
 | **Reject unknown and read-only fields at load** | Goes beyond AC3, same principle: silence caused this bug. Drift test keeps the sets in step with the envelopes |
 | **`PromptResult.content` is a host MUST, until Issue 76** | `messages` is Issue 76; until then a host that fills only `messages` defeats content rules. `content` is the authoritative copy on the way out. Documented and pinned by a known-gap test. A read-only `content` derived from `messages` was rejected: a deny on it would pass the tests while a redaction of the same text silently does nothing |
 | **ContentPart only, no MCPExtension fallback** | `ContentPart` and `MCPExtension` are different views (wire view vs resolved identity), so falling back would quietly swap the agent's name for the resolved one. Consistent with how tools work |
 | **Layers are views; no consistency check** | `ContentPart` is the wire view (what the agent sent) and `MCPExtension` is the resolved identity (from the host's catalog). A gateway may legitimately make them differ, so equality is neither enforced nor expected. The guide documents what each layer means |
 | **`ToolCall.namespace` = agent-facing namespace** | Not in MCP and never read by PPE, so its meaning was undefined. Kept rather than removed (it is a public CMF field shared with CPEX) and defined to match the wire view: the namespace the agent sees, if any. The upstream namespace stays in `ToolMetadata.namespace` |
-| **Host contract ships with the code; full guide follows** | The code depends on hosts honoring the MUSTs, so the contract (MUSTs, layer definitions, two known gaps) lands in this PR as a short section of `cmf-extensions.md`. The six worked recipes follow in a separate PR |
+| **Host contract ships with the code; full guide follows** | The code depends on hosts honoring the MUSTs, so the contract (MUSTs, layer definitions, two known gaps) lands in this PR as a new `host-integration-guide.md`, kept separate from the attribute-bag doc. The six worked recipes follow in a separate PR, added to the same file |
 | **Icons not in the PDP attribute bag** | Display metadata; no known rule keys on an icon URL. Kept on structs (struct-only, like `inputSchema`). A `StringSet` of `src` values can be added later if a use case turns up; adding is non-breaking, removing would be |
 | **`MCPExtension` from host catalog only** | Authorization keys on it, so agent-supplied values would let the agent choose what is authorized. Hosts without a catalog leave it unset |
 | **Body parsing deferred; operator preferred** | The future path is an opt-in APL operator (e.g. `json`), used per rule, which leaves the envelope unchanged. A `content_parsed` sibling field is not planned: two copies of the body let a redaction of one copy leak through the other. Neither blocks this issue. |

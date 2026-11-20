@@ -80,6 +80,7 @@ pub use decision_cache::{
 pub use delegation_invoker::DelegationPluginInvoker;
 pub use dispatch_plan::{DispatchCache, RouteDispatchPlan, RoutePluginEntry};
 pub use elicitation_invoker::ElicitationPluginInvoker;
+pub use message_projection::Projection;
 pub use payload_fields::PayloadFields;
 pub use pdp_router::PdpRouter;
 pub use register::{AplOptions, register_apl};

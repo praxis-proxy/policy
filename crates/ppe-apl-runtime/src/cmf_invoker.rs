@@ -88,6 +88,7 @@ use praxis_policy_apl_core::step::{
 };
 
 use crate::dispatch_plan::RouteDispatchPlan;
+use crate::message_projection::Projection;
 use crate::payload_fields::PayloadFields;
 use crate::session_store::{SessionStore, SessionStoreError};
 
@@ -153,6 +154,9 @@ where
     /// the additions to the session store. Empty when there was no
     /// `session_id` (so no hydration happened).
     initial_labels: HashSet<String>,
+    /// Which content parts a field stage's readback reads. Must match the
+    /// route handler's, so the readback sees the part the pipeline wrote.
+    projection: Projection,
 }
 
 impl<H: HookTypeDef> HookPluginInvoker<H>
@@ -212,7 +216,17 @@ where
             session_id,
             session_store,
             initial_labels,
+            projection: Projection::default(),
         })
+    }
+
+    /// Read field-stage readbacks from the content parts `projection` names.
+    /// The route handler passes the route's projection. Defaults to
+    /// [`Projection::Tool`].
+    #[must_use]
+    pub fn with_projection(mut self, projection: Projection) -> Self {
+        self.projection = projection;
+        self
     }
 
     /// Snapshot the current payload. Call after route evaluation to
@@ -412,7 +426,9 @@ where
         // pre-redaction plaintext back to the pipeline, undoing the
         // earlier stage.
         let field_before = match invocation {
-            PluginInvocation::Field { name, phase, .. } => current_payload.field_value(name, phase),
+            PluginInvocation::Field { name, phase, .. } => {
+                current_payload.field_value(name, phase, self.projection)
+            },
             PluginInvocation::Step { .. } => None,
         };
 
@@ -462,7 +478,7 @@ where
                 match invocation {
                     PluginInvocation::Field { name, phase, .. } => {
                         let rewritten = modified
-                            .field_value(name, phase)
+                            .field_value(name, phase, self.projection)
                             .filter(|new_value| field_before.as_ref() != Some(new_value));
                         if rewritten.is_none() {
                             tracing::debug!(

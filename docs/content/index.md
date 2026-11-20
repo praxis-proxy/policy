@@ -93,6 +93,8 @@ history.
   typed contextual state, and the capabilities that unlock it
 - [CMF extensions and the attribute bag](cmf-extensions.md):
   the per-type absent-value contract and every key the bridge emits
+- [Host integration guide](host-integration-guide.md):
+  what a host must put on a message for policy to take effect
 
 ## Reference
 
