@@ -58,7 +58,7 @@ fips = [
 # system OpenSSL under the FIPS provider; it requires `fips` and excludes `jwt`.
 jwt = ["_jwt", "jsonwebtoken/aws_lc_rs"]
 jwt-openssl-fips = ["_jwt", "dep:openssl"]
-api-key = ["_engine-core", "_plugins"]
+api-key = ["_engine-core", "_plugins", "_token_lookup"]
 oauth = [
   "_engine-core",
   "_plugins",
@@ -112,6 +112,9 @@ _pdps = ["dep:stacker"]
 _session = []
 _secrets = []
 _jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64"]
+# The shared core of the resolvers that turn a credential into an identity by
+# looking it up. Crate-private: each plugin re-exports what it makes public.
+_token_lookup = ["_engine-core"]
 
 [dependencies]
 # Engine crates, optional so a consumer resolves only the layer it asked for.

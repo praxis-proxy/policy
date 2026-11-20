@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::plugins::identity_api_key::crypto::hash_credential;
+use crate::token_lookup::crypto::hash_credential;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

@@ -42,13 +42,11 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;
 
-use crate::plugins::identity_api_key::crypto::hash_credential;
 use praxis_policy_core::host::HostServices;
 use serde::{Deserialize, Serialize};
 
-use crate::plugins::identity_api_key::directory::{
-    DirectoryError, KeyDirectory, KeyRecord, PresentedKey,
-};
+use crate::token_lookup::crypto::hash_credential;
+use crate::token_lookup::directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 
 fn default_max_entries() -> usize {
     10_000

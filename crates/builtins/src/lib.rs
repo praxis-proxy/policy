@@ -52,6 +52,9 @@ compile_error!("jwt-openssl-fips requires the fips feature");
 #[cfg(feature = "_plugins")]
 pub mod plugins;
 
+#[cfg(feature = "_token_lookup")]
+mod token_lookup;
+
 #[cfg(feature = "_pdps")]
 pub mod pdps;
 
