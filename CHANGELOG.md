@@ -25,10 +25,15 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive matches must handle the new variant. `RouteDispatchPlan` adds `metadata_entries`; exhaustive struct literals must initialize it or use `..Default::default()`, and exhaustive destructuring must name the field or use `..`. Both types are also reachable through the `praxis_policy` facade's crate re-exports. `RoutePluginEntry::pick_entry` takes a new leading `requested_family` argument; pass the dispatching hook's `HookTypeDef::NAME`. ([#287](https://github.com/praxis-proxy/policy/pull/287))
 - **Breaking for metadata sources:** a plugin reached by APL `fetch(name)` must use `mode: sequential`; `transform` and other modes cannot return the awaited typed record required for publication. ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for file secrets:** with `base_dir` set, an absolute symlink beneath the directory is refused with a reference error even when its target is inside; make the link relative. Kubernetes Secret volumes and CSI-projected secrets already use relative links. ([#338](https://github.com/praxis-proxy/policy/pull/338))
 
 ### Fixed
 
 - **APL step dispatch picked hooks across families.** A plugin that registered a CMF hook alongside an unphased hook such as `metadata.fetch`, `identity.resolve` or `token.delegate` could have a `run()` step dispatched to the unphased hook, depending on hash order, and denied with a payload type mismatch. Step dispatch now also matches the hook family. ([#287](https://github.com/praxis-proxy/policy/pull/287))
+
+### Security
+
+- **`file` secret provider: `base_dir` containment can no longer be raced.** With `base_dir` set, the file is now opened beneath the directory in one step, so a writer inside it cannot swap a symlink between the containment check and the read and have a file outside the directory accepted. This also covers Windows, where no identity check ran before. A link that leaves the directory is refused with a reference error on every read; links that stay inside, including the relative `..data` links of a Kubernetes projected mount, still read. Without `base_dir`, behaviour is unchanged. ([#302](https://github.com/praxis-proxy/policy/issues/302), [#199](https://github.com/praxis-proxy/policy/issues/199))
 
 ## [0.6.0] - 2026-11-06
 
