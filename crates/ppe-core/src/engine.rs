@@ -4595,6 +4595,11 @@ impl PolicyEngine {
     /// globally-registered post-invoke plugin) would otherwise report
     /// "no hooks" and be skipped by out-of-process hosts that use this as a
     /// fast-skip gate — silently dropping the route's policy for that phase.
+    ///
+    /// Once any `revocation:` block lists a checker, every `Pre` and `Post`
+    /// hook counts too, because the engine checks revocation inside their
+    /// dispatch. A host that skipped one would release a revoked caller's
+    /// request or response unchecked.
     pub fn has_hooks_for(&self, hook_name: &str) -> bool {
         let snapshot = self.load_runtime();
         snapshot.registry.has_hooks_for(&HookType::new(hook_name))
@@ -4602,6 +4607,8 @@ impl PolicyEngine {
                 .route_annotations
                 .keys()
                 .any(|k| k.hook_name.as_str() == hook_name)
+            || (snapshot.declares_revocation
+                && crate::revocation::check_points(hook_name) != (None, None))
     }
 
     /// Look up a plugin by name. Returns an `Arc<PluginRef>` clone — works

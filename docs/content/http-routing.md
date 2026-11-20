@@ -106,9 +106,11 @@ extensions.
 
 Revocation checks need nothing new from the host. The engine runs them
 while it handles `http.request`, before and after the policy pipeline, and
-`http.response`, after the pipeline allows the response. The response check
-only happens if the host calls `http.response`. If it never does, responses
-go back unchecked. See
+`http.response`, after the pipeline allows the response. Once a checker is
+configured, `PolicyEngine::has_hooks_for` reports both hooks, so a host that
+skips hooks with nothing on them still calls these. The response check only
+happens if the host calls `http.response`. If it never does, responses go
+back unchecked. See
 [Revocation](identity-delegation.md#where-the-engine-checks).
 
 ## Rate-limit hooks

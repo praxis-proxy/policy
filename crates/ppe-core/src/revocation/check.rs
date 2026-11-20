@@ -476,6 +476,52 @@ mod tests {
         assert_eq!(calls.load(Ordering::Acquire), 0, "never asked");
     }
 
+    #[tokio::test]
+    async fn a_host_is_told_to_call_every_checked_hook() {
+        let (engine, _) = engine(&format!(
+            "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
+            checker("kc", "{ vouch: [subject, client] }")
+        ))
+        .await;
+
+        let reported: Vec<_> = BUILTIN_HOOK_METADATA
+            .iter()
+            .filter(|(name, _)| engine.has_hooks_for(name))
+            .map(|(name, _)| *name)
+            .collect();
+
+        assert_eq!(
+            reported,
+            vec![
+                "cmf.tool_pre_invoke",
+                "cmf.tool_post_invoke",
+                "cmf.llm_input",
+                "cmf.llm_output",
+                "cmf.prompt_pre_invoke",
+                "cmf.prompt_post_invoke",
+                "cmf.resource_pre_fetch",
+                "cmf.resource_post_fetch",
+                "http.request",
+                "http.response",
+                "revocation.check",
+            ],
+            "a host that skips a hook has_hooks_for denies would skip its revocation check"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_revocation_no_hook_is_reported_for_it() {
+        let (engine, _) = engine("routes:\n  - tool: t\n").await;
+
+        let reported: Vec<_> = BUILTIN_HOOK_METADATA
+            .iter()
+            .filter(|(name, _)| engine.has_hooks_for(name))
+            .map(|(name, _)| *name)
+            .collect();
+
+        assert!(reported.is_empty(), "nothing is configured: {reported:?}");
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
