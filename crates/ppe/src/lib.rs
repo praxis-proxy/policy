@@ -57,7 +57,8 @@
 //! defaults must select it or `fips`. `builtins`
 //! enables every bundled extension, including the Valkey session
 //! store; or pick a granular subset (`jwt`, `api-key`, `oauth`, `elicitation-ciba`,
-//! `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`; or `jwt-openssl-fips` in
+//! `revocation-introspection`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`;
+//! or `jwt-openssl-fips` in
 //! place of `jwt`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
@@ -242,6 +243,10 @@ pub use praxis_policy_builtins::plugins::identity_jwt::{
 pub use praxis_policy_builtins::plugins::quota::{KIND as QUOTA_KIND, QuotaFactory};
 #[cfg(feature = "experimental-ratelimit")]
 pub use praxis_policy_builtins::plugins::ratelimit::{KIND as RATELIMIT_KIND, RateLimitFactory};
+#[cfg(feature = "revocation-introspection")]
+pub use praxis_policy_builtins::plugins::revocation_introspection::{
+    IntrospectionFactory, KIND as REVOCATION_INTROSPECTION_KIND,
+};
 #[cfg(feature = "secrets-vault")]
 pub use praxis_policy_builtins::secrets::vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
@@ -277,8 +282,9 @@ pub use praxis_policy_builtins::session::valkey::{
 macro_rules! register_builtins {
     ( $( feature $feat:literal => $krate:ident :: $factory:ident ),* $(,)? ) => {
         /// Register every enabled by-kind plugin factory on `mgr`: identity
-        /// (`jwt`), delegators (`oauth`), and elicitation approvers
-        /// (`elicitation-ciba`). Call before loading a config so the engine can
+        /// (`jwt`), delegators (`oauth`), elicitation approvers
+        /// (`elicitation-ciba`), and revocation checkers
+        /// (`revocation-introspection`). Call before loading a config so the engine can
         /// instantiate plugins whose YAML `kind:` matches.
         ///
         /// A host adds its own with [`PolicyEngine::register_factory`], after
@@ -315,6 +321,8 @@ use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 use praxis_policy_builtins::plugins::quota as quota_builtin;
 #[cfg(feature = "experimental-ratelimit")]
 use praxis_policy_builtins::plugins::ratelimit as ratelimit_builtin;
+#[cfg(feature = "revocation-introspection")]
+use praxis_policy_builtins::plugins::revocation_introspection as introspection_builtin;
 
 #[cfg(feature = "_builtin")]
 register_builtins! {
@@ -323,6 +331,7 @@ register_builtins! {
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
     feature "delegator-vault"    => vault_delegator_builtin::VaultDelegatorFactory,
     feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
+    feature "revocation-introspection" => introspection_builtin::IntrospectionFactory,
     // Experimental: registers only when `experimental-quota` is named, never via `builtins`.
     feature "experimental-quota" => quota_builtin::QuotaFactory,
     feature "experimental-ratelimit" => ratelimit_builtin::RateLimitFactory,
@@ -670,6 +679,10 @@ mod tests {
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "delegator-vault"), "delegator/vault"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),
+            (
+                cfg!(feature = "revocation-introspection"),
+                "revocation/introspection",
+            ),
         ];
         for (enabled, kind) in expected {
             if !enabled {

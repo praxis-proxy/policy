@@ -281,6 +281,40 @@ fn a_run_step_naming_a_rate_limit_only_plugin_fails_the_load() {
 }
 
 #[test]
+fn a_plugin_reached_only_by_a_revocation_step_passes_at_every_scope() {
+    for scope in [
+        "global:\n  revocation: [introspect]\nroutes:\n  - tool: t\n",
+        "global:\n  defaults:\n    tool:\n      revocation: [introspect]\nroutes:\n  - tool: t\n",
+        "groups:\n  g:\n    revocation: [introspect]\nroutes:\n  - tool: t\n    groups: g\n",
+        "routes:\n  - tool: t\n    revocation: [introspect]\n",
+    ] {
+        let yaml = format!(
+            "plugins:\n  - name: introspect\n    kind: builtin\n    hooks: [revocation.check]\n{scope}"
+        );
+        let alarms = alarms_raised_by_loading(&yaml);
+        assert!(
+            !alarms.contains(&NARROWED.to_owned()),
+            "a revocation step covers the hook the plugin declares: {alarms:?}\n{yaml}"
+        );
+    }
+}
+
+#[test]
+fn a_run_step_naming_a_revocation_only_plugin_fails_the_load() {
+    let err = load_err(
+        "plugins:\n  - name: introspect\n    kind: builtin\n    hooks: [revocation.check]\n\
+         routes:\n  - tool: t\n    authorization:\n      pre_invocation:\n        - \
+         \"run(introspect)\"\n",
+    );
+    for needle in ["routes.tool:t", "introspect", "revocation:"] {
+        assert!(
+            err.contains(needle),
+            "the refusal must name `{needle}` and point at revocation: {err}"
+        );
+    }
+}
+
+#[test]
 fn a_run_step_naming_a_plugin_with_another_hook_beside_a_rate_limit_hook_loads() {
     loads(
         "

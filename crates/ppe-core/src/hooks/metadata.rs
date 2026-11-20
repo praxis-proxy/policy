@@ -87,6 +87,7 @@ use crate::http_hook::HTTP_HOOK_METADATA;
 use crate::identity::hook::IDENTITY_HOOK_METADATA;
 use crate::metadata::METADATA_HOOK_METADATA;
 use crate::ratelimit_hook::RATELIMIT_HOOK_METADATA;
+use crate::revocation::hook::REVOCATION_HOOK_METADATA;
 
 /// Lifecycle position a hook occupies for dispatcher purposes.
 ///
@@ -194,6 +195,7 @@ const HOOK_TABLES: &[&[(&str, HookMetadata)]] = &[
     ELICITATION_HOOK_METADATA,
     METADATA_HOOK_METADATA,
     RATELIMIT_HOOK_METADATA,
+    REVOCATION_HOOK_METADATA,
 ];
 
 /// How many rows the per-module tables hold between them, so the flat
@@ -317,6 +319,7 @@ mod tests {
     use crate::identity::{HOOK_IDENTITY_RESOLVE, IdentityHook};
     use crate::metadata::{HOOK_METADATA_FETCH, MetadataFetchHook};
     use crate::ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY};
+    use crate::revocation::{HOOK_REVOCATION_CHECK, RevocationHook};
 
     #[test]
     fn cmf_tool_pre_invoke_is_pre_phase_for_tool_entity() {
@@ -379,6 +382,7 @@ mod tests {
             HOOK_TOKEN_DELEGATE,
             HOOK_ELICIT,
             HOOK_METADATA_FETCH,
+            HOOK_REVOCATION_CHECK,
         ] {
             let meta = lookup(name).expect("registered");
             assert_eq!(meta.phase, HookPhase::Unphased, "{name}");
@@ -517,9 +521,10 @@ mod tests {
             2,
             "the rate-limit family declares a hook per stage"
         );
+        assert_eq!(REVOCATION_HOOK_METADATA.len(), 1);
         assert_eq!(
             BUILTIN_HOOK_METADATA.len(),
-            16,
+            17,
             "every family's hooks reach the built-in table"
         );
         for table in HOOK_TABLES {
@@ -602,6 +607,7 @@ mod tests {
             HOOK_METADATA_FETCH,
             HOOK_RATELIMIT_PRE_IDENTITY,
             HOOK_RATELIMIT_POST_IDENTITY,
+            HOOK_REVOCATION_CHECK,
         ] {
             assert!(
                 BUILTIN_HOOK_METADATA.iter().any(|(n, _)| *n == name),
@@ -623,6 +629,7 @@ mod tests {
             (ELICITATION_HOOK_METADATA, ElicitationHook::NAME),
             (METADATA_HOOK_METADATA, MetadataFetchHook::NAME),
             (RATELIMIT_HOOK_METADATA, HttpHook::NAME),
+            (REVOCATION_HOOK_METADATA, RevocationHook::NAME),
         ] {
             for (name, meta) in table {
                 assert_eq!(meta.family, Some(family), "{name}");

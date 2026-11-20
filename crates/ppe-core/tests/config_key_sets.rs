@@ -72,6 +72,7 @@ fn the_route_table_is_the_accept_set() {
             "plugins",
             "authentication",
             "rate_limits",
+            "revocation",
             "assertions",
             "response",
             "authorization",
@@ -335,6 +336,7 @@ fn the_route_table_records_who_reads_each_key() {
             "groups",
             "authentication",
             "rate_limits",
+            "revocation",
             "assertions",
         ],
         "the route keys praxis-policy-core reads are its typed fields"
@@ -593,6 +595,7 @@ fn the_engine_settings_table_is_the_accept_set() {
             "audit_timeout_milliseconds",
             "short_circuit_on_deny",
             "route_cache_max_entries",
+            "require_revocation",
             "effect_log_path",
             "effect_log_compaction_threshold",
             "capture_content_provenance",
@@ -833,6 +836,76 @@ fn a_misspelled_rate_limits_object_key_is_rejected() {
     ] {
         let err = praxis_policy_core::config::parse_config(yaml)
             .expect_err("a misspelled rate_limits key must be rejected")
+            .to_string();
+        assert!(
+            err.contains("replace_inherted") && err.contains("replace_inherited"),
+            "the error at {path} must name the key and its accepted spelling: {err}"
+        );
+    }
+}
+
+#[test]
+fn every_section_scope_accepts_the_revocation_block() {
+    for scope in [
+        ConfigScope::Global,
+        ConfigScope::EntityDefault,
+        ConfigScope::Group,
+        ConfigScope::Route,
+    ] {
+        assert!(
+            names(scope).contains(&"revocation"),
+            "`revocation` sits beside `rate_limits` in the `{}` table",
+            scope.label()
+        );
+    }
+    for scope in [ConfigScope::Document, ConfigScope::EngineSettings] {
+        assert!(
+            !names(scope).contains(&"revocation"),
+            "`revocation` must not be accepted at `{}`",
+            scope.label()
+        );
+    }
+}
+
+#[test]
+fn the_revocation_tables_are_the_accept_sets() {
+    assert_eq!(
+        names(ConfigScope::Revocation),
+        vec!["steps", "replace_inherited"],
+        "a revocation block accepts what a rate_limits block does"
+    );
+    assert_eq!(
+        names(ConfigScope::RevocationStep),
+        vec!["name", "config"],
+        "a revocation step accepts what a rate_limits step does"
+    );
+}
+
+#[test]
+fn a_misspelled_revocation_object_key_is_rejected() {
+    for (path, yaml) in [
+        (
+            "routes[]",
+            "routes:\n  - tool: get_weather\n    revocation:\n      replace_inherted: true\n      \
+             steps: [introspect]\n",
+        ),
+        (
+            "global",
+            "global:\n  revocation:\n    replace_inherted: true\n    steps: [introspect]\n",
+        ),
+        (
+            "global.defaults.tool",
+            "global:\n  defaults:\n    tool:\n      revocation:\n        replace_inherted: \
+             true\n        steps: [introspect]\n",
+        ),
+        (
+            "groups.hr",
+            "groups:\n  hr:\n    revocation:\n      replace_inherted: true\n      steps: \
+             [introspect]\n",
+        ),
+    ] {
+        let err = praxis_policy_core::config::parse_config(yaml)
+            .expect_err("a misspelled revocation key must be rejected")
             .to_string();
         assert!(
             err.contains("replace_inherted") && err.contains("replace_inherited"),

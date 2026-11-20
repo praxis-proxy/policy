@@ -27,6 +27,7 @@
 //! | `elicitation-ciba` | `plugins::elicitation_ciba` |
 //! | `quota/limitador` | `plugins::quota` |
 //! | `ratelimit/limitador` | `plugins::ratelimit` |
+//! | `revocation-introspection` | `plugins::revocation_introspection` |
 //! | `cedar` | `pdps::cedar_direct` |
 //! | `cel` | `pdps::cel` |
 //! | `opa` | `pdps::opa` |
@@ -45,6 +46,11 @@ compile_error!("select one Policy crypto backend: crypto-rustcrypto or fips");
     not(any(feature = "crypto-rustcrypto", feature = "fips"))
 ))]
 compile_error!("api-key requires crypto-rustcrypto or fips");
+#[cfg(all(
+    feature = "revocation-introspection",
+    not(any(feature = "crypto-rustcrypto", feature = "fips"))
+))]
+compile_error!("revocation-introspection requires crypto-rustcrypto or fips");
 #[cfg(all(feature = "jwt", feature = "jwt-openssl-fips"))]
 compile_error!("select one JWT backend: jwt or jwt-openssl-fips");
 #[cfg(all(feature = "jwt-openssl-fips", not(feature = "fips")))]
@@ -92,5 +98,9 @@ pub fn bundled_crypto_capabilities() -> Vec<BundledCryptoCapability> {
     ]
 }
 
-#[cfg(any(feature = "valkey", feature = "elicitation-ciba"))]
+#[cfg(any(
+    feature = "valkey",
+    feature = "elicitation-ciba",
+    feature = "revocation-introspection"
+))]
 mod env_secret;
