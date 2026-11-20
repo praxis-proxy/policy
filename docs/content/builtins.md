@@ -143,8 +143,15 @@ One cost profile means every parameter that changes verification time
 matches across records: the bcrypt cost, every argon2 parameter, or the
 sha-crypt variant, round count and salt length. A file mixing sha-crypt
 salt lengths is refused at load, because a longer salt can add a digest
-block to most rounds and make those users cheaper or dearer to verify than
-an unknown one. Re-hash such a file with one salt length.
+block to two rounds in three and make those users cheaper or dearer to
+verify than an unknown one. Re-hash such a file with one salt length.
+
+Matching salt lengths fix the input length of every round that hashes the
+salt, not the exact total work. Sha-crypt setup hashes the salt a number of
+times derived from an intermediate digest, so two sha-crypt records with
+equal-length salts can still differ by up to a few dozen digest blocks.
+That difference is small beside the round count, which the profile does
+fix; bcrypt and argon2 records sharing a profile perform the same work.
 
 | | `htpasswd` | `user_file` |
 |---|---|---|

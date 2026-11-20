@@ -621,6 +621,12 @@ async fn an_overflow_attempt_settles_on_the_bucket_it_was_charged_against() {
 /// being an unlimited guessing path, and it is pinned by
 /// `failure_limit::tests::failed_recoveries_close_a_spent_buckets_recovery_path`.
 ///
+/// The bucket seed is random per process, so this cannot name a fixture ID
+/// that shares the victim's bucket. That a colliding caller is admitted as
+/// unproven and counted when it proves itself is pinned with a controlled
+/// collision by
+/// `failure_limit::tests::a_colliding_caller_proves_itself_over_a_bucket_another_key_spent`.
+///
 /// Driven against the limiter rather than a resolver: spraying this many
 /// user-ids through real bcrypt verifications would take minutes.
 #[test]
@@ -660,26 +666,19 @@ fn a_spray_that_blocks_every_overflow_bucket_still_lets_a_proven_caller_through(
         "the spray must have been counted in overflow"
     );
 
-    // A caller the saturated map cannot name, whose bucket the spray spent.
-    // The refusal is recoverable, not a verdict on this caller, so the attempt
-    // is admitted for a verification rather than denied outright.
-    let victim = limiter
-        .admit("victim")
-        .expect("a spent shared bucket must refuse recoverably, not block the attempt");
-    assert!(
-        victim.is_unproven(),
-        "a spent shared bucket must mark the attempt unproven, not serve it unconditionally: \
-         the failures in it belong to the spray, not to this caller, and only a verified \
-         credential tells the two apart"
+    let victim = limiter.admit("victim").expect(
+        "a caller the saturated map cannot name must be admitted for a verification, whether \
+         or not the spray spent its bucket: a spent shared bucket refuses recoverably, it does \
+         not block the attempt",
     );
-
-    // Settling it as a success is the evidence the bucket could not supply.
+    let unproven = victim.is_unproven();
     victim.record_success();
+
     assert_eq!(
         limiter.proven(),
-        1,
-        "a cleared shared-bucket refusal must be observable, so an operator can see \
-         legitimate callers paying for buckets they do not own"
+        u64::from(unproven),
+        "a success over a spent bucket is a cleared recovery and must be counted, and one over \
+         a bucket the spray missed is an ordinary success that must not be"
     );
 }
 

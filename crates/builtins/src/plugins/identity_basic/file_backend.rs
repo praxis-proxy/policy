@@ -79,7 +79,8 @@ struct Index {
     /// The hash an unknown user is verified against.
     ///
     /// One of the file's own records whenever it holds any, which is what
-    /// makes a miss cost exactly what a hit costs rather than approximately.
+    /// makes a miss run the same parameters a hit runs rather than estimated
+    /// ones.
     dummy: ParsedHash,
 }
 
@@ -460,11 +461,14 @@ fn mint_floor_hash(
 
 /// Build an index from a source, selecting the miss-path hash.
 ///
-/// Any record in the file costs what every other one does, so reusing one of
-/// them makes a miss cost exactly what a hit costs -- by construction rather
-/// than by estimate. The synthesized hash is for a file with no records at
-/// all, which otherwise answers in nanoseconds and is distinguishable from a
-/// populated one by timing alone.
+/// Every record in the file shares one cost profile, so reusing one of them
+/// makes a miss run the parameters a hit runs -- by construction rather than
+/// by estimate. For bcrypt and argon2 that is the same work. Sha-crypt setup
+/// hashes the salt a digest-dependent number of times, so a sha-crypt miss
+/// can differ from a hit by up to a few dozen digest blocks, small beside the
+/// rounds the profile fixes. The synthesized hash is for a file with no
+/// records at all, which otherwise answers in nanoseconds and is
+/// distinguishable from a populated one by timing alone.
 fn build_index(
     source: &dyn IndexSource,
     max_password_bytes: Option<usize>,
@@ -583,7 +587,7 @@ impl FileBackend {
     /// Whatever made the read or the parse fail. The index is unchanged either
     /// way.
     pub fn reload(&self) -> Result<(), String> {
-        self.state.reload()
+        self.state.reload().map(|_loaded_at_ms| ())
     }
 
     /// Look up a normalised user-id, refreshing the index when it is due.
@@ -611,7 +615,14 @@ impl FileBackend {
         // ceiling between the two clock reads, so a lookup that lost the slot
         // to a fresh index could otherwise deny as `Stale` against the index
         // that reload is about to replace.
+        //
+        // The due check is repeated here for the same reason. The refresh
+        // marker never lands later than the staleness ceiling, so an index
+        // that reads as stale is always due a refresh; one that crossed both
+        // between the two clock reads would otherwise deny with no reload
+        // attempted or in flight.
         if self.state.is_stale() {
+            ReloadState::refresh_if_due(&self.state).await;
             self.state.await_reload().await;
             if self.state.is_stale() {
                 return Err(DirectoryError::Stale);
@@ -756,10 +767,12 @@ impl ReloadState {
 
     /// Reload the file, retaining the previous index on failure.
     ///
+    /// Returns the load time it stamped on the published index.
+    ///
     /// # Errors
     ///
     /// Whatever made the read or the parse fail.
-    fn reload(&self) -> Result<(), String> {
+    fn reload(&self) -> Result<u64, String> {
         // Read, parse and publish under one lock, so concurrent reloads cannot
         // interleave. Two unserialized reloads that straddle a file
         // replacement can read opposite sides of it and then publish in the
@@ -802,8 +815,9 @@ impl ReloadState {
         // under a fresh one, which is a staleness ceiling that passes while
         // serving exactly what it exists to stop serving.
         self.index.store(Arc::new(index));
-        self.loaded_at_ms.store(self.now_ms(), Ordering::Release);
-        Ok(())
+        let loaded_at_ms = self.now_ms();
+        self.loaded_at_ms.store(loaded_at_ms, Ordering::Release);
+        Ok(loaded_at_ms)
     }
 
     /// Attempt a reload when the refresh interval has elapsed.
@@ -848,19 +862,30 @@ impl ReloadState {
         // keeps an unreadable file from being retried on every request, and it
         // moves only once the reload is done, so a lookup arriving mid-reload
         // still finds the slot due and waits on it when the index is stale.
+        //
+        // After a successful reload the marker counts from the load stamp, not
+        // from a later clock read. Validation keeps `refresh_secs` at or below
+        // `max_staleness_secs`, so the refresh falls due no later than the
+        // index goes stale; a marker read after the stamp could land past the
+        // ceiling when the two are equal, leaving a stale index with no
+        // refresh due.
         let interval_ms = state.source.refresh_secs().saturating_mul(1000);
         let reloading = Arc::clone(state);
         let outcome = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             let outcome = reloading.reload();
-            let next = reloading.now_ms().saturating_add(interval_ms);
+            let from = match outcome {
+                Ok(loaded_at_ms) => loaded_at_ms,
+                Err(_) => reloading.now_ms(),
+            };
+            let next = from.saturating_add(interval_ms);
             reloading.next_attempt_ms.store(next, Ordering::Release);
             outcome
         })
         .await;
 
         let error = match outcome {
-            Ok(Ok(())) => return,
+            Ok(Ok(_loaded_at_ms)) => return,
             Ok(Err(error)) => error,
             Err(_join_failed) => "the reload task did not complete".to_owned(),
         };

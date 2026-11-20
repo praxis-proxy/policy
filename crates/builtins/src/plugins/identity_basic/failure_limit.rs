@@ -205,11 +205,15 @@ impl Admission<'_> {
     /// whatever spent the bucket, and a second charge there is a budget the
     /// colliding caller cannot clear. The failure is charged to the bucket's
     /// recovery budget instead, which only failed recoveries spend, so
-    /// `max_failures` wrong guesses close recovery on that bucket for a window
-    /// while a caller who proves itself keeps passing.
+    /// `max_failures` wrong guesses close recovery on that bucket for a window.
+    /// While recovery is closed, [`admit`] refuses with [`Refusal::Saturated`]
+    /// before the credential is verified, so a colliding caller with a correct
+    /// password is refused too.
     ///
     /// A *successful* recovery still costs nothing, so a legitimate caller
-    /// sharing a bucket re-proves itself without limit.
+    /// sharing a bucket re-proves itself without limit while recovery is open.
+    ///
+    /// [`admit`]: FailureLimiter::admit
     pub fn record_failure(mut self) {
         self.settled = true;
         if self.unproven {
@@ -415,7 +419,6 @@ impl FailureLimiter {
     /// [`is_unproven`]: Admission::is_unproven
     /// [`saturations`]: FailureLimiter::saturations
     pub fn admit(&self, user_id: impl Into<String>) -> Result<Admission<'_>, Refusal> {
-        let now = self.now_ms();
         let window = self.window_ms();
         let user_id: String = user_id.into();
         // A poisoned lock means some holder panicked. Recovered rather than
@@ -435,6 +438,7 @@ impl FailureLimiter {
         // unreachable through this type's API and a test could only fake it.
         // Anyone adding a fallible critical section here owes it a test.
         let mut guard = self.write();
+        let now = self.now_ms();
 
         if let Some(counter) = guard.named.get_mut(user_id.as_str()) {
             counter.expire(now);
@@ -660,6 +664,11 @@ impl FailureLimiter {
         );
     }
 
+    /// Milliseconds since the limiter started.
+    ///
+    /// Read with the write lock held. A reading taken before the lock can lose
+    /// the race for it, and `fail` would then store its older window end over
+    /// a later settlement's, expiring the counter early.
     fn now_ms(&self) -> u64 {
         self.started
             .elapsed()
@@ -678,16 +687,16 @@ impl FailureLimiter {
 
     /// Release an attempt's reservation without recording a verdict.
     fn release(&self, user_id: &str, slot: Slot) {
-        let now = self.now_ms();
         let mut guard = self.write();
+        let now = self.now_ms();
         guard.with_counter(user_id, slot, |counter| counter.release(now));
     }
 
     /// Convert an attempt's reservation into a recorded failure.
     fn settle_failure(&self, user_id: &str, slot: Slot) {
-        let now = self.now_ms();
         let window = self.window_ms();
         let mut guard = self.write();
+        let now = self.now_ms();
         guard.with_counter(user_id, slot, |counter| counter.fail(now, window));
     }
 
@@ -704,8 +713,8 @@ impl FailureLimiter {
     /// standing for the same reason, and are what the caller re-proves itself
     /// against on its next request.
     fn settle_success(&self, user_id: &str, slot: Slot) {
-        let now = self.now_ms();
         let mut guard = self.write();
+        let now = self.now_ms();
         match slot {
             Slot::Named => {
                 if let Some(counter) = guard.named.get_mut(user_id) {
@@ -753,9 +762,9 @@ impl FailureLimiter {
         let Slot::Overflow(bucket) = slot else {
             return;
         };
-        let now = self.now_ms();
         let window = self.window_ms();
         let mut guard = self.write();
+        let now = self.now_ms();
         if let Some(recovery) = guard.recoveries.get_mut(bucket) {
             settle(recovery, now, window);
         }
@@ -769,9 +778,9 @@ impl FailureLimiter {
     /// inherited failures would be removed by the very failure meant to bound
     /// it -- handing the next attempt a fresh budget.
     fn settle_named_unproven_failure(&self, user_id: &str) {
-        let now = self.now_ms();
         let window = self.window_ms();
         let mut guard = self.write();
+        let now = self.now_ms();
         if let Some(counter) = guard.named.get_mut(user_id) {
             counter.fail_unreserved(now, window);
         }
@@ -1541,6 +1550,42 @@ mod tests {
             u64::from(rounds),
             "every cleared refusal must be counted, so an operator can see legitimate callers \
              paying for failures they do not own"
+        );
+    }
+
+    #[test]
+    fn a_colliding_caller_proves_itself_over_a_bucket_another_key_spent() {
+        let limiter = limiter(0, 2);
+        let bucket = overflow_bucket("attacker");
+        let victim = (0..1_000_000_u32)
+            .map(|n| format!("victim{n}"))
+            .find(|candidate| overflow_bucket(candidate) == bucket)
+            .expect("a million candidates cover a 1024-bucket table");
+        fail(&limiter, "attacker", 2);
+
+        let attempt = limiter
+            .admit(victim.as_str())
+            .expect("a bucket another key spent must refuse recoverably, not block the attempt");
+        assert!(
+            attempt.is_unproven(),
+            "the spent bucket's failures belong to the attacker, so the colliding caller is \
+             admitted for a verification rather than served unconditionally"
+        );
+        attempt.record_success();
+
+        assert_eq!(
+            limiter.proven(),
+            1,
+            "a cleared shared-bucket refusal must be observable, so an operator can see \
+             legitimate callers paying for buckets they do not own"
+        );
+
+        let again = limiter
+            .admit(victim.as_str())
+            .expect("the recovery budget still has room, so the caller can prove itself again");
+        assert!(
+            again.is_unproven(),
+            "the bucket is still spent, so the next attempt is a recovery too"
         );
     }
 

@@ -189,7 +189,7 @@ pub enum CostProfile {
     },
 
     /// Sha-crypt parameters: the function, the round count it runs, and the
-    /// salt length every round hashes.
+    /// salt length the rounds that use the salt hash.
     ShaCrypt {
         /// Which function (`$5$` or `$6$`), since the two differ in cost.
         variant: ShaCryptVariant,
@@ -197,9 +197,16 @@ pub enum CostProfile {
         rounds: u32,
         /// The salt's length in characters.
         ///
-        /// Part of the cost, because most rounds hash the salt. With a 7-byte
-        /// password, salts of 8 and 16 characters make a `$5$` round 54 or 62
-        /// bytes: one SHA-256 block or two, per [RFC 6234 Section 4.1].
+        /// Part of the cost, because two rounds in three hash the salt. With a
+        /// 7-byte password, salts of 8 and 16 characters make such a `$5$`
+        /// round 54 or 62 bytes: one SHA-256 block or two, per
+        /// [RFC 6234 Section 4.1].
+        ///
+        /// Matching lengths give every record the same input length in those
+        /// rounds, not identical total work. Setup hashes the salt a number of
+        /// times derived from an intermediate digest, so two records with
+        /// equal-length salts can still differ by up to a few dozen digest
+        /// blocks before the rounds begin.
         ///
         /// [RFC 6234 Section 4.1]: https://datatracker.ietf.org/doc/html/rfc6234#section-4.1
         salt_chars: usize,

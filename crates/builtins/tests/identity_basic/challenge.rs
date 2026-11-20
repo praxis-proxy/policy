@@ -589,6 +589,20 @@ async fn failed_recoveries_close_a_spent_overflow_bucket_until_its_window_passes
         None,
         "the closure lasts one window, after which a caller who knows the password is served"
     );
+
+    resolve_with_header(&resolver, &basic_header("squatter", "whatever")).await;
+    for _ in 0..2 {
+        resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
+    }
+
+    let recovered = resolve_with_header(&resolver, &basic_header("alice", "correct horse")).await;
+    assert_eq!(
+        denial_code(&recovered).as_deref(),
+        None,
+        "with the named slot taken again and alice's bucket spent again, this login can only pass \
+         through recovery, so it proves the recovery budget expired with its window rather than \
+         only the bucket's ordinary budget"
+    );
 }
 
 #[tokio::test]

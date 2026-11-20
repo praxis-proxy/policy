@@ -608,6 +608,11 @@ fn a_burst_after_an_idle_period_past_the_ceiling_waits_for_the_reload() {
         let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
 
         tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
+        file.rewrite(&format!(
+            "{}\n{}\n",
+            bcrypt_line("alice", "pw", 4),
+            bcrypt_line("bob", "pw", 4)
+        ));
 
         let (squatter, release) = occupy_the_blocking_pool();
 
@@ -615,7 +620,7 @@ fn a_burst_after_an_idle_period_past_the_ceiling_waits_for_the_reload() {
         for _ in 0..16_u32 {
             let dir = std::sync::Arc::clone(&dir);
             set.spawn(async move {
-                dir.lookup("alice", &services())
+                dir.lookup("bob", &services())
                     .await
                     .map(|found| found.is_some())
             });
@@ -645,7 +650,9 @@ fn a_burst_after_an_idle_period_past_the_ceiling_waits_for_the_reload() {
         }
         assert!(
             outcomes.len() == 16 && outcomes.iter().all(|outcome| matches!(outcome, Ok(true))),
-            "once the reload publishes, every waiting lookup must answer from it: {outcomes:?}"
+            "once the reload publishes, every waiting lookup must answer from it: bob exists only \
+             in the rewritten file, so a lookup answering from the old index would miss: \
+             {outcomes:?}"
         );
         assert_eq!(
             dir.reload_attempts(),
@@ -881,17 +888,13 @@ async fn every_record_in_a_large_file_is_reachable() {
     let svc = services();
 
     assert_eq!(dir.len(), 500, "every record in a large file is indexed");
-    assert!(
-        dir.lookup("user0", &svc).await.expect("answers").is_some(),
-        "the first record is reachable"
-    );
-    assert!(
-        dir.lookup("user499", &svc)
-            .await
-            .expect("answers")
-            .is_some(),
-        "so is the last"
-    );
+    for n in 0..500_u32 {
+        let user_id = format!("user{n}");
+        assert!(
+            dir.lookup(&user_id, &svc).await.expect("answers").is_some(),
+            "{user_id} must be reachable, not only the first and last records"
+        );
+    }
     assert!(
         dir.lookup("nobody", &svc).await.expect("answers").is_none(),
         "and a miss in a large file is still a miss"
