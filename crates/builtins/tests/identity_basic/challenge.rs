@@ -507,7 +507,7 @@ async fn a_spent_overflow_bucket_does_not_deny_a_correct_password() {
 
     // Spend alice's bucket. Her user-id hashes to one bucket, so guessing
     // against her own name is the cheapest way to fill the one she shares.
-    for _ in 0..4 {
+    for _ in 0..2 {
         resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
     }
     assert!(
@@ -556,6 +556,38 @@ async fn a_spent_overflow_bucket_still_refuses_a_wrong_password() {
         Some(3),
         "a budget of two must refuse the third wrong guess even through a shared bucket: the \
          refusal moves after verification, it does not go away"
+    );
+}
+
+#[tokio::test]
+async fn failed_recoveries_close_a_spent_overflow_bucket_until_its_window_passes() {
+    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
+    let mut block = htpasswd_block(file.path());
+    block["failure_limit"] =
+        serde_json::json!({ "capacity": 1, "max_failures": 2, "window_secs": 1 });
+    let resolver = resolver(block).expect("the config loads");
+
+    resolve_with_header(&resolver, &basic_header("squatter", "whatever")).await;
+    for _ in 0..4 {
+        resolve_with_header(&resolver, &basic_header("alice", "wrong horse")).await;
+    }
+
+    let closed = resolve_with_header(&resolver, &basic_header("alice", "correct horse")).await;
+    assert_eq!(
+        denial_code(&closed).as_deref(),
+        Some(codes::TOO_MANY_FAILURES),
+        "two wrong guesses spend alice's shared bucket and two failed recoveries spend its \
+         recovery budget, so even a correct password is refused unverified: verifying it would \
+         leave the guesser an unlimited path against every user-id hashing into that bucket"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let reopened = resolve_with_header(&resolver, &basic_header("alice", "correct horse")).await;
+    assert_eq!(
+        denial_code(&reopened).as_deref(),
+        None,
+        "the closure lasts one window, after which a caller who knows the password is served"
     );
 }
 

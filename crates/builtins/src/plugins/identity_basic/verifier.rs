@@ -188,12 +188,21 @@ pub enum CostProfile {
         parallelism: u32,
     },
 
-    /// Sha-crypt parameters: the function, and the round count it runs.
+    /// Sha-crypt parameters: the function, the round count it runs, and the
+    /// salt length every round hashes.
     ShaCrypt {
         /// Which function (`$5$` or `$6$`), since the two differ in cost.
         variant: ShaCryptVariant,
         /// Rounds of the digest function.
         rounds: u32,
+        /// The salt's length in characters.
+        ///
+        /// Part of the cost, because most rounds hash the salt. With a 7-byte
+        /// password, salts of 8 and 16 characters make a `$5$` round 54 or 62
+        /// bytes: one SHA-256 block or two, per [RFC 6234 Section 4.1].
+        ///
+        /// [RFC 6234 Section 4.1]: https://datatracker.ietf.org/doc/html/rfc6234#section-4.1
+        salt_chars: usize,
     },
 }
 
@@ -226,9 +235,14 @@ impl CostProfile {
                 variant.as_str(),
                 u32::from(version),
             ),
-            Self::ShaCrypt { variant, rounds } => {
-                format!("{} rounds={rounds}", variant.ident())
-            },
+            Self::ShaCrypt {
+                variant,
+                rounds,
+                salt_chars,
+            } => format!(
+                "{} rounds={rounds} salt={salt_chars} chars",
+                variant.ident()
+            ),
         }
     }
 }
@@ -333,7 +347,8 @@ impl Default for Limits {
 ///
 /// Where a deployment is restricted to a SHA-2 underlying hash, use sha256crypt
 /// (`$5$`) or sha512crypt (`$6$`); `mkpasswd -m sha512crypt` writes them, and
-/// every record in one file must share a single cost profile.
+/// every record in one file must share a single cost profile, salt length
+/// included.
 ///
 /// ```
 /// use praxis_policy_builtins::plugins::identity_basic::{
@@ -353,6 +368,7 @@ impl Default for Limits {
 ///     CostProfile::ShaCrypt {
 ///         variant: ShaCryptVariant::Sha512,
 ///         rounds: 100_000,
+///         salt_chars: 16,
 ///     },
 /// );
 /// # Ok::<(), praxis_policy_builtins::plugins::identity_basic::HashError>(())
@@ -607,7 +623,8 @@ fn admit_sha_crypt(
     // enforce that -- it hashes whatever it is given -- so a longer salt would
     // verify here and fail against `crypt(3)`, making this backend disagree
     // with the tool that wrote the file.
-    if salt.as_str().len() > SHA_CRYPT_MAX_SALT_CHARS {
+    let salt_chars = salt.as_str().len();
+    if salt_chars > SHA_CRYPT_MAX_SALT_CHARS {
         return Err(HashError::Malformed);
     }
 
@@ -616,7 +633,11 @@ fn admit_sha_crypt(
     }
 
     Ok(ParsedHash {
-        profile: CostProfile::ShaCrypt { variant, rounds },
+        profile: CostProfile::ShaCrypt {
+            variant,
+            rounds,
+            salt_chars,
+        },
         encoded: stored.to_owned(),
     })
 }

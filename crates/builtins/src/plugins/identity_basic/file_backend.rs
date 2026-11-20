@@ -605,8 +605,17 @@ impl FileBackend {
         // directory failure rather than as an unknown user, which is the
         // difference between an operator seeing an outage and seeing a wave of
         // bad passwords.
+        //
+        // A reload in flight is waited for here, at the decision itself,
+        // rather than where the refresh slot was lost. The index can cross its
+        // ceiling between the two clock reads, so a lookup that lost the slot
+        // to a fresh index could otherwise deny as `Stale` against the index
+        // that reload is about to replace.
         if self.state.is_stale() {
-            return Err(DirectoryError::Stale);
+            self.state.await_reload().await;
+            if self.state.is_stale() {
+                return Err(DirectoryError::Stale);
+            }
         }
 
         let index = self.state.index.load();
@@ -731,6 +740,20 @@ impl ReloadState {
         age > Duration::from_secs(self.source.max_staleness_secs())
     }
 
+    /// Wait for a request-path reload already in flight, if there is one.
+    ///
+    /// Returns at once when the refresh slot is free: no reload is coming, so
+    /// the index this lookup sees is the one it has to answer from.
+    async fn await_reload(&self) {
+        if self.refreshing.try_lock().is_err() {
+            tracing::debug!(
+                backend = self.source.kind(),
+                "index past its ceiling; waiting for the in-flight reload",
+            );
+            drop(self.refreshing.lock().await);
+        }
+    }
+
     /// Reload the file, retaining the previous index on failure.
     ///
     /// # Errors
@@ -786,29 +809,21 @@ impl ReloadState {
     /// Attempt a reload when the refresh interval has elapsed.
     ///
     /// The reload itself runs on a blocking thread. A lookup that finds a
-    /// reload already in flight returns at once while the index is inside its
-    /// ceiling, and waits for that reload once it is past it.
+    /// reload already in flight returns at once; [`ReloadState::await_reload`]
+    /// is how it waits for that reload when the index is past its ceiling.
+    ///
+    /// [`ReloadState::await_reload`]: ReloadState::await_reload
     async fn refresh_if_due(state: &Arc<Self>) {
         if state.now_ms() < state.next_attempt_ms.load(Ordering::Acquire) {
             return;
         }
 
         // Losing the slot means another lookup is already reloading. Within
-        // the ceiling the running index is still an answer, so this lookup
-        // serves it. Past the ceiling the only answer is the one that reload
-        // is about to publish, and denying instead turns one quiet period into
-        // a burst of `Stale` denials.
-        let slot = match Arc::clone(&state.refreshing).try_lock_owned() {
-            Ok(slot) => slot,
-            Err(_in_flight) if state.is_stale() => {
-                tracing::debug!(
-                    backend = state.source.kind(),
-                    "index past its ceiling; waiting for the in-flight reload",
-                );
-                drop(state.refreshing.lock().await);
-                return;
-            },
-            Err(_in_flight) => return,
+        // the ceiling the running index is still an answer. Past it, `lookup`
+        // waits for that reload, since denying instead turns one quiet period
+        // into a burst of `Stale` denials.
+        let Ok(slot) = Arc::clone(&state.refreshing).try_lock_owned() else {
+            return;
         };
 
         // A reload that finished between the due check above and the slot

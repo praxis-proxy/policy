@@ -809,7 +809,8 @@ fn sha_crypt_records_load_and_verify_in_both_variants() {
             parsed.profile(),
             CostProfile::ShaCrypt {
                 variant,
-                rounds: 1_000
+                rounds: 1_000,
+                salt_chars: 16,
             },
             "{ident} must carry the round count it was minted at"
         );
@@ -861,7 +862,8 @@ fn a_sha_crypt_record_without_an_explicit_rounds_field_loads_at_the_default() {
         parsed.profile(),
         CostProfile::ShaCrypt {
             variant: ShaCryptVariant::Sha512,
-            rounds: SHA_CRYPT_DEFAULT_ROUNDS
+            rounds: SHA_CRYPT_DEFAULT_ROUNDS,
+            salt_chars: 16,
         },
         "an absent rounds field means the format's default, not zero: reading it as anything else \
          would make this record's profile differ from an explicit `rounds=5000` that hashes \

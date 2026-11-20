@@ -84,6 +84,22 @@ pub fn argon2_line(user_id: &str, password: &str, memory_kib: u32, time_cost: u3
 /// Minted for the same reason as the argon2 helper: a checked-in digest
 /// matches no password anyone knows, so it cannot prove a verify.
 pub fn sha_crypt_at(variant: ShaCryptVariant, rounds: u32, password: &str) -> String {
+    // Twelve raw bytes, not sixteen: the hasher base64-encodes whatever it is
+    // given before hashing, so a 16-byte salt would land as a 22-character
+    // field and exceed the format's 16-character cap. Twelve encodes to
+    // exactly sixteen, which is the width every published `$5$`/`$6$` vector
+    // carries.
+    sha_crypt_salted(variant, rounds, password, b"saltsaltsalt")
+}
+
+/// A sha-crypt hash minted over `raw_salt`, which the hasher base64-encodes
+/// into the salt field: six raw bytes make an eight-character salt.
+pub fn sha_crypt_salted(
+    variant: ShaCryptVariant,
+    rounds: u32,
+    password: &str,
+    raw_salt: &[u8],
+) -> String {
     use sha_crypt::PasswordHasher as _;
 
     let algorithm = match variant {
@@ -93,13 +109,8 @@ pub fn sha_crypt_at(variant: ShaCryptVariant, rounds: u32, password: &str) -> St
     };
     let params = sha_crypt::Params::new(rounds).expect("sha-crypt accepts these rounds");
 
-    // Twelve raw bytes, not sixteen: the hasher base64-encodes whatever it is
-    // given before hashing, so a 16-byte salt would land as a 22-character
-    // field and exceed the format's 16-character cap. Twelve encodes to
-    // exactly sixteen, which is the width every published `$5$`/`$6$` vector
-    // carries.
     sha_crypt::ShaCrypt::new(algorithm, params)
-        .hash_password_with_salt(password.as_bytes(), b"saltsaltsalt")
+        .hash_password_with_salt(password.as_bytes(), raw_salt)
         .expect("sha-crypt mints with a legal salt")
         .to_string()
 }

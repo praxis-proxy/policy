@@ -420,7 +420,7 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         // the directory's verification permits.
         let admission = match self
             .limiter
-            .admit(&limiter_key(user_id, payload.client_host()))
+            .admit(limiter_key(user_id, payload.client_host()))
         {
             Ok(admission) => admission,
             // `Refusal` is `#[non_exhaustive]` for downstream crates, but

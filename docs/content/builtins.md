@@ -139,6 +139,13 @@ rather than in how they verify one. Both index by user-id, admit the same
 four schemes, enforce one cost profile per file, and share the refresh
 window and staleness ceiling described below.
 
+One cost profile means every parameter that changes verification time
+matches across records: the bcrypt cost, every argon2 parameter, or the
+sha-crypt variant, round count and salt length. A file mixing sha-crypt
+salt lengths is refused at load, because a longer salt can add a digest
+block to most rounds and make those users cheaper or dearer to verify than
+an unknown one. Re-hash such a file with one salt length.
+
 | | `htpasswd` | `user_file` |
 |---|---|---|
 | Format | Apache `.htpasswd` lines | YAML under a `users:` key |
@@ -308,6 +315,16 @@ keeps its own: with N replicas a guesser gets about N times `max_failures`
 per window, and a lockout applies only on the replicas that counted the
 failures. A spray of one password across many user-ids never fills a single
 counter. Both need a shared or edge limiter.
+
+Past `capacity`, keys are counted in a fixed table of shared overflow
+buckets. A spent bucket does not refuse a correct password: the attempt is
+verified, because the failures that spent the bucket may belong to another
+key. Each bucket's wrong guesses on that path are budgeted too. Once
+`max_failures` of them land within a window, the bucket denies as
+`auth.too_many_failures` without verifying until a window passes, so a
+guesser who spent a target's bucket gains at most one more budget per
+window. A key that shares that bucket is denied for that window as well.
+Raise `capacity` if the limiter's saturation count keeps rising.
 
 ### The HTTP transport
 

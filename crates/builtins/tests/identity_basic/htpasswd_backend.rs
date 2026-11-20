@@ -14,7 +14,7 @@ use praxis_policy_builtins::plugins::identity_basic::{
 use praxis_policy_builtins::plugins::identity_basic::ShaCryptVariant;
 
 use crate::support::{
-    HtpasswdFile, argon2_line, bcrypt_line, config_for, services, sha_crypt_line,
+    HtpasswdFile, argon2_line, bcrypt_line, config_for, services, sha_crypt_line, sha_crypt_salted,
 };
 
 // -----------------------------------------------------------------------------
@@ -24,6 +24,13 @@ use crate::support::{
 /// An argon2 record, for the uniformity cases.
 const ARGON2_RECORD: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
                              MOUsGI8r0i0dSn9k0rLmvL2mNj8D0nQ0jQX1QmXKjQI";
+
+/// How long a held task is watched for, to show it is waiting rather than done.
+///
+/// Bounded observation, not a deadline the work races: the task cannot finish
+/// until the test releases what it is held on, so the probe need only be long
+/// enough for the other tasks to run, and every passing run waits it out.
+const PENDING_PROBE: std::time::Duration = std::time::Duration::from_millis(200); // 200 ms
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -390,11 +397,7 @@ async fn the_smallest_legal_refresh_interval_still_merges_a_burst_into_one_read(
 
 #[test]
 fn a_due_reload_runs_on_the_blocking_pool_not_the_async_worker() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .max_blocking_threads(1)
-        .enable_time()
-        .build()
-        .expect("the test runtime builds");
+    let runtime = single_blocking_thread_runtime();
 
     runtime.block_on(async {
         let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
@@ -487,13 +490,13 @@ async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_rec
     }
 
     writer.await.expect("the revoking rename completes");
-    // The barrier does not order the rename before any reload: on a loaded
-    // runner all 16 racing reloads can read the pre-revocation file before
-    // the writer thread is scheduled. These reloads start only after the
-    // rename has landed, and they still overlap any racers that are running.
-    // A serialized racer that publishes after one of them must also have
-    // read after it, so the settled index has to come from the
-    // post-revocation file. An unserialized one could still publish bob last.
+    tracing::info!(
+        late_reloads = 4,
+        "the barrier does not order the rename before any racing reload, so on a loaded runner \
+         all 16 can read the pre-revocation file; these reloads start after the rename has \
+         landed and still overlap any racer that is running, so a serialized racer publishing \
+         after one of them also read after it, while an unserialized one could publish bob last"
+    );
     for _ in 0..4_u32 {
         let dir = std::sync::Arc::clone(&dir);
         set.spawn_blocking(move || dir.reload());
@@ -593,86 +596,127 @@ async fn past_the_staleness_ceiling_lookups_report_unavailable_not_unknown() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_burst_after_an_idle_period_past_the_ceiling_waits_for_the_reload() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
-    let mut config = config_for(file.path());
-    config.refresh_secs = 1;
-    config.max_staleness_secs = 2;
-    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
+#[test]
+fn a_burst_after_an_idle_period_past_the_ceiling_waits_for_the_reload() {
+    let runtime = single_blocking_thread_runtime();
 
-    tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
+    runtime.block_on(async {
+        let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+        let mut config = config_for(file.path());
+        config.refresh_secs = 1;
+        config.max_staleness_secs = 2;
+        let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
 
-    let mut handles = Vec::new();
-    for _ in 0..16 {
-        let dir = std::sync::Arc::clone(&dir);
-        handles.push(tokio::spawn(async move {
-            dir.lookup("alice", &services())
-                .await
-                .map(|found| found.is_some())
-        }));
-    }
-    let mut outcomes = Vec::new();
-    for handle in handles {
-        outcomes.push(handle.await.expect("the lookup task completes"));
-    }
+        tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
 
-    assert!(
-        outcomes.iter().all(|outcome| matches!(outcome, Ok(true))),
-        "after a quiet period past the ceiling, lookups that lose the refresh slot must wait \
-         for the in-flight reload rather than deny as `Stale`: {outcomes:?}"
-    );
-    assert_eq!(
-        dir.reload_attempts(),
-        1,
-        "the waiting lookups must share the one reload rather than each run their own"
-    );
+        let (squatter, release) = occupy_the_blocking_pool();
+
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..16_u32 {
+            let dir = std::sync::Arc::clone(&dir);
+            set.spawn(async move {
+                dir.lookup("alice", &services())
+                    .await
+                    .map(|found| found.is_some())
+            });
+        }
+
+        let while_held = tokio::time::timeout(PENDING_PROBE, set.join_next()).await;
+        let reloads_while_held = dir.reload_attempts();
+
+        drop(release);
+        squatter.await.expect("the squatting task completes");
+
+        assert!(
+            matches!(while_held, Err(tokio::time::error::Elapsed { .. })),
+            "with the reload held off the blocking pool, no lookup in the burst may answer: past \
+             the ceiling each one waits for the in-flight reload rather than denying as `Stale`, \
+             got {while_held:?}"
+        );
+        assert_eq!(
+            reloads_while_held, 1,
+            "the first lookup claims the slot and queues the one reload, and the rest wait on it \
+             rather than start their own"
+        );
+
+        let mut outcomes = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            outcomes.push(joined.expect("the lookup task completes"));
+        }
+        assert!(
+            outcomes.len() == 16 && outcomes.iter().all(|outcome| matches!(outcome, Ok(true))),
+            "once the reload publishes, every waiting lookup must answer from it: {outcomes:?}"
+        );
+        assert_eq!(
+            dir.reload_attempts(),
+            1,
+            "the waiting lookups must share the one reload rather than each run their own"
+        );
+    });
 }
 
-#[tokio::test]
-async fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 10)));
-    let mut config = config_for(file.path());
-    config.max_concurrent_verifications = 1;
-    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
+#[test]
+fn concurrent_verifications_beyond_the_cap_deny_rather_than_queue() {
+    let runtime = single_blocking_thread_runtime();
 
-    let mut set = tokio::task::JoinSet::new();
-    for _ in 0..8_u32 {
-        let dir = std::sync::Arc::clone(&dir);
-        set.spawn(async move {
-            let svc = services();
-            let rec = dir
-                .lookup("alice", &svc)
-                .await
-                .expect("answers")
-                .expect("alice exists");
-            dir.verify(Some(&rec), &crate::support::password("pw"), &svc)
-                .await
-        });
-    }
+    runtime.block_on(async {
+        let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+        let mut config = config_for(file.path());
+        config.max_concurrent_verifications = 1;
+        let dir = HtpasswdDirectory::new(config).expect("the file loads");
+        let svc = services();
+        let record = dir
+            .lookup("alice", &svc)
+            .await
+            .expect("the lookup answers")
+            .expect("alice is in the file");
+        let credential = crate::support::password("pw");
 
-    let mut saturated = 0_u32;
-    while let Some(joined) = set.join_next().await {
-        if matches!(
-            joined.expect("the task completes"),
-            Err(praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated)
-        ) {
-            saturated = saturated.saturating_add(1);
+        let (squatter, release) = occupy_the_blocking_pool();
+
+        let mut admitted = Box::pin(dir.verify(Some(&record), &credential, &svc));
+        let took_the_permit = futures::poll!(&mut admitted).is_pending();
+
+        let mut contenders = Vec::new();
+        for _ in 0..7_u32 {
+            contenders.push(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    dir.verify(Some(&record), &credential, &svc),
+                )
+                .await,
+            );
         }
-    }
-    assert!(
-        saturated > 0,
-        "a cap of 1 under 8 concurrent verifies must refuse at least one"
-    );
+
+        drop(release);
+        squatter.await.expect("the squatting task completes");
+        let verdict = admitted.await;
+
+        assert!(
+            took_the_permit,
+            "the first verify must take the only permit and queue its blocking work"
+        );
+        assert!(
+            contenders.iter().all(|contender| matches!(
+                contender,
+                Ok(Err(
+                    praxis_policy_builtins::plugins::identity_basic::DirectoryError::Saturated
+                ))
+            )),
+            "with the only permit held, every contender must be refused at once as `Saturated` \
+             rather than queue behind it: {contenders:?}"
+        );
+        assert!(
+            matches!(verdict, Ok(true)),
+            "and the verification holding the permit must authenticate once it runs: the cap \
+             refuses excess work, not the request it admitted, got {verdict:?}"
+        );
+    });
 }
 
 #[test]
 fn dropping_a_verify_future_does_not_release_its_permit_early() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .max_blocking_threads(1)
-        .enable_time()
-        .build()
-        .expect("the test runtime builds");
+    let runtime = single_blocking_thread_runtime();
 
     runtime.block_on(async {
         let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
@@ -722,52 +766,87 @@ fn dropping_a_verify_future_does_not_release_its_permit_early() {
     });
 }
 
-#[tokio::test]
-async fn a_burst_of_lookups_triggers_one_file_read() {
-    let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
-    let mut config = config_for(file.path());
-    config.refresh_secs = 1;
-    config.max_staleness_secs = 3600;
-    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
+#[test]
+fn a_burst_of_lookups_triggers_one_file_read() {
+    let runtime = single_blocking_thread_runtime();
 
-    assert_eq!(
-        dir.reload_attempts(),
-        0,
-        "no read happens before the first due time"
-    );
+    runtime.block_on(async {
+        let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 4)));
+        let mut config = config_for(file.path());
+        config.refresh_secs = 1;
+        config.max_staleness_secs = 3600;
+        let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
 
-    file.rewrite(&format!(
-        "{}\n{}\n",
-        bcrypt_line("alice", "pw", 4),
-        bcrypt_line("bob", "pw", 4),
-    ));
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-
-    let mut set = tokio::task::JoinSet::new();
-    for _ in 0..16_u32 {
-        let dir = std::sync::Arc::clone(&dir);
-        set.spawn(async move {
-            let svc = services();
-            dir.lookup("alice", &svc).await.map(|found| found.is_some())
-        });
-    }
-    while let Some(joined) = set.join_next().await {
-        assert!(
-            joined.expect("the task completes").expect("answers"),
-            "every lookup in the burst must see the record"
+        assert_eq!(
+            dir.reload_attempts(),
+            0,
+            "no read happens before the first due time"
         );
-    }
 
-    assert_eq!(
-        dir.reload_attempts(),
-        1,
-        "16 concurrent lookups past the due time must cost exactly one file read"
-    );
-    assert_eq!(
-        dir.len(),
-        2,
-        "and that one read must have picked up the rewritten file"
-    );
+        file.rewrite(&format!(
+            "{}\n{}\n",
+            bcrypt_line("alice", "pw", 4),
+            bcrypt_line("bob", "pw", 4),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        let (squatter, release) = occupy_the_blocking_pool();
+
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..16_u32 {
+            let dir = std::sync::Arc::clone(&dir);
+            set.spawn(async move {
+                dir.lookup("alice", &services())
+                    .await
+                    .map(|found| found.is_some())
+            });
+        }
+
+        let mut served = Vec::new();
+        let losers = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while served.len() < 15
+                && let Some(joined) = set.join_next().await
+            {
+                served.push(joined.expect("the lookup task completes"));
+            }
+        })
+        .await;
+        let while_held = tokio::time::timeout(PENDING_PROBE, set.join_next()).await;
+        let reloads_while_held = dir.reload_attempts();
+
+        drop(release);
+        squatter.await.expect("the squatting task completes");
+
+        assert!(
+            matches!(losers, Ok(())) && served.iter().all(|outcome| matches!(outcome, Ok(true))),
+            "within the ceiling, the 15 lookups that lose the refresh slot must answer from the \
+             running index while the reload is held, rather than wait for it: {served:?}"
+        );
+        assert!(
+            matches!(while_held, Err(tokio::time::error::Elapsed { .. })),
+            "the lookup that claimed the slot must still be waiting on the held reload, or the \
+             burst did not overlap it, got {while_held:?}"
+        );
+        assert_eq!(
+            reloads_while_held, 1,
+            "16 concurrent lookups past the due time must cost exactly one file read"
+        );
+
+        let reloader = set
+            .join_next()
+            .await
+            .expect("the reloading lookup is still in the set")
+            .expect("the lookup task completes");
+        assert!(
+            matches!(reloader, Ok(true)),
+            "the lookup that ran the reload must answer once it publishes, got {reloader:?}"
+        );
+        assert_eq!(
+            dir.len(),
+            2,
+            "and that one read must have picked up the rewritten file"
+        );
+    });
 }
 
 #[tokio::test]
@@ -789,12 +868,14 @@ async fn the_stored_hash_never_reaches_the_projected_fields() {
 }
 
 #[tokio::test]
-async fn lookup_cost_does_not_grow_with_the_record_count() {
-    let mut lines = String::new();
-    for n in 0..500_u32 {
-        lines.push_str(&bcrypt_line(&format!("user{n}"), "pw", 4));
-        lines.push('\n');
-    }
+async fn every_record_in_a_large_file_is_reachable() {
+    let shared = bcrypt_line("user", "pw", 4);
+    let (_, stored) = shared
+        .split_once(':')
+        .expect("the fixture line has a separator");
+    let lines: String = (0..500_u32)
+        .map(|n| format!("user{n}:{stored}\n"))
+        .collect();
     let file = HtpasswdFile::write(&lines);
     let dir = directory(&file).expect("a large file loads");
     let svc = services();
@@ -809,7 +890,7 @@ async fn lookup_cost_does_not_grow_with_the_record_count() {
             .await
             .expect("answers")
             .is_some(),
-        "so is the last, without a scan"
+        "so is the last"
     );
     assert!(
         dir.lookup("nobody", &svc).await.expect("answers").is_none(),
@@ -959,6 +1040,14 @@ fn a_file_whose_records_cost_different_amounts_fails_at_load() {
             ),
         ),
         (
+            "two sha-crypt salt lengths",
+            format!(
+                "a:{}\nb:{}\n",
+                sha_crypt_salted(ShaCryptVariant::Sha256, 1_000, "pw", b"saltsalt0000"),
+                sha_crypt_salted(ShaCryptVariant::Sha256, 1_000, "pw", b"salt00"),
+            ),
+        ),
+        (
             "sha-crypt and bcrypt",
             format!(
                 "{}\n{}\n",
@@ -1060,10 +1149,6 @@ async fn a_reload_onto_a_new_uniform_cost_is_accepted_and_tracked() {
 
 #[tokio::test]
 async fn a_reload_onto_mixed_costs_is_refused_and_the_uniform_index_keeps_serving() {
-    // Uniformity is a property of whatever is being served, not of the first
-    // read, so the refresh path has to enforce it too. A rewrite that mixed
-    // costs and was accepted here would reintroduce the enumeration oracle at
-    // runtime, on a file that loaded clean.
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "pw", 5)));
     let dir = directory(&file).expect("the file loads");
     let svc = services();
@@ -1078,8 +1163,10 @@ async fn a_reload_onto_mixed_costs_is_refused_and_the_uniform_index_keeps_servin
         .expect_err("a rewrite mixing two bcrypt costs must fail the reload");
     assert!(
         err.contains("One cost profile per file"),
-        "the refresh path must refuse mixed costs for the same reason the load \
-         path does, and say so, got: {err}"
+        "the refresh path must refuse mixed costs for the same reason the load path does, and \
+         say so: uniformity is a property of whatever is being served, so a rewrite accepted \
+         here would reintroduce the enumeration oracle at runtime on a file that loaded clean, \
+         got: {err}"
     );
 
     assert_eq!(
@@ -1201,23 +1288,17 @@ async fn a_reload_onto_bcrypt_is_refused_under_a_ceiling_bcrypt_cannot_honour() 
 
 #[test]
 fn an_empty_file_loads_under_a_ceiling_bcrypt_could_not_honour() {
-    // The miss-path hash for a file with no records is a synthesized bcrypt
-    // one, so reading the ceiling off it refused this load and told the
-    // operator to re-hash a file holding no bcrypt record at all. An empty
-    // file constrains the ceiling not at all: there is no stored hash for a
-    // long password to be silently truncated against.
     let file = HtpasswdFile::write("# every user revoked\n");
 
-    HtpasswdDirectory::with_password_ceiling(config_for(file.path()), 128)
-        .expect("a file with no records must not be read as a bcrypt directory");
+    HtpasswdDirectory::with_password_ceiling(config_for(file.path()), 128).expect(
+        "a file with no records must not be read as a bcrypt directory: its miss-path hash is a \
+         synthesized bcrypt one, but with no stored hash there is no long password to truncate, \
+         so an empty file constrains the ceiling not at all",
+    );
 }
 
 #[tokio::test]
 async fn revoking_every_user_publishes_the_empty_index_under_a_large_ceiling() {
-    // Truncating the file is how an operator revokes everyone. Refusing that
-    // reload left the previous index serving, so every revoked user kept
-    // authenticating until the staleness ceiling elapsed -- a failure the
-    // caller sees as success.
     let argon2 = argon2_line("alice", "correct horse", 19_456, 2);
     let file = HtpasswdFile::write(&format!("{argon2}\n"));
     let dir = HtpasswdDirectory::with_password_ceiling(config_for(file.path()), 128)
@@ -1225,12 +1306,16 @@ async fn revoking_every_user_publishes_the_empty_index_under_a_large_ceiling() {
     let svc = services();
 
     file.rewrite("");
-    dir.reload()
-        .expect("emptying the file must publish the empty index, not refuse the reload");
+    dir.reload().expect(
+        "emptying the file is how an operator revokes everyone, so it must publish the empty \
+         index rather than refuse the reload",
+    );
 
     assert!(
         dir.lookup("alice", &svc).await.expect("answers").is_none(),
-        "the revoked user must be gone from the published index"
+        "the revoked user must be gone from the published index: a refused reload left the \
+         previous one serving, so every revoked user kept authenticating until the staleness \
+         ceiling elapsed -- a failure the caller sees as success"
     );
 }
 
@@ -1258,6 +1343,17 @@ async fn a_reload_onto_bcrypt_is_accepted_under_a_ceiling_bcrypt_can_honour() {
 // -----------------------------------------------------------------------------
 
 /// Build a directory over a fixture file, with the default ceilings.
+/// A current-thread runtime with one blocking thread, which
+/// [`occupy_the_blocking_pool`] can hold so blocking work queued after it is
+/// provably unstarted.
+fn single_blocking_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_time()
+        .build()
+        .expect("the test runtime builds")
+}
+
 fn directory(file: &HtpasswdFile) -> Result<HtpasswdDirectory, String> {
     HtpasswdDirectory::new(config_for(file.path()))
 }

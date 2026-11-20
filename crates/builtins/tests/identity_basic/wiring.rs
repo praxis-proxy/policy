@@ -616,6 +616,11 @@ async fn an_overflow_attempt_settles_on_the_bucket_it_was_charged_against() {
 /// earlier spray test filled only the *named* map, so the relocated defect
 /// passed underneath it.
 ///
+/// What still closes a bucket is `max_failures` *failed* recoveries in it,
+/// each a full verification. That is the bound that keeps a spent bucket from
+/// being an unlimited guessing path, and it is pinned by
+/// `failure_limit::tests::failed_recoveries_close_a_spent_buckets_recovery_path`.
+///
 /// Driven against the limiter rather than a resolver: spraying this many
 /// user-ids through real bcrypt verifications would take minutes.
 #[test]
@@ -633,12 +638,19 @@ fn a_spray_that_blocks_every_overflow_bucket_still_lets_a_proven_caller_through(
         .admit("squatter")
         .expect("the squatter takes the only named slot");
 
-    // Spend every bucket several times over, which is what the old refusal
-    // needed to lock the route.
+    tracing::info!(
+        junk_user_ids = 8_192,
+        "spending every bucket several times over, which is what the old refusal needed to lock \
+         the route; recoveries the spray is offered are abandoned unsettled, because only failed \
+         verifications charge a bucket's recovery budget and each one costs the spray a full KDF \
+         run through the recovery ceiling"
+    );
     for n in 0..8_192 {
         let name = format!("junk{n}");
         for _ in 0..2 {
-            if let Ok(admission) = limiter.admit(&name) {
+            if let Ok(admission) = limiter.admit(&name)
+                && !admission.is_unproven()
+            {
                 admission.record_failure();
             }
         }
@@ -673,7 +685,7 @@ fn a_spray_that_blocks_every_overflow_bucket_still_lets_a_proven_caller_through(
 
 #[test]
 fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
-    use praxis_policy_builtins::plugins::identity_basic::FailureLimiter;
+    use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
 
     let limiter = FailureLimiter::new(
         serde_json::from_value(serde_json::json!({
@@ -687,21 +699,23 @@ fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
         .expect("the junk name takes the only named slot")
         .record_failure();
 
-    // Attempts the shared bucket's budget admitted outright. Past it the
-    // attempts come back marked unproven -- bounded by the recovery ceiling
-    // and served only on a correct password -- which is a different bound and
-    // not the one this test pins.
     let mut charged = 0_u32;
-    for _ in 0..8 {
+    let mut recoveries = 0_u32;
+    let mut refusal = None;
+    for _ in 0..64 {
         match limiter.admit("alice") {
             Ok(admission) => {
                 if admission.is_unproven() {
-                    break;
+                    recoveries = recoveries.saturating_add(1);
+                } else {
+                    charged = charged.saturating_add(1);
                 }
-                charged = charged.saturating_add(1);
                 admission.record_failure();
             },
-            Err(_) => break,
+            Err(refused) => {
+                refusal = Some(refused);
+                break;
+            },
         }
     }
 
@@ -710,6 +724,12 @@ fn a_saturated_failure_limiter_still_bounds_a_fresh_target() {
         "a user-id the saturated map cannot name must still be bounded by max_failures: \
          filling the map with a junk name previously bought an attacker an unlimited budget \
          against any fresh target"
+    );
+    assert_eq!(
+        (recoveries, refusal),
+        (2, Some(Refusal::Saturated)),
+        "and guessing past the spent bucket must stop too: failed recoveries were uncharged, so \
+         every wrong guess after the first two reached the verifier without limit"
     );
     assert!(
         limiter.saturations() > 0,
