@@ -31,6 +31,7 @@ use praxis_policy_core::host::HostServices;
 use serde_json::Value;
 
 use super::BasicCredential;
+use super::failure_limit::RecoveryLease;
 use super::verifier::{HashError, Limits, ParsedHash, parse_hash};
 
 /// A recognized user record with projectable fields and an opaque verifier.
@@ -195,6 +196,34 @@ pub trait CredentialDirectory: std::fmt::Debug + Send + Sync {
         credential: &BasicCredential,
         services: &dyn HostServices,
     ) -> Result<bool, DirectoryError>;
+
+    /// [`verify`], holding `lease` until the verification work ends.
+    ///
+    /// The resolver passes the recovery ceiling slot of an unproven attempt
+    /// here. The default holds it for as long as this future, which is enough
+    /// for a backend that verifies on the calling task. A backend that moves
+    /// the work elsewhere, such as onto a blocking thread, must override this
+    /// and move the lease with the work: dropping a `JoinHandle` does not
+    /// cancel a blocking task, so a lease released with the future lets a
+    /// disconnected client start a replacement recovery beside the hash still
+    /// running.
+    ///
+    /// # Errors
+    ///
+    /// As [`verify`].
+    ///
+    /// [`verify`]: CredentialDirectory::verify
+    async fn verify_holding(
+        &self,
+        record: Option<&UserRecord>,
+        credential: &BasicCredential,
+        lease: Option<RecoveryLease>,
+        services: &dyn HostServices,
+    ) -> Result<bool, DirectoryError> {
+        let verdict = self.verify(record, credential, services).await;
+        drop(lease);
+        verdict
+    }
 
     /// A name for this backend, for diagnostics and the effect log.
     fn kind(&self) -> &'static str;

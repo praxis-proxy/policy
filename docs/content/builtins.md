@@ -194,14 +194,26 @@ plugins:
 # Not a PPE config document: this is the directory file the provider reads.
 users:
   - username: alice
-    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$..."
+    password_hash: "<alice's argon2id PHC string>"
     roles: [admin, auditor]
     teams: [platform]
   - username: contractor
-    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$..."
+    password_hash: "<contractor's argon2id PHC string>"
     roles: [reader]
     expires_at: 2026-12-31T23:59:59Z
 ```
+
+The two `password_hash` values are placeholders, and the file does not load
+until each is a complete PHC string. Mint every record with the same
+parameters, since a directory admits one cost profile per file. With the
+reference `argon2` CLI, for example:
+
+```console
+printf '%s' 'the password' | argon2 "$(openssl rand -hex 16)" -id -t 2 -k 19456 -p 1 -e
+```
+
+Use `printf '%s'` rather than `echo`, which appends a newline that becomes
+part of the hashed password.
 
 `username`, `password_hash` and `expires_at` are storage fields: they are
 consumed by the backend and never reach the projected claims, so a
@@ -280,15 +292,24 @@ That retention is bounded. The previous index serves only until it reaches
 `provider.max_staleness_secs`, after which every lookup is denied as
 `auth.directory_unavailable` rather than answered from an index the backend
 no longer stands behind. A refused refresh is therefore a countdown, not a
-steady state: restore a valid file within the staleness ceiling, or
-authentication stops for every user in the directory. The refusal is logged
+steady state: a *successful reload* has to land within the staleness
+ceiling, or authentication stops for every user in the directory. Restoring
+a valid file is not enough on its own. A failed reload delays the next
+automatic attempt by `refresh_secs`, so a file restored just after a failure
+is not read until that interval passes, and with `refresh_secs` equal to
+`max_staleness_secs` that can be after the ceiling. The refusal is logged
 once per refresh interval with the path and the parse error.
 
 ### Repeated failures
 
-`failure_limit` bounds password guessing. Once a key has spent its budget,
-further attempts deny as `auth.too_many_failures` without running the
-verifier, until the window passes. A successful login clears the counter.
+`failure_limit` bounds password guessing. Once a key counted by name has
+spent its own budget, further attempts deny as `auth.too_many_failures`
+without running the verifier, until the window passes, and a successful
+login clears that counter. A key counted in a shared overflow bucket, or
+carrying failures inherited from one, is different: a spent bucket still
+sends the attempt to verification while the bucket's recovery budget is
+open, and a success there clears none of the bucket's failures. See the
+overflow buckets below.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -307,9 +328,16 @@ the user-id alone. That difference decides who a lockout hits:
 - **Without one,** every client's failures land on the same counter, so
   anyone who knows a user-id can lock that user out for the window by
   sending `max_failures` wrong passwords, and keep it locked out by
-  repeating them. The default of 100 is the most that NIST SP 800-63B
-  Section 5.2.2 allows, which makes that lockout as expensive as the
-  standard permits, not impossible.
+  repeating them. The default of 100 is this plugin's local default and
+  sets the price of that lockout, not a bound that makes it impossible.
+
+The default is not a NIST consecutive-failure limit. NIST SP 800-63B-4
+Section 3.2.2 limits consecutive failed attempts on an account, and once
+that limit is reached it has the authenticator disabled until it is
+rebound. This limiter does neither: its budget restores itself when the
+window passes, even if the account never authenticates, and a source-scoped
+key or several replicas give one account several budgets. An account-level
+limit that disables and rebinds belongs to whatever owns your directory.
 
 Set the client host only from a value the client cannot choose, such as the
 peer address or one a trusted proxy wrote. Taken from a client-supplied

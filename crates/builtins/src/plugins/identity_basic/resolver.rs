@@ -417,8 +417,10 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         // saturated map cannot name. That guard reserves against a bounded
         // recovery ceiling rather than against the user-id's budget, so the
         // verification it asks for cannot be repeated freely enough to occupy
-        // the directory's verification permits.
-        let admission = match self
+        // the directory's verification permits. That ceiling slot is handed to
+        // the verification below, so it is held for as long as the hash runs
+        // rather than for as long as this future.
+        let mut admission = match self
             .limiter
             .admit(limiter_key(user_id, payload.client_host()))
         {
@@ -450,9 +452,10 @@ impl HookHandler<IdentityHook> for BasicIdentityResolver {
         // factor, so an unknown user-id costs what every known one costs.
         // Passing `None` through rather than returning early is the whole of
         // that property: a `return` here would be the timing oracle.
+        let lease = admission.take_lease();
         let verified = match self
             .directory
-            .verify(record.as_ref(), &credential, ext)
+            .verify_holding(record.as_ref(), &credential, lease, ext)
             .await
         {
             Ok(verified) => verified,

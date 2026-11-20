@@ -426,61 +426,53 @@ async fn unproven_attempts_cannot_hold_more_than_the_ceiling_of_verifications() 
     use praxis_policy_builtins::plugins::identity_basic::{FailureLimiter, Refusal};
 
     // Deliberately smaller than the former fixed ceiling of 8, which is the
-    // configuration that turned the ceiling into the outage it prevents.
+    // configuration that turned the ceiling into the outage it prevents. A
+    // quarter of it is the ceiling this measures.
     const VERIFICATIONS: usize = 8;
+    const CEILING: usize = VERIFICATIONS / 4;
+    // Above the ceiling, so the bucket's own recovery budget -- `max_failures`
+    // per window -- cannot be what refuses the attempt past it.
+    const MAX_FAILURES: u32 = 4;
 
     let limiter = FailureLimiter::new(
         serde_json::from_value(serde_json::json!({
-            "capacity": 0, "max_failures": 1, "window_secs": 60,
+            "capacity": 0, "max_failures": MAX_FAILURES, "window_secs": 60,
         }))
         .expect("the limiter config parses"),
         VERIFICATIONS,
     );
 
-    limiter
-        .admit("alice")
-        .expect("the first attempt is within the bucket's budget")
-        .record_failure();
+    for _ in 0..MAX_FAILURES {
+        limiter
+            .admit("alice")
+            .expect("each attempt is within the bucket's ordinary budget")
+            .record_failure();
+    }
 
     // Every further attempt for alice is unproven: her bucket is spent and the
     // map has no slot to promote her into. Held open, so they are exactly the
     // in-flight verifications an unbounded path would let pile up.
-    let mut held = Vec::new();
-    for _ in 0..64 {
-        match limiter.admit("alice") {
-            Ok(attempt) => {
-                assert!(
-                    attempt.is_unproven(),
-                    "a spent shared bucket must admit recoverably, or this test is measuring \
-                     the failure budget instead of the recovery path"
-                );
-                held.push(attempt);
-            },
-            Err(refusal) => {
-                assert_eq!(
-                    refusal,
-                    Refusal::Saturated,
-                    "the recovery path refuses distinctly from a spent failure budget, so an \
-                     operator can tell a saturated map from a blocked user-id"
-                );
-                break;
-            },
-        }
-    }
+    let held: Vec<_> = (0..CEILING)
+        .map(|n| {
+            let attempt = limiter.admit("alice").unwrap_or_else(|refusal| {
+                panic!("recovery {n} is within the ceiling: {refusal:?}")
+            });
+            assert!(
+                attempt.is_unproven(),
+                "a spent shared bucket must admit recoverably, or this test is measuring the \
+                 failure budget instead of the recovery path"
+            );
+            attempt
+        })
+        .collect();
 
-    assert!(
-        held.len() < 64,
-        "concurrent unproven verifications must be bounded: unbounded, {} of them ran at once \
-         and held every verification permit the directory has, denying unrelated callers as a \
-         directory failure",
-        held.len()
-    );
-    assert!(
-        held.len() < VERIFICATIONS,
-        "the ceiling must leave a verification permit for a caller whose own budget is \
-         unspent: {} recoveries against {VERIFICATIONS} permits is the directory outage this \
-         bounds, and a ceiling that only bounds concurrency reaches it whenever an operator \
-         configures a capacity at or below the ceiling",
+    assert_eq!(
+        limiter.admit("alice").err(),
+        Some(Refusal::Saturated),
+        "with {} recoveries held against {VERIFICATIONS} permits, the next must be refused: \
+         the bucket's recovery budget of {MAX_FAILURES} still has room, so only the global \
+         ceiling can refuse it, and that ceiling must leave permits for callers whose own \
+         budget is unspent",
         held.len()
     );
 }
@@ -708,17 +700,27 @@ async fn an_expired_limiter_entry_frees_capacity() {
 
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
+    let saturations = resolver.limiter_saturations();
     let fresh = resolve_with_header(&resolver, &basic_header("bob", "whatever")).await;
     assert_eq!(
         denial_code(&fresh).as_deref(),
         Some(codes::INVALID_CREDENTIALS),
-        "once alice's counter expires its slot is reclaimed, so bob is tracked rather than \
-         refused for want of capacity"
+        "bob's credential is evaluated rather than refused for want of capacity"
+    );
+    assert_eq!(
+        (resolver.limiter_saturations(), resolver.limiter_tracked()),
+        (saturations, 1),
+        "once alice's counter expires its slot is reclaimed, so bob is tracked by name in it: \
+         an attempt routed through overflow would deny the same way but count a saturation"
     );
 }
 
+/// The resolver's own denial carries the 401 and the challenge.
+///
+/// Driven against the resolver directly, so it pins what the plugin emits,
+/// not what a route's `response:` block does with it downstream.
 #[tokio::test]
-async fn a_route_response_block_does_not_override_the_challenge() {
+async fn the_resolver_denial_carries_its_own_401_and_challenge() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
     let resolver = resolver(htpasswd_block(file.path())).expect("the config loads");
 
@@ -728,14 +730,12 @@ async fn a_route_response_block_does_not_override_the_challenge() {
     assert_eq!(
         violation.proto_error_code,
         Some(401),
-        "an identity denial never reaches the route handler's denial decoration, because that \
-         handler binds only the CMF and HTTP hook families. So the plugin's 401 and challenge \
-         win unconditionally and a route's `response:` block does not apply here"
+        "a wrong password denies with the plugin's own 401"
     );
     assert_eq!(
         challenge_of(&result).as_deref(),
         Some("Basic realm=\"ops\""),
-        "the plugin's own challenge is the one that survives"
+        "and with the plugin's own challenge, which RFC 7617 requires on that 401"
     );
 }
 

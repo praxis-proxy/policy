@@ -6,15 +6,17 @@
 //! than a hit.
 
 use praxis_policy_builtins::plugins::identity_basic::directory::CredentialDirectory as _;
+use praxis_policy_builtins::plugins::identity_basic::file_backend::FileBackend;
 use praxis_policy_builtins::plugins::identity_basic::verifier::EMPTY_DIRECTORY_COST;
 use praxis_policy_builtins::plugins::identity_basic::{
-    CostProfile, HtpasswdConfig, HtpasswdDirectory,
+    CostProfile, DirectoryError, HtpasswdConfig, HtpasswdDirectory,
 };
 
 use praxis_policy_builtins::plugins::identity_basic::ShaCryptVariant;
 
 use crate::support::{
-    HtpasswdFile, argon2_line, bcrypt_line, config_for, services, sha_crypt_line, sha_crypt_salted,
+    HtpasswdFile, ScriptedSource, argon2_line, bcrypt_line, config_for, services, sha_crypt_line,
+    sha_crypt_salted,
 };
 
 // -----------------------------------------------------------------------------
@@ -441,93 +443,128 @@ fn a_due_reload_runs_on_the_blocking_pool_not_the_async_worker() {
     });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// A reload must hold the publication lock across its read, not only across
+/// the publish.
+///
+/// The first reload is held after it has captured the pre-revocation records,
+/// the source is then revoked, and a second reload is started. A lock that
+/// covered only the publish would let the second read while the first is
+/// held; it must instead wait for the first to publish, then read and publish
+/// the revoked records last.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_record() {
-    let shared = bcrypt_line("filler", "pw", 4);
-    let (_, stored) = shared
-        .split_once(':')
-        .expect("the fixture line has a separator");
-    let filler: String = (0..400_u32)
-        .map(|n| format!("filler-{n}:{stored}\n"))
-        .collect();
-    let both = format!("{filler}alice:{stored}\nbob:{stored}\n");
-    let revoked = format!("{filler}alice:{stored}\n");
-    tracing::info!(
-        records = 402,
-        "a wide file makes reading and parsing dominate the publish, so \
-         unserialized reloads would overlap readily; one shared hash per line \
-         keeps the fixture cheap to build and costs the same to parse"
+    let source = ScriptedSource::new(&["alice", "bob"], 3600, 7200);
+    let control = source.control();
+    let backend =
+        std::sync::Arc::new(FileBackend::new(Box::new(source), None).expect("the source loads"));
+
+    let (captured, release) = control.hold_next_read();
+    let first = {
+        let backend = std::sync::Arc::clone(&backend);
+        tokio::task::spawn_blocking(move || backend.reload())
+    };
+    tokio::task::spawn_blocking(move || captured.recv())
+        .await
+        .expect("the capture wait completes")
+        .expect("the first reload captures the pre-revocation records");
+
+    control.set_users(&["alice"]);
+    let reads_while_held = control.reads();
+    let second = {
+        let backend = std::sync::Arc::clone(&backend);
+        tokio::task::spawn_blocking(move || backend.reload())
+    };
+    tokio::time::sleep(PENDING_PROBE).await;
+    assert_eq!(
+        control.reads(),
+        reads_while_held,
+        "the second reload must not read while the first holds the publication lock: a lock \
+         over the publish alone lets it read the revoked file and publish before the held \
+         reload republishes bob"
     );
 
-    let file = HtpasswdFile::write(&both);
-    let mut config = config_for(file.path());
-    config.refresh_secs = 3600;
-    config.max_staleness_secs = 7200;
-    let dir = std::sync::Arc::new(HtpasswdDirectory::new(config).expect("the file loads"));
-    let svc = services();
+    release.send(()).expect("the held reload is waiting");
+    first
+        .await
+        .expect("the first reload task completes")
+        .expect("the pre-revocation records are valid");
+    second
+        .await
+        .expect("the second reload task completes")
+        .expect("the revoked records are valid");
 
-    let path = file.path().to_owned();
-    let staging = format!("{path}.revoking");
-    std::fs::write(&staging, &revoked).expect("the fixture is writable");
+    assert_eq!(
+        backend.peak_concurrent_reloads(),
+        1,
+        "reloads straddling a revocation must read, parse and publish one at a time"
+    );
+    assert!(
+        backend.lookup("bob").await.expect("answers").is_none(),
+        "the reload that read after the revocation publishes last, so bob stays revoked"
+    );
+}
 
-    let start = std::sync::Arc::new(std::sync::Barrier::new(17));
-    let writer = {
-        let start = std::sync::Arc::clone(&start);
-        tokio::task::spawn_blocking(move || {
-            start.wait();
-            std::fs::rename(&staging, &path).expect("the rename lands");
-        })
-    };
+/// A stalled read must not hold lookups past the staleness ceiling.
+///
+/// The defect: the lookup that started a reload awaited it unbounded, and
+/// every later lookup queued on the refresh slot before the staleness check.
+/// A hung read therefore hung every request instead of denying as `Stale`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_reload_past_the_ceiling_denies_as_stale_rather_than_hanging() {
+    let source = ScriptedSource::new(&["alice"], 1, 1);
+    let control = source.control();
+    let backend =
+        std::sync::Arc::new(FileBackend::new(Box::new(source), None).expect("the source loads"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    control.set_users(&["alice", "bob"]);
+    let (captured, release) = control.hold_next_read();
 
     let mut set = tokio::task::JoinSet::new();
-    for _ in 0..16_u32 {
-        let dir = std::sync::Arc::clone(&dir);
-        let start = std::sync::Arc::clone(&start);
-        set.spawn_blocking(move || {
-            start.wait();
-            dir.reload()
-        });
-    }
-
-    writer.await.expect("the revoking rename completes");
-    tracing::info!(
-        late_reloads = 4,
-        "the barrier does not order the rename before any racing reload, so on a loaded runner \
-         all 16 can read the pre-revocation file; these reloads start after the rename has \
-         landed and still overlap any racer that is running, so a serialized racer publishing \
-         after one of them also read after it, while an unserialized one could publish bob last"
-    );
     for _ in 0..4_u32 {
-        let dir = std::sync::Arc::clone(&dir);
-        set.spawn_blocking(move || dir.reload());
+        let backend = std::sync::Arc::clone(&backend);
+        set.spawn(async move { backend.lookup("bob").await.map(|found| found.is_some()) });
     }
-    while let Some(joined) = set.join_next().await {
-        joined
-            .expect("the reload task completes")
-            .expect("both versions of the file are valid");
-    }
+    tokio::task::spawn_blocking(move || captured.recv())
+        .await
+        .expect("the capture wait completes")
+        .expect("the request-path reload reaches the stalled read");
 
-    assert_eq!(
-        dir.peak_concurrent_reloads(),
-        1,
-        "reloads racing a file replacement must take the read-parse-publish \
-         path one at a time. Overlapping reloads read opposite sides of the \
-         replacement and then publish in completion order rather than read \
-         order, so the one holding the pre-revocation file can store on top of \
-         an index built from the post-revocation one -- restoring the revoked \
-         record and stamping it fresh for a whole refresh interval"
-    );
-
+    let outcomes = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut outcomes = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            outcomes.push(joined.expect("the lookup task completes"));
+        }
+        outcomes
+    })
+    .await
+    .expect("every lookup must answer within its bound rather than queue on the stalled read");
     assert!(
-        dir.lookup("bob", &svc).await.expect("answers").is_none(),
-        "a reload that started after the rename read a file without bob, and \
-         every later publish read later still, so the settled index must not \
-         carry him"
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, Err(DirectoryError::Stale))),
+        "past the ceiling with no replacement published, each lookup denies as stale: \
+         {outcomes:?}"
     );
     assert_eq!(
-        dir.len(),
-        401,
-        "and the settled index must hold exactly the records that file has"
+        backend.reload_attempts(),
+        1,
+        "the stalled reload keeps the refresh slot, so the lookups that gave up started no \
+         duplicate read"
+    );
+
+    release.send(()).expect("the stalled read is waiting");
+    let mut served = false;
+    for _ in 0..50_u32 {
+        if matches!(backend.lookup("bob").await, Ok(Some(_))) {
+            served = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        served,
+        "once the stalled read finishes, its index publishes and lookups answer from it"
     );
 }
 

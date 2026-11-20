@@ -38,9 +38,11 @@ pub use config::{
 pub use credential::{BasicCredential, DecodeError, decode_basic};
 pub use directory::{CredentialDirectory, DirectoryError, StoredVerifier, UserRecord};
 pub use factory::{BasicIdentityFactory, KIND};
-pub use failure_limit::{FailureLimiter, Refusal};
+pub use failure_limit::{FailureLimiter, RecoveryLease, Refusal};
 pub use htpasswd::{HtpasswdConfig, HtpasswdDirectory};
 pub use praxis_policy_core::extensions::raw_credentials::Credential;
 pub use resolver::{BasicIdentityResolver, codes};
 pub use user_file::{UserFileConfig, UserFileDirectory};
-pub use verifier::{CostProfile, HashError, Limits, ParsedHash, Scheme, ShaCryptVariant};
+pub use verifier::{
+    CostProfile, HashError, Limits, ParsedHash, Scheme, ShaCryptVariant, VerifyError,
+};

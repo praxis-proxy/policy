@@ -55,7 +55,11 @@
 // the verification it asks for is CPU-bound work an attacker repeats for free:
 // without that ceiling a wrong-password spray on one user-id would occupy the
 // backend's verification permits and turn a bounded refusal into a directory
-// outage for every other caller.
+// outage for every other caller. The slot on that ceiling travels with the
+// verification as a `RecoveryLease`, so a cancelled request does not return it
+// while the hash it admitted is still running. A recovery on a named counter
+// also reserves on that counter, so recoveries in flight for one user-id are
+// bounded by its own budget, not only by the global ceiling.
 //
 // What this is still not: it is per process, so replicas do not share it; a
 // source-scoped key does not bound one user-id guessed from many sources; and
@@ -64,7 +68,8 @@
 
 use std::collections::HashMap;
 use std::hash::BuildHasher as _;
-use std::sync::RwLock;
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::plugins::identity_basic::config::FailureLimitConfig;
@@ -170,10 +175,14 @@ pub struct Admission<'limiter> {
     slot: Slot,
     /// Whether unattributable failures already refused this attempt.
     ///
-    /// Set on the recoverable path, where the attempt is charged against the
-    /// counter's separate unproven budget rather than its failure budget.
-    /// Settlement therefore records no failure and refunds a success.
+    /// Set on the recoverable path, where the attempt also holds a slot on
+    /// the ceiling of concurrent unproven verifications.
     unproven: bool,
+    /// The unproven attempt's ceiling slot, until [`take_lease`] moves it to
+    /// the verification.
+    ///
+    /// [`take_lease`]: Admission::take_lease
+    lease: Option<RecoveryLease>,
     user_id: String,
 }
 
@@ -187,6 +196,15 @@ impl Admission<'_> {
     /// refusal that admitted it still stands.
     pub fn is_unproven(&self) -> bool {
         self.unproven
+    }
+
+    /// Take the unproven attempt's ceiling slot, to hand to the verification.
+    ///
+    /// `None` for an ordinary attempt, or once taken. The settlement stays on
+    /// the admission, so a cancelled request still records no failure; only
+    /// the concurrency slot moves, and it is released when the lease drops.
+    pub fn take_lease(&mut self) -> Option<RecoveryLease> {
+        self.lease.take()
     }
 
     /// Record a failed verification and release the reservation.
@@ -253,25 +271,52 @@ impl Admission<'_> {
 
 impl Drop for Admission<'_> {
     fn drop(&mut self) {
-        if self.unproven {
-            if !self.settled {
-                // No reservation against the failure budget to return, but the
-                // ceiling slot must come back however the attempt ended: a
-                // leaked slot is permanent, and enough of them close the
-                // recovery path for the life of the process.
-                self.limiter.release_unproven();
-                self.limiter
-                    .settle_recovery(self.slot, |recovery, now, _| recovery.release(now));
-            }
+        if self.settled {
             return;
         }
-        if !self.settled {
-            // Neither a failure nor a success: the attempt never produced a
-            // verdict on the credential, so it releases its reservation
-            // without touching the failure count. A directory that cannot
-            // answer must not spend a named victim's budget.
-            self.limiter.release(&self.user_id, self.slot);
+        // Neither a failure nor a success: the attempt never produced a
+        // verdict on the credential, so it releases its reservation without
+        // touching the failure count. A directory that cannot answer must not
+        // spend a named victim's budget. A ceiling slot still held here drops
+        // with `lease`.
+        if self.unproven
+            && let Slot::Overflow(_) = self.slot
+        {
+            self.limiter
+                .settle_recovery(self.slot, |recovery, now, _| recovery.release(now));
+            return;
         }
+        self.limiter.release(&self.user_id, self.slot);
+    }
+}
+
+/// A slot on the ceiling of concurrent unproven verifications.
+///
+/// Taken from an unproven [`Admission`] with [`Admission::take_lease`] and
+/// moved into whatever runs the verification, so the slot is held for as long
+/// as the CPU work it bounds rather than for as long as the request's future.
+/// Dropping a `JoinHandle` does not cancel a blocking task: a slot released
+/// with the request let a client that disconnected mid-verification start a
+/// replacement recovery beside the hash still running, so the recovery path
+/// held more verification permits than its ceiling allows.
+///
+/// [`Admission`]: Admission
+/// [`Admission::take_lease`]: Admission::take_lease
+#[derive(Debug)]
+pub struct RecoveryLease {
+    in_flight: Arc<AtomicU32>,
+}
+
+impl Drop for RecoveryLease {
+    fn drop(&mut self) {
+        // Saturating, not wrapping: a count that reached zero and underflowed
+        // would read as full and refuse every recovery for the life of the
+        // process, which is the outage this path exists to avoid.
+        let _ = self.in_flight.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |held| Some(held.saturating_sub(1)),
+        );
     }
 }
 
@@ -325,10 +370,11 @@ pub struct FailureLimiter {
     ///
     /// Global rather than per-counter, and a concurrency count rather than a
     /// spend: see [`MAX_UNPROVEN_IN_FLIGHT`]. The per-bucket spend is
-    /// `Counters::recoveries`.
+    /// `Counters::recoveries`. Shared so each [`RecoveryLease`] can return its
+    /// slot from the task running the verification.
     ///
     /// [`MAX_UNPROVEN_IN_FLIGHT`]: MAX_UNPROVEN_IN_FLIGHT
-    unproven_in_flight: std::sync::atomic::AtomicU32,
+    unproven_in_flight: Arc<AtomicU32>,
     /// How many unproven verifications may run at once, for this directory.
     ///
     /// Derived at construction from the backend's verification capacity rather
@@ -351,7 +397,7 @@ impl FailureLimiter {
             counters: RwLock::new(Counters::new()),
             saturations: std::sync::atomic::AtomicU64::new(0),
             proven: std::sync::atomic::AtomicU64::new(0),
-            unproven_in_flight: std::sync::atomic::AtomicU32::new(0),
+            unproven_in_flight: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -419,7 +465,6 @@ impl FailureLimiter {
     /// [`is_unproven`]: Admission::is_unproven
     /// [`saturations`]: FailureLimiter::saturations
     pub fn admit(&self, user_id: impl Into<String>) -> Result<Admission<'_>, Refusal> {
-        let window = self.window_ms();
         let user_id: String = user_id.into();
         // A poisoned lock means some holder panicked. Recovered rather than
         // treated as a denial, matching the reload lock in `htpasswd`.
@@ -452,23 +497,24 @@ impl FailureLimiter {
                 // bucket are counted. Those are not this caller's to answer
                 // for, so the refusal stays recoverable for as long as they
                 // live rather than hardening into a block the moment a named
-                // slot opened. Charged against the separate unproven budget
-                // and not the failure budget: spending the latter would deny
-                // this caller for an attacker's guesses, which is the lockout
-                // the recoverable refusal exists to prevent.
-                Verdict::Unproven => {
-                    if self.claim_unproven() {
-                        Ok(self.admitted_unproven(user_id, Slot::Named))
-                    } else {
-                        Err(Refusal::Saturated)
-                    }
-                },
+                // slot opened.
+                Verdict::Unproven => self
+                    .admit_named_recovery(counter, user_id)
+                    .ok_or(Refusal::Saturated),
             };
         }
 
         // Room for a counter of its own, so the attempt is tracked by name and
-        // pays no collision cost.
-        if guard.named.len() < self.config.capacity || guard.reclaim(now) {
+        // pays no collision cost -- unless the bucket still has attempts in
+        // flight, which may be this user-id's. Those settle on the bucket, so
+        // promoting past them started the named budget without them and let
+        // the user-id run `max_failures` more attempts beside them. The bucket
+        // cannot say whose they are, so carrying them over would charge this
+        // user-id for a colliding caller's reservations; the user-id stays in
+        // overflow, which still bounds it, until they settle.
+        if !guard.overflow_busy(&user_id)
+            && (guard.named.len() < self.config.capacity || guard.reclaim(now))
+        {
             // Seeded from the overflow bucket rather than started at zero.
             // The arms otherwise share no failure state, so promoting a
             // user-id out of overflow was a budget reset: a blocked attacker
@@ -491,17 +537,19 @@ impl FailureLimiter {
             // denied unverified on a junk-user-id spray's evidence, which is
             // exactly the outage the recoverable refusal exists to prevent.
             // They still bound this user-id, and bound it recoverably.
-            let inherited = guard.overflow_failures(&user_id, now);
+            //
+            // They keep the bucket's expiry, not a window opened here. A fresh
+            // window gave a failure about to expire a full new one, and
+            // sharing the own-failure window let an ordinary success close it
+            // and drop the inherited count early.
+            let (inherited, inherited_expires_at_ms) = guard.overflow_failures(&user_id, now);
             let mut counter = Counter {
-                // Only a counter carrying failures needs a window; a fresh one
-                // takes its first from `fail`, as `reserve` opens none.
-                expires_at_ms: if inherited == 0 {
-                    0
-                } else {
-                    now.saturating_add(window)
-                },
+                // A fresh counter takes its first window from `fail`, as
+                // `reserve` opens none.
+                expires_at_ms: 0,
                 failures: 0,
                 inherited,
+                inherited_expires_at_ms,
                 outstanding: 0,
             };
             return match counter.verdict(self.config.max_failures) {
@@ -515,16 +563,12 @@ impl FailureLimiter {
                 Verdict::Blocked => Err(Refusal::Blocked),
                 Verdict::Unproven => {
                     // Inserted so the inherited count lives in the named
-                    // counter and expires on its own window, rather than being
-                    // re-read from a shared bucket a colliding attacker keeps
-                    // refreshing. Nothing is reserved on it: the attempt holds
-                    // a slot on the unproven ceiling instead.
-                    guard.named.insert(user_id.clone(), counter);
-                    if self.claim_unproven() {
-                        Ok(self.admitted_unproven(user_id, Slot::Named))
-                    } else {
-                        Err(Refusal::Saturated)
-                    }
+                    // counter and expires with the bucket's window, rather
+                    // than being re-read from a shared bucket a colliding
+                    // attacker keeps refreshing.
+                    let counter = guard.named.entry(user_id.clone()).or_insert(counter);
+                    self.admit_named_recovery(counter, user_id)
+                        .ok_or(Refusal::Saturated)
                 },
             };
         }
@@ -560,14 +604,13 @@ impl FailureLimiter {
             // it a guesser who spent a target's bucket had unlimited
             // sequential guesses against it, bounded only by the ceiling on
             // how many ran at once.
-            if !self.claim_unproven() {
+            let Some(lease) = self.claim_unproven() else {
                 return Err(Refusal::Saturated);
-            }
+            };
             if !guard.reserve_recovery(bucket, now, self.config.max_failures) {
-                self.release_unproven();
                 return Err(Refusal::Saturated);
             }
-            return Ok(self.admitted_unproven(user_id, Slot::Overflow(bucket)));
+            return Ok(self.admitted_unproven(user_id, Slot::Overflow(bucket), lease));
         }
         counter.reserve();
         Ok(self.admitted(user_id, Slot::Overflow(bucket)))
@@ -605,19 +648,48 @@ impl FailureLimiter {
             settled: false,
             slot,
             unproven: false,
+            lease: None,
             user_id,
         }
     }
 
     /// An admission for an attempt unattributable failures already refused.
-    fn admitted_unproven(&self, user_id: String, slot: Slot) -> Admission<'_> {
+    fn admitted_unproven(
+        &self,
+        user_id: String,
+        slot: Slot,
+        lease: RecoveryLease,
+    ) -> Admission<'_> {
         Admission {
             limiter: self,
             settled: false,
             slot,
             unproven: true,
+            lease: Some(lease),
             user_id,
         }
+    }
+
+    /// Admit a recovery on a named counter that inherited failures spent.
+    ///
+    /// Reserves on the counter as well as on the ceiling. The ceiling bounds
+    /// recoveries across all user-ids; the reservation bounds this one's by
+    /// its own budget, which a failed recovery spends. Without it every
+    /// recovery admitted together passed the same check before any failure
+    /// settled, so a budget of two let the whole ceiling's worth of guesses
+    /// reach the verifier. The reservation also pins the counter, so expiry
+    /// and reclaim cannot replace it before this attempt settles on it.
+    ///
+    /// `Verdict::Unproven` means own failures and attempts in flight leave
+    /// room, so a single recovery can always prove a correct credential.
+    fn admit_named_recovery(
+        &self,
+        counter: &mut Counter,
+        user_id: String,
+    ) -> Option<Admission<'_>> {
+        let lease = self.claim_unproven()?;
+        counter.reserve();
+        Some(self.admitted_unproven(user_id, Slot::Named, lease))
     }
 
     /// Take a slot on the unproven-verification ceiling, if one is free.
@@ -626,13 +698,13 @@ impl FailureLimiter {
     /// that overshoots is briefly visible to every other attempt, so a burst
     /// arriving together would refuse each other on slots all about to be
     /// returned.
-    fn claim_unproven(&self) -> bool {
+    fn claim_unproven(&self) -> Option<RecoveryLease> {
         let mut held = self
             .unproven_in_flight
             .load(std::sync::atomic::Ordering::Acquire);
         loop {
             if held >= self.unproven_ceiling {
-                return false;
+                return None;
             }
             match self.unproven_in_flight.compare_exchange_weak(
                 held,
@@ -640,7 +712,11 @@ impl FailureLimiter {
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
             ) {
-                Ok(_) => return true,
+                Ok(_) => {
+                    return Some(RecoveryLease {
+                        in_flight: Arc::clone(&self.unproven_in_flight),
+                    });
+                },
                 Err(current) => held = current,
             }
         }
@@ -650,18 +726,6 @@ impl FailureLimiter {
     fn count_proven(&self) {
         self.proven
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Return a slot to the unproven-verification ceiling.
-    fn release_unproven(&self) {
-        // Saturating, not wrapping: a count that reached zero and underflowed
-        // would read as full and refuse every recovery for the life of the
-        // process, which is the outage this path exists to avoid.
-        let _ = self.unproven_in_flight.fetch_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-            |held| Some(held.saturating_sub(1)),
-        );
     }
 
     /// Milliseconds since the limiter started.
@@ -735,20 +799,17 @@ impl FailureLimiter {
 
     /// Settle an unproven attempt whose credential did not verify.
     ///
-    /// Returns the ceiling slot and charges the failure where it can be
-    /// attributed. A named counter can: the wrong password is this user-id's,
-    /// whatever the inherited count that refused the attempt was, so the
-    /// failure is recorded and `max_failures` wrong recoveries turn
+    /// Charges the failure where it can be attributed. A named counter can:
+    /// the wrong password is this user-id's, whatever the inherited count that
+    /// refused the attempt was, so the reservation settles as a failure on the
+    /// counter that admitted it and `max_failures` wrong recoveries turn
     /// `Verdict::Unproven` into `Verdict::Blocked`. A shared bucket's failure
     /// count cannot, since charging it would spend a budget for every
     /// colliding user-id, so the failure is kept on the bucket's recovery
     /// budget instead, which closes only the recovery path.
     fn settle_unproven_failure(&self, user_id: &str, slot: Slot) {
-        // Before the counter work, so the slot comes back even if the counter
-        // the attempt was charged against has since been removed.
-        self.release_unproven();
         if slot == Slot::Named {
-            self.settle_named_unproven_failure(user_id);
+            self.settle_failure(user_id, slot);
         }
         self.settle_recovery(slot, Counter::fail);
     }
@@ -770,29 +831,14 @@ impl FailureLimiter {
         }
     }
 
-    /// Record a failed recovery against a named counter.
-    ///
-    /// Reaches the counter directly rather than through `with_counter`: that
-    /// helper removes a counter settling to zero on every field, and an
-    /// unproven attempt holds no reservation, so a counter carrying only
-    /// inherited failures would be removed by the very failure meant to bound
-    /// it -- handing the next attempt a fresh budget.
-    fn settle_named_unproven_failure(&self, user_id: &str) {
-        let window = self.window_ms();
-        let mut guard = self.write();
-        let now = self.now_ms();
-        if let Some(counter) = guard.named.get_mut(user_id) {
-            counter.fail_unreserved(now, window);
-        }
-    }
-
     /// Settle an unproven attempt whose credential verified.
     ///
-    /// Counts the proof, returns the ceiling slot, and clears the failures
-    /// this caller recorded on its own failed recoveries. The *inherited*
-    /// count is left standing: it may be a colliding attacker's, so clearing
-    /// it would hand that attacker a fresh budget, and this caller re-proves
-    /// itself on its next request for as long as it lives.
+    /// Counts the proof and settles a named reservation as a success, which
+    /// clears the failures this caller recorded on its own failed recoveries.
+    /// The *inherited* count is left standing: it may be a colliding
+    /// attacker's, so clearing it would hand that attacker a fresh budget, and
+    /// this caller re-proves itself on its next request for as long as it
+    /// lives.
     ///
     /// A shared bucket's failures are left alone for the same reason they are
     /// never charged: nothing on it is this caller's to clear. Its recovery
@@ -800,34 +846,10 @@ impl FailureLimiter {
     /// caller who proves itself never spends that budget.
     fn settle_proven(&self, user_id: &str, slot: Slot) {
         self.count_proven();
-        self.release_unproven();
         if slot == Slot::Named {
-            self.clear_proven_failures(user_id);
+            self.settle_success(user_id, slot);
         }
         self.settle_recovery(slot, |recovery, now, _| recovery.release(now));
-    }
-
-    /// Clear a named counter's own failures after a proven recovery.
-    ///
-    /// Reaches the counter directly for the reason
-    /// [`settle_named_unproven_failure`] does: the attempt holds no
-    /// reservation, so `with_counter`'s zero check is not the right test, and
-    /// a counter still carrying inherited failures must survive this to keep
-    /// bounding the user-id recoverably.
-    ///
-    /// [`settle_named_unproven_failure`]: FailureLimiter::settle_named_unproven_failure
-    fn clear_proven_failures(&self, user_id: &str) {
-        let mut guard = self.write();
-        let Some(counter) = guard.named.get_mut(user_id) else {
-            return;
-        };
-        counter.clear_own_failures();
-        // Nothing left to bound the user-id: no failures of its own, no
-        // inherited count, no attempt in flight. Removed so the named slot
-        // returns to `capacity` rather than being pinned by an empty counter.
-        if counter.outstanding == 0 && counter.inherited == 0 {
-            guard.named.remove(user_id);
-        }
     }
 
     fn window_ms(&self) -> u64 {
@@ -889,6 +911,13 @@ struct Counter {
     /// overflow a lockout, denying a correct password unverified on evidence
     /// that was not the caller's.
     inherited: u32,
+    /// When `inherited` stops counting: the bucket's expiry, copied with it.
+    ///
+    /// Separate from `expires_at_ms`, which is the window of this counter's
+    /// own failures. Sharing one let promotion hand an expiring bucket failure
+    /// a fresh full window, and let an ordinary success close the window and
+    /// drop the inherited count before the bucket's had passed.
+    inherited_expires_at_ms: u64,
     /// Attempts admitted and not yet settled.
     outstanding: u32,
 }
@@ -900,18 +929,20 @@ impl Counter {
     /// record that the attempt is in flight, so dropping the counter would let
     /// a parallel guess past the budget it was already charged against.
     fn idle(&self, now: u64) -> bool {
-        self.outstanding == 0 && !self.live(now)
+        self.outstanding == 0 && !self.live(now) && self.inherited_expires_at_ms <= now
     }
 
-    /// Drop a stale window's failures, keeping any live reservation.
+    /// Drop stale failures, keeping any live reservation.
     ///
-    /// Inherited failures expire on the same window as recorded ones. They are
-    /// a shared bucket's evidence against this user-id, and evidence that no
-    /// longer bounds the bucket must not keep bounding the caller it was
-    /// copied to.
+    /// Inherited failures expire with the bucket window they were copied
+    /// from. They are a shared bucket's evidence against this user-id, and
+    /// evidence that no longer bounds the bucket must not keep bounding the
+    /// caller it was copied to.
     fn expire(&mut self, now: u64) {
         if !self.live(now) {
             self.failures = 0;
+        }
+        if self.inherited_expires_at_ms <= now {
             self.inherited = 0;
         }
     }
@@ -924,23 +955,7 @@ impl Counter {
         self.expires_at_ms = now.saturating_add(window);
     }
 
-    /// Record a failure for an attempt that holds no reservation.
-    ///
-    /// The recovery path admits against the unproven ceiling rather than
-    /// reserving on the counter, so settling one must not decrement
-    /// `outstanding`: that would discharge a *different* attempt's reservation
-    /// and let a parallel guess past the budget it was already charged
-    /// against. Everything else matches [`fail`] -- the failure counts and
-    /// reopens the window from now.
-    ///
-    /// [`fail`]: Counter::fail
-    fn fail_unreserved(&mut self, now: u64, window: u64) {
-        self.expire(now);
-        self.failures = self.failures.saturating_add(1);
-        self.expires_at_ms = now.saturating_add(window);
-    }
-
-    /// Whether this counter still bounds attempts.
+    /// Whether this counter's own failures still bound attempts.
     fn live(&self, now: u64) -> bool {
         self.expires_at_ms > now
     }
@@ -993,23 +1008,18 @@ impl Counter {
         }
     }
 
-    /// Clear the failures this user-id recorded itself, keeping inherited ones.
-    ///
-    /// For a proven recovery, which holds no reservation: `outstanding` is
-    /// another attempt's and is left alone. The window is not closed either --
-    /// an inherited count may still be live, and it is what the caller
-    /// re-proves itself against on its next request.
-    fn clear_own_failures(&mut self) {
-        self.failures = 0;
-    }
-
     /// Settle a reservation as a success, clearing the recorded failures.
+    ///
+    /// Closes only the own-failure window. An inherited count keeps the
+    /// bucket's expiry, and is what the caller re-proves itself against on its
+    /// next request.
     fn succeed(&mut self, now: u64) {
         self.outstanding = self.outstanding.saturating_sub(1);
         self.failures = 0;
         if self.outstanding == 0 {
             self.expires_at_ms = now;
         }
+        self.expire(now);
     }
 }
 
@@ -1068,18 +1078,32 @@ impl Counters {
         true
     }
 
-    /// The live failures recorded for a user-id in the overflow table.
+    /// The live failures recorded for a user-id in the overflow table, and
+    /// when they expire.
     ///
     /// Expires the bucket first, so a stale window contributes nothing. Reads
     /// zero when the index cannot be taken, which `overflow_bucket`'s mask
     /// makes unreachable; the crate denies `indexing_slicing`, so the bound is
     /// taken rather than asserted.
-    fn overflow_failures(&mut self, user_id: &str, now: u64) -> u32 {
+    fn overflow_failures(&mut self, user_id: &str, now: u64) -> (u32, u64) {
         let bucket = overflow_bucket(user_id);
-        self.overflow.get_mut(bucket).map_or(0, |counter| {
+        self.overflow.get_mut(bucket).map_or((0, 0), |counter| {
             counter.expire(now);
-            counter.failures
+            (counter.failures, counter.expires_at_ms)
         })
+    }
+
+    /// Whether a user-id's overflow bucket has attempts still in flight,
+    /// ordinary or recovering.
+    ///
+    /// Reads idle when the index cannot be taken, which `overflow_bucket`'s
+    /// mask makes unreachable: promotion then counts the user-id by name,
+    /// where the overflow arm would count it nowhere.
+    fn overflow_busy(&self, user_id: &str) -> bool {
+        let bucket = overflow_bucket(user_id);
+        let in_flight =
+            |table: &[Counter]| table.get(bucket).is_some_and(|held| held.outstanding > 0);
+        in_flight(&self.overflow) || in_flight(&self.recoveries)
     }
 
     /// Drop idle named counters, at most once per [`RECLAIM_INTERVAL_MS`].
@@ -1296,6 +1320,7 @@ mod tests {
             expires_at_ms: 1_000,
             failures: 2,
             inherited: 1,
+            inherited_expires_at_ms: 1_000,
             outstanding: 0,
         };
 
@@ -1332,9 +1357,10 @@ mod tests {
     #[test]
     fn inherited_failures_expire_on_the_window() {
         let mut counter = Counter {
-            expires_at_ms: 1_000,
+            expires_at_ms: 0,
             failures: 0,
             inherited: 5,
+            inherited_expires_at_ms: 1_000,
             outstanding: 0,
         };
 
@@ -1780,32 +1806,231 @@ mod tests {
         }
     }
 
-    /// A failed recovery must not discharge a parallel attempt's reservation.
+    /// Promote `sprayer` onto a named counter carrying `inherited == 2`.
     ///
-    /// An unproven attempt is admitted against the ceiling and reserves
-    /// nothing on the counter, so settling one must leave `outstanding` alone.
-    /// Decrementing it would return a *different* attempt's reservation and
-    /// let a parallel guess past the budget it was already charged against.
+    /// A budget of two, one named slot, and the global recovery ceiling well
+    /// above the named budget, so only the named reservation can bound what
+    /// the tests below measure.
+    fn promoted_sprayer() -> FailureLimiter {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        fail(&limiter, "sprayer", 2);
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+        limiter
+    }
+
+    /// Named recoveries in flight must spend the named budget.
+    ///
+    /// The defect: a named recovery took a slot on the global ceiling but
+    /// reserved nothing on its counter, so with `max_failures = 2` and a
+    /// ceiling of eight, every recovery admitted together passed the same
+    /// check before any failure settled.
     #[test]
-    fn a_failed_recovery_leaves_a_parallel_reservation_outstanding() {
-        let mut counter = Counter {
-            expires_at_ms: 1_000,
+    fn named_recoveries_in_flight_are_bounded_by_the_named_budget() {
+        let limiter = promoted_sprayer();
+
+        let held: Vec<_> = std::iter::repeat_with(|| {
+            let attempt = limiter
+                .admit("sprayer")
+                .expect("the named budget admits two recoveries at once");
+            assert!(attempt.is_unproven(), "each rests on the inherited count");
+            attempt
+        })
+        .take(2)
+        .collect();
+
+        assert_eq!(
+            limiter.admit("sprayer").err(),
+            Some(Refusal::Blocked),
+            "two recoveries in flight spend a named budget of two, so a third must be refused \
+             before verification even though the global ceiling has room"
+        );
+
+        for attempt in held {
+            attempt.record_failure();
+        }
+        assert_eq!(
+            limiter.admit("sprayer").err(),
+            Some(Refusal::Blocked),
+            "and both failures settle on the counter, which then blocks by its own failures"
+        );
+    }
+
+    /// A single recovery must still be able to prove a correct credential.
+    #[test]
+    fn one_recovery_proves_a_credential_when_only_inherited_failures_spent_the_budget() {
+        let limiter = promoted_sprayer();
+
+        let attempt = limiter
+            .admit("sprayer")
+            .expect("own failures and attempts in flight leave room, so one recovery is admitted");
+        assert!(attempt.is_unproven(), "the inherited count still refuses");
+        attempt.record_success();
+
+        assert_eq!(limiter.proven(), 1, "and its proof is counted");
+        assert_eq!(
+            limiter.tracked(),
+            1,
+            "the success clears the reservation but leaves the inherited count bounding the key"
+        );
+    }
+
+    /// A named recovery must settle on the counter that admitted it.
+    ///
+    /// The reservation pins the counter: an outstanding attempt keeps it out
+    /// of reclaim however long its windows have been closed, so it cannot be
+    /// removed and recreated under the attempt. Settling after expiry records
+    /// the failure on that same counter instead of losing it.
+    #[test]
+    fn a_named_recovery_pins_its_counter_through_expiry() {
+        let mut counters = Counters::new();
+        let mut admitted = Counter {
+            expires_at_ms: 0,
             failures: 0,
             inherited: 2,
-            outstanding: 1,
+            inherited_expires_at_ms: 1_000,
+            outstanding: 0,
+        };
+        admitted.reserve();
+        counters.named.insert("sprayer".to_owned(), admitted);
+
+        let after_expiry = 1_000_u64.saturating_add(RECLAIM_INTERVAL_MS);
+        assert!(
+            !counters.reclaim(after_expiry),
+            "a counter with a recovery in flight must not be reclaimed once its windows close"
+        );
+
+        counters.with_counter("sprayer", super::Slot::Named, |counter| {
+            counter.fail(after_expiry, 300_000);
+        });
+        let settled = counters
+            .named
+            .get("sprayer")
+            .expect("the same counter is still held");
+        assert_eq!(
+            (settled.failures, settled.outstanding, settled.inherited),
+            (1, 0, 0),
+            "the failed recovery settles on the counter that admitted it, after its inherited \
+             count expired"
+        );
+    }
+
+    /// Promotion must wait for the bucket's attempts in flight to settle.
+    ///
+    /// The defect: promotion started the named counter with nothing
+    /// outstanding while the key's ordinary attempts were still running on its
+    /// bucket. Those settled in overflow, so the key ran a fresh named budget
+    /// beside them.
+    #[test]
+    fn promotion_waits_for_the_buckets_attempts_in_flight() {
+        let limiter = limiter(1, 2);
+        let squatter = limiter.admit("squatter").expect("takes the only slot");
+
+        let in_flight = limiter
+            .admit("attacker")
+            .expect("the attacker is counted in overflow");
+        squatter.record_success();
+        assert_eq!(
+            limiter.tracked(),
+            0,
+            "the squatter's success frees the slot"
+        );
+
+        let saturations = limiter.saturations();
+        let beside = limiter
+            .admit("attacker")
+            .expect("the bucket has room for a second attempt");
+        assert_eq!(
+            (limiter.tracked(), limiter.saturations()),
+            (0, saturations.saturating_add(1)),
+            "with an attempt still in flight on the bucket, the key must stay in overflow \
+             rather than take the free slot with a fresh budget"
+        );
+        let third = limiter
+            .admit("attacker")
+            .expect("a bucket spent by attempts in flight refuses recoverably");
+        assert!(
+            third.is_unproven() && limiter.tracked() == 0,
+            "two attempts in flight spend the bucket's budget of two, so a third is only a \
+             recovery on the bucket, not an ordinary attempt on a fresh named budget"
+        );
+
+        drop((in_flight, beside, third));
+        limiter
+            .admit("attacker")
+            .expect("with nothing in flight the key is promoted")
+            .record_success();
+        assert_eq!(
+            limiter.saturations(),
+            saturations.saturating_add(2),
+            "the promoted attempt is counted by name, not in overflow"
+        );
+    }
+
+    /// Inherited failures must keep the bucket's expiry.
+    ///
+    /// The defects: promotion gave an expiring bucket failure a fresh full
+    /// window, and an ordinary success closed the shared window and dropped
+    /// the inherited count early.
+    #[test]
+    fn inherited_failures_keep_the_buckets_expiry() {
+        let mut counter = Counter {
+            expires_at_ms: 0,
+            failures: 0,
+            inherited: 1,
+            inherited_expires_at_ms: 1_000,
+            outstanding: 0,
         };
 
-        counter.fail_unreserved(500, 300_000);
+        counter.reserve();
+        counter.succeed(500);
+        assert_eq!(
+            counter.inherited, 1,
+            "an ordinary success clears own failures only, not a live inherited count"
+        );
+
+        counter.reserve();
+        counter.fail(900, 300_000);
+        counter.expire(1_000);
+        assert_eq!(
+            (counter.failures, counter.inherited),
+            (1, 0),
+            "a later failure extends only the own-failure window; the inherited count still \
+             expires with the bucket's"
+        );
+    }
+
+    /// A recovery's ceiling slot must outlive a cancelled request.
+    ///
+    /// The defect: dropping the admission released the slot while the blocking
+    /// verification it bounded kept running, so a replacement recovery could
+    /// take another verification permit beside it.
+    #[test]
+    fn a_taken_lease_holds_the_ceiling_after_its_admission_drops() {
+        let limiter = limiter_with_verifications(0, 1, 4);
+        fail(&limiter, "sprayer", 1);
+
+        let mut attempt = limiter
+            .admit("sprayer")
+            .expect("a capacity of four leaves one recovery slot");
+        let lease = attempt
+            .take_lease()
+            .expect("an unproven attempt holds a lease");
+        drop(attempt);
 
         assert_eq!(
-            counter.outstanding, 1,
-            "the in-flight attempt still holds its reservation: an unproven settlement has \
-             none of its own to return, so taking one discharges a guess running beside it"
+            limiter.admit("sprayer").err(),
+            Some(Refusal::Saturated),
+            "the lease is still with the verification, so the ceiling of one is still full"
         );
-        assert_eq!(
-            counter.failures, 1,
-            "and the failed recovery is recorded, which is what bounds the next guess"
-        );
+
+        drop(lease);
+        limiter
+            .admit("sprayer")
+            .expect("the slot returns once the verification's lease drops");
     }
 
     /// A failed recovery must not remove the counter that bounds it.
@@ -1920,6 +2145,7 @@ mod tests {
                 expires_at_ms: 1_000,
                 failures: 1,
                 inherited: 0,
+                inherited_expires_at_ms: 0,
                 outstanding: 0,
             },
         );

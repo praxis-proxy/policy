@@ -33,6 +33,7 @@ use praxis_policy_core::host::HostServices;
 
 use super::BasicCredential;
 use super::directory::{CredentialDirectory, DirectoryError, UserRecord};
+use super::failure_limit::RecoveryLease;
 use super::file_backend::{
     Entry, FileBackend, IndexSource, check_password_ceiling, enforce_uniform_cost, validate_timers,
 };
@@ -405,7 +406,17 @@ impl CredentialDirectory for HtpasswdDirectory {
         credential: &BasicCredential,
         _services: &dyn HostServices,
     ) -> Result<bool, DirectoryError> {
-        self.backend.verify(record, credential).await
+        self.backend.verify(record, credential, None).await
+    }
+
+    async fn verify_holding(
+        &self,
+        record: Option<&UserRecord>,
+        credential: &BasicCredential,
+        lease: Option<RecoveryLease>,
+        _services: &dyn HostServices,
+    ) -> Result<bool, DirectoryError> {
+        self.backend.verify(record, credential, lease).await
     }
 
     fn kind(&self) -> &'static str {

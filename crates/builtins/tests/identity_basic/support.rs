@@ -418,3 +418,157 @@ pub fn challenge_of(
         .as_str()
         .map(str::to_owned)
 }
+
+// -----------------------------------------------------------------------------
+// Scripted index source
+// -----------------------------------------------------------------------------
+
+/// An [`IndexSource`] whose records a test sets and whose next read it can
+/// hold, so reload interleavings are arranged rather than raced for.
+///
+/// [`IndexSource`]: praxis_policy_builtins::plugins::identity_basic::file_backend::IndexSource
+#[derive(Debug)]
+pub struct ScriptedSource {
+    control: std::sync::Arc<SourceControl>,
+    path: std::path::PathBuf,
+    refresh_secs: u64,
+    max_staleness_secs: u64,
+}
+
+/// The test's side of a [`ScriptedSource`].
+#[derive(Debug)]
+pub struct SourceControl {
+    hash: praxis_policy_builtins::plugins::identity_basic::ParsedHash,
+    users: std::sync::Mutex<Vec<String>>,
+    reads: std::sync::atomic::AtomicU64,
+    gate: std::sync::Mutex<Option<ReadGate>>,
+}
+
+/// A held read: it reports the records it captured, then waits for release.
+#[derive(Debug)]
+struct ReadGate {
+    captured: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+impl ScriptedSource {
+    /// A source serving `users`, each with one shared bcrypt hash of `pw`.
+    pub fn new(users: &[&str], refresh_secs: u64, max_staleness_secs: u64) -> Self {
+        let line = bcrypt_line("seed", "pw", 4);
+        let (_, stored) = line
+            .split_once(':')
+            .expect("the fixture line has a separator");
+        let hash = praxis_policy_builtins::plugins::identity_basic::verifier::parse_hash(
+            stored,
+            &praxis_policy_builtins::plugins::identity_basic::Limits::default(),
+        )
+        .expect("the fixture hash parses");
+        Self {
+            control: std::sync::Arc::new(SourceControl {
+                hash,
+                users: std::sync::Mutex::new(users.iter().map(|&user| user.to_owned()).collect()),
+                reads: std::sync::atomic::AtomicU64::new(0),
+                gate: std::sync::Mutex::new(None),
+            }),
+            path: std::path::PathBuf::from("scripted"),
+            refresh_secs,
+            max_staleness_secs,
+        }
+    }
+
+    /// The handle a test keeps after the source moves into a backend.
+    pub fn control(&self) -> std::sync::Arc<SourceControl> {
+        std::sync::Arc::clone(&self.control)
+    }
+}
+
+impl SourceControl {
+    /// Replace the records the next read returns.
+    pub fn set_users(&self, users: &[&str]) {
+        *self.users.lock().expect("the users lock is not poisoned") =
+            users.iter().map(|&user| user.to_owned()).collect();
+    }
+
+    /// How many reads have started.
+    pub fn reads(&self) -> u64 {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Hold the next read once it has captured its records.
+    ///
+    /// Returns a receiver that fires when the read has captured them, and a
+    /// sender that releases it.
+    pub fn hold_next_read(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (captured, on_captured) = std::sync::mpsc::channel();
+        let (release, on_release) = std::sync::mpsc::channel();
+        *self.gate.lock().expect("the gate lock is not poisoned") = Some(ReadGate {
+            captured,
+            release: on_release,
+        });
+        (on_captured, release)
+    }
+}
+
+impl praxis_policy_builtins::plugins::identity_basic::file_backend::IndexSource for ScriptedSource {
+    fn read(
+        &self,
+        _max_password_bytes: Option<usize>,
+    ) -> Result<
+        std::collections::HashMap<
+            String,
+            praxis_policy_builtins::plugins::identity_basic::file_backend::Entry,
+        >,
+        String,
+    > {
+        self.control
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let users = self
+            .control
+            .users
+            .lock()
+            .expect("the users lock is not poisoned")
+            .clone();
+        let gate = self
+            .control
+            .gate
+            .lock()
+            .expect("the gate lock is not poisoned")
+            .take();
+        if let Some(gate) = gate {
+            let _ = gate.captured.send(());
+            let _ = gate.release.recv();
+        }
+        Ok(users
+            .into_iter()
+            .map(|user| {
+                let entry = praxis_policy_builtins::plugins::identity_basic::file_backend::Entry {
+                    hash: self.control.hash.clone(),
+                    fields: std::collections::HashMap::new(),
+                    expires_at: None,
+                };
+                (user, entry)
+            })
+            .collect())
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn refresh_secs(&self) -> u64 {
+        self.refresh_secs
+    }
+
+    fn max_staleness_secs(&self) -> u64 {
+        self.max_staleness_secs
+    }
+
+    fn max_concurrent_verifications(&self) -> usize {
+        4
+    }
+
+    fn kind(&self) -> &'static str {
+        "scripted"
+    }
+}

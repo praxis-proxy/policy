@@ -713,22 +713,57 @@ pub fn verify(hash: &ParsedHash, password: &Password) -> bool {
 ///
 /// This call is blocking and CPU-bound; run it off the async worker.
 /// Callers should keep the password bytes in a zeroizing buffer.
+///
+/// A verification that could not run reads as a mismatch here. A caller that
+/// charges a mismatch against a failure budget should use
+/// [`try_verify_bytes`], which keeps the two apart.
 pub fn verify_bytes(hash: &ParsedHash, bytes: &[u8]) -> bool {
+    try_verify_bytes(hash, bytes).unwrap_or(false)
+}
+
+/// Why a verification produced no verdict on the password.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum VerifyError {
+    /// The hash function could not allocate its working memory.
+    ///
+    /// Argon2 reports this as a recoverable error under memory pressure,
+    /// whatever the password. It says nothing about the credential.
+    #[error("the verifier could not allocate its working memory")]
+    OutOfMemory,
+}
+
+/// Verify password bytes against an admitted stored hash, keeping a
+/// verification that could not run apart from a mismatch.
+///
+/// This call is blocking and CPU-bound; run it off the async worker.
+/// Callers should keep the password bytes in a zeroizing buffer.
+///
+/// # Errors
+///
+/// [`VerifyError::OutOfMemory`] when Argon2 cannot allocate its working
+/// memory. Folded into `false`, that charged a correct password against its
+/// failure budget on a host under memory pressure.
+///
+/// [`VerifyError::OutOfMemory`]: VerifyError::OutOfMemory
+pub fn try_verify_bytes(hash: &ParsedHash, bytes: &[u8]) -> Result<bool, VerifyError> {
     let matched = (|| match hash.scheme() {
         Scheme::Bcrypt => {
             // R26: bcrypt would otherwise accept any password sharing the
             // stored one's first 72 bytes. Refusing here rather than
             // truncating, because truncating is what creates the collision.
             if bytes.len() > BCRYPT_TRUNCATION_BYTES {
-                return 0_u8;
+                return Ok(0_u8);
             }
-            u8::from(bcrypt::verify(bytes, &hash.encoded).unwrap_or(false))
+            Ok(u8::from(
+                bcrypt::verify(bytes, &hash.encoded).unwrap_or(false),
+            ))
         },
         Scheme::Argon2 => {
             let Ok(parsed) = PasswordHash::new(&hash.encoded) else {
-                return 0_u8;
+                return Ok(0_u8);
             };
-            u8::from(Argon2::default().verify_password(bytes, &parsed).is_ok())
+            argon2_outcome(Argon2::default().verify_password(bytes, &parsed))
         },
         Scheme::ShaCrypt => {
             // The variant and rounds come from the record, not from this
@@ -736,11 +771,11 @@ pub fn verify_bytes(hash: &ParsedHash, bytes: &[u8]) -> bool {
             // compares with `ct_eq`, so the value here only supplies defaults
             // it does not use. No length ceiling as bcrypt needs above --
             // sha-crypt consumes the whole password rather than truncating it.
-            u8::from(
+            Ok(u8::from(
                 ShaCrypt::SHA512
                     .verify_password(bytes, hash.encoded.as_str())
                     .is_ok(),
-            )
+            ))
         },
         // Deliberately exhaustive with no catch-all. `Scheme` is
         // `#[non_exhaustive]` for downstream crates, but within this one the
@@ -749,6 +784,43 @@ pub fn verify_bytes(hash: &ParsedHash, bytes: &[u8]) -> bool {
         // default. A `_ => 0` arm would be unreachable today and, worse, would
         // hide that breakage behind a verdict of "wrong password" the day a
         // scheme is added.
-    })();
-    matched.ct_eq(&1_u8).into()
+    })()?;
+    Ok(matched.ct_eq(&1_u8).into())
+}
+
+/// Read an Argon2 verification result as a match, a mismatch, or no verdict.
+///
+/// Only an allocation failure is no verdict. Every other error, including
+/// the mismatch itself, is a refusal of this password against this record.
+fn argon2_outcome(result: argon2::password_hash::Result<()>) -> Result<u8, VerifyError> {
+    match result {
+        Ok(()) => Ok(1),
+        Err(argon2::password_hash::Error::OutOfMemory) => Err(VerifyError::OutOfMemory),
+        Err(_refused) => Ok(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VerifyError, argon2_outcome};
+
+    #[test]
+    fn an_argon2_allocation_failure_is_no_verdict_rather_than_a_mismatch() {
+        assert_eq!(
+            argon2_outcome(Err(argon2::password_hash::Error::OutOfMemory)),
+            Err(VerifyError::OutOfMemory),
+            "a verifier that could not allocate says nothing about the password, so it must not \
+             read as a wrong one and spend the caller's failure budget"
+        );
+    }
+
+    #[test]
+    fn an_argon2_mismatch_and_a_match_keep_their_verdicts() {
+        assert_eq!(
+            argon2_outcome(Err(argon2::password_hash::Error::PasswordInvalid)),
+            Ok(0),
+            "a wrong password is still a mismatch"
+        );
+        assert_eq!(argon2_outcome(Ok(())), Ok(1), "and a correct one a match");
+    }
 }

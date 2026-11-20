@@ -44,7 +44,32 @@ use arc_swap::ArcSwap;
 
 use super::BasicCredential;
 use super::directory::{DirectoryError, StoredVerifier, UserRecord};
-use super::verifier::{CostProfile, ParsedHash, empty_directory_hash, verify_bytes};
+use super::failure_limit::RecoveryLease;
+use super::verifier::{
+    CostProfile, ParsedHash, VerifyError, empty_directory_hash, try_verify_bytes,
+};
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// How long one lookup waits for a request-path reload before answering from
+/// the index already loaded.
+///
+/// A stalled read -- a hung network mount, a blocked FIFO, a blocking pool
+/// with no free thread -- otherwise held the lookup that started the reload,
+/// and once the index went stale every later lookup queued on the same slot
+/// without ever reaching the staleness check. A host deadline ended each
+/// request but released nothing, so the backend could not even deny as
+/// `Stale`. Past this bound a lookup answers from what is loaded, which past
+/// the ceiling is `Stale`. The running reload keeps the slot, so a waiter
+/// that gives up starts no duplicate read, and one that completes in time
+/// serves every waiter the new index.
+///
+/// Fixed rather than configurable: a healthy reload is a whole-file read and
+/// parse, which this comfortably covers, and a request-path wait longer than
+/// this is an outage whether or not the read later finishes.
+const RELOAD_WAIT: Duration = Duration::from_secs(2);
 
 // -----------------------------------------------------------------------------
 // Public types
@@ -593,7 +618,9 @@ impl FileBackend {
     /// Look up a normalised user-id, refreshing the index when it is due.
     ///
     /// A lookup that finds the index past its ceiling while a reload is in
-    /// flight waits for that reload and answers from what it publishes.
+    /// flight waits for that reload and answers from what it publishes. The
+    /// wait is bounded, so a stalled read denies as `Stale` past the ceiling
+    /// rather than holding the lookup.
     ///
     /// # Errors
     ///
@@ -602,7 +629,8 @@ impl FileBackend {
     ///
     /// [`DirectoryError::Stale`]: super::directory::DirectoryError::Stale
     pub async fn lookup(&self, user_id: &str) -> Result<Option<UserRecord>, DirectoryError> {
-        ReloadState::refresh_if_due(&self.state).await;
+        let deadline = tokio::time::Instant::now() + RELOAD_WAIT;
+        ReloadState::refresh_if_due(&self.state, deadline).await;
 
         // Past the ceiling the loaded index is not an answer this backend
         // stands behind, so it says it cannot answer. That denies as a
@@ -622,8 +650,8 @@ impl FileBackend {
         // between the two clock reads would otherwise deny with no reload
         // attempted or in flight.
         if self.state.is_stale() {
-            ReloadState::refresh_if_due(&self.state).await;
-            self.state.await_reload().await;
+            ReloadState::refresh_if_due(&self.state, deadline).await;
+            self.state.await_reload(deadline).await;
             if self.state.is_stale() {
                 return Err(DirectoryError::Stale);
             }
@@ -652,7 +680,12 @@ impl FileBackend {
     /// [`DirectoryError::Saturated`] at the concurrency cap,
     /// [`DirectoryError::Malformed`] for a delegated verdict a file backend
     /// cannot carry, and [`DirectoryError::Unavailable`] when the blocking
-    /// task does not complete.
+    /// task does not complete or the hash function could not run, such as an
+    /// Argon2 allocation failure. Neither says anything about the password, so
+    /// neither reads as a mismatch the resolver would charge.
+    ///
+    /// `lease` is an unproven attempt's recovery ceiling slot. It moves into
+    /// the blocking task with the permit, for the same reason.
     ///
     /// [`DirectoryError::Saturated`]: super::directory::DirectoryError::Saturated
     /// [`DirectoryError::Malformed`]: super::directory::DirectoryError::Malformed
@@ -661,6 +694,7 @@ impl FileBackend {
         &self,
         record: Option<&UserRecord>,
         credential: &BasicCredential,
+        lease: Option<RecoveryLease>,
     ) -> Result<bool, DirectoryError> {
         // Acquired before either branch, so the found and not-found paths are
         // bounded identically. Denying rather than waiting: a queue here is an
@@ -720,12 +754,14 @@ impl FileBackend {
             // and released when the task ends, not when the caller's future
             // does.
             let _permit = permit;
-            verify_bytes(&hash, &password_bytes)
+            let _lease = lease;
+            try_verify_bytes(&hash, &password_bytes)
         })
         .await
         .map_err(|_join_failed| {
             DirectoryError::Unavailable("the verification task did not complete".to_owned())
-        })?;
+        })?
+        .map_err(|error: VerifyError| DirectoryError::Unavailable(error.to_string()))?;
 
         // The dummy's verdict is discarded: it exists to cost time, and
         // returning it would authenticate a miss whenever the dummy's
@@ -751,17 +787,26 @@ impl ReloadState {
         age > Duration::from_secs(self.source.max_staleness_secs())
     }
 
-    /// Wait for a request-path reload already in flight, if there is one.
+    /// Wait for a request-path reload already in flight, if there is one, at
+    /// most until `deadline`.
     ///
     /// Returns at once when the refresh slot is free: no reload is coming, so
     /// the index this lookup sees is the one it has to answer from.
-    async fn await_reload(&self) {
+    async fn await_reload(&self, deadline: tokio::time::Instant) {
         if self.refreshing.try_lock().is_err() {
             tracing::debug!(
                 backend = self.source.kind(),
                 "index past its ceiling; waiting for the in-flight reload",
             );
-            drop(self.refreshing.lock().await);
+            if tokio::time::timeout_at(deadline, self.refreshing.lock())
+                .await
+                .is_err()
+            {
+                tracing::debug!(
+                    backend = self.source.kind(),
+                    "the in-flight reload did not finish in time; answering from the loaded index",
+                );
+            }
         }
     }
 
@@ -820,14 +865,15 @@ impl ReloadState {
         Ok(loaded_at_ms)
     }
 
-    /// Attempt a reload when the refresh interval has elapsed.
+    /// Attempt a reload when the refresh interval has elapsed, waiting for it
+    /// at most until `deadline`.
     ///
     /// The reload itself runs on a blocking thread. A lookup that finds a
     /// reload already in flight returns at once; [`ReloadState::await_reload`]
     /// is how it waits for that reload when the index is past its ceiling.
     ///
     /// [`ReloadState::await_reload`]: ReloadState::await_reload
-    async fn refresh_if_due(state: &Arc<Self>) {
+    async fn refresh_if_due(state: &Arc<Self>, deadline: tokio::time::Instant) {
         if state.now_ms() < state.next_attempt_ms.load(Ordering::Acquire) {
             return;
         }
@@ -869,40 +915,53 @@ impl ReloadState {
         // index goes stale; a marker read after the stamp could land past the
         // ceiling when the two are equal, leaving a stale index with no
         // refresh due.
+        //
+        // The wait is bounded by `deadline`, and the failure warning is logged
+        // from the task itself, so a lookup that stops waiting on a stalled
+        // read loses neither the slot's exclusion nor the warning.
         let interval_ms = state.source.refresh_secs().saturating_mul(1000);
         let reloading = Arc::clone(state);
-        let outcome = tokio::task::spawn_blocking(move || {
+        let task = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             let outcome = reloading.reload();
-            let from = match outcome {
-                Ok(loaded_at_ms) => loaded_at_ms,
+            let from = match &outcome {
+                Ok(loaded_at_ms) => *loaded_at_ms,
                 Err(_) => reloading.now_ms(),
             };
             let next = from.saturating_add(interval_ms);
             reloading.next_attempt_ms.store(next, Ordering::Release);
-            outcome
-        })
-        .await;
+            if let Err(error) = outcome {
+                reloading.warn_reload_failed(&error);
+            }
+        });
 
-        let error = match outcome {
-            Ok(Ok(_loaded_at_ms)) => return,
-            Ok(Err(error)) => error,
-            Err(_join_failed) => "the reload task did not complete".to_owned(),
-        };
+        match tokio::time::timeout_at(deadline, task).await {
+            Ok(Ok(())) => {},
+            Ok(Err(_join_failed)) => state.warn_reload_failed("the reload task did not complete"),
+            Err(_elapsed) => tracing::debug!(
+                backend = state.source.kind(),
+                "the reload did not finish in time; it keeps the refresh slot until it does",
+            ),
+        }
+    }
 
-        // Rate limited by the refresh interval itself: this runs once per
-        // interval, not once per request, because the slot was claimed above.
-        //
-        // The path is operator-supplied. The error is whatever the source
-        // returned, and a source is required by `IndexSource::read` to keep
-        // credential and hash material out of it -- this line is why that is
-        // a contract rather than a courtesy: a reload error lands in operator
-        // logs on every refresh interval, post-startup, while the plugin goes
-        // on serving the previous index. A source that forwards a parser error
-        // verbatim will leak whatever that parser quotes back.
+    /// Log a failed request-path reload.
+    ///
+    /// Rate limited by the refresh interval itself: this runs once per
+    /// interval, not once per request, because only the holder of the refresh
+    /// slot reloads.
+    ///
+    /// The path is operator-supplied. The error is whatever the source
+    /// returned, and a source is required by `IndexSource::read` to keep
+    /// credential and hash material out of it -- this line is why that is a
+    /// contract rather than a courtesy: a reload error lands in operator logs
+    /// on every refresh interval, post-startup, while the plugin goes on
+    /// serving the previous index. A source that forwards a parser error
+    /// verbatim will leak whatever that parser quotes back.
+    fn warn_reload_failed(&self, error: &str) {
         tracing::warn!(
-            backend = state.source.kind(),
-            path = %state.source.path().display(),
+            backend = self.source.kind(),
+            path = %self.source.path().display(),
             %error,
             "the directory file could not be reloaded; the previous index is still serving",
         );

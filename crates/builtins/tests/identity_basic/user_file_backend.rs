@@ -1194,3 +1194,60 @@ async fn a_file_backend_refuses_a_delegated_verdict() {
          one: got {outcome:?}"
     );
 }
+
+// -----------------------------------------------------------------------------
+// Documented example
+// -----------------------------------------------------------------------------
+
+/// The `users.yaml` example in the operator docs must load and log in once its
+/// placeholders hold hashes minted as the docs describe.
+///
+/// Read from the page itself, so an edit that breaks a field, a key or the
+/// record shape there fails here rather than at an operator's first load.
+#[tokio::test]
+async fn the_documented_user_file_loads_and_authenticates_once_its_hashes_are_minted() {
+    let page = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/content/builtins.md"
+    ))
+    .expect("the builtins page is readable");
+    let example = page
+        .split("```yaml\n")
+        .filter_map(|fenced| fenced.split_once("\n```").map(|(body, _)| body))
+        .find(|body| body.starts_with("# /etc/ppe/users.yaml"))
+        .expect("the page documents a users.yaml example");
+
+    let contents = example
+        .replace(
+            "<alice's argon2id PHC string>",
+            &argon2_at(19_456, 2, "alice password"),
+        )
+        .replace(
+            "<contractor's argon2id PHC string>",
+            &argon2_at(19_456, 2, "contractor password"),
+        );
+    let file = UserYamlFile::write(&contents);
+    let dir = directory(&file).expect("the documented file loads once its hashes are complete");
+    let svc = services();
+
+    let record = dir
+        .lookup("alice", &svc)
+        .await
+        .expect("the lookup answers")
+        .expect("alice is in the documented file");
+    assert_eq!(
+        record.fields.get("roles"),
+        Some(&serde_json::json!(["admin", "auditor"])),
+        "the documented fields project as the docs say"
+    );
+    assert!(
+        dir.verify(
+            Some(&record),
+            &crate::support::password("alice password"),
+            &svc
+        )
+        .await
+        .expect("the verify answers"),
+        "and alice logs in with the password her hash was minted from"
+    );
+}

@@ -54,7 +54,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `advertise_utf8_charset`. The failure limit keys on the user-id scoped to
   the host-supplied client host, falling back to the user-id alone, and
   defaults to 100 failures per 5-minute window. The feature is non-FIPS and
-  is refused alongside `fips`. See [What Basic asks of the host] before enabling it.
+  is not supported alongside `fips`. Nothing refuses the combination at
+  compile time, so a FIPS host must require
+  `CryptoCapabilityReport::fips_profile_is_safe()` at startup, which `basic`
+  makes return `false`. See [What Basic asks of the host] before enabling it.
   ([#313](https://github.com/praxis-proxy/policy/pull/313),
   [#340](https://github.com/praxis-proxy/policy/pull/340))
 
