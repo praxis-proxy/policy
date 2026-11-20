@@ -257,6 +257,39 @@ pub(crate) fn project_prompt_result(prompt: &PromptResult) -> Value {
     })
 }
 
+/// Which content part's envelope was replaced by a non-object value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReplacedPart {
+    ToolCall,
+    PromptRequest,
+    ResourceRef,
+    Resource,
+    PromptResult,
+}
+
+impl ReplacedPart {
+    /// A representative field name the error message can suggest instead of
+    /// the whole-envelope replacement.
+    pub(crate) fn suggested_field(self) -> &'static str {
+        match self {
+            Self::Resource | Self::PromptResult => "content",
+            _ => "<field>",
+        }
+    }
+}
+
+impl std::fmt::Display for ReplacedPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ToolCall => f.write_str("ToolCall"),
+            Self::PromptRequest => f.write_str("PromptRequest"),
+            Self::ResourceRef => f.write_str("ResourceRef"),
+            Self::Resource => f.write_str("Resource"),
+            Self::PromptResult => f.write_str("PromptResult"),
+        }
+    }
+}
+
 /// A pipeline replaced a fixed resource or prompt envelope as a whole with a
 /// value that is not an object, so write-back cannot apply it.
 ///
@@ -266,8 +299,8 @@ pub(crate) fn project_prompt_result(prompt: &PromptResult) -> Value {
 /// [`write_prompt_result`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EnvelopeReplaced {
-    /// The content part whose envelope was replaced, such as `Resource`.
-    pub(crate) part: &'static str,
+    /// The content part whose envelope was replaced.
+    pub(crate) part: ReplacedPart,
 }
 
 /// Inverse of [`extract_args_from_message`]: write `args` back into the part
@@ -289,7 +322,7 @@ pub(crate) fn write_args_back_to_message(
         match (projection, part) {
             (Projection::Tool | Projection::Prompt, ContentPart::ToolCall { content }) => {
                 let Some(obj) = args.as_object() else {
-                    return Err(EnvelopeReplaced { part: "ToolCall" });
+                    return Err(EnvelopeReplaced { part: ReplacedPart::ToolCall });
                 };
                 content.arguments = obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 return Ok(());
@@ -297,7 +330,7 @@ pub(crate) fn write_args_back_to_message(
             (Projection::Tool | Projection::Prompt, ContentPart::PromptRequest { content }) => {
                 let Some(obj) = args.as_object() else {
                     return Err(EnvelopeReplaced {
-                        part: "PromptRequest",
+                        part: ReplacedPart::PromptRequest,
                     });
                 };
                 content.arguments = obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -395,7 +428,7 @@ pub(crate) fn write_resource_ref(
 ) -> Result<(), EnvelopeReplaced> {
     let Some(obj) = args.as_object() else {
         return Err(EnvelopeReplaced {
-            part: "ResourceRef",
+            part: ReplacedPart::ResourceRef,
         });
     };
     write_opt_string(&mut resource_ref.name, obj.get("name"));
@@ -425,7 +458,7 @@ pub(crate) fn write_resource(
     result: &Value,
 ) -> Result<(), EnvelopeReplaced> {
     let Some(obj) = result.as_object() else {
-        return Err(EnvelopeReplaced { part: "Resource" });
+        return Err(EnvelopeReplaced { part: ReplacedPart::Resource });
     };
     write_opt_string(&mut resource.name, obj.get("name"));
     write_opt_string(&mut resource.title, obj.get("title"));
@@ -455,7 +488,7 @@ pub(crate) fn write_prompt_result(
 ) -> Result<(), EnvelopeReplaced> {
     let Some(obj) = result.as_object() else {
         return Err(EnvelopeReplaced {
-            part: "PromptResult",
+            part: ReplacedPart::PromptResult,
         });
     };
     write_opt_string(&mut prompt.description, obj.get("description"));
@@ -872,7 +905,7 @@ mod tests {
         let before = extract_args_from_message(&msg);
         assert_eq!(
             write_args_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
-            Err(EnvelopeReplaced { part: "ToolCall" }),
+            Err(EnvelopeReplaced { part: ReplacedPart::ToolCall }),
             "forwarding the original arguments would undo the redaction"
         );
         assert_eq!(extract_args_from_message(&msg), before);
@@ -939,7 +972,7 @@ mod tests {
         assert_eq!(
             write_args_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
             Err(EnvelopeReplaced {
-                part: "PromptRequest",
+                part: ReplacedPart::PromptRequest,
             }),
             "forwarding the original arguments would undo the redaction"
         );
@@ -1043,9 +1076,13 @@ mod tests {
                 content: Resource {
                     resource_request_id: "rr_001".to_owned(),
                     uri: "hr://employees/42".to_owned(),
+                    name: Some("employee 42".to_owned()),
+                    title: Some("Employee Record".to_owned()),
+                    description: Some("HR employee record".to_owned()),
                     content: Some("SSN 123-45-6789".to_owned()),
                     mime_type: Some("text/plain".to_owned()),
                     size_bytes: Some(15),
+                    version: Some("v3".to_owned()),
                     resource_type: ResourceType::Uri,
                     annotations: [("tier".to_owned(), serde_json::json!("gold"))]
                         .into_iter()
@@ -1067,7 +1104,7 @@ mod tests {
                     messages: vec![],
                     content: Some("Summarize this: SSN 123-45-6789".to_owned()),
                     is_error: false,
-                    error_message: None,
+                    error_message: Some("partial result".to_owned()),
                 },
             }],
         )
@@ -1095,14 +1132,14 @@ mod tests {
             extract_result_from_message(&resource_message()),
             serde_json::json!({
                 "uri": "hr://employees/42",
-                "name": null,
-                "title": null,
-                "description": null,
+                "name": "employee 42",
+                "title": "Employee Record",
+                "description": "HR employee record",
                 "resource_type": "uri",
                 "content": "SSN 123-45-6789",
                 "mime_type": "text/plain",
                 "size_bytes": 15,
-                "version": null,
+                "version": "v3",
                 "annotations": { "tier": "gold" },
                 "icons": null,
             }),
@@ -1119,7 +1156,7 @@ mod tests {
                 "description": "Summary prompt",
                 "content": "Summarize this: SSN 123-45-6789",
                 "is_error": false,
-                "error_message": null,
+                "error_message": "partial result",
             }),
             "result must be the PromptResult envelope, not the empty text fallback"
         );
@@ -1454,7 +1491,7 @@ mod tests {
         assert_eq!(
             write_args_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
             Err(EnvelopeReplaced {
-                part: "ResourceRef"
+                part: ReplacedPart::ResourceRef
             }),
             "a non-object args envelope must be refused, not silently dropped"
         );
@@ -1467,7 +1504,7 @@ mod tests {
         let mut msg = original.clone();
         assert_eq!(
             write_result_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
-            Err(EnvelopeReplaced { part: "Resource" }),
+            Err(EnvelopeReplaced { part: ReplacedPart::Resource }),
             "a non-object result envelope must be refused, not silently dropped"
         );
         assert_differs_only_in(&original, &msg, |_| {});
@@ -1480,7 +1517,7 @@ mod tests {
         assert_eq!(
             write_result_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
             Err(EnvelopeReplaced {
-                part: "PromptResult"
+                part: ReplacedPart::PromptResult
             }),
             "a non-object result envelope must be refused, not silently dropped"
         );

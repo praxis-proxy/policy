@@ -491,7 +491,7 @@ fn a_nested_rule_writing_prompt_name_is_refused_as_read_only() {
     );
 }
 
-// ---- unknown field paths on fixed envelopes ----------------------------------
+// ---- unknown field paths on fixed envelopes ---------------------------------
 
 #[test]
 fn an_unknown_args_field_on_a_resource_route_is_refused_with_the_valid_fields() {

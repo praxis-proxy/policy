@@ -176,6 +176,81 @@ mod tests {
         );
     }
 
+    fn resource_payload() -> MessagePayload {
+        use praxis_policy_core::cmf::enums::ResourceType;
+        use praxis_policy_core::cmf::Resource;
+        MessagePayload {
+            message: Message::with_content(
+                Role::Tool,
+                vec![ContentPart::Resource {
+                    content: Resource {
+                        resource_request_id: "rr_001".to_owned(),
+                        uri: "hr://employees/42".to_owned(),
+                        content: Some("SSN 123-45-6789".to_owned()),
+                        mime_type: Some("text/plain".to_owned()),
+                        size_bytes: Some(15),
+                        resource_type: ResourceType::Uri,
+                        ..Resource::default()
+                    },
+                }],
+            ),
+        }
+    }
+
+    fn prompt_result_payload() -> MessagePayload {
+        use praxis_policy_core::cmf::PromptResult;
+        MessagePayload {
+            message: Message::with_content(
+                Role::Assistant,
+                vec![ContentPart::PromptResult {
+                    content: PromptResult {
+                        prompt_request_id: "pr_001".to_owned(),
+                        prompt_name: "summarize".to_owned(),
+                        description: Some("Summary prompt".to_owned()),
+                        messages: vec![],
+                        content: Some("The summary text".to_owned()),
+                        is_error: false,
+                        error_message: None,
+                    },
+                }],
+            ),
+        }
+    }
+
+    #[test]
+    fn a_resource_projects_its_result_content_field() {
+        let payload = resource_payload();
+        assert_eq!(
+            payload.field_value("content", DispatchPhase::Post, Projection::Resource),
+            Some(serde_json::json!("SSN 123-45-6789")),
+        );
+        assert_eq!(
+            payload.field_value("uri", DispatchPhase::Post, Projection::Resource),
+            Some(serde_json::json!("hr://employees/42")),
+        );
+        assert_eq!(
+            payload.field_value("nonexistent", DispatchPhase::Post, Projection::Resource),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_prompt_result_projects_its_result_content_field() {
+        let payload = prompt_result_payload();
+        assert_eq!(
+            payload.field_value("content", DispatchPhase::Post, Projection::Prompt),
+            Some(serde_json::json!("The summary text")),
+        );
+        assert_eq!(
+            payload.field_value("prompt_name", DispatchPhase::Post, Projection::Prompt),
+            Some(serde_json::json!("summarize")),
+        );
+        assert_eq!(
+            payload.field_value("nonexistent", DispatchPhase::Post, Projection::Prompt),
+            None,
+        );
+    }
+
     #[test]
     fn the_http_payload_has_no_fields_in_either_phase() {
         // The default body is the whole implementation, so this is what an

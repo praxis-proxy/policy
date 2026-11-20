@@ -51,6 +51,8 @@ pub mod delegation_invoker;
 pub mod dispatch_plan;
 /// Dispatches elicitation steps to the elicitation hook.
 pub mod elicitation_invoker;
+/// Load-time envelope validation for resource and prompt routes.
+mod envelope_checks;
 /// Folds a plugin's payload edits back into the request.
 mod message_projection;
 /// Rejects plugins whose mode is unsafe inside a `parallel:` block.

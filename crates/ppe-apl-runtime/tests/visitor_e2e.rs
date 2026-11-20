@@ -701,9 +701,9 @@ routes:
 /// Smoke test that the visitor surfaces a compile error from a malformed
 /// APL block as a `PluginError::Config` out of `load_config_yaml`. Catches
 /// regressions where visitor errors swallow into Ok(_) or panic.
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Multi-entity-type route support (llm / prompt / resource)
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 //
 // Previously, the visitor hardcoded annotation on
 // `cmf.tool_pre_invoke` / `cmf.tool_post_invoke` regardless of route
@@ -1582,9 +1582,9 @@ async fn llm_route_enforces_completion_constraints() {
     );
 }
 
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Resource and prompt content reaches policy
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 //
 // Each deny is paired with a clean input on the same route, so a test cannot
 // pass by the route denying everything.
@@ -2169,9 +2169,9 @@ routes:
     );
 }
 
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Known gaps, pending per-part projection (#76)
-// ---------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 //
 // Each asserts the behavior #76 should deliver and is expected to fail until
 // then. When #76 lands, the test starts passing and its `should_panic` and

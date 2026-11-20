@@ -885,16 +885,12 @@ impl AplRouteHandler {
             tracing::warn!(
                 route = %self.route.route_key,
                 block,
-                part = replaced.part,
+                part = %replaced.part,
                 "pipeline replaced a whole envelope; failing request closed"
             );
             if continue_processing {
                 continue_processing = false;
-                // Only the result envelopes have a `content` field to point at.
-                let example = match replaced.part {
-                    "Resource" | "PromptResult" => "content",
-                    _ => "<field>",
-                };
+                let example = replaced.part.suggested_field();
                 let mut v = PluginViolation::new(
                     ENVELOPE_REPLACED_CODE,
                     format!(
