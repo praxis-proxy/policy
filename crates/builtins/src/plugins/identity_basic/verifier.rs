@@ -698,6 +698,10 @@ pub fn empty_directory_hash() -> Result<ParsedHash, HashError> {
 /// Verify a decoded credential against an admitted stored hash.
 ///
 /// This call is blocking and CPU-bound; run it off the async worker.
+///
+/// A verification that could not run reads as a mismatch here. A caller that
+/// charges a mismatch against a failure budget should use
+/// [`try_verify_bytes`], which keeps the two apart.
 pub fn verify_credential(hash: &ParsedHash, credential: &super::BasicCredential) -> bool {
     verify(hash, credential.password())
 }
@@ -705,6 +709,10 @@ pub fn verify_credential(hash: &ParsedHash, credential: &super::BasicCredential)
 /// Verify a password against an admitted stored hash.
 ///
 /// This call is blocking and CPU-bound; run it off the async worker.
+///
+/// A verification that could not run reads as a mismatch here. A caller that
+/// charges a mismatch against a failure budget should use
+/// [`try_verify_bytes`], which keeps the two apart.
 pub fn verify(hash: &ParsedHash, password: &Password) -> bool {
     password.verify_with(|bytes| verify_bytes(hash, bytes))
 }

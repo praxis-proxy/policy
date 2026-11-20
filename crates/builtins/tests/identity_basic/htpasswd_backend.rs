@@ -34,6 +34,22 @@ const ARGON2_RECORD: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
 /// enough for the other tasks to run, and every passing run waits it out.
 const PENDING_PROBE: std::time::Duration = std::time::Duration::from_millis(200); // 200 ms
 
+/// How long a test waits for a scripted read to start before failing.
+///
+/// A watchdog, not a timing claim: a read that never starts means the code
+/// under test stopped calling the source, and an unbounded wait would hang the
+/// suite rather than report it.
+const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(10); // 10 s
+
+/// The longest a request-path lookup may wait on a reload: the file backend's
+/// `RELOAD_WAIT`, which is private to it.
+const REQUEST_PATH_RELOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(2); // 2 s
+
+/// Scheduling slack allowed on top of [`REQUEST_PATH_RELOAD_WAIT`].
+///
+/// Large enough for a loaded CI host, and well short of a wait that doubled.
+const RELOAD_WAIT_SLACK: std::time::Duration = std::time::Duration::from_millis(1_500); // 1.5 s
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -443,14 +459,6 @@ fn a_due_reload_runs_on_the_blocking_pool_not_the_async_worker() {
     });
 }
 
-/// A reload must hold the publication lock across its read, not only across
-/// the publish.
-///
-/// The first reload is held after it has captured the pre-revocation records,
-/// the source is then revoked, and a second reload is started. A lock that
-/// covered only the publish would let the second read while the first is
-/// held; it must instead wait for the first to publish, then read and publish
-/// the revoked records last.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_record() {
     let source = ScriptedSource::new(&["alice", "bob"], 3600, 7200);
@@ -463,7 +471,7 @@ async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_rec
         let backend = std::sync::Arc::clone(&backend);
         tokio::task::spawn_blocking(move || backend.reload())
     };
-    tokio::task::spawn_blocking(move || captured.recv())
+    tokio::task::spawn_blocking(move || captured.recv_timeout(CAPTURE_WAIT))
         .await
         .expect("the capture wait completes")
         .expect("the first reload captures the pre-revocation records");
@@ -504,11 +512,6 @@ async fn concurrent_reloads_across_a_revocation_cannot_republish_the_revoked_rec
     );
 }
 
-/// A stalled read must not hold lookups past the staleness ceiling.
-///
-/// The defect: the lookup that started a reload awaited it unbounded, and
-/// every later lookup queued on the refresh slot before the staleness check.
-/// A hung read therefore hung every request instead of denying as `Stale`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_reload_past_the_ceiling_denies_as_stale_rather_than_hanging() {
     let source = ScriptedSource::new(&["alice"], 1, 1);
@@ -520,12 +523,13 @@ async fn a_stalled_reload_past_the_ceiling_denies_as_stale_rather_than_hanging()
     control.set_users(&["alice", "bob"]);
     let (captured, release) = control.hold_next_read();
 
+    let started = std::time::Instant::now();
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..4_u32 {
         let backend = std::sync::Arc::clone(&backend);
         set.spawn(async move { backend.lookup("bob").await.map(|found| found.is_some()) });
     }
-    tokio::task::spawn_blocking(move || captured.recv())
+    tokio::task::spawn_blocking(move || captured.recv_timeout(CAPTURE_WAIT))
         .await
         .expect("the capture wait completes")
         .expect("the request-path reload reaches the stalled read");
@@ -539,6 +543,12 @@ async fn a_stalled_reload_past_the_ceiling_denies_as_stale_rather_than_hanging()
     })
     .await
     .expect("every lookup must answer within its bound rather than queue on the stalled read");
+    let waited = started.elapsed();
+    assert!(
+        waited <= REQUEST_PATH_RELOAD_WAIT.saturating_add(RELOAD_WAIT_SLACK),
+        "a lookup waits at most {REQUEST_PATH_RELOAD_WAIT:?} on a stalled reload, so all four \
+         answer within it plus scheduling slack, not merely before the watchdog: {waited:?}"
+    );
     assert!(
         outcomes
             .iter()

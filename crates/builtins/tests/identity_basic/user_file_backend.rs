@@ -1199,11 +1199,6 @@ async fn a_file_backend_refuses_a_delegated_verdict() {
 // Documented example
 // -----------------------------------------------------------------------------
 
-/// The `users.yaml` example in the operator docs must load and log in once its
-/// placeholders hold hashes minted as the docs describe.
-///
-/// Read from the page itself, so an edit that breaks a field, a key or the
-/// record shape there fails here rather than at an operator's first load.
 #[tokio::test]
 async fn the_documented_user_file_loads_and_authenticates_once_its_hashes_are_minted() {
     let page = std::fs::read_to_string(concat!(

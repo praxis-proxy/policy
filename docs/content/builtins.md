@@ -209,11 +209,15 @@ parameters, since a directory admits one cost profile per file. With the
 reference `argon2` CLI, for example:
 
 ```console
-printf '%s' 'the password' | argon2 "$(openssl rand -hex 16)" -id -t 2 -k 19456 -p 1 -e
+printf 'Password: ' >&2; read -rs password; printf '\n' >&2
+printf '%s' "$password" | argon2 "$(openssl rand -hex 16)" -id -t 2 -k 19456 -p 1 -e
+unset password
 ```
 
-Use `printf '%s'` rather than `echo`, which appends a newline that becomes
-part of the hashed password.
+`read -s` prompts without echoing, so the password never appears in the
+command line or the shell history. `printf` is a shell builtin, so it does
+not appear in the process list either. Use `printf '%s'` rather than
+`echo`, which appends a newline that becomes part of the hashed password.
 
 `username`, `password_hash` and `expires_at` are storage fields: they are
 consumed by the backend and never reach the projected claims, so a
@@ -308,8 +312,9 @@ without running the verifier, until the window passes, and a successful
 login clears that counter. A key counted in a shared overflow bucket, or
 carrying failures inherited from one, is different: a spent bucket still
 sends the attempt to verification while the bucket's recovery budget is
-open, and a success there clears none of the bucket's failures. See the
-overflow buckets below.
+open, and a success there clears none of the bucket's failures. A closed
+recovery budget stops those recovery attempts, not every attempt on the
+bucket. See the overflow buckets below.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -355,10 +360,19 @@ Past `capacity`, keys are counted in a fixed table of shared overflow
 buckets. A spent bucket does not refuse a correct password: the attempt is
 verified, because the failures that spent the bucket may belong to another
 key. Each bucket's wrong guesses on that path are budgeted too. Once
-`max_failures` of them land within a window, the bucket denies as
-`auth.too_many_failures` without verifying until a window passes, so a
+`max_failures` of them land within a window, the bucket's recovery path
+closes until a window has passed since the last failed recovery, so a
 guesser who spent a target's bucket gains at most one more budget per
-window. A key that shares that bucket is denied for that window as well.
+window. While recovery is closed, an attempt on the spent bucket denies as
+`auth.too_many_failures` without verifying, and so does one from any key
+that shares the bucket. A key promoted to a counter of its own carries the
+bucket's failed recoveries with it, so a freed slot does not reopen the
+path.
+
+The closure stops recovery attempts only. The bucket's own failures and its
+recovery budget expire separately, so once the bucket's failures expire,
+ordinary attempts are verified again even while recovery is still closed.
+The closure applies again only when those attempts spend the bucket.
 Raise `capacity` if the limiter's saturation count keeps rising.
 
 ### The HTTP transport

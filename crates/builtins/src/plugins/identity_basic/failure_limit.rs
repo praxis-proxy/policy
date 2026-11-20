@@ -283,7 +283,9 @@ impl Drop for Admission<'_> {
             && let Slot::Overflow(_) = self.slot
         {
             self.limiter
-                .settle_recovery(self.slot, |recovery, now, _| recovery.release(now));
+                .settle_recovery(&self.user_id, self.slot, |recovery, now, _| {
+                    recovery.release(now);
+                });
             return;
         }
         self.limiter.release(&self.user_id, self.slot);
@@ -505,13 +507,14 @@ impl FailureLimiter {
         }
 
         // Room for a counter of its own, so the attempt is tracked by name and
-        // pays no collision cost -- unless the bucket still has attempts in
-        // flight, which may be this user-id's. Those settle on the bucket, so
-        // promoting past them started the named budget without them and let
-        // the user-id run `max_failures` more attempts beside them. The bucket
-        // cannot say whose they are, so carrying them over would charge this
-        // user-id for a colliding caller's reservations; the user-id stays in
-        // overflow, which still bounds it, until they settle.
+        // pays no collision cost -- unless this user-id still has attempts in
+        // flight on its bucket. Those settle on the bucket, so promoting past
+        // them started the named budget without them and let the user-id run
+        // `max_failures` more attempts beside them; it stays in overflow, which
+        // still bounds it, until they settle. Attempts in flight for colliding
+        // user-ids do not hold it back: they settle on the bucket either way,
+        // and waiting on them let one pending attempt and one recovery keep
+        // every other key in the bucket from a free named slot.
         if !guard.overflow_busy(&user_id)
             && (guard.named.len() < self.config.capacity || guard.reclaim(now))
         {
@@ -542,7 +545,17 @@ impl FailureLimiter {
             // window gave a failure about to expire a full new one, and
             // sharing the own-failure window let an ordinary success close it
             // and drop the inherited count early.
-            let (inherited, inherited_expires_at_ms) = guard.overflow_failures(&user_id, now);
+            //
+            // The bucket's failed recoveries come along too, apart from both
+            // failure counts. They bound only the recovery path, as they did on
+            // the bucket: dropping them reopened a closed recovery budget the
+            // moment a named slot freed, and counting them as failures would
+            // refuse an attempt the recovery budget still has room for.
+            let bucket = overflow_bucket(&user_id);
+            let (inherited, inherited_expires_at_ms) =
+                Counters::live_failures(&mut guard.overflow, bucket, now);
+            let (inherited_recoveries, inherited_recoveries_expires_at_ms) =
+                Counters::live_failures(&mut guard.recoveries, bucket, now);
             let mut counter = Counter {
                 // A fresh counter takes its first window from `fail`, as
                 // `reserve` opens none.
@@ -550,6 +563,8 @@ impl FailureLimiter {
                 failures: 0,
                 inherited,
                 inherited_expires_at_ms,
+                inherited_recoveries,
+                inherited_recoveries_expires_at_ms,
                 outstanding: 0,
             };
             return match counter.verdict(self.config.max_failures) {
@@ -610,9 +625,11 @@ impl FailureLimiter {
             if !guard.reserve_recovery(bucket, now, self.config.max_failures) {
                 return Err(Refusal::Saturated);
             }
+            guard.track(&user_id);
             return Ok(self.admitted_unproven(user_id, Slot::Overflow(bucket), lease));
         }
         counter.reserve();
+        guard.track(&user_id);
         Ok(self.admitted(user_id, Slot::Overflow(bucket)))
     }
 
@@ -681,12 +698,16 @@ impl FailureLimiter {
     /// and reclaim cannot replace it before this attempt settles on it.
     ///
     /// `Verdict::Unproven` means own failures and attempts in flight leave
-    /// room, so a single recovery can always prove a correct credential.
+    /// room, so a single recovery can prove a correct credential unless the
+    /// failed recoveries carried in from the bucket have closed the path.
     fn admit_named_recovery(
         &self,
         counter: &mut Counter,
         user_id: String,
     ) -> Option<Admission<'_>> {
+        if counter.recovery_closed(self.config.max_failures) {
+            return None;
+        }
         let lease = self.claim_unproven()?;
         counter.reserve();
         Some(self.admitted_unproven(user_id, Slot::Named, lease))
@@ -792,6 +813,7 @@ impl FailureLimiter {
                 if let Some(counter) = guard.overflow.get_mut(bucket) {
                     counter.release(now);
                 }
+                guard.untrack(user_id);
             },
             Slot::Uncounted => {},
         }
@@ -811,7 +833,7 @@ impl FailureLimiter {
         if slot == Slot::Named {
             self.settle_failure(user_id, slot);
         }
-        self.settle_recovery(slot, Counter::fail);
+        self.settle_recovery(user_id, slot, Counter::fail);
     }
 
     /// Settle an unproven attempt's reservation on its overflow bucket's
@@ -819,7 +841,12 @@ impl FailureLimiter {
     ///
     /// Only an attempt admitted over a shared bucket holds one, so any other
     /// slot is left alone.
-    fn settle_recovery(&self, slot: Slot, settle: impl FnOnce(&mut Counter, u64, u64)) {
+    fn settle_recovery(
+        &self,
+        user_id: &str,
+        slot: Slot,
+        settle: impl FnOnce(&mut Counter, u64, u64),
+    ) {
         let Slot::Overflow(bucket) = slot else {
             return;
         };
@@ -829,6 +856,7 @@ impl FailureLimiter {
         if let Some(recovery) = guard.recoveries.get_mut(bucket) {
             settle(recovery, now, window);
         }
+        guard.untrack(user_id);
     }
 
     /// Settle an unproven attempt whose credential verified.
@@ -849,7 +877,7 @@ impl FailureLimiter {
         if slot == Slot::Named {
             self.settle_success(user_id, slot);
         }
-        self.settle_recovery(slot, |recovery, now, _| recovery.release(now));
+        self.settle_recovery(user_id, slot, |recovery, now, _| recovery.release(now));
     }
 
     fn window_ms(&self) -> u64 {
@@ -918,6 +946,16 @@ struct Counter {
     /// a fresh full window, and let an ordinary success close the window and
     /// drop the inherited count before the bucket's had passed.
     inherited_expires_at_ms: u64,
+    /// Failed recoveries carried in from the bucket's recovery budget on
+    /// promotion.
+    ///
+    /// They close the recovery path as they did on the bucket, and nothing
+    /// else: an attempt with own budget to spare is still admitted, and a
+    /// recovery still runs while they leave room.
+    inherited_recoveries: u32,
+    /// When `inherited_recoveries` stops counting: the recovery budget's
+    /// expiry, copied with it.
+    inherited_recoveries_expires_at_ms: u64,
     /// Attempts admitted and not yet settled.
     outstanding: u32,
 }
@@ -945,6 +983,9 @@ impl Counter {
         if self.inherited_expires_at_ms <= now {
             self.inherited = 0;
         }
+        if self.inherited_recoveries_expires_at_ms <= now {
+            self.inherited_recoveries = 0;
+        }
     }
 
     /// Settle a reservation as a failure.
@@ -964,6 +1005,15 @@ impl Counter {
     fn release(&mut self, now: u64) {
         self.outstanding = self.outstanding.saturating_sub(1);
         self.expire(now);
+    }
+
+    /// Whether the failed recoveries carried in from the bucket, with this
+    /// counter's own failures and attempts in flight, have spent `budget`.
+    fn recovery_closed(&self, budget: u32) -> bool {
+        self.failures
+            .saturating_add(self.outstanding)
+            .saturating_add(self.inherited_recoveries)
+            >= budget
     }
 
     /// Charge an admitted attempt against the budget.
@@ -1044,6 +1094,14 @@ struct Counters {
     ///
     /// [`RECLAIM_INTERVAL_MS`]: RECLAIM_INTERVAL_MS
     next_reclaim_ms: u64,
+    /// Attempts in flight in the overflow table, ordinary or recovering, by
+    /// user-id.
+    ///
+    /// The buckets count reservations without saying whose they are, and
+    /// promotion needs to tell this user-id's from a colliding one's. Each
+    /// entry belongs to an admission that already holds the user-id, so the
+    /// map is bounded by the attempts in flight.
+    in_flight: HashMap<String, u32>,
 }
 
 impl Counters {
@@ -1057,6 +1115,7 @@ impl Counters {
                 .take(OVERFLOW_BUCKETS)
                 .collect(),
             next_reclaim_ms: 0,
+            in_flight: HashMap::new(),
         }
     }
 
@@ -1078,32 +1137,24 @@ impl Counters {
         true
     }
 
-    /// The live failures recorded for a user-id in the overflow table, and
-    /// when they expire.
+    /// The live failures recorded in one bucket of `table`, and when they
+    /// expire.
     ///
     /// Expires the bucket first, so a stale window contributes nothing. Reads
     /// zero when the index cannot be taken, which `overflow_bucket`'s mask
     /// makes unreachable; the crate denies `indexing_slicing`, so the bound is
     /// taken rather than asserted.
-    fn overflow_failures(&mut self, user_id: &str, now: u64) -> (u32, u64) {
-        let bucket = overflow_bucket(user_id);
-        self.overflow.get_mut(bucket).map_or((0, 0), |counter| {
+    fn live_failures(table: &mut [Counter], bucket: usize, now: u64) -> (u32, u64) {
+        table.get_mut(bucket).map_or((0, 0), |counter| {
             counter.expire(now);
             (counter.failures, counter.expires_at_ms)
         })
     }
 
-    /// Whether a user-id's overflow bucket has attempts still in flight,
-    /// ordinary or recovering.
-    ///
-    /// Reads idle when the index cannot be taken, which `overflow_bucket`'s
-    /// mask makes unreachable: promotion then counts the user-id by name,
-    /// where the overflow arm would count it nowhere.
+    /// Whether this user-id has attempts still in flight in the overflow
+    /// table, ordinary or recovering.
     fn overflow_busy(&self, user_id: &str) -> bool {
-        let bucket = overflow_bucket(user_id);
-        let in_flight =
-            |table: &[Counter]| table.get(bucket).is_some_and(|held| held.outstanding > 0);
-        in_flight(&self.overflow) || in_flight(&self.recoveries)
+        self.in_flight.contains_key(user_id)
     }
 
     /// Drop idle named counters, at most once per [`RECLAIM_INTERVAL_MS`].
@@ -1120,6 +1171,22 @@ impl Counters {
         let before = self.named.len();
         self.named.retain(|_, held| !held.idle(now));
         self.named.len() < before
+    }
+
+    /// Record an attempt admitted in the overflow table for `user_id`.
+    fn track(&mut self, user_id: &str) {
+        let held = self.in_flight.entry(user_id.to_owned()).or_insert(0);
+        *held = held.saturating_add(1);
+    }
+
+    /// Settle one of `user_id`'s attempts in the overflow table.
+    fn untrack(&mut self, user_id: &str) {
+        if let Some(held) = self.in_flight.get_mut(user_id) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                self.in_flight.remove(user_id);
+            }
+        }
     }
 
     /// Apply `settle` to the counter `admit` charged this attempt against.
@@ -1143,6 +1210,7 @@ impl Counters {
                 if let Some(counter) = self.overflow.get_mut(bucket) {
                     settle(counter);
                 }
+                self.untrack(user_id);
             },
             Slot::Uncounted => {},
         }
@@ -1321,6 +1389,8 @@ mod tests {
             failures: 2,
             inherited: 1,
             inherited_expires_at_ms: 1_000,
+            inherited_recoveries: 0,
+            inherited_recoveries_expires_at_ms: 0,
             outstanding: 0,
         };
 
@@ -1361,6 +1431,8 @@ mod tests {
             failures: 0,
             inherited: 5,
             inherited_expires_at_ms: 1_000,
+            inherited_recoveries: 0,
+            inherited_recoveries_expires_at_ms: 0,
             outstanding: 0,
         };
 
@@ -1892,6 +1964,8 @@ mod tests {
             failures: 0,
             inherited: 2,
             inherited_expires_at_ms: 1_000,
+            inherited_recoveries: 0,
+            inherited_recoveries_expires_at_ms: 0,
             outstanding: 0,
         };
         admitted.reserve();
@@ -1970,6 +2044,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_colliding_key_is_promoted_past_another_keys_attempts_in_flight() {
+        let limiter = limiter_with_verifications(1, 1, 4);
+        let bucket = overflow_bucket("attacker");
+        let mut colliding = (0..1_000_000_u32)
+            .map(|n| format!("caller{n}"))
+            .filter(|candidate| overflow_bucket(candidate) == bucket);
+        let recovering = colliding
+            .next()
+            .expect("a million candidates cover a 1024-bucket table");
+        let promoted = colliding
+            .next()
+            .expect("a million candidates cover a 1024-bucket table twice");
+        let squatter = limiter.admit("squatter").expect("takes the only slot");
+
+        let pending = limiter
+            .admit("attacker")
+            .expect("the attacker is counted in overflow");
+        let recovery = limiter
+            .admit(recovering.as_str())
+            .expect("a bucket spent by a reservation refuses recoverably");
+        assert!(
+            recovery.is_unproven(),
+            "the pending attempt spends a budget of one, so a colliding key only recovers"
+        );
+        squatter.record_success();
+
+        let attempt = limiter
+            .admit(promoted.as_str())
+            .expect("a free named slot must admit a key with nothing of its own in flight");
+        assert!(
+            !attempt.is_unproven() && limiter.tracked() == 1,
+            "the bucket's attempts in flight belong to other keys, so this key takes the free \
+             slot with an ordinary attempt instead of a recovery the full ceiling refuses"
+        );
+        drop((pending, recovery, attempt));
+    }
+
+    #[test]
+    fn promotion_keeps_a_closed_recovery_budget_closed() {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        fail(&limiter, "target", 2);
+        for _ in 0..2 {
+            limiter
+                .admit("target")
+                .expect("the bucket's recovery budget admits two recoveries")
+                .record_failure();
+        }
+        assert_eq!(
+            limiter.admit("target").err(),
+            Some(Refusal::Saturated),
+            "two failed recoveries close the bucket's recovery path"
+        );
+
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+
+        assert_eq!(
+            limiter.admit("target").err(),
+            Some(Refusal::Saturated),
+            "a freed named slot must not reopen the recovery path the bucket closed"
+        );
+    }
+
+    #[test]
+    fn promotion_carries_a_partly_spent_recovery_budget() {
+        let limiter = limiter(1, 2);
+        fail(&limiter, "squatter", 1);
+        fail(&limiter, "target", 2);
+        limiter
+            .admit("target")
+            .expect("the bucket's recovery budget has room")
+            .record_failure();
+
+        limiter
+            .admit("squatter")
+            .expect("the squatter is admitted")
+            .record_success();
+
+        let attempt = limiter
+            .admit("target")
+            .expect("one failed recovery leaves the carried budget room for another");
+        assert!(
+            attempt.is_unproven() && limiter.tracked() == 1,
+            "the promoted key recovers on its named counter"
+        );
+        attempt.record_failure();
+
+        assert_eq!(
+            limiter.admit("target").err(),
+            Some(Refusal::Saturated),
+            "the failed recovery carried from the bucket and the one on the named counter spend \
+             a budget of two between them"
+        );
+    }
+
     /// Inherited failures must keep the bucket's expiry.
     ///
     /// The defects: promotion gave an expiring bucket failure a fresh full
@@ -1982,6 +2155,8 @@ mod tests {
             failures: 0,
             inherited: 1,
             inherited_expires_at_ms: 1_000,
+            inherited_recoveries: 0,
+            inherited_recoveries_expires_at_ms: 0,
             outstanding: 0,
         };
 
@@ -2146,6 +2321,8 @@ mod tests {
                 failures: 1,
                 inherited: 0,
                 inherited_expires_at_ms: 0,
+                inherited_recoveries: 0,
+                inherited_recoveries_expires_at_ms: 0,
                 outstanding: 0,
             },
         );

@@ -715,10 +715,15 @@ async fn an_expired_limiter_entry_frees_capacity() {
     );
 }
 
-/// The resolver's own denial carries the 401 and the challenge.
+/// The resolver's own denial carries the 401 that [RFC 9110 Section 15.5.2]
+/// requires a `WWW-Authenticate` challenge on, and the Basic challenge that
+/// [RFC 7617 Section 2] defines.
 ///
 /// Driven against the resolver directly, so it pins what the plugin emits,
 /// not what a route's `response:` block does with it downstream.
+///
+/// [RFC 9110 Section 15.5.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.2
+/// [RFC 7617 Section 2]: https://datatracker.ietf.org/doc/html/rfc7617#section-2
 #[tokio::test]
 async fn the_resolver_denial_carries_its_own_401_and_challenge() {
     let file = HtpasswdFile::write(&format!("{}\n", bcrypt_line("alice", "correct horse", 4)));
@@ -730,12 +735,13 @@ async fn the_resolver_denial_carries_its_own_401_and_challenge() {
     assert_eq!(
         violation.proto_error_code,
         Some(401),
-        "a wrong password denies with the plugin's own 401"
+        "a wrong password denies with the plugin's own 401 (RFC 9110 Section 15.5.2)"
     );
     assert_eq!(
         challenge_of(&result).as_deref(),
         Some("Basic realm=\"ops\""),
-        "and with the plugin's own challenge, which RFC 7617 requires on that 401"
+        "and with the plugin's own Basic challenge (RFC 7617 Section 2), which RFC 9110 \
+         Section 15.5.2 requires on that 401"
     );
 }
 
