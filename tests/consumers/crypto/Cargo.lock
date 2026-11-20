@@ -635,7 +635,7 @@ checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "praxis-policy"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-cmf"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "praxis-policy-apl-core",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-runtime"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-builtins"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-orchestration"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "futures",
  "tokio",
@@ -748,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-audit-logger"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-pii-scanner"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "praxis-policy-core",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-transcript-scanner"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "praxis-policy-core",
