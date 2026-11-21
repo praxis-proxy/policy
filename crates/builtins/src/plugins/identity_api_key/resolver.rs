@@ -18,6 +18,7 @@ use crate::plugins::identity_api_key::config::{
 };
 use crate::plugins::identity_api_key::file_directory::FileDirectory;
 use crate::plugins::identity_api_key::http_directory::HttpDirectory;
+use crate::token_lookup::crypto::API_KEY_CACHE;
 use crate::token_lookup::directory::KeyDirectory;
 use crate::token_lookup::resolver::{
     LookupProfile, LookupResolver, check_location_capability, config_error, parse_settings,
@@ -48,8 +49,9 @@ pub mod codes {
     pub const KEY_EXPIRED: &str = "auth.key_expired";
 }
 
-/// The codes that are this plugin's own.
+/// What is this plugin's own: its denial codes and cache labels.
 const PROFILE: LookupProfile = LookupProfile {
+    cache_hash: API_KEY_CACHE,
     expired_code: codes::KEY_EXPIRED,
     unknown_code: codes::KEY_UNKNOWN,
 };
@@ -87,7 +89,7 @@ impl ApiKeyIdentityResolver {
                 Arc::new(HttpDirectory::new(http.clone()).map_err(|e| config_error(&config, e))?)
             },
         };
-        let directory = with_cache(&config, directory, settings.cache.as_ref())?;
+        let directory = with_cache(&config, directory, settings.cache.as_ref(), &PROFILE)?;
 
         let lookup = LookupResolver::new(
             directory,

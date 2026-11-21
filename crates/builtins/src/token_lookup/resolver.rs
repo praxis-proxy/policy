@@ -22,6 +22,7 @@ use praxis_policy_core::plugin::{OnError, PluginConfig, PluginMode};
 use serde::de::DeserializeOwned;
 
 use crate::token_lookup::cache::{CacheConfig, CachingDirectory};
+use crate::token_lookup::crypto::HashLabels;
 use crate::token_lookup::directory::{KeyDirectory, PresentedKey};
 
 /// Denial codes every lookup resolver shares.
@@ -49,6 +50,8 @@ pub(crate) mod codes {
 /// What differs between one lookup resolver and another.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LookupProfile {
+    /// How the cache reports a failure to hash a credential.
+    pub(crate) cache_hash: HashLabels,
     /// Denial code for a record past its `expires_at`.
     pub(crate) expired_code: &'static str,
     /// Denial code for a credential the directory did not recognise.
@@ -256,10 +259,13 @@ pub(crate) fn with_cache(
     config: &PluginConfig,
     directory: Arc<dyn KeyDirectory>,
     cache: Option<&CacheConfig>,
+    profile: &LookupProfile,
 ) -> Result<Arc<dyn KeyDirectory>, Box<PluginError>> {
     match cache {
         Some(cache) => Ok(Arc::new(
-            CachingDirectory::new(directory, cache.clone()).map_err(|e| config_error(config, e))?,
+            CachingDirectory::new(directory, cache.clone())
+                .map_err(|e| config_error(config, e))?
+                .with_hash_labels(profile.cache_hash),
         )),
         None => Ok(directory),
     }

@@ -62,10 +62,11 @@ praxis-policy = { version = "0.7.0", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all ten below: `jwt`, `api-key`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
+| `builtins` | all eleven below: `jwt`, `api-key`, `kubernetes-token-review`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault` |
 | `jwt` | `identity/jwt`, verified with AWS-LC |
 | `jwt-openssl-fips` | `identity/jwt` and DPoP, verified with system OpenSSL under the FIPS provider. Requires `fips`; cannot be combined with `jwt`. HMAC (HS256, HS384, HS512) and EdDSA are refused at config load |
 | `api-key` | `identity/api-key` |
+| `kubernetes-token-review` | `identity/kubernetes-token-review` |
 | `fips` | OpenSSL FIPS SHA-256 for Policy's shared hashing, used by the engine and API-key. Needs no identity builtin. Keyed content provenance is rejected because it requires HMAC. Select with `default-features = false`; other crypto-using builtins are reported and make the profile unsafe. |
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::token_lookup::crypto::hash_credential;
+use crate::token_lookup::crypto::{HashLabels, hash_credential};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -237,6 +237,12 @@ fn normalize_digest(authored: &str, index: IndexKind) -> Result<String, String> 
 /// A SHA-256 digest, hex encoded.
 const SHA256_HEX_LEN: usize = 64;
 
+/// How a failure to hash for the index is reported.
+const INDEX_HASH: HashLabels = HashLabels {
+    failure: "API key hashing failed",
+    op: "api_key_index",
+};
+
 impl FileDirectory {
     /// Read the file once and build the index.
     ///
@@ -360,7 +366,7 @@ impl FileDirectory {
     fn digest(&self, presented: &PresentedKey) -> Result<String, DirectoryError> {
         match self.config.index {
             IndexKind::Sha256 => {
-                let digest = hash_credential(presented, "api_key_index")?;
+                let digest = hash_credential(presented, INDEX_HASH)?;
                 let mut out = String::with_capacity("sha256:".len() + SHA256_HEX_LEN);
                 out.push_str("sha256:");
                 for byte in digest {

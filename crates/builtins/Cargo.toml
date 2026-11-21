@@ -22,6 +22,7 @@ features = [
   "crypto-rustcrypto",
   "jwt",
   "api-key",
+  "kubernetes-token-review",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
@@ -59,6 +60,7 @@ fips = [
 jwt = ["_jwt", "jsonwebtoken/aws_lc_rs"]
 jwt-openssl-fips = ["_jwt", "dep:openssl"]
 api-key = ["_engine-core", "_plugins", "_token_lookup"]
+kubernetes-token-review = ["_engine-core", "_plugins", "_token_lookup", "dep:base64"]
 oauth = [
   "_engine-core",
   "_plugins",
@@ -391,6 +393,11 @@ required-features = ["jwt-openssl-fips"]
 name = "api_key"
 path = "tests/api_key/main.rs"
 required-features = ["api-key"]
+
+[[test]]
+name = "token_review"
+path = "tests/token_review/main.rs"
+required-features = ["kubernetes-token-review"]
 
 [[test]]
 name = "oauth"
