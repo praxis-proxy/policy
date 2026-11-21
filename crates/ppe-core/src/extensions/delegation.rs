@@ -63,6 +63,8 @@ pub struct DelegationHop {
 
     /// When this hop was minted. Default is the Unix epoch — production
     /// code constructs with `Utc::now()`; only tests rely on the default.
+    /// A hop read from an inbound `act` claim carries the token's `iat`
+    /// instead, a true upper bound, since the token does not date earlier hops.
     #[serde(default)]
     pub timestamp: DateTime<Utc>,
 
@@ -90,6 +92,13 @@ pub struct DelegationExtension {
     pub chain: Vec<DelegationHop>,
 
     /// Chain depth (number of hops). `u32` for wire-stable width.
+    ///
+    /// When read from an RFC 8693 `act` claim, this counts nested `act`
+    /// objects, which section 4.1 calls informational only and not to be
+    /// considered in access control decisions. It reflects only what the
+    /// issuing STS chose to nest, so it can understate the real chain and is
+    /// never overstated. A depth limit is a best-effort guard, not a hop limit;
+    /// enforce a hard limit at the STS that mints the tokens.
     #[serde(default)]
     pub depth: u32,
 
@@ -105,7 +114,9 @@ pub struct DelegationExtension {
     #[serde(default)]
     pub delegated: bool,
 
-    /// Age of the delegation chain in seconds.
+    /// Age in seconds of the token that carried the chain, measured from its
+    /// `iat`. On an exchanged token `iat` is the time of the latest exchange,
+    /// so a re-exchange resets it; it is not the age of the whole chain.
     #[serde(default)]
     pub age_seconds: f64,
 }

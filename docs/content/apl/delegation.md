@@ -219,8 +219,24 @@ context:
 | `delegation.actor_subject_id` | The acting subject for this hop. |
 
 These let policy reason about the chain itself, for example
-`require(delegation.depth <= 1)` to refuse deeply nested delegation, or the
-post-check above to enforce least privilege on what was actually granted.
+`require(!delegated)` to refuse delegated calls, `require(delegation.actor_subject_id == "agent-a")`
+to admit one actor, or the post-check above to enforce least privilege on what
+was actually granted. `delegated` and `delegation.actor_subject_id` come from
+top-level claims.
+
+> **Warning: `delegation.depth` is informational.** The value counts nested
+> `act` claims, which RFC 8693 section 4.1 calls informational only and not to
+> be considered in access control decisions. It reflects only what the issuing
+> STS chose to nest, so it can understate the real chain and is never
+> overstated: an STS that does not nest the prior `act` mints a depth-1 token
+> for a three-hop delegation. A depth limit is a best-effort guard, not a hop
+> limit. Enforce a hard limit at the STS that mints the tokens.
+
+A depth limit is a secondary guard under that warning:
+
+```text
+require(delegation.depth <= 1)
+```
 
 ## Pipeline integration
 
