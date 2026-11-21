@@ -15,7 +15,7 @@ use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::host::HostServices as _;
-use praxis_policy_core::http::{HttpRequest, form_urlencode};
+use praxis_policy_core::http::{HttpRequest, form_urlencode, form_urlencode_component};
 use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::revocation::{
@@ -262,9 +262,17 @@ fn issuer_of(token: &str) -> Option<String> {
         .map(|issuer| issuer.iss)
 }
 
-/// `Basic base64(client_id:client_secret)`, as the OAuth delegator sends it.
+/// `client_secret_basic` (RFC 6749 section 2.3.1): each part form-encoded,
+/// joined with `:`, then base64. Encoding first keeps a `:` in the client ID
+/// from splitting the pair, and a `+` or `%` in the secret from decoding to
+/// different bytes at the server.
 fn basic_authorization(client_id: &str, secret: &str) -> Zeroizing<String> {
-    let raw = Zeroizing::new(format!("{client_id}:{secret}"));
+    let secret = Zeroizing::new(form_urlencode_component(secret));
+    let raw = Zeroizing::new(format!(
+        "{}:{}",
+        form_urlencode_component(client_id),
+        secret.as_str()
+    ));
     Zeroizing::new(format!(
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
@@ -746,9 +754,9 @@ mod tests {
             "body"
         );
         assert_eq!(
-            header("authorization"),
-            Some(basic_authorization("ppe", "s3cret").to_string()),
-            "client_secret_basic"
+            header("authorization").as_deref(),
+            Some("Basic cHBlOnMzY3JldA=="),
+            "client_secret_basic for ppe:s3cret"
         );
         assert_eq!(
             header("content-type").as_deref(),
@@ -756,5 +764,28 @@ mod tests {
             "content type"
         );
         assert_eq!(request.timeout, Duration::from_millis(500), "timeout");
+    }
+
+    #[tokio::test]
+    async fn client_credentials_are_form_encoded_before_basic() {
+        let transport =
+            Arc::new(FakeTransport::new().json("/introspect", 200, r#"{"active":true}"#));
+        let ext = ext(&transport, &[(IdentitySlot::Client, jwt(ISSUER))]);
+        let checker = checker(json!({
+            "client_id": "ppe:svc",
+            "client_secret_source": { "kind": "literal", "secret": "a+b c%&" },
+        }));
+
+        run(&checker, &asked(&[IdentitySlot::Client]), &ext).await;
+
+        let request = transport.last_request().expect("a request was sent");
+        assert_eq!(
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Basic cHBlJTNBc3ZjOmElMkJiK2MlMjUlMjY="),
+            "RFC 6749 section 2.3.1: base64 of ppe%3Asvc:a%2Bb+c%25%26"
+        );
     }
 }

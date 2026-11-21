@@ -274,40 +274,62 @@ impl HttpRequest {
 /// this produces the body, not the header, because a transport must not
 /// have to guess which of the two a caller meant.
 pub fn form_urlencode(pairs: &[(&str, &str)]) -> Bytes {
-    fn encode_into(out: &mut String, raw: &str) {
-        for byte in raw.as_bytes() {
-            match byte {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
-                    out.push(*byte as char);
-                },
-                b' ' => out.push('+'),
-                other => {
-                    out.push('%');
-                    out.push(
-                        char::from_digit(u32::from(other >> 4), 16)
-                            .unwrap_or('0')
-                            .to_ascii_uppercase(),
-                    );
-                    out.push(
-                        char::from_digit(u32::from(other & 0xF), 16)
-                            .unwrap_or('0')
-                            .to_ascii_uppercase(),
-                    );
-                },
-            }
-        }
-    }
-
     let mut out = String::new();
     for (i, (key, value)) in pairs.iter().enumerate() {
         if i > 0 {
             out.push('&');
         }
-        encode_into(&mut out, key);
+        form_urlencode_into(&mut out, key);
         out.push('=');
-        encode_into(&mut out, value);
+        form_urlencode_into(&mut out, value);
     }
     Bytes::from(out)
+}
+
+/// Encode one value by the rules [`form_urlencode`] applies to each key and
+/// value.
+///
+/// RFC 6749 section 2.3.1 has a client form-encode its `client_id` and
+/// secret this way before joining them for HTTP Basic, so an authorization
+/// server that decodes them recovers the original bytes. The result is sized
+/// up front and never reallocates, so a caller holding a secret in a
+/// zeroizing buffer leaves no stray copy behind.
+///
+/// ```
+/// use praxis_policy_core::http::form_urlencode_component;
+///
+/// assert_eq!(form_urlencode_component("a b+c:d"), "a+b%2Bc%3Ad");
+/// ```
+#[must_use]
+pub fn form_urlencode_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().saturating_mul(3));
+    form_urlencode_into(&mut out, raw);
+    out
+}
+
+/// Append `raw` to `out`, form-urlencoded.
+fn form_urlencode_into(out: &mut String, raw: &str) {
+    for byte in raw.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(*byte as char);
+            },
+            b' ' => out.push('+'),
+            other => {
+                out.push('%');
+                out.push(
+                    char::from_digit(u32::from(other >> 4), 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit(u32::from(other & 0xF), 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+            },
+        }
+    }
 }
 
 /// A buffered HTTP response.

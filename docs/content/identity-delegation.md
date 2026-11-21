@@ -1492,9 +1492,10 @@ any status other than 200, or a response body it cannot parse denies with
 
 The plugin needs two capabilities: `perform_http` to reach the endpoint
 through the host's HTTP transport, and `read_inbound_credentials` to read
-the raw tokens. It authenticates to the endpoint with HTTP Basic, sending
-`client_id:secret` base64-encoded with neither part form-encoded first. The
-OAuth delegator does the same.
+the raw tokens. It authenticates to the endpoint with HTTP Basic as RFC 6749
+section 2.3.1 describes: the client ID and secret are each form-encoded,
+joined with `:`, and base64-encoded. A secret containing `+`, `%`, `&` or a
+space therefore reaches the server unchanged.
 
 `cache_ttl_seconds` sets the revocation window. After a token is revoked at
 the issuer, PPE keeps accepting it until the cached answer expires. The
