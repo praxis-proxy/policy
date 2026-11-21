@@ -389,7 +389,11 @@ How strict the check is depends on how you set it up:
 | A route with `revocation: { steps: [], replace_inherited: true }` | The route opts out on purpose. The load raises `revocation_replaced_inherited` so the opt-out is visible. This is allowed even with `require_revocation: true`. |
 
 Requests that do not match any route are still checked, using the checkers
-from `global.revocation` and the default for their entity type.
+from `global.revocation` and the default for their entity type. If
+`global.authentication` is set, those requests count as covered only when
+`global.revocation` lists a checker, because an entity default covers only
+its own entity type. Otherwise they are reported like an uncovered route,
+as `global (requests matching no route)`.
 
 [Identity](identity-delegation.md#revocation) covers where the checks run,
 which identities a checker has to cover, the denial codes, and the

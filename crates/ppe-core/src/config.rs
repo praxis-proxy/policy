@@ -4178,14 +4178,23 @@ pub(crate) fn rate_limits_without_authentication(
         .collect()
 }
 
+/// How a report names requests that match no route.
+const NO_ROUTE_FALLBACK: &str = "global (requests matching no route)";
+
 /// Every route that resolves authentication but runs no revocation check and
-/// is not explicitly excluded, named for a report.
+/// is not explicitly excluded, named for a report, after the no-route
+/// fallback when it is uncovered too.
 ///
 /// Empty unless revocation is in use: some `revocation:` block lists a
 /// checker, or `engine_settings.require_revocation` is set. A deployment that
 /// never configures revocation gets no finding. A route is explicitly
 /// excluded when a `revocation:` block on its path sets `replace_inherited:
 /// true` and leaves it with no checker.
+///
+/// A request matching no route is authenticated by `global.authentication`
+/// and checked by `global.revocation` and its entity's default. An entity
+/// default covers only its own entity type, so only a global checker covers
+/// the fallback.
 pub(crate) fn routes_without_revocation(config: &PolicyConfig) -> Vec<String> {
     let in_use = config.engine_settings.require_revocation
         || step_list_blocks(config, &REVOCATION_BLOCK)
@@ -4194,19 +4203,25 @@ pub(crate) fn routes_without_revocation(config: &PolicyConfig) -> Vec<String> {
     if !in_use {
         return Vec::new();
     }
-    config
-        .routes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, route)| {
-            if fold_step_layers(authentication_layers(config, Some(route))).is_empty() {
-                return None;
-            }
-            let layers = step_list_layers(config, &REVOCATION_BLOCK, Some(route), None);
-            let excluded = layers.iter().any(|layer| layer.config.replace_inherited);
-            let checkers = fold_step_layers(layers);
-            (checkers.is_empty() && !excluded).then(|| route_display_name(route, i))
-        })
+    let uncovered = |route: Option<&RouteEntry>| {
+        if fold_step_layers(authentication_layers(config, route)).is_empty() {
+            return false;
+        }
+        let layers = step_list_layers(config, &REVOCATION_BLOCK, route, None);
+        let excluded = layers.iter().any(|layer| layer.config.replace_inherited);
+        fold_step_layers(layers).is_empty() && !excluded
+    };
+    let fallback = uncovered(None).then(|| NO_ROUTE_FALLBACK.to_owned());
+    fallback
+        .into_iter()
+        .chain(
+            config
+                .routes
+                .iter()
+                .enumerate()
+                .filter(|(_, route)| uncovered(Some(route)))
+                .map(|(i, route)| route_display_name(route, i)),
+        )
         .collect()
 }
 
@@ -6533,8 +6548,45 @@ routes:
         .expect("partial coverage loads without require_revocation");
         assert_eq!(
             routes_without_revocation(&cfg),
-            vec!["tool:search".to_owned()],
-            "only the uncovered route is reported; the covered and the excluded ones are not",
+            vec![NO_ROUTE_FALLBACK.to_owned(), "tool:search".to_owned()],
+            "the uncovered fallback and route are reported; the covered and the excluded routes \
+             are not",
+        );
+    }
+
+    #[test]
+    fn the_no_route_fallback_is_covered_only_by_a_global_checker() {
+        for (yaml, expected, why) in [
+            (
+                "global:\n  authentication: [jwt]\n  revocation: [introspect]\n",
+                vec![],
+                "a global checker covers requests matching no route",
+            ),
+            (
+                "global:\n  authentication: [jwt]\n  defaults:\n    tool:\n      revocation: \
+                 [introspect]\n",
+                vec![NO_ROUTE_FALLBACK],
+                "an entity default leaves every other entity type unchecked",
+            ),
+            (
+                "global:\n  defaults:\n    tool:\n      revocation: [introspect]\n",
+                vec![],
+                "an anonymous fallback has nothing to check",
+            ),
+        ] {
+            let cfg = revocation_config(yaml).expect("loads without require_revocation");
+            assert_eq!(routes_without_revocation(&cfg), expected, "{why}\n{yaml}");
+        }
+    }
+
+    #[test]
+    fn require_revocation_rejects_an_authenticated_fallback_with_no_global_checker() {
+        let err = revocation_error(
+            "engine_settings:\n  require_revocation: true\nglobal:\n  authentication: [jwt]\n",
+        );
+        assert!(
+            err.contains("require_revocation") && err.contains(NO_ROUTE_FALLBACK),
+            "requests matching no route are authenticated and never checked: {err}"
         );
     }
 
@@ -6570,8 +6622,10 @@ routes:
 "#,
         );
         assert!(
-            err.contains("require_revocation") && err.contains("tool:search"),
-            "the uncovered route is named: {err}"
+            err.contains("require_revocation")
+                && err.contains(NO_ROUTE_FALLBACK)
+                && err.contains("tool:search"),
+            "the uncovered fallback and route are named: {err}"
         );
         assert!(
             !err.contains("tool:transfer"),
