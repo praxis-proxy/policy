@@ -1399,7 +1399,7 @@ host-defined hook that has a phase.
 | Check point | When it runs |
 |---|---|
 | `AfterAuthentication` | On a `Pre` hook, before the policy pipeline. |
-| `BeforeDispatch` | On a `Pre` hook, after the pipeline allows the request. This catches a credential revoked while a policy step, a PDP call or a human approval was still in progress. |
+| `BeforeDispatch` | On a `Pre` hook, after the pipeline allows the request. This catches a credential revoked while a policy step, a PDP call or a human approval was still in progress, as long as the checker asks the issuer again. A checker that caches answers can reuse the one from before the pipeline, and then catches the revocation only once that answer expires. |
 | `BeforeRelease` | On a `Post` hook, after the pipeline allows the response and before it goes back to the caller. |
 
 Hooks without a phase are not checked: `identity.resolve`, the rate-limit
@@ -1433,8 +1433,12 @@ checker vouched for, and denies the request with
 `auth.revocation_unavailable` if it finds one. So if callers on a route
 authenticate with an API key and the only checker is introspection, every
 request is denied. To fix that, add a checker that handles API keys, or
-exclude the route. Two checkers can cover the same slot, and adding a
-checker can only make the check stricter.
+exclude the route.
+
+Two checkers can cover the same slot, and if either denies, the request is
+denied. Adding a checker can also let requests through: one that vouches
+for a slot nobody else covered turns that slot's denial into a pass. Add a
+checker only for credentials it can actually confirm with their issuer.
 
 A checker should vouch for a slot only when it actually asked the issuer. A
 kill-list checker, for example, knows an identity is not on its list, but
@@ -1496,13 +1500,15 @@ OAuth delegator does the same.
 the issuer, PPE keeps accepting it until the cached answer expires. The
 default, `0`, turns caching off and asks the issuer every time. The cache
 key is the token's SHA-256, computed with Policy's shared hashing, so the
-plugin works in a `fips` build. If several requests check the same token at
-once, only one call goes to the issuer. A failed lookup is never cached. A
+plugin works in a `fips` build. With caching on, if several requests check
+the same token at once, only one call goes to the issuer. With the default
+of `0`, each check makes its own call. A failed lookup is never cached. A
 route that overrides the plugin's `config:` gets its own instance, with its
 own cache.
 
-The IdP has to offer RFC 7662 introspection to a confidential client.
-Keycloak, Okta, Ping and ForgeRock, Curity, WSO2, Gluu, Ory Hydra, Zitadel,
+The IdP has to issue JWT access tokens, since the checker leaves opaque
+tokens alone, and has to offer RFC 7662 introspection to a confidential
+client. Keycloak, Okta, Ping and ForgeRock, Curity, WSO2, Gluu, Ory Hydra, Zitadel,
 Authentik, Duende IdentityServer and Spring Authorization Server all do.
 Microsoft Entra ID, Auth0, Amazon Cognito and Google do not offer it for
 access tokens, and OpenShift and Kubernetes use TokenReview instead. Those
@@ -1535,7 +1541,7 @@ standards, not any one vendor. Per layer:
 | Service token (`client_credentials`) | RFC 6749 §4.4 | Keycloak | broadly supported |
 | On-behalf-of exchange | RFC 8693 | Keycloak (STE v2) | IdPs vary in RFC 8693 support; verify per target |
 | SVID as client credential | RFC 7523 + `draft-ietf-oauth-spiffe-client-auth` | Keycloak 26.6 (`spiffe:v1`) | emerging; an IETF OAuth WG draft, other IdPs not yet confirmed |
-| Revocation check | RFC 7662 | not yet; only unit-tested against a fake transport | Keycloak, Okta, Ping, Curity, or any IdP with an introspection endpoint; see [Revocation](#revocation) |
+| Revocation check | RFC 7662 | not yet; only unit-tested against a fake transport | Keycloak, Okta, Ping, Curity, or any IdP that issues JWT access tokens and has an introspection endpoint; see [Revocation](#revocation) |
 
 If the IdP does not support SPIFFE, PPE can still validate
 the SVID *itself* (it already fetches SPIRE's JWKS in `identity.resolve`),
