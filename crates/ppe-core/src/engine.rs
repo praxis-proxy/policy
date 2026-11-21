@@ -3841,10 +3841,11 @@ impl PolicyEngine {
             ));
         };
 
-        // Rate-limit lists skip the cache. A fill from a request still on an
-        // older snapshot could outlive the clear a reload runs, and would then
-        // keep serving that generation's limiter instances.
-        let cacheable = !StructuralList::is_rate_limits(hook_name);
+        // Rate-limit and revocation lists skip the cache. A fill from a request
+        // still on an older snapshot could outlive the clear a reload runs, and
+        // would then keep serving that generation's limiters or checkers.
+        let cacheable =
+            !StructuralList::is_rate_limits(hook_name) && !StructuralList::is_revocation(hook_name);
 
         // Fast path: zero-allocation cache lookup with raw_entry
         let hash = {

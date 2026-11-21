@@ -477,6 +477,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checker_entries_never_enter_the_route_cache() {
+        let (engine, calls) = engine(&format!(
+            "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
+            checker("kc", "{ vouch: [subject, client] }")
+        ))
+        .await;
+
+        let result = invoke(&engine, HOOK_CMF_TOOL_PRE_INVOKE).await;
+
+        assert!(!result.is_denied(), "both slots vouched");
+        assert_eq!(calls.load(Ordering::Acquire), 2, "both check points ran");
+        assert_eq!(
+            engine.routing_cache_size(),
+            0,
+            "a fill from a request on an older snapshot would outlive a reload's clear and keep \
+             serving that generation's checkers"
+        );
+    }
+
+    #[tokio::test]
     async fn a_host_is_told_to_call_every_checked_hook() {
         let (engine, _) = engine(&format!(
             "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
