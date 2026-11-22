@@ -29,7 +29,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   token and its depth is never capped. A token whose `act` is not an object
   (JSON `null` counts as absent), or names no actor `sub`, and a `client` or `caller_workload` token that carries
   `act`, is now denied with `auth.mapping_failed` rather than passing as a
-  direct call. Tokens without `act` are unchanged. `delegation.depth` counts
+  direct call. A `role: user` token without `act` replaces any delegation chain
+  set by an earlier resolver with no chain. `delegation.depth` counts
   nested `act` claims that RFC 8693 calls informational and only reflects what
   the issuing STS nested, so treat a depth limit as best effort and enforce a
   hard limit at the STS.
