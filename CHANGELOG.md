@@ -17,6 +17,68 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-20
+
+### Added
+
+- **Typed metadata source dispatch.** `MetadataFetchHook`,
+  `MetadataFetchRequest` and `MetadataFetchResult` let callers select one
+  configured source and invoke its `metadata.fetch` handler through the normal
+  executor, with capability filtering and error handling. The framework owns
+  validation, provenance stamping and installation of acquired facts.
+  ([#281](https://github.com/praxis-proxy/policy/pull/281))
+- **APL metadata fetching.** `fetch(name)` acquires immutable facts in
+  `authorization.pre_invocation` and makes them available immediately to later
+  predicates and PDPs under `metadata.<name>.*`. Sources are validated at load;
+  each source may be fetched once per compiled route, and fetches cannot run in
+  `parallel`. `on_error: fail` stops authorization without publishing a record;
+  `ignore` publishes a valid source error record and continues. Malformed or
+  missing records and framework failures always fail closed.
+  `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and
+  `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method defaults
+  to rejecting unsupported fetches, preserving existing implementations.
+  `AcquiredFacts::validate()` exposes the core record validation rules.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+
+### Changed
+
+- **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive
+  matches must handle the new variant. `RouteDispatchPlan` adds
+  `metadata_entries`; exhaustive struct literals must initialize it or use
+  `..Default::default()`, and exhaustive destructuring must name the field or
+  use `..`. Both types are also reachable through the `praxis_policy` facade's
+  crate re-exports. `RoutePluginEntry::pick_entry` takes a new leading
+  `requested_family` argument; pass the dispatching hook's `HookTypeDef::NAME`.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for metadata sources:** a plugin reached by APL `fetch(name)` must
+  use `mode: sequential`; `transform` and other modes cannot return the awaited
+  typed record required for publication. Sources must declare `metadata.fetch`
+  and use `on_error: fail` or `ignore`.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+
+### Fixed
+
+- **APL step dispatch picked hooks across families.** A plugin that registered
+  a CMF hook alongside an unphased hook such as `metadata.fetch`,
+  `identity.resolve` or `token.delegate` could have a `run()` step dispatched to
+  the unphased hook, depending on hash order, and denied with a payload type
+  mismatch. Step dispatch now also matches the hook family.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Experimental rate-limiter dependency maintenance.** Updated Limitador to
+  `0.14.1`, removing its Postcard default-feature dependency on unmaintained
+  `heapless 0.7.17` and the unused transitive dependencies it pulled in.
+  ([#355](https://github.com/praxis-proxy/policy/pull/355))
+
+### Internal
+
+- Documented revocation and transaction-token requirements, including proposed
+  enforcement points, signal freshness, credential lineage and phased delivery.
+  This is a design document; runtime enforcement is not implemented.
+  ([#284](https://github.com/praxis-proxy/policy/pull/284))
+- Added supply-chain maintenance exceptions for unmaintained `chrono` and
+  `chrono-tz` (RUSTSEC-2026-0543 and RUSTSEC-2026-0555), which remain runtime
+  dependencies of the engine and bundled PDPs with no patched release.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added
@@ -1133,7 +1195,8 @@ First release. The engine was extracted from another project rather than written
 
 - **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/praxis-proxy/policy/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/praxis-proxy/policy/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/praxis-proxy/policy/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/praxis-proxy/policy/compare/v0.4.0...v0.4.1

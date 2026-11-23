@@ -102,6 +102,13 @@ uses `Extensions::for_child_request`, which retains the ordinary request
 context but clears acquired metadata. The child may install its own records,
 and those records are not merged into the parent.
 
+`PolicyEngine::annotate_route` installs framework-trusted orchestrator
+handlers. Such a handler may append metadata only when its host-written config
+grants the hidden framework publication capability. Hosts must reserve that
+grant for orchestrators that validate and provenance-stamp acquired facts; it
+is not a capability for YAML-declared source plugins. Existing instances must
+survive publication unchanged.
+
 ## Capabilities
 
 A plugin declares the capabilities it needs. PPE filters the extensions before
