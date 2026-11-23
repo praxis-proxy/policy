@@ -58,6 +58,7 @@ directly:
 | Claims | `claim.<k>` |
 | OAuth client | `client.client_id`, `client.authorized_scopes`, `client.roles`, `client.permissions`, and aliases for undotted members under `client.role.<r>` / `client.perm.<p>` |
 | Workload (SPIFFE / mTLS) | `caller_workload.spiffe_id`, `caller_workload.trust_domain` |
+| Delegation chain (`role: user` with an `act` claim) | `delegation.depth`, `delegated`, `delegation.origin_subject_id`, `delegation.actor_subject_id`, `delegation.age_seconds` |
 
 `require(role.hr)` is true when the verified token carried the `hr` role, and
 `redact(!perm.view_ssn)` redacts unless it carried the `view_ssn` permission.
@@ -66,6 +67,73 @@ can interpret dotted keys as nested namespaces. Names containing `:` cannot be
 written as attribute paths. Use the canonical sets for either case:
 `subject.roles contains "admin.readonly"` or
 `subject.roles contains "system:authenticated"`.
+
+## Delegation chain from the `act` claim
+
+A token minted by RFC 8693 token exchange names the party acting for the
+subject in an `act` claim, and an actor that was itself acting for someone nests
+the earlier `act` inside its own:
+
+```json
+{ "sub": "alice", "act": { "sub": "agent-b", "act": { "sub": "agent-a" } } }
+```
+
+A `role: user` `identity/jwt` resolver reads that nesting into the delegation
+chain, so `delegation.*` predicates see the chain the token carries. Alice
+delegated to `agent-a`, which delegated to `agent-b`. `require(!delegated)`
+refuses any token that carries `act`, and
+`require(delegation.actor_subject_id == "agent-b")` refuses any other current
+actor. Both read top-level claims, which is what RFC 8693 section 4.1 allows
+access control to consider.
+
+| Attribute | Value for the token above |
+|-----------|---------------------------|
+| `delegation.depth` | `2`, one per `act` object |
+| `delegated` | `true`; `false` when the token has no `act` |
+| `delegation.origin_subject_id` | the resolved subject id (`alice`) |
+| `delegation.actor_subject_id` | the outermost `act.sub` (`agent-b`), the current actor |
+| `delegation.age_seconds` | seconds since the token's `iat`, `0` without one |
+
+The chain is trusted as presented: it is as trustworthy as the issuer, because
+the resolver reads it only from a token whose signature, issuer and audience
+verified. Depth is never capped, since a clipped chain would read shallower than
+it is. A malformed `act` (not an object, or an object without a non-empty string
+`sub`) denies the request with `auth.mapping_failed` instead of being ignored,
+so a delegated call cannot pass as direct; a JSON `null` counts as absent. An
+issuer that never writes `act` leaves `delegation.depth` at `0`.
+
+> **Warning: `delegation.depth` is informational.** The value counts nested
+> `act` claims, which RFC 8693 section 4.1 calls informational only and not to
+> be considered in access control decisions. It reflects only what the issuing
+> STS chose to nest, so it can understate the real chain and is never
+> overstated: an STS that does not nest the prior `act` mints a depth-1 token
+> for a three-hop delegation. A depth limit is a best-effort guard, not a hop
+> limit. Enforce a hard limit at the STS that mints the tokens.
+
+A depth limit is still available as a secondary guard:
+
+```text
+require(delegation.depth <= 2)
+```
+
+A few details matter when writing rules against these attributes:
+
+- Each hop's `timestamp` is the token's `iat`. The token does not say when an
+  earlier hop happened, and `iat` is a true upper bound.
+- `delegation.age_seconds` is the age of the token, not of the chain. On an
+  exchanged token `iat` is the time of the latest exchange, so every
+  re-exchange resets it. Do not use it as a maximum chain age.
+- `delegation.origin_subject_id` is the claim-mapped subject id, which may be an
+  email or a username, while `delegation.actor_subject_id` is the raw `act.sub`.
+  Comparing the two compares different namespaces.
+- Only `act.sub` is read. An `act` may also carry `iss`, which RFC 8693 notes
+  may be needed to identify an actor uniquely, so the same `act.sub` from two
+  trusted issuers reads as the same actor. There is no `delegation.actor_issuer`
+  attribute.
+
+Only a `role: user` resolver reads `act`. A `client` or `caller_workload` token
+that carries `act` is denied with `auth.mapping_failed` rather than read with
+`delegated` false.
 
 ## Multiple sources
 

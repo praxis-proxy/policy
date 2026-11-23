@@ -185,10 +185,18 @@ predicate is false.
 require(role.hr)                  # deny unless role.hr
 require(a, b)                     # deny unless both: !(a & b)
 require(a | b)                    # deny unless either: !(a | b)
-require(delegation.depth < 3)
 require(!delegated)
+require(delegation.actor_subject_id == "agent-a")
+require(delegation.depth < 3)    # best-effort, see the note below
 require(a) & b                    # equivalent to !a & b
 ```
+
+> **Warning: `delegation.depth` is informational.** The value counts nested
+> `act` claims, which RFC 8693 section 4.1 calls informational only and not to
+> be considered in access control decisions. It reflects only what the issuing
+> STS chose to nest, so it can understate the real chain and is never
+> overstated. A depth limit is a best-effort guard, not a hop limit. Enforce a
+> hard limit at the STS that mints the tokens.
 
 Commas inside `require(...)` are conjunctions and have the lowest precedence.
 For example, `require(a, b | c)` is equivalent to `!(a & (b | c))`.

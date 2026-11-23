@@ -961,6 +961,59 @@ async fn http_response_policy_loads_the_request_session() {
     }
 }
 
+/// A depth limit holds against the `act` chain an inbound token carries.
+#[tokio::test]
+async fn delegation_depth_limit_reads_the_act_chain_of_the_user_token() {
+    let yaml = Fixture::Cedar.hermetic().replacen(
+        "  - tool: send_email\n    authorization:\n      pre_invocation:\n",
+        "  - tool: send_email\n    authorization:\n      pre_invocation:\n        \
+         - \"delegation.depth > 1: deny('delegation too deep', 'delegation_too_deep')\"\n",
+        1,
+    );
+    assert!(yaml.contains("delegation_too_deep"), "the rule is in place");
+    let host = RefHost::builder().start(&yaml).await.expect("depth policy");
+    let agent = Persona::HrCopilot.token();
+    let with_act = |act: Option<Value>| {
+        let mut claims = Persona::Bob.claims();
+        if let Some(act) = act {
+            claims["act"] = act;
+        }
+        idp::sign(&claims)
+    };
+    let direct = with_act(None);
+    let one_hop = with_act(Some(json!({"sub": "hr-copilot"})));
+    let two_hops = with_act(Some(
+        json!({"sub": "hr-copilot", "act": {"sub": "planner"}}),
+    ));
+    let email = json!({
+        "to": "partner@example.com",
+        "subject": "FYI",
+        "body": "Quarterly planning notes, nothing sensitive here.",
+    });
+
+    for (token, denied) in [(&direct, false), (&one_hop, false), (&two_hops, true)] {
+        let call = Call::with_tokens("send_email", token, &agent).args(email.clone());
+        let planted = call.planted();
+        let out = host.call(call).await;
+        assert_eq!(
+            out.denied_at,
+            denied.then_some(Stage::Request),
+            "{:?}",
+            out.violation
+        );
+        assert_eq!(
+            out.violation_code(),
+            denied.then_some("delegation_too_deep")
+        );
+        assert_eq!(
+            out.upstream.is_some(),
+            !denied,
+            "a deny reaches no upstream"
+        );
+        out.assert_no_leaks(&planted);
+    }
+}
+
 /// Add a recorded token to the secrets checked against an outcome.
 fn assert_recorded_token(out: &mut host::Outcome, token: &str, label: &str) {
     out.response_headers
