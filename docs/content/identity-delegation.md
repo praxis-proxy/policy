@@ -1029,15 +1029,24 @@ Tested: inbound verification against Keycloak 26.8 (`dpop_live`, see
 
 ### Recipe 12: A Kubernetes token, reviewed by the API server
 
-Use `identity/kubernetes-token-review` when a caller presents a token only the
-cluster can vouch for: a legacy Secret-based ServiceAccount token, which never
-expires and is revoked only by deleting its Secret, a bound token whose pod may
-have been deleted, or a token from a webhook authenticator. The resolver sends
-it to the [TokenReview] API and maps the user the cluster names.
+`identity/kubernetes-token-review` sends the caller's token to the
+[TokenReview] API and maps the user the cluster names.
 
-A ServiceAccount JWT that only needs its signature checked does not need this.
-`identity/jwt` against the cluster's issuer verifies it locally, with no call
-per request.
+**Use this when** a caller presents a token only the cluster can vouch for: a
+legacy Secret-based ServiceAccount token, which never expires and is revoked
+only by deleting its Secret; a bound token that must stop working as soon as
+its pod is deleted; or a token the cluster authenticates through a webhook or
+maps through its OIDC settings. It also returns the user's groups, which a
+ServiceAccount JWT does not carry.
+
+**Prefer instead** `identity/jwt` against the cluster's issuer for projected
+ServiceAccount tokens. It verifies them locally, with no call to the API server
+per request and no dependency on its availability. It needs the cluster's
+issuer discovery and JWKS reachable from PPE, which managed clusters publish
+and a self-managed one grants with a binding for `system:unauthenticated`, and
+it sees only the namespace and ServiceAccount, not groups. Treat legacy tokens
+as something to migrate off rather than a reason to keep this path: they never
+expire, and Kubernetes now removes unused ones.
 
 ```yaml
 plugins:
@@ -1055,7 +1064,7 @@ plugins:
         reviewer_token:
           kind: file
           path: /var/run/secrets/kubernetes.io/serviceaccount/token
-          reread_secs: 60
+          refresh_secs: 60
         timeout_secs: 5
       audiences: [praxis-gateway]
       record_map:
@@ -1073,7 +1082,7 @@ global:
 **PPE's own identity.** The reviewer token authenticates PPE to the API server,
 and that identity needs `create` on `tokenreviews`. The built-in
 `system:auth-delegator` ClusterRole grants it. A `file` token is read again once
-`reread_secs` has passed, so a projected ServiceAccount token rotates without a
+`refresh_secs` has passed, so a projected ServiceAccount token rotates without a
 restart. Outside the cluster, use `kind: env` with a variable `name`, holding a
 long-lived token for a dedicated reviewer ServiceAccount.
 
