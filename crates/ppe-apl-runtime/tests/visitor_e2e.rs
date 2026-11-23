@@ -2273,7 +2273,7 @@ async fn invoke_entity_with_parts(
     result
 }
 
-fn forwarded(result: &PipelineResult) -> MessagePayload {
+fn forwarded(result: &PipelineResult) -> &MessagePayload {
     result
         .modified_payload
         .as_ref()
@@ -2281,7 +2281,6 @@ fn forwarded(result: &PipelineResult) -> MessagePayload {
         .as_any()
         .downcast_ref::<MessagePayload>()
         .expect("cmf hooks carry MessagePayload")
-        .clone()
 }
 
 fn resource_ref_part(uri: &str) -> ContentPart {

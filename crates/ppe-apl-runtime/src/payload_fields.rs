@@ -112,7 +112,7 @@ fn field_value_from_message(
             crate::message_projection::extract_args_from_message(message, projection)
         },
         DispatchPhase::Post => {
-            crate::message_projection::extract_result_from_message(message, projection)
+            crate::message_projection::extract_result_from_message(message, projection).0
         },
     };
     if projected.is_object() {

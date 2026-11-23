@@ -166,43 +166,82 @@ pub(crate) fn rewrite_message_text(msg: &mut Message, new_text: &str) {
 }
 
 /// Extract `RoutePayload.args` from a CMF message. By `projection`:
-///   * [`Projection::Tool`] / [`Projection::Prompt`] → the first `ToolCall` or
-///     `PromptRequest` part's `arguments` map (Object)
+///   * [`Projection::Tool`] → the first `ToolCall`; falls back to
+///     `PromptRequest` only when no `ToolCall` exists
+///   * [`Projection::Prompt`] → the first `PromptRequest`; falls back
+///     to `ToolCall` only when no `PromptRequest` exists
 ///   * [`Projection::Resource`] → the first `ResourceRef`, through
 ///     [`project_resource_ref_args`] (Object)
 ///   * Else (text / no matching part) → JSON String of text content
+///
+/// Each projection prefers its own part kind so that a mixed message
+/// (e.g. a `ToolCall` before a `PromptRequest`) applies policy to the
+/// right arguments regardless of part order.
 ///
 /// `args.<field>` APL paths target tool / prompt arguments directly.
 /// For text-only messages we fall back to the v0 "args = whole text"
 /// shape so `args.text` predicates keep working.
 pub(crate) fn extract_args_from_message(msg: &Message, projection: Projection) -> Value {
+    match projection {
+        Projection::Tool => {
+            if let Some(v) = find_args::<true>(msg) {
+                return v;
+            }
+        },
+        Projection::Prompt => {
+            if let Some(v) = find_args::<false>(msg) {
+                return v;
+            }
+        },
+        Projection::Resource => {
+            for part in &msg.content {
+                if let ContentPart::ResourceRef { content } = part {
+                    return project_resource_ref_args(content);
+                }
+            }
+        },
+    }
+    Value::String(msg.get_text_content())
+}
+
+/// Search message parts for arguments. When `TOOL_FIRST` is true the
+/// preferred part is `ToolCall` with `PromptRequest` as fallback; when
+/// false the preference is reversed.
+fn find_args<const TOOL_FIRST: bool>(msg: &Message) -> Option<Value> {
+    let mut fallback: Option<Value> = None;
     for part in &msg.content {
-        match (projection, part) {
-            (Projection::Tool | Projection::Prompt, ContentPart::ToolCall { content }) => {
-                return Value::Object(
-                    content
-                        .arguments
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                );
+        match part {
+            ContentPart::ToolCall { content } => {
+                let v = clone_arguments(&content.arguments);
+                if TOOL_FIRST {
+                    return Some(v);
+                }
+                if fallback.is_none() {
+                    fallback = Some(v);
+                }
             },
-            (Projection::Tool | Projection::Prompt, ContentPart::PromptRequest { content }) => {
-                return Value::Object(
-                    content
-                        .arguments
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                );
-            },
-            (Projection::Resource, ContentPart::ResourceRef { content }) => {
-                return project_resource_ref_args(content);
+            ContentPart::PromptRequest { content } => {
+                let v = clone_arguments(&content.arguments);
+                if !TOOL_FIRST {
+                    return Some(v);
+                }
+                if fallback.is_none() {
+                    fallback = Some(v);
+                }
             },
             _ => {},
         }
     }
-    Value::String(msg.get_text_content())
+    fallback
+}
+
+fn clone_arguments(arguments: &HashMap<String, Value>) -> Value {
+    Value::Object(
+        arguments
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
 }
 
 /// Project a resource reference into the fixed `args` envelope:
@@ -304,9 +343,11 @@ pub(crate) struct EnvelopeReplaced {
 }
 
 /// Inverse of [`extract_args_from_message`]: write `args` back into the part
-/// the same `projection` reads: the first `ToolCall` / `PromptRequest`
-/// argument map, the first `ResourceRef` (through [`write_resource_ref`]), or
-/// — for text payloads — the first text part.
+/// the same `projection` reads. Each projection prefers its own part kind
+/// ([`Projection::Tool`] → `ToolCall`, [`Projection::Prompt`] →
+/// `PromptRequest`) and falls back to the other only when its preferred
+/// kind is absent, mirroring the read ordering in
+/// [`extract_args_from_message`].
 ///
 /// Args replaced as a whole with a value that is not an object (such as a bare
 /// `**` redaction turning them into a string) are refused with
@@ -318,31 +359,24 @@ pub(crate) fn write_args_back_to_message(
     args: &Value,
     projection: Projection,
 ) -> Result<(), EnvelopeReplaced> {
-    for part in &mut msg.content {
-        match (projection, part) {
-            (Projection::Tool | Projection::Prompt, ContentPart::ToolCall { content }) => {
-                let Some(obj) = args.as_object() else {
-                    return Err(EnvelopeReplaced {
-                        part: ReplacedPart::ToolCall,
-                    });
-                };
-                content.arguments = obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                return Ok(());
-            },
-            (Projection::Tool | Projection::Prompt, ContentPart::PromptRequest { content }) => {
-                let Some(obj) = args.as_object() else {
-                    return Err(EnvelopeReplaced {
-                        part: ReplacedPart::PromptRequest,
-                    });
-                };
-                content.arguments = obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                return Ok(());
-            },
-            (Projection::Resource, ContentPart::ResourceRef { content }) => {
-                return write_resource_ref(content, args);
-            },
-            _ => {},
-        }
+    match projection {
+        Projection::Tool => {
+            if let Some(r) = write_args_to_part::<true>(msg, args) {
+                return r;
+            }
+        },
+        Projection::Prompt => {
+            if let Some(r) = write_args_to_part::<false>(msg, args) {
+                return r;
+            }
+        },
+        Projection::Resource => {
+            for part in &mut msg.content {
+                if let ContentPart::ResourceRef { content } = part {
+                    return write_resource_ref(content, args);
+                }
+            }
+        },
     }
     // Fall through: no structured entity part — treat as text.
     if let Some(text) = args.as_str() {
@@ -351,8 +385,75 @@ pub(crate) fn write_args_back_to_message(
     Ok(())
 }
 
-/// Extract `RoutePayload.result` from a CMF message. Mirror of
-/// [`extract_args_from_message`] for the Post phase. By `projection`:
+/// Write arguments back to the preferred part kind. When `TOOL_FIRST` is
+/// true, `ToolCall` is preferred with `PromptRequest` as fallback; when
+/// false the preference is reversed. Returns `None` when neither kind
+/// exists in the message.
+fn write_args_to_part<const TOOL_FIRST: bool>(
+    msg: &mut Message,
+    args: &Value,
+) -> Option<Result<(), EnvelopeReplaced>> {
+    let mut preferred: Option<(usize, ReplacedPart)> = None;
+    let mut fallback: Option<(usize, ReplacedPart)> = None;
+    for (i, part) in msg.content.iter().enumerate() {
+        match part {
+            ContentPart::ToolCall { .. } => {
+                if TOOL_FIRST {
+                    preferred = preferred.or(Some((i, ReplacedPart::ToolCall)));
+                } else {
+                    fallback = fallback.or(Some((i, ReplacedPart::ToolCall)));
+                }
+            },
+            ContentPart::PromptRequest { .. } => {
+                if TOOL_FIRST {
+                    fallback = fallback.or(Some((i, ReplacedPart::PromptRequest)));
+                } else {
+                    preferred = preferred.or(Some((i, ReplacedPart::PromptRequest)));
+                }
+            },
+            _ => {},
+        }
+    }
+    let (idx, replaced) = preferred.or(fallback)?;
+    Some(write_arguments_at(msg, idx, args, replaced))
+}
+
+fn write_arguments_at(
+    msg: &mut Message,
+    idx: usize,
+    args: &Value,
+    replaced: ReplacedPart,
+) -> Result<(), EnvelopeReplaced> {
+    let Some(obj) = args.as_object() else {
+        return Err(EnvelopeReplaced { part: replaced });
+    };
+    let new_args: HashMap<String, Value> =
+        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let Some(part) = msg.content.get_mut(idx) else {
+        return Ok(());
+    };
+    match part {
+        ContentPart::ToolCall { content } => content.arguments = new_args,
+        ContentPart::PromptRequest { content } => content.arguments = new_args,
+        _ => {},
+    }
+    Ok(())
+}
+
+/// Stable identity of the result part that was projected, so write-back
+/// can find the same part even if a plugin reordered the message.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ResultIdentity {
+    /// For a `Resource` projection, the `uri` of the projected part.
+    /// `None` for other projections (they have no reordering concern).
+    pub(crate) resource_uri: Option<String>,
+}
+
+/// Extract `RoutePayload.result` from a CMF message, together with an
+/// identity that [`write_result_back_to_message`] uses to find the same
+/// part after plugins may have reordered the content list.
+///
+/// By `projection`:
 ///   * [`Projection::Tool`] → the first `ToolResult`'s `content` JSON value
 ///   * [`Projection::Resource`] → the first `Resource`, through
 ///     [`project_resource_result`] (Object)
@@ -361,33 +462,66 @@ pub(crate) fn write_args_back_to_message(
 ///   * Else (text / no matching part) → JSON String of text
 ///
 /// `result.<field>` APL paths target the structured result directly.
-pub(crate) fn extract_result_from_message(msg: &Message, projection: Projection) -> Value {
+pub(crate) fn extract_result_from_message(
+    msg: &Message,
+    projection: Projection,
+) -> (Value, ResultIdentity) {
     for part in &msg.content {
         match (projection, part) {
             (Projection::Tool, ContentPart::ToolResult { content }) => {
-                return content.content.clone();
+                return (content.content.clone(), ResultIdentity::default());
             },
             (Projection::Resource, ContentPart::Resource { content }) => {
-                return project_resource_result(content);
+                let identity = ResultIdentity {
+                    resource_uri: Some(content.uri.clone()),
+                };
+                return (project_resource_result(content), identity);
             },
             (Projection::Prompt, ContentPart::PromptResult { content }) => {
-                return project_prompt_result(content);
+                return (project_prompt_result(content), ResultIdentity::default());
             },
             _ => {},
         }
     }
-    Value::String(msg.get_text_content())
+    (
+        Value::String(msg.get_text_content()),
+        ResultIdentity::default(),
+    )
+}
+
+/// Like [`extract_result_from_message`], but matches the part identified by
+/// `identity` instead of taking the first one. For a `Resource` projection
+/// this finds the `Resource` whose `uri` matches the one originally
+/// extracted; for other projections it falls back to first-match.
+pub(crate) fn extract_result_by_identity(
+    msg: &Message,
+    projection: Projection,
+    identity: &ResultIdentity,
+) -> Value {
+    if let Some(uri) = &identity.resource_uri {
+        for part in &msg.content {
+            if let ContentPart::Resource { content } = part
+                && content.uri == *uri
+            {
+                return project_resource_result(content);
+            }
+        }
+        return Value::Null;
+    }
+    extract_result_from_message(msg, projection).0
 }
 
 /// Inverse of [`extract_result_from_message`]: write a mutated `result` back
-/// into the part the same `projection` reads: the first
-/// `ContentPart::ToolResult.content`, the first `Resource` / `PromptResult` in
-/// place (through [`write_resource`] / [`write_prompt_result`], never by
-/// appending a text part), or — for text-only messages — the first text
-/// part. The praxis
-/// filter's response-body re-serializer then lifts the new content
-/// out of the `ContentPart` and folds it back into the JSON-RPC
-/// `result.content[*].text` payload.
+/// into the part that was originally projected. For a `Resource` projection,
+/// the `identity` carries the `uri` of the part that was extracted, and
+/// write-back finds the `Resource` with that `uri` rather than taking the
+/// first one — a plugin between extraction and write-back may have reordered
+/// parts. If no `Resource` with the original `uri` exists (the plugin
+/// removed it), the write fails with [`EnvelopeReplaced`] so the request
+/// is denied rather than silently writing to the wrong part.
+///
+/// For `Tool` and `Prompt` projections the identity is unused; they match
+/// the first `ToolResult` / `PromptResult` as before.
 ///
 /// A `Resource` / `PromptResult` envelope replaced as a whole is refused with
 /// [`EnvelopeReplaced`].
@@ -395,6 +529,7 @@ pub(crate) fn write_result_back_to_message(
     msg: &mut Message,
     result: &Value,
     projection: Projection,
+    identity: &ResultIdentity,
 ) -> Result<(), EnvelopeReplaced> {
     for part in &mut msg.content {
         match (projection, part) {
@@ -403,6 +538,11 @@ pub(crate) fn write_result_back_to_message(
                 return Ok(());
             },
             (Projection::Resource, ContentPart::Resource { content }) => {
+                if let Some(uri) = &identity.resource_uri
+                    && content.uri != *uri
+                {
+                    continue;
+                }
                 return write_resource(content, result);
             },
             (Projection::Prompt, ContentPart::PromptResult { content }) => {
@@ -410,6 +550,13 @@ pub(crate) fn write_result_back_to_message(
             },
             _ => {},
         }
+    }
+    // For a Resource projection with an identity, reaching here means the
+    // plugin removed the part we projected — deny rather than skip.
+    if identity.resource_uri.is_some() {
+        return Err(EnvelopeReplaced {
+            part: ReplacedPart::Resource,
+        });
     }
     if let Some(text) = result.as_str() {
         rewrite_message_text(msg, text);
@@ -632,11 +779,17 @@ fn warn_on_conflict(base_value: Option<&Value>, pre_value: &Value, key: &str) {
 /// value type is stored as its JSON text rather than dropped, because a
 /// redaction that produced an unexpected type must still replace the original.
 fn write_opt_string(target: &mut Option<String>, value: Option<&Value>) {
-    *target = match value {
+    let new = match value {
         None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(other) => Some(other.to_string()),
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(other) => {
+            *target = Some(other.to_string());
+            return;
+        },
     };
+    if target.as_deref() != new {
+        *target = new.map(str::to_owned);
+    }
 }
 
 /// A value that is not a non-negative integer within `u64` clears the field.
@@ -712,6 +865,10 @@ mod tests {
     }
 
     fn extract_result_from_message(msg: &Message) -> Value {
+        super::extract_result_from_message(msg, projection_for(msg)).0
+    }
+
+    fn extract_result_with_identity(msg: &Message) -> (Value, super::ResultIdentity) {
         super::extract_result_from_message(msg, projection_for(msg))
     }
 
@@ -725,7 +882,8 @@ mod tests {
         result: &Value,
     ) -> Result<(), EnvelopeReplaced> {
         let projection = projection_for(msg);
-        super::write_result_back_to_message(msg, result, projection)
+        let identity = super::extract_result_from_message(msg, projection).1;
+        super::write_result_back_to_message(msg, result, projection, &identity)
     }
 
     fn tool_call_message() -> Message {
@@ -1666,19 +1824,17 @@ mod tests {
     #[test]
     fn a_tool_route_reads_the_tool_result_past_an_embedded_resource() {
         let msg = resource_then_tool_result();
-        assert_eq!(
-            super::extract_result_from_message(&msg, Projection::Tool),
-            serde_json::json!({"temp": 12, "sky": "grey"}),
-        );
+        let (value, _) = super::extract_result_from_message(&msg, Projection::Tool);
+        assert_eq!(value, serde_json::json!({"temp": 12, "sky": "grey"}));
     }
 
     #[test]
     fn a_tool_route_writes_the_tool_result_and_leaves_the_embedded_resource() {
         let original = resource_then_tool_result();
         let mut msg = original.clone();
-        let mut result = super::extract_result_from_message(&msg, Projection::Tool);
+        let (mut result, identity) = super::extract_result_from_message(&msg, Projection::Tool);
         result["temp"] = serde_json::json!("[REDACTED]");
-        super::write_result_back_to_message(&mut msg, &result, Projection::Tool)
+        super::write_result_back_to_message(&mut msg, &result, Projection::Tool, &identity)
             .expect("write-back applies");
         let as_json = |part: &ContentPart| serde_json::to_value(part).expect("part serializes");
         assert_eq!(
@@ -1696,8 +1852,13 @@ mod tests {
     fn a_resource_route_reads_the_resource_past_a_tool_result() {
         let mut msg = tool_result_message();
         msg.content.extend(resource_message().content);
-        let result = super::extract_result_from_message(&msg, Projection::Resource);
+        let (result, identity) = extract_result_with_identity(&msg);
         assert_eq!(result["uri"], serde_json::json!("hr://employees/42"));
+        assert_eq!(
+            identity.resource_uri.as_deref(),
+            Some("hr://employees/42"),
+            "identity captures the projected resource's uri"
+        );
     }
 
     #[test]
@@ -1712,7 +1873,9 @@ mod tests {
     fn a_tool_route_reads_text_from_a_message_with_only_a_resource() {
         let msg = resource_message();
         assert!(
-            super::extract_result_from_message(&msg, Projection::Tool).is_string(),
+            super::extract_result_from_message(&msg, Projection::Tool)
+                .0
+                .is_string(),
             "a tool route must not project a resource envelope"
         );
     }

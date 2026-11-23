@@ -456,6 +456,19 @@ fn a_recursive_path_naming_a_read_only_field_in_another_case_is_refused() {
 }
 
 #[test]
+fn a_recursive_path_through_a_non_root_field_is_not_refused() {
+    // `**.annotations.uri` addresses `uri` inside `annotations`, not the
+    // read-only root `uri`.  The segment after `**` is `annotations`.
+    loads(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      "**.annotations.uri": redact
+"#,
+    );
+}
+
+#[test]
 fn a_rule_writing_uri_on_a_resource_route_is_refused_as_read_only() {
     let e = load_err(
         r#"routes:

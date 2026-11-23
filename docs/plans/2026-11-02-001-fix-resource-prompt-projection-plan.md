@@ -893,11 +893,11 @@ the matching `project_*` function emits, so the two cannot drift.
 | Test | Expected |
 |---|---|
 | `result:` on HTTP route | Rejected (existing, regression guard) |
-| `args:` with a named field on LLM route | Rejected, message names `args` and `llm` |
-| `result:` with a named field on LLM route | Rejected, message names `result` and `llm` |
-| `args:` with a named field under `global.defaults.llm` | Rejected |
-| `"**"` on LLM route, route and `global.defaults.llm` | Accepted; e2e shows the whole completion redacted |
-| `"**"` with a named field on LLM route | Rejected, message names the field and suggests `**` |
+| `args:` with a named field on LLM route | Deferred — loads without error, fields have no effect (Praxis does not rewrite inference bodies) |
+| `result:` with a named field on LLM route | Deferred — loads without error, fields have no effect |
+| `args:` with a named field under `global.defaults.llm` | Deferred — loads without error, fields have no effect |
+| `"**"` on LLM route, route and `global.defaults.llm` | Deferred — loads without error; Praxis does not rewrite inference bodies, so the redaction does not reach the client |
+| `"**"` with a named field on LLM route | Deferred — loads without error, fields have no effect |
 | `args:` with valid fields on resource route | Accepted |
 | `result:` with valid fields on resource route | Accepted |
 | `result:` with `annotations.audience` on resource route | Accepted (nested path under an open map) |

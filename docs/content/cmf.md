@@ -15,6 +15,20 @@ resource, a rendered prompt, or a model completion. Field pipelines (`args:` /
 reaches policy as plain text, a `**` path applies to the whole text, and
 `llm.*` attributes cover the rest.
 
+PPE transforms the content parts in the CMF message — it does not control
+the bytes the host sends to the client. A redaction applied to
+`result.content` or a `**` path rewrites the CMF part, but the client
+receives the redacted text only if the host serializes its response from
+that transformed part. If the host instead forwards the original upstream
+body, the redaction has no effect on what the client sees.
+
+Praxis currently re-serializes tool results and resource content from their
+CMF parts, so redactions on `tool:` and `resource:` routes reach the
+client. On `llm:` routes, Praxis forwards the original inference body;
+`result:` pipelines and `**` redactions on those routes change the CMF
+message but do not change what the client receives. See the
+[host integration guide](host-integration-guide.md) for the full contract.
+
 ## Message structure
 
 A CMF `Message` carries:

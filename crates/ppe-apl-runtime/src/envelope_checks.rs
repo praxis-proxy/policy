@@ -68,8 +68,9 @@ pub(crate) fn reject_field_stages_without_fields(
 /// `taint(...)`, a detecting scan) is accepted, as are rules that read the
 /// field. Called for the same scopes as [`reject_field_stages_without_fields`].
 ///
-/// A recursive path (`**.uri`) is judged by its last segment, since it can
-/// reach the top-level field of that name. The name is compared without case,
+/// A recursive path (`**.uri`) is judged by the segment after `**`, since
+/// that is the one that could land at the root level. The name is compared
+/// without case,
 /// because a `redact` stage matches keys without case at runtime, so
 /// `**.URI` reaches `uri` too.
 pub(crate) fn reject_writes_to_read_only_fields(
@@ -82,7 +83,7 @@ pub(crate) fn reject_writes_to_read_only_fields(
             let mut segments = field_use.field.split('.');
             let first = segments.next().unwrap_or_default();
             let addressed = if first == RECURSIVE_SEGMENT {
-                field_use.field.rsplit('.').next().unwrap_or_default()
+                segments.next().unwrap_or_default()
             } else {
                 first
             };

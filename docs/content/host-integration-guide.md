@@ -112,15 +112,21 @@ Policy does not yet inspect every content part of every message:
   return several contents, and if the host maps each to its own `Resource`
   part, the second and later parts bypass `result.*` rules. Emit one fetched
   content per message, or fold the text of all contents into one part, or treat
-  multi-content reads as only partly covered.
+  multi-content reads as only partly covered. Note that folding changes what
+  rules can match: scanning rules (`regex`, `pii_redact`) still work, but
+  exact-match rules written for a single entry will not match the combined
+  string. Addressing individual content parts is tracked in issue #76.
 - **`PromptResult.messages` is not projected.** Content in `messages` is
   inspected only through `content`, which is why the host must fill
   `content`.
 - **`Resource.blob` is not projected.** A resource whose body is only in
   `blob` reaches policy with `content: null`, so `result.content` rules match
-  nothing. A `content` redaction sets `content` to `[REDACTED]` but forwards
-  the blob unchanged, so the body still reaches the client. Map text bodies to
-  `content`, even when the server sent them as a base64 blob, or inspect blobs
+  nothing. A `content` redaction sets `content` to `[REDACTED]` but leaves
+  `blob` unchanged — if the host serializes the response from `blob`, the
+  original body still reaches the client. A host that decodes a blob into
+  `content` for inspection **must** either remove the original `blob` after
+  decoding or derive the serialized response from the (potentially redacted)
+  `content`, never from the original `blob`. Alternatively, inspect blobs
   with a plugin (the `transcript-scanner` reference plugin decodes them as
   UTF-8).
 - **A bare `**` cannot replace a whole envelope.** `result: { "**": redact }`
