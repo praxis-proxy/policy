@@ -237,8 +237,9 @@ holds the key.
 #### Setting up the key
 
 The key is an ordinary declared secret, so everything in
-[the `secrets:` block](configuration.md#the-secrets-block) applies. Generate one
-with enough entropy and keep it wherever the deployment keeps credentials:
+[the `secrets:` block](../reference/configuration.md#the-secrets-block) applies.
+Generate one with enough entropy and keep it wherever the deployment keeps
+credentials:
 
 ```sh
 openssl rand -base64 48 > /etc/ppe/provenance.key
@@ -618,7 +619,8 @@ participant, or installing a reconciler that can.
 
 ## See also
 
-- [`assertions.md`](assertions.md) for what the engine puts on the wire
+- [`assertions.md`](../reference/assertions.md) for what the engine puts on the
+  wire
 - `crates/ppe-core/src/audit.rs` for the sink trait
 - `crates/ppe-core/src/decision.rs` for the decision log
 - `crates/ppe-core/src/effect.rs` for effect records, the log and recovery

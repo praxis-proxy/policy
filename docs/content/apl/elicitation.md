@@ -326,8 +326,8 @@ REDISCLI_AUTH="$(cat /run/secrets/ciba-valkey-password)" \
 ```
 
 Expect `PONG`. For a standalone store, use its configured endpoint and
-password source instead. The ACL test in [Testing](../testing.md) checks the
-data-command grants.
+password source instead. The ACL test in [Testing](../guides/testing.md) checks
+the data-command grants.
 
 ### Durability
 

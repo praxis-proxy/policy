@@ -107,8 +107,8 @@ extensions.
 ## Rate-limit hooks
 
 A configuration with a `rate_limits:` list needs the host to call the two
-rate-limit hooks. See [Configuration](configuration.md#rate-limits) for list
-syntax and [Rate Limiting](rate-limiting.md) for plugin behavior.
+rate-limit hooks. See [Configuration](../reference/configuration.md#rate-limits)
+for list syntax and [Rate Limiting](rate-limiting.md) for plugin behavior.
 
 Order and count. Call `ratelimit.pre_identity` before the first
 `identity.resolve` of a request, and `ratelimit.post_identity` after the last.
@@ -203,6 +203,6 @@ plugin runs only where a step names it with `run(name)`.
 
 - [Identity and Delegation](identity-delegation.md): resolve inbound principals
   and mint outbound credentials.
-- [Header Assertions](assertions.md): control the identity and response headers
-  crossing the boundary.
+- [Header Assertions](../reference/assertions.md): control the identity and
+  response headers crossing the boundary.
 - [Deployment](deployment.md): place the HTTP enforcement point.

@@ -371,6 +371,6 @@ cannot drift from what the engine accepts.
 
 ## Next
 
-- [Deployment](deployment.md): place the boundary that emits and filters
+- [Deployment](../guides/deployment.md): place the boundary that emits and filters
   assertions.
-- [Patterns](patterns.md): combine assertions with layered enforcement.
+- [Patterns](../guides/patterns.md): combine assertions with layered enforcement.

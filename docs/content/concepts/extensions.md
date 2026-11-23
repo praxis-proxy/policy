@@ -65,14 +65,14 @@ to refuse an unreported request. The model and output facts use
 `llm.model.*` and `llm.output.*`. Legacy `llm.model_id`, `llm.provider`,
 `llm.capabilities`, and `completion.*` aliases remain value-identical for
 existing policies.
-[LLM Routes](llm-routes.md) lists the per-phase keys and a worked config.
+[LLM Routes](../guides/llm-routes.md) lists the per-phase keys and a worked config.
 
 The request arguments and response body are also flattened. An object
 writes `args.<dotted>` / `result.<dotted>`; a top-level scalar or scalar
 array writes the bare key `args` / `result`. The route name is
 `route.key`. APL field pipelines (`args:` / `result:`) operate on those. Operator-maintained static attributes
 are flattened under `data.*` — these come from config files, not the request,
-and need no capability (see [Static Attributes](apl/attributes.md)).
+and need no capability (see [Static Attributes](../apl/attributes.md)).
 
 PDPs read the raw `http.query` from the canonical attribute bag. Plugin views
 include it only with `read_query`; `read_headers` alone exposes the request and
@@ -84,7 +84,7 @@ same request target.
 Most extensions are inputs — resolved before policy runs and flattened into
 the bag for predicates to read. The candidate constraint is the exception:
 it is an output. APL `restrict` effects fold into it (see [Backend
-Restriction](apl/restrict.md)), it rides the returned extensions the same way
+Restriction](../apl/restrict.md)), it rides the returned extensions the same way
 minted delegation tokens do, and the host router reads it typed to prune its
 candidate set. Because PPE links the router in-process, this is a typed value,
 not a serialized blob. Capability-gating the write is not yet applied — the
@@ -161,7 +161,7 @@ label and credential capabilities widen no plugin's bag view: labels are read
 from the typed extension, and credential material flows through plugin payloads
 rather than the bag. APL predicates read `security.labels` from the bag, which
 is how `security.labels contains "secret"` works (see [Session
-Taint](apl/tainting.md)).
+Taint](../apl/tainting.md)).
 
 `read_llm_request` gates the one request carrier. The body contains
 client-supplied JSON and reaches PDPs through structured input, while the
@@ -208,7 +208,7 @@ engine therefore refuses to start and names the plugin and the
 capability to add.
 
 Any plugin that fetches JWKS, exchanges a token, or dispatches a CIBA
-prompt must declare it. See [Builtins](builtins.md) for how the bundled
+prompt must declare it. See [Builtins](../reference/builtins.md) for how the bundled
 ones do.
 
 ## Mutability tiers
@@ -242,10 +242,12 @@ plugin sees;
 the CMF extractors then flatten those slots into the bag). The same filtered,
 tier-enforced view feeds the attribute bag APL evaluates, so a policy and the
 plugins it invokes operate on a consistent, least-privilege picture of the
-request. See [Identity](apl/identity.md) for how the subject is populated and
-[Session Taint](apl/tainting.md) for the monotonic label tier in action.
+request. See [Identity](../apl/identity.md) for how the subject is populated and
+[Session Taint](../apl/tainting.md) for the monotonic label tier in action.
 
 ## Next
 
-- [Crates](crates.md): map the runtime and extension APIs to workspace crates.
-- [Builtins](builtins.md): review the bundled plugins, PDPs, and session store.
+- [Crates](../reference/crates.md): map the runtime and extension APIs to
+  workspace crates.
+- [Builtins](../reference/builtins.md): review the bundled plugins, PDPs, and
+  session store.

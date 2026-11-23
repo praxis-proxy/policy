@@ -2389,7 +2389,7 @@ mod tests {
     #[test]
     fn missing_key_matches_cmf_extensions_table() {
         tracing::debug!(
-            "docs/content/cmf-extensions.md — APL missing-key row: \
+            "docs/content/concepts/cmf-extensions.md — APL missing-key row: \
              presence/equality/membership/order are false; negated forms are true"
         );
         let bag = AttributeBag::new();

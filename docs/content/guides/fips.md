@@ -142,11 +142,11 @@ report reflects that combined selection. Set `default-features = false` on
 each Policy dependency, including plugin crates, so the host selects the
 backend. Defaults enabled elsewhere can add `crypto-rustcrypto` to a FIPS
 build and select both backends, which the build rejects. See
-[Crypto backend](crates.md#crypto-backend).
+[Crypto backend](../reference/crates.md#crypto-backend).
 
 ## Next
 
-- [Builtins](builtins.md): the full feature list.
-- [Crates](crates.md#validate-shared-hashing-at-startup): startup validation
+- [Builtins](../reference/builtins.md): the full feature list.
+- [Crates](../reference/crates.md#validate-shared-hashing-at-startup): startup validation
   and fallible hashing for embedders.
 - [Testing](testing.md): the FIPS test targets.

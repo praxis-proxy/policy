@@ -142,7 +142,7 @@ attributes; bind PPE attributes explicitly.
 and routes. The engine combines those layers in that order. One list feeds
 both rate-limit hooks, and each plugin runs at the hook it declares.
 The list and `replace_inherited` forms match `authentication:`; see
-[Configuration](configuration.md#rate-limits) for the full syntax.
+[Configuration](../reference/configuration.md#rate-limits) for the full syntax.
 
 A step's `config:` must be a mapping. The engine merges it key by key over
 the plugin's config and creates a separate limiter for that step. For

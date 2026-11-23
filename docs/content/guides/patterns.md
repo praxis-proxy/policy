@@ -56,7 +56,7 @@ routes:
 
 Taint a session when it touches sensitive data, then gate later operations on
 the label. The control spans requests and the model cannot route around it (see
-[Session Taint](apl/tainting.md)):
+[Session Taint](../apl/tainting.md)):
 
 ```yaml
 routes:
@@ -97,4 +97,4 @@ every layer.
 
 - [Upgrading APL](upgrade-apl.md): migrate existing configurations to the
   current syntax.
-- [Plugins and Pipeline](pipeline.md): extend APL with host plugins.
+- [Plugins and Pipeline](../concepts/pipeline.md): extend APL with host plugins.

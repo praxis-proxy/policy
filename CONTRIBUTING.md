@@ -29,7 +29,7 @@ named `known_gap_*` and marked
 mode, the reference host and the host-drift check are
 described in [Testing Policy].
 
-[Testing Policy]: docs/content/testing.md#integration-suites
+[Testing Policy]: docs/content/guides/testing.md#integration-suites
 
 ## Picking Up an Issue
 

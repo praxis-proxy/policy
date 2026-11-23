@@ -5,7 +5,7 @@ This document is the acceptance write-up for the Criterion suite under
 measures**, **CI policy**, and **baseline / profile** results.
 
 To run the suite rather than read its results, see
-[Benchmarks](../content/benchmarks.md).
+[Benchmarks](../content/reference/benchmarks.md).
 
 **Framework:** Criterion **0.7** (`html_reports`, `async_tokio`).
 

@@ -42,7 +42,7 @@ and `require(authenticated)` denies.
 
 `identity/api-key` looks up an opaque key in a file or HTTP directory and maps
 its record into the same attributes. Policies such as `require(role.hr)` work
-with either resolver. See [Recipe 7](../identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory)
+with either resolver. See [Recipe 7](../guides/identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory)
 for configuration and revocation timing.
 
 ## What lands in the bag
@@ -158,7 +158,7 @@ plugins:
 Cookie and query-string values are parsed by PPE, not by the host's HTTP
 framework, so the same request resolves identically regardless of which
 proxy sits in front of it. See
-[Configuration — Credential location](../configuration.md#credential-location)
+[Configuration — Credential location](../reference/configuration.md#credential-location)
 for the full reference and security notes.
 
 ## Pipeline integration
@@ -166,8 +166,8 @@ for the full reference and security notes.
 Identity resolution is a hook (`identity.resolve`) that runs ahead of the
 route's policy phase. The resolved subject is filtered by each downstream
 plugin's declared capabilities (see [Extensions &
-Capability-Gating](../extensions.md)): a plugin only sees the identity fields it
-is entitled to. APL predicates read the same bag, gated the same way.
+Capability-Gating](../concepts/extensions.md)): a plugin only sees the identity
+fields it is entitled to. APL predicates read the same bag, gated the same way.
 
 Once identity is resolved, policy can authorize ([APL](index.md)), delegate
 downstream ([Delegation](delegation.md)), or hand a relationship decision to a
@@ -175,7 +175,7 @@ PDP ([PDP Integration](pdp.md)).
 
 ## Next
 
-- [Identity Claim Mapping](../identity-claim-mapping.md): add and test a
+- [Claim mapper presets](../guides/identity-claim-mapping.md): add and test a
   provider-specific JWT claim mapper preset.
 - [Static Attributes](attributes.md): combine verified identity with
   operator-maintained facts.

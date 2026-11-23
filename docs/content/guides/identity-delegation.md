@@ -9,15 +9,15 @@ tool server, or agent-side (see [Where to place PPE](#where-to-place-ppe)).
 Throughout this page "the enforcement point" means "wherever this PPE instance
 runs."
 
-For the conceptual model first, read [Use Cases](use-cases.md) and
+For the conceptual model first, read [Use Cases](../concepts/use-cases.md) and
 [Deployment](deployment.md); for the full config schema, see
-[Configuration](configuration.md).
+[Configuration](../reference/configuration.md).
 
 ## The model in one picture
 
 Every request crosses two identity boundaries:
 
-![Two identity boundaries. Inbound: identity.resolve validates credentials and fills typed identity slots, additively. Outbound: token.delegate mints the downstream credential, chosen per route by subject.](../images/identity_two_boundaries.svg)
+![Two identity boundaries. Inbound: identity.resolve validates credentials and fills typed identity slots, additively. Outbound: token.delegate mints the downstream credential, chosen per route by subject.](../../images/identity_two_boundaries.svg)
 
 - Inbound. `identity.resolve` plugins each read one credential (from a
   header, cookie, or query parameter) and land a typed identity in a slot.
@@ -39,7 +39,7 @@ Every request crosses two identity boundaries:
 
 Each resolver reads from one wire location — header, cookie, or query
 parameter — named in the `credential:` block. See
-[Configuration — Credential location](configuration.md#credential-location).
+[Configuration — Credential location](../reference/configuration.md#credential-location).
 
 > **Delegation and non-header credentials.** Delegated tokens are
 > attached to the upstream call as HTTP headers (Bearer tokens). When
@@ -157,7 +157,7 @@ routes:
 ```
 
 That is what [Recipe 2](#recipe-2-agent-acting-as-itself-by-its-spiffe-svid)
-uses. (Full group / defaults syntax: [Configuration](configuration.md).)
+uses. (Full group / defaults syntax: [Configuration](../reference/configuration.md).)
 
 ### Rule of thumb
 
@@ -173,7 +173,8 @@ uses. (Full group / defaults syntax: [Configuration](configuration.md).)
 ## Recipes
 
 Each recipe is a drop-in: the plugins it needs, the route layout, and where
-it's been tested. All config is [unified-config](configuration.md) YAML.
+it's been tested. All config is [unified-config](../reference/configuration.md)
+YAML.
 
 > One spelling. These recipes write policy under `authorization:`,
 > with `pre_invocation:` and `post_invocation:` inside it. That is now
@@ -458,7 +459,7 @@ actor on the wire exactly as RFC 8693 delegation prescribes (`actor_token` +
 > (`token-exchange-delegation`), and it changes that outcome for this recipe.
 > It takes over any exchange carrying an `actor_token`, requires the actor
 > token to be an access token from the same realm, and requires the subject
-> token to name the actor in a `may_act` claim ([details](apl/delegation.md#on-behalf-of-a-user-with-the-agent-named)).
+> token to name the actor in a `may_act` claim ([details](../apl/delegation.md#on-behalf-of-a-user-with-the-agent-named)).
 > A raw SVID is not a realm token, so with that feature on, this recipe's
 > exchange is refused rather than the actor being ignored. Against Keycloak,
 > capture the acting agent at the PPE boundary (audit / downstream header)
@@ -564,7 +565,8 @@ route, configure a resolver for each prefix; nonmatching resolvers skip their
 directory lookup.
 
 The presented key is not stored in `raw_credentials` for downstream forwarding.
-Use `secret.<name>` on an [assertion](assertions.md) to authenticate to an upstream.
+Use `secret.<name>` on an [assertion](../reference/assertions.md) to
+authenticate to an upstream.
 
 #### Denial codes
 
@@ -1006,8 +1008,9 @@ the agent's token nor any user token is sent to the IdP.
 In both variants the agent is verified on the way in and governed by policy, but
 it is not named in the downstream token, because its bound token is the one
 credential PPE cannot pass on. A tool that needs to know which agent called has
-to be told separately, for example with an [assertion](assertions.md) built
-from the agent's verified identity.
+to be told separately, for example with an
+[assertion](../reference/assertions.md) built from the agent's verified
+identity.
 
 **Requiring the binding per route.** With `mode: required`, every token from
 that issuer is already bound when policy runs, so a route needs nothing more.
@@ -1402,7 +1405,7 @@ has no end-to-end result.
 
 ## Next
 
-- [Header Assertions](assertions.md): project resolved identity onto upstream
-  requests.
+- [Header Assertions](../reference/assertions.md): project resolved identity
+  onto upstream requests.
 - [Deployment](deployment.md): place identity and delegation controls at the
   required boundary.

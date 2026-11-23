@@ -146,7 +146,7 @@ need their own checks. HMAC remains unavailable under FIPS even when
 SHA-256 validation succeeds.
 
 FIPS hosts also check `crypto_capability_report().fips_profile_is_safe()`
-to reject unsupported bundled crypto operations. See [FIPS](fips.md) for
+to reject unsupported bundled crypto operations. See [FIPS](../guides/fips.md) for
 the supported selections and host setup.
 
 `PluginError` adds a `Crypto { source: CryptoError }` variant. Consumers
@@ -199,4 +199,4 @@ safe reason to clients.
 
 - [Builtins](builtins.md): review the extensions available through facade
   features.
-- [Testing](testing.md): test APL and plugins through the runtime.
+- [Testing](../guides/testing.md): test APL and plugins through the runtime.

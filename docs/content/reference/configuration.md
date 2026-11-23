@@ -36,7 +36,7 @@ and a document is legal in one of them only.
 
 Under `dispatch: policy`, loading fails if a declared plugin is unreachable
 and warns if a plugin is reached on fewer hooks than it declares.
-[Audit sinks](auditing.md) receive verdicts without policy steps and are
+[Audit sinks](../guides/auditing.md) receive verdicts without policy steps and are
 exempt from the reachability error unless `mode: disabled`. Unused hooks
 declared by a sink still produce warnings.
 
@@ -97,9 +97,9 @@ it may see.
 | `name` | instance name, referenced from policy as `run(name)` or `delegate(name, ...)` |
 | `kind` | which implementation, for example `identity/jwt` |
 | `hooks` | the hook points it registers on |
-| `mode` | `sequential` (default), `transform`, `audit`, `concurrent`, `fire_and_forget`, or `disabled`; see [Execution modes](pipeline.md#execution-modes) |
+| `mode` | `sequential` (default), `transform`, `audit`, `concurrent`, `fire_and_forget`, or `disabled`; see [Execution modes](../concepts/pipeline.md#execution-modes) |
 | `on_error` | `fail` (default), `ignore`, or `disable` |
-| `capabilities` | declared context access, see [Extensions](extensions.md) |
+| `capabilities` | declared context access, see [Extensions](../concepts/extensions.md) |
 | `config` | plugin-specific settings |
 
 ```yaml
@@ -197,12 +197,12 @@ global:
 an optional `cache:` block with positive `ttl_seconds` and
 `max_entries` (keep the cap modest; removal is `O(n)`); omission
 leaves evaluation uncached. See
-[PDP decision cache](../pdp-decision-cache.md). `session_store:`
+[PDP decision cache](../../pdp-decision-cache.md). `session_store:`
 selects where Session Taint labels live; without it, labels stay in an
 in-process memory store and do not survive a reload or reach a second
 replica. `attribute_files:` loads the operator-maintained tree policy
 reads under `data.*`, covered in
-[Static Attributes](apl/attributes.md).
+[Static Attributes](../apl/attributes.md).
 
 ## Routes
 
@@ -328,8 +328,9 @@ without a `config:` runs once per request, and the load warns with alarm
 A plugin whose only hooks are the rate-limit hooks cannot be named in a
 `run(name)` step. Under `dispatch: hooks`, `rate_limits:` is a load error
 like the other policy scopes. See
-[HTTP Routing](http-routing.md#rate-limit-hooks) for what the host must do,
-and [Rate Limiting](rate-limiting.md) for plugin settings and counter behavior.
+[HTTP Routing](../guides/http-routing.md#rate-limit-hooks) for what the host
+must do, and [Rate Limiting](../guides/rate-limiting.md) for plugin settings and
+counter behavior.
 
 ## Requests with no entity
 
@@ -338,7 +339,7 @@ with the violation code `unidentified_request` and a 400-class status,
 kept distinct from a policy's own deny because no rule was reached.
 
 For authorizing plain HTTP requests rather than named entities, see
-[HTTP Routing](http-routing.md).
+[HTTP Routing](../guides/http-routing.md).
 
 ## Secrets and key material
 
@@ -511,9 +512,9 @@ client_secret_source:
 
 ## Next
 
-- [HTTP Routing](http-routing.md): select policy by request path and method.
-- [Identity and Delegation](identity-delegation.md): configure inbound identity
-  and outbound credentials.
+- [HTTP Routing](../guides/http-routing.md): select policy by request path and method.
+- [Identity and Delegation](../guides/identity-delegation.md): configure inbound
+  identity and outbound credentials.
 - [Header Assertions](assertions.md): project derived identity onto upstream
   requests.
-- [Upgrading APL](upgrade-apl.md): migrate an older configuration.
+- [Upgrading APL](../guides/upgrade-apl.md): migrate an older configuration.

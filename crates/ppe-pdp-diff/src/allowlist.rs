@@ -67,7 +67,7 @@ pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
                      (default deny). Unguarded CEL `role.hr` is an eval error \
                      (the `role` namespace is absent). OPA with no `default` \
                      leaves `allow` undefined — a clean deny. The bridge \
-                     contract in `docs/content/cmf-extensions.md` is: write the \
+                     contract in `docs/content/concepts/cmf-extensions.md` is: write the \
                      original set present-empty and keep flattened bools \
                      presence-only. Authors who need agreement use \
                      `subject.roles` (see `empty-set` / `bridge-empty-teams` / \
@@ -100,7 +100,7 @@ pub(crate) fn allowlist() -> Vec<AllowlistEntry> {
                      OPA without `default` leaves the query undefined \
                      (DefaultDeny). Authors who need the denylist closed \
                      write `require(exists(claim.tenant) & claim.tenant != \
-                     \"acme\")`. See `docs/content/cmf-extensions.md`.",
+                     \"acme\")`. See `docs/content/concepts/cmf-extensions.md`.",
             cedar: Outcome::deny(CauseKind::EvalError),
             cel: Outcome::deny(CauseKind::EvalError),
             opa: Outcome::deny(CauseKind::DefaultDeny),

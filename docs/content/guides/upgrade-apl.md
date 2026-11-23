@@ -656,6 +656,6 @@ an example that never demonstrated it.
 
 ## Next
 
-- [Plugins and Pipeline](pipeline.md): extend APL with host plugins.
-- [Common Message Format](cmf.md): inspect the protocol-agnostic message
+- [Plugins and Pipeline](../concepts/pipeline.md): extend APL with host plugins.
+- [Common Message Format](../concepts/cmf.md): inspect the protocol-agnostic message
   envelope evaluated by APL.

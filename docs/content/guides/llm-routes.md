@@ -94,7 +94,7 @@ host passes those extensions on `cmf.llm_output`.
 
 Identity (`subject.*`, `role.*`, `perm.*`, `claim.*`), security labels, the
 delegation chain, and entity metadata (`meta.*`) are the same on an `llm:` route
-as on any other. [Extensions](extensions.md) lists them with the capabilities
+as on any other. [Extensions](../concepts/extensions.md) lists them with the capabilities
 that expose them. Model identity (`llm.model.id`, `llm.model.provider`,
 `llm.model.capabilities`) and `llm.output.*` need no capability. The request keys
 need `read_llm_request` in a plugin's view; a route's own rules always see
@@ -235,7 +235,8 @@ A model outside `gpt-4*` matches no route here, so none of this applies to it.
 
 ## Next
 
-- [Extensions](extensions.md): every namespace and the capability behind it.
-- [Common Message Format](cmf.md): the message both hooks carry.
+- [Extensions](../concepts/extensions.md): every namespace and the capability
+  behind it.
+- [Common Message Format](../concepts/cmf.md): the message both hooks carry.
 - [HTTP Routing](http-routing.md): the other selector that is not a tool,
   resource, or prompt name.

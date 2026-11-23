@@ -1,4 +1,4 @@
-# How PPE Works
+# How the Policy Engine works
 
 ## A running scenario
 
@@ -15,12 +15,12 @@ a later page:
 
 | Label | Requirement | Where |
 |-------|-------------|-------|
-| R1 | Resolve the real user behind the agent | [Identity](apl/identity.md) |
-| R2 | Same request, different data (redact per identity) | [Effects](apl/effects.md) |
-| R3 | Enforce on inputs and results (validate args, shape output) | [APL](apl/index.md) |
-| R4 | Delegate downstream with a narrower credential | [Delegation](apl/delegation.md) |
-| R5 | Remember the session (carry state across calls) | [Session Taint](apl/tainting.md) |
-| R6 | Out-of-band elicitations (human approval) | [Elicitation](apl/elicitation.md) |
+| R1 | Resolve the real user behind the agent | [Identity](../apl/identity.md) |
+| R2 | Same request, different data (redact per identity) | [Effects](../apl/effects.md) |
+| R3 | Enforce on inputs and results (validate args, shape output) | [APL](../apl/index.md) |
+| R4 | Delegate downstream with a narrower credential | [Delegation](../apl/delegation.md) |
+| R5 | Remember the session (carry state across calls) | [Session Taint](../apl/tainting.md) |
+| R6 | Out-of-band elicitations (human approval) | [Elicitation](../apl/elicitation.md) |
 
 The agent's LLM decides which operation to run. It is untrusted. PPE sits
 between it and every capability, and decides what actually happens. For each
@@ -52,7 +52,7 @@ routes:
 - An engineer is denied at `require(role.hr)`. The call never reaches the
   backend.
 
-![Three identical get_compensation requests pass through PPE APL policy and produce three outcomes by identity: the full record for HR with view_ssn, the record with SSN redacted for HR without view_ssn, and a deny for non-HR callers](../images/overview_outcomes.svg)
+![Three identical get_compensation requests pass through PPE APL policy and produce three outcomes by identity: the full record for HR with view_ssn, the record with SSN redacted for HR without view_ssn, and a deny for non-HR callers](../../images/overview_outcomes.svg)
 
 No application code changed between the three outcomes. The policy did.
 
@@ -74,7 +74,7 @@ routes:
 An email with no sensitive content in its body is still blocked if the session
 previously read secret data. This is a write-down control, and the LLM cannot
 route around it because the taint lives in PPE, not in the conversation.
-[Session Taint](apl/tainting.md) defines label propagation and persistence.
+[Session Taint](../apl/tainting.md) defines label propagation and persistence.
 
 ## Where the boundary sits
 
@@ -84,11 +84,11 @@ policy does not change; the enforcement point does.
 A gateway in front of a tool server controls inbound calls. A sidecar on the
 agent controls its outbound calls. An in-framework integration controls
 operations as the runtime issues them. The same APL policy enforces in all
-three. [Deployment](deployment.md) walks through each.
+three. [Deployment](../guides/deployment.md) walks through each.
 
 ## Related documentation
 
 - [Use Cases](use-cases.md): run the controls above end to end behind a gateway.
-- [APL](apl/index.md): the enforcement-pipeline configuration.
-- [Identity](apl/identity.md): how callers are resolved into the attributes
+- [APL](../apl/index.md): the enforcement-pipeline configuration.
+- [Identity](../apl/identity.md): how callers are resolved into the attributes
   policy reads.

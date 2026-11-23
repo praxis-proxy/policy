@@ -115,7 +115,7 @@ second, shadow policy engine. It provisions the facts; APL decides with them.
 ## Pipeline integration
 
 `data.*` is an ordinary bag namespace (see [Extensions &
-Capability-Gating](../extensions.md)): predicates read it exactly like
+Capability-Gating](../concepts/extensions.md)): predicates read it exactly like
 `subject.*` or `session.labels`, and it composes with them freely —
 `data.tenants[subject.tenant].data_region` ties a static fact to a per-request
 identity in one predicate. The tree is loaded once at startup and shared across

@@ -17,5 +17,5 @@ cargo nextest run -p praxis-policy-builtins --features experimental-ratelimit --
 cargo bench -p praxis-policy-builtins --features experimental-ratelimit --bench ratelimit_hot_path
 ```
 
-[rate-limiting guide]: ../../../../../docs/content/rate-limiting.md
+[rate-limiting guide]: ../../../../../docs/content/guides/rate-limiting.md
 [Limitador]: https://github.com/Kuadrant/limitador

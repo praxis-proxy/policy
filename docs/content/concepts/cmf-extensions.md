@@ -11,7 +11,7 @@ The fourteen slots dispatched by `extract_extensions` are listed below.
 never enter the bag, and a routing constraint is not a policy attribute.
 `llm_request` contributes normalized parts to the bag; its parsed body reaches
 PDPs as structured JSON instead (see
-[Structured request input](apl/pdp.md#structured-request-input)).
+[Structured request input](../apl/pdp.md#structured-request-input)).
 
 ## Contents
 
@@ -653,4 +653,4 @@ On `tool:` routes, OPA and CEL do not read the request argument rows
 above. They receive the arguments as native JSON instead, so arrays of
 objects, array order, duplicates, numbers, and `null` survive. Cedar receives
 the same JSON, sanitized, as `context.args`. APL still reads the flattened
-keys. See [Structured request input](apl/pdp.md#structured-request-input).
+keys. See [Structured request input](../apl/pdp.md#structured-request-input).
