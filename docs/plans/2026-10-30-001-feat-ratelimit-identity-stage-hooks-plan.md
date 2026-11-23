@@ -592,7 +592,9 @@ graph TD
 - Modify:
   - `crates/builtins/src/plugins/ratelimit/README.md`
   - `docs/content/index.md`
-  - `docs/content/reference/configuration.md`, `pipeline.md`, `http-routing.md`
+  - `docs/content/reference/configuration.md`
+  - `docs/content/concepts/pipeline.md`
+  - `docs/content/guides/http-routing.md`
   - `docs/content/reference/builtins.md`, `crates.md`
   - `docs/content/concepts/cmf-extensions.md`, `extensions.md`
   - `docs/content/guides/upgrade-apl.md`
