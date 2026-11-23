@@ -61,6 +61,9 @@ pub mod plugins;
 #[cfg(feature = "_token_lookup")]
 mod token_lookup;
 
+#[cfg(feature = "_validation")]
+mod validation;
+
 #[cfg(feature = "_pdps")]
 pub mod pdps;
 

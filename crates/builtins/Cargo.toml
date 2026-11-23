@@ -64,8 +64,8 @@ kubernetes-token-review = [
   "_engine-core",
   "_plugins",
   "_token_lookup",
+  "_validation",
   "dep:base64",
-  "dep:url",
 ]
 oauth = [
   "_engine-core",
@@ -123,6 +123,8 @@ _jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64"]
 # The shared core of the resolvers that turn a credential into an identity by
 # looking it up. Crate-private: each plugin re-exports what it makes public.
 _token_lookup = ["_engine-core"]
+# Config checks more than one builtin needs. Crate-private.
+_validation = ["dep:url"]
 
 [dependencies]
 # Engine crates, optional so a consumer resolves only the layer it asked for.

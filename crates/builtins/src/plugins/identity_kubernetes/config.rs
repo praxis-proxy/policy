@@ -13,6 +13,7 @@ use praxis_policy_core::identity::mapping::{
 use serde::{Deserialize, Serialize};
 
 use crate::token_lookup::cache::CacheConfig;
+use crate::validation::https::require_https_url;
 
 /// What a mapped workload identity records as its attestor.
 pub const ATTESTOR: &str = "kubernetes_token_review";
@@ -168,30 +169,10 @@ impl TokenReviewResolverConfig {
 // Utility Functions
 // -----------------------------------------------------------------------------
 
-/// Require an HTTPS base URL the review path can be appended to.
-///
-/// The reviewer's bearer token travels on this connection, so plain HTTP would
-/// hand it to anything on the path. An `https` URI with an empty host is
-/// invalid per [RFC 9110 Section 4.2.2]. A query or fragment would end up in
-/// front of the appended review path.
-///
-/// [RFC 9110 Section 4.2.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.2.2
+/// Require an HTTPS base URL the review path can be appended to. A query or
+/// fragment would end up in front of the appended path.
 fn validate_api_server_url(raw: &str) -> Result<(), String> {
-    let url = url::Url::parse(raw)
-        .map_err(|e| format!("`api_server.url` is not a valid URL ('{raw}'): {e}"))?;
-    if url.scheme() != "https" {
-        return Err(format!(
-            "`api_server.url` must be an https URL, got '{raw}'"
-        ));
-    }
-    // Checked on the raw text as well: the WHATWG parser reads `https:///apis`
-    // as host `apis`, which would send the token somewhere nobody configured.
-    let authority_missing = raw
-        .get("https://".len()..)
-        .is_none_or(|rest| rest.is_empty() || rest.starts_with(['/', ':']));
-    if authority_missing || url.host_str().is_none_or(str::is_empty) {
-        return Err(format!("`api_server.url` has no host: '{raw}'"));
-    }
+    let url = require_https_url("api_server.url", raw)?;
     if url.query().is_some() || url.fragment().is_some() {
         return Err(format!(
             "`api_server.url` must be a base URL without a query or fragment, got '{raw}'"
@@ -223,35 +204,11 @@ mod tests {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // RFC 9110 Section 4.2.2: an https URI with an empty host is invalid
-    // -------------------------------------------------------------------------
-
-    /// [RFC 9110 Section 4.2.2] makes an `https` URI with an empty host
-    /// invalid.
-    ///
-    /// [RFC 9110 Section 4.2.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.2.2
     #[test]
-    fn rfc9110_4_2_2_an_https_url_with_an_empty_host_is_rejected() {
-        for url in ["https://", "https:///apis", "https://:6443"] {
-            assert!(
-                validate_api_server_url(url).is_err(),
-                "{url} has no host and must be rejected"
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Shape the review path cannot be appended to
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn plain_http_a_query_or_a_fragment_is_rejected() {
+    fn a_query_or_a_fragment_is_rejected() {
         for url in [
-            "http://kubernetes.default.svc",
             "https://kubernetes.default.svc?x=1",
             "https://kubernetes.default.svc#frag",
-            "not a url",
         ] {
             assert!(
                 validate_api_server_url(url).is_err(),
