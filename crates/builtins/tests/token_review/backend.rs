@@ -259,11 +259,11 @@ async fn a_jwt_answer_expires_with_the_token() {
 }
 
 #[tokio::test]
-async fn a_rotated_reviewer_token_is_picked_up_after_the_reread_interval() {
+async fn a_rotated_reviewer_token_is_picked_up_after_the_refresh_interval() {
     let file = TokenFile::write(REVIEWER);
     let config: ApiServerConfig = serde_json::from_value(serde_json::json!({
         "url": API_SERVER,
-        "reviewer_token": { "kind": "file", "path": file.path(), "reread_secs": 1 },
+        "reviewer_token": { "kind": "file", "path": file.path(), "refresh_secs": 1 },
     }))
     .expect("the config parses");
     let directory = TokenReviewDirectory::new(&config, Vec::new()).expect("the token reads");

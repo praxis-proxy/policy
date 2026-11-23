@@ -17,7 +17,7 @@ use crate::token_lookup::cache::CacheConfig;
 /// What a mapped workload identity records as its attestor.
 pub const ATTESTOR: &str = "kubernetes_token_review";
 
-fn default_reread_secs() -> u64 {
+fn default_refresh_secs() -> u64 {
     60
 }
 
@@ -97,15 +97,15 @@ pub enum ReviewerTokenSource {
         /// The variable holding the token.
         name: String,
     },
-    /// A file, re-read once `reread_secs` has passed so a projected token
+    /// A file, re-read once `refresh_secs` has passed so a projected token
     /// rotates.
     File {
         /// Path to the token, such as
         /// `/var/run/secrets/kubernetes.io/serviceaccount/token`.
         path: PathBuf,
         /// How long a read is reused before the file is read again.
-        #[serde(default = "default_reread_secs")]
-        reread_secs: u64,
+        #[serde(default = "default_refresh_secs")]
+        refresh_secs: u64,
     },
 }
 
@@ -154,8 +154,11 @@ impl TokenReviewResolverConfig {
         if self.api_server.timeout_secs == 0 {
             return Err("`api_server.timeout_secs` is zero, so every review would time out".into());
         }
-        if let ReviewerTokenSource::File { reread_secs: 0, .. } = self.api_server.reviewer_token {
-            return Err("`reviewer_token.reread_secs` is zero; omit it for the default".into());
+        if let ReviewerTokenSource::File {
+            refresh_secs: 0, ..
+        } = self.api_server.reviewer_token
+        {
+            return Err("`reviewer_token.refresh_secs` is zero; omit it for the default".into());
         }
         if self
             .audiences

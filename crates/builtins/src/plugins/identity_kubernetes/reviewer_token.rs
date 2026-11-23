@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// PPE's own token for the API server. A file is re-read once `reread_secs` has
+// PPE's own token for the API server. A file is re-read once `refresh_secs` has
 // passed, as client-go does, so a projected token rotates. A failed re-read
 // keeps the last token: denying every request on a read error turns a blip
 // into an outage.
@@ -59,10 +59,10 @@ impl ReviewerToken {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             (current.token.clone(), current.read_at)
         };
-        let ReviewerTokenSource::File { reread_secs, .. } = &self.source else {
+        let ReviewerTokenSource::File { refresh_secs, .. } = &self.source else {
             return token;
         };
-        if read_at.elapsed() < Duration::from_secs(*reread_secs) {
+        if read_at.elapsed() < Duration::from_secs(*refresh_secs) {
             return token;
         }
 
