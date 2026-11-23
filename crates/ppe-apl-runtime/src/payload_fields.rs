@@ -177,8 +177,8 @@ mod tests {
     }
 
     fn resource_payload() -> MessagePayload {
-        use praxis_policy_core::cmf::enums::ResourceType;
         use praxis_policy_core::cmf::Resource;
+        use praxis_policy_core::cmf::enums::ResourceType;
         MessagePayload {
             message: Message::with_content(
                 Role::Tool,

@@ -322,7 +322,9 @@ pub(crate) fn write_args_back_to_message(
         match (projection, part) {
             (Projection::Tool | Projection::Prompt, ContentPart::ToolCall { content }) => {
                 let Some(obj) = args.as_object() else {
-                    return Err(EnvelopeReplaced { part: ReplacedPart::ToolCall });
+                    return Err(EnvelopeReplaced {
+                        part: ReplacedPart::ToolCall,
+                    });
                 };
                 content.arguments = obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 return Ok(());
@@ -458,7 +460,9 @@ pub(crate) fn write_resource(
     result: &Value,
 ) -> Result<(), EnvelopeReplaced> {
     let Some(obj) = result.as_object() else {
-        return Err(EnvelopeReplaced { part: ReplacedPart::Resource });
+        return Err(EnvelopeReplaced {
+            part: ReplacedPart::Resource,
+        });
     };
     write_opt_string(&mut resource.name, obj.get("name"));
     write_opt_string(&mut resource.title, obj.get("title"));
@@ -905,7 +909,9 @@ mod tests {
         let before = extract_args_from_message(&msg);
         assert_eq!(
             write_args_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
-            Err(EnvelopeReplaced { part: ReplacedPart::ToolCall }),
+            Err(EnvelopeReplaced {
+                part: ReplacedPart::ToolCall
+            }),
             "forwarding the original arguments would undo the redaction"
         );
         assert_eq!(extract_args_from_message(&msg), before);
@@ -1504,7 +1510,9 @@ mod tests {
         let mut msg = original.clone();
         assert_eq!(
             write_result_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
-            Err(EnvelopeReplaced { part: ReplacedPart::Resource }),
+            Err(EnvelopeReplaced {
+                part: ReplacedPart::Resource
+            }),
             "a non-object result envelope must be refused, not silently dropped"
         );
         assert_differs_only_in(&original, &msg, |_| {});
