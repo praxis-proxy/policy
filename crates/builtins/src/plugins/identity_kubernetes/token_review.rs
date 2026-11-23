@@ -228,5 +228,19 @@ fn jwt_expiry(token: &str) -> Option<DateTime<Utc>> {
         .decode(payload)
         .ok()?;
     let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    DateTime::from_timestamp(claims.get("exp")?.as_i64()?, 0)
+    numeric_date(claims.get("exp")?)
+}
+
+/// An RFC 7519 `NumericDate`, which may carry a fraction.
+///
+/// A fraction is floored, so the bound can only come earlier. The float goes
+/// through its decimal text because a float-to-integer cast can truncate
+/// silently; a value too large for an `i64` is far enough out to leave
+/// unbounded.
+fn numeric_date(value: &Value) -> Option<DateTime<Utc>> {
+    let seconds = match value.as_i64() {
+        Some(seconds) => seconds,
+        None => format!("{:.0}", value.as_f64()?.floor()).parse().ok()?,
+    };
+    DateTime::from_timestamp(seconds, 0)
 }

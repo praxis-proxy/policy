@@ -91,6 +91,25 @@ async fn an_authenticated_jwt_past_its_exp_is_denied_as_expired() {
 }
 
 #[tokio::test]
+async fn an_authenticated_jwt_past_a_decimal_exp_is_denied_as_expired() {
+    let file = TokenFile::write(REVIEWER);
+    let resolver = resolver(config(file.path())).expect("the config builds");
+
+    let result = resolve(
+        &resolver,
+        &jwt_expiring_at(1.5),
+        api_server(201, AUTHENTICATED),
+    )
+    .await;
+
+    assert_eq!(
+        denial_code(&result).as_deref(),
+        Some(codes::TOKEN_EXPIRED),
+        "a decimal exp bounds the record as an integer one does"
+    );
+}
+
+#[tokio::test]
 async fn a_cached_answer_is_not_asked_for_again() {
     let file = TokenFile::write(REVIEWER);
     let mut block = config(file.path());

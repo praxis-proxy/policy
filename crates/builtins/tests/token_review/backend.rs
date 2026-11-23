@@ -244,7 +244,7 @@ async fn a_jwt_answer_expires_with_the_token() {
 
     let record = directory
         .lookup(
-            &PresentedKey::new(jwt_expiring_at(4_102_444_800)),
+            &PresentedKey::new(jwt_expiring_at(4_102_444_800_i64)),
             &services,
         )
         .await
@@ -255,6 +255,27 @@ async fn a_jwt_answer_expires_with_the_token() {
         record.expires_at.map(|at| at.timestamp()),
         Some(4_102_444_800),
         "the record carries the token's own exp"
+    );
+}
+
+#[tokio::test]
+async fn a_decimal_exp_is_floored_rather_than_dropped() {
+    let (_file, directory) = directory(&["praxis-gateway"]);
+    let services = granting(api_server(201, AUTHENTICATED));
+
+    let record = directory
+        .lookup(
+            &PresentedKey::new(jwt_expiring_at(4_102_444_800.9)),
+            &services,
+        )
+        .await
+        .expect("the API server answers")
+        .expect("an authenticated review is a record");
+
+    assert_eq!(
+        record.expires_at.map(|at| at.timestamp()),
+        Some(4_102_444_800),
+        "RFC 7519 allows a fractional NumericDate; flooring keeps the bound"
     );
 }
 

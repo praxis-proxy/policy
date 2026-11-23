@@ -153,7 +153,8 @@ pub fn denial_code(result: &PluginResult<IdentityPayload>) -> Option<String> {
 
 /// An unsigned JWT whose payload carries `exp`. Signature is never checked
 /// here: the API server is the verifier.
-pub fn jwt_expiring_at(exp: i64) -> String {
+pub fn jwt_expiring_at(exp: impl Into<serde_json::Value>) -> String {
+    let exp: serde_json::Value = exp.into();
     let encode = |value: serde_json::Value| {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
     };
