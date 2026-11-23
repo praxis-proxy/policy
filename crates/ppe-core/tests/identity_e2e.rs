@@ -36,6 +36,9 @@ use async_trait::async_trait;
 
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
+use praxis_policy_core::extensions::raw_credentials::{
+    Credential, RawInboundToken, TokenKind, TokenRole,
+};
 use praxis_policy_core::extensions::{SubjectExtension, WorkloadIdentity};
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
@@ -128,6 +131,48 @@ impl HookHandler<IdentityHook> for WorkloadResolver {
             trust_domain: Some("example.com".to_owned()),
             ..Default::default()
         });
+        PluginResult::modify_payload(updated)
+    }
+}
+
+/// A JWT-style resolver: writes the subject and stores the raw token under
+/// `User`, as `identity/jwt` does.
+struct TokenStashingResolver {
+    cfg: PluginConfig,
+    subject_id: String,
+}
+
+#[async_trait]
+impl Plugin for TokenStashingResolver {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<IdentityHook> for TokenStashingResolver {
+    async fn handle(
+        &self,
+        payload: &IdentityPayload,
+        _ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<IdentityPayload> {
+        let mut updated = payload.clone();
+        updated.subject = Some(SubjectExtension {
+            id: Some(self.subject_id.clone()),
+            ..Default::default()
+        });
+        let mut raw = updated.raw_credentials.clone().unwrap_or_default();
+        raw.inbound_tokens.insert(
+            TokenRole::User,
+            RawInboundToken::new(
+                payload.raw_token(),
+                Credential::Header {
+                    name: "Authorization".to_owned(),
+                },
+                TokenKind::Jwt,
+            ),
+        );
+        updated.raw_credentials = Some(raw);
         PluginResult::modify_payload(updated)
     }
 }
@@ -307,6 +352,68 @@ async fn two_resolvers_chain_populates_both_slots() {
 
     // Original input fields still intact.
     assert_eq!(final_payload.raw_token(), "eyJ.fake.jwt");
+}
+
+/// A later resolver that replaces the subject without a token of its own,
+/// as an API-key resolver after a JWT one does, must not inherit the
+/// earlier subject's token: a revocation checker or delegator reading the
+/// `User` token would otherwise act on Alice's credential for Bob. A resolver
+/// that only fills another slot leaves the token alone.
+#[tokio::test]
+async fn a_replaced_subject_does_not_inherit_the_previous_token() {
+    for (second_slot_is_subject, expected_subject, expected_token) in
+        [(true, "bob", None), (false, "alice", Some("alice.jwt"))]
+    {
+        let mgr = Arc::new(PolicyEngine::default());
+        let jwt_cfg = config("jwt", 10);
+        let jwt = Arc::new(TokenStashingResolver {
+            cfg: jwt_cfg.clone(),
+            subject_id: "alice".to_owned(),
+        });
+        mgr.register_handler::<IdentityHook, _>(jwt, jwt_cfg)
+            .unwrap();
+        let second_cfg = config("second", 20);
+        if second_slot_is_subject {
+            let key = Arc::new(SubjectResolver {
+                cfg: second_cfg.clone(),
+                subject_id: "bob".to_owned(),
+            });
+            mgr.register_handler::<IdentityHook, _>(key, second_cfg)
+                .unwrap();
+        } else {
+            let workload = Arc::new(WorkloadResolver {
+                cfg: second_cfg.clone(),
+                require_prior_subject: true,
+            });
+            mgr.register_handler::<IdentityHook, _>(workload, second_cfg)
+                .unwrap();
+        }
+        mgr.initialize().await.unwrap();
+
+        let (result, _bg) = mgr
+            .invoke_named::<IdentityHook>(
+                HOOK_IDENTITY_RESOLVE,
+                build_payload("alice.jwt"),
+                Extensions::default(),
+                None,
+            )
+            .await;
+
+        let identity = extract_identity(&result);
+        assert_eq!(
+            identity.subject.as_ref().unwrap().id.as_deref(),
+            Some(expected_subject),
+        );
+        assert_eq!(
+            identity
+                .raw_credentials
+                .as_ref()
+                .and_then(|raw| raw.inbound_tokens.get(&TokenRole::User))
+                .map(|t| t.token.as_str()),
+            expected_token,
+            "subject {expected_subject}"
+        );
+    }
 }
 
 /// Rejecting handler short-circuits the pipeline. `continue_processing`

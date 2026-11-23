@@ -46,7 +46,18 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   per-value encoder `form_urlencode` already used, for callers building an
   RFC 6749 Basic credential.
 
-## [0.7.0] - 2026-11-20
+### Fixed
+
+- **A replaced identity no longer keeps the previous identity's token.**
+  When a later `identity.resolve` plugin replaced a slot without storing a
+  token of its own, such as an API-key resolver after a JWT one, the earlier
+  identity's raw token stayed under that slot's role. A delegator exchanging
+  the user's token, or a revocation checker, then acted on the first
+  caller's credential for the second. The identity chain now drops a token
+  whose slot changed identity, keyed on `subject.id`, `client.client_id` and
+  `caller_workload.spiffe_id`. `IdentityPayload::merge` applies the same
+  rule.
+
 
 ### Added
 
