@@ -1175,8 +1175,11 @@ impl Counters {
 
     /// Record an attempt admitted in the overflow table for `user_id`.
     fn track(&mut self, user_id: &str) {
-        let held = self.in_flight.entry(user_id.to_owned()).or_insert(0);
-        *held = held.saturating_add(1);
+        if let Some(held) = self.in_flight.get_mut(user_id) {
+            *held = held.saturating_add(1);
+        } else {
+            self.in_flight.insert(user_id.to_owned(), 1);
+        }
     }
 
     /// Settle one of `user_id`'s attempts in the overflow table.

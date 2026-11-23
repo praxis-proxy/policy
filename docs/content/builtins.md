@@ -209,7 +209,7 @@ parameters, since a directory admits one cost profile per file. With the
 reference `argon2` CLI, for example:
 
 ```console
-printf 'Password: ' >&2; read -rs password; printf '\n' >&2
+printf 'Password: ' >&2; IFS= read -rs password; printf '\n' >&2
 printf '%s' "$password" | argon2 "$(openssl rand -hex 16)" -id -t 2 -k 19456 -p 1 -e
 unset password
 ```
@@ -218,6 +218,8 @@ unset password
 command line or the shell history. `printf` is a shell builtin, so it does
 not appear in the process list either. Use `printf '%s'` rather than
 `echo`, which appends a newline that becomes part of the hashed password.
+`IFS=` and `-r` keep leading and trailing spaces and backslashes, which
+`read` would otherwise strip from the password before it is hashed.
 
 `username`, `password_hash` and `expires_at` are storage fields: they are
 consumed by the backend and never reach the projected claims, so a
