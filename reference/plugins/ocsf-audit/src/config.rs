@@ -9,6 +9,7 @@ use std::sync::Arc;
 use praxis_policy_core::audit::export::{AuditExporter, ExportError, ExporterConfig};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::emitter::TracingExporter;
 
@@ -22,35 +23,36 @@ const MISSING_OUTPUT: &str = "no audit destination configured; set `destination:
 
 /// The `config:` block of an `audit/ocsf` plugin entry.
 ///
-/// `destination` or `exporters` must be set before the sink can load.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Holds exactly one output. In YAML the entry sets exactly one of
+/// `destination` and `exporters`, and an `exporters` list is never empty.
+/// Build one in code with [`OcsfAuditConfig::new`].
+///
+/// ```
+/// use praxis_policy_plugin_ocsf_audit::{OcsfAuditConfig, OcsfDestination, OutputSelection};
+///
+/// let mut config = OcsfAuditConfig::new(OutputSelection::Destination(OcsfDestination::Stderr));
+/// config.chain_uid = Some("gateway-eu-1".to_owned());
+/// assert!(config.chain, "chaining is on unless the entry turns it off");
+/// ```
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(into = "WireConfig", try_from = "WireConfig")]
 pub struct OcsfAuditConfig {
-    /// Where OCSF events go, as a single destination: `stderr` or
-    /// `tracing`. Mutually exclusive with `exporters`, which can name
-    /// several. One of the two is required.
-    #[serde(default)]
-    pub destination: Option<OcsfDestination>,
-
-    /// Where OCSF events go, as a list of exporters. Every record is
-    /// written, byte for byte, to each one. Mutually exclusive with
-    /// `destination`; an empty list is rejected.
+    /// Where OCSF events go: a single `destination`, `stderr` or `tracing`,
+    /// or an `exporters` list that can name several. The entry sets one of
+    /// the two keys.
     ///
     /// ```yaml
     /// exporters:
     ///   - { kind: file, path: /var/log/ppe/ocsf.ndjson, fsync: batch }
     ///   - { kind: stderr }
     /// ```
-    #[serde(default)]
-    pub exporters: Option<Vec<OcsfExporterConfig>>,
+    pub output: OutputSelection,
 
     /// Populates OCSF `metadata.product` so a single collector can
     /// attribute events to a deployment.
-    #[serde(default = "default_product_name")]
     pub product_name: String,
 
     /// Populates OCSF `metadata.product.vendor_name`.
-    #[serde(default = "default_vendor_name")]
     pub vendor_name: String,
 
     /// When true, attach an attestation to every event: compute a
@@ -58,7 +60,6 @@ pub struct OcsfAuditConfig {
     /// event through `prev_event` (its uid, `type_uid` and fingerprint),
     /// forming a tamper-evident chain. This declares the
     /// `record_integrity` profile.
-    #[serde(default = "default_true")]
     pub chain: bool,
 
     /// Identifier for this attestation chain (OCSF
@@ -73,7 +74,6 @@ pub struct OcsfAuditConfig {
     /// `metadata.uid` discards the later records as
     /// replays. Give every process its own value, or leave it unset and
     /// take the per-process default.
-    #[serde(default)]
     pub chain_uid: Option<String>,
 
     /// Signing mode for the attestation. `none` produces an unsigned
@@ -85,7 +85,6 @@ pub struct OcsfAuditConfig {
     /// missing key fails construction loudly rather than silently
     /// emitting unsigned records. Through the factory, use the path form:
     /// the engine retains its plugin config.
-    #[serde(default)]
     pub signing: SigningMode,
 
     /// Inline PKCS#8 P-256 private key PEM for `signing: dsse`.
@@ -98,12 +97,10 @@ pub struct OcsfAuditConfig {
     /// Consumed at direct construction: the emitter zeroizes and clears
     /// this field and its own raw plugin config, whatever `signing` is set
     /// to. A caller that kept another config copy must clear that copy.
-    #[serde(default)]
     pub signing_key_pem: Option<String>,
 
     /// Path to a PKCS#8 P-256 private key PEM for `signing: dsse`.
     /// Mutually exclusive with `signing_key_pem`.
-    #[serde(default)]
     pub signing_key_pem_path: Option<String>,
 
     /// Key identifier (JWKS `kid`) stamped at `unmapped.signature_key_id`,
@@ -111,7 +108,6 @@ pub struct OcsfAuditConfig {
     /// published key set. Rides in `unmapped`, outside the hashed bytes
     /// like the signature itself, because `digital_signature` has no
     /// member for signature material.
-    #[serde(default)]
     pub signing_key_id: Option<String>,
 
     /// OCSF `attestation.authority_uid`: the authority the signing
@@ -122,7 +118,6 @@ pub struct OcsfAuditConfig {
     /// serialization, so it cannot be swapped after the fact without
     /// breaking the fingerprint. Recommended in the schema; set it
     /// whenever signing is on.
-    #[serde(default)]
     pub authority_uid: Option<String>,
 
     /// When true (default), fields that have no native OCSF home
@@ -130,15 +125,16 @@ pub struct OcsfAuditConfig {
     /// security labels) are emitted under OCSF `unmapped` rather than
     /// dropped. That preserves the evidence and keeps the schema gaps
     /// visible in the records themselves.
-    #[serde(default = "default_true")]
     pub include_gap_fields: bool,
 }
 
-impl Default for OcsfAuditConfig {
-    fn default() -> Self {
+impl OcsfAuditConfig {
+    /// A config that writes to `output`, with every other field at its
+    /// default.
+    #[must_use]
+    pub fn new(output: OutputSelection) -> Self {
         Self {
-            destination: None,
-            exporters: None,
+            output,
             product_name: default_product_name(),
             vendor_name: default_vendor_name(),
             chain: default_true(),
@@ -153,14 +149,85 @@ impl Default for OcsfAuditConfig {
     }
 }
 
-fn default_product_name() -> String {
-    "Praxis Policy Engine OCSF Audit".to_owned()
+/// Where the sink writes: one destination, or a list of exporters that each
+/// receive every record byte for byte.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OutputSelection {
+    /// The `destination` key: `stderr` or `tracing`.
+    Destination(OcsfDestination),
+    /// The `exporters` key: one or more exporters.
+    Exporters(ExporterList),
 }
-fn default_vendor_name() -> String {
-    "Praxis".to_owned()
+
+impl OutputSelection {
+    /// The exporters this selection names, opened and ready to write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an exporter cannot be opened, such as a `file`
+    /// path that is not absolute or not writable.
+    pub fn build_exporters(&self) -> Result<Vec<Arc<dyn AuditExporter>>, ExportError> {
+        match self {
+            Self::Destination(OcsfDestination::Tracing) => Ok(vec![Arc::new(TracingExporter)]),
+            Self::Destination(OcsfDestination::Stderr) => Ok(vec![ExporterConfig::Stderr.build()?]),
+            Self::Exporters(list) => list
+                .as_slice()
+                .iter()
+                .map(OcsfExporterConfig::build)
+                .collect(),
+        }
+    }
 }
-fn default_true() -> bool {
-    true
+
+/// A nonempty `exporters` list.
+///
+/// ```
+/// use praxis_policy_plugin_ocsf_audit::{
+///     ExporterList, OcsfExporterConfig, OutputSelectionError, TracingTag,
+/// };
+///
+/// let list = ExporterList::try_from(vec![OcsfExporterConfig::Tracing(TracingTag::Tracing)])?;
+/// assert_eq!(list.as_slice().len(), 1);
+/// assert!(
+///     matches!(ExporterList::try_from(vec![]), Err(OutputSelectionError::Empty)),
+///     "an empty list is refused"
+/// );
+/// # Ok::<(), OutputSelectionError>(())
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExporterList(Vec<OcsfExporterConfig>);
+
+impl ExporterList {
+    /// The entries, in the order records are written to them.
+    #[must_use]
+    pub fn as_slice(&self) -> &[OcsfExporterConfig] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<OcsfExporterConfig>> for ExporterList {
+    type Error = OutputSelectionError;
+
+    fn try_from(entries: Vec<OcsfExporterConfig>) -> Result<Self, Self::Error> {
+        if entries.is_empty() {
+            return Err(OutputSelectionError::Empty);
+        }
+        Ok(Self(entries))
+    }
+}
+
+/// Why a `config:` block does not select an output.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum OutputSelectionError {
+    /// Both `destination` and `exporters` are set.
+    #[error("set either `destination` or `exporters`, not both")]
+    Conflicting,
+    /// `exporters` is set but names nothing.
+    #[error("`exporters` is empty; name at least one of stderr, stdout, file or tracing")]
+    Empty,
+    /// Neither key is set; null counts as unset.
+    #[error("{MISSING_OUTPUT}")]
+    Missing,
 }
 
 /// Where a record is written when `destination` is set.
@@ -228,19 +295,6 @@ impl OcsfExporterConfig {
     }
 }
 
-impl OcsfAuditConfig {
-    /// The exporters records go to: `exporters` when set, otherwise the one
-    /// `destination` names.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if neither output is set, both are set, the exporter
-    /// list is empty, or an exporter cannot be opened.
-    pub fn build_exporters(&self) -> Result<Vec<Arc<dyn AuditExporter>>, ExportError> {
-        OutputSelection::try_from(self)?.build_exporters()
-    }
-}
-
 /// How the attestation is signed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -255,46 +309,300 @@ pub enum SigningMode {
     Dsse,
 }
 
-enum OutputSelection<'a> {
-    Destination(OcsfDestination),
-    Exporters {
-        first: &'a OcsfExporterConfig,
-        rest: &'a [OcsfExporterConfig],
-    },
+/// The `config:` block as the entry writes it, with `destination` and
+/// `exporters` as two keys. The checked conversion into [`OcsfAuditConfig`]
+/// is where an entry that selects no single output is refused.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireConfig {
+    #[serde(default)]
+    authority_uid: Option<String>,
+    #[serde(default = "default_true")]
+    chain: bool,
+    #[serde(default)]
+    chain_uid: Option<String>,
+    #[serde(default)]
+    destination: Option<OcsfDestination>,
+    #[serde(default)]
+    exporters: Option<Vec<OcsfExporterConfig>>,
+    #[serde(default = "default_true")]
+    include_gap_fields: bool,
+    #[serde(default = "default_product_name")]
+    product_name: String,
+    #[serde(default)]
+    signing: SigningMode,
+    #[serde(default)]
+    signing_key_id: Option<String>,
+    #[serde(default)]
+    signing_key_pem: Option<String>,
+    #[serde(default)]
+    signing_key_pem_path: Option<String>,
+    #[serde(default = "default_vendor_name")]
+    vendor_name: String,
 }
 
-impl<'a> TryFrom<&'a OcsfAuditConfig> for OutputSelection<'a> {
-    type Error = ExportError;
+impl TryFrom<WireConfig> for OcsfAuditConfig {
+    type Error = OutputSelectionError;
 
-    fn try_from(config: &'a OcsfAuditConfig) -> Result<Self, Self::Error> {
-        match (&config.destination, &config.exporters) {
-            (None, None) => Err(ExportError::Config(MISSING_OUTPUT.to_owned())),
-            (Some(_), Some(_)) => Err(ExportError::Config(
-                "set either `destination` or `exporters`, not both".to_owned(),
-            )),
-            (None, Some(list)) => {
-                let Some((first, rest)) = list.split_first() else {
-                    return Err(ExportError::Config(
-                        "`exporters` is empty; name at least one of stderr, stdout, file or tracing"
-                            .to_owned(),
-                    ));
-                };
-                Ok(Self::Exporters { first, rest })
-            },
-            (Some(destination), None) => Ok(Self::Destination(*destination)),
+    fn try_from(wire: WireConfig) -> Result<Self, Self::Error> {
+        let output = match (wire.destination, wire.exporters) {
+            (None, None) => return Err(OutputSelectionError::Missing),
+            (Some(_), Some(_)) => return Err(OutputSelectionError::Conflicting),
+            (Some(destination), None) => OutputSelection::Destination(destination),
+            (None, Some(entries)) => OutputSelection::Exporters(ExporterList::try_from(entries)?),
+        };
+        Ok(Self {
+            output,
+            product_name: wire.product_name,
+            vendor_name: wire.vendor_name,
+            chain: wire.chain,
+            chain_uid: wire.chain_uid,
+            signing: wire.signing,
+            signing_key_pem: wire.signing_key_pem,
+            signing_key_pem_path: wire.signing_key_pem_path,
+            signing_key_id: wire.signing_key_id,
+            authority_uid: wire.authority_uid,
+            include_gap_fields: wire.include_gap_fields,
+        })
+    }
+}
+
+impl From<OcsfAuditConfig> for WireConfig {
+    fn from(config: OcsfAuditConfig) -> Self {
+        let (destination, exporters) = match config.output {
+            OutputSelection::Destination(destination) => (Some(destination), None),
+            OutputSelection::Exporters(list) => (None, Some(list.0)),
+        };
+        Self {
+            authority_uid: config.authority_uid,
+            chain: config.chain,
+            chain_uid: config.chain_uid,
+            destination,
+            exporters,
+            include_gap_fields: config.include_gap_fields,
+            product_name: config.product_name,
+            signing: config.signing,
+            signing_key_id: config.signing_key_id,
+            signing_key_pem: config.signing_key_pem,
+            signing_key_pem_path: config.signing_key_pem_path,
+            vendor_name: config.vendor_name,
         }
     }
 }
 
-impl OutputSelection<'_> {
-    fn build_exporters(self) -> Result<Vec<Arc<dyn AuditExporter>>, ExportError> {
-        match self {
-            Self::Destination(OcsfDestination::Tracing) => Ok(vec![Arc::new(TracingExporter)]),
-            Self::Destination(OcsfDestination::Stderr) => Ok(vec![ExporterConfig::Stderr.build()?]),
-            Self::Exporters { first, rest } => std::iter::once(first)
-                .chain(rest.iter())
-                .map(OcsfExporterConfig::build)
-                .collect(),
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
+fn default_product_name() -> String {
+    "Praxis Policy Engine OCSF Audit".to_owned()
+}
+
+fn default_vendor_name() -> String {
+    "Praxis".to_owned()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_config_built_in_code_matches_a_destination_only_block() -> TestResult {
+        let built = OcsfAuditConfig::new(OutputSelection::Destination(OcsfDestination::Stderr));
+        let parsed: OcsfAuditConfig = serde_json::from_value(json!({ "destination": "stderr" }))?;
+
+        assert_eq!(
+            serde_json::to_value(built)?,
+            serde_json::to_value(parsed)?,
+            "code and YAML must agree on every default"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn each_destination_builds_its_one_exporter() -> TestResult {
+        let stderr = OutputSelection::Destination(OcsfDestination::Stderr).build_exporters()?;
+        let tracing = OutputSelection::Destination(OcsfDestination::Tracing).build_exporters()?;
+
+        assert_eq!(
+            exporter_names(&stderr),
+            ["stderr"],
+            "destination stderr must build one stderr exporter"
+        );
+        assert_eq!(
+            exporter_names(&tracing),
+            ["tracing"],
+            "destination tracing must build one tracing exporter"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_exporter_list_builds_every_entry_in_order() -> TestResult {
+        let list = ExporterList::try_from(vec![
+            OcsfExporterConfig::Tracing(TracingTag::Tracing),
+            OcsfExporterConfig::Builtin(ExporterConfig::Stdout),
+        ])?;
+        let exporters = OutputSelection::Exporters(list).build_exporters()?;
+
+        assert_eq!(
+            exporter_names(&exporters),
+            ["tracing", "stdout"],
+            "exporters must build in list order"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_exporter_list_cannot_be_constructed() {
+        assert!(
+            matches!(
+                ExporterList::try_from(vec![]),
+                Err(OutputSelectionError::Empty)
+            ),
+            "an empty list must be refused at construction"
+        );
+    }
+
+    #[test]
+    fn missing_conflicting_null_and_empty_selections_fail_to_parse() {
+        for (block, expected) in [
+            (json!({}), OutputSelectionError::Missing),
+            (json!({ "chain": true }), OutputSelectionError::Missing),
+            (
+                json!({ "destination": null }),
+                OutputSelectionError::Missing,
+            ),
+            (json!({ "exporters": null }), OutputSelectionError::Missing),
+            (
+                json!({ "destination": null, "exporters": null }),
+                OutputSelectionError::Missing,
+            ),
+            (
+                json!({ "destination": "stderr", "exporters": [{ "kind": "stderr" }] }),
+                OutputSelectionError::Conflicting,
+            ),
+            (json!({ "exporters": [] }), OutputSelectionError::Empty),
+        ] {
+            let message = serde_json::from_value::<OcsfAuditConfig>(block.clone())
+                .err()
+                .map(|err| err.to_string());
+
+            assert_eq!(
+                message,
+                Some(expected.to_string()),
+                "{block} must fail with the {expected:?} message"
+            );
         }
+    }
+
+    #[test]
+    fn the_missing_output_error_lists_every_option() {
+        let message = OutputSelectionError::Missing.to_string();
+
+        for needle in [
+            "destination",
+            "exporters",
+            "stderr",
+            "tracing",
+            "stdout",
+            "file",
+        ] {
+            assert!(
+                message.contains(needle),
+                "the error must name {needle}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_keys_are_still_rejected() {
+        let message = serde_json::from_value::<OcsfAuditConfig>(json!({
+            "destination": "stderr",
+            "destinations": "stdout",
+        }))
+        .err()
+        .map(|err| err.to_string());
+
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|text| text.contains("destinations")),
+            "an unknown key must fail the parse and be named: {message:?}"
+        );
+    }
+
+    #[test]
+    fn a_null_beside_a_set_key_is_ignored() -> TestResult {
+        let parsed: OcsfAuditConfig = serde_json::from_value(json!({
+            "destination": null,
+            "exporters": [{ "kind": "stdout" }],
+        }))?;
+
+        assert_eq!(
+            parsed.output,
+            OutputSelection::Exporters(ExporterList::try_from(vec![OcsfExporterConfig::Builtin(
+                ExporterConfig::Stdout
+            )])?),
+            "an explicit null must read as absent"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn both_shapes_round_trip_on_the_wire() -> TestResult {
+        let destination = json!({ "destination": "tracing", "chain": false });
+        let exporters = json!({
+            "exporters": [{ "kind": "tracing" }, { "kind": "stdout" }],
+            "vendor_name": "Acme",
+        });
+
+        for block in [destination, exporters] {
+            let parsed: OcsfAuditConfig = serde_json::from_value(block.clone())?;
+            let wire = serde_json::to_value(&parsed)?;
+            let reparsed: OcsfAuditConfig = serde_json::from_value(wire.clone())?;
+
+            for (key, value) in block.as_object().into_iter().flatten() {
+                assert_eq!(
+                    wire.get(key),
+                    Some(value),
+                    "{key} must serialize as it was written"
+                );
+            }
+            assert_eq!(
+                wire.as_object().map(serde_json::Map::len),
+                Some(12),
+                "the wire shape keeps both output keys: {wire}"
+            );
+            assert_eq!(
+                serde_json::to_value(reparsed)?,
+                wire,
+                "a serialized config must parse back to the same wire form"
+            );
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn exporter_names(exporters: &[Arc<dyn AuditExporter>]) -> Vec<String> {
+        exporters
+            .iter()
+            .map(|exporter| exporter.name().to_owned())
+            .collect()
     }
 }
