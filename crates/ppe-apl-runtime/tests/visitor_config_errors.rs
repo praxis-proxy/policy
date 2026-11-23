@@ -694,6 +694,34 @@ fn a_recursive_path_loads_on_a_resource_route() {
 }
 
 #[test]
+fn a_recursive_path_naming_an_unknown_field_on_a_prompt_result_is_refused() {
+    // A prompt result has no open map, so every key is a root field and a
+    // misspelled name after `**` would never match.
+    let e = load_err(
+        r#"routes:
+  - prompt: summarize-*
+    result:
+      "**.contnet": redact
+"#,
+    );
+    assert!(
+        e.contains("`**.contnet`") && e.contains("no field `contnet`"),
+        "a recursive path naming no prompt result field must be refused: {e}"
+    );
+}
+
+#[test]
+fn a_recursive_path_naming_a_prompt_result_field_in_another_case_loads() {
+    loads(
+        r#"routes:
+  - prompt: summarize-*
+    result:
+      "**.Content": redact
+"#,
+    );
+}
+
+#[test]
 fn dynamic_argument_maps_are_not_checked_against_a_field_set() {
     loads(
         r#"routes:

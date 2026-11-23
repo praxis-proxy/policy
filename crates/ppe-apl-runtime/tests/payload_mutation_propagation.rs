@@ -30,9 +30,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use praxis_policy_core::cmf::enums::Role;
+use praxis_policy_core::cmf::enums::{ResourceType, Role};
 use praxis_policy_core::cmf::{
-    CmfHook, ContentPart, Message, MessagePayload, ToolCall, ToolResult,
+    CmfHook, ContentPart, Message, MessagePayload, Resource, ToolCall, ToolResult,
 };
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
@@ -67,6 +67,8 @@ enum Target {
     NestedToolCallArgument(&'static str, &'static str),
     Thinking,
     Text,
+    /// Drop every `Resource` part from the message.
+    RemoveResources,
 }
 
 struct RewritePlugin {
@@ -92,6 +94,12 @@ impl HookHandler<CmfHook> for RewritePlugin {
             .message
             .content
             .iter()
+            .filter(|part| {
+                !matches!(
+                    (self.target, part),
+                    (Target::RemoveResources, ContentPart::Resource { .. })
+                )
+            })
             .map(|part| match (self.target, part) {
                 (Target::ToolResultContent, ContentPart::ToolResult { content }) => {
                     let mut next = content.clone();
@@ -711,6 +719,75 @@ routes:
 /// A plugin invoked as a pipeline stage on `city` rewrites `city`. The
 /// redaction must land on that argument and nowhere else — in
 /// particular, the message's unrelated text must not be copied over it.
+/// A plugin that removes the `Resource` a `result:` pipeline checked leaves
+/// write-back no part to land on. The request is denied, and the reason says
+/// the part is gone rather than that the pipeline replaced the envelope.
+#[tokio::test]
+async fn a_plugin_removing_the_checked_resource_is_denied_as_removed() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: resource-dropper
+    kind: resource-dropper
+    hooks: [cmf.resource_post_fetch]
+routes:
+  - resource: hr://employees/*
+    result:
+      content: redact
+    authorization:
+      post_invocation:
+        - "run(resource-dropper)"
+"#;
+
+    let mgr = manager_with_yaml(
+        "resource-dropper",
+        Box::new(RewriteFactory {
+            target: Target::RemoveResources,
+            hook: "cmf.resource_post_fetch",
+        }),
+        YAML,
+    )
+    .await;
+
+    let mut meta = praxis_policy_core::extensions::MetaExtension::default();
+    meta.entity_type = Some("resource".to_owned());
+    meta.entity_name = Some("hr://employees/42".to_owned());
+    let ext = Extensions {
+        meta: Some(Arc::new(meta)),
+        ..Default::default()
+    };
+    let payload = payload_of(
+        Role::Tool,
+        vec![ContentPart::Resource {
+            content: Resource {
+                resource_request_id: "rr_001".to_owned(),
+                uri: "hr://employees/42".to_owned(),
+                content: Some("SSN 123-45-6789".to_owned()),
+                resource_type: ResourceType::Uri,
+                ..Resource::default()
+            },
+        }],
+    );
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.resource_post_fetch", payload, ext, None)
+        .await;
+
+    assert!(
+        !result.continue_processing,
+        "with the checked resource gone, the request must be denied"
+    );
+    let violation = result.violation.expect("deny must carry a violation");
+    assert_eq!(violation.code, "policy.envelope_replaced");
+    assert!(
+        violation.reason.contains("no longer in the message")
+            && !violation.reason.contains("replaced the whole"),
+        "the reason must say the part is gone, not that it was replaced: {}",
+        violation.reason
+    );
+}
+
 #[tokio::test]
 async fn plugin_stage_rewrites_only_the_field_it_was_pointed_at() {
     const YAML: &str = r#"

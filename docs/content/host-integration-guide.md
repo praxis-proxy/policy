@@ -113,9 +113,12 @@ Policy does not yet inspect every content part of every message:
   part, the second and later parts bypass `result.*` rules. Emit one fetched
   content per message, or fold the text of all contents into one part, or treat
   multi-content reads as only partly covered. Note that folding changes what
-  rules can match: scanning rules (`regex`, `pii_redact`) still work, but
-  exact-match rules written for a single entry will not match the combined
-  string. Addressing individual content parts is tracked in issue #76.
+  rules see. Rules written for a single entry may not behave the same on the
+  combined string: exact-match rules will not match, and a pattern anchored
+  with `^` or `$` checks only the start or end of the combined text, so a
+  match in a later entry is missed. Hosts that fold entries must account for
+  entry boundaries in their rules. Addressing individual content parts is
+  tracked in issue #76.
 - **`PromptResult.messages` is not projected.** Content in `messages` is
   inspected only through `content`, which is why the host must fill
   `content`.

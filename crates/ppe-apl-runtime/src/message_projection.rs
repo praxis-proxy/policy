@@ -63,6 +63,8 @@ use serde_json::{Value, json};
 
 use praxis_policy_core::cmf::{ContentPart, Message, PromptResult, Resource, ResourceReference};
 
+use praxis_policy_apl_core::get_dotted;
+
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -208,31 +210,20 @@ pub(crate) fn extract_args_from_message(msg: &Message, projection: Projection) -
 /// preferred part is `ToolCall` with `PromptRequest` as fallback; when
 /// false the preference is reversed.
 fn find_args<const TOOL_FIRST: bool>(msg: &Message) -> Option<Value> {
-    let mut fallback: Option<Value> = None;
+    // Borrow while scanning; only the returned map is cloned.
+    let mut fallback: Option<&HashMap<String, Value>> = None;
     for part in &msg.content {
-        match part {
-            ContentPart::ToolCall { content } => {
-                let v = clone_arguments(&content.arguments);
-                if TOOL_FIRST {
-                    return Some(v);
-                }
-                if fallback.is_none() {
-                    fallback = Some(v);
-                }
-            },
-            ContentPart::PromptRequest { content } => {
-                let v = clone_arguments(&content.arguments);
-                if !TOOL_FIRST {
-                    return Some(v);
-                }
-                if fallback.is_none() {
-                    fallback = Some(v);
-                }
-            },
-            _ => {},
+        let (arguments, preferred) = match part {
+            ContentPart::ToolCall { content } => (&content.arguments, TOOL_FIRST),
+            ContentPart::PromptRequest { content } => (&content.arguments, !TOOL_FIRST),
+            _ => continue,
+        };
+        if preferred {
+            return Some(clone_arguments(arguments));
         }
+        fallback = fallback.or(Some(arguments));
     }
-    fallback
+    fallback.map(clone_arguments)
 }
 
 fn clone_arguments(arguments: &HashMap<String, Value>) -> Value {
@@ -329,17 +320,32 @@ impl std::fmt::Display for ReplacedPart {
     }
 }
 
-/// A pipeline replaced a fixed resource or prompt envelope as a whole with a
-/// value that is not an object, so write-back cannot apply it.
+/// Write-back cannot apply a pipeline's result to a fixed resource or prompt
+/// envelope: the pipeline replaced the envelope as a whole with a value that
+/// is not an object, or the part the route projected is no longer in the
+/// message (see [`EnvelopeError`]).
 ///
 /// Keeping the original part instead would send content the pipeline meant
 /// to change, such as an unredacted body, so the caller fails the request
-/// closed. Returned by [`write_resource_ref`], [`write_resource`] and
-/// [`write_prompt_result`].
+/// closed. Returned by [`write_resource_ref`], [`write_resource`],
+/// [`write_prompt_result`] and [`write_result_back_to_message`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EnvelopeReplaced {
-    /// The content part whose envelope was replaced.
+    /// The content part whose envelope could not be written.
     pub(crate) part: ReplacedPart,
+    /// Why write-back could not apply the result.
+    pub(crate) error: EnvelopeError,
+}
+
+/// Why an [`EnvelopeReplaced`] write-back failed. The caller denies the
+/// request either way; the error only picks the denial's wording.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EnvelopeError {
+    /// The pipeline replaced the envelope as a whole with a non-object value.
+    Replaced,
+    /// The part the route projected is no longer in the message, for
+    /// example because a plugin removed it.
+    Removed,
 }
 
 /// Inverse of [`extract_args_from_message`]: write `args` back into the part
@@ -425,7 +431,10 @@ fn write_arguments_at(
     replaced: ReplacedPart,
 ) -> Result<(), EnvelopeReplaced> {
     let Some(obj) = args.as_object() else {
-        return Err(EnvelopeReplaced { part: replaced });
+        return Err(EnvelopeReplaced {
+            part: replaced,
+            error: EnvelopeError::Replaced,
+        });
     };
     let new_args: HashMap<String, Value> =
         obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -442,6 +451,9 @@ fn write_arguments_at(
 
 /// Stable identity of the result part that was projected, so write-back
 /// can find the same part even if a plugin reordered the message.
+///
+/// Telling apart two `Resource` parts that share a `uri` will come in the
+/// future, with issue 76.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResultIdentity {
     /// For a `Resource` projection, the `uri` of the projected part.
@@ -487,6 +499,96 @@ pub(crate) fn extract_result_from_message(
         Value::String(msg.get_text_content()),
         ResultIdentity::default(),
     )
+}
+
+/// Read one `result` field the way [`extract_result_from_message`] followed by
+/// a dotted lookup would, without building the whole envelope first.
+///
+/// Selects the same part (first match for `projection`) and clones only the
+/// requested value, so reading `result.uri` does not copy the resource body.
+/// `field` is relative to the result root. Paths inside `annotations`
+/// (`annotations.reviewer.name`) are followed as dotted lookups. A projection
+/// that is not an object (a scalar tool result, or a text-only message) is
+/// itself the field, as in [`extract_result_from_message`].
+pub(crate) fn extract_result_field(
+    msg: &Message,
+    projection: Projection,
+    field: &str,
+) -> Option<Value> {
+    let (head, rest) = match field.split_once('.') {
+        Some((head, rest)) => (head, Some(rest)),
+        None => (field, None),
+    };
+    for part in &msg.content {
+        match (projection, part) {
+            (Projection::Tool, ContentPart::ToolResult { content }) => {
+                return if content.content.is_object() {
+                    get_dotted(&content.content, field).cloned()
+                } else {
+                    Some(content.content.clone())
+                };
+            },
+            (Projection::Resource, ContentPart::Resource { content }) => {
+                if head == "annotations"
+                    && let Some(rest) = rest
+                {
+                    let (key, inner) = match rest.split_once('.') {
+                        Some((key, inner)) => (key, Some(inner)),
+                        None => (rest, None),
+                    };
+                    let value = content.annotations.get(key)?;
+                    return match inner {
+                        Some(inner) => get_dotted(value, inner).cloned(),
+                        None => Some(value.clone()),
+                    };
+                }
+                return rest
+                    .is_none()
+                    .then(|| resource_field(content, head))
+                    .flatten();
+            },
+            (Projection::Prompt, ContentPart::PromptResult { content }) => {
+                return rest
+                    .is_none()
+                    .then(|| prompt_result_field(content, head))
+                    .flatten();
+            },
+            _ => {},
+        }
+    }
+    Some(Value::String(msg.get_text_content()))
+}
+
+/// One top-level field of the [`project_resource_result`] envelope, or `None`
+/// for a name the envelope does not have.
+fn resource_field(resource: &Resource, name: &str) -> Option<Value> {
+    Some(match name {
+        "uri" => json!(resource.uri),
+        "name" => json!(resource.name),
+        "title" => json!(resource.title),
+        "description" => json!(resource.description),
+        "resource_type" => json!(resource.resource_type),
+        "content" => json!(resource.content),
+        "mime_type" => json!(resource.mime_type),
+        "size_bytes" => json!(resource.size_bytes),
+        "version" => json!(resource.version),
+        "annotations" => json!(resource.annotations),
+        "icons" => json!(resource.icons),
+        _ => return None,
+    })
+}
+
+/// One top-level field of the [`project_prompt_result`] envelope, or `None`
+/// for a name the envelope does not have.
+fn prompt_result_field(prompt: &PromptResult, name: &str) -> Option<Value> {
+    Some(match name {
+        "prompt_name" => json!(prompt.prompt_name),
+        "description" => json!(prompt.description),
+        "content" => json!(prompt.content),
+        "is_error" => json!(prompt.is_error),
+        "error_message" => json!(prompt.error_message),
+        _ => return None,
+    })
 }
 
 /// Like [`extract_result_from_message`], but matches the part identified by
@@ -556,6 +658,7 @@ pub(crate) fn write_result_back_to_message(
     if identity.resource_uri.is_some() {
         return Err(EnvelopeReplaced {
             part: ReplacedPart::Resource,
+            error: EnvelopeError::Removed,
         });
     }
     if let Some(text) = result.as_str() {
@@ -578,6 +681,7 @@ pub(crate) fn write_resource_ref(
     let Some(obj) = args.as_object() else {
         return Err(EnvelopeReplaced {
             part: ReplacedPart::ResourceRef,
+            error: EnvelopeError::Replaced,
         });
     };
     write_opt_string(&mut resource_ref.name, obj.get("name"));
@@ -609,6 +713,7 @@ pub(crate) fn write_resource(
     let Some(obj) = result.as_object() else {
         return Err(EnvelopeReplaced {
             part: ReplacedPart::Resource,
+            error: EnvelopeError::Replaced,
         });
     };
     write_opt_string(&mut resource.name, obj.get("name"));
@@ -640,6 +745,7 @@ pub(crate) fn write_prompt_result(
     let Some(obj) = result.as_object() else {
         return Err(EnvelopeReplaced {
             part: ReplacedPart::PromptResult,
+            error: EnvelopeError::Replaced,
         });
     };
     write_opt_string(&mut prompt.description, obj.get("description"));
@@ -1068,7 +1174,8 @@ mod tests {
         assert_eq!(
             write_args_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
             Err(EnvelopeReplaced {
-                part: ReplacedPart::ToolCall
+                part: ReplacedPart::ToolCall,
+                error: EnvelopeError::Replaced,
             }),
             "forwarding the original arguments would undo the redaction"
         );
@@ -1137,6 +1244,7 @@ mod tests {
             write_args_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
             Err(EnvelopeReplaced {
                 part: ReplacedPart::PromptRequest,
+                error: EnvelopeError::Replaced,
             }),
             "forwarding the original arguments would undo the redaction"
         );
@@ -1655,7 +1763,8 @@ mod tests {
         assert_eq!(
             write_args_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
             Err(EnvelopeReplaced {
-                part: ReplacedPart::ResourceRef
+                part: ReplacedPart::ResourceRef,
+                error: EnvelopeError::Replaced,
             }),
             "a non-object args envelope must be refused, not silently dropped"
         );
@@ -1669,7 +1778,8 @@ mod tests {
         assert_eq!(
             write_result_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
             Err(EnvelopeReplaced {
-                part: ReplacedPart::Resource
+                part: ReplacedPart::Resource,
+                error: EnvelopeError::Replaced,
             }),
             "a non-object result envelope must be refused, not silently dropped"
         );
@@ -1683,11 +1793,94 @@ mod tests {
         assert_eq!(
             write_result_back_to_message(&mut msg, &serde_json::json!("[REDACTED]")),
             Err(EnvelopeReplaced {
-                part: ReplacedPart::PromptResult
+                part: ReplacedPart::PromptResult,
+                error: EnvelopeError::Replaced,
             }),
             "a non-object result envelope must be refused, not silently dropped"
         );
         assert_differs_only_in(&original, &msg, |_| {});
+    }
+
+    #[test]
+    fn extract_result_field_matches_a_lookup_on_the_full_envelope() {
+        // The old readback: project the whole envelope, then look up the field.
+        fn via_envelope(msg: &Message, projection: Projection, field: &str) -> Option<Value> {
+            let projected = super::extract_result_from_message(msg, projection).0;
+            if projected.is_object() {
+                get_dotted(&projected, field).cloned()
+            } else {
+                Some(projected)
+            }
+        }
+
+        let mut resource = resource_message();
+        if let ContentPart::Resource { content } = &mut resource.content[0] {
+            content.annotations.insert(
+                "reviewer".to_owned(),
+                serde_json::json!({ "name": "Ada", "ids": [7, 8] }),
+            );
+            content
+                .annotations
+                .insert("audience".to_owned(), serde_json::json!("hr"));
+        }
+        let mut resource_paths: Vec<&str> = RESOURCE_FIELDS.to_vec();
+        resource_paths.extend([
+            "annotations.audience",
+            "annotations.reviewer",
+            "annotations.reviewer.name",
+            "annotations.reviewer.ids.1",
+            "annotations.missing",
+            "annotations.audience.deeper",
+            "content.inner",
+            "no_such_field",
+        ]);
+        let mut prompt_paths: Vec<&str> = PROMPT_RESULT_FIELDS.to_vec();
+        prompt_paths.extend(["content.inner", "no_such_field"]);
+
+        let mut scalar_tool = tool_result_message();
+        if let ContentPart::ToolResult { content } = &mut scalar_tool.content[0] {
+            content.content = serde_json::json!("plain text result");
+        }
+        let cases: Vec<(Message, Projection, Vec<&str>)> = vec![
+            (resource, Projection::Resource, resource_paths),
+            (prompt_result_message(), Projection::Prompt, prompt_paths),
+            (
+                tool_result_message(),
+                Projection::Tool,
+                vec!["temp", "missing", "temp.x"],
+            ),
+            (scalar_tool, Projection::Tool, vec!["anything"]),
+            (
+                Message::text(Role::User, "just text"),
+                Projection::Resource,
+                vec!["content"],
+            ),
+        ];
+        for (msg, projection, paths) in &cases {
+            for path in paths {
+                assert_eq!(
+                    super::extract_result_field(msg, *projection, path),
+                    via_envelope(msg, *projection, path),
+                    "{projection:?} `{path}` must read the same as a lookup on the full envelope"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_write_to_a_removed_resource_is_refused_as_removed() {
+        let mut msg = resource_message();
+        let (result, identity) = super::extract_result_from_message(&msg, Projection::Resource);
+        msg.content
+            .retain(|part| !matches!(part, ContentPart::Resource { .. }));
+        assert_eq!(
+            super::write_result_back_to_message(&mut msg, &result, Projection::Resource, &identity),
+            Err(EnvelopeReplaced {
+                part: ReplacedPart::Resource,
+                error: EnvelopeError::Removed,
+            }),
+            "a projected resource that is gone must be refused as removed, not as replaced"
+        );
     }
 
     #[test]

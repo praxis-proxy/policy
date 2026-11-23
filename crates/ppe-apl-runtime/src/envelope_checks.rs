@@ -110,7 +110,14 @@ pub(crate) fn reject_writes_to_read_only_fields(
 /// envelope, which has a fixed set of fields: a name the envelope does
 /// not have, or a path that continues inside a field holding a single value
 /// (`content.ssn`; `content` is an opaque string). A path inside `annotations`
-/// is accepted, since it is an open map, and so is a recursive `**` path.
+/// is accepted, since it is an open map.
+///
+/// A recursive path (`**.ssn`) is judged by the segment after `**`. On an
+/// envelope with an open map, any name may sit inside that map, so the path is
+/// accepted. On an envelope without one, every key is a root field, so the
+/// name must be one of them; otherwise a typo such as `**.contnet` would load
+/// and never match. The name is compared without case, as in
+/// [`reject_writes_to_read_only_fields`].
 ///
 /// Tool `args` / `result` and prompt `args` take their keys from the host's
 /// arguments map, so they have no fixed set and are not checked. Called for
@@ -126,6 +133,23 @@ pub(crate) fn reject_unknown_field_paths(
             let mut segments = field_use.field.split('.');
             let first = segments.next().unwrap_or_default();
             if first == RECURSIVE_SEGMENT {
+                let name = segments.next().unwrap_or_default().to_lowercase();
+                let has_open_map = envelope.fields.iter().any(|f| OPEN_MAP_FIELDS.contains(f));
+                if !has_open_map
+                    && !name.is_empty()
+                    && name != RECURSIVE_SEGMENT
+                    && !envelope.fields.contains(&name.as_str())
+                {
+                    return Err(format!(
+                        "{scope}: {origin} names `{field}`, but a `{entity_type}:` `{block}` has \
+                         no field `{name}`, so the recursive path would never match. Its fields \
+                         are: {fields}.",
+                        origin = field_use.origin,
+                        field = field_use.field,
+                        fields = envelope.fields.join(", "),
+                    )
+                    .into());
+                }
                 continue;
             }
             if !envelope.fields.contains(&first) {

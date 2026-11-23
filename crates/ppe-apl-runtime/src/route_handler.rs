@@ -69,9 +69,9 @@ use crate::delegation_invoker::DelegationPluginInvoker;
 use crate::dispatch_plan::DispatchCache;
 use crate::elicitation_invoker::ElicitationPluginInvoker;
 use crate::message_projection::{
-    EnvelopeReplaced, Projection, ResultIdentity, apply_changed_paths, extract_args_from_message,
-    extract_result_by_identity, extract_result_from_message, write_args_back_to_message,
-    write_result_back_to_message,
+    EnvelopeError, EnvelopeReplaced, Projection, ResultIdentity, apply_changed_paths,
+    extract_args_from_message, extract_result_by_identity, extract_result_from_message,
+    write_args_back_to_message, write_result_back_to_message,
 };
 use crate::payload_fields::PayloadFields;
 use crate::pdp_router::PdpRouter;
@@ -895,20 +895,28 @@ impl AplRouteHandler {
                 route = %self.route.route_key,
                 block,
                 part = %replaced.part,
-                "pipeline replaced a whole envelope; failing request closed"
+                error = ?replaced.error,
+                "pipeline result cannot be written back; failing request closed"
             );
             if continue_processing {
                 continue_processing = false;
-                let example = replaced.part.suggested_field();
-                let mut v = PluginViolation::new(
-                    ENVELOPE_REPLACED_CODE,
-                    format!(
-                        "the `{block}:` pipeline replaced the whole `{part}` envelope, which \
-                         cannot be applied; address a field instead, such as `{example}: redact` \
-                         or `\"**.<field>\": redact`",
-                        part = replaced.part,
+                let part = replaced.part;
+                let reason = match replaced.error {
+                    EnvelopeError::Replaced => {
+                        let example = part.suggested_field();
+                        format!(
+                            "the `{block}:` pipeline replaced the whole `{part}` envelope, which \
+                             cannot be applied; address a field instead, such as `{example}: \
+                             redact` or `\"**.<field>\": redact`"
+                        )
+                    },
+                    EnvelopeError::Removed => format!(
+                        "the `{part}` that the `{block}:` pipeline checked is no longer in the \
+                         message, so its result cannot be written back; a plugin may have \
+                         removed it"
                     ),
-                );
+                };
+                let mut v = PluginViolation::new(ENVELOPE_REPLACED_CODE, reason);
                 decorate_denial_response(&mut v, self.route.response.as_ref());
                 violation = Some(v);
             }

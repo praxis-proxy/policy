@@ -112,7 +112,9 @@ fn field_value_from_message(
             crate::message_projection::extract_args_from_message(message, projection)
         },
         DispatchPhase::Post => {
-            crate::message_projection::extract_result_from_message(message, projection).0
+            // Reads the one field directly, so a resource body is not copied
+            // to read `uri`.
+            return crate::message_projection::extract_result_field(message, projection, field);
         },
     };
     if projected.is_object() {

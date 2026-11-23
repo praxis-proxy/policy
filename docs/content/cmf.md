@@ -22,12 +22,15 @@ receives the redacted text only if the host serializes its response from
 that transformed part. If the host instead forwards the original upstream
 body, the redaction has no effect on what the client sees.
 
-Praxis currently re-serializes tool results and resource content from their
-CMF parts, so redactions on `tool:` and `resource:` routes reach the
-client. On `llm:` routes, Praxis forwards the original inference body;
-`result:` pipelines and `**` redactions on those routes change the CMF
-message but do not change what the client receives. See the
-[host integration guide](host-integration-guide.md) for the full contract.
+Praxis currently re-serializes tool results from their CMF parts, so
+redactions on `tool:` routes reach the client. Resource and prompt responses
+are not yet re-serialized
+([praxis#1583](https://github.com/praxis-proxy/praxis/pull/1583) adds this);
+until then, redactions on `resource:` and `prompt:` routes change the CMF
+message but not what the client receives. On `llm:` routes, Praxis forwards
+the original inference body; `result:` pipelines and `**` redactions on those
+routes change the CMF message but do not change what the client receives.
+See the [host integration guide](host-integration-guide.md) for the full contract.
 
 ## Message structure
 
