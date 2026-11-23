@@ -386,6 +386,13 @@ indirection and the timestamped directory behind it are relative symlinks within
 the mount. An absolute link is refused even when its target is inside the
 directory; make it relative. `base_dir` may itself be a symlink.
 
+Two notes apply wherever the walk replaces `openat2`: every platform but Linux,
+and a Linux kernel without `openat2`. Each directory on the way is opened for
+reading, so it needs read permission and not only search (execute) permission;
+a search-only directory (mode `0111`) fails with a backend error. The walk also
+holds one descriptor per component of the reference until the file is open, so
+a very deep reference needs that many free descriptors under `RLIMIT_NOFILE`.
+
 `file` covers Kubernetes Secret volumes, CSI-projected secrets, container
 secret mounts, and a Vault Agent sidecar templating to disk, so a
 deployment using any of those needs no network backend.

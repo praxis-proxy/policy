@@ -153,6 +153,12 @@ impl FileSecretProvider {
     /// writer inside the directory swaps a link and the check passes for a file
     /// other than the one opened.
     ///
+    /// The component-by-component walk used where `openat2` is unavailable
+    /// opens each directory for reading, so a search-only directory (mode
+    /// `0111`) fails with a backend error, and it holds one descriptor per
+    /// component of the reference until the file is open. `openat2` has
+    /// neither requirement.
+    ///
     /// The directory is opened per read rather than at build time because a
     /// projected mount may not exist yet when the factory runs, and so that a
     /// directory replaced on disk is the one read.
