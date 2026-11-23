@@ -116,8 +116,11 @@ pub(crate) fn reject_writes_to_read_only_fields(
 /// envelope with an open map, any name may sit inside that map, so the path is
 /// accepted. On an envelope without one, every key is a root field, so the
 /// name must be one of them; otherwise a typo such as `**.contnet` would load
-/// and never match. The name is compared without case, as in
-/// [`reject_writes_to_read_only_fields`].
+/// and never match.
+///
+/// Names are compared the way the runtime will match them: without case when
+/// the path's stages include `redact` (so `CONTENT: redact` is accepted), and
+/// with exact spelling otherwise (so `CONTENT: str` is refused).
 ///
 /// Tool `args` / `result` and prompt `args` take their keys from the host's
 /// arguments map, so they have no fixed set and are not checked. Called for
@@ -130,15 +133,16 @@ pub(crate) fn reject_unknown_field_paths(
     for envelope in fixed_envelopes(entity_type, layer) {
         let block = envelope.block;
         for field_use in &envelope.uses {
+            let ignore_case = matches_without_case(field_use.stages);
             let mut segments = field_use.field.split('.');
             let first = segments.next().unwrap_or_default();
             if first == RECURSIVE_SEGMENT {
-                let name = segments.next().unwrap_or_default().to_lowercase();
+                let name = segments.next().unwrap_or_default();
                 let has_open_map = envelope.fields.iter().any(|f| OPEN_MAP_FIELDS.contains(f));
                 if !has_open_map
                     && !name.is_empty()
                     && name != RECURSIVE_SEGMENT
-                    && !envelope.fields.contains(&name.as_str())
+                    && envelope_field(envelope.fields, name, ignore_case).is_none()
                 {
                     return Err(format!(
                         "{scope}: {origin} names `{field}`, but a `{entity_type}:` `{block}` has \
@@ -152,7 +156,7 @@ pub(crate) fn reject_unknown_field_paths(
                 }
                 continue;
             }
-            if !envelope.fields.contains(&first) {
+            let Some(known) = envelope_field(envelope.fields, first, ignore_case) else {
                 return Err(format!(
                     "{scope}: {origin} names `{field}`, but a `{entity_type}:` `{block}` has no \
                      field `{first}`. Its fields are: {fields}.",
@@ -161,8 +165,8 @@ pub(crate) fn reject_unknown_field_paths(
                     fields = envelope.fields.join(", "),
                 )
                 .into());
-            }
-            if segments.next().is_some() && !OPEN_MAP_FIELDS.contains(&first) {
+            };
+            if segments.next().is_some() && !OPEN_MAP_FIELDS.contains(&known) {
                 return Err(format!(
                     "{scope}: {origin} names `{field}`, but `{first}` holds a single value with \
                      no fields inside it. Address `{first}` as a whole.",
@@ -250,6 +254,30 @@ struct FixedEnvelope<'a> {
     fields: &'static [&'static str],
     read_only: &'static [&'static str],
     uses: Vec<FieldUse<'a>>,
+}
+
+/// Whether the runtime matches this path's keys without case. Redaction does
+/// (`expand_for_pipeline` in `praxis-policy-apl-core`); every other stage
+/// matches keys exactly.
+fn matches_without_case(stages: &[Stage]) -> bool {
+    stages
+        .iter()
+        .any(|stage| matches!(stage, Stage::Redact { .. }))
+}
+
+/// The envelope field `name` resolves to, compared the way the runtime does:
+/// by `to_lowercase` when `ignore_case`, exactly otherwise.
+fn envelope_field(
+    fields: &'static [&'static str],
+    name: &str,
+    ignore_case: bool,
+) -> Option<&'static str> {
+    if ignore_case {
+        let name = name.to_lowercase();
+        fields.iter().copied().find(|f| f.to_lowercase() == name)
+    } else {
+        fields.iter().copied().find(|f| *f == name)
+    }
 }
 
 /// One field path addressed in an envelope, where it was written, and the

@@ -711,6 +711,44 @@ fn a_recursive_path_naming_an_unknown_field_on_a_prompt_result_is_refused() {
 }
 
 #[test]
+fn a_redacted_field_in_another_case_loads() {
+    // Redaction matches keys without case at runtime, so the load check must
+    // accept the same spellings, including a path into `annotations`.
+    loads(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      CONTENT: redact
+      ANNOTATIONS.ssn: redact
+    authorization:
+      post_invocation:
+        - when: "!perm.view_title"
+          do: "result.Title | redact"
+  - prompt: summarize-*
+    result:
+      Description: redact
+"#,
+    );
+}
+
+#[test]
+fn a_non_redacting_field_in_another_case_is_refused() {
+    // Other stages match keys exactly at runtime, so `CONTENT` would never
+    // reach `content`; the misspelling must still be refused.
+    let e = load_err(
+        r#"routes:
+  - resource: hr://employees/*
+    result:
+      CONTENT: "str"
+"#,
+    );
+    assert!(
+        e.contains("`CONTENT`") && e.contains("no field `CONTENT`"),
+        "a non-redacting stage must keep strict spelling: {e}"
+    );
+}
+
+#[test]
 fn a_recursive_path_naming_a_prompt_result_field_in_another_case_loads() {
     loads(
         r#"routes:

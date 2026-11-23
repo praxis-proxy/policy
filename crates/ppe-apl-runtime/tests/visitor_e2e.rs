@@ -2075,6 +2075,63 @@ routes:
 }
 
 #[tokio::test]
+async fn a_redaction_path_in_another_case_redacts_the_resource_field() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    result:
+      CONTENT: redact
+      ANNOTATIONS.ssn: redact
+"#;
+    let mgr = build_manager_with_visitor(YAML).await;
+
+    let part = ContentPart::Resource {
+        content: Resource {
+            resource_request_id: "rr_001".to_owned(),
+            uri: "hr://employees/42".to_owned(),
+            content: Some("SSN 123-45-6789".to_owned()),
+            resource_type: ResourceType::Uri,
+            annotations: [
+                ("ssn".to_owned(), serde_json::json!("123-45-6789")),
+                ("audience".to_owned(), serde_json::json!("hr")),
+            ]
+            .into_iter()
+            .collect(),
+            ..Resource::default()
+        },
+    };
+    let result = invoke_entity(
+        &mgr,
+        "cmf.resource_post_fetch",
+        ("resource", "hr://employees/42"),
+        part,
+    )
+    .await;
+    assert!(result.continue_processing, "a field redaction allows");
+    let out = forwarded(&result);
+    let ContentPart::Resource { content } = &out.message.content[0] else {
+        panic!("the forwarded part must still be the Resource");
+    };
+    assert_eq!(
+        content.content.as_deref(),
+        Some("[REDACTED]"),
+        "`CONTENT: redact` must reach `content`, since redaction ignores case"
+    );
+    assert_eq!(
+        content.annotations.get("ssn"),
+        Some(&serde_json::json!("[REDACTED]")),
+        "`ANNOTATIONS.ssn: redact` must reach `annotations.ssn`"
+    );
+    assert_eq!(
+        content.annotations.get("audience"),
+        Some(&serde_json::json!("hr")),
+        "annotations the path does not name must be untouched"
+    );
+}
+
+#[tokio::test]
 async fn a_tool_route_redacts_the_tool_result_past_an_embedded_resource() {
     const YAML: &str = r#"
 engine_settings:
