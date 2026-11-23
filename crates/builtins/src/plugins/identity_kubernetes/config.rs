@@ -121,8 +121,8 @@ impl TokenReviewResolverConfig {
     ///
     /// A location no request can satisfy, a `record_map` the shared compiler
     /// refuses or with no section for the configured role, a URL that is not
-    /// absolute HTTPS, a zero timeout or re-read interval, or an empty
-    /// audience.
+    /// an HTTPS base URL with a host, a zero timeout or refresh interval, or
+    /// an empty audience.
     pub fn validate(&self) -> Result<ConfiguredClaimMap, String> {
         self.location().validate()?;
         let compiled = self
@@ -143,14 +143,7 @@ impl TokenReviewResolverConfig {
             )
         })?;
 
-        // The reviewer's bearer token travels on this connection, so plain
-        // HTTP would hand it to anything on the path.
-        if !self.api_server.url.starts_with("https://") {
-            return Err(format!(
-                "`api_server.url` must be an absolute https URL, got '{}'",
-                self.api_server.url
-            ));
-        }
+        validate_api_server_url(&self.api_server.url)?;
         if self.api_server.timeout_secs == 0 {
             return Err("`api_server.timeout_secs` is zero, so every review would time out".into());
         }
@@ -168,5 +161,102 @@ impl TokenReviewResolverConfig {
             return Err("`audiences` has an empty entry".into());
         }
         Ok(mapper)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Utility Functions
+// -----------------------------------------------------------------------------
+
+/// Require an HTTPS base URL the review path can be appended to.
+///
+/// The reviewer's bearer token travels on this connection, so plain HTTP would
+/// hand it to anything on the path. An `https` URI with an empty host is
+/// invalid per [RFC 9110 Section 4.2.2]. A query or fragment would end up in
+/// front of the appended review path.
+///
+/// [RFC 9110 Section 4.2.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.2.2
+fn validate_api_server_url(raw: &str) -> Result<(), String> {
+    let url = url::Url::parse(raw)
+        .map_err(|e| format!("`api_server.url` is not a valid URL ('{raw}'): {e}"))?;
+    if url.scheme() != "https" {
+        return Err(format!(
+            "`api_server.url` must be an https URL, got '{raw}'"
+        ));
+    }
+    // Checked on the raw text as well: the WHATWG parser reads `https:///apis`
+    // as host `apis`, which would send the token somewhere nobody configured.
+    let authority_missing = raw
+        .get("https://".len()..)
+        .is_none_or(|rest| rest.is_empty() || rest.starts_with(['/', ':']));
+    if authority_missing || url.host_str().is_none_or(str::is_empty) {
+        return Err(format!("`api_server.url` has no host: '{raw}'"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(format!(
+            "`api_server.url` must be a base URL without a query or fragment, got '{raw}'"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_api_server_url;
+
+    // -------------------------------------------------------------------------
+    // Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn an_https_base_url_with_a_host_is_accepted() {
+        for url in [
+            "https://kubernetes.default.svc",
+            "https://localhost:6443",
+            "https://proxy.example/k8s/",
+        ] {
+            assert_eq!(
+                validate_api_server_url(url),
+                Ok(()),
+                "{url} should be accepted"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // RFC 9110 Section 4.2.2: an https URI with an empty host is invalid
+    // -------------------------------------------------------------------------
+
+    /// [RFC 9110 Section 4.2.2] makes an `https` URI with an empty host
+    /// invalid.
+    ///
+    /// [RFC 9110 Section 4.2.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.2.2
+    #[test]
+    fn rfc9110_4_2_2_an_https_url_with_an_empty_host_is_rejected() {
+        for url in ["https://", "https:///apis", "https://:6443"] {
+            assert!(
+                validate_api_server_url(url).is_err(),
+                "{url} has no host and must be rejected"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Shape the review path cannot be appended to
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn plain_http_a_query_or_a_fragment_is_rejected() {
+        for url in [
+            "http://kubernetes.default.svc",
+            "https://kubernetes.default.svc?x=1",
+            "https://kubernetes.default.svc#frag",
+            "not a url",
+        ] {
+            assert!(
+                validate_api_server_url(url).is_err(),
+                "{url} must be rejected"
+            );
+        }
     }
 }

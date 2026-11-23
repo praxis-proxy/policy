@@ -60,7 +60,13 @@ fips = [
 jwt = ["_jwt", "jsonwebtoken/aws_lc_rs"]
 jwt-openssl-fips = ["_jwt", "dep:openssl"]
 api-key = ["_engine-core", "_plugins", "_token_lookup"]
-kubernetes-token-review = ["_engine-core", "_plugins", "_token_lookup", "dep:base64"]
+kubernetes-token-review = [
+  "_engine-core",
+  "_plugins",
+  "_token_lookup",
+  "dep:base64",
+  "dep:url",
+]
 oauth = [
   "_engine-core",
   "_plugins",

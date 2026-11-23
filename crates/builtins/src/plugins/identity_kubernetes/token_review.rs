@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 use praxis_policy_core::host::{HostServices, HttpRequestError};
 use praxis_policy_core::http::HttpRequest;
 use praxis_policy_core::http_retry::RetryPolicy;
-use serde_json::{Map, Value, json};
+use serde::Serialize;
+use serde_json::Value;
 
 use crate::plugins::identity_kubernetes::config::ApiServerConfig;
 use crate::plugins::identity_kubernetes::reviewer_token::ReviewerToken;
@@ -26,6 +27,24 @@ const REVIEW_PATH: &str = "/apis/authentication.k8s.io/v1/tokenreviews";
 
 /// A ceiling on the buffered review answer.
 const RESPONSE_MAX_BYTES: usize = 65_536; // 64 KiB
+
+/// The `TokenReview` object PPE sends.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequest<'a> {
+    api_version: &'static str,
+    kind: &'static str,
+    spec: ReviewSpec<'a>,
+}
+
+/// Its `spec`. An empty `audiences` is omitted, which asks for the API
+/// server's own audience.
+#[derive(Serialize)]
+struct ReviewSpec<'a> {
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    audiences: &'a [String],
+    token: &'a str,
+}
 
 /// Reviews tokens against the Kubernetes API server.
 #[derive(Debug)]
@@ -55,27 +74,26 @@ impl TokenReviewDirectory {
         })
     }
 
-    /// The `TokenReview` object for a token.
+    /// The `TokenReview` object for a token, serialized from borrowed fields
+    /// so the caller's token is not copied on the way.
     fn body(&self, token: &str) -> Result<Vec<u8>, DirectoryError> {
-        let mut spec = Map::new();
-        spec.insert("token".to_owned(), Value::String(token.to_owned()));
-        if !self.audiences.is_empty() {
-            spec.insert("audiences".to_owned(), json!(self.audiences));
-        }
-        let review = json!({
-            "apiVersion": "authentication.k8s.io/v1",
-            "kind": "TokenReview",
-            "spec": spec,
-        });
+        let review = ReviewRequest {
+            api_version: "authentication.k8s.io/v1",
+            kind: "TokenReview",
+            spec: ReviewSpec {
+                audiences: &self.audiences,
+                token,
+            },
+        };
         serde_json::to_vec(&review)
             .map_err(|e| DirectoryError::Malformed(format!("could not encode the review: {e}")))
     }
 
     /// Turn a review answer into an outcome.
     fn read_response(&self, body: &[u8], token: &str) -> Result<Option<KeyRecord>, DirectoryError> {
-        let parsed: Value = serde_json::from_slice(body)
+        let mut parsed: Value = serde_json::from_slice(body)
             .map_err(|e| DirectoryError::Malformed(format!("the review is not JSON: {e}")))?;
-        let Some(status) = parsed.get("status").and_then(Value::as_object) else {
+        let Some(status) = parsed.get_mut("status").and_then(Value::as_object_mut) else {
             return Err(DirectoryError::Malformed(
                 "the review carries no `status` object".to_owned(),
             ));
@@ -115,7 +133,7 @@ impl TokenReviewDirectory {
             }
         }
 
-        let Some(user) = status.get("user").and_then(Value::as_object) else {
+        let Some(Value::Object(user)) = status.remove("user") else {
             return Err(DirectoryError::Malformed(
                 "an authenticated review carries no `status.user`".to_owned(),
             ));
@@ -131,7 +149,7 @@ impl TokenReviewDirectory {
         }
 
         Ok(Some(KeyRecord {
-            fields: user.clone().into_iter().collect(),
+            fields: user.into_iter().collect(),
             expires_at: jwt_expiry(token),
         }))
     }
