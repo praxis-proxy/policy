@@ -421,6 +421,13 @@ fn http_routes_declaring_rate_limits(config: &PolicyConfig) -> Arc<[String]> {
     http_routes_declaring(config, |route| route.rate_limits.is_some())
 }
 
+/// The names of the `http:` routes that declare `revocation:`, for the same
+/// missing-path warning. Revocation is checked on `http.response` too, where a
+/// host is likeliest to leave the path off.
+fn http_routes_declaring_revocation(config: &PolicyConfig) -> Arc<[String]> {
+    http_routes_declaring(config, |route| route.revocation.is_some())
+}
+
 /// The names of the `http:` routes `declares` holds for. Empty in hook mode,
 /// since no route selects anything then.
 fn http_routes_declaring(
@@ -889,6 +896,10 @@ struct RuntimeSnapshot {
     /// hooks' counterpart of the warning above.
     http_routes_declaring_rate_limits: Arc<[String]>,
 
+    /// The `http:` routes that declare `revocation:`, for the revocation
+    /// hook's counterpart of the warning above.
+    http_routes_declaring_revocation: Arc<[String]>,
+
     // Keep configured hook presence after unregistration so the empty-registry
     // path cannot allow unchecked requests.
     declares_pre_identity_rate_limits: bool,
@@ -1000,6 +1011,10 @@ pub struct PolicyEngine {
     /// The same gate for an `http:` route's `rate_limits:` list. Separate, so
     /// one warning does not spend the other. Reset by `clear_routing_cache()`.
     route_rate_limits_unreachable_warned: AtomicBool,
+
+    /// The same gate for an `http:` route's `revocation:` list. Reset by
+    /// `clear_routing_cache()`.
+    route_revocation_unreachable_warned: AtomicBool,
 
     /// Whether a skipped `ratelimit.pre_identity` stage has been reported this
     /// cycle. A host that never calls the stage misses it on every request, so
@@ -1576,6 +1591,7 @@ fn snapshot_from_config(
     let route_cache_max_entries = policy_config.engine_settings.route_cache_max_entries;
     let http_routes_declaring_authentication = http_routes_declaring_authentication(&policy_config);
     let http_routes_declaring_rate_limits = http_routes_declaring_rate_limits(&policy_config);
+    let http_routes_declaring_revocation = http_routes_declaring_revocation(&policy_config);
     let declares_rate_limits_at = |hook: &str| {
         policy_config.dispatch_mode().is_policy()
             && config::step_list_declares_hook(&policy_config, &config::RATE_LIMITS_BLOCK, hook)
@@ -1602,6 +1618,7 @@ fn snapshot_from_config(
         route_annotations: HashMap::new(),
         http_routes_declaring_authentication,
         http_routes_declaring_rate_limits,
+        http_routes_declaring_revocation,
         declares_pre_identity_rate_limits,
         declares_post_identity_rate_limits,
         declares_revocation,
@@ -1636,6 +1653,7 @@ impl PolicyEngine {
             route_annotations: HashMap::new(),
             http_routes_declaring_authentication: Arc::from(Vec::new()),
             http_routes_declaring_rate_limits: Arc::from(Vec::new()),
+            http_routes_declaring_revocation: Arc::from(Vec::new()),
             declares_pre_identity_rate_limits: false,
             declares_post_identity_rate_limits: false,
             declares_revocation: false,
@@ -1652,6 +1670,7 @@ impl PolicyEngine {
             route_cache_full_warned: AtomicBool::new(false),
             route_authentication_unreachable_warned: AtomicBool::new(false),
             route_rate_limits_unreachable_warned: AtomicBool::new(false),
+            route_revocation_unreachable_warned: AtomicBool::new(false),
             rate_limit_stage_skipped_warned: AtomicBool::new(false),
             rate_limit_unavailable_warned: AtomicBool::new(false),
             route_request_assertions_unreachable_warned: AtomicBool::new(false),
@@ -4052,8 +4071,8 @@ impl PolicyEngine {
     /// Falling back to the global list is the behavior a host gets today and
     /// stays that way, but doing it silently hides which list ran for a
     /// request, so the condition is diagnosable from what the engine emits.
-    /// `authentication:` and `rate_limits:` latch separately, so one list's
-    /// warning does not spend the other's.
+    /// `authentication:`, `rate_limits:` and `revocation:` latch separately,
+    /// so one list's warning does not spend another's.
     ///
     /// Which routes those are is decided when the config lands, so this reads
     /// the answer off the snapshot. Every check here is O(1), which is what
@@ -4077,9 +4096,10 @@ impl PolicyEngine {
                 &snapshot.http_routes_declaring_rate_limits,
                 &self.route_rate_limits_unreachable_warned,
             ),
-            // Called from a route handler, for a request already routed with
-            // its request line in hand, so no route's list can be unreachable.
-            StructuralList::Revocation => return,
+            StructuralList::Revocation => (
+                &snapshot.http_routes_declaring_revocation,
+                &self.route_revocation_unreachable_warned,
+            ),
         };
         if unreachable.is_empty()
             || request_path.is_some_and(|path| path.starts_with('/'))
@@ -4104,7 +4124,14 @@ impl PolicyEngine {
                  The host must supply the request line on the extensions at both rate-limit \
                  hooks for a route's list to apply.",
             ),
-            StructuralList::Revocation => {},
+            StructuralList::Revocation => warn!(
+                routes = unreachable.join(", "),
+                "An http: route declares revocation: but an HTTP request or response \
+                 carries no readable path, so only the global and entity-default revocation \
+                 checkers run for it. The host must supply the request line on the \
+                 extensions at http.request and http.response for a route's checkers to \
+                 apply.",
+            ),
         }
     }
 
@@ -4577,6 +4604,8 @@ impl PolicyEngine {
         self.route_authentication_unreachable_warned
             .store(false, Ordering::Release);
         self.route_rate_limits_unreachable_warned
+            .store(false, Ordering::Release);
+        self.route_revocation_unreachable_warned
             .store(false, Ordering::Release);
         self.rate_limit_stage_skipped_warned
             .store(false, Ordering::Release);

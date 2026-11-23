@@ -477,6 +477,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_http_route_checker_with_no_path_warns_once() {
+        let (engine, _) = engine(&format!(
+            "{}{}global:\n  revocation: [kc]\nroutes:\n  - http: {{ path_prefix: /v1 }}\n    \
+             revocation: [kill-list]\n",
+            checker("kc", "{ vouch: [subject, client] }"),
+            checker("kill-list", "{ deny: auth.revoked }")
+        ))
+        .await;
+        let (events, sink) = capturing();
+
+        for _ in 0..3 {
+            let result = dispatch(&engine, HOOK_HTTP_RESPONSE, response_without_path()).await;
+            assert!(
+                !result.is_denied(),
+                "without a path only the global checker can run"
+            );
+        }
+
+        let warnings = events.matching("declares revocation:");
+        assert_eq!(warnings.len(), 1, "the warning latches: {warnings:?}");
+        assert!(
+            warnings
+                .first()
+                .is_some_and(|warning| warning.contains("/v1")),
+            "the warning names the route whose checkers could not run: {warnings:?}"
+        );
+        drop(sink);
+    }
+
+    #[tokio::test]
     async fn checker_entries_never_enter_the_route_cache() {
         let (engine, calls) = engine(&format!(
             "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
@@ -551,20 +581,25 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::cmf::constants::{HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE};
+    use crate::cmf::constants::{
+        ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
+    };
     use crate::context::PluginContext;
     use crate::engine::PolicyEngine;
     use crate::error::PluginError;
+    use crate::extensions::HttpExtension;
     use crate::extensions::MetaExtension;
     use crate::extensions::security::{ClientExtension, SecurityExtension, SubjectExtension};
     use crate::factory::{PluginFactory, PluginInstance};
     use crate::hooks::metadata::BUILTIN_HOOK_METADATA;
     use crate::hooks::payload::PluginPayload;
     use crate::hooks::trait_def::{HookTypeDef as _, PluginResult};
+    use crate::http_hook::HOOK_HTTP_RESPONSE;
     use crate::identity::HOOK_IDENTITY_RESOLVE;
     use crate::plugin::{Plugin, PluginConfig};
     use crate::registry::AnyHookHandler;
     use crate::revocation::{HOOK_REVOCATION_CHECK, RevocationHook};
+    use crate::trace_capture::capturing;
 
     const KIND: &str = "test/checker";
 
@@ -638,6 +673,19 @@ mod tests {
                 ..SecurityExtension::default()
             })),
             ..Extensions::default().with_meta()
+        }
+    }
+
+    /// An HTTP response carrying a subject and a client but no request path.
+    fn response_without_path() -> Extensions {
+        Extensions {
+            http: Some(Arc::new(HttpExtension::default())),
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_HTTP.to_owned()),
+                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                ..Default::default()
+            })),
+            ..both_slots()
         }
     }
 
