@@ -196,3 +196,37 @@ async fn the_engine_denies_an_unmatched_population_and_accepts_a_later_match() {
         Some("bob")
     );
 }
+
+/// A key replaces the subject a JWT resolver set, so the JWT's delegation chain
+/// must go with it rather than describe the new identity.
+#[tokio::test]
+async fn a_key_resolved_subject_drops_the_delegation_of_an_earlier_resolver() {
+    let corp = file_for("sk-corp-secret", "bob");
+    let key_resolver =
+        resolver(file_config(corp.path(), Some("Bearer sk-corp-"))).expect("the resolver builds");
+
+    let mut payload =
+        IdentityPayload::new("", TokenSource::ApiKey).with_headers(HashMap::from([(
+            "authorization".to_owned(),
+            "Bearer sk-corp-secret".to_owned(),
+        )]));
+    payload.delegation = Some(praxis_policy_core::extensions::DelegationExtension {
+        delegated: true,
+        depth: 1,
+        actor_subject_id: Some("trusted-agent".to_owned()),
+        origin_subject_id: Some("alice".to_owned()),
+        ..Default::default()
+    });
+
+    let result = crate::support::resolve_with_payload(&key_resolver, &payload).await;
+
+    let identity = result.modified_payload.expect("the key resolves");
+    assert_eq!(
+        identity.subject.as_ref().and_then(|s| s.id.as_deref()),
+        Some("bob")
+    );
+    assert!(
+        identity.delegation.is_none(),
+        "the earlier identity's delegation must not describe the key's subject"
+    );
+}

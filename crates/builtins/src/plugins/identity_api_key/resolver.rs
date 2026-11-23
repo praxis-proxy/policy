@@ -247,7 +247,13 @@ impl HookHandler<IdentityHook> for ApiKeyIdentityResolver {
         let mut updated = payload.clone();
         match &self.settings.role {
             TokenRole::User => match self.mapper.map_subject(&record.fields) {
-                Some(subject) => updated.subject = Some(subject),
+                Some(subject) => {
+                    updated.subject = Some(subject);
+                    // A directory record carries no `act`. Any delegation an
+                    // earlier resolver left describes the subject just
+                    // replaced, so it must not outlive it.
+                    updated.delegation = None;
+                },
                 None => return mapping_failed("subject"),
             },
             TokenRole::Client => match self.mapper.map_client(&record.fields) {
