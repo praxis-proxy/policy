@@ -352,7 +352,7 @@ fn the_bridge_emits_exactly_the_catalog() {
         unlisted.is_empty(),
         "the bridge emits keys the catalog does not declare: {unlisted:?}. \
          Add them to `catalog::CATALOG` and to the per-slot table in \
-         docs/content/cmf-extensions.md, or stop writing them."
+         docs/content/concepts/cmf-extensions.md, or stop writing them."
     );
 
     // Every entry has to be reached by something, or the catalog is declaring
@@ -530,16 +530,16 @@ fn no_capability_names_a_prefix_nothing_writes() {
 
 fn docs_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/content/cmf-extensions.md")
+        .join("../../docs/content/concepts/cmf-extensions.md")
         .canonicalize()
-        .expect("docs/content/cmf-extensions.md exists")
+        .expect("docs/content/concepts/cmf-extensions.md exists")
 }
 
 fn guide_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/content/extensions.md")
+        .join("../../docs/content/concepts/extensions.md")
         .canonicalize()
-        .expect("docs/content/extensions.md exists")
+        .expect("docs/content/concepts/extensions.md exists")
 }
 
 /// What one documented row says about a key.
@@ -665,7 +665,7 @@ fn the_documented_tables_list_exactly_the_catalog() {
 
     assert!(
         missing_from_docs.is_empty() && missing_from_catalog.is_empty(),
-        "docs/content/cmf-extensions.md and `catalog::CATALOG` disagree.\n\
+        "docs/content/concepts/cmf-extensions.md and `catalog::CATALOG` disagree.\n\
          declared but undocumented: {missing_from_docs:?}\n\
          documented but not declared: {missing_from_catalog:?}"
     );
@@ -742,7 +742,7 @@ fn the_capability_guide_names_only_capabilities_core_recognises() {
     unknown.dedup();
     assert!(
         unknown.is_empty(),
-        "docs/content/extensions.md names read capabilities core does not recognise: {unknown:?}"
+        "docs/content/concepts/extensions.md names read capabilities core does not recognise: {unknown:?}"
     );
 }
 

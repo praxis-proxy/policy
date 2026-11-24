@@ -49,9 +49,12 @@ use praxis_policy_core::metadata::HOOK_METADATA_FETCH;
 use praxis_policy_core::plugin::OnError;
 use praxis_policy_core::registry::HookEntry;
 
+use praxis_policy_apl_core::constraint::{RestrictSpec, StringSetSpec};
+use praxis_policy_apl_core::parser::parse_predicate;
 use praxis_policy_apl_core::pipeline::{FieldRule, Stage};
 use praxis_policy_apl_core::plugin_decl::{EffectivePlugin, PluginRegistry};
-use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
+use praxis_policy_apl_core::rules::{CompiledRoute, Condition, Effect, Expression};
+use praxis_policy_apl_core::step::PdpResolver;
 
 /// Per-plugin pre-resolved entries for one route. Stores ALL hook
 /// entries the plugin registered (keyed by hook name) so the
@@ -599,6 +602,138 @@ pub(crate) fn collect_fetch_plugin_names(route: &CompiledRoute) -> Vec<String> {
     out
 }
 
+/// Return whether a route half reads acquired metadata.
+///
+/// Includes nested predicates, elicitation recipients and scopes, PDP policy
+/// dependencies, fetches, restrictions, and conditional field pipelines.
+pub(crate) fn route_uses_metadata(
+    route: &CompiledRoute,
+    request_half: bool,
+    pdp: Option<&dyn PdpResolver>,
+) -> bool {
+    let mut uses_metadata = false;
+    let mut visit = |effect: &Effect| {
+        uses_metadata |= effect_uses_metadata(effect, request_half, pdp);
+    };
+    let (effects, field_rules) = if request_half {
+        (&route.pre_invocation, &route.args)
+    } else {
+        (&route.post_invocation, &route.result)
+    };
+    walk_effects(effects, &mut visit);
+
+    for field_rule in field_rules {
+        uses_metadata |= stages_use_metadata(&field_rule.pipeline.stages);
+    }
+
+    uses_metadata
+}
+
+fn effect_uses_metadata(
+    effect: &Effect,
+    request_half: bool,
+    pdp: Option<&dyn PdpResolver>,
+) -> bool {
+    match effect {
+        Effect::Fetch(_) => true,
+        Effect::When { condition, .. } => expression_uses_metadata(condition),
+        Effect::Pdp { call, .. } => pdp.map_or_else(
+            || call.references_metadata(),
+            |resolver| resolver.requires_metadata(call),
+        ),
+        Effect::FieldOp { path, stages } => {
+            field_op_runs_in_half(path, request_half) && stages_use_metadata(stages)
+        },
+        Effect::Elicit(step) => {
+            attribute_path_uses_metadata(&step.from)
+                || step.scope.as_deref().is_some_and(|scope| {
+                    parse_predicate(scope)
+                        .is_ok_and(|expression| expression_uses_metadata(&expression))
+                })
+        },
+        Effect::Restrict { spec } => restrict_uses_metadata(spec),
+        _ => false,
+    }
+}
+
+fn field_op_runs_in_half(path: &str, request_half: bool) -> bool {
+    if request_half {
+        path.starts_with("args.")
+    } else {
+        path.starts_with("result.")
+    }
+}
+
+fn restrict_uses_metadata(spec: &RestrictSpec) -> bool {
+    [
+        spec.allow_models.as_ref(),
+        spec.deny_models.as_ref(),
+        spec.allow_regions.as_ref(),
+        spec.allow_sites.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| match value {
+        StringSetSpec::Ref(path) => attribute_path_uses_metadata(path),
+        StringSetSpec::Literal(_) => false,
+    })
+}
+
+fn stages_use_metadata(stages: &[Stage]) -> bool {
+    stages.iter().any(|stage| match stage {
+        Stage::Redact {
+            condition: Some(condition),
+        } => expression_uses_metadata(condition),
+        _ => false,
+    })
+}
+
+fn expression_uses_metadata(expression: &Expression) -> bool {
+    match expression {
+        Expression::Condition(condition) => match condition {
+            Condition::Comparison { key, .. }
+            | Condition::IsTrue { key }
+            | Condition::IsFalse { key }
+            | Condition::Exists { key } => attribute_path_uses_metadata(key),
+            Condition::InSet {
+                value_key, set_key, ..
+            } => attribute_path_uses_metadata(value_key) || attribute_path_uses_metadata(set_key),
+        },
+        Expression::And(expressions) | Expression::Or(expressions) => {
+            expressions.iter().any(expression_uses_metadata)
+        },
+        Expression::Not(expression) => expression_uses_metadata(expression),
+        Expression::Always => false,
+    }
+}
+
+fn attribute_path_uses_metadata(path: &str) -> bool {
+    if path == "metadata" || path.starts_with("metadata.") || path.starts_with("metadata[") {
+        return true;
+    }
+
+    let mut rest = path;
+    while let Some(open) = rest.find('[') {
+        let Some(after_open) = rest.get(open + 1..) else {
+            return false;
+        };
+        let Some(close) = after_open.find(']') else {
+            return false;
+        };
+        let Some(inner) = after_open.get(..close) else {
+            return false;
+        };
+        if attribute_path_uses_metadata(inner.trim()) {
+            return true;
+        }
+        let Some(tail) = after_open.get(close + 1..) else {
+            return false;
+        };
+        rest = tail;
+    }
+    false
+}
+
 /// Walk a `CompiledRoute` and return the unique plugin names referenced
 /// by any `Effect::Plugin` anywhere in `pre_invocation` / `post_invocation` (including
 /// nested) or `Stage::Plugin` (in `args` / `result` pipelines).
@@ -639,20 +774,40 @@ pub(crate) fn collect_plugin_names(route: &CompiledRoute) -> Vec<String> {
 /// Delegation and elicitation names join both sides: their effects carry a
 /// plugin the route dispatches to the same way a step does.
 pub(crate) fn collect_plugin_names_by_half(route: &CompiledRoute) -> (Vec<String>, Vec<String>) {
-    fn names_in(effects: &[Effect]) -> Vec<String> {
+    fn names_in(effects: &[Effect], request_half: bool) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut visit = |e: &Effect| {
-            let name = match e {
-                Effect::Plugin { name } => name,
-                Effect::Delegate(ds) => &ds.plugin_name,
-                Effect::Elicit(es) => &es.plugin_name,
-                Effect::Fetch(step) => &step.plugin_name,
-                _ => return,
-            };
-            if seen.insert(name.clone()) {
-                out.push(name.clone());
-            }
+        let mut visit = |e: &Effect| match e {
+            Effect::Plugin { name } => {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
+            },
+            Effect::Delegate(ds) => {
+                if seen.insert(ds.plugin_name.clone()) {
+                    out.push(ds.plugin_name.clone());
+                }
+            },
+            Effect::Elicit(es) => {
+                if seen.insert(es.plugin_name.clone()) {
+                    out.push(es.plugin_name.clone());
+                }
+            },
+            Effect::Fetch(step) => {
+                if seen.insert(step.plugin_name.clone()) {
+                    out.push(step.plugin_name.clone());
+                }
+            },
+            Effect::FieldOp { path, stages } if field_op_runs_in_half(path, request_half) => {
+                for stage in stages {
+                    if let Stage::Plugin { name } = stage
+                        && seen.insert(name.clone())
+                    {
+                        out.push(name.clone());
+                    }
+                }
+            },
+            _ => {},
         };
         walk_effects(effects, &mut visit);
         out
@@ -680,9 +835,9 @@ pub(crate) fn collect_plugin_names_by_half(route: &CompiledRoute) -> (Vec<String
         }
     }
 
-    let mut pre = names_in(&route.pre_invocation);
+    let mut pre = names_in(&route.pre_invocation, true);
     extend_unique(&mut pre, stage_names(&route.args));
-    let mut post = names_in(&route.post_invocation);
+    let mut post = names_in(&route.post_invocation, false);
     extend_unique(&mut post, stage_names(&route.result));
     (pre, post)
 }
@@ -711,8 +866,10 @@ pub(crate) fn collect_family_fixed_plugin_hooks(
     out
 }
 
-/// Compute the union of capabilities declared by every plugin a
-/// `CompiledRoute` can dispatch to (with per-route overrides applied).
+/// Compute the union of capabilities needed by plugins reachable from one
+/// route half (with per-route overrides applied).
+/// Delegation, elicitation, and metadata-fetch bridge capabilities remain
+/// route-wide because either handler half can dispatch those fixed-hook families.
 ///
 /// This is what the synthetic `AplRouteHandler`'s `PluginConfig.capabilities`
 /// must be set to: praxis-policy-core's executor filters the `Extensions` view
@@ -728,11 +885,18 @@ pub(crate) fn collect_family_fixed_plugin_hooks(
 pub(crate) fn route_capability_union(
     route: &CompiledRoute,
     registry: &PluginRegistry,
+    request_half: bool,
 ) -> std::collections::HashSet<String> {
     let mut caps: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Plugin steps (`run(name)` in policy / `plugin: name` in
     // args / result pipelines).
-    for name in collect_plugin_names(route) {
+    let (pre_plugins, post_plugins) = collect_plugin_names_by_half(route);
+    let half_plugins = if request_half {
+        pre_plugins
+    } else {
+        post_plugins
+    };
+    for name in half_plugins {
         if let Some(eff) = EffectivePlugin::resolve(&name, registry, &route.plugin_overrides) {
             for cap in eff.capabilities.as_slice() {
                 caps.insert(cap.clone());
@@ -875,8 +1039,16 @@ struct CachedDispatchPlan {
 
 #[cfg(test)]
 mod cache_tests {
-    use super::{CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine};
+    use super::{
+        CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine, collect_plugin_names_by_half,
+        route_uses_metadata,
+    };
     use std::sync::Arc;
+
+    use praxis_policy_apl_core::constraint::{OnEmpty, RestrictSpec, StringSetSpec};
+    use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage};
+    use praxis_policy_apl_core::rules::{Condition, Effect, Expression};
+    use praxis_policy_apl_core::step::{ElicitKind, ElicitStep, FetchStep, PdpCall, PdpDialect};
 
     #[tokio::test]
     async fn stale_generation_reuses_the_newer_initialized_plan() {
@@ -904,6 +1076,301 @@ mod cache_tests {
         assert!(
             Arc::ptr_eq(&installed, &subsequent),
             "the stale request must not evict the current generation's plan"
+        );
+    }
+
+    #[test]
+    fn elicitation_scope_grants_metadata_only_for_referenced_attributes() {
+        for (scope, expected) in [
+            (None, false),
+            (Some("!metadata.account.suspended"), true),
+            (Some("subject.active & !metadata.account.suspended"), true),
+            (Some("data.tenants[metadata.account.id].active"), true),
+            (Some("subject.note == 'metadata.account'"), false),
+            (Some("args.amount <= 25000"), false),
+            (Some("metadata.account.suspended &"), false),
+        ] {
+            let mut route = CompiledRoute::new("tool:approval");
+            route.post_invocation.push(Effect::Elicit(ElicitStep {
+                kind: ElicitKind::Approval,
+                plugin_name: "approver".to_owned(),
+                channel: None,
+                from: "alice@example.com".to_owned(),
+                purpose: None,
+                scope: scope.map(str::to_owned),
+                timeout: None,
+                config_override: None,
+                on_error: None,
+                source: "approval".to_owned(),
+            }));
+
+            assert_eq!(
+                route_uses_metadata(&route, false, None),
+                expected,
+                "response metadata inference must inspect scope {scope:?}"
+            );
+            assert!(
+                !route_uses_metadata(&route, true, None),
+                "a response approval must not grant request metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn route_metadata_usage_covers_fetch_nested_predicates_and_pdp_arguments() {
+        let mut route = CompiledRoute::new("tool:test");
+        assert!(
+            !route_uses_metadata(&route, true, None),
+            "a route without metadata use needs no grant"
+        );
+
+        route.pre_invocation.push(Effect::When {
+            condition: Expression::And(vec![Expression::Condition(Condition::IsTrue {
+                key: "subject.active".to_owned(),
+            })]),
+            body: vec![Effect::Sequential(vec![Effect::When {
+                condition: Expression::Condition(Condition::Exists {
+                    key: "metadata.account.active".to_owned(),
+                }),
+                body: vec![Effect::Allow],
+                source: "nested".to_owned(),
+            }])],
+            source: "outer".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&route, true, None),
+            "nested metadata predicates need the grant"
+        );
+
+        let mut fetch_route = CompiledRoute::new("tool:fetch");
+        fetch_route.pre_invocation.push(Effect::Fetch(FetchStep {
+            plugin_name: "account".to_owned(),
+            source: "fetch".to_owned(),
+        }));
+        assert!(
+            route_uses_metadata(&fetch_route, true, None),
+            "fetch effects need the grant"
+        );
+
+        let mut pdp_route = CompiledRoute::new("tool:pdp");
+        pdp_route.pre_invocation.push(Effect::Pdp {
+            call: PdpCall {
+                dialect: PdpDialect::Opa,
+                args: serde_yaml::Value::String("metadata.account.active".to_owned()),
+            },
+            on_allow: Vec::new(),
+            on_deny: Vec::new(),
+        });
+        assert!(
+            route_uses_metadata(&pdp_route, true, None),
+            "PDP metadata arguments need the grant"
+        );
+
+        let mut pipeline_route = CompiledRoute::new("tool:pipeline");
+        pipeline_route.args.push(FieldRule {
+            field: "amount".to_owned(),
+            pipeline: Pipeline {
+                stages: vec![Stage::Redact {
+                    condition: Some(Expression::Condition(Condition::IsFalse {
+                        key: "metadata.account.redact".to_owned(),
+                    })),
+                }],
+            },
+            source: "pipeline".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&pipeline_route, true, None),
+            "conditional pipeline metadata references need the grant"
+        );
+
+        let mut field_op_route = CompiledRoute::new("tool:field-op");
+        field_op_route.pre_invocation.push(Effect::When {
+            condition: Expression::Always,
+            body: vec![Effect::FieldOp {
+                path: "args.account_status".to_owned(),
+                stages: vec![Stage::Redact {
+                    condition: Some(Expression::Condition(Condition::IsTrue {
+                        key: "metadata.account.sensitive".to_owned(),
+                    })),
+                }],
+            }],
+            source: "field-op".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&field_op_route, true, None),
+            "conditional field operations need the grant"
+        );
+
+        let mut interpolated_route = CompiledRoute::new("tool:interpolated");
+        interpolated_route.pre_invocation.push(Effect::When {
+            condition: Expression::Condition(Condition::IsTrue {
+                key: "data.tenants[metadata.account.id].blocked".to_owned(),
+            }),
+            body: vec![Effect::Deny {
+                reason: None,
+                code: None,
+            }],
+            source: "interpolated".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&interpolated_route, true, None),
+            "metadata used to interpolate an attribute path needs the grant"
+        );
+
+        let mut metadata_source_route = CompiledRoute::new("tool:metadata-source");
+        metadata_source_route.pre_invocation.push(Effect::When {
+            condition: Expression::Condition(Condition::IsTrue {
+                key: "metadata[args.source].suspended".to_owned(),
+            }),
+            body: vec![Effect::Deny {
+                reason: None,
+                code: None,
+            }],
+            source: "metadata-source".to_owned(),
+        });
+        assert!(
+            route_uses_metadata(&metadata_source_route, true, None),
+            "a subscript directly under the metadata root needs the grant"
+        );
+
+        let mut restrict_route = CompiledRoute::new("tool:restrict");
+        restrict_route.pre_invocation.push(Effect::Restrict {
+            spec: RestrictSpec {
+                allow_regions: Some(StringSetSpec::Ref(
+                    "metadata.account.allowed_regions".to_owned(),
+                )),
+                on_empty: OnEmpty::Fallback,
+                ..RestrictSpec::default()
+            },
+        });
+        assert!(
+            route_uses_metadata(&restrict_route, true, None),
+            "metadata-backed routing restrictions need the grant"
+        );
+
+        for (dialect, expression) in [
+            (PdpDialect::Cel, "metadata.account.active == true"),
+            (PdpDialect::Opa, "input.metadata.account.active == true"),
+        ] {
+            let mut evaluator_route = CompiledRoute::new("tool:evaluator");
+            evaluator_route.pre_invocation.push(Effect::Pdp {
+                call: PdpCall {
+                    dialect,
+                    args: serde_yaml::Value::String(expression.to_owned()),
+                },
+                on_allow: Vec::new(),
+                on_deny: Vec::new(),
+            });
+            assert!(
+                route_uses_metadata(&evaluator_route, true, None),
+                "supported evaluator metadata paths need the grant: {expression}"
+            );
+        }
+
+        let mut literal_route = CompiledRoute::new("tool:literal");
+        literal_route.pre_invocation.push(Effect::Pdp {
+            call: PdpCall {
+                dialect: PdpDialect::Opa,
+                args: serde_yaml::Value::String("https://metadata.example".to_owned()),
+            },
+            on_allow: Vec::new(),
+            on_deny: Vec::new(),
+        });
+        assert!(
+            !route_uses_metadata(&literal_route, true, None),
+            "literal strings must not grant metadata access"
+        );
+    }
+
+    #[test]
+    fn route_metadata_usage_is_scoped_to_the_active_phase() {
+        let mut route = CompiledRoute::new("tool:response-metadata");
+        route.post_invocation.push(Effect::When {
+            condition: Expression::Condition(Condition::Exists {
+                key: "metadata.account.active".to_owned(),
+            }),
+            body: vec![Effect::Allow],
+            source: "response".to_owned(),
+        });
+        route.result.push(FieldRule {
+            field: "status".to_owned(),
+            pipeline: Pipeline {
+                stages: vec![Stage::Redact {
+                    condition: Some(Expression::Condition(Condition::IsTrue {
+                        key: "metadata.account.sensitive".to_owned(),
+                    })),
+                }],
+            },
+            source: "response-pipeline".to_owned(),
+        });
+
+        assert!(
+            !route_uses_metadata(&route, true, None),
+            "response-only metadata use must not widen the request handler"
+        );
+        assert!(
+            route_uses_metadata(&route, false, None),
+            "the response handler must receive metadata used by its effects and pipeline"
+        );
+
+        let mut out_of_phase = CompiledRoute::new("tool:out-of-phase-field-op");
+        out_of_phase.pre_invocation.push(Effect::FieldOp {
+            path: "result.status".to_owned(),
+            stages: vec![Stage::Redact {
+                condition: Some(Expression::Condition(Condition::IsTrue {
+                    key: "metadata.account.sensitive".to_owned(),
+                })),
+            }],
+        });
+        assert!(
+            !route_uses_metadata(&out_of_phase, true, None),
+            "a field operation skipped in this phase must not widen the handler"
+        );
+    }
+
+    #[test]
+    fn field_operation_plugins_are_collected_only_for_the_half_that_runs_them() {
+        let mut route = CompiledRoute::new("tool:field-op-plugins");
+        route.pre_invocation.extend([
+            Effect::FieldOp {
+                path: "args.card_number".to_owned(),
+                stages: vec![Stage::Plugin {
+                    name: "request-luhn".to_owned(),
+                }],
+            },
+            Effect::FieldOp {
+                path: "result.card_number".to_owned(),
+                stages: vec![Stage::Plugin {
+                    name: "skipped-response-luhn".to_owned(),
+                }],
+            },
+        ]);
+        route.post_invocation.extend([
+            Effect::FieldOp {
+                path: "result.card_number".to_owned(),
+                stages: vec![Stage::Plugin {
+                    name: "response-luhn".to_owned(),
+                }],
+            },
+            Effect::FieldOp {
+                path: "args.card_number".to_owned(),
+                stages: vec![Stage::Plugin {
+                    name: "skipped-request-luhn".to_owned(),
+                }],
+            },
+        ]);
+
+        let (request, response) = collect_plugin_names_by_half(&route);
+
+        assert_eq!(
+            request,
+            ["request-luhn"],
+            "only the request field operation runs on the request half"
+        );
+        assert_eq!(
+            response,
+            ["response-luhn"],
+            "only the response field operation runs on the response half"
         );
     }
 }

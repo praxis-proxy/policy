@@ -137,7 +137,7 @@ mod tests {
         );
     }
 
-    /// The sink-mode config in `docs/content/auditing.md`, built through the factory
+    /// The sink-mode config in `docs/content/guides/auditing.md`, built through the factory
     /// the way the engine would. A documented example that does not construct
     /// is a bug report waiting to be filed.
     #[test]

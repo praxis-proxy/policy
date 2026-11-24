@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Live Vault KV v2 coverage. See `docs/content/testing.md` for provisioning.
+//! Live Vault KV v2 coverage. See `docs/content/guides/testing.md` for provisioning.
 
 #![cfg(all(feature = "secrets-vault", feature = "http-hyper"))]
 #![expect(clippy::expect_used, reason = "test code")]
@@ -33,7 +33,7 @@ impl HttpTransport for RecordingTransport {
 }
 
 #[tokio::test]
-#[ignore = "requires a provisioned Vault server; see docs/content/testing.md"]
+#[ignore = "requires a provisioned Vault server; see docs/content/guides/testing.md"]
 async fn vault_kv_v2_reads_live_and_maps_soft_deleted_versions() {
     let (Ok(address), Ok(role_id), Ok(secret_id)) = (
         env::var("VAULT_ADDR"),

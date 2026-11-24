@@ -161,7 +161,7 @@ is not inherited by entity routes.
 Routes key on tool, prompt, resource, or LLM. A generic
 HTTP request that carries no such entity is authorized by the `global`
 policy instead, or by an `http:` route that selects on the request line
-(see [HTTP Routing](../http-routing.md)). When `global` declares an
+(see [HTTP Routing](../guides/http-routing.md)). When `global` declares an
 `authorization:` (or `args:`) block, PPE evaluates it for these requests,
 reading the request line (`http.method`, `http.path`, `http.host`,
 `http.scheme`) and headers. Pair it with a `global` `response:` to return a
@@ -228,7 +228,7 @@ not policy terms themselves:
 - `assertions:` renders engine-derived identity onto the upstream
   request as headers and filters what an upstream may tell a client
   back. It runs after the applicable policy phase. See
-  [Header Assertions](../assertions.md).
+  [Header Assertions](../reference/assertions.md).
 - `authentication:` names the identity-resolution plugins that run
   before policy. See [Identity](identity.md).
 

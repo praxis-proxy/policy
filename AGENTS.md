@@ -70,6 +70,7 @@ crates/
   builtins      the nine bundled extensions, one
                 Cargo feature each:
                   plugins::  identity_jwt, identity_api_key,
+                             identity_kubernetes,
                              delegator_oauth, elicitation_ciba
                   pdps::     cedar_direct, cel, opa
                   session::  valkey
@@ -165,7 +166,7 @@ The suites under `tests/` skip their `#[ignore]`d
 `PPE_KEYCLOAK_URL` or `VAULT_*` is set. A test for an
 open defect is `known_gap_*` with
 `#[should_panic(expected = "known gap #<issue>")]`.
-See `docs/content/testing.md`, Integration suites.
+See `docs/content/guides/testing.md`, Integration suites.
 
 Prefer one test binary per concern over many small
 ones. Cargo builds one binary per `tests/*.rs`, and a

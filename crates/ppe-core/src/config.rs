@@ -10518,7 +10518,7 @@ routes:
         let config = load(FOUR_LEVELS);
         assert!(dropped_inherited_assertions(&config).is_empty());
     }
-    /// The configuration in `docs/content/auditing.md` has to load. A doc whose
+    /// The configuration in `docs/content/guides/auditing.md` has to load. A doc whose
     /// examples do not parse is worse than no doc: it sends an operator
     /// debugging their YAML instead of their policy.
     ///

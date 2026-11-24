@@ -22,6 +22,7 @@
 //! | `jwt-openssl-fips` | `plugins::identity_jwt`, verified with OpenSSL FIPS; requires `fips` |
 //! | `api-key` | `plugins::identity_api_key` |
 //! | `basic` | `plugins::identity_basic`; password crypto is RustCrypto only |
+//! | `kubernetes-token-review` | `plugins::identity_kubernetes` |
 //! | `crypto-rustcrypto` | RustCrypto SHA-256 and HMAC; on by default |
 //! | `fips` | OpenSSL FIPS SHA-256, shared by Policy, API-key and DPoP; no HMAC |
 //! | `oauth` | `plugins::delegator_oauth` |
@@ -46,12 +47,23 @@ compile_error!("select one Policy crypto backend: crypto-rustcrypto or fips");
     not(any(feature = "crypto-rustcrypto", feature = "fips"))
 ))]
 compile_error!("api-key requires crypto-rustcrypto or fips");
+#[cfg(all(
+    feature = "kubernetes-token-review",
+    not(any(feature = "crypto-rustcrypto", feature = "fips"))
+))]
+compile_error!("kubernetes-token-review requires crypto-rustcrypto or fips");
 #[cfg(all(feature = "jwt", feature = "jwt-openssl-fips"))]
 compile_error!("select one JWT backend: jwt or jwt-openssl-fips");
 #[cfg(all(feature = "jwt-openssl-fips", not(feature = "fips")))]
 compile_error!("jwt-openssl-fips requires the fips feature");
 #[cfg(feature = "_plugins")]
 pub mod plugins;
+
+#[cfg(feature = "_token_lookup")]
+mod token_lookup;
+
+#[cfg(feature = "_validation")]
+mod validation;
 
 #[cfg(feature = "_pdps")]
 pub mod pdps;

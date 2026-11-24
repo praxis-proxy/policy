@@ -66,6 +66,7 @@ builtins = [
   "jwt",
   "api-key",
   "basic",
+  "kubernetes-token-review",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
@@ -88,6 +89,7 @@ jwt = ["_jwt", "praxis-policy-builtins/jwt"]
 jwt-openssl-fips = ["_jwt", "praxis-policy-builtins/jwt-openssl-fips"]
 api-key = ["_builtin", "praxis-policy-builtins/api-key"]
 basic = ["_builtin", "praxis-policy-builtins/basic"]
+kubernetes-token-review = ["_builtin", "praxis-policy-builtins/kubernetes-token-review"]
 oauth = ["_builtin", "praxis-policy-builtins/oauth"]
 delegator-vault = ["_builtin", "praxis-policy-builtins/delegator-vault"]
 elicitation-ciba = [

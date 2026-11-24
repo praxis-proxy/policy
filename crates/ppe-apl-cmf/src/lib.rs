@@ -50,7 +50,7 @@
 //! policy author may reference, so adding one here widens the language.
 //!
 //! The absent-value contract, the original-vs-flattened relationship, and the
-//! per-slot catalog are in `docs/content/cmf-extensions.md`.
+//! per-slot catalog are in `docs/content/concepts/cmf-extensions.md`.
 
 /// Bridges agent session and lineage into `agent.*` keys.
 pub mod agent;

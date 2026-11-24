@@ -173,7 +173,8 @@ in `crates/ppe-core/src/config.rs`;
 ## Catalog
 
 Plugin axis, `on_error: fail`, one cell per
-`{Sequential, Transform, Audit, Concurrent, FireAndForget} × {panic, error, timeout, wrong-type}`
+`{Sequential, Transform, Audit, Concurrent, FireAndForget}` ×
+`{panic, error, timeout, wrong-type}`
 plus a `None` control per mode. Each cell asserts the decision (deny
 with a named code, or continue with a named record, or allow plus the
 background-task observation), not merely that no allow was returned.
