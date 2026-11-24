@@ -1009,7 +1009,7 @@ pub struct PolicyEngine {
 
     /// Every declared value, resolved.
     ///
-    /// Available after initialization and replaced on reload. In-flight
+    /// Available after secret resolution and replaced on reload. In-flight
     /// requests retain their previous bindings.
     secrets: arc_swap::ArcSwapOption<crate::secrets::SecretStore>,
 }
@@ -1086,8 +1086,8 @@ fn warn_on_inactive_settings(cfg: &PolicyConfig) {
 /// Refuse a reload whose `secrets:` block is not the one the resolved values
 /// came from.
 ///
-/// Values are read once, during `initialize`, so a document declaring anything
-/// else describes bindings the process does not have: a value it never read, a
+/// Synchronous loading does not resolve changed secret declarations. A
+/// different block can describe a value the process never read, a
 /// reference it is not refreshing, a provider it never built. Applying the rest
 /// of such a document would leave the engine serving policy from one document
 /// against credentials from another, and `refresh_secrets` re-reading the
@@ -1191,8 +1191,7 @@ fn missing_reloaded_content_key(name: &str) -> Box<PluginError> {
 /// The content provenance key a config calls for, from the secrets resolved
 /// so far.
 ///
-/// `store` is `None` before the first `initialize`, and a named key then waits
-/// for `initialize` to attach it.
+/// Without a resolved store, a named key waits for initialization.
 ///
 /// A named key missing from the resolved store is an error even if config
 /// validation accepted its declaration.
@@ -1856,10 +1855,10 @@ impl PolicyEngine {
     /// provider settings changes refresh those handles. Changed bindings leave
     /// existing handles on their previous values.
     ///
-    /// Before the first secret resolution, reads are deferred to
-    /// [`Self::initialize`]. Afterward, every required read must succeed before
-    /// the replacement takes effect. The current provenance-key selection and
-    /// capture mode are retained.
+    /// Before initialization, reads are deferred to [`Self::initialize`] if
+    /// no store has been resolved. Otherwise, every required read must succeed
+    /// before the replacement takes effect. The current provenance-key
+    /// selection and capture mode are retained.
     ///
     /// # Errors
     ///

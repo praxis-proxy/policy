@@ -283,7 +283,8 @@ seeing different ids knows the key changed, not the content. Rotating the bytes
 behind `provenance_key` takes effect on the next `refresh_secrets`. Each
 invocation captures one validated key for its input and output hashes; a
 rotation during that invocation affects later invocations. Weak or unavailable
-key material fails closed, without switching to plain hashing.
+key material logs an error and omits provenance hashes. The policy verdict is
+unchanged, and hashing never falls back to the plain scheme.
 
 To add and select a different value atomically, use
 `PolicyEngine::reload_secrets_with_key(replacement,

@@ -444,10 +444,10 @@ rather than a last-one-wins.
 Shape is checked at load: a value naming an undeclared provider fails
 against the document, without contacting a backend.
 
-Every declared value is read during `PolicyEngine::initialize()`, before
-any plugin initializes. A value that cannot be read stops startup. A
-credential that has never resolved once has no last-good to serve, so
-there is no degraded state to start in.
+`PolicyEngine::initialize()` resolves declarations that have not already been
+read by `reload_secrets_with_key`, before any plugin initializes. A value that
+cannot be read stops startup. A credential that has never resolved has no
+last-good value to serve.
 
 After startup the host decides when to re-read, by calling
 `refresh_secrets()`. Nothing in the engine spawns a ticker: a task binds
@@ -517,15 +517,15 @@ least 32 bytes. `ContentKeySource::Unkeyed` explicitly selects plain SHA-256;
 `Secret("unkeyed")` is refused because that name is reserved. Capture mode
 remains unchanged. See [content provenance](auditing.md#content-provenance).
 
-Secret reload requires a loaded document. Ordinary `reload_secrets` defers reads
-until `initialize()` if no store has been resolved yet. `reload_secrets_with_key`
+Secret reload requires a loaded document. Before initialization, ordinary
+`reload_secrets` defers reads if no store has been resolved.
+`reload_secrets_with_key`
 always resolves and validates the replacement, including before initialization.
 Cancellation, invalid key material or a concurrent configuration change refuse
 the replacement. Policy annotations, plugin identities and state, rate-limit
-overrides, factory
-context and audit counters survive the operation. Policy or plugin changes
-require the host's configuration-loading workflow; this API accepts secret
-material and key selection only.
+overrides, factory context and audit counters survive the operation. Policy or
+plugin changes require the host's configuration-loading workflow; this API
+accepts secret material and key selection only.
 
 Rotating bytes behind an existing reference still uses `refresh_secrets()`.
 No declaration changes on that path.
