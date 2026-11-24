@@ -3963,26 +3963,40 @@ impl PolicyEngine {
                 let resolved = config::resolve_identity_plugins_for_route(policy_config, matched);
                 self.resolved_entries(snapshot, entries, &resolved).await
             },
-            Some(StructuralList::Revocation) => step_entries(
-                snapshot,
-                policy_config,
-                &config::REVOCATION_BLOCK,
-                entries,
-                matched,
-                Some(entity_type),
-                hook_name,
-            )
-            .map_err(|missing| {
-                error!(
-                    plugin = %missing.plugin,
-                    section = %missing.site.section,
-                    index = missing.site.index,
-                    "a revocation step has no checker in the running snapshot, so requests it \
-                     covers are denied with auth.revocation_unavailable until the plugin is \
-                     registered again or the configuration is reloaded",
-                );
-                RouteResolutionError::RevocationUnavailable
-            })?,
+            Some(StructuralList::Revocation) => {
+                let checkers = step_entries(
+                    snapshot,
+                    policy_config,
+                    &config::REVOCATION_BLOCK,
+                    entries,
+                    matched,
+                    Some(entity_type),
+                    hook_name,
+                )
+                .map_err(|missing| {
+                    error!(
+                        plugin = %missing.plugin,
+                        section = %missing.site.section,
+                        index = missing.site.index,
+                        "a revocation step has no checker in the running snapshot, so requests \
+                         it covers are denied with auth.revocation_unavailable until the plugin \
+                         is registered again or the configuration is reloaded",
+                    );
+                    RouteResolutionError::RevocationUnavailable
+                })?;
+                // The executor skips a disabled plugin, so a disabled kill list
+                // would deny nothing and the rest of the list would decide.
+                if let Some(disabled) = checkers.iter().find(|entry| entry.plugin_ref.is_disabled())
+                {
+                    error!(
+                        plugin = %disabled.plugin_ref.name(),
+                        "a revocation checker on this route is disabled, so requests it covers \
+                         are denied with auth.revocation_unavailable while it stays disabled",
+                    );
+                    return Err(RouteResolutionError::RevocationUnavailable);
+                }
+                checkers
+            },
             None => {
                 let resolved = config::resolve_plugins_for_entity(policy_config);
                 self.resolved_entries(snapshot, entries, &resolved).await

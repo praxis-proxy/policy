@@ -74,7 +74,8 @@ pub(crate) fn question(
 /// Turn the checkers' answer to `asked` into pass (`None`) or the violation to
 /// deny with.
 ///
-/// Passes when no checker ran, because the route runs none. Denies when a
+/// Passes when no checker ran, because the route runs none: the engine refuses
+/// a route whose checker is missing or disabled before any runs. Denies when a
 /// checker denies, when a checker fails ([`REVOCATION_UNAVAILABLE_CODE`], with
 /// a fixed reason), and when a slot `asked` names was vouched for by no
 /// checker.
@@ -335,6 +336,32 @@ mod tests {
             .expect("a configured checker that is gone must not let requests through");
 
         assert_eq!(denied.code, REVOCATION_UNAVAILABLE_CODE, "missing checker");
+    }
+
+    #[tokio::test]
+    async fn a_disabled_checker_denies_as_unavailable() {
+        let (engine, calls) = engine(&format!(
+            "{}{}engine_settings:\n  require_revocation: true\nglobal:\n  revocation: [kc, \
+             kill-list]\nroutes:\n  - tool: t\n",
+            checker("kc", "{ vouch: [subject, client] }"),
+            checker("kill-list", "{ deny: auth.revoked }")
+        ))
+        .await;
+        engine
+            .get_plugin("kill-list")
+            .expect("registered")
+            .disable();
+
+        let denied = check(&engine, both_slots())
+            .await
+            .expect("a configured checker that cannot run must not let requests through");
+
+        assert_eq!(denied.code, REVOCATION_UNAVAILABLE_CODE, "disabled checker");
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            0,
+            "the route is refused before any checker runs, so kc cannot vouch alone"
+        );
     }
 
     /// Every built-in hook, and where revocation is checked around it. A hook

@@ -1451,7 +1451,7 @@ follow it.
 | Code | Raised by | Means |
 |---|---|---|
 | `auth.revoked` | the checker | The issuer says the credential is no longer active. |
-| `auth.revocation_unavailable` | the checker or the engine | A checker errored, timed out or panicked; no checker vouched for one of the identities; or a listed checker is missing from the running configuration (status 503). |
+| `auth.revocation_unavailable` | the checker or the engine | A checker errored, timed out or panicked; no checker vouched for one of the identities; or a listed checker is missing from the running configuration or disabled (status 503). |
 
 Both codes come with a fixed reason, "credential revoked" or "revocation
 status unavailable", and no details. Hosts pass a violation's reason and
