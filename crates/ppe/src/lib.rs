@@ -200,9 +200,12 @@ pub use praxis_policy_core::factory::{FactoryContext, PluginFactory, PluginInsta
 /// There is no handle here that reads every declared value. A host drives
 /// refresh with `PolicyEngine::refresh_secrets` and watches for staleness with
 /// `PolicyEngine::secrets_last_success`, neither of which yields secret
-/// material. A `secrets:` block that changes after startup is applied with
-/// `PolicyEngine::reload_config`, which resolves the new block before swapping.
-/// `load_config` stays synchronous and refuses that change.
+/// material. Use [`PolicyEngine::reload_config`] to apply changes to a
+/// `secrets:` block after startup. [`PolicyEngine::load_config`] is synchronous
+/// and refuses those changes.
+///
+/// [`PolicyEngine::reload_config`]: crate::PolicyEngine::reload_config
+/// [`PolicyEngine::load_config`]: crate::PolicyEngine::load_config
 pub use praxis_policy_core::secrets::{
     ProviderFailure, ProviderHealth, RefreshReport, SecretError, SecretProvider,
     SecretProviderFactory, SecretProviderRegistry, SecretRef, SecretSnapshot, SecretsHealth,

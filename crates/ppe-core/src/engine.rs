@@ -817,9 +817,8 @@ struct RuntimeSnapshot {
 
     /// The secret store published with this snapshot.
     ///
-    /// An invocation renders assertions from this store, not from whichever
-    /// store a later reload installed. A value whose reference was unchanged
-    /// still shares its cell, so a refresh rotates what this snapshot reads.
+    /// In-flight assertions retain their bindings after a reload. Refreshes
+    /// still update values whose provider and reference are unchanged.
     secrets: Option<Arc<crate::secrets::SecretStore>>,
 }
 
@@ -1010,10 +1009,8 @@ pub struct PolicyEngine {
 
     /// Every declared value, resolved.
     ///
-    /// Installed by `initialize` and replaced by [`Self::reload_config`].
-    /// Readers clone the `Arc`, so a reload publishes the next store without
-    /// waiting for a request that still holds the previous one. Empty until
-    /// the first document that declares a secret is resolved.
+    /// Available after initialization and replaced on reload. In-flight
+    /// requests retain their previous bindings.
     secrets: arc_swap::ArcSwapOption<crate::secrets::SecretStore>,
 }
 
@@ -1131,21 +1128,15 @@ fn config_load_during_initialization() -> Box<PluginError> {
     })
 }
 
-/// The document moved while an async reload was reading secrets.
-///
-/// Publishing anyway would replace that newer document with the one whose
-/// secrets were just read. The caller retries against whatever is current.
+/// A retryable reload conflict after the installed configuration changed.
 fn config_changed_during_secret_resolution() -> Box<PluginError> {
     Box::new(PluginError::Config {
         message: "config changed while secrets were being resolved; retry the reload".to_owned(),
     })
 }
 
-/// Whether two published stores are the same allocation.
-///
-/// Pointer equality, not declaration equality: a reload that resolved against
-/// one store must not publish over a store a concurrent reload already swapped
-/// in, even when both declare the same block.
+// Identical declarations can still belong to different publications. Reload
+// must detect a replaced baseline even when its configuration is unchanged.
 fn same_published_store(
     left: Option<&Arc<crate::secrets::SecretStore>>,
     right: Option<&Arc<crate::secrets::SecretStore>>,
@@ -1157,12 +1148,7 @@ fn same_published_store(
     }
 }
 
-/// Whether the content key the reloaded document names will be legal once
-/// pending cell writes land.
-///
-/// Checked before those writes. [`content_key_for`] reads the cell, so a key
-/// that the reload is about to shorten would still look valid, and one it is
-/// about to lengthen would be refused.
+/// Validate the content key against staged values before committing them.
 fn reload_content_key_acceptable(
     cfg: &PolicyConfig,
     resolved: Option<&crate::secrets::store::ReloadedSecrets>,
@@ -1205,11 +1191,8 @@ fn missing_reloaded_content_key(name: &str) -> Box<PluginError> {
 /// `store` is `None` before the first `initialize`, and a named key then waits
 /// for `initialize` to attach it.
 ///
-/// The refusal for a key the store does not hold is a backstop. Validation
-/// rejects a key naming a value `secrets.values` does not declare, and
-/// [`refuse_changed_secrets`] keeps the block from changing on synchronous
-/// loads after startup, so reaching it means those two checks disagree. Erroring rather than asserting
-/// keeps a future edit to either one from digesting nothing with no sign.
+/// A named key missing from the resolved store is an error even if config
+/// validation accepted its declaration.
 fn content_key_for(
     cfg: &PolicyConfig,
     store: Option<&crate::secrets::SecretStore>,
@@ -1863,22 +1846,19 @@ impl PolicyEngine {
         self.load_config_with(policy_config, &crate::factory::FactoryContext::default())
     }
 
-    /// Load `policy_config`, resolving its `secrets:` block before the swap.
+    /// Load `policy_config` and apply changes to its `secrets:` block.
     ///
-    /// [`Self::load_config`] is synchronous and refuses a `secrets:` block that
-    /// differs from the one already resolved, because reading a secret can call
-    /// the network. This applies the change. The incoming block is resolved
-    /// first, and a value that cannot be read refuses the reload, so the
-    /// running snapshot keeps serving.
+    /// After initialization, every new or changed binding must resolve before
+    /// the configuration is installed. Use this asynchronous method when
+    /// changing secrets after startup; [`Self::load_config`] refuses those
+    /// changes.
     ///
-    /// A value whose provider and reference are unchanged keeps its cell. A
-    /// [`crate::secrets::SecretRef`] a plugin already holds keeps working and
-    /// keeps its generation. A provider whose settings changed is built again,
-    /// and the values still bound to it are re-read into that same cell.
+    /// Existing [`crate::secrets::SecretRef`] handles remain valid when their
+    /// provider and reference are unchanged. A provider settings change
+    /// refreshes those handles; their generation advances only if the value
+    /// changes.
     ///
-    /// Before [`Self::initialize`] has resolved anything, this installs the
-    /// document the way [`Self::load_config`] does. `initialize` resolves
-    /// whatever that installed.
+    /// Before [`Self::initialize`], secrets are resolved during initialization.
     ///
     /// # Errors
     ///
@@ -2047,10 +2027,8 @@ impl PolicyEngine {
             None
         };
 
-        // Resolve finished before this lock, so a failure above never swaps
-        // the snapshot. The lock is only the publication, same as `load_config`.
-        // `new_registry` stays outside the closure so a rejected publication
-        // drops the plugins it just registered after the lock is released.
+        // Plugin destruction can re-enter the engine. Rejected instances must
+        // outlive the writer lock.
         let writer = self.lock_runtime_writer();
         let current = self.runtime.load_full();
         let mut new_registry = current.registry.clone();
@@ -2073,9 +2051,7 @@ impl PolicyEngine {
                 .map(|reloaded| Arc::new(reloaded.publish(baseline.as_deref())));
             let empty = crate::secrets::SecretStore::empty();
             let key_store = installed.as_deref().unwrap_or(&empty);
-            // The length check above already accepted a named key against the
-            // bytes `publish` just wrote, so this builds the handle rather
-            // than deciding whether the key is legal.
+            // Key lengths must be accepted before shared values change.
             let content_key = content_key_for(&policy_config, Some(key_store))?;
             if let Some(baseline_store) = baseline.as_ref() {
                 baseline_store.retire();
@@ -2682,11 +2658,8 @@ impl PolicyEngine {
 
         info!("Resolved {} secret(s)", store.names().len());
         let store = Arc::new(store);
-        // Another initialize can be resolving the same document. Publishing
-        // under the writer makes the second one see the first's store instead
-        // of replacing it, which is what `OnceLock::set` used to guarantee.
-        // The snapshot an invocation already holds has to carry the same
-        // store, or assertions render against a later reload.
+        // Concurrent initialization must keep the first published bindings.
+        // Each runtime snapshot needs its own store for in-flight assertions.
         let conflict = {
             let writer = self.lock_runtime_writer();
             if let Some(existing) = self.installed_secrets() {
@@ -3687,13 +3660,8 @@ impl PolicyEngine {
             return (result, None);
         }
 
-        // Resolved at startup, so this is a synchronous load of what is already
-        // in memory. The store is the one published with this snapshot: a
-        // reload that gives a secret a new cell does not change an invocation
-        // already holding the previous snapshot. `None` is a host whose
-        // document declared no secrets; a contract reaching one cannot name a
-        // secret, because config load refuses a `secret.<name>` no
-        // `secrets.values` entry declares.
+        // In-flight assertions must retain the snapshot's secret bindings
+        // when a reload changes a reference.
         let secrets = snapshot.secrets.as_deref();
         let rendered = match result.modified_extensions.as_ref() {
             Some(extensions) => crate::assertions::render(&contract, extensions, secrets),
@@ -8153,9 +8121,6 @@ secrets:
         let _ = answer;
     }
 
-    /// A reload that rebuilds the provider publishes into a shared cell while
-    /// a refresh of the replaced store is still in flight. The refresh must not
-    /// overwrite the reload's value when it finishes.
     #[tokio::test]
     async fn a_provider_changing_reload_keeps_the_reload_value_after_an_old_refresh() {
         let yaml = "
@@ -8237,9 +8202,6 @@ secrets:
         );
     }
 
-    /// An invocation that started before a reload keeps the secret store that
-    /// was published with its snapshot. A changed reference is a new cell, so
-    /// the in-flight assertion must not read it.
     #[tokio::test]
     async fn an_in_flight_invocation_keeps_its_snapshot_assertion_secret() {
         register_hook_metadata(
@@ -8348,8 +8310,6 @@ routes:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Publication can still fail after secrets have been read. Retiring the
-    /// baseline before that failure would leave refresh unable to rotate it.
     #[tokio::test]
     async fn a_rejected_reload_leaves_the_baseline_able_to_refresh() {
         let yaml = "
@@ -8771,8 +8731,6 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An added value is read before the snapshot swaps. The value that was
-    /// already there keeps the cell its handle points at.
     #[tokio::test]
     async fn an_async_reload_resolves_an_added_secret_and_keeps_the_old_cell() {
         let (dir, yaml) = secret_fixture("hunter2\n");
@@ -8821,8 +8779,6 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One value that cannot be read refuses the reload. The running value
-    /// and the running document stay.
     #[tokio::test]
     async fn an_async_reload_refuses_when_a_new_secret_cannot_be_read() {
         let (dir, yaml) = secret_fixture("hunter2\n");
@@ -8861,9 +8817,6 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A new `base_dir` is a different provider. The value's declaration is
-    /// unchanged, so the handle keeps its cell and the reload reads the new
-    /// directory into it.
     #[tokio::test]
     async fn an_async_reload_rebuilds_a_provider_whose_settings_changed() {
         let (dir, yaml) = secret_fixture("hunter2\n");
@@ -8889,8 +8842,6 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir2);
     }
 
-    /// A changed reference is a different binding. The old handle keeps the
-    /// cell it had; later refreshes follow the new reference.
     #[tokio::test]
     async fn an_async_reload_gives_a_changed_reference_a_new_cell() {
         let (dir, yaml) = secret_fixture("hunter2\n");
@@ -8928,8 +8879,6 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Before `initialize`, nothing is resolved, so an async reload only
-    /// installs the document. `initialize` reads it.
     #[tokio::test]
     async fn an_async_reload_before_initialize_is_resolved_by_initialize() {
         let (dir, yaml) = secret_fixture("hunter2\n");

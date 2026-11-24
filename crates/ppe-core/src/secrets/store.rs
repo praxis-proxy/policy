@@ -256,20 +256,13 @@ impl RefreshReport {
     }
 }
 
-/// A store built for a reload, with writes to cells it shares with the
-/// previous one held back.
-///
-/// Applying those writes as each value is read would change a credential the
-/// running document still serves if a later value failed. [`Self::publish`]
-/// is the point the reload has decided to go out.
+/// A replacement store whose staged values remain private until publication.
 pub(crate) struct ReloadedSecrets {
     reused_health: Vec<String>,
     store: SecretStore,
-    /// `(name, cell, new bytes)`. The name is how a content-key check reads
-    /// the length it will have after publish, without writing the cell yet.
+    /// Pending values with their declared names and retained cells.
     updates: Vec<(String, Arc<SecretCell>, Zeroizing<String>)>,
-    /// Values whose declaration was unchanged, so the cell an existing
-    /// [`SecretRef`] holds is the one in `store`.
+    /// Number of bindings retained from the previous store.
     carried: usize,
 }
 
@@ -296,10 +289,7 @@ impl ReloadedSecrets {
         self.store.names().len()
     }
 
-    /// How many carried cells have new bytes waiting for [`Self::publish`].
-    ///
-    /// A carried cell is re-read only when its provider was rebuilt. The
-    /// declaration was unchanged, but the backend behind it was not.
+    /// Number of retained bindings re-read after rebuilding their provider.
     #[must_use]
     pub(crate) fn reread(&self) -> usize {
         self.updates.len()
@@ -307,9 +297,8 @@ impl ReloadedSecrets {
 
     /// The length `name` will have once this reload is published.
     ///
-    /// `None` when the new block does not declare it. A pending write wins
-    /// over the bytes the cell still holds, because those bytes are what a
-    /// check has to accept or refuse.
+    /// Returns `None` for an undeclared name. Validation must use this length
+    /// even while the previous value is still serving.
     #[must_use]
     pub(crate) fn len_after_publish(&self, name: &str) -> Option<usize> {
         if let Some((_, _, value)) = self.updates.iter().find(|(n, _, _)| n == name) {
@@ -318,11 +307,10 @@ impl ReloadedSecrets {
         self.store.value(name).map(|value| value.len())
     }
 
-    /// Write the pending bytes into the shared cells and return the store.
+    /// Commit staged values and return the replacement store.
     ///
-    /// After this, a [`SecretRef`] taken before the reload sees the new
-    /// bytes. Call it only when every value resolved and the reload is about
-    /// to be published, holding `previous`'s refresh lock when replacing it.
+    /// Call only after accepting the reload. Hold `previous`'s refresh lock
+    /// until the replacement is installed.
     pub(crate) fn publish(mut self, previous: Option<&SecretStore>) -> SecretStore {
         if let Some(previous) = previous {
             for name in &self.reused_health {
@@ -410,20 +398,15 @@ impl SecretStore {
             .publish(None))
     }
 
-    /// Resolve `config`, keeping the cell of every value whose provider and
-    /// reference are unchanged from `previous`.
+    /// Resolve `config`, retaining bindings whose provider and reference are
+    /// unchanged from `previous`.
     ///
-    /// A [`SecretRef`] a plugin already holds points at that cell, so it keeps
-    /// working and keeps its generation. A value that is new, or whose
-    /// provider or reference changed, is read into a new cell. A provider
-    /// whose settings changed is built again, and each value still bound to
-    /// it is re-read into the cell it already has; those bytes stay pending
-    /// until [`ReloadedSecrets::publish`], so one failed read leaves every
-    /// cell the running store shares untouched.
+    /// Existing [`SecretRef`] handles remain valid for retained bindings.
+    /// Provider settings changes require new reads; their values take effect
+    /// only after [`ReloadedSecrets::publish`]. Failure leaves `previous`
+    /// unchanged.
     ///
-    /// An identical provider declaration reuses the provider itself. A Vault
-    /// session, or any other state the provider holds, survives the reload
-    /// instead of being logged in for again.
+    /// Unchanged provider declarations retain their sessions.
     ///
     /// # Errors
     ///
@@ -500,10 +483,8 @@ impl SecretStore {
             });
             let cell = if let Some(cell) = carried_cell {
                 carried += 1;
-                // The declaration is the same, but the provider behind it was
-                // rebuilt. Read the new backend now so a failure refuses the
-                // reload, and hold the bytes until publish so the shared cell
-                // stays on the previous value if a later read fails.
+                // A failed reload must leave every retained binding unchanged,
+                // including values read successfully from a rebuilt provider.
                 if !reused_provider
                     .get(&declared.provider)
                     .copied()
@@ -602,9 +583,6 @@ impl SecretStore {
     }
 
     /// The `secrets:` block these values were resolved from.
-    ///
-    /// What a synchronous reload compares against. A reload that re-resolves
-    /// publishes another store; this one still describes the values it holds.
     #[must_use]
     pub fn declared(&self) -> &SecretsConfig {
         &self.declared
@@ -1111,8 +1089,6 @@ values:
         assert_eq!(provider.reads(), 2, "each refresh reads once, in turn");
     }
 
-    /// The first refresh captures its answer and waits. The second refresh
-    /// finishes first. The late completion must not put the older bytes back.
     #[tokio::test]
     async fn an_older_refresh_does_not_overwrite_a_newer_one() {
         struct Suspending {
