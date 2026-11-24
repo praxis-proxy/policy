@@ -20,12 +20,12 @@ around a filter chain. PPE ships as its `policy` filter (the
 `policy-engine` feature), so the gateway parses MCP JSON-RPC, runs the full
 policy pass, and only then forwards a scoped request upstream:
 
-![The Praxis demo topology: a chat agent calls the Praxis gateway over MCP, where the mcp, policy (PPE), and router filters run in sequence before forwarding to the hr-mcp server; the policy filter is configured by policy.yaml and talks to Keycloak for identity, token exchange, and CIBA, and to Valkey for Session Taint, while Keycloak pushes CIBA approvals to the auth-channel UI](../images/use_cases_topology.svg)
+![The Praxis demo topology: a chat agent calls the Praxis gateway over MCP, where the mcp, policy (PPE), and router filters run in sequence before forwarding to the hr-mcp server; the policy filter is configured by policy.yaml and talks to Keycloak for identity, token exchange, and CIBA, and to Valkey for Session Taint, while Keycloak pushes CIBA approvals to the auth-channel UI](../../images/use_cases_topology.svg)
 
 The wiring is two files:
 [`praxis.yaml`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/praxis.yaml)
 declares the listener and filter chain, and
-[`policy.yaml`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/policy.yaml)
+[`policy-cedar.yaml`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/policy-cedar.yaml)
 holds everything PPE: identity plugins, delegators, validators, routes, and the
 PDP policy. The use cases below are that one config, taken apart.
 
@@ -61,7 +61,7 @@ sees it. The demo resolves two identities per request, the human
 Run it:
 [`scenarios/01-bob-allow.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/01-bob-allow.sh),
 [`scenarios/02-alice-deny.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/02-alice-deny.sh).
-More: [Identity](apl/identity.md).
+More: [Identity](../apl/identity.md).
 
 ## 2. On-the-wire redaction
 
@@ -83,7 +83,7 @@ response path, so an unmodified MCP backend gets per-caller redaction for free.
 
 Run it:
 [`scenarios/03-eve-redact.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/03-eve-redact.sh).
-More: field pipelines in [Effects](apl/effects.md).
+More: field pipelines in [Effects](../apl/effects.md).
 
 ## 3. Credential custody and token exchange
 
@@ -110,7 +110,7 @@ Run it:
 [`scenarios/01-bob-allow.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/01-bob-allow.sh)
 plus
 [`verify-token-exchange.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/verify-token-exchange.sh).
-More: [Delegation](apl/delegation.md).
+More: [Delegation](../apl/delegation.md).
 
 ## 4. Cross-tool data-flow control
 
@@ -136,7 +136,7 @@ the same id.
 Run it:
 [`scenarios/08-bob-taint-deny.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/08-bob-taint-deny.sh),
 [`scenarios/09-cross-principal-taint-isolation.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/09-cross-principal-taint-isolation.sh).
-More: [Session Taint](apl/tainting.md).
+More: [Session Taint](../apl/tainting.md).
 
 ## 5. PII guardrails on arguments
 
@@ -160,11 +160,11 @@ Bob pasting an SSN into an email body gets a deny, and the audit record of the
 attempt is still written: the route runs `run(audit-log)` before
 `run(pii-scan)`, so observation happens before the gate blocks. Flip `mode:
 deny` to `audit` to shadow-test the scanner against real traffic first (see
-[Patterns](patterns.md#shadow-rollout-with-audit-mode)).
+[Patterns](../guides/patterns.md#shadow-rollout-with-audit-mode)).
 
 Run it:
 [`scenarios/07-bob-pii-deny.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/07-bob-pii-deny.sh).
-More: [Builtins](builtins.md).
+More: [Builtins](../reference/builtins.md).
 
 ## 6. Human-in-the-loop approval
 
@@ -194,7 +194,7 @@ Keycloak, which pushes the prompt to the manager's device. The `scope` binds the
 approval to the live amount, so a sign-off cannot be replayed against a larger
 change.
 
-![The approval sequence: the agent sends adjust_compensation for $25k and the gateway answers -32120 pending with an elicitation id while firing a CIBA backchannel request to Keycloak, which pushes the prompt to the manager's device; after the manager approves, the agent's peek returns -32121 approved, and re-sending with X-Policy-Elicitation-Id applies the change with a 200](../images/use_cases_hil_sequence.svg)
+![The approval sequence: the agent sends adjust_compensation for $25k and the gateway answers -32120 pending with an elicitation id while firing a CIBA backchannel request to Keycloak, which pushes the prompt to the manager's device; after the manager approves, the agent's peek returns -32121 approved, and re-sending with X-Policy-Elicitation-Id applies the change with a 200](../../images/use_cases_hil_sequence.svg)
 
 The agent needs no approval protocol; it sees "retry later" and, later, a
 result. In the demo's chat client the conversation continues until the
@@ -203,7 +203,7 @@ approval lands and the result cuts back in.
 Run it:
 [`scenarios/10-bob-adjust-under-threshold.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/10-bob-adjust-under-threshold.sh),
 [`scenarios/11-bob-adjust-approval.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/11-bob-adjust-approval.sh).
-More: [Elicitation](apl/elicitation.md).
+More: [Elicitation](../apl/elicitation.md).
 
 ## 7. Pluggable policy decisions
 
@@ -263,7 +263,7 @@ Run it:
 [`scenarios/04-alice-internal-allow.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/04-alice-internal-allow.sh),
 [`scenarios/05-alice-external-cedar-deny.sh`](https://github.com/praxis-proxy/demos/blob/main/demos/policy-engine/scenarios/05-alice-external-cedar-deny.sh),
 then again with `GATEWAY_CONFIG=praxis-cel.yaml`. More: [PDP
-Integration](apl/pdp.md).
+Integration](../apl/pdp.md).
 
 ## Run it yourself
 
@@ -281,11 +281,11 @@ Eleven scripted scenarios cover every control above, and `agent/chat.py
 included.
 
 The same scenario runs with PPE embedded as a Rust crate inside the host
-process rather than behind a gateway. See [Deployment](deployment.md) for
-what changes between the two placements.
+process rather than behind a gateway. See [Deployment](../guides/deployment.md)
+for what changes between the two placements.
 
 ## Related documentation
 
-- [APL](apl/index.md): define routes, phases, predicates, and field pipelines.
-- [Effects and Sequencing](apl/effects.md): order controls and halt on denial.
-- [PDP Integration](apl/pdp.md): invoke Cedar, CEL, or OPA from APL.
+- [APL](../apl/index.md): define routes, phases, predicates, and field pipelines.
+- [Effects and Sequencing](../apl/effects.md): order controls and halt on denial.
+- [PDP Integration](../apl/pdp.md): invoke Cedar, CEL, or OPA from APL.

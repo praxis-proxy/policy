@@ -35,7 +35,7 @@ Routes are a list of `- tool:` entries (or `resource:`, `prompt:`,
 `llm:`), with the `authorization:`, `args:`, and `result:` blocks under
 each. This is the form the runtime loads at every placement: the
 enforcement point changes, the config shape does not. See
-[Configuration](configuration.md) for the full structure.
+[Configuration](../reference/configuration.md) for the full structure.
 
 A placement that also carries plain HTTP traffic can select on the
 request line with an `http:` route, so one document covers both the
@@ -55,7 +55,7 @@ capability. Identity resolution, PDP calls, Token Exchange / Delegation,
 redaction, and Session Taint
 all work the same at each. For what each placement does and does not defend
 against, see the [Threat
-Model](threat-model.md#where-the-boundary-sits-and-what-each-placement-covers).
+Model](../concepts/threat-model.md#where-the-boundary-sits-and-what-each-placement-covers).
 
 ## Inference traffic
 
@@ -69,6 +69,6 @@ the enforced path for the operations you want mediated.
 - [Patterns](patterns.md): production patterns for rollout and layered
   enforcement.
 - [Upgrading APL](upgrade-apl.md): migrate existing policy before deployment.
-- [Configuration](configuration.md): the full configuration structure.
-- [Identity](apl/identity.md) and [Delegation](apl/delegation.md): wiring IdP
-  verification and token exchange in a real stack.
+- [Configuration](../reference/configuration.md): the full configuration structure.
+- [Identity](../apl/identity.md) and [Delegation](../apl/delegation.md): wiring
+  IdP verification and token exchange in a real stack.

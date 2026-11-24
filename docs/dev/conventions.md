@@ -102,7 +102,7 @@ The integration, resilience, and security suites under
 test binary per concern, gathering related cases under a
 `tests/<dir>/main.rs` harness.
 
-[Testing Policy]: ../content/testing.md
+[Testing Policy]: ../content/guides/testing.md
 
 Prefer more doctests when in doubt. Duplicative coverage
 between doctests and unit/integration tests is fine.

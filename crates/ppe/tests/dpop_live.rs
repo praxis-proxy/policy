@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Live `DPoP` coverage against a real Keycloak. See `docs/content/testing.md`.
+//! Live `DPoP` coverage against a real Keycloak. See `docs/content/guides/testing.md`.
 //!
 //! The unit and end-to-end `DPoP` tests sign their proofs with the same library
 //! the verifier uses, so a mistake shared by both sides would pass. Here the
@@ -306,7 +306,7 @@ fn code(result: &PipelineResult) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a live Keycloak; see docs/content/testing.md"]
+#[ignore = "requires a live Keycloak; see docs/content/guides/testing.md"]
 async fn a_keycloak_dpop_token_verifies_end_to_end() {
     let (Some(base), Some(realm), Some(user), Some(password)) = (
         env("DPOP_LIVE_KEYCLOAK_URL"),

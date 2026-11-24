@@ -32,7 +32,7 @@ output must cross, evaluated against state the model cannot see or forge.
 PPE draws that boundary. Every operation the agent attempts crosses it; nothing
 the model emits reaches a capability directly.
 
-![The PPE trust boundary: an untrusted caller and agent on one side, mediated capabilities on the other, with the PPE Reference Monitor between them evaluating APL policy against identity, delegation, taint, and audit state the model cannot forge, fed by an IdP and a PDP](../images/threat_model.svg)
+![The PPE trust boundary: an untrusted caller and agent on one side, mediated capabilities on the other, with the PPE Reference Monitor between them evaluating APL policy against identity, delegation, taint, and audit state the model cannot forge, fed by an IdP and a PDP](../../images/threat_model.svg)
 
 Everything to the left of the monitor is assumed hostile, and nothing the policy
 reads comes from there: verified tokens come from the IdP (identity provider),
@@ -61,22 +61,22 @@ PPE credential cache can delay the next Vault read until its TTL expires.
 
 | Threat | Without mediation | PPE control |
 |---|---|---|
-| Prompt-injection-driven tool misuse | injected text becomes an executed tool call | `require(...)` attribute gates and `args` validation run before dispatch; a PDP decides relationship questions ([Effects](apl/effects.md), [PDP](apl/pdp.md)) |
-| Confused deputy / privilege escalation | the agent acts with one blanket identity for all callers | identity resolved per caller from verified tokens; entitlements differ per subject, not per prompt ([Identity](apl/identity.md)) |
-| Cross-request data exfiltration (write-down) | data read in one call leaves through a later, innocent-looking call | `taint(...)` labels the session in PPE-owned state; later operations deny on the label even with clean payloads ([Session Taint](apl/tainting.md)) |
-| Credential exposure and over-broad tokens | backends receive the caller's raw IdP credential | `delegate(...)` exchanges it for a fresh audience-scoped token (RFC 8693); the granted scope is verified before use ([Delegation](apl/delegation.md)) |
-| PII disclosure | sensitive values flow into arguments and out in results | PII scanning on `args`, field-level `redact`/`mask` pipelines on `result` ([Builtins](builtins.md)) |
-| Unauthorized high-impact actions | the model triggers irreversible operations on its own authority | `require_approval(...)` suspends the call for out-of-band human sign-off ([Elicitation](apl/elicitation.md)) |
-| Approval replay | one sign-off is reused for a larger or different action | approvals are scope-bound to the live arguments and validated on resume ([Elicitation](apl/elicitation.md)) |
-| Unaccountable actions | no trustworthy record of what the agent did | an audit plugin emits an append-only record per decision, including denied attempts ([Patterns](patterns.md)) |
+| Prompt-injection-driven tool misuse | injected text becomes an executed tool call | `require(...)` attribute gates and `args` validation run before dispatch; a PDP decides relationship questions ([Effects](../apl/effects.md), [PDP](../apl/pdp.md)) |
+| Confused deputy / privilege escalation | the agent acts with one blanket identity for all callers | identity resolved per caller from verified tokens; entitlements differ per subject, not per prompt ([Identity](../apl/identity.md)) |
+| Cross-request data exfiltration (write-down) | data read in one call leaves through a later, innocent-looking call | `taint(...)` labels the session in PPE-owned state; later operations deny on the label even with clean payloads ([Session Taint](../apl/tainting.md)) |
+| Credential exposure and over-broad tokens | backends receive the caller's raw IdP credential | `delegate(...)` exchanges it for a fresh audience-scoped token (RFC 8693); the granted scope is verified before use ([Delegation](../apl/delegation.md)) |
+| PII disclosure | sensitive values flow into arguments and out in results | PII scanning on `args`, field-level `redact`/`mask` pipelines on `result` ([Builtins](../reference/builtins.md)) |
+| Unauthorized high-impact actions | the model triggers irreversible operations on its own authority | `require_approval(...)` suspends the call for out-of-band human sign-off ([Elicitation](../apl/elicitation.md)) |
+| Approval replay | one sign-off is reused for a larger or different action | approvals are scope-bound to the live arguments and validated on resume ([Elicitation](../apl/elicitation.md)) |
+| Unaccountable actions | no trustworthy record of what the agent did | an audit plugin emits an append-only record per decision, including denied attempts ([Patterns](../guides/patterns.md)) |
 
 No single row is load-bearing alone. The [defense-in-depth
-pattern](patterns.md#defense-in-depth) composes them in one route.
+pattern](../guides/patterns.md#defense-in-depth) composes them in one route.
 
 ## Where the boundary sits, and what each placement covers
 
 PPE is direction-agnostic: the same APL policy enforces at any placement (see
-[Deployment](deployment.md)). The placement decides which traffic is mediated,
+[Deployment](../guides/deployment.md)). The placement decides which traffic is mediated,
 which is the threat-model question: an enforcement point only stops what crosses
 it.
 
@@ -85,7 +85,7 @@ it.
 PPE fronts a tool server. Every request to that backend crosses the boundary,
 whichever agent or client sent it.
 
-![PPE as a gateway: agents and direct clients all pass through the PPE gateway before reaching the tool server](../images/threat_model_gateway.svg)
+![PPE as a gateway: agents and direct clients all pass through the PPE gateway before reaching the tool server](../../images/threat_model_gateway.svg)
 
 Covers
 
@@ -109,7 +109,7 @@ This is the placement in the end-to-end [Praxis demo](use-cases.md).
 PPE sits beside one agent and mediates its egress. Everything that agent emits
 crosses the boundary, whatever it targets.
 
-![PPE as an egress sidecar: all egress from the agent workload passes through the PPE sidecar on its way to internal tools, third-party APIs, and other agents](../images/threat_model_sidecar.svg)
+![PPE as an egress sidecar: all egress from the agent workload passes through the PPE sidecar on its way to internal tools, third-party APIs, and other agents](../../images/threat_model_sidecar.svg)
 
 Covers
 
@@ -128,14 +128,14 @@ Does not cover
 - Traffic that escapes the sidecar's capture. Egress must be forced through it
   at the network level, or the guarantee is advisory.
 - Inference traffic, unless you deliberately route it through the policy path
-  (see [Deployment](deployment.md#inference-traffic)).
+  (see [Deployment](../guides/deployment.md#inference-traffic)).
 
 ### Agent / agentic framework (in-process)
 
 PPE runs inside the agent runtime and mediates operations as the framework
 issues them.
 
-![PPE in-process: inside the agent runtime the LLM drives the framework, whose operations pass through in-process PPE before reaching tools and backends](../images/threat_model_inframework.svg)
+![PPE in-process: inside the agent runtime the LLM drives the framework, whose operations pass through in-process PPE before reaching tools and backends](../../images/threat_model_inframework.svg)
 
 Covers
 
@@ -188,6 +188,7 @@ privately via the process in
 
 ## Related documentation
 
-- [Quick Start](quickstart.md): stand up an enforcement point and load a policy.
+- [Quick Start](../getting-started/quickstart.md): stand up an enforcement point
+  and load a policy.
 - [Overview](overview.md): follow the enforcement pipeline through one scenario.
 - [Use Cases](use-cases.md): run the controls end to end in a gateway deployment.

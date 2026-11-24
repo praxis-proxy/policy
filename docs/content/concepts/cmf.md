@@ -65,5 +65,5 @@ gives policy the content; the extensions give it the context; APL decides.
   carried alongside each message.
 - [CMF extensions and the attribute bag](cmf-extensions.md): the keys APL
   reads and what a missing key means in each engine.
-- [Crates](crates.md): locate the CMF and runtime implementations in the
-  workspace.
+- [Crates](../reference/crates.md): locate the CMF and runtime implementations
+  in the workspace.

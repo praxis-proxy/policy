@@ -50,7 +50,7 @@ Setting both fields on one resolver fails configuration loading. An issuer
 with DPoP enabled requires a header credential and the `read_headers`
 capability. The [configuration guide] has complete examples.
 
-[configuration guide]: ../content/configuration.md#credential-location
+[configuration guide]: ../content/reference/configuration.md#credential-location
 
 ## Request inputs
 

@@ -53,11 +53,11 @@ for more criteria for these roles.
 
 There are two special tracks:
 
-* `Community Manager`
-* `Project Lead`
+- `Community Manager`
+- `Project Lead`
 
 These are also based on merit and participation, but are
-effectively _alternate tracks_ to the normal ladder. These
+effectively *alternate tracks* to the normal ladder. These
 are handled in a bespoke (but public) manner by the Project
 Leads.
 

@@ -40,7 +40,7 @@ Unguarded probes of **omitted scalars** whose namespace was never written
 Omitted **claim** scalars (`missing-claim-string`, `missing-claim-int`)
 Deny on all four engines and are `AgreeDeny`: CEL and Cedar report a key
 error rather than a policy false. See
-[`docs/content/cmf-extensions.md`](../../docs/content/cmf-extensions.md).
+[`docs/content/concepts/cmf-extensions.md`](../../docs/content/concepts/cmf-extensions.md).
 `!=` and `not in` on an omitted key do **not** agree across all four.
 APL `!=` Allows while CEL, cedar-direct, and OPA Deny
 (`missing-claim-not-eq`). APL `not in` Allows, OPA Allows with it (`not`

@@ -9,18 +9,18 @@ name it by `kind`.
 
 | Kind | Type | Feature | Purpose |
 |---|---|---|---|
-| `identity/jwt` | identity | `jwt` | Resolve a subject from a verified JWT, with configurable claim mapping. See [Identity](apl/identity.md). |
-| `identity/api-key` | identity | `api-key` | Resolve an API key against a file or HTTP directory. See [Recipe 7](identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory). |
-| `delegator/oauth` | delegator | `oauth` | RFC 8693 token exchange, with optional caching. See [Delegation](apl/delegation.md). |
-| `delegator/vault` | delegator | `delegator-vault` | Resolve caller-scoped or workload-owned downstream credentials from Vault KV v2. See [Vault delegation recipes](identity-delegation.md#recipe-8-a-users-vault-stored-credential). |
-| `elicitation/ciba` | elicitation | `elicitation-ciba` | OIDC CIBA human approval. See [Elicitation](apl/elicitation.md). |
+| `identity/jwt` | identity | `jwt` | Resolve a subject from a verified JWT, with configurable claim mapping. See [Identity](../apl/identity.md). |
+| `identity/api-key` | identity | `api-key` | Resolve an API key against a file or HTTP directory. See [Recipe 7](../guides/identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory). |
+| `delegator/oauth` | delegator | `oauth` | RFC 8693 token exchange, with optional caching. See [Delegation](../apl/delegation.md). |
+| `delegator/vault` | delegator | `delegator-vault` | Resolve caller-scoped or workload-owned downstream credentials from Vault KV v2. See [Vault delegation recipes](../guides/identity-delegation.md#recipe-8-a-users-vault-stored-credential). |
+| `elicitation/ciba` | elicitation | `elicitation-ciba` | OIDC CIBA human approval. See [Elicitation](../apl/elicitation.md). |
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
-| `valkey` | session store | `valkey` | Persist Session Taint labels across processes. CIBA can use the same server for approvals. See [Session Taint](apl/tainting.md). |
+| `valkey` | session store | `valkey` | Persist Session Taint labels across processes. CIBA can use the same server for approvals. See [Session Taint](../apl/tainting.md). |
 | `vault` | secret provider | `secrets-vault` | Resolve `secret:` references from Vault KV v2. Not auto-registered: it needs an `HttpTransport` the host supplies. |
 | `quota` | policy plugin | `experimental-quota` | Enforce a per-principal token budget through Limitador. Experimental and excluded from `builtins`. |
-| `ratelimit/limitador` | rate-limit plugin | `experimental-ratelimit` | Count requests against in-process Limitador limits at `ratelimit.pre_identity` or `ratelimit.post_identity`, listed under `rate_limits:`, and deny with 429. Experimental and excluded from `builtins`. See [Rate Limiting](rate-limiting.md). |
+| `ratelimit/limitador` | rate-limit plugin | `experimental-ratelimit` | Count requests against in-process Limitador limits at `ratelimit.pre_identity` or `ratelimit.post_identity`, listed under `rate_limits:`, and deny with 429. Experimental and excluded from `builtins`. See [Rate Limiting](../guides/rate-limiting.md). |
 
 The default session store is in-process memory. It needs no feature and
 no `kind`, but labels in it do not survive a reload or reach a second
@@ -30,7 +30,7 @@ CIBA approvals have their own correlation store, chosen by the plugin's
 `store:` block: `memory`, or `valkey` to share them across replicas.
 Configuring `global.session_store` does not change it unless the block
 references that connection. The CIBA `store:` block is required; see
-[Elicitation](apl/elicitation.md#correlation-store).
+[Elicitation](../apl/elicitation.md#correlation-store).
 
 The three decision points are held to each other by a differential test
 suite. Given the same attributes and equivalent policy intent, they must
@@ -86,7 +86,7 @@ runtime and its own plugins compiles nothing extra.
 
 Default builds use RustCrypto SHA-256. A FIPS build disables defaults and
 selects `fips`, optionally with `api-key` and `jwt-openssl-fips`; see
-[FIPS](fips.md) for the supported selections, host setup and startup checks.
+[FIPS](../guides/fips.md) for the supported selections, host setup and startup checks.
 
 `basic` is not part of a supported FIPS selection. It is reported whichever
 hash scheme the directory holds, so `fips_profile_is_safe()` is false on any
@@ -522,5 +522,5 @@ first-wins or last-wins.
 
 ## Next
 
-- [Testing](testing.md): test policy and plugin behavior through the runtime.
+- [Testing](../guides/testing.md): test policy and plugin behavior through the runtime.
 - [Configuration](configuration.md): declare builtins in a policy document.

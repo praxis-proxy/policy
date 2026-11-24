@@ -64,7 +64,7 @@ Vault KV v2 instead of minting an OAuth token. It requires
 capability, and `write_delegated_tokens`. `scheme_prefix` explicitly controls
 the outbound header value: use `"token "` for GitHub-style Authorization values,
 `"Bearer "` where required, or omit it for a bare `X-API-Key`. See the
-[Vault recipes](../identity-delegation.md#recipe-8-a-users-vault-stored-credential)
+[Vault recipes](../guides/identity-delegation.md#recipe-8-a-users-vault-stored-credential)
 for Vault policy, enrollment, and complete configuration.
 
 ## Choosing who the exchange is for
@@ -163,7 +163,7 @@ This shape has two consequences:
 
 ### When an inbound token is `DPoP`-bound
 
-A [`DPoP`](../identity-delegation.md#binding-tokens-to-the-callers-key-dpop)-bound
+A [`DPoP`](../guides/identity-delegation.md#binding-tokens-to-the-callers-key-dpop)-bound
 token can be used only by the client it was issued to, with a proof from that
 client's key. An IdP may also refuse to let any other client exchange it, and
 Keycloak does. PPE verifies such a token on the way in but cannot produce that
@@ -179,7 +179,7 @@ proof, so the token cannot be the one a `delegate` step sends:
 
 When the IdP refuses, the step is denied with `delegation.idp_rejected`, and
 the reason says which token sent was bound and what to change; the token is
-named in `details.bound_tokens`. [Recipe 11](../identity-delegation.md#recipe-11-an-agent-with-a-dpop-bound-token)
+named in `details.bound_tokens`. [Recipe 11](../guides/identity-delegation.md#recipe-11-an-agent-with-a-dpop-bound-token)
 shows both working shapes: exchanging a separate user token, and delegating on
 this instance's own credential.
 

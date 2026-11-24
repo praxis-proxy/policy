@@ -32,7 +32,7 @@ use crate::{
 /// Flatten every present slot in `Extensions` into `bag`.
 ///
 /// An absent slot writes nothing. A present slot follows the per-type
-/// absent-value contract in `docs/content/cmf-extensions.md`: `StringSet`
+/// absent-value contract in `docs/content/concepts/cmf-extensions.md`: `StringSet`
 /// keys are present-empty, optional scalars are omitted, flattened member
 /// booleans are presence-only.
 ///
@@ -164,7 +164,7 @@ mod tests {
         bag
     }
 
-    // The per-type contract in `docs/content/cmf-extensions.md`: inside a
+    // The per-type contract in `docs/content/concepts/cmf-extensions.md`: inside a
     // present slot, `StringSet` is present-empty, optional scalars are
     // omitted, non-option scalars are written, flattened member bools
     // are absent.
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn objects_and_data_stay_off_the_bag() {
-        // `docs/content/cmf-extensions.md`: security.objects / security.data are
+        // `docs/content/concepts/cmf-extensions.md`: security.objects / security.data are
         // typed-slot only. filter_extensions copies them unrestricted;
         // extract_extensions does not flatten them. Distinct from the
         // static `data:` payload tree.

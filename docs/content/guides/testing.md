@@ -295,7 +295,7 @@ docker stop ppe-keycloak ppe-valkey
 ```
 
 To test the ACL users in
-[Elicitation](apl/elicitation.md#shared-server-separate-acl-user), start a
+[Elicitation](../apl/elicitation.md#shared-server-separate-acl-user), start a
 Valkey server and run the ignored `documented_acl_users` test. Set
 `PPE_ACL_VALKEY` to its address and provide both passwords:
 
@@ -374,7 +374,7 @@ binary under `fips-default.cnf` after building with an ordinary config.
 
 ## Related documentation
 
-- [Crates](crates.md): locate the APIs and test surfaces in the workspace.
-- [Builtins](builtins.md): review the bundled components covered by integration
-  tests.
-- [Documentation index](index.md): return to the documentation map.
+- [Crates](../reference/crates.md): locate the APIs and test surfaces in the workspace.
+- [Builtins](../reference/builtins.md): review the bundled components covered by
+  integration tests.
+- [Documentation index](../index.md): return to the documentation map.

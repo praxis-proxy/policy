@@ -1,6 +1,6 @@
 # Quick Start
 
-Stand up PPE and run the [scenario](overview.md): a `get_employee` route
+Stand up PPE and run the [scenario](../concepts/overview.md): a `get_employee` route
 that authorizes by role and redacts a field by permission.
 
 You need Rust 1.92 or newer ([install with rustup](https://rustup.rs)).
@@ -17,7 +17,7 @@ praxis-policy = { version = "0.7.0", features = ["builtins", "http-hyper"] }
 identity, OAuth delegation, CIBA elicitation, the Cedar, CEL and OPA decision
 points, the Valkey session store, and the Vault secret provider. For a smaller
 build, name a subset instead: `features = ["jwt", "cedar"]`. See
-[Builtins](builtins.md).
+[Builtins](../reference/builtins.md).
 
 The default build is the engine alone. `http-hyper` is separate from
 `builtins` because it is the one piece a host commonly already owns: it
@@ -63,7 +63,7 @@ register_apl(
 ```
 
 A host with plugins of its own registers each one alongside this. See
-[Plugins and the Execution Pipeline](pipeline.md#when-to-write-a-plugin).
+[Plugins and the Execution Pipeline](../concepts/pipeline.md#when-to-write-a-plugin).
 
 Then install the outbound HTTP transport. PPE performs no HTTP of its
 own, so a plugin that fetches JWKS, exchanges a token, or dispatches a
@@ -78,7 +78,7 @@ A host that already has an HTTP client calls
 `engine.set_http_transport(my_transport)` instead, so the process keeps
 one connection pool and one TLS trust store. Either call goes before
 `initialize()`, and a plugin that reaches outward must also declare the
-`perform_http` capability. [Builtins](builtins.md#the-http-transport)
+`perform_http` capability. [Builtins](../reference/builtins.md#the-http-transport)
 covers both, and the error each mistake produces.
 
 ## 3. Write the policy
@@ -103,7 +103,7 @@ routes:
 ```
 
 `require(authenticated)` and `require(role.hr)` read attributes resolved
-from the caller's verified token. [Identity](apl/identity.md) covers how
+from the caller's verified token. [Identity](../apl/identity.md) covers how
 those attributes get there; for now, an identity plugin such as
 `identity/jwt` resolves the subject and roles before policy runs.
 
@@ -142,13 +142,16 @@ demonstrates.
 
 ## Next
 
-- [Overview](overview.md): follow the enforcement pipeline through one scenario.
-- [Use Cases](use-cases.md): run the full control set behind a gateway.
-- [APL](apl/index.md): the language, and its
-  [normative grammar](apl/apl-grammar.md).
-- [Configuration](configuration.md): the document, its keys, and both
+- [Use with Praxis](use-with-the-gateway.md): run the engine as the
+  Praxis `policy` filter.
+- [Overview](../concepts/overview.md): follow the enforcement pipeline through
+  one scenario.
+- [Use Cases](../concepts/use-cases.md): run the full control set behind a gateway.
+- [APL](../apl/index.md): the language, and its
+  [normative grammar](../apl/apl-grammar.md).
+- [Configuration](../reference/configuration.md): the document, its keys, and both
   dispatch modes.
-- [Identity](apl/identity.md): resolving callers into the attributes
+- [Identity](../apl/identity.md): resolving callers into the attributes
   policy reads.
-- [Delegation](apl/delegation.md): minting scoped downstream
+- [Delegation](../apl/delegation.md): minting scoped downstream
   credentials.

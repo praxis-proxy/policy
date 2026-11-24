@@ -1413,7 +1413,7 @@ routes:
 }
 
 /// An engine loaded with the one-route `llm: "gpt-4*"` config that
-/// `docs/content/llm-routes.md` shows under `## Worked config`, read from that
+/// `docs/content/guides/llm-routes.md` shows under `## Worked config`, read from that
 /// file so the example and these tests cannot drift apart. Moving the block or
 /// renaming its heading fails the tests that use this on purpose.
 ///
@@ -1423,12 +1423,12 @@ routes:
 async fn gpt4_route_engine() -> Arc<PolicyEngine> {
     let page = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/content/llm-routes.md"
+        "/../../docs/content/guides/llm-routes.md"
     ))
-    .expect("read docs/content/llm-routes.md");
+    .expect("read docs/content/guides/llm-routes.md");
     let (_, after) = page
         .split_once("## Worked config")
-        .expect("docs/content/llm-routes.md has a `## Worked config` section");
+        .expect("docs/content/guides/llm-routes.md has a `## Worked config` section");
     let (_, block) = after
         .split_once("```yaml\n")
         .expect("a yaml block follows the heading");
@@ -1494,7 +1494,7 @@ async fn llm_route_worked_config_allows_a_conforming_request() {
 
 /// `not in` is true on a missing key, so an unguarded rule on
 /// `llm.input.forced_tool` denies every request that forces no tool. The guarded
-/// spelling `docs/content/llm-routes.md` gives does not.
+/// spelling `docs/content/guides/llm-routes.md` gives does not.
 #[tokio::test]
 async fn a_not_in_rule_on_an_optional_key_needs_an_exists_guard() {
     let rule = |r: &str| {

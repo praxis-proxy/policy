@@ -177,7 +177,7 @@ fn settings_that_cannot_work_fail_the_build() {
 fn the_documented_recipe_builds() {
     let doc = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/content/identity-delegation.md"
+        "/../../docs/content/guides/identity-delegation.md"
     ))
     .expect("the identity docs are readable");
     let yaml = doc

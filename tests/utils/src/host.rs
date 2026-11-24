@@ -50,7 +50,7 @@
 //!   the call so the engine can tell the pre-identity stage ran.
 //! - Praxis supplies no HTTP extension to `cmf.tool_post_invoke`. This driver
 //!   carries the pre-invoke view, including `secret_headers`, as required by
-//!   `docs/content/assertions.md`. Both hosts rebuild the `http.response`
+//!   `docs/content/reference/assertions.md`. Both hosts rebuild the `http.response`
 //!   view from inbound headers plus response headers and status.
 //! - Praxis bounds the synchronous CMF response-body hook on `dispatch.rs`'s
 //!   two-worker runtime by `max(2 * plugin_timeout, 1s)`. This driver awaits

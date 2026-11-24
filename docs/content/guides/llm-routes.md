@@ -94,7 +94,7 @@ host passes those extensions on `cmf.llm_output`.
 
 Identity (`subject.*`, `role.*`, `perm.*`, `claim.*`), security labels, the
 delegation chain, and entity metadata (`meta.*`) are the same on an `llm:` route
-as on any other. [Extensions](extensions.md) lists them with the capabilities
+as on any other. [Extensions](../concepts/extensions.md) lists them with the capabilities
 that expose them. Model identity (`llm.model.id`, `llm.model.provider`,
 `llm.model.capabilities`) and `llm.output.*` need no capability. The request keys
 need `read_llm_request` in a plugin's view; a route's own rules always see
@@ -177,7 +177,8 @@ The same holds for a key a reported request leaves out. `llm.input.forced_tool` 
 written only when the request forces a tool, so
 `llm.input.forced_tool not in data.approved_tools: deny` denies every request that
 forces none. Pair it with the key's presence:
-`exists(llm.input.forced_tool) & llm.input.forced_tool not in data.approved_tools: deny`.
+`exists(llm.input.forced_tool) &
+llm.input.forced_tool not in data.approved_tools: deny`.
 
 ## Host obligations
 
@@ -212,7 +213,9 @@ routes:
         - "llm.input.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"
         - "!exists(llm.input.max_tokens): deny"
         - "llm.input.max_tokens > 4096: deny"
-        - "llm.input.instructions_digest != 'sha256-v1:c7ab4f357f26f014bb54a3ec069d56914eabffaf4aa2da4aa728baa0b57c415e': deny"
+        - >-
+          llm.input.instructions_digest !=
+          'sha256-v1:c7ab4f357f26f014bb54a3ec069d56914eabffaf4aa2da4aa728baa0b57c415e': deny
       post_invocation:
         - "llm.output.stop_reason == 'max_tokens': deny"
         - "llm.output.tokens.total > 20000: deny"
@@ -235,7 +238,8 @@ A model outside `gpt-4*` matches no route here, so none of this applies to it.
 
 ## Next
 
-- [Extensions](extensions.md): every namespace and the capability behind it.
-- [Common Message Format](cmf.md): the message both hooks carry.
+- [Extensions](../concepts/extensions.md): every namespace and the capability
+  behind it.
+- [Common Message Format](../concepts/cmf.md): the message both hooks carry.
 - [HTTP Routing](http-routing.md): the other selector that is not a tool,
   resource, or prompt name.

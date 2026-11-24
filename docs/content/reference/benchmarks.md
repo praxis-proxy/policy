@@ -129,8 +129,8 @@ additional pass with the `dhat-heap` feature.
 
 ## Related documentation
 
-- [Benchmark results](../dev/benchmarks.md): recorded baselines, profile
+- [Benchmark results](../../dev/benchmarks.md): recorded baselines, profile
   findings, and the reasoning behind the CI decision.
-- [Testing](testing.md): testing a policy as code.
+- [Testing](../guides/testing.md): testing a policy as code.
 - [Crates](crates.md): what each crate in the workspace is for.
-- [Documentation index](index.md): return to the documentation map.
+- [Documentation index](../index.md): return to the documentation map.

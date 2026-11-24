@@ -1203,7 +1203,7 @@ async fn a_file_backend_refuses_a_delegated_verdict() {
 async fn the_documented_user_file_loads_and_authenticates_once_its_hashes_are_minted() {
     let page = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/content/builtins.md"
+        "/../../docs/content/reference/builtins.md"
     ))
     .expect("the builtins page is readable");
     let example = page

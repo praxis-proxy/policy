@@ -373,7 +373,7 @@ CIBA resolves standalone and reference configs.
 
 **Files:**
 - Modify: `tests/integration/tests/suite/host_contract.rs`
-- Modify: `docs/content/builtins.md`, `docs/content/apl/elicitation.md`,
+- Modify: `docs/content/reference/builtins.md`, `docs/content/apl/elicitation.md`,
   `docs/content/apl/tainting.md`
 - Modify: `CHANGELOG.md`
 
