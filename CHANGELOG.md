@@ -30,6 +30,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `auth.directory_unavailable` rather than as a bad caller.
   ([#213](https://github.com/praxis-proxy/policy/issues/213))
 
+### Changed
+
+- **Documentation navigation.** Organize published pages into Getting started,
+  Guides, Concepts, APL, and Reference sections. Add a gateway integration
+  guide and update links and documentation test fixtures to use the new page
+  paths.
+  ([#362](https://github.com/praxis-proxy/policy/pull/362))
+
 ## [0.7.0] - 2026-11-20
 
 ### Added
