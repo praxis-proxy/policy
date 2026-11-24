@@ -1450,7 +1450,7 @@ mod promises {
 /// stays readable from the document.
 mod secret_source {
     use praxis_policy_core::audit::AuditHandler;
-    use praxis_policy_core::decision::DecisionLog;
+    use praxis_policy_core::decision::{DecisionLog, DecisionWarning};
     use praxis_policy_core::effect::EffectRecord;
     use praxis_policy_core::secrets::SecretProviderRegistry;
 
@@ -1721,9 +1721,10 @@ routes:
     /// entry per emit, in call order.
     #[derive(Default)]
     struct SinkRecorder {
-        views: Mutex<Vec<Option<HashMap<String, String>>>>,
         /// The same, for each effect the sink was shown.
         effect_views: Mutex<Vec<Option<HashMap<String, String>>>>,
+        views: Mutex<Vec<Option<HashMap<String, String>>>>,
+        warnings: Mutex<Vec<Vec<DecisionWarning>>>,
     }
 
     impl SinkRecorder {
@@ -1766,7 +1767,7 @@ routes:
             &self,
             _payload: &dyn PluginPayload,
             extensions: &Extensions,
-            _decisions: &DecisionLog,
+            decisions: &DecisionLog,
         ) {
             self.rec.views.lock().unwrap().push(
                 extensions
@@ -1774,6 +1775,11 @@ routes:
                     .as_deref()
                     .map(|http| http.request_headers.clone()),
             );
+            self.rec
+                .warnings
+                .lock()
+                .unwrap()
+                .push(decisions.warnings().to_vec());
         }
 
         async fn on_effect(&self, _effect: &EffectRecord, extensions: &Extensions) {
@@ -1901,6 +1907,7 @@ routes:
     /// wire.
     struct Audited {
         sink_view: Option<HashMap<String, String>>,
+        warnings: Vec<DecisionWarning>,
         wire: HashMap<String, String>,
     }
 
@@ -1927,8 +1934,74 @@ routes:
         assert_eq!(rec.calls(), 1, "the sink was called once");
         Audited {
             sink_view: rec.view(0),
+            warnings: rec.warnings.lock().unwrap()[0].clone(),
             wire: request_headers(&result),
         }
+    }
+
+    #[tokio::test]
+    async fn credential_target_use_reaches_the_audit_decision_record() {
+        let audited = audited_invocation(
+            "    request:
+      headers:
+        - name: Authorization
+          from: secret.legacy_api_key
+          allow_credential_target: true
+",
+            &["read_headers"],
+        )
+        .await;
+
+        assert_eq!(audited.warnings.len(), 1, "one credential target use");
+        let warning = &audited.warnings[0];
+        assert_eq!(warning.code(), "assertion_credential_target_used");
+        assert_eq!(
+            warning.fields().get("direction").map(String::as_str),
+            Some("assertions.request")
+        );
+        assert_eq!(
+            warning.fields().get("header").map(String::as_str),
+            Some("Authorization")
+        );
+        assert_eq!(
+            warning.fields().get("source").map(String::as_str),
+            Some("secret.legacy_api_key")
+        );
+        assert!(
+            !format!("{:?}", audited.warnings).contains("sk-live-abc123"),
+            "audit warnings must not carry the rendered credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn unapplied_credential_target_produces_no_use_warning() {
+        let audited = audited_invocation(
+            "    request:
+      headers:
+        - name: Authorization
+          from: secret.legacy_api_key
+          allow_credential_target: true
+        - name: x-required-tenant
+          from: claim.absent
+          on_missing: deny
+",
+            &["read_headers"],
+        )
+        .await;
+
+        assert!(
+            audited.warnings.is_empty(),
+            "a failed render applies no credential and records no use: {:?}",
+            audited.warnings
+        );
+        assert!(
+            !audited
+                .wire
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("Authorization")),
+            "the failed render must not inject a credential: {:?}",
+            audited.wire
+        );
     }
 
     /// The acceptance criterion: the value never reaches the audit record. A

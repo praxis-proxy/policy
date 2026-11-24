@@ -583,9 +583,23 @@ routes:
         "the conditional pipeline should allow: {:?}",
         result.violation
     );
-    assert!(
-        result.modified_payload.is_some(),
-        "a true metadata condition must redact the argument"
+    let forwarded = result
+        .modified_payload
+        .as_ref()
+        .and_then(|payload| payload.as_any().downcast_ref::<MessagePayload>())
+        .expect("a true metadata condition must return the rewritten CMF payload");
+    let city = forwarded
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            ContentPart::ToolCall { content } => content.arguments.get("city"),
+            _ => None,
+        });
+    assert_eq!(
+        city,
+        Some(&serde_json::json!("[REDACTED]")),
+        "the metadata-gated pipeline must redact the exact tool-call argument"
     );
 }
 

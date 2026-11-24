@@ -28,6 +28,21 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   multi-part and gateway adapter limits.
   ([#305](https://github.com/praxis-proxy/policy/pull/305))
 
+- **Acquired-metadata policy projections.** CEL and OPA receive lossless JSON
+  metadata, while Cedar receives its documented value and provenance records.
+  Empty top-level metadata objects are always present for absence checks.
+  ([#243](https://github.com/praxis-proxy/policy/issues/243))
+- **Metadata-backed assertions.** Request and response assertions can project
+  exact `metadata.<instance>.<path>` values with scalar, CSV, JSON, and member
+  encodings. Load validation requires a reachable earlier `fetch(instance)`;
+  credential-bearing targets require explicit opt-in and produce structured
+  load and decision-audit warnings.
+  ([#245](https://github.com/praxis-proxy/policy/issues/245))
+- **Framework decision warnings.** `DecisionLog` can carry structured
+  `DecisionWarning` entries. The reference JSON and OCSF audit sinks serialize
+  them in the decision record.
+  ([#245](https://github.com/praxis-proxy/policy/issues/245))
+
 - **Kubernetes `TokenReview` identity.** `identity/kubernetes-token-review`,
   behind the `kubernetes-token-review` feature, resolves a bearer token by
   submitting it to the API server's `TokenReview` API and maps `status.user`
@@ -38,37 +53,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   cached answer never outlives a JWT's `exp`, and a `401` or `403` denies as
   `auth.directory_unavailable` rather than as a bad caller.
   ([#213](https://github.com/praxis-proxy/policy/issues/213))
-
-### Changed
-
-- **Documentation navigation.** Organize published pages into Getting started,
-  Guides, Concepts, APL, and Reference sections. Add section landing pages
-  and a gateway integration guide, and update links and documentation test
-  fixtures to use the new page paths.
-  ([#362](https://github.com/praxis-proxy/policy/pull/362))
-
-## [0.7.0] - 2026-11-20
-
-### Added
-
-- **Typed metadata source dispatch.** `MetadataFetchHook`,
-  `MetadataFetchRequest` and `MetadataFetchResult` let callers select one
-  configured source and invoke its `metadata.fetch` handler through the normal
-  executor, with capability filtering and error handling. The framework owns
-  validation, provenance stamping and installation of acquired facts.
-  ([#281](https://github.com/praxis-proxy/policy/pull/281))
-- **APL metadata fetching.** `fetch(name)` acquires immutable facts in
-  `authorization.pre_invocation` and makes them available immediately to later
-  predicates and PDPs under `metadata.<name>.*`. Sources are validated at load;
-  each source may be fetched once per compiled route, and fetches cannot run in
-  `parallel`. `on_error: fail` stops authorization without publishing a record;
-  `ignore` publishes a valid source error record and continues. Malformed or
-  missing records and framework failures always fail closed.
-  `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and
-  `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method defaults
-  to rejecting unsupported fetches, preserving existing implementations.
-  `AcquiredFacts::validate()` exposes the core record validation rules.
-  ([#287](https://github.com/praxis-proxy/policy/pull/287))
 
 - **HTTP Basic identity.** The `basic` feature adds `identity/basic`, which
   decodes an [RFC 7617] credential, verifies it against an on-disk directory
@@ -96,6 +80,68 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Documentation navigation.** Organize published pages into Getting started,
+  Guides, Concepts, APL, and Reference sections. Add section landing pages
+  and a gateway integration guide, and update links and documentation test
+  fixtures to use the new page paths.
+  ([#362](https://github.com/praxis-proxy/policy/pull/362))
+
+- **Breaking for Rust callers:** `MetadataFetchOutcome` adds `metadata`,
+  `cedar_metadata`, and `metadata_provenance`; `HeaderEntry` and
+  `ResolvedHeader` add `allow_credential_target`. Struct literals and
+  exhaustive destructuring must include the new fields. `SourceRejection` adds
+  metadata-specific variants and is now non-exhaustive. Cedar schemas for
+  metadata-reading policies must declare `context.metadata` and
+  `context.metadata_provenance`. Every existing assertion targeting
+  `Authorization`, `Proxy-Authorization`, `Cookie`, or `Set-Cookie` must now
+  set `allow_credential_target: true`, including assertions sourced from
+  subjects, claims, clients, or declared secrets rather than metadata.
+  `SourcePath::Metadata` now contains a validated `MetadataPath` wrapper;
+  callers matching the old public `instance` and `path` fields must use
+  `MetadataPath::instance()` and `MetadataPath::segments()`.
+  ([#243](https://github.com/praxis-proxy/policy/issues/243),
+  [#245](https://github.com/praxis-proxy/policy/issues/245))
+
+- **Breaking for route capability grants:** ordinary `run()` and field-pipeline
+  plugin capabilities now contribute only to the request or response handler
+  half where that plugin runs. Delegation, elicitation, and metadata-fetch
+  plugins still contribute their declared capabilities to both halves.
+  Predicates on the other half that read `client.*`, `caller.workload.*`, or
+  `this.workload.*` need `read_client` or `read_workload` in the host baseline.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
+
+### Security
+
+- **CEL acquired-metadata diagnostics are redacted.** Denials retain useful
+  expression and type information without serializing metadata values,
+  provenance, or normalized source errors into downstream audit records.
+  ([#244](https://github.com/praxis-proxy/policy/issues/244))
+
+## [0.7.0] - 2026-11-20
+
+### Added
+
+- **Typed metadata source dispatch.** `MetadataFetchHook`,
+  `MetadataFetchRequest` and `MetadataFetchResult` let callers select one
+  configured source and invoke its `metadata.fetch` handler through the normal
+  executor, with capability filtering and error handling. The framework owns
+  validation, provenance stamping and installation of acquired facts.
+  ([#281](https://github.com/praxis-proxy/policy/pull/281))
+- **APL metadata fetching.** `fetch(name)` acquires immutable facts in
+  `authorization.pre_invocation` and makes them available immediately to later
+  predicates and PDPs under `metadata.<name>.*`. Sources are validated at load;
+  each source may be fetched once per compiled route, and fetches cannot run in
+  `parallel`. `on_error: fail` stops authorization without publishing a record;
+  `ignore` publishes a valid source error record and continues. Malformed or
+  missing records and framework failures always fail closed.
+  `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and
+  `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method defaults
+  to rejecting unsupported fetches, preserving existing implementations.
+  `AcquiredFacts::validate()` exposes the core record validation rules.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+
+### Changed
+
 - **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive
   matches must handle the new variant. `RouteDispatchPlan` adds
   `metadata_entries`; exhaustive struct literals must initialize it or use
@@ -109,13 +155,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   typed record required for publication. Sources must declare `metadata.fetch`
   and use `on_error: fail` or `ignore`.
   ([#287](https://github.com/praxis-proxy/policy/pull/287))
-- **Breaking for route capability grants:** ordinary `run()` and field-pipeline
-  plugin capabilities now contribute only to the request or response handler
-  half where that plugin runs. Delegation, elicitation, and metadata-fetch
-  plugins still contribute their declared capabilities to both halves.
-  Predicates on the other half that read `client.*`, `caller.workload.*`, or
-  `this.workload.*` need `read_client` or `read_workload` in the host baseline.
-  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 ### Fixed
 

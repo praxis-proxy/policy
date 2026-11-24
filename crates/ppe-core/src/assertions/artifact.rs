@@ -270,7 +270,7 @@ fn render_scope(
             resolve_assertions_for_route(config, matched, request_entity_type, direction)
         {
             any = true;
-            render_contract(&contract, direction, out);
+            render_contract(config, &contract, direction, out);
         }
     }
     if !any {
@@ -280,7 +280,12 @@ fn render_scope(
 }
 
 /// One direction's accumulated contract.
-fn render_contract(contract: &ResolvedContract, direction: Direction, out: &mut String) {
+fn render_contract(
+    config: &PolicyConfig,
+    contract: &ResolvedContract,
+    direction: Direction,
+    out: &mut String,
+) {
     let _ = writeln!(out, "    {}", direction.label());
     if contract.headers.is_empty() {
         out.push_str("      asserts nothing\n");
@@ -300,6 +305,7 @@ fn render_contract(contract: &ResolvedContract, direction: Direction, out: &mut 
                     capability_label(path.capability()),
                     encoding_note(header),
                 );
+                render_metadata_disclosure(config, path, out, "        ");
             },
             ResolvedSource::Members(members) => {
                 let _ = writeln!(out, "      {:<22}one JSON object {provenance}", header.name);
@@ -310,6 +316,7 @@ fn render_contract(contract: &ResolvedContract, direction: Direction, out: &mut 
                         path.authored(),
                         capability_label(path.capability())
                     );
+                    render_metadata_disclosure(config, path, out, "          ");
                 }
             },
             ResolvedSource::Unresolvable => {
@@ -320,6 +327,9 @@ fn render_contract(contract: &ResolvedContract, direction: Direction, out: &mut 
                     header.name
                 );
             },
+        }
+        if header.allow_credential_target {
+            out.push_str("        credential target explicitly allowed on this entry\n");
         }
     }
     out.push_str("      removed before injection\n");
@@ -347,6 +357,24 @@ fn render_contract(contract: &ResolvedContract, direction: Direction, out: &mut 
             .collect();
         let _ = writeln!(out, "        {} (strip:)", patterns.join(", "));
     }
+}
+
+fn render_metadata_disclosure(
+    config: &PolicyConfig,
+    path: &source::SourcePath,
+    out: &mut String,
+    indent: &str,
+) {
+    let source::SourcePath::Metadata(metadata) = path else {
+        return;
+    };
+    let instance = metadata.instance();
+    let plugin = config.plugins.iter().find(|plugin| plugin.name == instance);
+    let kind = plugin.map_or("<undeclared>", |plugin| plugin.kind.as_str());
+    let _ = writeln!(
+        out,
+        "{indent}externally acquired; producing plugin {instance} ({kind}); cache eligibility: unknown (producer-owned)"
+    );
 }
 
 /// What a `replace_inherited: true` above this route dropped, so the artifact
@@ -464,6 +492,42 @@ mod tests {
         let rendered = render(WORKED_EXAMPLE);
         for expected in ["read_subject", "read_claims", "read_roles"] {
             assert!(rendered.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn metadata_members_disclose_trust_cache_and_credential_opt_in() {
+        let rendered = render(
+            "
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: metadata/http
+    hooks: [metadata.fetch]
+    config:
+      cache:
+        enabled: true
+global:
+  assertions:
+    request:
+      headers:
+        - name: Authorization
+          members:
+            plan: metadata.account.plan
+          allow_credential_target: true
+",
+        );
+        for expected in [
+            "externally acquired",
+            "producing plugin account (metadata/http)",
+            "cache eligibility: unknown (producer-owned)",
+            "credential target explicitly allowed",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}:\n{rendered}"
+            );
         }
     }
 

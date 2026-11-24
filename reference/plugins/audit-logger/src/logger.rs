@@ -278,6 +278,9 @@ impl AuditLogger {
                 })
                 .collect();
             map.insert("decision_steps".into(), json!(steps));
+            if !decisions.warnings().is_empty() {
+                map.insert("decision_warnings".into(), json!(decisions.warnings()));
+            }
 
             // This invocation's place in the decision graph: its own span, the
             // upstream call that triggered it, and the trace they share.
@@ -407,6 +410,10 @@ impl HookHandler<CmfHook> for AuditLogger {
 )]
 mod tests {
     use super::*;
+    use praxis_policy_apl_core::route::StructuredInput;
+    use praxis_policy_apl_core::step::{PdpCall, PdpDialect, PdpResolver as _};
+    use praxis_policy_apl_core::{AttributeBag, Decision};
+    use praxis_policy_builtins::pdps::cel::CelResolver;
     use praxis_policy_core::cmf::{Message, Role, ToolCall};
     use praxis_policy_core::extensions::{MetaExtension, SecurityExtension, SubjectExtension};
     use praxis_policy_core::plugin::{OnError, PluginMode};
@@ -713,6 +720,104 @@ mod tests {
     fn listing_hooks_keeps_it_a_post_hook_observer_and_not_a_sink() {
         let observer = Arc::new(AuditLogger::new(cfg()).unwrap());
         assert!(observer.as_audit_handler().is_none());
+    }
+
+    #[test]
+    fn decision_warnings_are_serialized_with_stable_fields() {
+        use praxis_policy_core::decision::DecisionWarning;
+
+        let plugin = AuditLogger::new(sink_cfg()).unwrap();
+        let mut log = DecisionLog::new();
+        log.record_warning(DecisionWarning::new(
+            "assertion_credential_target_used",
+            [
+                ("direction".to_owned(), "request".to_owned()),
+                ("header".to_owned(), "Authorization".to_owned()),
+                ("source".to_owned(), "metadata.account.token".to_owned()),
+            ],
+        ));
+        log.finalize(Verdict::Allow);
+
+        let record =
+            plugin.build_decision_record(Some(&empty_payload()), &Extensions::default(), &log);
+
+        assert_eq!(
+            record["decision_warnings"],
+            serde_json::json!([{
+                "code": "assertion_credential_target_used",
+                "fields": {
+                    "direction": "request",
+                    "header": "Authorization",
+                    "source": "metadata.account.token"
+                }
+            }]),
+            "the audit record must preserve the complete framework warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn cel_metadata_denial_stays_redacted_after_audit_serialization() {
+        const MARKER: &str = "audit-secret-71af";
+
+        let call = PdpCall {
+            dialect: PdpDialect::Cel,
+            args: serde_yaml::from_str(
+                "expr: metadata.account.nested.secret == 'other' || metadata.account['$error_code'] == 'metadata.other'",
+            )
+            .unwrap(),
+        };
+        let structured = StructuredInput::default().with_metadata(
+            Arc::new(serde_json::json!({
+                "account": {
+                    "nested": {"secret": MARKER},
+                    "$error_code": format!("metadata.{MARKER}")
+                }
+            })),
+            Arc::new(serde_json::json!({})),
+            Arc::new(serde_json::json!({})),
+        );
+        let decision = CelResolver::new()
+            .evaluate_structured(&call, &AttributeBag::new(), &structured)
+            .await
+            .unwrap();
+        let Decision::Deny {
+            reason,
+            rule_source,
+        } = decision.decision
+        else {
+            panic!("the false CEL expression must deny");
+        };
+        let mut violation = PluginViolation::new(
+            rule_source,
+            reason.unwrap_or_else(|| "access denied".to_owned()),
+        );
+        violation.details.insert(
+            "diagnostics".to_owned(),
+            serde_json::json!(decision.diagnostics),
+        );
+        let mut log = DecisionLog::new();
+        log.record(
+            "cel",
+            PluginMode::Sequential,
+            PluginAction::Denied(Box::new(violation.clone())),
+        );
+        log.finalize(Verdict::Deny(violation));
+
+        let record = AuditLogger::new(sink_cfg()).unwrap().build_decision_record(
+            Some(&empty_payload()),
+            &Extensions::default(),
+            &log,
+        );
+        let serialized = serde_json::to_string(&record).unwrap();
+
+        assert!(
+            serialized.contains("metadata=map"),
+            "the audit record should retain a value-free metadata diagnostic: {serialized}"
+        );
+        assert!(
+            !serialized.contains(MARKER),
+            "neither metadata values nor source-error values may reach audit: {serialized}"
+        );
     }
 
     #[test]

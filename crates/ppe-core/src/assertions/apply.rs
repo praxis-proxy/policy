@@ -98,6 +98,7 @@ mod tests {
             source: ResolvedSource::From(SourcePath::SubjectId),
             on_missing: OnMissing::Omit,
             encode: None,
+            allow_credential_target: false,
             declared_in: "global".to_owned(),
             level: AssertionLevel::Global,
             overrode: None,
@@ -227,6 +228,47 @@ mod tests {
             headers.get("x-auth-user-id").map(String::as_str),
             Some("alice")
         );
+    }
+
+    /// HTTP field names are case-insensitive per [RFC 9110 Section 5.1].
+    ///
+    /// [RFC 9110 Section 5.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-5.1
+    #[test]
+    fn credential_targets_remove_every_case_variant_before_injection() {
+        for target_name in [
+            "Authorization",
+            "Proxy-Authorization",
+            "Cookie",
+            "Set-Cookie",
+        ] {
+            let lowercase = target_name.to_ascii_lowercase();
+            let uppercase = target_name.to_ascii_uppercase();
+            let mut ext = request(&[
+                (target_name, "spoofed-1"),
+                (&lowercase, "spoofed-2"),
+                (&uppercase, "spoofed-3"),
+            ]);
+
+            apply(
+                &contract(&[target_name], &[]),
+                &[(target_name.to_owned(), "trusted".to_owned())],
+                &mut ext,
+                Direction::Request,
+            );
+
+            let headers = request_headers(&ext);
+            let matching: Vec<_> = headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case(target_name))
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "{target_name} must have exactly one framework-rendered value: {headers:?}"
+            );
+            assert_eq!(matching[0].0, target_name);
+            assert_eq!(matching[0].1, "trusted");
+        }
     }
 
     #[test]

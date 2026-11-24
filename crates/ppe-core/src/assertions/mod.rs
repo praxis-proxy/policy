@@ -46,7 +46,7 @@ pub use floor::{
 };
 pub use render::{MissingSource, render};
 pub use resolved::{ResolvedContract, ResolvedHeader, ResolvedSource};
-pub use source::{SourceError, SourcePath, SourceRejection};
+pub use source::{MetadataPath, SourceError, SourcePath, SourceRejection};
 
 /// Which of the two contracts is in force.
 ///

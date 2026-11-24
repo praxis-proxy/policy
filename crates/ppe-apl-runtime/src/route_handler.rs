@@ -399,7 +399,10 @@ impl AplRouteHandler {
         )
         .await
         {
-            Ok(inv) => Arc::new(inv.with_projection(self.projection)),
+            Ok(inv) => Arc::new(
+                inv.with_structured_metadata_projection(self.structured_input)
+                    .with_projection(self.projection),
+            ),
             Err(e) => {
                 tracing::error!(
                     alarm = "session_store_failure",
@@ -492,13 +495,22 @@ impl AplRouteHandler {
         // A phase without a PDP skips the clone and depth walk. Otherwise,
         // depth is measured once and shared by every PDP step in the phase.
         let structured = if self.structured_input {
-            StructuredInput::new(
+            let structured = StructuredInput::new(
                 post_extensions
                     .llm_request
                     .as_ref()
                     .and_then(|request| request.body_shared().map(Arc::clone)),
                 (self.structured_args && args_value.is_object())
                     .then(|| Arc::new(args_value.clone())),
+            );
+            let (metadata, cedar_metadata, provenance) =
+                praxis_policy_apl_cmf::project_structured_metadata(
+                    post_extensions.metadata.as_deref(),
+                );
+            structured.with_metadata(
+                Arc::new(metadata),
+                Arc::new(cedar_metadata),
+                Arc::new(provenance),
             )
         } else {
             StructuredInput::default()

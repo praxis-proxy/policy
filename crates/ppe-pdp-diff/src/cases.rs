@@ -11,8 +11,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use chrono::{TimeZone as _, Utc};
+use praxis_policy_apl_cmf::{extract_metadata, project_structured_metadata};
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::route::StructuredInput;
+use praxis_policy_core::extensions::{AcquiredFacts, Extensions, MetadataCacheDisposition};
 use serde_json::{Value, json};
 
 use crate::outcome::CauseKind;
@@ -83,7 +86,68 @@ pub(crate) fn catalog() -> Vec<Case> {
         null_field(),
         float_field(),
         duplicate_elements(),
+        metadata_scalar(),
+        metadata_string_set(),
     ]
+}
+
+#[expect(clippy::expect_used, reason = "the test fixture is constant and valid")]
+fn with_metadata(mut case: Case, value: Value) -> Case {
+    let facts = AcquiredFacts::success(
+        value,
+        Utc.timestamp_opt(0, 0).single().expect("epoch exists"),
+        MetadataCacheDisposition::Disabled,
+    );
+    let mut extensions = Extensions::default();
+    extensions
+        .install_metadata("account", "metadata/http", facts)
+        .expect("the parity fixture is valid");
+    let metadata_extension = extensions.metadata.as_deref().expect("metadata installed");
+    extract_metadata(metadata_extension, &mut case.bag);
+    let (metadata, cedar_metadata, metadata_provenance) =
+        project_structured_metadata(Some(metadata_extension));
+    case.structured = case.structured.with_metadata(
+        Arc::new(metadata),
+        Arc::new(cedar_metadata),
+        Arc::new(metadata_provenance),
+    );
+    case
+}
+
+fn metadata_scalar() -> Case {
+    with_metadata(
+        with_apl(
+            case(
+                "metadata-scalar",
+                alice(),
+                "context.metadata.account.active",
+                "metadata.account.active",
+                "allow if input.metadata.account.active",
+                true,
+                Expect::AgreeAllow,
+            ),
+            "require(metadata.account.active)",
+        ),
+        json!({"active": true}),
+    )
+}
+
+fn metadata_string_set() -> Case {
+    with_metadata(
+        with_apl(
+            case(
+                "metadata-string-set",
+                alice(),
+                r#"context.metadata.account.roles.contains("reader")"#,
+                r#""reader" in metadata.account.roles"#,
+                r#"allow if "reader" in input.metadata.account.roles"#,
+                true,
+                Expect::AgreeAllow,
+            ),
+            r#"require(metadata.account.roles contains "reader")"#,
+        ),
+        json!({"roles": ["reader", "writer"]}),
+    )
 }
 
 fn alice() -> AttributeBag {
@@ -345,9 +409,7 @@ fn missing_subject_id() -> Case {
 }
 
 fn alice_via_bridge() -> AttributeBag {
-    use praxis_policy_core::extensions::{
-        Extensions, SecurityExtension, SubjectExtension, SubjectType,
-    };
+    use praxis_policy_core::extensions::{SecurityExtension, SubjectExtension, SubjectType};
 
     let ext = Extensions {
         security: Some(Arc::new(SecurityExtension {

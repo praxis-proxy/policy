@@ -320,6 +320,58 @@ routes:
 }
 
 #[tokio::test]
+async fn object_rule_field_references_preserve_metadata_denials() {
+    let yaml = r#"
+engine_settings:
+  dispatch: policy
+global:
+  pdp:
+    - kind: opa
+      modules:
+        - |
+          package helpers
+          policy := {"deny": [m | input.metadata.account.suspended; m := "suspended"]}
+        - |
+          package authz
+          deny := data.helpers.policy.deny
+routes:
+  - tool: get_document
+    authorization:
+      pre_invocation:
+        - opa:
+            query: data.authz.deny
+"#;
+    let manager = build_manager_with_yaml(yaml)
+        .await
+        .expect("object-valued policy loads");
+    for suspended in [false, true] {
+        let mut extensions = Extensions {
+            meta: Some(Arc::new(meta_for_tool("get_document"))),
+            ..Default::default()
+        };
+        extensions
+            .install_metadata(
+                "account",
+                "metadata/http",
+                AcquiredFacts::success(
+                    serde_json::json!({"suspended": suspended}),
+                    "2026-11-18T09:00:00Z".parse().expect("timestamp parses"),
+                    MetadataCacheDisposition::Disabled,
+                ),
+            )
+            .expect("host metadata installs");
+        let (result, _background) = manager
+            .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), extensions, None)
+            .await;
+        assert_eq!(
+            result.continue_processing, !suspended,
+            "the account facts must control the object-field reference; {:?}",
+            result.violation
+        );
+    }
+}
+
+#[tokio::test]
 async fn deny_set_whole_input_alias_receives_metadata_end_to_end() {
     const YAML: &str = r#"
 engine_settings:
