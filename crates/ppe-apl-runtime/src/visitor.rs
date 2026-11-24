@@ -1259,6 +1259,9 @@ impl ConfigVisitor for AplConfigVisitor {
             // effective policy in evaluation order.
             let mut effective = CompiledRoute::new(&route_key);
             if let Some(layer) = state.global_layer.clone() {
+                let source = format!("global (inherited by route '{route_key}')");
+                reject_unknown_field_paths(entity_type, &source, &layer)?;
+                reject_writes_to_read_only_fields(entity_type, &source, &layer)?;
                 effective.apply_layer(layer);
             }
             if let Some(layer) = state.default_layers.get(entity_type).cloned() {

@@ -28,7 +28,7 @@ use std::time::Duration;
 use crate::attributes::{AttributeBag, AttributeValue};
 use crate::pipeline::{Pipeline, ScanKind, Stage, TaintEvent, TaintScope, TypeCheck};
 use crate::rules::{CompareOp, Condition, Effect, Expression, Literal, Rule};
-use crate::step::{PdpResolver, PluginInvocation, PluginInvoker};
+use crate::step::{FieldLocation, PdpResolver, PluginInvocation, PluginInvoker};
 
 /// Outcome of evaluating a phase's rule list.
 #[derive(Debug, Clone, PartialEq)]
@@ -1473,7 +1473,7 @@ async fn dispatch_field_op(
     result_modified: &mut bool,
     payload: &mut crate::route::RoutePayload,
 ) -> EffectOutcome {
-    use crate::route::{get_concrete, remove_concrete, set_concrete};
+    use crate::route::{apply_omissions, field_parents, get_concrete, omit_field, set_concrete};
     use crate::step::DispatchPhase;
 
     // Pick the right side of the payload based on the path prefix.
@@ -1522,37 +1522,54 @@ async fn dispatch_field_op(
         Side::Args => *args = true,
         Side::Result => *result = true,
     };
+    let mut omissions = Vec::new();
     for concrete in paths {
         let Some(current) = get_concrete(root, &concrete).cloned() else {
             continue; // missing field on this element → silent no-op
         };
         // Plugins receive a root-relative field name; deny messages use the
         // prefixed path to identify the args or result side.
+        let parents = field_parents(root, &concrete).unwrap_or_default();
+        let location = FieldLocation {
+            path: &concrete,
+            parents: &parents,
+        };
         let eval =
-            evaluate_pipeline_at(&pipeline, &current, bag, plugins, subpath, phase, &concrete)
-                .await;
+            evaluate_pipeline_at(&pipeline, &current, bag, plugins, subpath, phase, location).await;
         taints.extend(eval.taints);
         match eval.outcome {
             FieldOutcome::Pass => {},
             FieldOutcome::Replace(new_val) => {
                 if set_concrete(root, &concrete, new_val) {
-                    plugins.record_field_write(&concrete, phase).await;
+                    plugins
+                        .record_field_write(
+                            &concrete,
+                            phase,
+                            get_concrete(root, &concrete),
+                            &parents,
+                        )
+                        .await;
                     mark_modified(side, args_modified, result_modified);
                 }
             },
             FieldOutcome::Omit => {
-                if remove_concrete(root, &concrete) {
-                    plugins.record_field_write(&concrete, phase).await;
+                if omit_field(root, concrete, &mut omissions, plugins, phase).await {
                     mark_modified(side, args_modified, result_modified);
                 }
             },
             FieldOutcome::Deny { reason, .. } => {
+                if apply_omissions(root, &mut omissions, plugins, phase).await {
+                    mark_modified(side, args_modified, result_modified);
+                }
                 return EffectOutcome::Halt(Decision::Deny {
                     reason: Some(reason),
                     rule_source: fallback_source.to_owned(),
                 });
             },
         }
+    }
+    if apply_omissions(root, &mut omissions, plugins, phase).await {
+        mark_modified(side, args_modified, result_modified);
     }
     EffectOutcome::Continue
 }
@@ -1619,7 +1636,11 @@ pub async fn evaluate_pipeline(
     phase: crate::step::DispatchPhase,
 ) -> PipelineEvaluation {
     let path: Vec<String> = field_name.split('.').map(str::to_owned).collect();
-    evaluate_pipeline_at(pipeline, value, bag, plugins, field_name, phase, &path).await
+    let location = FieldLocation {
+        path: &path,
+        parents: &[],
+    };
+    evaluate_pipeline_at(pipeline, value, bag, plugins, field_name, phase, location).await
 }
 
 /// Evaluate one expanded field without splitting keys that contain dots.
@@ -1630,7 +1651,7 @@ pub(crate) async fn evaluate_pipeline_at(
     plugins: &Arc<dyn PluginInvoker>,
     field_name: &str,
     phase: crate::step::DispatchPhase,
-    path: &[String],
+    location: FieldLocation<'_>,
 ) -> PipelineEvaluation {
     let mut current = value.clone();
     let mut replaced = false;
@@ -1853,7 +1874,10 @@ pub(crate) async fn evaluate_pipeline_at(
                     value: &current,
                     phase,
                 };
-                match plugins.invoke_field_at(name, bag, invocation, path).await {
+                match plugins
+                    .invoke_field_at(name, bag, invocation, location)
+                    .await
+                {
                     Ok(outcome) => {
                         // Plugins can emit taints regardless of decision.
                         taints.extend(outcome.taints);

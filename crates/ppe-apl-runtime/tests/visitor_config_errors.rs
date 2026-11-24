@@ -759,6 +759,47 @@ fn recursive_icon_descendant_writes_are_refused() {
     );
 }
 
+#[test]
+fn icon_reads_and_writable_recursive_descendants_load() {
+    loads(
+        "routes:\n  - resource: hr://employees/*\n    result:\n      icons.src: str\n      icons.3.mime_type: str\n      icons.sizes.0: str\n      \"**.uri.label\": redact\n",
+    );
+    let e = load_err(
+        "routes:\n  - resource: hr://employees/*\n    result:\n      icons.contnet: str\n",
+    );
+    assert!(e.contains("icons"), "unknown icon fields must fail: {e}");
+}
+
+#[test]
+fn fixed_condition_fields_and_inherited_global_rules_are_validated() {
+    for scope in [
+        "routes:\n  - resource: '*'\n    authorization:\n      post_invocation:\n        - \"result.contnet == 'secret': deny\"\n",
+        "routes:\n  - resource: '*'\n    authorization:\n      post_invocation:\n        - when: \"result.uri != ''\"\n          do: \"result.content | redact(result.contnet == 'secret')\"\n",
+        "global:\n  authorization:\n    post_invocation:\n      - \"result.contnet == 'secret': deny\"\nroutes:\n  - resource: '*'\n",
+        "global:\n  authorization:\n    post_invocation:\n      - when: \"result.uri != ''\"\n        do: \"result.uri | redact\"\nroutes:\n  - resource: '*'\n",
+    ] {
+        let e = load_err(scope);
+        assert!(
+            e.contains("contnet") || e.contains("read-only"),
+            "fixed field errors must fail at load: {e}"
+        );
+    }
+    loads(
+        "global:\n  authorization:\n    post_invocation:\n      - \"result.content == 'secret': deny\"\nroutes:\n  - resource: '*'\n  - prompt: '*'\n",
+    );
+}
+
+#[test]
+fn icon_descendants_in_conditions_are_refused_as_unavailable_attributes() {
+    let e = load_err(
+        "routes:\n  - resource: '*'\n    authorization:\n      post_invocation:\n        - \"result.icons.0.src == 'bad': deny\"\n",
+    );
+    assert!(
+        e.contains("field pipelines"),
+        "icon objects have no descendant predicate attributes: {e}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

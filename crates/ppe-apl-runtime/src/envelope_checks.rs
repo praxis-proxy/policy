@@ -8,7 +8,7 @@ use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_PROMPT, ENTITY_RESO
 use praxis_policy_core::visitor::VisitorError;
 
 use praxis_policy_apl_core::pipeline::{FieldRule, ScanKind, Stage};
-use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
+use praxis_policy_apl_core::rules::{CompiledRoute, Condition, Effect, Expression};
 
 use crate::dispatch_plan::walk_effects;
 use crate::message_projection::{
@@ -22,6 +22,15 @@ use crate::message_projection::{
 
 /// The field-path segment that matches at any depth (`**.ssn`).
 const RECURSIVE_SEGMENT: &str = "**";
+
+const ICON_FIELD_PATHS: &[&[&str]] = &[
+    &["icons"],
+    &["icons", "[]"],
+    &["icons", "[]", "src"],
+    &["icons", "[]", "mime_type"],
+    &["icons", "[]", "sizes"],
+    &["icons", "[]", "sizes", "[]"],
+];
 
 /// Reject field blocks on HTTP routes, whose payload exposes no fields.
 ///
@@ -68,15 +77,8 @@ pub(crate) fn reject_writes_to_read_only_fields(
 ) -> Result<(), VisitorError> {
     for envelope in fixed_envelopes(entity_type, layer) {
         for field_use in &envelope.uses {
-            let addressed = field_use
-                .field
-                .split('.')
-                .find(|segment| *segment != RECURSIVE_SEGMENT)
-                .unwrap_or_default()
-                .to_lowercase();
-            if (envelope.read_only.contains(&addressed.as_str())
-                || reaches_read_only_descendant(&envelope, field_use))
-                && field_use.stages.iter().any(stage_writes)
+            if field_use.stages.iter().any(stage_writes)
+                && reaches_read_only_descendant(&envelope, field_use)
             {
                 return Err(format!(
                     "{scope}: {origin} changes `{field}`, which is read-only on a \
@@ -135,6 +137,19 @@ pub(crate) fn reject_unknown_field_paths(
                 )
                 .into());
             };
+            if known == "icons" {
+                if field_use.condition && segments.any(|segment| segment != RECURSIVE_SEGMENT) {
+                    return Err(format!("{scope}: a condition names `{field}`, but icon descendants are available only to field pipelines", field = field_use.field).into());
+                }
+                let pattern: Vec<&str> = field_use.field.split('.').collect();
+                if ICON_FIELD_PATHS
+                    .iter()
+                    .any(|path| selector_matches(&pattern, path, ignore_case))
+                {
+                    continue;
+                }
+                return Err(format!("{scope}: {origin} names `{field}`, but icons have only src, mime_type and sizes fields", origin = field_use.origin, field = field_use.field).into());
+            }
             if segments.any(|segment| segment != RECURSIVE_SEGMENT)
                 && !OPEN_MAP_FIELDS.contains(&known)
             {
@@ -151,44 +166,46 @@ pub(crate) fn reject_unknown_field_paths(
     Ok(())
 }
 
-/// Whether a path can reach the read-only icon subtree.
-fn reaches_read_only_descendant(envelope: &FixedEnvelope<'_>, field: &FieldUse<'_>) -> bool {
-    fn matches(pattern: &[&str], path: &[&str]) -> bool {
-        let Some((segment, rest)) = pattern.split_first() else {
-            return path.is_empty();
-        };
-        if *segment == RECURSIVE_SEGMENT {
-            return matches(rest, path)
-                || path
-                    .split_first()
-                    .is_some_and(|(_, tail)| matches(pattern, tail));
-        }
-        let Some((key, tail)) = path.split_first() else {
-            return false;
-        };
-        let same = *segment == *key || (*key == "0" && segment.parse::<usize>().is_ok());
-        (same && matches(rest, tail)) || (*key == "0" && matches(pattern, tail))
-    }
-    if !envelope.read_only.contains(&"icons") {
-        return false;
-    }
-    let name = if matches_without_case(field.stages) {
-        field.field.to_lowercase()
-    } else {
-        field.field.to_owned()
+/// Match a selector against one fixed schema path. `[]` denotes an array index.
+fn selector_matches(pattern: &[&str], path: &[&str], ignore_case: bool) -> bool {
+    let Some((segment, rest)) = pattern.split_first() else {
+        return path.is_empty();
     };
-    let pattern: Vec<&str> = name.split('.').collect();
+    if *segment == RECURSIVE_SEGMENT {
+        return selector_matches(rest, path, ignore_case)
+            || path
+                .split_first()
+                .is_some_and(|(_, tail)| selector_matches(pattern, tail, ignore_case));
+    }
+    let Some((key, tail)) = path.split_first() else {
+        return false;
+    };
+    let same = if *key == "[]" {
+        segment.parse::<usize>().is_ok()
+    } else if ignore_case {
+        segment.eq_ignore_ascii_case(key)
+    } else {
+        *segment == *key
+    };
+    (same && selector_matches(rest, tail, ignore_case))
+        || (*key == "[]" && selector_matches(pattern, tail, ignore_case))
+}
+
+/// Whether the full selector can reach a protected value.
+fn reaches_read_only_descendant(envelope: &FixedEnvelope<'_>, field: &FieldUse<'_>) -> bool {
+    let pattern: Vec<&str> = field.field.split('.').collect();
     if pattern.iter().all(|segment| *segment == RECURSIVE_SEGMENT) {
         return false;
     }
-    [
-        &["icons", "0", "src"][..],
-        &["icons", "0", "mime_type"][..],
-        &["icons", "0", "sizes"][..],
-        &["icons", "0", "sizes", "0"][..],
-    ]
-    .iter()
-    .any(|path| matches(&pattern, path))
+    let ignore_case = matches_without_case(field.stages);
+    envelope
+        .read_only
+        .iter()
+        .any(|field| selector_matches(&pattern, &[field], ignore_case))
+        || (envelope.read_only.contains(&"icons")
+            && ICON_FIELD_PATHS
+                .iter()
+                .any(|path| selector_matches(&pattern, path, ignore_case)))
 }
 
 /// Return the fixed envelopes addressed by a route's field operations.
@@ -228,6 +245,7 @@ fn field_uses<'a>(
     let mut uses: Vec<FieldUse<'a>> = rules
         .iter()
         .map(|rule| FieldUse {
+            condition: false,
             field: &rule.field,
             origin: format!("the `{block}:` block"),
             stages: &rule.pipeline.stages,
@@ -238,20 +256,85 @@ fn field_uses<'a>(
         ("post_invocation", &layer.post_invocation),
     ] {
         walk_effects(effects, &mut |effect| {
-            if let Effect::FieldOp { path, stages } = effect
-                && let Some(field) = path
+            if let Effect::When { condition, .. } = effect {
+                condition_fields(condition, block, &mut uses);
+            }
+            if let Effect::FieldOp { path, stages } = effect {
+                stage_condition_fields(stages, block, &mut uses);
+                if let Some(field) = path
                     .strip_prefix(block)
                     .and_then(|rest| rest.strip_prefix('.'))
-            {
-                uses.push(FieldUse {
-                    field,
-                    origin: format!("a `{phase}:` rule"),
-                    stages,
-                });
+                {
+                    uses.push(FieldUse {
+                        condition: false,
+                        field,
+                        origin: format!("a `{phase}:` rule"),
+                        stages,
+                    });
+                }
             }
         });
     }
+    for rule in rules {
+        stage_condition_fields(&rule.pipeline.stages, block, &mut uses);
+    }
     uses
+}
+
+fn stage_condition_fields<'a>(
+    stages: &'a [Stage],
+    block: &'static str,
+    uses: &mut Vec<FieldUse<'a>>,
+) {
+    for stage in stages {
+        if let Stage::Redact {
+            condition: Some(condition),
+        } = stage
+        {
+            condition_fields(condition, block, uses);
+        }
+    }
+}
+
+fn condition_fields<'a>(
+    expression: &'a Expression,
+    block: &'static str,
+    uses: &mut Vec<FieldUse<'a>>,
+) {
+    let mut add = |key: &'a str| {
+        if let Some(field) = key
+            .strip_prefix(block)
+            .and_then(|key| key.strip_prefix('.'))
+        {
+            uses.push(FieldUse {
+                condition: true,
+                field,
+                origin: "a condition".to_owned(),
+                stages: &[],
+            });
+        }
+    };
+    match expression {
+        Expression::Condition(condition) => match condition {
+            Condition::Comparison { key, .. }
+            | Condition::IsTrue { key }
+            | Condition::IsFalse { key }
+            | Condition::Exists { key } => add(key),
+            Condition::InSet {
+                value_key, set_key, ..
+            } => {
+                add(value_key);
+                add(set_key);
+            },
+        },
+        Expression::And(expressions) | Expression::Or(expressions) => {
+            for expression in expressions {
+                condition_fields(expression, block, uses);
+            }
+        },
+        Expression::Not(expression) => condition_fields(expression, block, uses),
+        Expression::Always => {},
+    }
 }
 
 /// One block's field uses and the fixed envelope they address.
@@ -286,6 +369,7 @@ fn envelope_field(
 /// One field path addressed in an envelope, where it was written, and the
 /// stages applied to it.
 struct FieldUse<'a> {
+    condition: bool,
     field: &'a str,
     origin: String,
     stages: &'a [Stage],

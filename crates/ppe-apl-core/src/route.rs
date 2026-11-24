@@ -29,7 +29,8 @@ use crate::evaluator::{Decision, FieldOutcome, evaluate_effects, evaluate_pipeli
 use crate::pipeline::{Stage, TaintEvent};
 use crate::rules::CompiledRoute;
 use crate::step::{
-    DelegationInvoker, DispatchPhase, ElicitationInvoker, PdpResolver, PluginInvoker,
+    DelegationInvoker, DispatchPhase, ElicitationInvoker, FieldLocation, FieldParent, PdpResolver,
+    PluginInvoker,
 };
 
 /// Deepest structured input a PDP step accepts, the default recursion limit
@@ -248,10 +249,12 @@ pub async fn evaluate_pre(
                 pending: None,
             };
         };
+        let mut omissions = Vec::new();
         for path in paths {
             let Some(current) = get_concrete(&payload.args, &path).cloned() else {
                 continue; // missing field on this element → no pipeline to run
             };
+            let parents = field_parents(&payload.args, &path).unwrap_or_default();
             let eval = evaluate_pipeline_at(
                 &rule.pipeline,
                 &current,
@@ -259,7 +262,10 @@ pub async fn evaluate_pre(
                 plugins,
                 &rule.field,
                 DispatchPhase::Pre,
-                &path,
+                FieldLocation {
+                    path: &path,
+                    parents: &parents,
+                },
             )
             .await;
             taints.extend(eval.taints);
@@ -267,17 +273,35 @@ pub async fn evaluate_pre(
                 FieldOutcome::Pass => {},
                 FieldOutcome::Replace(new_val) => {
                     if set_concrete(&mut payload.args, &path, new_val) {
-                        plugins.record_field_write(&path, DispatchPhase::Pre).await;
+                        plugins
+                            .record_field_write(
+                                &path,
+                                DispatchPhase::Pre,
+                                get_concrete(&payload.args, &path),
+                                &parents,
+                            )
+                            .await;
                         args_modified = true;
                     }
                 },
                 FieldOutcome::Omit => {
-                    if remove_concrete(&mut payload.args, &path) {
-                        plugins.record_field_write(&path, DispatchPhase::Pre).await;
-                        args_modified = true;
-                    }
+                    args_modified |= omit_field(
+                        &mut payload.args,
+                        path,
+                        &mut omissions,
+                        plugins,
+                        DispatchPhase::Pre,
+                    )
+                    .await;
                 },
                 FieldOutcome::Deny { reason, .. } => {
+                    args_modified |= apply_omissions(
+                        &mut payload.args,
+                        &mut omissions,
+                        plugins,
+                        DispatchPhase::Pre,
+                    )
+                    .await;
                     return RouteDecision {
                         decision: Decision::Deny {
                             reason: Some(reason),
@@ -294,6 +318,13 @@ pub async fn evaluate_pre(
                 },
             }
         }
+        args_modified |= apply_omissions(
+            &mut payload.args,
+            &mut omissions,
+            plugins,
+            DispatchPhase::Pre,
+        )
+        .await;
     }
 
     let policy_eval = evaluate_effects(
@@ -360,10 +391,12 @@ pub async fn evaluate_post(
                     pending: None,
                 };
             };
+            let mut omissions = Vec::new();
             for path in paths {
                 let Some(current) = get_concrete(result, &path).cloned() else {
                     continue;
                 };
+                let parents = field_parents(result, &path).unwrap_or_default();
                 let eval = evaluate_pipeline_at(
                     &rule.pipeline,
                     &current,
@@ -371,7 +404,10 @@ pub async fn evaluate_post(
                     plugins,
                     &rule.field,
                     DispatchPhase::Post,
-                    &path,
+                    FieldLocation {
+                        path: &path,
+                        parents: &parents,
+                    },
                 )
                 .await;
                 taints.extend(eval.taints);
@@ -379,17 +415,26 @@ pub async fn evaluate_post(
                     FieldOutcome::Pass => {},
                     FieldOutcome::Replace(new_val) => {
                         if set_concrete(result, &path, new_val) {
-                            plugins.record_field_write(&path, DispatchPhase::Post).await;
+                            plugins
+                                .record_field_write(
+                                    &path,
+                                    DispatchPhase::Post,
+                                    get_concrete(result, &path),
+                                    &parents,
+                                )
+                                .await;
                             result_modified = true;
                         }
                     },
                     FieldOutcome::Omit => {
-                        if remove_concrete(result, &path) {
-                            plugins.record_field_write(&path, DispatchPhase::Post).await;
-                            result_modified = true;
-                        }
+                        result_modified |=
+                            omit_field(result, path, &mut omissions, plugins, DispatchPhase::Post)
+                                .await;
                     },
                     FieldOutcome::Deny { reason, .. } => {
+                        result_modified |=
+                            apply_omissions(result, &mut omissions, plugins, DispatchPhase::Post)
+                                .await;
                         return RouteDecision {
                             decision: Decision::Deny {
                                 reason: Some(reason),
@@ -406,6 +451,8 @@ pub async fn evaluate_post(
                     },
                 }
             }
+            result_modified |=
+                apply_omissions(result, &mut omissions, plugins, DispatchPhase::Post).await;
         }
     }
 
@@ -552,6 +599,64 @@ pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option
     let segs: Vec<&str> = path.split('.').collect();
     let mut out = Vec::new();
     walk(root, &segs, "", 0, &mut out).then_some(out)
+}
+
+/// Keep array indexes stable while retaining immediate object-key omissions.
+pub(crate) async fn omit_field(
+    root: &mut serde_json::Value,
+    path: Vec<String>,
+    omissions: &mut Vec<Vec<String>>,
+    plugins: &Arc<dyn PluginInvoker>,
+    phase: DispatchPhase,
+) -> bool {
+    let parents = field_parents(root, &path).unwrap_or_default();
+    if matches!(parents.last(), Some(FieldParent::Array { .. })) {
+        omissions.push(path);
+        return false;
+    }
+    if remove_concrete(root, &path) {
+        plugins
+            .record_field_write(&path, phase, None, &parents)
+            .await;
+        return true;
+    }
+    false
+}
+
+/// Apply omissions after a field rule has evaluated every selected value.
+pub(crate) async fn apply_omissions(
+    root: &mut serde_json::Value,
+    paths: &mut Vec<Vec<String>>,
+    plugins: &Arc<dyn PluginInvoker>,
+    phase: DispatchPhase,
+) -> bool {
+    paths.sort_by(|left, right| {
+        for (left, right) in left.iter().zip(right) {
+            let order = match (left.parse::<usize>(), right.parse::<usize>()) {
+                (Ok(left_index), Ok(right_index)) => {
+                    right_index.cmp(&left_index).then_with(|| right.cmp(left))
+                },
+                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => right.cmp(left),
+            };
+            if !order.is_eq() {
+                return order;
+            }
+        }
+        right.len().cmp(&left.len())
+    });
+    let mut modified = false;
+    for path in paths.drain(..) {
+        let parents = field_parents(root, &path).unwrap_or_default();
+        if remove_concrete(root, &path) {
+            plugins
+                .record_field_write(&path, phase, None, &parents)
+                .await;
+            modified = true;
+        }
+    }
+    modified
 }
 
 /// Redaction matches JSON keys without case sensitivity. `**` is an optional
@@ -710,6 +815,38 @@ pub fn get_dotted<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a ser
         cur = segment_get(cur, seg)?;
     }
     Some(cur)
+}
+
+/// Return the parent containers for a concrete field path.
+///
+/// Returns `None` when a parent is missing or scalar. The leaf itself may be
+/// absent, so a host can validate a write that restores an omitted field.
+///
+/// # Examples
+///
+/// ```
+/// use praxis_policy_apl_core::route::field_parents;
+/// use praxis_policy_apl_core::step::FieldParent;
+/// let value = serde_json::json!({"rows": [{"name": "Ada"}]});
+/// let path = vec!["rows".to_owned(), "0".to_owned(), "name".to_owned()];
+/// assert_eq!(field_parents(&value, &path), Some(vec![
+///     FieldParent::Object, FieldParent::Array { len: 1 }, FieldParent::Object,
+/// ]));
+/// ```
+pub fn field_parents(root: &serde_json::Value, path: &[String]) -> Option<Vec<FieldParent>> {
+    let mut value = root;
+    let mut parents = Vec::with_capacity(path.len());
+    for (index, segment) in path.iter().enumerate() {
+        parents.push(match value {
+            serde_json::Value::Object(_) => FieldParent::Object,
+            serde_json::Value::Array(items) => FieldParent::Array { len: items.len() },
+            _ => return None,
+        });
+        if index + 1 < path.len() {
+            value = segment_get(value, segment)?;
+        }
+    }
+    Some(parents)
 }
 
 /// Read a concrete path without splitting object keys that contain dots.
@@ -1993,5 +2130,296 @@ mod tests {
             !set_dotted(&mut v, "flat.inner", json!("x")),
             "nor written through"
         );
+    }
+    #[tokio::test]
+    async fn omissions_evaluate_every_array_element_in_both_phases() {
+        let values = serde_json::Value::Array((0..12).map(|index| json!(index)).collect());
+        let stages = vec![Stage::Redact { condition: None }, Stage::Omit];
+        let mut route = CompiledRoute::new("arrays");
+        route.args.push(field_rule("**", stages.clone()));
+        route.result.push(field_rule("**", stages));
+        let mut payload = RoutePayload::with_result(values.clone(), values);
+        let decision = evaluate_route(
+            &route,
+            &mut AttributeBag::new(),
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(
+            payload.args,
+            json!([]),
+            "omission must not skip shifted request elements"
+        );
+        assert_eq!(
+            payload.result,
+            Some(json!([])),
+            "omission must not skip shifted response elements"
+        );
+    }
+
+    #[tokio::test]
+    async fn omissions_remove_nested_array_leaves_under_mixed_object_keys() {
+        let values = json!({"2": [[1, 2], [3, 4]], "10": [[5, 6]], "1a": [[7, 8]]});
+        let mut route = CompiledRoute::new("nested-arrays");
+        route.result.push(field_rule(
+            "**.0",
+            vec![Stage::Redact { condition: None }, Stage::Omit],
+        ));
+        let mut payload = RoutePayload::with_result(json!({}), values);
+        let decision = evaluate_post(
+            &route,
+            &mut AttributeBag::new(),
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(
+            payload.result,
+            Some(json!({"2": [[4]], "10": [], "1a": []})),
+            "nested removals must address original indexes and retain sibling keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn omissions_preserve_plugin_order_and_original_values() {
+        for request in [true, false] {
+            let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorder: Arc<dyn PluginInvoker> = Arc::new(OmissionRecorder {
+                calls: Arc::clone(&calls),
+                deny_at: None,
+            });
+            let mut route = CompiledRoute::new("order");
+            let rule = field_rule(
+                "**",
+                vec![
+                    Stage::Plugin {
+                        name: "recorder".to_owned(),
+                    },
+                    Stage::Redact { condition: None },
+                    Stage::Omit,
+                ],
+            );
+            let mut payload = RoutePayload::with_result(json!([0, 1, 2]), json!([0, 1, 2]));
+            let decision = if request {
+                route.args.push(rule);
+                evaluate_pre(
+                    &route,
+                    &mut AttributeBag::new(),
+                    &mut payload,
+                    &pdp_arc(),
+                    &recorder,
+                    &delegations(),
+                    &elicitations(),
+                )
+                .await
+            } else {
+                route.result.push(rule);
+                evaluate_post(
+                    &route,
+                    &mut AttributeBag::new(),
+                    &mut payload,
+                    &pdp_arc(),
+                    &recorder,
+                    &delegations(),
+                    &elicitations(),
+                )
+                .await
+            };
+            assert_eq!(decision.decision, Decision::Allow);
+            assert_eq!(
+                *calls.lock().expect("recorder"),
+                vec![json!([0, 1, 2]), json!(0), json!(1), json!(2)],
+                "plugins must see the original values in their original evaluation order"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_omission_before_a_later_deny_is_retained() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder: Arc<dyn PluginInvoker> = Arc::new(OmissionRecorder {
+            calls: Arc::clone(&calls),
+            deny_at: Some(1),
+        });
+        let mut route = CompiledRoute::new("deny");
+        route.result.push(field_rule(
+            "**",
+            vec![
+                Stage::Plugin {
+                    name: "recorder".to_owned(),
+                },
+                Stage::Redact { condition: None },
+                Stage::Omit,
+            ],
+        ));
+        let mut payload = RoutePayload::with_result(json!({}), json!([0, 1, 2]));
+        let decision = evaluate_post(
+            &route,
+            &mut AttributeBag::new(),
+            &mut payload,
+            &pdp_arc(),
+            &recorder,
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        assert!(matches!(decision.decision, Decision::Deny { .. }));
+        assert!(
+            decision.result_modified,
+            "the earlier omission must still be reported"
+        );
+        assert_eq!(payload.result, Some(json!([1, 2])));
+        assert_eq!(
+            *calls.lock().expect("recorder"),
+            vec![json!([0, 1, 2]), json!(0), json!(1)],
+            "no plugin after the deny may run"
+        );
+    }
+
+    #[tokio::test]
+    async fn field_ops_preserve_omission_evaluation_order() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder: Arc<dyn PluginInvoker> = Arc::new(OmissionRecorder {
+            calls: Arc::clone(&calls),
+            deny_at: None,
+        });
+        let mut route = CompiledRoute::new("field-op");
+        route.post_invocation.push(Effect::FieldOp {
+            path: "result.**".to_owned(),
+            stages: vec![
+                Stage::Plugin {
+                    name: "recorder".to_owned(),
+                },
+                Stage::Redact { condition: None },
+                Stage::Omit,
+            ],
+        });
+        let mut payload = RoutePayload::with_result(json!({}), json!([0, 1, 2]));
+        let decision = evaluate_post(
+            &route,
+            &mut AttributeBag::new(),
+            &mut payload,
+            &pdp_arc(),
+            &recorder,
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(payload.result, Some(json!([])));
+        assert_eq!(
+            *calls.lock().expect("recorder"),
+            vec![json!([0, 1, 2]), json!(0), json!(1), json!(2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_field_plugins_keep_the_existing_value_contract() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder: Arc<dyn PluginInvoker> = Arc::new(OmissionRecorder {
+            calls: Arc::clone(&calls),
+            deny_at: None,
+        });
+        let pipeline = Pipeline {
+            stages: vec![
+                Stage::Type(TypeCheck::Str),
+                Stage::Plugin {
+                    name: "recorder".to_owned(),
+                },
+            ],
+        };
+        let evaluation = crate::evaluator::evaluate_pipeline(
+            &pipeline,
+            &json!("plain text"),
+            &AttributeBag::new(),
+            &recorder,
+            "body",
+            DispatchPhase::Post,
+        )
+        .await;
+        assert_eq!(evaluation.outcome, FieldOutcome::Pass);
+        assert_eq!(*calls.lock().expect("recorder"), vec![json!("plain text")]);
+    }
+
+    #[tokio::test]
+    async fn object_omissions_keep_their_existing_parent_behavior() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder: Arc<dyn PluginInvoker> = Arc::new(OmissionRecorder {
+            calls: Arc::clone(&calls),
+            deny_at: None,
+        });
+        let mut route = CompiledRoute::new("object");
+        route.result.push(field_rule(
+            "**",
+            vec![
+                Stage::Plugin {
+                    name: "recorder".to_owned(),
+                },
+                Stage::Redact { condition: None },
+                Stage::Omit,
+            ],
+        ));
+        let mut payload = RoutePayload::with_result(json!({}), json!({"branch": {"name": "Ada"}}));
+        let decision = evaluate_post(
+            &route,
+            &mut AttributeBag::new(),
+            &mut payload,
+            &pdp_arc(),
+            &recorder,
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(
+            *calls.lock().expect("recorder"),
+            vec![json!({"branch": {"name": "Ada"}}), json!({"name": "Ada"})],
+            "object-key omission must not introduce extra descendant plugin calls"
+        );
+        assert_eq!(payload.result, Some(json!({})));
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    struct OmissionRecorder {
+        calls: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        deny_at: Option<i64>,
+    }
+
+    #[async_trait::async_trait]
+    impl PluginInvoker for OmissionRecorder {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _bag: &AttributeBag,
+            invocation: crate::step::PluginInvocation<'_>,
+        ) -> Result<crate::step::PluginOutcome, crate::step::PluginError> {
+            let mut decision = Decision::Allow;
+            if let crate::step::PluginInvocation::Field { value, .. } = invocation {
+                self.calls.lock().expect("recorder").push(value.clone());
+                if self.deny_at.is_some() && value.as_i64() == self.deny_at {
+                    decision = Decision::Deny {
+                        reason: Some("stop".to_owned()),
+                        rule_source: "recorder".to_owned(),
+                    };
+                }
+            }
+            Ok(crate::step::PluginOutcome {
+                decision,
+                taints: Vec::new(),
+                modified_value: None,
+            })
+        }
     }
 }

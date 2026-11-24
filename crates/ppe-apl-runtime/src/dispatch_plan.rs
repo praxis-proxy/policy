@@ -734,22 +734,32 @@ fn attribute_path_uses_metadata(path: &str) -> bool {
     false
 }
 
-/// Walk a `CompiledRoute` and return the unique plugin names referenced
-/// by any `Effect::Plugin` anywhere in `pre_invocation` / `post_invocation` (including
-/// nested) or `Stage::Plugin` (in `args` / `result` pipelines).
-/// Insertion-ordered for build determinism.
+/// CMF plugin names needed by policy steps, field operations and field pipelines.
 pub(crate) fn collect_plugin_names(route: &CompiledRoute) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut visit = |e: &Effect| {
-        if let Effect::Plugin { name } = e
-            && seen.insert(name.clone())
-        {
-            out.push(name.clone());
-        }
-    };
-    walk_effects(&route.pre_invocation, &mut visit);
-    walk_effects(&route.post_invocation, &mut visit);
+    for (effects, request_half) in [
+        (&route.pre_invocation, true),
+        (&route.post_invocation, false),
+    ] {
+        walk_effects(effects, &mut |effect| match effect {
+            Effect::Plugin { name } => {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
+            },
+            Effect::FieldOp { path, stages } if field_op_runs_in_half(path, request_half) => {
+                for stage in stages {
+                    if let Stage::Plugin { name } = stage
+                        && seen.insert(name.clone())
+                    {
+                        out.push(name.clone());
+                    }
+                }
+            },
+            _ => {},
+        });
+    }
     for fr in route.args.iter().chain(route.result.iter()) {
         for stage in &fr.pipeline.stages {
             if let Stage::Plugin { name } = stage
@@ -765,8 +775,7 @@ pub(crate) fn collect_plugin_names(route: &CompiledRoute) -> Vec<String> {
 /// The plugin names a `CompiledRoute` reaches, split by which half reaches
 /// them: `(pre, post)`.
 ///
-/// [`collect_plugin_names`] unions the two halves, which is what a dispatch
-/// plan wants. The reachability report wants them apart, because a route's two
+/// The reachability report needs the halves apart, because a route's two
 /// halves install under different hooks and a plugin reached on one is not
 /// covered on the other. `args` pipelines run on the pre half and `result`
 /// pipelines on the post half, so each stage joins the side it runs on.
@@ -1040,8 +1049,8 @@ struct CachedDispatchPlan {
 #[cfg(test)]
 mod cache_tests {
     use super::{
-        CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine, collect_plugin_names_by_half,
-        route_uses_metadata,
+        CompiledRoute, DispatchCache, PluginRegistry, PolicyEngine, collect_plugin_names,
+        collect_plugin_names_by_half, route_uses_metadata,
     };
     use std::sync::Arc;
 
@@ -1371,6 +1380,11 @@ mod cache_tests {
             response,
             ["response-luhn"],
             "only the response field operation runs on the response half"
+        );
+        assert_eq!(
+            collect_plugin_names(&route),
+            ["request-luhn", "response-luhn"],
+            "the dispatch plan must resolve field plugins from both active halves"
         );
     }
 }

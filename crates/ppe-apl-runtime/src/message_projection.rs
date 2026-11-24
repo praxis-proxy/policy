@@ -9,11 +9,11 @@
 
 use std::collections::HashMap;
 
+use praxis_policy_apl_core::route::field_parents;
+use praxis_policy_apl_core::step::FieldParent;
 use serde_json::{Value, json};
 
 use praxis_policy_core::cmf::{ContentPart, Message, PromptResult, Resource, ResourceReference};
-
-use praxis_policy_apl_core::get_dotted;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -159,7 +159,22 @@ pub(crate) fn extract_args_from_message(msg: &Message, projection: Projection) -
 
 /// Return arguments from the preferred request kind, using the other kind as fallback.
 fn find_args<const TOOL_FIRST: bool>(msg: &Message) -> Option<Value> {
-    let mut fallback: Option<&HashMap<String, Value>> = None;
+    find_argument_map::<TOOL_FIRST>(msg).map(clone_arguments)
+}
+
+pub(crate) fn arguments_for_projection(
+    msg: &Message,
+    projection: Projection,
+) -> Option<&HashMap<String, Value>> {
+    match projection {
+        Projection::Tool => find_argument_map::<true>(msg),
+        Projection::Prompt => find_argument_map::<false>(msg),
+        Projection::Resource => None,
+    }
+}
+
+fn find_argument_map<const TOOL_FIRST: bool>(msg: &Message) -> Option<&HashMap<String, Value>> {
+    let mut fallback = None;
     for part in &msg.content {
         let (arguments, preferred) = match part {
             ContentPart::ToolCall { content } => (&content.arguments, TOOL_FIRST),
@@ -167,11 +182,11 @@ fn find_args<const TOOL_FIRST: bool>(msg: &Message) -> Option<Value> {
             _ => continue,
         };
         if preferred {
-            return Some(clone_arguments(arguments));
+            return Some(arguments);
         }
         fallback = fallback.or(Some(arguments));
     }
-    fallback.map(clone_arguments)
+    fallback
 }
 
 fn clone_arguments(arguments: &HashMap<String, Value>) -> Value {
@@ -235,6 +250,7 @@ pub(crate) fn project_prompt_result(prompt: &PromptResult) -> Value {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplacedPart {
     ToolCall,
+    ToolResult,
     PromptRequest,
     ResourceRef,
     Resource,
@@ -256,6 +272,7 @@ impl std::fmt::Display for ReplacedPart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ToolCall => f.write_str("ToolCall"),
+            Self::ToolResult => f.write_str("ToolResult"),
             Self::PromptRequest => f.write_str("PromptRequest"),
             Self::ResourceRef => f.write_str("ResourceRef"),
             Self::Resource => f.write_str("Resource"),
@@ -289,9 +306,26 @@ pub(crate) enum EnvelopeError {
     Removed,
     /// Several parts share the selected identity.
     Ambiguous,
+    /// Plugin edits changed the shape needed to locate a field write.
+    ShapeChanged,
 }
 
 impl EnvelopeReplaced {
+    pub(crate) fn shape_changed(projection: Projection, args: bool) -> Self {
+        let part = match (projection, args) {
+            (Projection::Resource, true) => ReplacedPart::ResourceRef,
+            (Projection::Resource, false) => ReplacedPart::Resource,
+            (Projection::Prompt, true) => ReplacedPart::PromptRequest,
+            (Projection::Prompt, false) => ReplacedPart::PromptResult,
+            (Projection::Tool, true) => ReplacedPart::ToolCall,
+            (Projection::Tool, false) => ReplacedPart::ToolResult,
+        };
+        Self {
+            part,
+            error: EnvelopeError::ShapeChanged,
+        }
+    }
+
     /// Explain why the selected envelope cannot be safely written.
     pub(crate) fn reason(self, block: &str) -> String {
         let part = self.part;
@@ -307,6 +341,9 @@ impl EnvelopeReplaced {
             EnvelopeError::Removed => format!(
                 "the `{part}` that the `{block}:` pipeline checked is no longer in the \
                  message, so its result cannot be written back; a plugin may have removed it"
+            ),
+            EnvelopeError::ShapeChanged => format!(
+                "the `{block}:` pipeline and plugin payload disagree on parent structure or array indexes"
             ),
             EnvelopeError::Ambiguous => format!(
                 "the `{block}:` pipeline cannot identify a unique `{part}` because several \
@@ -489,7 +526,7 @@ impl ResultIdentity {
         let ambiguous = key.as_ref().is_some_and(|key| {
             msg.content
                 .iter()
-                .filter(|part| key.matches(part))
+                .filter(|part| key.same_address(part))
                 .take(2)
                 .count()
                 > 1
@@ -506,7 +543,7 @@ impl ResultIdentity {
         &self,
         msg: &'a Message,
     ) -> Result<Option<&'a Resource>, EnvelopeReplaced> {
-        if !matches!(self.key, Some(PartKey::Resource(_))) {
+        if !matches!(self.key, Some(PartKey::Resource { .. })) {
             return Ok(None);
         }
         let Some(index) = self.index(msg)? else {
@@ -544,7 +581,7 @@ impl ResultIdentity {
             .content
             .iter()
             .enumerate()
-            .filter_map(|(index, part)| key.matches(part).then_some(index));
+            .filter_map(|(index, part)| key.same_address(part).then_some(index));
         let Some(index) = matches.next() else {
             return Err(EnvelopeReplaced {
                 part,
@@ -557,25 +594,45 @@ impl ResultIdentity {
                 error: EnvelopeError::Ambiguous,
             });
         }
+        if !msg.content.get(index).is_some_and(|part| key.matches(part)) {
+            return Err(EnvelopeReplaced {
+                part,
+                error: EnvelopeError::Removed,
+            });
+        }
         Ok(Some(index))
     }
 }
 
 #[derive(Clone, Debug)]
 enum PartKey {
-    Resource(String),
-    ResourceRef(String),
+    Resource { uri: String, request_id: String },
+    ResourceRef { uri: String, request_id: String },
     PromptResult { request_id: String, name: String },
 }
 
 impl PartKey {
+    fn same_address(&self, part: &ContentPart) -> bool {
+        match (self, part) {
+            (Self::Resource { uri, .. }, ContentPart::Resource { content }) => content.uri == *uri,
+            (Self::ResourceRef { uri, .. }, ContentPart::ResourceRef { content }) => {
+                content.uri == *uri
+            },
+            _ => self.matches(part),
+        }
+    }
+
     fn from_part(part: &ContentPart, kind: ReplacedPart) -> Option<Self> {
         match (kind, part) {
-            (ReplacedPart::Resource, ContentPart::Resource { content }) => {
-                Some(Self::Resource(content.uri.clone()))
-            },
+            (ReplacedPart::Resource, ContentPart::Resource { content }) => Some(Self::Resource {
+                uri: content.uri.clone(),
+                request_id: content.resource_request_id.clone(),
+            }),
             (ReplacedPart::ResourceRef, ContentPart::ResourceRef { content }) => {
-                Some(Self::ResourceRef(content.uri.clone()))
+                Some(Self::ResourceRef {
+                    uri: content.uri.clone(),
+                    request_id: content.resource_request_id.clone(),
+                })
             },
             (ReplacedPart::PromptResult, ContentPart::PromptResult { content }) => {
                 Some(Self::PromptResult {
@@ -589,16 +646,20 @@ impl PartKey {
 
     fn kind(&self) -> ReplacedPart {
         match self {
-            Self::Resource(_) => ReplacedPart::Resource,
-            Self::ResourceRef(_) => ReplacedPart::ResourceRef,
+            Self::Resource { .. } => ReplacedPart::Resource,
+            Self::ResourceRef { .. } => ReplacedPart::ResourceRef,
             Self::PromptResult { .. } => ReplacedPart::PromptResult,
         }
     }
 
     fn matches(&self, part: &ContentPart) -> bool {
         match (self, part) {
-            (Self::Resource(uri), ContentPart::Resource { content }) => content.uri == *uri,
-            (Self::ResourceRef(uri), ContentPart::ResourceRef { content }) => content.uri == *uri,
+            (Self::Resource { uri, request_id }, ContentPart::Resource { content }) => {
+                content.uri == *uri && content.resource_request_id == *request_id
+            },
+            (Self::ResourceRef { uri, request_id }, ContentPart::ResourceRef { content }) => {
+                content.uri == *uri && content.resource_request_id == *request_id
+            },
             (Self::PromptResult { request_id, name }, ContentPart::PromptResult { content }) => {
                 content.prompt_request_id == *request_id && content.prompt_name == *name
             },
@@ -648,33 +709,50 @@ pub(crate) fn extract_result_field(
     projection: Projection,
     field: &str,
 ) -> Option<Value> {
+    if projection == Projection::Tool
+        && let Some(value) = msg
+            .content
+            .iter()
+            .find_map(|part| match part {
+                ContentPart::ToolResult { content } => Some(&content.content),
+                _ => None,
+            })
+            .filter(|value| value.is_array())
+    {
+        return Some(value.clone());
+    }
+    let path: Vec<String> = field.split('.').map(str::to_owned).collect();
+    extract_result_field_at(msg, projection, &path)
+}
+
+/// Read one result field without splitting literal object keys.
+pub(crate) fn extract_result_field_at(
+    msg: &Message,
+    projection: Projection,
+    path: &[String],
+) -> Option<Value> {
     for part in &msg.content {
         match (projection, part) {
             (Projection::Tool, ContentPart::ToolResult { content }) => {
-                return if content.content.is_object() {
-                    get_dotted(&content.content, field).cloned()
+                return if content.content.is_object() || content.content.is_array() {
+                    value_at(&content.content, path).cloned()
                 } else {
                     Some(content.content.clone())
                 };
             },
             (Projection::Resource, ContentPart::Resource { content }) => {
-                return resource_field_value(content, field);
+                return resource_field_value_at(content, path);
             },
             (Projection::Prompt, ContentPart::PromptResult { content }) => {
-                return (!field.contains('.'))
-                    .then(|| prompt_result_field(content, field))
-                    .flatten();
+                return path
+                    .first()
+                    .filter(|_| path.len() == 1)
+                    .and_then(|field| prompt_result_field(content, field));
             },
             _ => {},
         }
     }
     Some(Value::String(msg.get_text_content()))
-}
-
-/// Return a resource field or a dotted annotation descendant.
-pub(crate) fn resource_field_value(resource: &Resource, field: &str) -> Option<Value> {
-    let path: Vec<String> = field.split('.').map(str::to_owned).collect();
-    resource_field_value_at(resource, &path)
 }
 
 /// Read one resource field using expanded path segments.
@@ -684,6 +762,25 @@ pub(crate) fn resource_field_value_at(resource: &Resource, path: &[String]) -> O
         && let Some((key, inner)) = rest.split_first()
     {
         return value_at(resource.annotations.get(key)?, inner).cloned();
+    }
+    if head == "icons"
+        && let Some((index, fields)) = rest.split_first()
+    {
+        let icon = resource.icons.as_ref()?.get(index.parse::<usize>().ok()?)?;
+        let Some((field, tail)) = fields.split_first() else {
+            return Some(json!(icon));
+        };
+        return match (field.as_str(), tail) {
+            ("src", []) => Some(json!(icon.src)),
+            ("mime_type", []) => icon.mime_type.as_ref().map(|value| json!(value)),
+            ("sizes", []) => icon.sizes.as_ref().map(|value| json!(value)),
+            ("sizes", [index]) => icon
+                .sizes
+                .as_ref()?
+                .get(index.parse::<usize>().ok()?)
+                .map(|value| json!(value)),
+            _ => None,
+        };
     }
     rest.is_empty()
         .then(|| resource_field(resource, head))
@@ -727,7 +824,7 @@ fn resource_field(resource: &Resource, name: &str) -> Option<Value> {
 /// for a name the envelope does not have.
 ///
 /// [`project_prompt_result`]: project_prompt_result
-fn prompt_result_field(prompt: &PromptResult, name: &str) -> Option<Value> {
+pub(crate) fn prompt_result_field(prompt: &PromptResult, name: &str) -> Option<Value> {
     Some(match name {
         "prompt_name" => json!(prompt.prompt_name),
         "description" => json!(prompt.description),
@@ -902,125 +999,83 @@ pub(crate) fn write_prompt_result(
     Ok(())
 }
 
-/// Apply policy-written paths even when their final value equals the input.
+/// One field write made by policy, including writes equal to their input.
+#[derive(Clone, Debug)]
+pub(crate) struct FieldWrite {
+    pub(crate) parents: Vec<FieldParent>,
+    pub(crate) path: Vec<String>,
+    pub(crate) value: Option<Value>,
+}
+
+/// Replay leaf writes without replacing siblings changed by plugins.
 ///
-/// Arrays retain whole-value merge semantics, including omitted elements.
-pub(crate) fn apply_written_paths(base: &mut Value, post: &Value, paths: &[Vec<String>]) {
-    fn apply(base: &mut Value, post: &Value, path: &[String]) {
+/// A changed array shape or a removed parent refuses reconciliation.
+pub(crate) fn apply_written_paths(
+    base: &mut Value,
+    writes: &[FieldWrite],
+    projection: Projection,
+    args: bool,
+) -> Result<(), EnvelopeReplaced> {
+    fn apply(base: &mut Value, path: &[String], value: Option<&Value>) -> bool {
         let Some((key, rest)) = path.split_first() else {
-            *base = post.clone();
-            return;
-        };
-        let (Some(base_map), Some(post_map)) = (base.as_object_mut(), post.as_object()) else {
-            *base = post.clone();
-            return;
-        };
-        let Some(value) = post_map.get(key) else {
-            base_map.remove(key);
-            return;
-        };
-        apply(
-            base_map.entry(key.clone()).or_insert(Value::Null),
-            value,
-            rest,
-        );
-    }
-    for path in paths {
-        apply(base, post, path);
-    }
-}
-
-/// Apply the differences between `pre` and `post` to `base`.
-///
-/// Unchanged paths retain independent edits already present in `base`.
-/// Objects merge by key; arrays and scalars are replaced as whole values.
-/// Keys removed from `post` are removed from `base`.
-pub(crate) fn apply_changed_paths(base: &mut Value, pre: &Value, post: &Value) {
-    let (Some(pre_map), Some(post_map)) = (pre.as_object(), post.as_object()) else {
-        if pre != post {
-            *base = post.clone();
-        }
-        return;
-    };
-    let Some(base_map) = base.as_object_mut() else {
-        // A scalar replacement has no safe per-key reconciliation.
-        tracing::warn!(
-            "payload projection changed shape under a field pipeline; \
-             applying the pipeline's view and discarding the other edit"
-        );
-        *base = post.clone();
-        return;
-    };
-
-    for (key, pre_value) in pre_map {
-        if !post_map.contains_key(key) {
-            if base_map
-                .get(key)
-                .is_some_and(|base_value| base_value != pre_value)
-            {
-                tracing::warn!(
-                    field = %key,
-                    "pipeline omitted this field, discarding a plugin's edit to it"
-                );
+            if let Some(value) = value {
+                *base = value.clone();
+                return true;
             }
-            base_map.remove(key);
-        }
-    }
-
-    for (key, post_value) in post_map {
-        match pre_map.get(key) {
-            Some(pre_value) if pre_value == post_value => {},
-            Some(pre_value) => {
-                let nested = base_map
-                    .get_mut(key)
-                    .filter(|base_value| base_value.is_object())
-                    .filter(|_| pre_value.is_object() && post_value.is_object());
-                if let Some(base_value) = nested {
-                    apply_changed_paths(base_value, pre_value, post_value);
+            return false;
+        };
+        match base {
+            Value::Object(map) => {
+                if rest.is_empty() {
+                    if let Some(value) = value {
+                        map.insert(key.clone(), value.clone());
+                    } else {
+                        map.remove(key);
+                    }
+                    true
                 } else {
-                    warn_on_conflict(base_map.get(key), pre_value, key);
-                    base_map.insert(key.clone(), post_value.clone());
+                    map.get_mut(key)
+                        .is_some_and(|child| apply(child, rest, value))
                 }
             },
-            None => {
-                if base_map.contains_key(key) {
-                    tracing::warn!(
-                        field = %key,
-                        "pipeline and plugin both added this field; keeping the pipeline's value"
-                    );
+            Value::Array(items) => {
+                let Some(index) = key
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|index| *index < items.len())
+                else {
+                    return false;
+                };
+                if rest.is_empty() {
+                    if let Some(value) = value {
+                        if let Some(slot) = items.get_mut(index) {
+                            *slot = value.clone();
+                        }
+                    } else {
+                        items.remove(index);
+                    }
+                    true
+                } else {
+                    items
+                        .get_mut(index)
+                        .is_some_and(|child| apply(child, rest, value))
                 }
-                base_map.insert(key.clone(), post_value.clone());
             },
+            _ => false,
         }
     }
-}
-
-/// Log the two ways a pipeline edit can override a plugin's work on the
-/// same key: the plugin changed it too, or the plugin removed it. Silent
-/// in the common case where the plugin left the key alone.
-fn warn_on_conflict(base_value: Option<&Value>, pre_value: &Value, key: &str) {
-    match base_value {
-        Some(base_value) if base_value != pre_value => tracing::warn!(
-            field = %key,
-            "pipeline edit overrides a plugin's edit to the same field; \
-             keeping the pipeline's value"
-        ),
-        Some(_) => {},
-        None => tracing::warn!(
-            field = %key,
-            "pipeline edit reinstates a field the plugin removed"
-        ),
+    let error = EnvelopeReplaced::shape_changed(projection, args);
+    for write in writes {
+        if field_parents(base, &write.path).as_deref() != Some(write.parents.as_slice()) {
+            return Err(error);
+        }
+        if !apply(base, &write.path, write.value.as_ref()) {
+            return Err(error);
+        }
     }
+    Ok(())
 }
 
-// -----------------------------------------------------------------------------
-// Write-back Value Conversion
-// -----------------------------------------------------------------------------
-
-/// A missing field was removed by the pipeline, so it clears like `null` does:
-/// keeping the old value would leak what an `omit` meant to drop. Every other
-/// value type is stored as its JSON text rather than dropped, because a
-/// redaction that produced an unexpected type must still replace the original.
 fn write_opt_string(target: &mut Option<String>, value: Option<&Value>) {
     let new = match value {
         None | Some(Value::Null) => None,
@@ -1051,14 +1106,19 @@ fn write_opt_u64(target: &mut Option<u64>, value: Option<&Value>, field: &str) {
     };
 }
 
-/// `apply_changed_paths` has already merged the pipeline's per-key changes into
-/// the map, so the merged object replaces it whole. A non-object value clears
-/// the map: it is usually a redaction of the whole field, and keeping the old
-/// map would forward what the redaction meant to hide.
+/// Preserve unchanged annotations; a non-object replacement clears the map
+/// so the original data cannot survive a whole-field redaction.
 fn write_annotations(target: &mut HashMap<String, Value>, value: Option<&Value>) {
     match value {
         None | Some(Value::Null) => target.clear(),
         Some(Value::Object(map)) => {
+            if target.len() == map.len()
+                && map
+                    .iter()
+                    .all(|(key, value)| target.get(key) == Some(value))
+            {
+                return;
+            }
             *target = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         },
         Some(_) => {
@@ -1080,6 +1140,7 @@ fn write_annotations(target: &mut HashMap<String, Value>, value: Option<&Value>)
 )]
 mod tests {
     use super::*;
+    use praxis_policy_apl_core::get_dotted;
 
     use praxis_policy_core::cmf::enums::{ResourceType, Role};
 
@@ -1246,20 +1307,20 @@ mod tests {
     }
 
     #[test]
-    fn changed_paths_apply_over_an_untouched_base() {
+    fn field_writes_apply_over_an_untouched_base() {
         let pre = serde_json::json!({"city": "London", "units": "metric"});
         let post = serde_json::json!({"city": "[REDACTED]", "units": "metric"});
         let mut base = pre.clone();
-        apply_changed_paths(&mut base, &pre, &post);
+        apply_test_writes(&mut base, &pre, &post, &["city"]).expect("field write applies");
         assert_eq!(base, post);
     }
 
     #[test]
-    fn changed_paths_preserve_another_editors_keys() {
+    fn field_writes_preserve_another_editors_keys() {
         let pre = serde_json::json!({"city": "London", "token": "sk-secret"});
         let post = serde_json::json!({"city": "[REDACTED]", "token": "sk-secret"});
         let mut base = serde_json::json!({"city": "London", "token": "[SCRUBBED]"});
-        apply_changed_paths(&mut base, &pre, &post);
+        apply_test_writes(&mut base, &pre, &post, &["city"]).expect("field write applies");
         assert_eq!(
             base,
             serde_json::json!({"city": "[REDACTED]", "token": "[SCRUBBED]"}),
@@ -1268,20 +1329,20 @@ mod tests {
     }
 
     #[test]
-    fn changed_paths_apply_removals() {
+    fn field_writes_apply_removals() {
         let pre = serde_json::json!({"city": "London", "debug": true});
         let post = serde_json::json!({"city": "London"});
         let mut base = serde_json::json!({"city": "Paris", "debug": true});
-        apply_changed_paths(&mut base, &pre, &post);
+        apply_test_writes(&mut base, &pre, &post, &["debug"]).expect("field write applies");
         assert_eq!(base, serde_json::json!({"city": "Paris"}));
     }
 
     #[test]
-    fn changed_paths_omit_a_key_the_plugin_rewrote() {
+    fn field_writes_omit_a_key_the_plugin_rewrote() {
         let pre = serde_json::json!({"city": "London", "ssn": "123-45-6789"});
         let post = serde_json::json!({"city": "London"});
         let mut base = serde_json::json!({"city": "London", "ssn": "[REDACTED]"});
-        apply_changed_paths(&mut base, &pre, &post);
+        apply_test_writes(&mut base, &pre, &post, &["ssn"]).expect("field write applies");
         assert_eq!(
             base,
             serde_json::json!({"city": "London"}),
@@ -1290,11 +1351,11 @@ mod tests {
     }
 
     #[test]
-    fn changed_paths_recurse_into_nested_objects() {
+    fn field_writes_recurse_into_nested_objects() {
         let pre = serde_json::json!({"user": {"name": "ada", "ssn": "123-45-6789"}});
         let post = serde_json::json!({"user": {"name": "ada", "ssn": "[REDACTED]"}});
         let mut base = serde_json::json!({"user": {"name": "ADA", "ssn": "123-45-6789"}});
-        apply_changed_paths(&mut base, &pre, &post);
+        apply_test_writes(&mut base, &pre, &post, &["user.ssn"]).expect("field write applies");
         assert_eq!(
             base,
             serde_json::json!({"user": {"name": "ADA", "ssn": "[REDACTED]"}}),
@@ -1303,20 +1364,20 @@ mod tests {
     }
 
     #[test]
-    fn changed_paths_let_the_pipeline_win_a_same_key_conflict() {
+    fn field_writes_let_the_pipeline_win_a_same_key_conflict() {
         let pre = serde_json::json!({"ssn": "123-45-6789"});
         let post = serde_json::json!({"ssn": "***-**-6789"});
         let mut base = serde_json::json!({"ssn": "[REDACTED]"});
-        apply_changed_paths(&mut base, &pre, &post);
+        apply_test_writes(&mut base, &pre, &post, &["ssn"]).expect("field write applies");
         assert_eq!(base, serde_json::json!({"ssn": "***-**-6789"}));
     }
 
     #[test]
-    fn changed_paths_reinstate_a_key_the_plugin_removed() {
+    fn field_writes_reinstate_a_key_the_plugin_removed() {
         let pre = serde_json::json!({"ssn": "123-45-6789", "name": "Ada"});
         let post = serde_json::json!({"ssn": "[REDACTED]", "name": "Ada"});
         let mut base = serde_json::json!({"name": "Ada"});
-        apply_changed_paths(&mut base, &pre, &post);
+        apply_test_writes(&mut base, &pre, &post, &["ssn"]).expect("field write applies");
         assert_eq!(
             base,
             serde_json::json!({"ssn": "[REDACTED]", "name": "Ada"}),
@@ -1325,23 +1386,31 @@ mod tests {
     }
 
     #[test]
-    fn changed_paths_replace_a_scalar_projection_whole() {
+    fn field_writes_replace_a_scalar_projection_whole() {
         let mut base = serde_json::json!("plugin text");
-        apply_changed_paths(
+        apply_test_writes(
             &mut base,
             &serde_json::json!("original"),
             &serde_json::json!("pipeline text"),
-        );
+            &[""],
+        )
+        .expect("whole-value write applies");
         assert_eq!(base, serde_json::json!("pipeline text"));
     }
 
     #[test]
-    fn changed_paths_take_the_pipeline_view_when_base_shape_differs() {
+    fn field_writes_refuse_a_changed_parent_shape() {
         let pre = serde_json::json!({"city": "London"});
         let post = serde_json::json!({"city": "[REDACTED]"});
         let mut base = serde_json::json!("no longer an object");
-        apply_changed_paths(&mut base, &pre, &post);
-        assert_eq!(base, post);
+        assert!(matches!(
+            apply_test_writes(&mut base, &pre, &post, &["city"]),
+            Err(EnvelopeReplaced {
+                error: EnvelopeError::ShapeChanged,
+                ..
+            })
+        ));
+        assert_eq!(base, serde_json::json!("no longer an object"));
     }
 
     #[test]
@@ -2087,6 +2156,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn field_writes_preserve_plugin_edits_to_array_siblings() {
+        let pre = json!({"rows": [{"ssn": "[REDACTED]"}, {"note": "secret"}]});
+        let mut base = json!({"rows": [{"ssn": "[REDACTED]"}, {"note": "[REDACTED]"}]});
+        apply_test_writes(&mut base, &pre, &pre, &["rows.0.ssn"]).expect("stable array");
+        assert_eq!(
+            base["rows"][1]["note"],
+            json!("[REDACTED]"),
+            "leaf replay must retain another element's plugin edit"
+        );
+    }
+
+    #[test]
+    fn field_writes_refuse_array_length_changes() {
+        let pre = json!({"rows": [{"id": 1, "ssn": "first"}, {"id": 2, "ssn": "second"}]});
+        let post = json!({"rows": [{"id": 1, "ssn": "[REDACTED]"}, {"id": 2, "ssn": "second"}]});
+        for mut base in [
+            json!({"rows": [{"id": 2, "ssn": "second"}]}),
+            json!({"rows": [{"id": 1, "ssn": "first"}, {"id": 2, "ssn": "second"}, {"id": 3, "ssn": "third"}]}),
+        ] {
+            let before = base.clone();
+            assert!(
+                matches!(
+                    apply_test_writes(&mut base, &pre, &post, &["rows.0.ssn"]),
+                    Err(EnvelopeReplaced {
+                        error: EnvelopeError::ShapeChanged,
+                        ..
+                    })
+                ),
+                "an unmappable leaf must deny"
+            );
+            assert_eq!(
+                base, before,
+                "an error must not resurrect an element or change its siblings"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_array_write_replaces_the_array() {
+        let pre = json!({"rows": [1, 2]});
+        let post = json!({"rows": []});
+        let mut base = json!({"rows": [2]});
+        apply_test_writes(&mut base, &pre, &post, &["rows"])
+            .expect("the policy addressed the whole array");
+        assert_eq!(base, post);
+    }
+
+    #[test]
+    fn redaction_can_make_array_elements_equal() {
+        let pre = json!({"rows": [{"ssn": "raw"}, {"ssn": "[REDACTED]"}]});
+        let mut base = json!({"rows": [{"ssn": "[REDACTED]"}, {"ssn": "[REDACTED]"}]});
+        let post = base.clone();
+        apply_test_writes(&mut base, &pre, &post, &["rows.0.ssn"])
+            .expect("the element positions did not change");
+        assert_eq!(base, post);
+    }
+
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------
@@ -2291,5 +2418,31 @@ mod tests {
         let mut msg = resource_message();
         msg.content.extend(tool_result_message().content);
         msg
+    }
+
+    fn apply_test_writes(
+        base: &mut Value,
+        pre: &Value,
+        post: &Value,
+        paths: &[&str],
+    ) -> Result<(), EnvelopeReplaced> {
+        let writes: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let path = if path.is_empty() {
+                    Vec::new()
+                } else {
+                    path.split('.').map(str::to_owned).collect()
+                };
+                let value = value_at(post, &path).cloned();
+                let parents = field_parents(pre, &path).unwrap_or_default();
+                FieldWrite {
+                    parents,
+                    path,
+                    value,
+                }
+            })
+            .collect();
+        apply_written_paths(base, &writes, Projection::Tool, false)
     }
 }

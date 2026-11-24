@@ -8,7 +8,7 @@ use praxis_policy_core::cmf::MessagePayload;
 use praxis_policy_core::hooks::payload::PluginPayload;
 use praxis_policy_core::http_hook::HttpPayload;
 
-use praxis_policy_apl_core::step::DispatchPhase;
+use praxis_policy_apl_core::step::{DispatchPhase, FieldLocation, FieldParent};
 
 use crate::message_projection::{EnvelopeReplaced, Projection, ResultIdentity};
 
@@ -61,6 +61,18 @@ pub trait PayloadFields: PluginPayload + Clone {
     ) -> Option<serde_json::Value> {
         self.field_value(field, phase)
     }
+
+    /// Read an expanded field path while retaining `field` for legacy hosts.
+    /// The default delegates using the configured field name.
+    fn field_value_at(
+        &self,
+        field: &str,
+        phase: DispatchPhase,
+        projection: Projection,
+        _path: &[String],
+    ) -> Option<serde_json::Value> {
+        self.field_value_with_projection(field, phase, projection)
+    }
 }
 
 impl PayloadFields for MessagePayload {
@@ -75,6 +87,29 @@ impl PayloadFields for MessagePayload {
         projection: Projection,
     ) -> Option<serde_json::Value> {
         field_value_from_message(&self.message, field, phase, projection)
+    }
+
+    fn field_value_at(
+        &self,
+        _field: &str,
+        phase: DispatchPhase,
+        projection: Projection,
+        path: &[String],
+    ) -> Option<serde_json::Value> {
+        match phase {
+            DispatchPhase::Pre => {
+                let args =
+                    crate::message_projection::extract_args_from_message(&self.message, projection);
+                if args.is_object() || args.is_array() {
+                    crate::message_projection::value_at(&args, path).cloned()
+                } else {
+                    Some(args)
+                }
+            },
+            DispatchPhase::Post => {
+                crate::message_projection::extract_result_field_at(&self.message, projection, path)
+            },
+        }
     }
 }
 
@@ -112,8 +147,9 @@ pub(crate) fn field_value_for_identity<P: PayloadFields>(
     phase: DispatchPhase,
     projection: Projection,
     identity: &ResultIdentity,
-    path: Option<&[String]>,
+    location: Option<FieldLocation<'_>>,
 ) -> Result<Option<serde_json::Value>, EnvelopeReplaced> {
+    let path = location.map(|location| location.path);
     if let Some(message) = payload.as_any().downcast_ref::<MessagePayload>() {
         let segments;
         let path = if let Some(path) = path {
@@ -122,24 +158,41 @@ pub(crate) fn field_value_for_identity<P: PayloadFields>(
             segments = field.split('.').map(str::to_owned).collect::<Vec<_>>();
             &segments
         };
-        if phase == DispatchPhase::Post
-            && projection == Projection::Resource
-            && let Some(resource) = identity.resource(&message.message)?
-        {
-            return Ok(crate::message_projection::resource_field_value_at(
-                resource, path,
-            ));
+        if let Some(location) = location {
+            let parents =
+                message_field_parents(&message.message, phase, projection, identity, path)?;
+            if parents.as_slice() != location.parents {
+                return Err(EnvelopeReplaced::shape_changed(
+                    projection,
+                    phase == DispatchPhase::Pre,
+                ));
+            }
+        }
+        if phase == DispatchPhase::Post && projection == Projection::Resource {
+            return Ok(match identity.resource(&message.message)? {
+                Some(resource) => {
+                    crate::message_projection::resource_field_value_at(resource, path)
+                },
+                None => Some(serde_json::Value::String(
+                    message.message.get_text_content(),
+                )),
+            });
+        }
+        if phase == DispatchPhase::Post && projection == Projection::Prompt {
+            return Ok(match identity.part(&message.message)? {
+                Some(praxis_policy_core::cmf::ContentPart::PromptResult { content }) => {
+                    path.first().filter(|_| path.len() == 1).and_then(|field| {
+                        crate::message_projection::prompt_result_field(content, field)
+                    })
+                },
+                _ => Some(serde_json::Value::String(
+                    message.message.get_text_content(),
+                )),
+            });
         }
         let projected = match (phase, projection) {
             (DispatchPhase::Pre, Projection::Resource) => {
                 Some(crate::message_projection::extract_args_by_identity(
-                    &message.message,
-                    projection,
-                    identity,
-                )?)
-            },
-            (DispatchPhase::Post, Projection::Prompt) => {
-                Some(crate::message_projection::extract_result_by_identity(
                     &message.message,
                     projection,
                     identity,
@@ -155,14 +208,106 @@ pub(crate) fn field_value_for_identity<P: PayloadFields>(
             });
         }
     }
-    let concrete;
-    let field = if let Some(path) = path {
-        concrete = path.join(".");
-        &concrete
+    Ok(if let Some(path) = path {
+        payload.field_value_at(field, phase, projection, path)
     } else {
-        field
+        payload.field_value_with_projection(field, phase, projection)
+    })
+}
+
+fn message_field_parents(
+    message: &praxis_policy_core::cmf::Message,
+    phase: DispatchPhase,
+    projection: Projection,
+    identity: &ResultIdentity,
+    path: &[String],
+) -> Result<Vec<FieldParent>, EnvelopeReplaced> {
+    use crate::message_projection::arguments_for_projection;
+    use praxis_policy_apl_core::route::field_parents;
+    use praxis_policy_core::cmf::ContentPart;
+
+    fn map_parents(
+        map: &std::collections::HashMap<String, serde_json::Value>,
+        path: &[String],
+    ) -> Option<Vec<FieldParent>> {
+        if path.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut parents = vec![FieldParent::Object];
+        if let Some((key, rest)) = path.split_first()
+            && !rest.is_empty()
+        {
+            parents.extend(field_parents(map.get(key)?, rest)?);
+        }
+        Some(parents)
+    }
+    fn fixed_parents(path: &[String]) -> Option<Vec<FieldParent>> {
+        match path.len() {
+            0 => Some(Vec::new()),
+            1 => Some(vec![FieldParent::Object]),
+            _ => None,
+        }
+    }
+    fn resource_parents(
+        resource: &praxis_policy_core::cmf::Resource,
+        path: &[String],
+    ) -> Option<Vec<FieldParent>> {
+        if path.len() <= 1 {
+            return fixed_parents(path);
+        }
+        let (field, rest) = path.split_first()?;
+        let mut parents = vec![FieldParent::Object];
+        if field == "annotations" {
+            parents.extend(map_parents(&resource.annotations, rest)?);
+            return Some(parents);
+        }
+        if field != "icons" {
+            return None;
+        }
+        let icons = resource.icons.as_ref()?;
+        parents.push(FieldParent::Array { len: icons.len() });
+        let (index, fields) = rest.split_first()?;
+        if !fields.is_empty() {
+            let icon = icons.get(index.parse::<usize>().ok()?)?;
+            parents.push(FieldParent::Object);
+            if fields.len() > 1 {
+                if fields.first()?.as_str() != "sizes" || fields.len() != 2 {
+                    return None;
+                }
+                parents.push(FieldParent::Array {
+                    len: icon.sizes.as_ref()?.len(),
+                });
+            }
+        }
+        Some(parents)
+    }
+    let parents = match (phase, projection) {
+        (DispatchPhase::Pre, Projection::Resource) => match identity.part(message)? {
+            Some(ContentPart::ResourceRef { .. }) => fixed_parents(path),
+            _ => path.is_empty().then(Vec::new),
+        },
+        (DispatchPhase::Pre, _) => arguments_for_projection(message, projection)
+            .and_then(|map| map_parents(map, path))
+            .or_else(|| path.is_empty().then(Vec::new)),
+        (DispatchPhase::Post, Projection::Resource) => match identity.resource(message)? {
+            Some(resource) => resource_parents(resource, path),
+            None => path.is_empty().then(Vec::new),
+        },
+        (DispatchPhase::Post, Projection::Prompt) => match identity.part(message)? {
+            Some(ContentPart::PromptResult { .. }) => fixed_parents(path),
+            _ => path.is_empty().then(Vec::new),
+        },
+        (DispatchPhase::Post, Projection::Tool) => message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                ContentPart::ToolResult { content } => Some(&content.content),
+                _ => None,
+            })
+            .and_then(|value| field_parents(value, path))
+            .or_else(|| path.is_empty().then(Vec::new)),
     };
-    Ok(payload.field_value_with_projection(field, phase, projection))
+    parents.ok_or_else(|| EnvelopeReplaced::shape_changed(projection, phase == DispatchPhase::Pre))
 }
 
 /// Return the argument or result field addressed by the dispatch phase.
@@ -310,6 +455,64 @@ mod tests {
         );
         assert_eq!(
             payload.field_value_with_projection("city", DispatchPhase::Post, Projection::Tool),
+            None
+        );
+    }
+
+    #[test]
+    fn concrete_readback_keeps_legacy_field_names() {
+        let path = vec!["rows".to_owned(), "0".to_owned(), "name".to_owned()];
+        let value = field_value_for_identity(
+            &LegacyPayload,
+            "rows.name",
+            DispatchPhase::Post,
+            Projection::Resource,
+            &ResultIdentity::default(),
+            Some(FieldLocation {
+                path: &path,
+                parents: &[],
+            }),
+        )
+        .expect("legacy readback");
+        assert_eq!(value, Some(serde_json::json!("rows.name")));
+    }
+
+    #[test]
+    fn resource_readback_addresses_icon_fields() {
+        let mut payload = resource_payload();
+        let Some(ContentPart::Resource { content }) = payload.message.content.first_mut() else {
+            panic!("resource")
+        };
+        content
+            .icons
+            .get_or_insert_with(Vec::new)
+            .push(praxis_policy_core::extensions::Icon {
+                src: "icon.svg".to_owned(),
+                mime_type: Some("image/svg+xml".to_owned()),
+                sizes: Some(vec!["any".to_owned()]),
+            });
+        for (field, expected) in [
+            ("icons.0.src", serde_json::json!("icon.svg")),
+            ("icons.0.mime_type", serde_json::json!("image/svg+xml")),
+            ("icons.0.sizes.0", serde_json::json!("any")),
+            ("icons.0.sizes", serde_json::json!(["any"])),
+        ] {
+            assert_eq!(
+                payload.field_value_with_projection(
+                    field,
+                    DispatchPhase::Post,
+                    Projection::Resource
+                ),
+                Some(expected),
+                "{field}"
+            );
+        }
+        assert_eq!(
+            payload.field_value_with_projection(
+                "icons.0.src.extra",
+                DispatchPhase::Post,
+                Projection::Resource
+            ),
             None
         );
     }

@@ -83,13 +83,13 @@ use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::pipeline::{TaintEvent, TaintScope};
 use praxis_policy_apl_core::step::{
-    DispatchPhase, FetchStep, MetadataFetchError, MetadataFetchOutcome, PluginError,
-    PluginInvocation, PluginInvoker, PluginOutcome,
+    DispatchPhase, FetchStep, FieldLocation, FieldParent, MetadataFetchError, MetadataFetchOutcome,
+    PluginError, PluginInvocation, PluginInvoker, PluginOutcome,
 };
 
 use crate::dispatch_plan::RouteDispatchPlan;
 use crate::message_projection::{
-    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, ResultIdentity,
+    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, FieldWrite, Projection, ResultIdentity,
 };
 use crate::payload_fields::{PayloadFields, field_value_for_identity, payload_identities};
 use crate::session_store::{SessionStore, SessionStoreError};
@@ -161,7 +161,7 @@ where
     projection: Projection,
     /// Original reference, resource and prompt selections.
     identities: [ResultIdentity; 4],
-    written_fields: Mutex<Vec<(DispatchPhase, Vec<String>)>>,
+    written_fields: Mutex<Vec<(DispatchPhase, FieldWrite)>>,
 }
 
 impl<H: HookTypeDef> HookPluginInvoker<H>
@@ -371,7 +371,7 @@ where
         plugin_name: &str,
         _bag: &AttributeBag,
         invocation: PluginInvocation<'_>,
-        path: Option<&[String]>,
+        location: Option<FieldLocation<'_>>,
     ) -> Result<PluginOutcome, PluginError> {
         let resolved = self
             .plan
@@ -439,12 +439,12 @@ where
                     phase,
                     self.projection,
                     self.identity(phase),
-                    path,
+                    location,
                 ) {
                     Ok(value) => value,
                     Err(error) => {
                         return Ok(PluginOutcome {
-                            decision: result_target_denial(error),
+                            decision: result_target_denial(error, phase),
                             taints: Vec::new(),
                             modified_value: None,
                         });
@@ -505,14 +505,14 @@ where
                             phase,
                             self.projection,
                             self.identity(phase),
-                            path,
+                            location,
                         ) {
                             Ok(value) => {
                                 value.filter(|new_value| field_before.as_ref() != Some(new_value))
                             },
                             Err(error) => {
                                 if matches!(decision, Decision::Allow) {
-                                    decision = result_target_denial(error);
+                                    decision = result_target_denial(error, phase);
                                 }
                                 None
                             },
@@ -589,13 +589,13 @@ where
         }
     }
 
-    pub(crate) async fn written_paths(&self, phase: DispatchPhase) -> Vec<Vec<String>> {
+    pub(crate) async fn field_writes(&self, phase: DispatchPhase) -> Vec<FieldWrite> {
         self.written_fields
             .lock()
             .await
             .iter()
             .filter(|(written_phase, _)| *written_phase == phase)
-            .map(|(_, path)| path.clone())
+            .map(|(_, write)| write.clone())
             .collect()
     }
 }
@@ -619,16 +619,28 @@ where
         name: &str,
         bag: &AttributeBag,
         invocation: PluginInvocation<'_>,
-        path: &[String],
+        location: FieldLocation<'_>,
     ) -> Result<PluginOutcome, PluginError> {
-        self.invoke_at(name, bag, invocation, Some(path)).await
+        let location =
+            (!location.parents.is_empty() || location.path.is_empty()).then_some(location);
+        self.invoke_at(name, bag, invocation, location).await
     }
 
-    async fn record_field_write(&self, path: &[String], phase: DispatchPhase) {
-        self.written_fields
-            .lock()
-            .await
-            .push((phase, path.to_vec()));
+    async fn record_field_write(
+        &self,
+        path: &[String],
+        phase: DispatchPhase,
+        value: Option<&serde_json::Value>,
+        parents: &[FieldParent],
+    ) {
+        self.written_fields.lock().await.push((
+            phase,
+            FieldWrite {
+                parents: parents.to_vec(),
+                path: path.to_vec(),
+                value: value.cloned(),
+            },
+        ));
     }
 
     /// Dispatch one resolved source and publish its validated acquired facts.
@@ -733,9 +745,12 @@ fn hydrate_labels(mut extensions: Extensions, labels: &[String]) -> Extensions {
 }
 
 /// A plugin cannot return a field value for a removed or ambiguous resource.
-fn result_target_denial(error: EnvelopeReplaced) -> Decision {
+fn result_target_denial(error: EnvelopeReplaced, phase: DispatchPhase) -> Decision {
     Decision::Deny {
-        reason: Some(error.reason("result")),
+        reason: Some(error.reason(match phase {
+            DispatchPhase::Pre => "args",
+            DispatchPhase::Post => "result",
+        })),
         rule_source: ENVELOPE_REPLACED_CODE.to_owned(),
     }
 }

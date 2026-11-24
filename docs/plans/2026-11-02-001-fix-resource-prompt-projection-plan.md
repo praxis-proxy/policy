@@ -396,14 +396,12 @@ reachable through Praxis.
 
 | Option | Behavior | Trade-off |
 |---|---|---|
-| **(a) Fold (proposed)** | All text entries of one `resources/read` are folded into a single `Resource` part; a rewrite emits one entry | Nothing goes uninspected, consistent with how Praxis folds tool text blocks. Per-entry `uri`/`mimeType` are not preserved on a rewrite. |
+| **(a) Fold (proposed)** | Combine text for inspection while retaining each entry's boundaries, URI and MIME type. Map edits back to the original entries; deny a rewrite that cannot preserve them. | Joined-text rules must account for entry boundaries. Non-text content needs separate inspection or rejection. |
 | (b) One part per entry | Each entry becomes its own `Resource` part | Keeps structure, but PPE inspects only the first part until Issue 76, so later entries bypass policy. |
 
-With (a), the first-part-only gap stays a documented limitation for hosts that
-emit several `Resource` parts, but is closed for Praxis. Non-text blocks (for
-example blobs, which PPE does not project) are dropped on a rewrite, matching
-current `tools/call` behavior, so the emitted bytes are exactly what policy
-vetted.
+With (a), the host must preserve entry metadata during serialization and
+inspect or reject excluded content separately. Folding text does not provide
+blob inspection or native per-entry addressing in PPE.
 
 **Praxis acceptance criteria (asserted on the bytes sent to the client, not on
 the PPE `Message`):**
@@ -1046,9 +1044,10 @@ MCPExtension**. Three layers feed policy, and the guide must cover all of them:
 | `MCPExtension` (`ResourceMetadata`, `PromptMetadata`, `ToolMetadata`) | PDP attribute bag (`mcp.resource.*`, `mcp.prompt.*`, `mcp.tool.*`) | Set by host |
 | `ContentPart` (`ResourceRef`, `Resource`, `PromptResult`, etc.) | APL `args.*` / `result.*` projection | Set by host |
 
-A host that sets only MCPExtension but no ContentPart gets route matching and
-PDP predicates but empty APL envelopes. This is the most likely misconfiguration
-and must be called out explicitly.
+A host that supplies route metadata in `MetaExtension` and catalog data in
+`MCPExtension`, but no `ContentPart`, can match a route and read catalog
+attributes while leaving the APL payload empty. Without `MetaExtension`, the
+expected route may not run either.
 
 #### In this PR: the contract, in a new guide
 

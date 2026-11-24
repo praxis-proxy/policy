@@ -10,6 +10,11 @@ Resource and prompt response inspection requires the adapter work in
 
 [praxis#1583]: https://github.com/praxis-proxy/praxis/pull/1583
 
+If configuration loading fails, stop using that engine. `load_config_yaml`
+does not roll back partial loads. Hosts that must retain the current policy
+on failure should build and validate a replacement engine before switching
+traffic to it.
+
 ## Message inputs
 
 Routing, catalog attributes and field pipelines read separate parts of the
@@ -79,6 +84,7 @@ Result edits and plugin field readback use the URI selected before plugins
 run. That URI must identify one resource in both the original and current
 message. A removed target or duplicate URI denies the request.
 Resource argument edits apply the same rule to the selected `ResourceRef`.
+The selected part's resource request ID must also remain unchanged.
 Write-back reports `policy.envelope_replaced`; a plugin readback denial is
 attributed to its field pipeline. Request correlation IDs do not distinguish
 parts of one response. Emit one resource per message when URIs can repeat.
@@ -106,8 +112,9 @@ that pair no longer identifies a unique result.
 Retain each message's role and text boundaries separately from the joined
 string. Apply edits only when they can be mapped back without changing those
 roles or boundaries; deny if an edit crosses a boundary and cannot be mapped
-safely. A simpler host strategy is to evaluate each message's text separately
-and replace that message's text with the inspected result.
+safely. Per-message evaluation lets a host replace each message's text
+separately, but changes matching for exact and anchored rules. Keep joined-text
+evaluation for rules that must detect content spanning message boundaries.
 
 Issue #76 also tracks inspection and addressing of individual resource
 parts.
@@ -128,15 +135,24 @@ load and write-back preserves their original values:
 The URI identifies the fetch that was authorized. Redirecting a fetch after
 the route and PDP have decided requires separate routing and authorization.
 
+Array fields use indexes. Plugins must retain element order when editing
+array leaves. A write is refused if its parent structure or array length no
+longer matches the recorded state. Use one chain, such as `run(plugin) | omit`,
+when a plugin must inspect an element before removal. Use ordered `do:` steps
+for operations that depend on earlier edits; field maps define no execution
+order. A later field plugin addressing that array is refused while its
+payload still has the old indexes.
+
 A bare `**` redaction replaces a whole envelope with a string. On
 `ResourceRef`, `Resource`, `PromptResult`, `ToolCall` or `PromptRequest`,
 that denies with `policy.envelope_replaced`. Address a field such as
 `content` or `annotations.ssn` instead. Text-only messages and arbitrary
 tool-result JSON retain their whole-value redaction behavior.
 
-The top-level `global` policy reaches several envelope kinds and is not
-checked against their field catalogs. Put resource and prompt field rules
-on their routes, entity defaults or groups, which are checked at load.
+Field rules and condition keys are checked against the route's envelope at
+load, including inherited global rules. Put fields specific to resources or
+prompts on their routes, entity defaults or groups; a global rule must be
+valid for every resource and prompt route that inherits it.
 
 ## Example policies
 

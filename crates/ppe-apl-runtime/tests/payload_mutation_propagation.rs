@@ -115,7 +115,7 @@ async fn tool_call_argument_rewrite_reaches_the_host() {
     assert!(result.continue_processing);
     assert_eq!(
         tool_arg_of(forwarded(&result), "city"),
-        Some(serde_json::json!("[REDACTED]"))
+        Some(&serde_json::json!("[REDACTED]"))
     );
 }
 
@@ -257,12 +257,12 @@ routes:
     let out = forwarded(&result);
     assert_eq!(
         tool_arg_of(out, "city"),
-        Some(serde_json::json!("[REDACTED]")),
+        Some(&serde_json::json!("[REDACTED]")),
         "the pipeline's redaction must reach the host"
     );
     assert_eq!(
         tool_arg_of(out, "token"),
-        Some(serde_json::json!("[REDACTED]")),
+        Some(&serde_json::json!("[REDACTED]")),
         "the plugin's edit must not be clobbered by folding the pipeline's \
          args back in"
     );
@@ -317,7 +317,7 @@ routes:
 
     assert!(result.continue_processing, "route should allow");
     let out = forwarded(&result);
-    let content = tool_result_of(out).expect("tool result present").clone();
+    let content = tool_result_of(out).expect("tool result present");
     assert_eq!(
         content.get("employee_id"),
         Some(&serde_json::json!("****45")),
@@ -439,7 +439,7 @@ routes:
     assert!(result.continue_processing, "route should allow");
     assert_eq!(
         tool_arg_of(forwarded(&result), "city"),
-        Some(serde_json::json!("[REDACTED]"))
+        Some(&serde_json::json!("[REDACTED]"))
     );
 }
 
@@ -677,12 +677,12 @@ routes:
     assert_eq!(tool_arg_of(out, "debug"), None, "the omit must apply");
     assert_eq!(
         tool_arg_of(out, "token"),
-        Some(serde_json::json!("[REDACTED]")),
+        Some(&serde_json::json!("[REDACTED]")),
         "the plugin's edit must not be undone by applying the omit"
     );
     assert_eq!(
         tool_arg_of(out, "city"),
-        Some(serde_json::json!("London")),
+        Some(&serde_json::json!("London")),
         "an argument nobody touched must be left alone"
     );
 }
@@ -763,9 +763,6 @@ routes:
   - tool: get_weather
     args:
       city: "str | mask(2) | run(token-scrubber)"
-    authorization:
-      pre_invocation:
-        - "run(token-scrubber)"
 "#;
 
     let mgr = manager_with_yaml(
@@ -803,12 +800,12 @@ routes:
     let out = forwarded(&result);
     assert_eq!(
         tool_arg_of(out, "city"),
-        Some(serde_json::json!("****on")),
+        Some(&serde_json::json!("****on")),
         "the mask stage's output must survive the plugin stage that followed it"
     );
     assert_eq!(
         tool_arg_of(out, "token"),
-        Some(serde_json::json!("[REDACTED]")),
+        Some(&serde_json::json!("[REDACTED]")),
         "and the plugin's own edit must still reach the host"
     );
 }
@@ -835,7 +832,7 @@ async fn allow_without_mutation_reports_no_modification() {
     assert!(!result.payload_modified);
     assert_eq!(
         tool_arg_of(forwarded(&result), "city"),
-        Some(serde_json::json!("London")),
+        Some(&serde_json::json!("London")),
         "an untouched request must arrive untouched"
     );
 }
@@ -1060,7 +1057,7 @@ async fn missing_or_duplicate_references_deny_edits_and_field_readback() {
 
 #[tokio::test]
 async fn prompt_edits_and_field_readback_follow_the_original_after_reordering() {
-    for pipeline in ["redact", "run(projection-editor) | str"] {
+    for pipeline in ["redact", "run(projection-editor) | mask(1)"] {
         let result = projection_edit_result(
             ("prompt", "cmf.prompt_post_invoke", "result"),
             "content",
@@ -1088,7 +1085,7 @@ async fn prompt_edits_and_field_readback_follow_the_original_after_reordering() 
         let original = if pipeline == "redact" {
             "[REDACTED]"
         } else {
-            "original"
+            "*******l"
         };
         let order = if pipeline == "redact" {
             vec![("other", Some("other")), ("original", Some(original))]
@@ -1156,6 +1153,11 @@ async fn an_idempotent_policy_redaction_overrides_a_later_plugin_edit() {
             panic!("resource result")
         };
         assert_eq!(
+            content.version.as_deref(),
+            Some("plugin-edited"),
+            "the authorization plugin must have run"
+        );
+        assert_eq!(
             content.content.as_deref(),
             Some("[REDACTED]"),
             "a policy write wins even when its input was already redacted"
@@ -1214,6 +1216,254 @@ async fn annotation_plugin_readback_uses_expanded_array_and_dotted_key_paths() {
     }
 }
 
+#[tokio::test]
+async fn array_leaf_replay_preserves_sibling_redaction_and_denies_removal() {
+    for target in [Target::EditSiblingArrayNote, Target::RemoveFirstResourceRow] {
+        let part = ContentPart::Resource {
+            content: Resource {
+                uri: "original".to_owned(),
+                annotations: serde_json::from_value(
+                    serde_json::json!({"rows": [{"ssn": "[REDACTED]"}, {"note": "secret"}]}),
+                )
+                .expect("annotation map"),
+                ..Resource::default()
+            },
+        };
+        let result = projection_edit_result(
+            ("resource", "cmf.resource_post_fetch", "result"),
+            "annotations.rows.0.ssn",
+            "redact",
+            "    authorization:\n      post_invocation:\n        - \"run(projection-editor)\"",
+            vec![part],
+            target,
+        )
+        .await;
+        if matches!(target, Target::RemoveFirstResourceRow) {
+            assert!(
+                !result.continue_processing,
+                "array removal must refuse an unmappable policy write"
+            );
+            assert!(
+                result.modified_payload.is_none(),
+                "denial must forward no resurrected elements"
+            );
+        } else {
+            assert!(
+                result.continue_processing,
+                "an independent sibling edit must survive"
+            );
+            let ContentPart::Resource { content } = &forwarded(&result).message.content[0] else {
+                panic!("resource")
+            };
+            assert_eq!(content.version.as_deref(), Some("plugin-row-edit"));
+            assert_eq!(
+                content.annotations["rows"][0]["ssn"],
+                serde_json::json!("[REDACTED]")
+            );
+            assert_eq!(
+                content.annotations["rows"][1]["note"],
+                serde_json::json!("[REDACTED]")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn tool_readback_preserves_literal_dotted_keys() {
+    let mut part = tool_result_part("unused");
+    let ContentPart::ToolResult { content } = &mut part else {
+        panic!("tool result")
+    };
+    content.content = serde_json::json!({"a.b": {"secret": "original"}});
+    let result = projection_edit_result(
+        ("tool", "cmf.tool_post_invoke", "result"),
+        "**.secret",
+        "redact | run(projection-editor)",
+        "",
+        vec![part],
+        Target::InsertNestedToolResultBranch,
+    )
+    .await;
+    assert!(
+        result.continue_processing,
+        "an unrelated branch can be added"
+    );
+    let content = tool_result_of(forwarded(&result)).expect("tool result");
+    assert_eq!(content["a.b"]["secret"], serde_json::json!("[REDACTED]"));
+    assert_eq!(content["a"]["b"]["secret"], serde_json::json!("public"));
+}
+
+#[tokio::test]
+async fn resource_readback_refuses_a_replacement_request_at_the_same_uri() {
+    for (hook, block, field, part) in [
+        (
+            "cmf.resource_pre_fetch",
+            "args",
+            "selector",
+            reference_part("original"),
+        ),
+        (
+            "cmf.resource_post_fetch",
+            "result",
+            "content",
+            ContentPart::Resource {
+                content: Resource {
+                    uri: "original".to_owned(),
+                    content: Some("original".to_owned()),
+                    ..Resource::default()
+                },
+            },
+        ),
+    ] {
+        let result = projection_edit_result(
+            ("resource", hook, block),
+            field,
+            "str | run(projection-editor)",
+            "",
+            vec![part],
+            Target::ReplaceResourceRequest,
+        )
+        .await;
+        assert!(
+            !result.continue_processing,
+            "a different request must not receive this request's field write"
+        );
+        let reason = result.violation.expect("target denial").reason;
+        assert!(
+            reason.contains(&format!("`{block}:`")),
+            "phase must be correct: {reason}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_field_plugin_after_array_omission_is_denied_before_dispatch() {
+    let yaml = r#"engine_settings:
+  dispatch: policy
+plugins:
+  - name: editor
+    kind: editor
+    hooks: [cmf.resource_post_fetch]
+routes:
+  - resource: '*'
+    authorization:
+      post_invocation:
+        - when: "result.uri == 'original'"
+          do:
+            - "result.annotations.rows.0 | omit"
+            - "result.annotations.rows.0.ssn | run(editor)"
+"#;
+    let mgr = manager_with_yaml(
+        "editor",
+        Box::new(RewriteFactory {
+            target: Target::DenyIfDispatched,
+            hook: "cmf.resource_post_fetch",
+        }),
+        yaml,
+    )
+    .await;
+    let part = ContentPart::Resource {
+        content: Resource {
+            uri: "original".to_owned(),
+            annotations: serde_json::from_value(
+                serde_json::json!({"rows": [{"ssn": "first"}, {"ssn": "second"}]}),
+            )
+            .expect("annotations"),
+            ..Resource::default()
+        },
+    };
+    let extensions = Extensions {
+        meta: Some(Arc::new(praxis_policy_core::extensions::MetaExtension {
+            entity_type: Some("resource".to_owned()),
+            entity_name: Some("original".to_owned()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let (result, _background) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.resource_post_fetch",
+            payload_of(Role::Tool, vec![part]),
+            extensions,
+            None,
+        )
+        .await;
+    assert!(
+        !result.continue_processing,
+        "readback after an omission must not select the old index"
+    );
+    let violation = result.violation.expect("array index denial");
+    assert!(
+        violation.reason.contains("indexes"),
+        "the plugin must not dispatch: {}",
+        violation.reason
+    );
+}
+
+#[tokio::test]
+async fn ordered_field_ops_after_an_array_omission_use_the_remaining_element() {
+    let yaml = r#"engine_settings:
+  dispatch: policy
+routes:
+  - resource: '*'
+    authorization:
+      post_invocation:
+        - when: "result.uri == 'original'"
+          do:
+            - "result.annotations.rows.0 | omit"
+            - "result.annotations.rows.0.profile.ssn | redact"
+"#;
+    let mgr = manager_with_yaml(
+        "unused",
+        Box::new(RewriteFactory {
+            target: Target::DenyIfDispatched,
+            hook: "cmf.resource_post_fetch",
+        }),
+        yaml,
+    )
+    .await;
+    let part = ContentPart::Resource {
+        content: Resource {
+            uri: "original".to_owned(),
+            annotations: serde_json::from_value(serde_json::json!({
+                "rows": [
+                    {"removed": true},
+                    {"profile": {"ssn": "secret"}, "note": "keep"},
+                ],
+            }))
+            .expect("annotations"),
+            ..Resource::default()
+        },
+    };
+    let extensions = Extensions {
+        meta: Some(Arc::new(praxis_policy_core::extensions::MetaExtension {
+            entity_type: Some("resource".to_owned()),
+            entity_name: Some("original".to_owned()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let (result, _background) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.resource_post_fetch",
+            payload_of(Role::Tool, vec![part]),
+            extensions,
+            None,
+        )
+        .await;
+    assert!(
+        result.continue_processing,
+        "pure rules must retain sequential array indexing"
+    );
+    let ContentPart::Resource { content } = &forwarded(&result).message.content[0] else {
+        panic!("resource")
+    };
+    assert_eq!(
+        content.annotations["rows"],
+        serde_json::json!([{"profile": {"ssn": "[REDACTED]"}, "note": "keep"}])
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -1237,6 +1487,10 @@ enum Target {
     RewriteResourceContent,
     RewriteResourceAnnotations,
     DenyIfDispatched,
+    ReplaceResourceRequest,
+    InsertNestedToolResultBranch,
+    EditSiblingArrayNote,
+    RemoveFirstResourceRow,
 }
 
 struct RewritePlugin {
@@ -1324,9 +1578,46 @@ impl HookHandler<CmfHook> for RewritePlugin {
                 (Target::Text, ContentPart::Text { .. }) => ContentPart::Text {
                     text: "[REDACTED]".to_owned(),
                 },
+                (Target::ReplaceResourceRequest, ContentPart::Resource { content }) => {
+                    let mut next = content.clone();
+                    next.resource_request_id = "replacement".to_owned();
+                    ContentPart::Resource { content: next }
+                },
+                (Target::ReplaceResourceRequest, ContentPart::ResourceRef { content }) => {
+                    let mut next = content.clone();
+                    next.resource_request_id = "replacement".to_owned();
+                    ContentPart::ResourceRef { content: next }
+                },
+                (Target::InsertNestedToolResultBranch, ContentPart::ToolResult { content }) => {
+                    let mut next = content.clone();
+                    next.content.as_object_mut().expect("object result").insert(
+                        "a".to_owned(),
+                        serde_json::json!({"b": {"secret": "public"}}),
+                    );
+                    ContentPart::ToolResult { content: next }
+                },
+                (
+                    Target::EditSiblingArrayNote | Target::RemoveFirstResourceRow,
+                    ContentPart::Resource { content },
+                ) => {
+                    let mut next = content.clone();
+                    let rows = next
+                        .annotations
+                        .get_mut("rows")
+                        .and_then(serde_json::Value::as_array_mut)
+                        .expect("resource rows");
+                    if matches!(self.target, Target::RemoveFirstResourceRow) {
+                        rows.remove(0);
+                    } else {
+                        rows[1]["note"] = serde_json::json!("[REDACTED]");
+                    }
+                    next.version = Some("plugin-row-edit".to_owned());
+                    ContentPart::Resource { content: next }
+                },
                 (Target::RewriteResourceContent, ContentPart::Resource { content }) => {
                     let mut next = content.clone();
                     next.content = Some("plugin-secret".to_owned());
+                    next.version = Some("plugin-edited".to_owned());
                     ContentPart::Resource { content: next }
                 },
                 (Target::RewriteResourceAnnotations, ContentPart::Resource { content }) => {
@@ -1597,9 +1888,9 @@ fn tool_result_of(payload: &MessagePayload) -> Option<&serde_json::Value> {
     })
 }
 
-fn tool_arg_of(payload: &MessagePayload, key: &str) -> Option<serde_json::Value> {
+fn tool_arg_of<'a>(payload: &'a MessagePayload, key: &str) -> Option<&'a serde_json::Value> {
     payload.message.content.iter().find_map(|part| match part {
-        ContentPart::ToolCall { content } => content.arguments.get(key).cloned(),
+        ContentPart::ToolCall { content } => content.arguments.get(key),
         _ => None,
     })
 }
@@ -1757,6 +2048,7 @@ async fn projection_edit_result(
             hook: match hook {
                 "cmf.resource_pre_fetch" => "cmf.resource_pre_fetch",
                 "cmf.resource_post_fetch" => "cmf.resource_post_fetch",
+                "cmf.tool_post_invoke" => "cmf.tool_post_invoke",
                 _ => "cmf.prompt_post_invoke",
             },
         }),

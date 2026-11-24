@@ -69,7 +69,7 @@ use crate::delegation_invoker::DelegationPluginInvoker;
 use crate::dispatch_plan::DispatchCache;
 use crate::elicitation_invoker::ElicitationPluginInvoker;
 use crate::message_projection::{
-    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, apply_changed_paths, apply_written_paths,
+    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, apply_written_paths,
     extract_args_by_identity, extract_args_from_message, extract_result_by_identity,
     extract_result_from_message, write_args_by_identity, write_result_back_to_message,
 };
@@ -651,20 +651,7 @@ impl AplRouteHandler {
         let final_payload = invoker.current_payload().await;
         let final_extensions = invoker.current_extensions().await;
 
-        // The pre-evaluation projections. No longer used to *detect*
-        // pipeline edits (the decision reports those) — they're the
-        // baseline for folding those edits back in below, which needs to
-        // know which paths the pipeline touched.
-        //
-        // Each side is projected only in the phase that can edit it:
-        // `evaluate_pre` never sets `result_modified` and `evaluate_post`
-        // never sets `args_modified`, so the other projection would be
-        // unread work on every request.
-        let pre_args = match self.phase {
-            Phase::Pre => message.map(|m| extract_args_from_message(m, self.projection)),
-            Phase::Post => None,
-        };
-        // The baseline must precede plugin edits so only policy changes are merged.
+        // Write events retain policy edits even when their output equals the input.
         let mut envelope_replaced: Option<(&'static str, EnvelopeReplaced)> = None;
         // Which of the three sources changed the payload, in precedence
         // order. Each condition is a signal from the code that performed
@@ -673,36 +660,12 @@ impl AplRouteHandler {
         // invoker's flag is set when a plugin's payload is accepted.
         // Nothing here infers a change by comparing values.
         let modified_payload: Option<Box<dyn PluginPayload>> = if decision.args_modified {
-            // An args pipeline (Pre) rewrote a field. Fold the new
-            // args back into a fresh MessagePayload so downstream
-            // readers (the host's body re-serializer) see the
-            // change.
-            //
-            // Only the paths the pipeline touched are applied. A plugin
-            // may have rewritten other arguments on the same tool call,
-            // and those edits aren't in `route_payload.args` (it was
-            // projected before any plugin ran), so writing it wholesale
-            // would silently drop them.
-            //
-            // Without a pre-projection there is no way to tell which
-            // paths the pipeline changed, so write nothing rather than
-            // fold in an unattributable diff — a wholesale write is
-            // exactly the clobbering this merge exists to prevent. Only
-            // the Pre phase sets `args_modified`, and only the Pre phase
-            // projects `pre_args`, so this holds by construction.
-            //
-            // The fold is message-shaped, so it is gated on the payload
-            // being one. `pre_args` is already `None` for a payload that
-            // carries no message, and a route on such a family cannot
-            // declare the `args:` stage that sets this flag, so the gate
-            // never has anything to skip.
+            // Replacing the entire projection would discard independent plugin edits.
             let mut updated = final_payload.clone();
-            if let Some(pre) = pre_args.as_ref()
-                && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
-            {
+            if let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>() {
                 let identity = invoker.identity(praxis_policy_apl_core::step::DispatchPhase::Pre);
                 let paths = invoker
-                    .written_paths(praxis_policy_apl_core::step::DispatchPhase::Pre)
+                    .field_writes(praxis_policy_apl_core::step::DispatchPhase::Pre)
                     .await;
                 let write_args = extract_args_by_identity(
                     &target.message,
@@ -710,8 +673,7 @@ impl AplRouteHandler {
                     identity,
                 )
                 .and_then(|mut merged| {
-                    apply_changed_paths(&mut merged, pre, &route_payload.args);
-                    apply_written_paths(&mut merged, &route_payload.args, &paths);
+                    apply_written_paths(&mut merged, &paths, self.projection, true)?;
                     write_args_by_identity(&mut target.message, &merged, self.projection, identity)
                 });
                 if let Err(e) = write_args {
@@ -720,33 +682,18 @@ impl AplRouteHandler {
             }
             Some::<Box<dyn PluginPayload>>(Box::new(updated))
         } else if decision.result_modified {
-            // A `result:` pipeline rewrote a field in the upstream
-            // response. Fold the new result back into the message
-            // so the host's response body re-serializer can write
-            // it out before forwarding downstream. Only the Post phase
-            // can set this — a Pre route has no result to rewrite.
-            //
-            // Same per-path merge as the args branch above, for the same
-            // reason: a plugin may have redacted a different part of the
-            // same tool result.
-            // Same "no pre-projection, no write" rule as the args branch
-            // above, and the same message gate for the same reason.
             let mut updated = final_payload.clone();
-            if let Some(result_value) = route_payload.result.as_ref()
+            if route_payload.result.is_some()
                 && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
             {
-                let pre = message.map_or(Value::Null, |m| {
-                    extract_result_from_message(m, self.projection).0
-                });
                 let identity = invoker.identity(praxis_policy_apl_core::step::DispatchPhase::Post);
                 let paths = invoker
-                    .written_paths(praxis_policy_apl_core::step::DispatchPhase::Post)
+                    .field_writes(praxis_policy_apl_core::step::DispatchPhase::Post)
                     .await;
                 let write_result =
                     extract_result_by_identity(&target.message, self.projection, identity)
                         .and_then(|mut merged| {
-                            apply_changed_paths(&mut merged, &pre, result_value);
-                            apply_written_paths(&mut merged, result_value, &paths);
+                            apply_written_paths(&mut merged, &paths, self.projection, false)?;
                             write_result_back_to_message(
                                 &mut target.message,
                                 &merged,
