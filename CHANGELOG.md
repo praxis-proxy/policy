@@ -47,6 +47,18 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   per-value encoder `form_urlencode` already used, for callers building an
   RFC 6749 Basic credential.
 
+### Changed
+
+- **Breaking for Rust callers:** `EngineSettings` adds `require_revocation`,
+  and `GlobalConfig`, `PolicyGroup` and `RouteEntry` each add `revocation`;
+  exhaustive struct literals must initialize them or use
+  `..Default::default()`, and exhaustive destructuring must name the fields
+  or use `..`. `ConfigScope` adds `Revocation` and `RevocationStep`, and
+  `RouteResolutionError` adds `RevocationUnavailable`; downstream exhaustive
+  matches must handle the new variants. All of these are also reachable
+  through the `praxis_policy` facade's crate re-exports.
+  ([#205](https://github.com/praxis-proxy/policy/issues/205))
+
 ### Fixed
 
 - **A replaced identity no longer keeps the previous identity's token.**
@@ -68,6 +80,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `ClientExtension` and `WorkloadIdentity` now implement `PartialEq` and
   `Eq`.
 
+## [0.7.0] - 2026-11-20
 
 ### Added
 
