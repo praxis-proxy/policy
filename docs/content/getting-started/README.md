@@ -5,5 +5,5 @@ Praxis deployment. Read the pages in order:
 
 1. [Quick Start](quickstart.md):
    add the crate, register the runtime, and run a first policy
-2. [Use with the gateway](use-with-the-gateway.md):
+2. [Use with Praxis](use-with-the-gateway.md):
    how the policy engine runs inside Praxis as its `policy` filter

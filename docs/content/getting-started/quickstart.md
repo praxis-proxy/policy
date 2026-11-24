@@ -142,7 +142,7 @@ demonstrates.
 
 ## Next
 
-- [Use with the gateway](use-with-the-gateway.md): run the engine as the
+- [Use with Praxis](use-with-the-gateway.md): run the engine as the
   Praxis `policy` filter.
 - [Overview](../concepts/overview.md): follow the enforcement pipeline through
   one scenario.

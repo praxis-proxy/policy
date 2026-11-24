@@ -1,4 +1,4 @@
-# Use PPE with Praxis
+# Use with Praxis
 
 [Praxis](https://github.com/praxis-proxy/praxis) embeds the Praxis Policy Engine
 (PPE) in its `policy` filter. The filter evaluates request policy before

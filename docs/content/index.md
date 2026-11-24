@@ -34,7 +34,7 @@ in this order, or jump to the one that matches your task.
 
 - [Quick Start](getting-started/quickstart.md):
   stand up an enforcement point and run your first policy
-- [Use with the gateway](getting-started/use-with-the-gateway.md):
+- [Use with Praxis](getting-started/use-with-the-gateway.md):
   run the engine as the Praxis `policy` filter
 
 ## Guides
