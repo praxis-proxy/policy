@@ -1406,6 +1406,11 @@ Hooks without a phase are not checked: `identity.resolve`, the rate-limit
 hooks, `token.delegate`, and `revocation.check` itself. A request with no
 resolved identity has nothing to check, so it passes.
 
+Checkers run on the context table the host passed with the hook, as they
+would if the host called `revocation.check` itself. A checker sees what the
+host and earlier checks stored there, and what it stores is passed to the
+policy pipeline and returned to the host in `PipelineResult.context_table`.
+
 One request can go through several phased hooks. For example, an HTTP
 request that carries a tool call is checked at both. With
 `cache_ttl_seconds: 0`, that means more than one call to the IdP per

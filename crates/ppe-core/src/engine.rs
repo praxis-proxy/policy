@@ -2930,7 +2930,7 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        let context_table =
+        let mut context_table =
             self.track_rate_limit_stage(snapshot, hook_name, &extensions, context_table);
         // Gated on the snapshot, not left to the revocation dispatch to find
         // nothing: that dispatch settles through `finish` like any other and
@@ -2943,11 +2943,17 @@ impl PolicyEngine {
 
         // Before the route's entries are resolved, so a revoked identity is
         // refused whether or not the route has a plugin on this hook.
-        if let Some(check_point) = check_before
-            && let Some(violation) = self
-                .check_revocation(snapshot, &extensions, check_point)
-                .await
-        {
+        let refused_before = match check_before {
+            Some(check_point) => {
+                let (violation, table) = self
+                    .check_revocation(snapshot, &extensions, check_point, context_table)
+                    .await;
+                context_table = table;
+                violation
+            },
+            None => None,
+        };
+        if let Some(violation) = refused_before {
             let matched = resolve_contract_route(snapshot, &extensions);
             return (
                 self.finish(
@@ -2980,12 +2986,16 @@ impl PolicyEngine {
         if let Some(check_point) = check_after
             && !result.is_denied()
             && let Some(extensions) = result.modified_extensions.as_ref()
-            && let Some(violation) = self
-                .check_revocation(snapshot, extensions, check_point)
-                .await
         {
-            refused = result.modified_payload.take();
-            result = deny_allowed(violation, result);
+            let table = std::mem::take(&mut result.context_table);
+            let (violation, table) = self
+                .check_revocation(snapshot, extensions, check_point, Some(table))
+                .await;
+            result.context_table = table.unwrap_or_default();
+            if let Some(violation) = violation {
+                refused = result.modified_payload.take();
+                result = deny_allowed(violation, result);
+            }
         }
 
         (
@@ -2997,29 +3007,45 @@ impl PolicyEngine {
 
     /// Check whether the identities `extensions` carries still hold authority
     /// on the request's route, at `check_point`: `None` to pass, or the
-    /// violation to deny with.
+    /// violation to deny with, and the request's context table after the
+    /// check.
     ///
     /// Dispatches the revocation hook on `snapshot`, the snapshot of the
     /// dispatch being checked, so a reload landing between the two cannot
     /// swap in another configuration's checkers. The route is resolved from
     /// `extensions` exactly as the checked dispatch resolved it.
+    ///
+    /// The checkers run on `context_table`, the request's own, as they would
+    /// when a host dispatches `revocation.check` itself: they see what the
+    /// host and earlier check points left there, and what they write goes on
+    /// to the pipeline and back to the host.
     async fn check_revocation(
         &self,
         snapshot: &RuntimeSnapshot,
         extensions: &Extensions,
         check_point: crate::revocation::CheckPoint,
-    ) -> Option<crate::error::PluginViolation> {
-        let asked = crate::revocation::question(extensions, check_point)?;
+        context_table: Option<PluginContextTable>,
+    ) -> (
+        Option<crate::error::PluginViolation>,
+        Option<PluginContextTable>,
+    ) {
+        let Some(asked) = crate::revocation::question(extensions, check_point) else {
+            return (None, context_table);
+        };
         // Boxed because the dispatch this enters is the one that called here.
-        let (result, _background) = Box::pin(self.dispatch(
+        let (mut result, _background) = Box::pin(self.dispatch(
             snapshot,
             crate::revocation::HOOK_REVOCATION_CHECK,
             Box::new(asked.clone()),
             extensions.clone(),
-            None,
+            context_table,
         ))
         .await;
-        crate::revocation::verdict(&asked, result)
+        let context_table = std::mem::take(&mut result.context_table);
+        (
+            crate::revocation::verdict(&asked, result),
+            Some(context_table),
+        )
     }
 
     /// Resolve the route's entries for `hook_name` and run them, without

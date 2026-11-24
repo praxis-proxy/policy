@@ -450,6 +450,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checks_share_the_request_context_table() {
+        let (engine, _) = engine(&format!(
+            "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
+            checker("kc", "{ vouch: [subject, client], tally: true }")
+        ))
+        .await;
+        let kc = engine.get_plugin("kc").expect("registered").id();
+        let mut seeded = PluginContextTable::default();
+        seeded
+            .local_states
+            .insert(kc, HashMap::from([("tally".to_owned(), 10.into())]));
+
+        let (result, _) = engine
+            .invoke_by_name(
+                HOOK_CMF_TOOL_PRE_INVOKE,
+                Box::new(RevocationCheck::new(CheckPoint::AfterAuthentication, [])),
+                both_slots(),
+                Some(seeded),
+            )
+            .await;
+
+        assert!(!result.is_denied(), "vouched at both points");
+        assert_eq!(
+            result
+                .context_table
+                .local_states
+                .get(&kc)
+                .and_then(|s| s.get("tally")),
+            Some(&12.into()),
+            "the check before the pipeline saw the host's 10, the check after it saw 11, and \
+             the host gets 12 back"
+        );
+    }
+
+    #[tokio::test]
     async fn a_revocation_during_the_pipeline_is_caught_before_dispatch() {
         let (engine, calls) = engine(&format!(
             "{}global:\n  revocation: [kc]\nroutes:\n  - tool: t\n",
@@ -603,6 +638,7 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -611,7 +647,7 @@ mod tests {
     use crate::cmf::constants::{
         ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
     };
-    use crate::context::PluginContext;
+    use crate::context::{PluginContext, PluginContextTable};
     use crate::engine::PolicyEngine;
     use crate::error::PluginError;
     use crate::extensions::HttpExtension;
@@ -759,10 +795,18 @@ mod tests {
             &self,
             payload: &dyn PluginPayload,
             _extensions: &Extensions,
-            _ctx: &mut PluginContext,
+            ctx: &mut PluginContext,
         ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
             let checker = &self.0;
             let call = checker.calls.fetch_add(1, Ordering::AcqRel) + 1;
+            if checker.setting("tally") == Some(&serde_json::Value::Bool(true)) {
+                let seen = ctx
+                    .local_state
+                    .get("tally")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default();
+                ctx.local_state.insert("tally".into(), (seen + 1).into());
+            }
             let revoked_by_now = checker
                 .setting("revoke_from_call")
                 .and_then(serde_json::Value::as_u64)
