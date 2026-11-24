@@ -30,6 +30,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `auth.directory_unavailable` rather than as a bad caller.
   ([#213](https://github.com/praxis-proxy/policy/issues/213))
 
+### Fixed
+
+- **Secret declaration reloads.** `PolicyEngine::reload_secrets` applies changed
+  declarations while preserving the running policy and plugin state.
+  `reload_secrets_with_key` replaces declarations and selects their provenance
+  key together. Failed reads or validation leave the current bindings in place.
+  In-flight calls keep one validated key for both audit hashes. Refresh reports
+  and provider health preserve committed results and outage history.
+  ([#155](https://github.com/praxis-proxy/policy/issues/155),
+  [#291](https://github.com/praxis-proxy/policy/pull/291))
+
 ## [0.7.0] - 2026-11-20
 
 ### Added

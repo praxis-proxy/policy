@@ -946,13 +946,23 @@ pub struct PolicyEngine {
     initializations_in_flight: AtomicUsize,
 
     /// Monotonic config-generation counter. Bumped every time the runtime
-    /// snapshot is swapped (factory mutation, config (re)load, plugin
-    /// register/unregister). External orchestrators (praxis-policy-apl-runtime's dispatch
-    /// plan cache) pair their cached values with the generation seen at
-    /// build time; a generation mismatch on lookup signals "evict + rebuild."
-    /// Starts at 0; first snapshot publish (empty registry) leaves it at 0,
-    /// so callers can use 0 as a "never observed" sentinel.
+    /// snapshot is swapped for registry, policy, or plugin changes. External
+    /// orchestrators (praxis-policy-apl-runtime's dispatch plan cache) pair
+    /// their cached values with the generation seen at build time; a
+    /// generation mismatch on lookup signals "evict + rebuild." Starts at 0;
+    /// first snapshot publish (empty registry) leaves it at 0, so callers can
+    /// use 0 as a "never observed" sentinel.
+    ///
+    /// Secret-only reloads bump [`Self::secrets_revision`] instead, so APL
+    /// route override instances keep their accumulated state.
     generation: AtomicU64,
+
+    /// Monotonic secret-publication counter. Bumped by
+    /// [`Self::reload_secrets`] / [`Self::reload_secrets_with_key`] when a
+    /// replacement store is installed. Concurrent secret reloads compare this
+    /// (with the published store pointer) without invalidating
+    /// `config_generation`-keyed caches.
+    secrets_revision: AtomicU64,
 
     /// Serialises writers on `runtime`. Every mutation is a load, clone,
     /// store, so the lock has to span the whole sequence: a writer that clones
@@ -1584,6 +1594,7 @@ impl PolicyEngine {
             initialized: AtomicBool::new(false),
             initializations_in_flight: AtomicUsize::new(0),
             generation: AtomicU64::new(0),
+            secrets_revision: AtomicU64::new(0),
             runtime_write: Mutex::new(()),
             task_tracker: tokio_util::task::TaskTracker::new(),
             visitors: RwLock::new(Vec::new()),
@@ -1745,6 +1756,16 @@ impl PolicyEngine {
     /// a higher generation guarantees visibility of the new snapshot.
     pub fn config_generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    /// Monotonic counter used to detect concurrent secret publications.
+    ///
+    /// Distinct from [`Self::config_generation`]: secret-only reloads must not
+    /// evict APL dispatch plans or rebuild route override instances. A higher
+    /// value means another publication was installed; it does not guarantee
+    /// every carried cell already holds its replacement bytes.
+    pub fn secrets_revision(&self) -> u64 {
+        self.secrets_revision.load(Ordering::Acquire)
     }
 
     /// Whether any identity-resolve plugin is configured for a route.
@@ -2032,6 +2053,7 @@ impl PolicyEngine {
             return Err(config_load_during_initialization());
         }
         let seen_generation = self.generation.load(Ordering::Acquire);
+        let seen_secrets_revision = self.secrets_revision.load(Ordering::Acquire);
         let original = self.load_runtime();
         let baseline = self.installed_secrets();
         let mut policy_config = original.policy_config.clone().ok_or_else(|| {
@@ -2072,6 +2094,7 @@ impl PolicyEngine {
             }
             let current_store = self.installed_secrets();
             if self.generation.load(Ordering::Acquire) != seen_generation
+                || self.secrets_revision.load(Ordering::Acquire) != seen_secrets_revision
                 || !same_published_store(baseline.as_ref(), current_store.as_ref())
                 || (defer_reads && self.initialized.load(Ordering::Acquire))
             {
@@ -2094,18 +2117,30 @@ impl PolicyEngine {
                 return Err(error);
             },
         };
-        let installed = if defer_reads {
+        // Health merges here; staged cell writes wait until after the runtime
+        // swap so an old snapshot cannot capture replacement bytes first.
+        let published = if defer_reads {
             None
         } else {
             resolved
                 .take()
-                .map(|value| Arc::new(value.publish(baseline.as_deref())))
+                .map(|value| value.publish(baseline.as_deref()).share())
         };
+        let installed = published
+            .as_ref()
+            .map(crate::secrets::store::SharedPublication::store);
         if policy_config.engine_settings.capture_content_provenance
             && let Some(key) = prepared_key
         {
             replacement.executor.set_content_key(key);
         }
+        // Decide before `policy_config` moves into the replacement. Emit only
+        // after the write locks drop so a rejected reload never warns and a
+        // concurrent reader is not blocked on logging.
+        let warn_unkeyed = policy_config.engine_settings.capture_content_provenance
+            && policy_config.engine_settings.content_key_source()
+                == Some(ContentKeySource::Unkeyed);
+        let warning_config = warn_unkeyed.then(|| policy_config.clone());
         replacement.policy_config = Some(policy_config);
         replacement.secrets = installed.clone();
         if let Some(store) = baseline.as_ref() {
@@ -2113,11 +2148,17 @@ impl PolicyEngine {
         }
         self.secrets.store(installed);
         self.runtime.store(Arc::new(replacement));
-        self.generation.fetch_add(1, Ordering::Release);
+        self.secrets_revision.fetch_add(1, Ordering::Release);
+        if let Some(published) = published {
+            // Cell writes are visible through the Arc already installed above.
+            published.apply_staged_cells();
+        }
         drop(writer);
         drop(refresh_guard);
         drop(original);
-        self.clear_routing_cache();
+        if let Some(cfg) = warning_config {
+            warn_on_inactive_settings(&cfg);
+        }
         Ok(())
     }
 
@@ -3603,7 +3644,7 @@ impl PolicyEngine {
     async fn finish(
         &self,
         snapshot: &RuntimeSnapshot,
-        executor: &Executor,
+        executor: &crate::executor::Invocation<'_>,
         hook_name: Option<&str>,
         matched: Option<&config::MatchedRoute<'_>>,
         fallback_payload: Option<Box<dyn PluginPayload>>,
@@ -8243,7 +8284,7 @@ secrets:
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = "new-backend".to_owned();
         let changed = yaml.replace("tag: first", "tag: second");
-        let reloading = {
+        let mut reloading = {
             let engine = Arc::clone(&engine);
             tokio::spawn(async move {
                 engine
@@ -8252,10 +8293,21 @@ secrets:
             })
         };
 
-        reloading
-            .await
-            .expect("the reload task does not panic")
-            .expect("the provider is rebuilt and the value re-read");
+        let reload_result =
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut reloading).await {
+                Ok(joined) => joined.expect("the reload task does not panic"),
+                Err(_) => {
+                    reloading.abort();
+                    release.notify_one();
+                    let _ = refreshing.await;
+                    let _ = reloading.await;
+                    panic!(
+                        "reload stayed blocked behind the paused refresh; release the refresh gate \
+                     before awaiting publication"
+                    );
+                },
+            };
+        reload_result.expect("the provider is rebuilt and the value re-read");
 
         release.notify_one();
         refreshing.await.expect("the refresh task does not panic");
@@ -13183,11 +13235,21 @@ routes:
                 Some("upstream_key")
             );
         }
+        let secrets_revision = engine.secrets_revision();
         engine
             .reload_secrets_with_key(incoming, ContentKeySource::Unkeyed)
             .await
             .unwrap();
         assert_eq!(handle.get().as_str(), "b".repeat(40));
+        assert_eq!(
+            engine.config_generation(),
+            generation,
+            "a secret-only reload must not bump config_generation"
+        );
+        assert!(
+            engine.secrets_revision() > secrets_revision,
+            "a secret-only reload must advance secrets_revision"
+        );
         assert!(
             engine
                 .load_runtime()

@@ -485,10 +485,11 @@ generation again until the value changes once more.
 
 ### Secrets and reload
 
-Synchronous `load_config` refuses a changed `secrets:` block after secret
-resolution. The running document and credentials remain installed. Before
-initialization, the block can change because `initialize()` reads the loaded
-document.
+Synchronous `load_config` refuses a changed `secrets:` block once a store has
+been resolved — including after `reload_secrets_with_key` installs one before
+`initialize()`. The running document and credentials remain installed. The
+block can still change while the engine is uninitialized *and* no store has
+been resolved, because `initialize()` reads whatever document is loaded.
 
 Use `PolicyEngine::reload_secrets(SecretsConfig)` to apply secret declarations
 without replacing policy or plugins. New and changed bindings resolve before
@@ -512,10 +513,12 @@ engine.reload_secrets(replacement).await?;
 
 The provenance-key selection is retained. To add and select a new key in one
 operation, call `reload_secrets_with_key` with the replacement block and
-`ContentKeySource::Secret("new_key")`. The selected value must resolve to at
-least 32 bytes. `ContentKeySource::Unkeyed` explicitly selects plain SHA-256;
-`Secret("unkeyed")` is refused because that name is reserved. Capture mode
-remains unchanged. See [content provenance](auditing.md#content-provenance).
+`ContentKeySource::Secret("new_key")`. Selecting a key does not enable capture;
+`capture_content_provenance` must already be on. Named keys need a RustCrypto
+build: a FIPS configuration rejects them even when the secret is declared and
+at least 32 bytes long. `ContentKeySource::Unkeyed` explicitly selects plain
+SHA-256; `Secret("unkeyed")` is refused because that name is reserved. Capture
+mode remains unchanged. See [content provenance](auditing.md#content-provenance).
 
 Secret reload requires a loaded document. Before initialization, ordinary
 `reload_secrets` defers reads if no store has been resolved.

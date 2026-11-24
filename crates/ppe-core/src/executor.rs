@@ -446,13 +446,139 @@ pub struct Executor {
     /// with `capture_content_provenance` on, so a missing key never degrades
     /// to an unkeyed digest nobody chose.
     content_key: Option<crate::hooks::payload::ContentKey>,
-    captured_content_key: Option<crate::hooks::payload::CapturedContentKey>,
 
     /// Effect keys open in this process, which a recovery sweep leaves alone.
     /// Belongs with the log rather than the executor, so the engine carries it
     /// across a reload that keeps the log; requests still running on the old
     /// executor are acting on that same file.
     in_flight: Arc<crate::effect::InFlightEffects>,
+}
+
+/// How this invocation digests content for audit.
+enum InvocationProvenance {
+    /// No keyed capture; digest with the executor's live key when configured.
+    Live,
+    /// Keyed capture failed; never digest and never fall back to the live key.
+    Suppressed,
+    /// Digest with this snapshot of the key.
+    Captured(crate::hooks::payload::CapturedContentKey),
+}
+
+/// Borrowed executor plus the provenance key captured for one audited call.
+///
+/// Sequence counters stay on the shared executor. A failed capture suppresses
+/// digests for the whole invocation instead of falling back to the live key.
+pub(crate) struct Invocation<'a> {
+    executor: &'a Executor,
+    provenance: InvocationProvenance,
+}
+
+impl<'a> std::ops::Deref for Invocation<'a> {
+    type Target = Executor;
+
+    fn deref(&self) -> &Executor {
+        self.executor
+    }
+}
+
+impl Invocation<'_> {
+    fn content_hash(&self, payload: &dyn PluginPayload) -> Option<String> {
+        match &self.provenance {
+            InvocationProvenance::Captured(key) => {
+                payload.audit_bytes().and_then(|bytes| key.digest(&bytes))
+            },
+            InvocationProvenance::Suppressed => None,
+            InvocationProvenance::Live => self.executor.content_hash(payload),
+        }
+    }
+
+    fn digests_content(&self) -> bool {
+        match &self.provenance {
+            InvocationProvenance::Captured(_) => true,
+            InvocationProvenance::Suppressed => false,
+            InvocationProvenance::Live => self.executor.provenance_key().is_some(),
+        }
+    }
+
+    /// Entry provenance under the key captured for this invocation.
+    pub(crate) fn entry_decisions(
+        &self,
+        payload: &dyn PluginPayload,
+        extensions: &Extensions,
+    ) -> DecisionLog {
+        let mut decisions = DecisionLog::new();
+        self.capture_entry_provenance(&mut decisions, payload, extensions);
+        decisions
+    }
+
+    fn capture_entry_provenance(
+        &self,
+        decisions: &mut DecisionLog,
+        payload: &dyn PluginPayload,
+        extensions: &Extensions,
+    ) {
+        if self.audit_handlers.is_empty() {
+            return;
+        }
+        let request = extensions.request.as_ref();
+        decisions.set_span(crate::decision::Span::for_request(
+            request.and_then(|r| r.trace_id.as_deref()),
+            request.and_then(|r| r.span_id.as_deref()),
+        ));
+        if let Some(sec) = extensions.security.as_ref() {
+            let mut labels: Vec<String> = sec.labels.iter().cloned().collect();
+            labels.sort_unstable();
+            decisions.set_input_labels(labels);
+        }
+        if self.digests_content() {
+            decisions.set_input_hash(self.content_hash(payload));
+        }
+    }
+
+    /// Finalize and emit under the key captured for this invocation.
+    pub(crate) async fn emit_decision(
+        &self,
+        payload: &dyn PluginPayload,
+        extensions: &Extensions,
+        decisions: &mut DecisionLog,
+        verdict: Verdict,
+    ) {
+        decisions.finalize(verdict);
+        if self.audit_handlers.is_empty() {
+            return;
+        }
+        if self.digests_content() {
+            decisions.set_output_hash(self.content_hash(payload));
+        }
+        self.stamp_decision_stream(decisions);
+        self.emit_audit(payload, extensions, decisions).await;
+    }
+
+    /// [`Executor::execute_audited`] using this invocation's captured key for
+    /// entry hashing.
+    pub(crate) async fn execute_audited(
+        &self,
+        entries: &[HookEntry],
+        payload: Box<dyn PluginPayload>,
+        extensions: Extensions,
+        context_table: Option<PluginContextTable>,
+        task_tracker: &tokio_util::task::TaskTracker,
+    ) -> (
+        PipelineResult,
+        BackgroundTasks,
+        Option<Box<dyn PluginPayload>>,
+    ) {
+        self.executor
+            .execute_audited(
+                self,
+                entries,
+                payload,
+                extensions,
+                context_table,
+                task_tracker,
+            )
+            .await
+    }
 }
 
 /// Compose a stream id from an optional namespace and the per-type label.
@@ -485,7 +611,6 @@ impl Executor {
             emission_seq: Arc::new(AtomicU64::new(0)),
             stream_namespace,
             content_key: None,
-            captured_content_key: None,
             in_flight: Arc::default(),
         }
     }
@@ -510,7 +635,6 @@ impl Executor {
     #[must_use]
     pub fn with_content_key(mut self, key: crate::hooks::payload::ContentKey) -> Self {
         self.content_key = Some(key);
-        self.captured_content_key = None;
         self
     }
 
@@ -518,35 +642,32 @@ impl Executor {
     /// engine's path once secrets are resolved.
     pub fn set_content_key(&mut self, key: crate::hooks::payload::ContentKey) {
         self.content_key = Some(key);
-        self.captured_content_key = None;
     }
 
-    pub(crate) fn for_invocation(&self) -> std::borrow::Cow<'_, Self> {
-        let Some(key @ crate::hooks::payload::ContentKey::Keyed(_)) = self.provenance_key() else {
-            return std::borrow::Cow::Borrowed(self);
-        };
-        if self.audit_handlers.is_empty() {
-            return std::borrow::Cow::Borrowed(self);
-        }
-
-        let captured = match key.capture() {
-            Ok(captured) => Some(captured),
-            Err(error) => {
-                tracing::error!(%error, "content provenance key capture failed");
-                None
+    /// Capture a keyed provenance secret for one audited invocation, or borrow
+    /// the executor when no capture is required.
+    pub(crate) fn for_invocation(&self) -> Invocation<'_> {
+        let provenance = match self.provenance_key() {
+            Some(key @ crate::hooks::payload::ContentKey::Keyed(_))
+                if !self.audit_handlers.is_empty() =>
+            {
+                match key.capture() {
+                    Ok(captured) => InvocationProvenance::Captured(captured),
+                    Err(error) => {
+                        tracing::error!(%error, "content provenance key capture failed");
+                        InvocationProvenance::Suppressed
+                    },
+                }
             },
+            _ => InvocationProvenance::Live,
         };
-        let mut executor = self.clone();
-        // A failed capture must not fall back to the live handle.
-        executor.content_key = None;
-        executor.captured_content_key = captured;
-        std::borrow::Cow::Owned(executor)
+        Invocation {
+            executor: self,
+            provenance,
+        }
     }
 
     fn content_hash(&self, payload: &dyn PluginPayload) -> Option<String> {
-        if let Some(key) = self.captured_content_key.as_ref() {
-            return payload.audit_bytes().and_then(|bytes| key.digest(&bytes));
-        }
         let key = self.provenance_key()?;
         payload.audit_bytes().and_then(|bytes| key.digest(&bytes))
     }
@@ -682,85 +803,6 @@ impl Executor {
     /// short-circuits, which return before reaching `execute`, and at the
     /// route-resolution denial, which has no pipeline to build one.
     ///
-    /// The verdict is not set here. Nothing between this and the emit can
-    /// change what a zero-plugin invocation rules, but the contract is that
-    /// only [`Self::emit_decision`] finalizes, so there is one place where a
-    /// record's verdict is decided rather than two that have to agree.
-    pub(crate) fn entry_decisions(
-        &self,
-        payload: &dyn PluginPayload,
-        extensions: &Extensions,
-    ) -> DecisionLog {
-        let mut decisions = DecisionLog::new();
-        self.capture_entry_provenance(&mut decisions, payload, extensions);
-        decisions
-    }
-
-    /// Finalize a decision log with the verdict the caller is actually
-    /// returning, stamp it into the audit stream, and hand it to every sink.
-    ///
-    /// The engine calls this after its assertion contract establishes the
-    /// final verdict. Route-resolution denials must also reach this point,
-    /// even though no pipeline ran.
-    ///
-    /// Without a sink, this still finalizes the caller-visible decision log.
-    pub(crate) async fn emit_decision(
-        &self,
-        payload: &dyn PluginPayload,
-        extensions: &Extensions,
-        decisions: &mut DecisionLog,
-        verdict: Verdict,
-    ) {
-        decisions.finalize(verdict);
-        if self.audit_handlers.is_empty() {
-            return;
-        }
-        // Taken here rather than by a sink, so the key stays with the executor.
-        if self.provenance_key().is_some() || self.captured_content_key.is_some() {
-            decisions.set_output_hash(self.content_hash(payload));
-        }
-        self.stamp_decision_stream(decisions);
-        self.emit_audit(payload, extensions, decisions).await;
-    }
-
-    /// Record what this invocation started from: its place in the trace, the
-    /// taint it arrived with, and optionally a hash of its content.
-    ///
-    /// The input side of a node's provenance has to be captured before any
-    /// plugin runs, because a sink comparing it against the final state is
-    /// what shows the pipeline's effect on the request.
-    ///
-    /// A no-op when no sink is attached, so provenance costs an unaudited host
-    /// nothing.
-    fn capture_entry_provenance(
-        &self,
-        decisions: &mut DecisionLog,
-        payload: &dyn PluginPayload,
-        extensions: &Extensions,
-    ) {
-        // Nothing will read it, so do not build it. Deriving a span means two
-        // fresh UUIDs and two allocations, which is not a price an unaudited
-        // host should pay on every request. The steps and the verdict are
-        // recorded either way, because the phases record them as they run.
-        if self.audit_handlers.is_empty() {
-            return;
-        }
-        let request = extensions.request.as_ref();
-        decisions.set_span(crate::decision::Span::for_request(
-            request.and_then(|r| r.trace_id.as_deref()),
-            request.and_then(|r| r.span_id.as_deref()),
-        ));
-        if let Some(sec) = extensions.security.as_ref() {
-            let mut labels: Vec<String> = sec.labels.iter().cloned().collect();
-            // Sorted so two records of the same labels compare equal.
-            labels.sort_unstable();
-            decisions.set_input_labels(labels);
-        }
-        if self.provenance_key().is_some() || self.captured_content_key.is_some() {
-            decisions.set_input_hash(self.content_hash(payload));
-        }
-    }
-
     /// Hand the finalized decision to every audit sink, once per pipeline run.
     async fn emit_audit(
         &self,
@@ -845,8 +887,8 @@ impl Executor {
         context_table: Option<PluginContextTable>,
         task_tracker: &tokio_util::task::TaskTracker,
     ) -> (PipelineResult, BackgroundTasks) {
-        let executor = self.for_invocation();
-        let (result, tasks, _refused) = executor
+        let invocation = self.for_invocation();
+        let (result, tasks, _refused) = invocation
             .execute_audited(entries, payload, extensions, context_table, task_tracker)
             .await;
         (result, tasks)
@@ -861,8 +903,12 @@ impl Executor {
     /// what was denied is most of the way to useless. So the payload comes
     /// back beside the result rather than inside it, and only the engine's
     /// emit sees it. `None` on an allow, where the result carries it already.
+    ///
+    /// Entry hashing uses `invocation`'s captured key so a failed capture
+    /// cannot fall back to the live handle mid-pipeline.
     pub(crate) async fn execute_audited(
         &self,
+        invocation: &Invocation<'_>,
         entries: &[HookEntry],
         payload: Box<dyn PluginPayload>,
         extensions: Extensions,
@@ -879,7 +925,7 @@ impl Executor {
             // A hook resolving to zero plugins is normal (nothing configured
             // for this entity). The engine short-circuits these before
             // reaching here; this covers a direct `execute(&[], ..)`.
-            let mut decisions = self.entry_decisions(&*payload, &extensions);
+            let mut decisions = invocation.entry_decisions(&*payload, &extensions);
             decisions.finalize(Verdict::Allow);
             return (
                 PipelineResult::allowed_with(payload, extensions, ctx_table)
@@ -914,7 +960,7 @@ impl Executor {
         // What each plugin did and how the pipeline ruled. Threaded through
         // the phases, finalized at each return point, and attached to the
         // result for audit sinks.
-        let mut decisions = self.entry_decisions(&*current_payload, &current_extensions);
+        let mut decisions = invocation.entry_decisions(&*current_payload, &current_extensions);
 
         if let Some(v) = self
             .run_serial_phase(
