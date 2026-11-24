@@ -54,7 +54,7 @@
 // maps it to a status code (401 / 403 / etc.). Same pattern as
 // CMF tool-pre-invoke denials.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -62,7 +62,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::executor::PipelineResult;
-use crate::extensions::raw_credentials::TokenRole;
+use crate::extensions::raw_credentials::{RawInboundToken, TokenRole};
 use crate::extensions::{
     ClientExtension, DelegationExtension, Extensions, RawCredentialsExtension, SecurityExtension,
     SubjectExtension, WorkloadIdentity,
@@ -166,6 +166,12 @@ pub struct IdentityPayload {
     /// another population. Kept inside the hook pipeline, never serialized.
     #[serde(skip)]
     credential_declined: bool,
+
+    /// The roles whose token the resolver now running supplied through
+    /// [`supply_inbound_token`](Self::supply_inbound_token). Cleared after
+    /// each resolver, never serialized.
+    #[serde(skip)]
+    tokens_supplied: HashSet<TokenRole>,
 }
 
 struct RedactedHeaders<'a>(&'a HashMap<String, String>);
@@ -221,6 +227,7 @@ impl IdentityPayload {
             resolved_at: None,
             raw_claims: HashMap::new(),
             credential_declined: false,
+            tokens_supplied: HashSet::new(),
         }
     }
 
@@ -300,55 +307,70 @@ impl IdentityPayload {
     /// `PluginResult::deny`, which halts the chain at the framework
     /// level rather than being expressed as payload state. See the
     /// module docs for the rationale.
+    ///
+    /// A token `other` carried over for a slot it gave a different identity
+    /// is dropped; see [`supply_inbound_token`](Self::supply_inbound_token).
     pub fn merge(&mut self, other: IdentityPayload) {
-        let before = self.clone();
+        let after = Slots {
+            subject: other.subject.as_ref().or(self.subject.as_ref()),
+            client: other.client.as_ref().or(self.client.as_ref()),
+            caller_workload: other
+                .caller_workload
+                .as_ref()
+                .or(self.caller_workload.as_ref()),
+            tokens: other
+                .raw_credentials
+                .as_ref()
+                .or(self.raw_credentials.as_ref()),
+        };
+        let left_behind = left_behind(&self.slots(), &after, &other.tokens_supplied);
         self.merge_fields(other);
-        self.drop_tokens_of_replaced_slots(&before);
+        self.forget_tokens(&left_behind);
     }
 
-    /// Drop each raw inbound token that no longer belongs to the identity in
-    /// its slot.
+    /// Store `token` as the request's inbound token for `role`: the
+    /// credential behind the identity this resolver put in that role's slot.
     ///
-    /// A resolver that replaces a slot's identity without writing that slot's
-    /// token leaves the previous identity's token behind: a JWT resolver
-    /// stores Alice's token under `User`, then an API-key resolver puts Bob in
-    /// `subject`. Anything reading the token by role, a revocation checker or
-    /// a delegator exchanging the user's token, would then act on Alice's
-    /// credential for Bob. So when a slot's identity changed since `before`
-    /// and its token is still the one `before` carried, the token goes.
-    ///
-    /// Identity is the slot's key (`subject.id`, `client.client_id`,
-    /// `caller_workload.spiffe_id`), so resolving the same credential again
-    /// keeps its token.
-    pub(crate) fn drop_tokens_of_replaced_slots(&mut self, before: &Self) {
-        let Some(raw) = self.raw_credentials.as_mut() else {
-            return;
-        };
-        let replaced = [
-            (
-                TokenRole::User,
-                subject_key(before.subject.as_ref()) != subject_key(self.subject.as_ref()),
-            ),
-            (
-                TokenRole::Client,
-                client_key(before.client.as_ref()) != client_key(self.client.as_ref()),
-            ),
-            (
-                TokenRole::CallerWorkload,
-                workload_key(before.caller_workload.as_ref())
-                    != workload_key(self.caller_workload.as_ref()),
-            ),
-        ];
-        let carried = before.raw_credentials.as_ref();
-        for (role, identity_changed) in replaced {
-            let left_behind = carried
-                .and_then(|then| then.inbound_tokens.get(&role))
-                .zip(raw.inbound_tokens.get(&role))
-                .is_some_and(|(then, now)| *then.token == *now.token);
-            if identity_changed && left_behind {
-                raw.inbound_tokens.remove(&role);
+    /// A token belongs to the identity its slot held when the token was
+    /// stored. A later resolver that changes the slot in any way keeps the
+    /// token only by supplying it here again, or by storing a different one.
+    /// Otherwise the token is dropped when that resolver returns, so the new
+    /// identity never acts on the old one's credential: a revocation checker
+    /// would vouch for it, and a delegator would exchange it.
+    pub fn supply_inbound_token(&mut self, role: TokenRole, token: RawInboundToken) {
+        self.raw_credentials
+            .get_or_insert_with(RawCredentialsExtension::default)
+            .inbound_tokens
+            .insert(role.clone(), token);
+        self.tokens_supplied.insert(role);
+    }
+
+    /// Drop each token the resolver that turned `before` into this payload
+    /// left behind, and clear what it supplied, so the next resolver starts
+    /// from nothing supplied.
+    pub(crate) fn settle_tokens_after(&mut self, before: &Self) {
+        let left_behind = left_behind(&before.slots(), &self.slots(), &self.tokens_supplied);
+        self.forget_tokens(&left_behind);
+    }
+
+    /// The identity slots and inbound tokens, borrowed.
+    fn slots(&self) -> Slots<'_> {
+        Slots {
+            subject: self.subject.as_ref(),
+            client: self.client.as_ref(),
+            caller_workload: self.caller_workload.as_ref(),
+            tokens: self.raw_credentials.as_ref(),
+        }
+    }
+
+    /// Remove the tokens for `roles`, and the record of what was supplied.
+    fn forget_tokens(&mut self, roles: &[TokenRole]) {
+        if let Some(raw) = self.raw_credentials.as_mut() {
+            for role in roles {
+                raw.inbound_tokens.remove(role);
             }
         }
+        self.tokens_supplied.clear();
     }
 
     /// The field-by-field overlay [`merge`](Self::merge) applies.
@@ -459,20 +481,49 @@ impl IdentityPayload {
 
 impl_plugin_payload!(IdentityPayload);
 
-/// Who fills the `subject` slot. `None` when the slot is empty, and `""` for
-/// a subject with no ID, so the two stay distinct.
-fn subject_key(subject: Option<&SubjectExtension>) -> Option<&str> {
-    subject.map(|s| s.id.as_deref().unwrap_or_default())
+/// A payload's identity slots and inbound tokens, borrowed.
+struct Slots<'a> {
+    subject: Option<&'a SubjectExtension>,
+    client: Option<&'a ClientExtension>,
+    caller_workload: Option<&'a WorkloadIdentity>,
+    tokens: Option<&'a RawCredentialsExtension>,
 }
 
-/// Who fills the `client` slot.
-fn client_key(client: Option<&ClientExtension>) -> Option<&str> {
-    client.map(|c| c.client_id.as_str())
+/// The roles whose token a resolver left behind going from `before` to
+/// `after`: the role's slot changed, the token is still the one `before`
+/// carried, and the resolver did not supply it again.
+///
+/// The whole slot is compared, not an ID. The same ID from two authorities, a
+/// JWT `sub` of `42` and an API key's subject `42`, is two identities, and
+/// `iss` is not in a subject's claims unless the operator maps it.
+fn left_behind(
+    before: &Slots<'_>,
+    after: &Slots<'_>,
+    supplied: &HashSet<TokenRole>,
+) -> Vec<TokenRole> {
+    [
+        (TokenRole::User, before.subject != after.subject),
+        (TokenRole::Client, before.client != after.client),
+        (
+            TokenRole::CallerWorkload,
+            before.caller_workload != after.caller_workload,
+        ),
+    ]
+    .into_iter()
+    .filter(|(role, slot_changed)| {
+        *slot_changed
+            && !supplied.contains(role)
+            && token(before.tokens, role)
+                .zip(token(after.tokens, role))
+                .is_some_and(|(then, now)| then == now)
+    })
+    .map(|(role, _)| role)
+    .collect()
 }
 
-/// Who fills the `caller_workload` slot, keyed like [`subject_key`].
-fn workload_key(workload: Option<&WorkloadIdentity>) -> Option<&str> {
-    workload.map(|w| w.spiffe_id.as_deref().unwrap_or_default())
+/// The inbound token stored for `role`.
+fn token<'a>(tokens: Option<&'a RawCredentialsExtension>, role: &TokenRole) -> Option<&'a str> {
+    tokens?.inbound_tokens.get(role).map(|t| t.token.as_str())
 }
 
 #[cfg(test)]
@@ -669,7 +720,7 @@ mod tests {
         let mut after = before.clone();
         after.subject = Some(subject("bob"));
 
-        after.drop_tokens_of_replaced_slots(&before);
+        after.settle_tokens_after(&before);
 
         assert_eq!(user_token(&after), None, "bob must not carry alice's token");
     }
@@ -680,7 +731,7 @@ mod tests {
         let mut after = before.clone();
         after.subject = Some(subject("alice"));
 
-        after.drop_tokens_of_replaced_slots(&before);
+        after.settle_tokens_after(&before);
 
         assert_eq!(user_token(&after), Some("alice-jwt"));
     }
@@ -691,9 +742,64 @@ mod tests {
         let after_resolver = authenticated("bob", "bob-jwt");
         let mut after = after_resolver.clone();
 
-        after.drop_tokens_of_replaced_slots(&before);
+        after.settle_tokens_after(&before);
 
         assert_eq!(user_token(&after), Some("bob-jwt"));
+    }
+
+    #[test]
+    fn a_resolver_that_supplies_the_same_token_again_keeps_it() {
+        let before = authenticated("alice", "alice-jwt");
+        let mut after = before.clone();
+        after.subject = Some(subject("alice@corp"));
+        after.supply_inbound_token(TokenRole::User, inbound("alice-jwt"));
+
+        after.settle_tokens_after(&before);
+
+        assert_eq!(
+            user_token(&after),
+            Some("alice-jwt"),
+            "the resolver mapped the same credential to a new subject and said so"
+        );
+    }
+
+    #[test]
+    fn the_same_id_from_another_authority_drops_the_token() {
+        let mut before = authenticated("42", "jwt-for-42");
+        before.subject = Some(SubjectExtension {
+            claims: HashMap::from([("azp".to_owned(), "web".into())]),
+            ..subject("42")
+        });
+        let mut after = before.clone();
+        after.subject = Some(subject("42"));
+
+        after.settle_tokens_after(&before);
+
+        assert_eq!(
+            user_token(&after),
+            None,
+            "an API-key subject 42 is not the JWT's subject 42"
+        );
+    }
+
+    #[test]
+    fn a_supplied_token_is_not_protected_from_the_next_resolver() {
+        let anonymous = IdentityPayload::new("alice-jwt", TokenSource::Bearer);
+        let mut first = anonymous.clone();
+        first.subject = Some(subject("alice"));
+        first.supply_inbound_token(TokenRole::User, inbound("alice-jwt"));
+        first.settle_tokens_after(&anonymous);
+        let mut second = first.clone();
+        second.subject = Some(subject("bob"));
+
+        second.settle_tokens_after(&first);
+
+        assert_eq!(
+            user_token(&first),
+            Some("alice-jwt"),
+            "the first resolver's"
+        );
+        assert_eq!(user_token(&second), None, "supplied once, not forever");
     }
 
     #[test]
@@ -705,7 +811,7 @@ mod tests {
             ..Default::default()
         });
 
-        after.drop_tokens_of_replaced_slots(&before);
+        after.settle_tokens_after(&before);
 
         assert_eq!(user_token(&after), Some("alice-jwt"));
     }
@@ -722,6 +828,19 @@ mod tests {
         assert_eq!(user_token(&base), None, "bob must not carry alice's token");
     }
 
+    #[test]
+    fn merge_keeps_a_token_the_overlay_supplied() {
+        let mut base = authenticated("alice", "alice-jwt");
+        let mut overlay = base.clone();
+        overlay.subject = Some(subject("alice@corp"));
+        overlay.supply_inbound_token(TokenRole::User, inbound("alice-jwt"));
+
+        base.merge(overlay);
+
+        assert_eq!(user_token(&base), Some("alice-jwt"));
+        assert!(base.tokens_supplied.is_empty(), "settled");
+    }
+
     fn subject(id: &str) -> SubjectExtension {
         SubjectExtension {
             id: Some(id.into()),
@@ -729,23 +848,25 @@ mod tests {
         }
     }
 
-    /// A payload whose `subject` is `id`, authenticated by `token`.
-    fn authenticated(id: &str, token: &str) -> IdentityPayload {
-        use crate::extensions::raw_credentials::{Credential, RawInboundToken, TokenKind};
+    fn inbound(token: &str) -> RawInboundToken {
+        use crate::extensions::raw_credentials::{Credential, TokenKind};
 
+        RawInboundToken::new(
+            token,
+            Credential::Header {
+                name: "Authorization".into(),
+            },
+            TokenKind::Jwt,
+        )
+    }
+
+    /// A payload whose `subject` is `id`, authenticated by `token`, stored
+    /// the way a resolver that predates `supply_inbound_token` stores it.
+    fn authenticated(id: &str, token: &str) -> IdentityPayload {
         let mut payload = IdentityPayload::new(token, TokenSource::Bearer);
         payload.subject = Some(subject(id));
         let mut raw = RawCredentialsExtension::default();
-        raw.inbound_tokens.insert(
-            TokenRole::User,
-            RawInboundToken::new(
-                token,
-                Credential::Header {
-                    name: "Authorization".into(),
-                },
-                TokenKind::Jwt,
-            ),
-        );
+        raw.inbound_tokens.insert(TokenRole::User, inbound(token));
         payload.raw_credentials = Some(raw);
         payload
     }

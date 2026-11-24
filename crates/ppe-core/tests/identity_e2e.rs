@@ -161,8 +161,7 @@ impl HookHandler<IdentityHook> for TokenStashingResolver {
             id: Some(self.subject_id.clone()),
             ..Default::default()
         });
-        let mut raw = updated.raw_credentials.clone().unwrap_or_default();
-        raw.inbound_tokens.insert(
+        updated.supply_inbound_token(
             TokenRole::User,
             RawInboundToken::new(
                 payload.raw_token(),
@@ -172,7 +171,6 @@ impl HookHandler<IdentityHook> for TokenStashingResolver {
                 TokenKind::Jwt,
             ),
         );
-        updated.raw_credentials = Some(raw);
         PluginResult::modify_payload(updated)
     }
 }
@@ -358,12 +356,15 @@ async fn two_resolvers_chain_populates_both_slots() {
 /// as an API-key resolver after a JWT one does, must not inherit the
 /// earlier subject's token: a revocation checker or delegator reading the
 /// `User` token would otherwise act on Alice's credential for Bob. A resolver
-/// that only fills another slot leaves the token alone.
+/// that only fills another slot leaves the token alone, and one that maps the
+/// same credential to a new subject and supplies it again keeps it.
 #[tokio::test]
 async fn a_replaced_subject_does_not_inherit_the_previous_token() {
-    for (second_slot_is_subject, expected_subject, expected_token) in
-        [(true, "bob", None), (false, "alice", Some("alice.jwt"))]
-    {
+    for (second, expected_subject, expected_token) in [
+        ("api-key", "bob", None),
+        ("workload", "alice", Some("alice.jwt")),
+        ("remapping-jwt", "alice@corp", Some("alice.jwt")),
+    ] {
         let mgr = Arc::new(PolicyEngine::default());
         let jwt_cfg = config("jwt", 10);
         let jwt = Arc::new(TokenStashingResolver {
@@ -373,20 +374,31 @@ async fn a_replaced_subject_does_not_inherit_the_previous_token() {
         mgr.register_handler::<IdentityHook, _>(jwt, jwt_cfg)
             .unwrap();
         let second_cfg = config("second", 20);
-        if second_slot_is_subject {
-            let key = Arc::new(SubjectResolver {
-                cfg: second_cfg.clone(),
-                subject_id: "bob".to_owned(),
-            });
-            mgr.register_handler::<IdentityHook, _>(key, second_cfg)
-                .unwrap();
-        } else {
-            let workload = Arc::new(WorkloadResolver {
-                cfg: second_cfg.clone(),
-                require_prior_subject: true,
-            });
-            mgr.register_handler::<IdentityHook, _>(workload, second_cfg)
-                .unwrap();
+        match second {
+            "api-key" => {
+                let key = Arc::new(SubjectResolver {
+                    cfg: second_cfg.clone(),
+                    subject_id: "bob".to_owned(),
+                });
+                mgr.register_handler::<IdentityHook, _>(key, second_cfg)
+                    .unwrap();
+            },
+            "workload" => {
+                let workload = Arc::new(WorkloadResolver {
+                    cfg: second_cfg.clone(),
+                    require_prior_subject: true,
+                });
+                mgr.register_handler::<IdentityHook, _>(workload, second_cfg)
+                    .unwrap();
+            },
+            _ => {
+                let remap = Arc::new(TokenStashingResolver {
+                    cfg: second_cfg.clone(),
+                    subject_id: "alice@corp".to_owned(),
+                });
+                mgr.register_handler::<IdentityHook, _>(remap, second_cfg)
+                    .unwrap();
+            },
         }
         mgr.initialize().await.unwrap();
 
@@ -411,7 +423,7 @@ async fn a_replaced_subject_does_not_inherit_the_previous_token() {
                 .and_then(|raw| raw.inbound_tokens.get(&TokenRole::User))
                 .map(|t| t.token.as_str()),
             expected_token,
-            "subject {expected_subject}"
+            "{second} resolver"
         );
     }
 }

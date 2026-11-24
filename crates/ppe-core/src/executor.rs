@@ -1163,7 +1163,7 @@ impl Executor {
                                         .as_any()
                                         .downcast_ref::<crate::identity::IdentityPayload>(
                                     ) {
-                                        identity.drop_tokens_of_replaced_slots(before);
+                                        identity.settle_tokens_after(before);
                                     }
                                 }
                                 *payload = mp;

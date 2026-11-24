@@ -54,10 +54,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   token of its own, such as an API-key resolver after a JWT one, the earlier
   identity's raw token stayed under that slot's role. A delegator exchanging
   the user's token, or a revocation checker, then acted on the first
-  caller's credential for the second. The identity chain now drops a token
-  whose slot changed identity, keyed on `subject.id`, `client.client_id` and
-  `caller_workload.spiffe_id`. `IdentityPayload::merge` applies the same
-  rule.
+  caller's credential for the second. A token now belongs to the identity
+  its slot held when the token was stored. When a later resolver changes
+  that slot in any way, the token is dropped unless the resolver stores it
+  again with the new `IdentityPayload::supply_inbound_token`, or stores a
+  different one. The whole slot is compared, so the same ID from two
+  authorities, such as a JWT `sub` and an API key's subject, counts as a
+  change. `identity/jwt` stores its token through `supply_inbound_token`, so
+  a second JWT resolver that maps the same token to a new subject keeps it.
+  A resolver outside this repository that edits a slot after `identity/jwt`
+  and still needs the token must store it again the same way.
+  `IdentityPayload::merge` applies the same rule. `SubjectExtension`,
+  `ClientExtension` and `WorkloadIdentity` now implement `PartialEq` and
+  `Eq`.
 
 
 ### Added
