@@ -943,13 +943,6 @@ impl ConfigVisitor for AplConfigVisitor {
                 if global_assertions.is_none() && default_assertions.is_none() {
                     continue;
                 }
-                let mut effective = global_compiled.clone();
-                if let Some(block) = apl_subblock(section) {
-                    effective.apply_layer(
-                        compile_policy_block_value(&format!("global.defaults.{entity}"), &block)
-                            .map_err(|error| -> VisitorError { Box::new(error) })?,
-                    );
-                }
                 let assertions = [global_assertions.as_ref(), default_assertions.as_ref()]
                     .into_iter()
                     .flatten()
@@ -957,7 +950,7 @@ impl ConfigVisitor for AplConfigVisitor {
                 validate_assertion_fetch_reachability(
                     &format!("global.defaults.{entity} catch-all"),
                     &assertions,
-                    &effective,
+                    &global_compiled,
                 )?;
             }
         }

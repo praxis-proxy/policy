@@ -40,7 +40,7 @@ impl MetadataDependencies {
         let mut pending = self
             .edges
             .keys()
-            .filter(|rule| rule.starts_with(&root))
+            .filter(|rule| rule.starts_with(&root) || root.starts_with(rule))
             .cloned()
             .collect::<Vec<_>>();
         let mut seen = HashSet::new();
@@ -79,7 +79,7 @@ impl MetadataDependencies {
             let dependencies = references.into_iter().flat_map(|candidate| {
                 known
                     .iter()
-                    .filter(move |rule| rule.starts_with(&candidate))
+                    .filter(move |rule| rule.starts_with(&candidate) || candidate.starts_with(rule))
                     .cloned()
             });
             self.edges.entry(name).or_default().extend(dependencies);
@@ -515,12 +515,13 @@ fn collect_expression_references(
         } else {
             None
         };
-        if let Some(mut resolved) = resolved {
-            while resolved.len() > 1 {
-                out.insert(resolved.clone());
-                resolved.pop();
-            }
+        if let Some(resolved) = resolved
+            && resolved.len() > 1
+        {
+            out.insert(resolved);
         }
+        collect_reference_indexes(expression, package, imports, out);
+        return;
     }
 
     match expression {
@@ -584,6 +585,22 @@ fn collect_expression_references(
         | Expr::Bool { .. }
         | Expr::Null { .. }
         | Expr::Var { .. } => {},
+    }
+}
+
+fn collect_reference_indexes(
+    expression: &Expr,
+    package: &[String],
+    imports: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<RulePath>,
+) {
+    match expression {
+        Expr::RefDot { refr, .. } => collect_reference_indexes(refr, package, imports, out),
+        Expr::RefBrack { refr, index, .. } => {
+            collect_reference_indexes(refr, package, imports, out);
+            collect_expression_references(index, package, imports, out);
+        },
+        _ => {},
     }
 }
 

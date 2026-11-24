@@ -19,6 +19,7 @@ use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 use praxis_policy_apl_core::{AttributeBag, Decision};
 use praxis_policy_apl_runtime::{AplOptions, register_apl};
+use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, ToolCall};
 use praxis_policy_core::context::PluginContext;
@@ -29,6 +30,7 @@ use praxis_policy_core::extensions::{
 };
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::{HookHandler, PluginResult, TypedHandlerAdapter};
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload};
 use praxis_policy_core::metadata::{MetadataFetchHook, MetadataFetchRequest};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
@@ -649,6 +651,113 @@ global:
         "{rendered}"
     );
     assert!(rendered.contains("fetch(account)"), "{rendered}");
+}
+
+#[tokio::test]
+async fn default_fetch_cannot_satisfy_an_unmatched_http_assertion() {
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(
+        "test-source",
+        Box::new(SourceFactory(SourceResult::Success)),
+    );
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+global:
+  defaults:
+    http:
+      authorization:
+        pre_invocation: ["fetch(account)"]
+      assertions:
+        request:
+          headers:
+            - name: x-account-active
+              from: metadata.account.active
+              on_missing: deny
+routes:
+  - http: /known
+    authorization:
+      pre_invocation: [allow]
+"#,
+        )
+        .expect_err("an unmatched request never executes the declared default fetch");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("global.defaults.http catch-all"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("fetch(account)"), "{rendered}");
+}
+
+#[tokio::test]
+async fn global_fetch_satisfies_default_assertions_for_unmatched_http() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+global:
+  authorization:
+    pre_invocation: ["fetch(account)"]
+  defaults:
+    http:
+      assertions:
+        request:
+          headers:
+            - name: x-account-active
+              from: metadata.account.active
+              on_missing: deny
+routes:
+  - http: /known
+    authorization:
+      pre_invocation: [allow]
+"#,
+        SourceResult::Success,
+    )
+    .await;
+    for path in ["/known", "/other"] {
+        let extensions = Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_HTTP.to_owned()),
+                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                ..Default::default()
+            })),
+            http: Some(Arc::new(HttpExtension {
+                method: Some("GET".to_owned()),
+                path: Some(path.to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let (result, _background) = engine
+            .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, extensions, None)
+            .await;
+        assert!(
+            result.continue_processing,
+            "global fetch must run for {path}: {:?}",
+            result.violation
+        );
+        assert_eq!(
+            result
+                .modified_extensions
+                .as_ref()
+                .and_then(|extensions| extensions.http.as_deref())
+                .and_then(|http| http.request_headers.get("x-account-active"))
+                .map(String::as_str),
+            Some("true"),
+            "the default assertion must render the globally acquired fact for {path}"
+        );
+    }
 }
 
 #[tokio::test]

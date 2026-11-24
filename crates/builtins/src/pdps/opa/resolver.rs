@@ -1106,6 +1106,43 @@ deny contains "suspended" if { values := [x | x := input]; values[0].metadata.ac
     }
 
     #[test]
+    fn child_queries_inherit_metadata_from_object_rules() {
+        let resolver = resolver(
+            &[
+                r#"package helpers
+policy := {"deny": [m | input.metadata.account.suspended; m := "suspended"]}"#,
+                "package authz\ndeny := data.helpers.policy.deny",
+            ],
+            OnError::Deny,
+        );
+
+        for query in ["data.helpers.policy.deny", "data.authz.deny"] {
+            assert!(
+                resolver.requires_metadata(&call(query, None)),
+                "a query or reference below an object rule must inherit its metadata: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_variables_and_constant_helpers_do_not_grant_unrelated_metadata() {
+        let resolver = resolver(
+            &[
+                "package helpers\nconstant := {\"active\": true}\nmetadata_gate if input.metadata.account.active",
+                "package authz\nmetadata_gate if input.metadata.account.active\nallow if { some r in input.roles; r == \"admin\" }\nhelper_allow if data.helpers.constant.active",
+            ],
+            OnError::Deny,
+        );
+
+        for query in ["data.authz.allow", "data.authz.helper_allow"] {
+            assert!(
+                !resolver.requires_metadata(&call(query, None)),
+                "unrelated package rules must not grant metadata: {query}"
+            );
+        }
+    }
+
+    #[test]
     fn parent_document_query_includes_indexed_metadata_rules() {
         let indexed = resolver(
             &[r#"package authz
