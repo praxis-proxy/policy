@@ -1,4 +1,4 @@
-# Identity and Token Exchange / Delegation
+# Identity and Delegation
 
 PPE resolves the inbound caller and mints the outbound credential on every
 request. Select the recipe matching the required principal, copy its plugin and
