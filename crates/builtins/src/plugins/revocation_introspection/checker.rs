@@ -26,7 +26,7 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::plugins::revocation_introspection::KIND;
-use crate::plugins::revocation_introspection::cache::StatusCache;
+use crate::plugins::revocation_introspection::cache::{Answer, StatusCache};
 use crate::plugins::revocation_introspection::config::IntrospectionConfig;
 
 // -----------------------------------------------------------------------------
@@ -49,10 +49,12 @@ enum Status {
     Unavailable,
 }
 
-/// The RFC 7662 response fields this checker reads.
+/// The RFC 7662 response fields this checker reads. `exp` only bounds how
+/// long the answer is cached.
 #[derive(Deserialize)]
 struct IntrospectionResponse {
     active: bool,
+    exp: Option<f64>,
 }
 
 /// The claims read from a token before it is sent anywhere.
@@ -155,7 +157,7 @@ impl IntrospectionChecker {
             Some(cache) => cache.get_or_fetch(token, self.introspect(ext, token)).await,
             None => self.introspect(ext, token).await,
         };
-        match answer {
+        match answer.map(|answer| answer.active) {
             Ok(true) => Status::Active,
             Ok(false) => {
                 tracing::info!(plugin = %self.config.name, ?slot, "credential revoked");
@@ -174,8 +176,9 @@ impl IntrospectionChecker {
         }
     }
 
-    /// POST the token to the introspection endpoint and read `active`.
-    async fn introspect(&self, ext: &Extensions, token: &str) -> Result<bool, String> {
+    /// POST the token to the introspection endpoint and read `active` and
+    /// `exp`.
+    async fn introspect(&self, ext: &Extensions, token: &str) -> Result<Answer, String> {
         let body = form_urlencode(&[("token", token), ("token_type_hint", "access_token")]);
         let request = HttpRequest::post(&self.typed.introspection_endpoint, body)
             .timeout(self.timeout)
@@ -192,7 +195,10 @@ impl IntrospectionChecker {
             return Err(format!("status {}", response.status));
         }
         serde_json::from_slice::<IntrospectionResponse>(&response.body)
-            .map(|parsed| parsed.active)
+            .map(|parsed| Answer {
+                active: parsed.active,
+                exp: parsed.exp,
+            })
             .map_err(|e| format!("malformed response: {e}"))
     }
 }
@@ -663,6 +669,37 @@ mod tests {
 
             assert_eq!(transport.call_count(), 1, "{body}: one call, then cached");
         }
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_not_reused_past_its_exp() {
+        let passed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 1;
+        let transport = Arc::new(
+            FakeTransport::new()
+                .json(
+                    "/introspect",
+                    200,
+                    &format!(r#"{{"active":true,"exp":{passed}}}"#),
+                )
+                .json("/introspect", 200, r#"{"active":false}"#),
+        );
+        let ext = ext(&transport, &[(IdentitySlot::Client, jwt(ISSUER))]);
+        let checker = checker(json!({ "cache_ttl_seconds": 60 }));
+
+        let first = run(&checker, &asked(&[IdentitySlot::Client]), &ext).await;
+        let second = run(&checker, &asked(&[IdentitySlot::Client]), &ext).await;
+
+        assert_eq!(vouched(&first), vec![IdentitySlot::Client], "first");
+        assert_eq!(
+            denied_with(&second).0,
+            REVOKED_CODE,
+            "RFC 7662 section 4: not cached past exp"
+        );
+        assert_eq!(transport.call_count(), 2, "asked again");
     }
 
     #[tokio::test]

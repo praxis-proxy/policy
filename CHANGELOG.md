@@ -38,7 +38,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   feature, part of `builtins`, asks the issuer through RFC 7662
   introspection whether a JWT from the configured `issuer` is still active.
   Answers can be cached with `cache_ttl_seconds`, which defaults to `0`, so
-  every check is a live call. The cache key is the token's SHA-256 from
+  every check is a live call. A cached answer never outlives the response's
+  `exp`. The cache key is the token's SHA-256 from
   Policy's shared hashing, so the feature works under `fips`. It
   authenticates with `client_secret_basic`, form-encoding the client ID and
   secret first as RFC 6749 section 2.3.1 requires.

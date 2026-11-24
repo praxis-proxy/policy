@@ -1499,7 +1499,9 @@ space therefore reaches the server unchanged.
 
 `cache_ttl_seconds` sets the revocation window. After a token is revoked at
 the issuer, PPE keeps accepting it until the cached answer expires. The
-default, `0`, turns caching off and asks the issuer every time. The cache
+default, `0`, turns caching off and asks the issuer every time. When the
+issuer's answer includes `exp`, the answer is not kept past that time, even
+if the TTL is longer, as RFC 7662 section 4 requires. The cache
 key is the token's SHA-256, computed with Policy's shared hashing, so the
 plugin works in a `fips` build. With caching on, if several requests check
 the same token at once, only one call goes to the issuer. With the default
