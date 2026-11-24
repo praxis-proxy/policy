@@ -1,0 +1,15 @@
+{
+  "kind": "TokenReview",
+  "apiVersion": "authentication.k8s.io/v1",
+  "metadata": {},
+  "spec": {
+    "token": "<redacted>",
+    "audiences": [
+      "praxis-gateway"
+    ]
+  },
+  "status": {
+    "user": {},
+    "error": "[invalid bearer token, token audiences [\"https://kubernetes.default.svc.cluster.local\"] is invalid for the target audiences [\"praxis-gateway\"]]"
+  }
+}

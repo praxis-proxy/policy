@@ -1,0 +1,13 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "tokenreviews.authentication.k8s.io is forbidden: User \"system:serviceaccount:team-a:reviewer-norbac\" cannot create resource \"tokenreviews\" in API group \"authentication.k8s.io\" at the cluster scope",
+  "reason": "Forbidden",
+  "details": {
+    "group": "authentication.k8s.io",
+    "kind": "tokenreviews"
+  },
+  "code": 403
+}

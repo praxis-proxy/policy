@@ -17,6 +17,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Kubernetes `TokenReview` identity.** `identity/kubernetes-token-review`,
+  behind the `kubernetes-token-review` feature, resolves a bearer token by
+  submitting it to the API server's `TokenReview` API and maps `status.user`
+  onto the identity slots. It serves tokens that cannot be verified locally,
+  such as legacy Secret-based ServiceAccount tokens. PPE authenticates with
+  its own token from a file, re-read so a projected token rotates, or from an
+  environment variable. `audiences` are sent and checked in the answer, a
+  cached answer never outlives a JWT's `exp`, and a `401` or `403` denies as
+  `auth.directory_unavailable` rather than as a bad caller.
+  ([#213](https://github.com/praxis-proxy/policy/issues/213))
+
 ## [0.7.0] - 2026-11-20
 
 ### Added
