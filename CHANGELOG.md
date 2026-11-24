@@ -30,6 +30,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `auth.directory_unavailable` rather than as a bad caller.
   ([#213](https://github.com/praxis-proxy/policy/issues/213))
 
+- **Plugin-facing secret reads.** A plugin whose entry declares
+  `read_secret:<name>` can exchange that name for a `SecretRef` during
+  `initialize_with`, through the new `InitExtensions::resolve_secret`. One grant
+  covers one declared value. A missing grant and a grant naming nothing in
+  `secrets.values` fail as distinct `SecretAccessError` variants, each naming
+  its fix. `SecretRef::fixed` is now public under the `test-util` feature, so
+  plugin tests can grant a secret without a provider behind it.
+
 ### Changed
 
 - **Documentation navigation.** Organize published pages into Getting started,
@@ -38,15 +46,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   fixtures to use the new page paths.
   ([#362](https://github.com/praxis-proxy/policy/pull/362))
 
-### Added
-
-- **Plugin-facing secret reads.** A plugin whose entry declares
-  `read_secret:<name>` can exchange that name for a `SecretRef` during
-  `initialize_with`, through the new `InitExtensions::resolve_secret`. One grant
-  covers one declared value. A missing grant and a grant naming nothing in
-  `secrets.values` fail as distinct `SecretAccessError` variants, each naming
-  its fix. `SecretRef::fixed` is now public under the `test-util` feature, so
-  plugin tests can grant a secret without a provider behind it.
 
 ## [0.7.0] - 2026-11-20
 

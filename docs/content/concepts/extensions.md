@@ -217,7 +217,7 @@ ones do.
 `read_secret:<name>` also gates something other than a slot: one declared
 secret, which a plugin exchanges for a handle during initialization. It names
 the value it grants, so an entry lists one per secret. See [Reading a secret
-from a plugin](configuration.md#reading-a-secret-from-a-plugin).
+from a plugin](../reference/configuration.md#reading-a-secret-from-a-plugin).
 
 ## Mutability tiers
 

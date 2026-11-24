@@ -400,40 +400,6 @@ impl InitExtensions {
         Self::default()
     }
 
-    /// Attach the HTTP transport, having already decided the plugin may
-    /// have it.
-    ///
-    /// The capability check belongs to the caller (the engine) because
-    /// only it holds the plugin's authoritative grants; this type just
-    /// carries the verdict.
-    #[must_use]
-    pub fn with_http(mut self, http: Arc<dyn HttpTransport>) -> Self {
-        self.http = HttpTransportSlot::installed(http);
-        self
-    }
-
-    /// Record that a transport exists but this plugin may not use it.
-    #[must_use]
-    pub fn with_http_withheld(mut self) -> Self {
-        self.http = HttpTransportSlot::withheld();
-        self
-    }
-
-    /// Grant the declared secret `name`, having already decided the plugin
-    /// holds its [`secret_capability`].
-    #[must_use]
-    pub fn with_secret(mut self, name: impl Into<String>, secret: SecretRef) -> Self {
-        self.secrets.insert(name.into(), Some(secret));
-        self
-    }
-
-    /// Record a grant for `name` that no declared value backs.
-    #[must_use]
-    pub fn with_undeclared_secret(mut self, name: impl Into<String>) -> Self {
-        self.secrets.insert(name.into(), None);
-        self
-    }
-
     /// Exchange the name of a declared secret for a handle to its value.
     ///
     /// The plugin's entry must hold `read_secret:<name>`, and `secrets.values`
@@ -471,6 +437,40 @@ impl InitExtensions {
                 name: name.to_owned(),
             }),
         }
+    }
+
+    /// Attach the HTTP transport, having already decided the plugin may
+    /// have it.
+    ///
+    /// The capability check belongs to the caller (the engine) because
+    /// only it holds the plugin's authoritative grants; this type just
+    /// carries the verdict.
+    #[must_use]
+    pub fn with_http(mut self, http: Arc<dyn HttpTransport>) -> Self {
+        self.http = HttpTransportSlot::installed(http);
+        self
+    }
+
+    /// Record that a transport exists but this plugin may not use it.
+    #[must_use]
+    pub fn with_http_withheld(mut self) -> Self {
+        self.http = HttpTransportSlot::withheld();
+        self
+    }
+
+    /// Grant the declared secret `name`, having already decided the plugin
+    /// holds its [`secret_capability`].
+    #[must_use]
+    pub fn with_secret(mut self, name: impl Into<String>, secret: SecretRef) -> Self {
+        self.secrets.insert(name.into(), Some(secret));
+        self
+    }
+
+    /// Record a grant for `name` that no declared value backs.
+    #[must_use]
+    pub fn with_undeclared_secret(mut self, name: impl Into<String>) -> Self {
+        self.secrets.insert(name.into(), None);
+        self
     }
 }
 

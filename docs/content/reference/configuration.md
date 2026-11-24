@@ -534,6 +534,12 @@ its initialization either way, which stops startup.
 The grant is fixed for the life of a plugin instance. A reload that removes it
 builds new instances, and those never receive the handle.
 
+A route that overrides a plugin's `capabilities` can narrow its secret grants
+but not widen them. A `read_secret:` entry the plugin's own entry lacks is
+ignored, with a warning naming the plugin and the capability. A route that
+drops a grant runs its own instance of the plugin, initialized without that
+handle, because the shared instance already holds it.
+
 ### Per-plugin secret sources
 
 Plugins that predate the `secrets:` block carry their own typed source

@@ -478,6 +478,46 @@ fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Valu
     merged
 }
 
+/// A route's capability list, with its `read_secret:` grants limited to the
+/// ones the plugin's own entry holds.
+///
+/// A route narrows a plugin's secrets and never widens them: the entry under
+/// `plugins:` is where an operator decides which values a plugin may read.
+fn narrow_secret_grants(
+    entry: &std::collections::HashSet<String>,
+    route: &std::collections::HashSet<String>,
+    plugin_name: &str,
+) -> std::collections::HashSet<String> {
+    route
+        .iter()
+        .filter(|cap| {
+            let widens = cap.starts_with(crate::host::SECRET_CAPABILITY_PREFIX)
+                && !entry.contains(cap.as_str());
+            if widens {
+                warn!(
+                    plugin = %plugin_name,
+                    capability = %cap,
+                    "a route override cannot grant a secret the plugin's own entry does not; \
+                     ignoring it",
+                );
+            }
+            !widens
+        })
+        .cloned()
+        .collect()
+}
+
+/// The `read_secret:` grants in a capability set.
+fn secret_grants(
+    capabilities: &std::collections::HashSet<String>,
+) -> std::collections::BTreeSet<&str> {
+    capabilities
+        .iter()
+        .map(String::as_str)
+        .filter(|cap| cap.starts_with(crate::host::SECRET_CAPABILITY_PREFIX))
+        .collect()
+}
+
 /// Build one instance for every `rate_limits:` step carrying a `config:`
 /// override, through the plugin's own factory.
 ///
@@ -4181,6 +4221,11 @@ impl PolicyEngine {
     ///   sharing the *base plugin `Arc`* with a merged `TrustedConfig`
     ///   (override caps / `on_error` replace base values) and an
     ///   independent circuit breaker. Cheap — no factory call.
+    /// - **`read_secret:` grants:** a `capabilities_override` may drop a
+    ///   secret the plugin's entry grants but never add one; a grant the entry
+    ///   lacks is ignored with a warning. An override that drops one takes the
+    ///   factory path below with the base `config`, because the shared base
+    ///   instance already holds the handle.
     /// - **`config_override` set:** invokes the registered factory for
     ///   the plugin's `kind` with a merged `PluginConfig` (override
     ///   `config` *replaces* base `config` wholesale per unified-config
@@ -4228,9 +4273,11 @@ impl PolicyEngine {
         };
         let mut merged_config = base_ref.trusted_config().clone();
 
-        // Capabilities: override replaces base when present.
+        // Capabilities: override replaces base when present, except that a
+        // route may only narrow the secrets the plugin's own entry grants.
         if let Some(caps) = capabilities_override {
-            merged_config.capabilities = caps.clone();
+            merged_config.capabilities =
+                narrow_secret_grants(&base_ref.trusted_config().capabilities, caps, plugin_name);
         }
 
         // on_error: override replaces base when present.
@@ -4238,10 +4285,16 @@ impl PolicyEngine {
             merged_config.on_error = oe;
         }
 
+        // A base instance that took a secret at initialization keeps the
+        // handle, so sharing it would let a route that dropped the grant keep
+        // reading the secret. Such a route gets its own instance instead.
+        let drops_a_secret = secret_grants(&merged_config.capabilities)
+            != secret_grants(&base_ref.trusted_config().capabilities);
+
         // Caps/on_error-only path — shared base plugin Arc, new
         // PluginRef with merged config + fresh circuit breaker.
         // No factory call, no async work.
-        if config_override.is_none() {
+        if config_override.is_none() && !drops_a_secret {
             let new_ref = Arc::new(crate::registry::PluginRef::new(
                 Arc::clone(base_ref.plugin()),
                 merged_config,
@@ -4260,27 +4313,25 @@ impl PolicyEngine {
                 .collect();
         }
 
-        // Config override present — factory path. Convert YAML
-        // override value into the JSON shape `PluginConfig.config`
-        // carries (YAML is a superset of JSON so serde re-serialization
-        // is safe). Per spec, override `config` replaces the base
-        // `config` wholesale.
-        let Some(cfg_yaml) = config_override else {
-            // Unreachable: the branch above returns when this is None.
-            return base_entries;
-        };
-        let cfg_json = match serde_json::to_value(cfg_yaml) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                    plugin = %plugin_name,
-                    error = %e,
-                    "build_override_entries: YAML→JSON config conversion failed",
-                );
-                return Vec::new();
-            },
-        };
-        merged_config.config = Some(cfg_json);
+        // Factory path: a config override, or a dropped secret grant on the
+        // base config. Convert a YAML override value into the JSON shape
+        // `PluginConfig.config` carries (YAML is a superset of JSON so serde
+        // re-serialization is safe). Per spec, override `config` replaces the
+        // base `config` wholesale.
+        if let Some(cfg_yaml) = config_override {
+            let cfg_json = match serde_json::to_value(cfg_yaml) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                        plugin = %plugin_name,
+                        error = %e,
+                        "build_override_entries: YAML→JSON config conversion failed",
+                    );
+                    return Vec::new();
+                },
+            };
+            merged_config.config = Some(cfg_json);
+        }
 
         let kind = merged_config.kind.clone();
         // The registry lock is released before `create_with` runs. It is
@@ -9677,6 +9728,229 @@ routes:
         assert_eq!(*log.lock().unwrap(), vec![Ok(true), Ok(false)]);
     }
 
+    /// Records, per instance, the secret its initialization read for
+    /// `upstream_key`, or `None` when the grant was refused.
+    struct SecretRecorder {
+        cfg: PluginConfig,
+        log: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl Plugin for SecretRecorder {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+
+        async fn initialize_with(
+            &self,
+            ext: &crate::host::InitExtensions,
+        ) -> Result<(), Box<PluginError>> {
+            let seen = ext
+                .resolve_secret("upstream_key")
+                .ok()
+                .map(|secret| secret.get().as_str().to_owned());
+            self.log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(seen);
+            Ok(())
+        }
+    }
+
+    impl HookHandler<TestHook> for SecretRecorder {
+        async fn handle(
+            &self,
+            _payload: &TestPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> PluginResult<TestPayload> {
+            PluginResult::allow()
+        }
+    }
+
+    struct SecretRecorderFactory {
+        log: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl crate::factory::PluginFactory for SecretRecorderFactory {
+        fn create(
+            &self,
+            config: &PluginConfig,
+        ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            let plugin = Arc::new(SecretRecorder {
+                cfg: config.clone(),
+                log: Arc::clone(&self.log),
+            });
+            let handler: Arc<dyn AnyHookHandler> =
+                Arc::new(TypedHandlerAdapter::<TestHook, SecretRecorder>::new(
+                    Arc::clone(&plugin),
+                ));
+            Ok(crate::factory::PluginInstance {
+                plugin,
+                handlers: vec![(
+                    crate::identity::HOOK_IDENTITY_RESOLVE,
+                    Arc::new(ServingIdentity(handler)),
+                )],
+            })
+        }
+    }
+
+    /// An initialized engine whose `recorder` plugin entry holds
+    /// `entry_caps`, with `upstream_key` declared, and the log its instances
+    /// append to.
+    async fn secret_recorder_engine(
+        entry_caps: &str,
+    ) -> (
+        PolicyEngine,
+        Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        std::path::PathBuf,
+    ) {
+        let (dir, _) = secret_fixture("hunter2\n");
+        let yaml = format!(
+            "
+engine_settings:
+  dispatch: policy
+secrets:
+  providers:
+    local: {{ kind: file, base_dir: {} }}
+  values:
+    upstream_key: {{ provider: local, ref: upstream.key }}
+plugins:
+  - name: recorder
+    kind: test/secret_recorder
+    hooks: [identity.resolve]
+    mode: sequential
+    capabilities: {entry_caps}
+    config:
+      max_requests: 100
+routes:
+  - tool: get_compensation
+    authentication:
+      - name: recorder
+",
+            dir.display()
+        );
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mgr = PolicyEngine::default();
+        assert!(
+            mgr.set_secret_providers(
+                crate::secrets::SecretProviderRegistry::with_builtin_backends()
+            )
+        );
+        mgr.register_factory(
+            "test/secret_recorder",
+            Box::new(SecretRecorderFactory {
+                log: Arc::clone(&log),
+            }),
+        );
+        mgr.load_config(parse_fixture_config(&yaml).expect("the fixture parses"))
+            .expect("the fixture loads");
+        mgr.initialize().await.expect("initializes");
+        (mgr, log, dir)
+    }
+
+    fn caps(list: &[&str]) -> std::collections::HashSet<String> {
+        list.iter().map(|c| (*c).to_owned()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_route_override_cannot_grant_a_secret_its_entry_lacks() {
+        register_fixture_hooks();
+        let (mgr, log, dir) = secret_recorder_engine("[read_headers]").await;
+        let cfg_override: serde_yaml::Value = serde_yaml::from_str("max_requests: 10").unwrap();
+
+        let entries = mgr
+            .build_override_entries(
+                "recorder",
+                Some(&cfg_override),
+                Some(&caps(&["read_headers", "read_secret:upstream_key"])),
+                None,
+            )
+            .await;
+
+        assert!(!entries.is_empty(), "the override instance was built");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![None, None],
+            "neither the base nor the route instance may read a secret the entry never granted"
+        );
+        assert!(
+            entries.iter().all(|(_, entry)| !entry
+                .plugin_ref
+                .trusted_config()
+                .capabilities
+                .contains("read_secret:upstream_key")),
+            "the widening grant is dropped from the override's capabilities"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_route_override_keeps_a_secret_its_entry_grants() {
+        register_fixture_hooks();
+        let (mgr, log, dir) = secret_recorder_engine("[read_secret:upstream_key]").await;
+        let cfg_override: serde_yaml::Value = serde_yaml::from_str("max_requests: 10").unwrap();
+
+        let entries = mgr
+            .build_override_entries(
+                "recorder",
+                Some(&cfg_override),
+                Some(&caps(&["read_secret:upstream_key"])),
+                None,
+            )
+            .await;
+
+        assert!(!entries.is_empty(), "the override instance was built");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![Some("hunter2".to_owned()), Some("hunter2".to_owned())],
+            "a route that keeps the entry's grant gets the handle on its own instance"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_capabilities_only_override_that_drops_a_secret_gets_its_own_instance() {
+        register_fixture_hooks();
+        let (mgr, log, dir) = secret_recorder_engine("[read_secret:upstream_key]").await;
+
+        let entries = mgr
+            .build_override_entries("recorder", None, Some(&caps(&["read_headers"])), None)
+            .await;
+
+        assert!(!entries.is_empty(), "the override instance was built");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![Some("hunter2".to_owned()), None],
+            "the route that dropped the grant runs an instance that never received the handle, \
+             not the base instance holding it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_capabilities_only_override_that_keeps_its_secrets_shares_the_base_instance() {
+        register_fixture_hooks();
+        let (mgr, log, dir) = secret_recorder_engine("[read_secret:upstream_key]").await;
+
+        let entries = mgr
+            .build_override_entries(
+                "recorder",
+                None,
+                Some(&caps(&["read_secret:upstream_key", "read_headers"])),
+                None,
+            )
+            .await;
+
+        assert!(!entries.is_empty(), "the override entries were built");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![Some("hunter2".to_owned())],
+            "an override that leaves the secret grants alone keeps the cheap shared-instance path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Override and base must have INDEPENDENT circuit breakers. A failure
     /// on an override-only route (e.g., bad credentials in the merged
     /// config) must not silently disable the plugin for every other route
@@ -13089,6 +13363,48 @@ mod rate_limit_dispatch_tests {
     }
 
     #[tokio::test]
+    async fn a_rate_limits_override_instance_reads_the_secret_its_entry_grants() {
+        let dir = std::env::temp_dir().join(format!("ppe-rl-secrets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("upstream.key"), "hunter2\n").expect("write");
+        let yaml = format!(
+            "secrets:\n  providers:\n    local: {{ kind: file, base_dir: {} }}\n  values:\n    \
+             upstream_key: {{ provider: local, ref: upstream.key }}\nplugins:\n  - {{ name: \
+             user-a, kind: test/limiter, hooks: [ratelimit.post_identity], capabilities: \
+             [read_secret:upstream_key], config: {{ read_secret: upstream_key }} }}\nroutes:\n  \
+             - tool: t\n    rate_limits:\n      - name: user-a\n        config: {{ tag: route \
+             }}\n",
+            dir.display()
+        );
+        let (engine, probe) = limiter_engine_unloaded();
+        assert!(
+            engine.set_secret_providers(
+                crate::secrets::SecretProviderRegistry::with_builtin_backends()
+            )
+        );
+        engine
+            .load_config(crate::config::parse_config(&yaml).expect("the fixture parses"))
+            .expect("the fixture loads");
+        engine.initialize().await.expect("initialize");
+
+        let mut seen = probe
+            .secrets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                ("base".to_owned(), Some("hunter2".to_owned())),
+                ("route".to_owned(), Some("hunter2".to_owned())),
+            ],
+            "the override instance initializes under its entry's grant, like the base"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn override_instances_are_shut_down_with_the_engine() {
         let (engine, probe) = limiter_engine(&format!(
             "{LIMITERS}routes:\n  - tool: t\n    rate_limits:\n      - name: user-a\n        \
@@ -13141,6 +13457,7 @@ mod rate_limit_dispatch_tests {
     #[derive(Default)]
     struct ProbeState {
         hits: Mutex<Vec<(String, String, u64)>>,
+        secrets: Mutex<Vec<(String, Option<String>)>>,
         built: AtomicUsize,
         inits: AtomicUsize,
         shutdowns: AtomicUsize,
@@ -13203,11 +13520,33 @@ mod rate_limit_dispatch_tests {
             &self.cfg
         }
 
-        async fn initialize(&self) -> Result<(), Box<PluginError>> {
+        async fn initialize_with(
+            &self,
+            ext: &crate::host::InitExtensions,
+        ) -> Result<(), Box<PluginError>> {
             if self.setting("fail_init") == Some(&serde_json::Value::Bool(true)) {
                 return Err(config_error(INIT_FAILURE.to_owned()));
             }
             self.probe.inits.fetch_add(1, Ordering::AcqRel);
+            if let Some(name) = self
+                .setting("read_secret")
+                .and_then(serde_json::Value::as_str)
+            {
+                let tag = self
+                    .setting("tag")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("base")
+                    .to_owned();
+                let seen = ext
+                    .resolve_secret(name)
+                    .ok()
+                    .map(|secret| secret.get().as_str().to_owned());
+                self.probe
+                    .secrets
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((tag, seen));
+            }
             Ok(())
         }
 
