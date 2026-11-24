@@ -22,12 +22,12 @@ history.
 The documentation is grouped by what you are trying to do. Read the sections
 in this order, or jump to the one that matches your task.
 
-1. [Getting started](#getting-started): run the engine and connect it to
+1. [Getting started](getting-started/README.md): run the engine and connect it to
    Praxis.
 2. [Guides](guides/README.md): configure and operate a specific control.
 3. [Concepts](concepts/README.md): how the engine works and why it is built
    this way.
-4. [APL](#apl): the policy language, its grammar, and its effects.
+4. [APL](apl/README.md): the policy language, its grammar, and its effects.
 5. [Reference](reference/README.md): configuration keys, contracts, crates, and
    builtins.
 
@@ -84,7 +84,7 @@ in this order, or jump to the one that matches your task.
 
 ## APL
 
-- [APL](apl/index.md):
+- [APL overview](apl/index.md):
   routes, phases, predicates, rules, and field pipelines
 - [Grammar](apl/apl-grammar.md):
   the normative grammar; where it and the parser disagree, one is a bug
