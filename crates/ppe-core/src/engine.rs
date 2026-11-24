@@ -2983,6 +2983,7 @@ impl PolicyEngine {
         // a concurrent register/load_config swapping in a new snapshot doesn't
         // change our view mid-pipeline.
         let snapshot = self.load_runtime();
+        let executor = snapshot.executor.for_invocation();
         let context_table =
             self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
@@ -2999,6 +3000,7 @@ impl PolicyEngine {
             return (
                 self.finish(
                     &snapshot,
+                    &executor,
                     Some(hook_name),
                     matched.as_ref(),
                     None,
@@ -3022,6 +3024,7 @@ impl PolicyEngine {
                 return (
                     self.finish(
                         &snapshot,
+                        &executor,
                         Some(hook_name),
                         None,
                         Some(payload),
@@ -3040,6 +3043,7 @@ impl PolicyEngine {
             return (
                 self.finish(
                     &snapshot,
+                    &executor,
                     Some(hook_name),
                     matched.as_ref(),
                     None,
@@ -3056,8 +3060,7 @@ impl PolicyEngine {
 
         let (result, tasks, refused) = {
             let _boundary = self.enter_executor();
-            snapshot
-                .executor
+            executor
                 .execute_audited(
                     &entries,
                     payload,
@@ -3072,6 +3075,7 @@ impl PolicyEngine {
         (
             self.finish(
                 &snapshot,
+                &executor,
                 Some(hook_name),
                 matched.as_ref(),
                 refused,
@@ -3114,6 +3118,7 @@ impl PolicyEngine {
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
         let snapshot = self.load_runtime();
+        let executor = snapshot.executor.for_invocation();
         let context_table =
             self.track_rate_limit_stage(&snapshot, H::NAME, &extensions, context_table);
         let hook_type = HookType::new(H::NAME);
@@ -3127,6 +3132,7 @@ impl PolicyEngine {
             return (
                 self.finish(
                     &snapshot,
+                    &executor,
                     Some(H::NAME),
                     matched.as_ref(),
                     None,
@@ -3150,6 +3156,7 @@ impl PolicyEngine {
                 return (
                     self.finish(
                         &snapshot,
+                        &executor,
                         Some(H::NAME),
                         None,
                         Some(Box::new(payload)),
@@ -3169,6 +3176,7 @@ impl PolicyEngine {
             return (
                 self.finish(
                     &snapshot,
+                    &executor,
                     Some(H::NAME),
                     matched.as_ref(),
                     None,
@@ -3186,8 +3194,7 @@ impl PolicyEngine {
         let boxed: Box<dyn PluginPayload> = Box::new(payload);
         let (result, tasks, refused) = {
             let _boundary = self.enter_executor();
-            snapshot
-                .executor
+            executor
                 .execute_audited(
                     &entries,
                     boxed,
@@ -3200,8 +3207,15 @@ impl PolicyEngine {
                 .await
         };
         (
-            self.finish(&snapshot, Some(H::NAME), matched.as_ref(), refused, result)
-                .await,
+            self.finish(
+                &snapshot,
+                &executor,
+                Some(H::NAME),
+                matched.as_ref(),
+                refused,
+                result,
+            )
+            .await,
             tasks,
         )
     }
@@ -3241,6 +3255,7 @@ impl PolicyEngine {
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
         let snapshot = self.load_runtime();
+        let executor = snapshot.executor.for_invocation();
         let context_table =
             self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
         let hook_type = HookType::new(hook_name);
@@ -3261,6 +3276,7 @@ impl PolicyEngine {
             return (
                 self.finish(
                     &snapshot,
+                    &executor,
                     Some(hook_name),
                     matched.as_ref(),
                     None,
@@ -3284,6 +3300,7 @@ impl PolicyEngine {
                 return (
                     self.finish(
                         &snapshot,
+                        &executor,
                         Some(hook_name),
                         None,
                         Some(Box::new(payload)),
@@ -3303,6 +3320,7 @@ impl PolicyEngine {
             return (
                 self.finish(
                     &snapshot,
+                    &executor,
                     Some(hook_name),
                     matched.as_ref(),
                     None,
@@ -3320,8 +3338,7 @@ impl PolicyEngine {
         let boxed: Box<dyn PluginPayload> = Box::new(payload);
         let (result, tasks, refused) = {
             let _boundary = self.enter_executor();
-            snapshot
-                .executor
+            executor
                 .execute_audited(
                     &entries,
                     boxed,
@@ -3336,6 +3353,7 @@ impl PolicyEngine {
         (
             self.finish(
                 &snapshot,
+                &executor,
                 Some(hook_name),
                 matched.as_ref(),
                 refused,
@@ -3392,6 +3410,7 @@ impl PolicyEngine {
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
         let snapshot = self.load_runtime();
+        let executor = snapshot.executor.for_invocation();
         self.warn_if_dispatch_has_no_boundary(&snapshot);
         if entries.is_empty() {
             let boxed: Box<dyn PluginPayload> = Box::new(payload);
@@ -3402,6 +3421,7 @@ impl PolicyEngine {
                 // boundary this call runs inside.
                 self.finish(
                     &snapshot,
+                    &executor,
                     None,
                     None,
                     None,
@@ -3418,8 +3438,7 @@ impl PolicyEngine {
         let boxed: Box<dyn PluginPayload> = Box::new(payload);
         let (result, tasks, refused) = {
             let _boundary = self.enter_executor();
-            snapshot
-                .executor
+            executor
                 .execute_audited(
                     entries,
                     boxed,
@@ -3432,7 +3451,8 @@ impl PolicyEngine {
                 .await
         };
         (
-            self.finish(&snapshot, None, None, refused, result).await,
+            self.finish(&snapshot, &executor, None, None, refused, result)
+                .await,
             tasks,
         )
     }
@@ -3540,6 +3560,7 @@ impl PolicyEngine {
     async fn finish(
         &self,
         snapshot: &RuntimeSnapshot,
+        executor: &Executor,
         hook_name: Option<&str>,
         matched: Option<&config::MatchedRoute<'_>>,
         fallback_payload: Option<Box<dyn PluginPayload>>,
@@ -3554,7 +3575,7 @@ impl PolicyEngine {
             Some(v) => crate::decision::Verdict::Deny(v.clone()),
             None => crate::decision::Verdict::Allow,
         };
-        if snapshot.executor.has_audit_handlers()
+        if executor.has_audit_handlers()
             && let Some(payload) = carried
                 .as_deref()
                 .or(refused.as_deref())
@@ -3570,10 +3591,9 @@ impl PolicyEngine {
             // record with no span or input hash and no arrival taint to diff
             // the final labels against.
             if result.decision_log.verdict().is_none() {
-                result.decision_log = snapshot.executor.entry_decisions(payload, &extensions);
+                result.decision_log = executor.entry_decisions(payload, &extensions);
             }
-            snapshot
-                .executor
+            executor
                 .emit_decision(payload, &extensions, &mut result.decision_log, verdict)
                 .await;
             result.modified_extensions = Some(extensions);
@@ -12893,6 +12913,128 @@ routes:
         );
     }
 
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[tokio::test]
+    async fn content_provenance_retains_a_valid_key_across_secret_reload() {
+        for invocation in ProvenanceInvocation::all() {
+            for denied in [false, true] {
+                let (old, next) = provenance_rotation(invocation, denied, true).await;
+                assert_eq!(old.continue_processing, !denied);
+                assert_eq!(next.continue_processing, !denied);
+                assert_eq!(
+                    old.decision_log.input_hash(),
+                    old.decision_log.output_hash(),
+                    "{invocation:?}: an in-flight invocation must retain its validated key"
+                );
+                assert_eq!(
+                    next.decision_log.input_hash(),
+                    next.decision_log.output_hash(),
+                    "{invocation:?}: the next invocation uses one key too"
+                );
+                assert_ne!(
+                    old.decision_log.input_hash(),
+                    next.decision_log.input_hash(),
+                    "{invocation:?}: the next invocation must see the valid rotation"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[tokio::test]
+    async fn content_provenance_retains_one_key_across_secret_refresh() {
+        for invocation in ProvenanceInvocation::all() {
+            let (old, next) = provenance_rotation(invocation, false, false).await;
+            assert_eq!(
+                old.decision_log.input_hash(),
+                old.decision_log.output_hash(),
+                "{invocation:?}: refresh must not change the key within a record"
+            );
+            assert_eq!(
+                next.decision_log.input_hash(),
+                next.decision_log.output_hash()
+            );
+            assert_ne!(
+                old.decision_log.input_hash(),
+                next.decision_log.input_hash()
+            );
+            assert_eq!(
+                old.decision_log.epoch(),
+                next.decision_log.epoch(),
+                "refresh must retain the audit stream"
+            );
+            assert_ne!(
+                old.decision_log.stream_seq(),
+                next.decision_log.stream_seq(),
+                "captured executors must share sequence counters"
+            );
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[tokio::test]
+    async fn short_refreshed_keys_omit_provenance_on_empty_and_denied_invocations() {
+        for has_handler in [false, true] {
+            let (directory, yaml) = provenance_fixture(PROVENANCE_KEY);
+            let engine = Arc::new(engine_reading_secrets(&yaml));
+            engine.initialize().await.expect("engine initializes");
+            let names = if has_handler {
+                vec!["cmf", "cmf.tool_pre_invoke"]
+            } else {
+                vec!["cmf.llm_output"]
+            };
+            let config = make_config("provenance_probe", 10, PluginMode::Sequential);
+            engine
+                .register_handler_for_names::<crate::cmf::CmfHook, _>(
+                    Arc::new(ProvenanceProbe {
+                        calls: AtomicUsize::new(1),
+                        cfg: config.clone(),
+                        denied: has_handler,
+                        entered: Arc::default(),
+                        release: Arc::default(),
+                    }),
+                    config,
+                    &names,
+                )
+                .expect("audit sink registers");
+            std::fs::write(directory.join("upstream.key"), "x").expect("short rotation fixture");
+            let refreshed = engine.refresh_secrets().await;
+            assert_eq!(refreshed.updated.len(), 1);
+            for invocation in ProvenanceInvocation::all() {
+                let result = invoke_provenance(&engine, invocation).await;
+                assert_eq!(result.continue_processing, !has_handler);
+                assert!(
+                    result.decision_log.span().is_some(),
+                    "the audit record must still be captured"
+                );
+                assert_eq!(
+                    result.decision_log.input_hash(),
+                    None,
+                    "{invocation:?}: a weak key must not produce an input digest"
+                );
+                assert_eq!(
+                    result.decision_log.output_hash(),
+                    None,
+                    "{invocation:?}: a weak key must not produce an output digest or an unkeyed fallback"
+                );
+            }
+            std::fs::write(directory.join("upstream.key"), PROVENANCE_KEY)
+                .expect("restore a valid key");
+            let recovered = engine.refresh_secrets().await;
+            assert_eq!(recovered.updated.len(), 1);
+            let result = invoke_provenance(&engine, ProvenanceInvocation::Named).await;
+            assert!(
+                result.decision_log.input_hash().is_some(),
+                "the next invocation must recover after a valid rotation"
+            );
+            assert_eq!(
+                result.decision_log.input_hash(),
+                result.decision_log.output_hash()
+            );
+            std::fs::remove_dir_all(directory).expect("remove fixture");
+        }
+    }
+
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------
@@ -12952,6 +13094,241 @@ routes:
         ) -> PluginResult<TestPayload> {
             PluginResult::allow()
         }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[derive(Clone, Copy, Debug)]
+    enum ProvenanceInvocation {
+        Erased,
+        Typed,
+        Named,
+        Entries,
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    impl ProvenanceInvocation {
+        fn all() -> [Self; 4] {
+            [Self::Erased, Self::Typed, Self::Named, Self::Entries]
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    struct ProvenanceProbe {
+        calls: AtomicUsize,
+        cfg: PluginConfig,
+        denied: bool,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[async_trait]
+    impl Plugin for ProvenanceProbe {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+        fn as_audit_handler(self: Arc<Self>) -> Option<Arc<dyn crate::audit::AuditHandler>> {
+            Some(self)
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    impl HookHandler<crate::cmf::CmfHook> for ProvenanceProbe {
+        async fn handle(
+            &self,
+            _payload: &crate::cmf::MessagePayload,
+            _extensions: &Extensions,
+            _context: &mut PluginContext,
+        ) -> PluginResult<crate::cmf::MessagePayload> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            if self.denied {
+                PluginResult::deny(PluginViolation::new("test.deny", "fixture denial"))
+            } else {
+                PluginResult::allow()
+            }
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[async_trait]
+    impl crate::audit::AuditHandler for ProvenanceProbe {
+        async fn handle(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _decisions: &crate::decision::DecisionLog,
+        ) {
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    fn provenance_payload() -> crate::cmf::MessagePayload {
+        crate::cmf::MessagePayload {
+            message: crate::cmf::Message::text(crate::cmf::Role::User, "unchanged content"),
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    async fn invoke_provenance(
+        engine: &PolicyEngine,
+        invocation: ProvenanceInvocation,
+    ) -> PipelineResult {
+        use crate::cmf::CmfHook;
+        let payload = provenance_payload();
+        match invocation {
+            ProvenanceInvocation::Erased => {
+                engine
+                    .invoke_by_name(
+                        "cmf.tool_pre_invoke",
+                        Box::new(payload),
+                        Extensions::default(),
+                        None,
+                    )
+                    .await
+                    .0
+            },
+            ProvenanceInvocation::Typed => {
+                engine
+                    .invoke::<CmfHook>(payload, Extensions::default(), None)
+                    .await
+                    .0
+            },
+            ProvenanceInvocation::Named => {
+                engine
+                    .invoke_named::<CmfHook>(
+                        "cmf.tool_pre_invoke",
+                        payload,
+                        Extensions::default(),
+                        None,
+                    )
+                    .await
+                    .0
+            },
+            ProvenanceInvocation::Entries => {
+                let entries: Vec<crate::registry::HookEntry> = engine
+                    .find_plugin_entries("provenance_probe")
+                    .into_iter()
+                    .filter(|(name, _)| name == "cmf.tool_pre_invoke")
+                    .map(|(_, entry)| entry)
+                    .collect();
+                engine
+                    .invoke_entries::<CmfHook>(&entries, payload, Extensions::default(), None)
+                    .await
+                    .0
+            },
+        }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    async fn provenance_rotation(
+        invocation: ProvenanceInvocation,
+        denied: bool,
+        reload: bool,
+    ) -> (PipelineResult, PipelineResult) {
+        use crate::hooks::payload::ContentKey;
+        let replacement_key = PROVENANCE_KEY.repeat(2);
+        let (directory, mut yaml) = provenance_fixture(PROVENANCE_KEY);
+        std::fs::write(directory.join("replacement.key"), &replacement_key)
+            .expect("replacement key");
+        yaml.push_str("    replacement_key: { provider: local, ref: replacement.key }\n");
+        let engine = Arc::new(engine_reading_secrets(&yaml));
+        engine.initialize().await.expect("engine initializes");
+        let live_key = ContentKey::keyed(
+            resolved_secrets(&engine)
+                .secret("upstream_key")
+                .expect("key is declared"),
+        )
+        .expect("original key is valid");
+        let expected_old = live_key
+            .digest(&provenance_payload().audit_bytes().expect("CMF audit bytes"))
+            .expect("original digest");
+        let expected_new = ContentKey::keyed(crate::secrets::SecretRef::fixed(&replacement_key))
+            .expect("replacement key is valid")
+            .digest(&provenance_payload().audit_bytes().expect("CMF audit bytes"))
+            .expect("replacement digest");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let config = make_config("provenance_probe", 10, PluginMode::Sequential);
+        engine
+            .register_handler_for_names::<crate::cmf::CmfHook, _>(
+                Arc::new(ProvenanceProbe {
+                    calls: AtomicUsize::new(0),
+                    cfg: config.clone(),
+                    denied,
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                }),
+                config,
+                &["cmf", "cmf.tool_pre_invoke"],
+            )
+            .expect("probe registers");
+        let pending = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move { invoke_provenance(&engine, invocation).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("invocation reaches the handler");
+        let replacement_directory = if reload {
+            let (other, _) = secret_fixture("x");
+            std::fs::write(other.join("replacement.key"), &replacement_key)
+                .expect("valid new selection");
+            let changed = yaml
+                .replace(
+                    &directory.display().to_string(),
+                    &other.display().to_string(),
+                )
+                .replace(
+                    "content_provenance_key: upstream_key",
+                    "content_provenance_key: replacement_key",
+                );
+            engine
+                .reload_config(parse_fixture_config(&changed).expect("reload config parses"))
+                .await
+                .expect("valid new selection reloads");
+            Some(other)
+        } else {
+            std::fs::write(directory.join("upstream.key"), &replacement_key)
+                .expect("valid refresh fixture");
+            let refreshed = engine.refresh_secrets().await;
+            assert_eq!(refreshed.updated.len(), 1);
+            assert_ne!(
+                live_key
+                    .digest(&provenance_payload().audit_bytes().expect("CMF audit bytes"))
+                    .as_deref(),
+                Some(expected_old.as_str()),
+                "direct ContentKey::digest must retain live SecretRef rotation"
+            );
+            None
+        };
+        let next = invoke_provenance(&engine, invocation).await;
+        assert_eq!(
+            next.decision_log.input_hash(),
+            Some(expected_new.as_str()),
+            "the next invocation must select the valid replacement key"
+        );
+        release.notify_one();
+        let old = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+            .await
+            .expect("paused invocation finishes")
+            .expect("invocation does not panic");
+        assert_eq!(
+            old.decision_log.input_hash(),
+            Some(expected_old.as_str()),
+            "{invocation:?}: input is taken under the original key"
+        );
+        assert!(
+            next.decision_log.input_hash().is_some(),
+            "the valid replacement produces a digest"
+        );
+        std::fs::remove_dir_all(directory).expect("remove original fixture");
+        if let Some(other) = replacement_directory {
+            std::fs::remove_dir_all(other).expect("remove replacement fixture");
+        }
+        (old, next)
     }
 }
 

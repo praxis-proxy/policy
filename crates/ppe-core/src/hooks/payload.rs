@@ -192,14 +192,19 @@ impl ContentKey {
     /// Returns a message naming the minimum when the secret is shorter than
     /// [`MIN_CONTENT_KEY_BYTES`].
     pub fn keyed(secret: crate::secrets::SecretRef) -> Result<Self, String> {
-        let len = secret.get().len();
-        if len < MIN_CONTENT_KEY_BYTES {
-            return Err(format!(
-                "the content provenance key is {len} bytes; it needs at least \
-                 {MIN_CONTENT_KEY_BYTES}"
-            ));
-        }
+        validate_content_key(&secret.get())?;
         Ok(Self::Keyed(secret))
+    }
+
+    pub(crate) fn capture(&self) -> Result<CapturedContentKey, String> {
+        match self {
+            Self::Unkeyed => Ok(CapturedContentKey::Unkeyed),
+            Self::Keyed(secret) => {
+                let key = secret.get();
+                validate_content_key(&key)?;
+                Ok(CapturedContentKey::Keyed(key))
+            },
+        }
     }
 
     /// Digest `bytes`, prefixed with the scheme and, for a keyed digest, the
@@ -210,31 +215,58 @@ impl ContentKey {
     /// down over an audit field.
     #[must_use]
     pub fn digest(&self, bytes: &[u8]) -> Option<String> {
-        use crate::crypto::{hmac_sha256, sha256};
-
         match self {
-            Self::Unkeyed => {
-                let digest = sha256(bytes)
-                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
-                    .ok()?;
-                Some(format!("sha256:{}", hex(&digest)))
-            },
-            Self::Keyed(secret) => {
-                let key = secret.get();
-                let id = hmac_sha256(key.as_bytes(), KEY_ID_LABEL)
-                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
-                    .ok()?;
-                let digest = hmac_sha256(key.as_bytes(), bytes)
-                    .inspect_err(|error| tracing::error!(%error, "content digest failed"))
-                    .ok()?;
-                Some(format!(
-                    "hmac-sha256:{}:{}",
-                    hex(id.get(..8).unwrap_or_default()),
-                    hex(&digest)
-                ))
-            },
+            Self::Unkeyed => unkeyed_digest(bytes),
+            Self::Keyed(secret) => keyed_digest(secret.get().as_bytes(), bytes),
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) enum CapturedContentKey {
+    Unkeyed,
+    Keyed(zeroize::Zeroizing<String>),
+}
+
+impl CapturedContentKey {
+    pub(crate) fn digest(&self, bytes: &[u8]) -> Option<String> {
+        match self {
+            Self::Unkeyed => unkeyed_digest(bytes),
+            Self::Keyed(key) => keyed_digest(key.as_bytes(), bytes),
+        }
+    }
+}
+
+fn validate_content_key(key: &str) -> Result<(), String> {
+    let len = key.len();
+    if len < MIN_CONTENT_KEY_BYTES {
+        return Err(format!(
+            "the content provenance key is {len} bytes; it needs at least \
+             {MIN_CONTENT_KEY_BYTES}"
+        ));
+    }
+    Ok(())
+}
+
+fn keyed_digest(key: &[u8], bytes: &[u8]) -> Option<String> {
+    let id = crate::crypto::hmac_sha256(key, KEY_ID_LABEL)
+        .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+        .ok()?;
+    let digest = crate::crypto::hmac_sha256(key, bytes)
+        .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+        .ok()?;
+    Some(format!(
+        "hmac-sha256:{}:{}",
+        hex(id.get(..8).unwrap_or_default()),
+        hex(&digest)
+    ))
+}
+
+fn unkeyed_digest(bytes: &[u8]) -> Option<String> {
+    let digest = crate::crypto::sha256(bytes)
+        .inspect_err(|error| tracing::error!(%error, "content digest failed"))
+        .ok()?;
+    Some(format!("sha256:{}", hex(&digest)))
 }
 
 fn hex(bytes: &[u8]) -> String {
