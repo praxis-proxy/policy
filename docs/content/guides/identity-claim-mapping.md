@@ -1,6 +1,7 @@
 # Add a claim mapper preset
 
-Adding a preset is data-driven; no new mapper implementation or resolver branch is needed.
+Adding a preset is data-driven; no new mapper implementation or resolver branch
+is needed.
 
 ## 1. Verify the provider's claim contract
 
@@ -16,7 +17,8 @@ Avoid guessing mappings. Presets intentionally leave uncertain fields empty.
 
 ## 2. Prototype the mapping inline
 
-Test the intended mapping using `claim_map` first. It uses exactly the same schema as a preset.
+Test the intended mapping using `claim_map` first. It uses exactly the same
+schema as a preset.
 Supported destination fields are listed in
 [`claim_map_config.rs`](../../../crates/ppe-core/src/identity/mapping/claim_map_config.rs).
 
@@ -85,7 +87,8 @@ Important options:
 
 - `array_only`: accept only arrays.
 - `string_only`: accept only strings.
-- `stop_if_present`: do not fall through if the claim exists with an unusable value; scalar fields only.
+- `stop_if_present`: do not fall through if the claim exists with an unusable
+  value; scalar fields only.
 - `split: "whitespace"`: split a string such as OAuth `scope`.
 - `merge: "union"`: combine collection candidates.
 - `on_missing: "deny"`: reject instead of leaving the field empty.
@@ -101,9 +104,11 @@ Add one entry to `PRESETS` in
 ("vendor", include_str!("presets/vendor.json")),
 ```
 
-Keep the table alphabetically sorted. `include_str!` embeds the preset into the binary.
+Keep the table alphabetically sorted. `include_str!` embeds the preset into
+the binary.
 
-Do not change `DEFAULT_PRESET` unless intentionally making a breaking behavioral change.
+Do not change `DEFAULT_PRESET` unless intentionally making a breaking
+behavioral change.
 
 ## 5. Pin the exact mapping in tests
 
@@ -120,8 +125,9 @@ Then add tests covering:
 - Any provider-specific legacy claim names.
 - `on_missing` or anchor behavior where relevant.
 
-Several table-driven tests automatically check every registry entry for parsing, compilation,
-unique naming, resolver construction, and factory construction.
+Several table-driven tests automatically check every registry entry for
+parsing, compilation, unique naming, resolver construction, and factory
+construction.
 
 ## 6. Update hard-coded provider assumptions
 
@@ -133,9 +139,9 @@ Review these tests when adding another provider:
 - Resolver workload-role expectations in
   [`resolver.rs`](../../../crates/builtins/src/plugins/identity_jwt/resolver.rs).
 
-Current generic tests expect every preset to support both `subject` and `client`. If the new
-preset legitimately supports fewer roles, adjust those invariants explicitly instead of adding
-speculative mappings.
+Current generic tests expect every preset to support both `subject` and
+`client`. If the new preset legitimately supports fewer roles, adjust those
+invariants explicitly instead of adding speculative mappings.
 
 ## 7. Add an end-to-end case
 
@@ -155,8 +161,8 @@ Update:
 - Module documentation in [`mod.rs`](../../../crates/builtins/src/plugins/identity_jwt/mod.rs).
 - Identity documentation in [`identity-delegation.md`](identity-delegation.md).
 
-Add a new changelog entry if appropriate. Do not rewrite an older release note merely because it
-historically says "four presets."
+Add a new changelog entry if appropriate. Do not rewrite an older release note
+merely because it historically says "four presets."
 
 ## 9. Validate
 
@@ -167,5 +173,5 @@ make check
 make ci
 ```
 
-The minimal code change is the JSON file plus registry entry. Tests, documented omissions, and
-user-facing lists make it production-ready.
+The minimal code change is the JSON file plus registry entry. Tests,
+documented omissions, and user-facing lists make it production-ready.

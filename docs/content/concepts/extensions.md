@@ -70,8 +70,9 @@ existing policies.
 The request arguments and response body are also flattened. An object
 writes `args.<dotted>` / `result.<dotted>`; a top-level scalar or scalar
 array writes the bare key `args` / `result`. The route name is
-`route.key`. APL field pipelines (`args:` / `result:`) operate on those. Operator-maintained static attributes
-are flattened under `data.*` — these come from config files, not the request,
+`route.key`. APL field pipelines (`args:` / `result:`) operate on those.
+Operator-maintained static attributes are flattened under `data.*` — these
+come from config files, not the request,
 and need no capability (see [Static Attributes](../apl/attributes.md)).
 
 PDPs read the raw `http.query` from the canonical attribute bag. Plugin views

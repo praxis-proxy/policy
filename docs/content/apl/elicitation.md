@@ -208,8 +208,9 @@ A reference requires its own `password`; `username` is optional for a Valkey
 default user. A password alone does not separate CIBA from Session Taint: when
 neither block sets a `username`, both authenticate as the default user and share
 its ACL, so CIBA can read and delete taint keys. Isolation needs a `username`
-that differs from the session store's. A reference may also set `key_prefix`, `connect_timeout_ms`, and
-`command_timeout_ms`. The global endpoint must be a bare `host:port` with
+that differs from the session store's. A reference may also set `key_prefix`,
+`connect_timeout_ms`, and `command_timeout_ms`. The global endpoint must be a
+bare `host:port` with
 separate credentials: full URL endpoints cannot be referenced. Use the
 standalone form for a different server. A reference fails to load when
 `global.session_store` is absent or is not `kind: valkey`. Hosts must load the

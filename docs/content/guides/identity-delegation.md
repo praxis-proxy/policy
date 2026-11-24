@@ -827,10 +827,11 @@ Omitting `scheme_prefix` deliberately produces the bare `X-API-Key` value.
 
 > **Praxis host compatibility:** `RawDelegatedToken` carries the exact
 > `outbound_prefix`, and this repository's reference host honors it. The
-> separately maintained Praxis proxy filter currently hard-codes `Bearer `
-> when attaching delegated tokens. Bare values and prefixes such as `token `
-> are therefore deferred until that consumer reads `outbound_prefix`; do not
-> deploy those configurations through the Praxis filter yet.
+> separately maintained Praxis proxy filter currently hard-codes `Bearer`
+> followed by a space when attaching delegated tokens. Bare values and prefixes
+> such as `token` followed by a space are therefore deferred until that consumer
+> reads `outbound_prefix`; do not deploy those configurations through the
+> Praxis filter yet.
 
 #### Vault delegation denial codes
 
@@ -968,7 +969,9 @@ routes:
         - "require(role.hr)"
         # subject: user (the default, written out): exchange the user's token
         # from X-User-Token. The agent's bound token cannot be exchanged.
-        - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation], subject: user)"
+        - >-
+          delegate(workday-oauth, target: workday-api, audience: workday-api,
+          permissions: [read_compensation], subject: user)
 ```
 
 Each resolver has its own issuer settings, so one IdP can be trusted with `DPoP`

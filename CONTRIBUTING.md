@@ -13,9 +13,9 @@ do not follow the conventions will be rejected.
 3. Build and test: `make build && make test`
 4. Run every gate locally before pushing: `make all`
 
-Requirements are listed in [docs/development.md].
+The required Rust toolchain and components are pinned in [rust-toolchain.toml].
 
-[docs/development.md]: docs/development.md
+[rust-toolchain.toml]: rust-toolchain.toml
 
 ## Tests
 
@@ -38,10 +38,7 @@ and added to a project board) are open for contributors
 to take, and only at `Medium` or `Low` priority. Urgent
 and high-priority work is assigned by maintainers. If you
 self-assign something outside these rules, a bot unassigns
-it and points you back here. See [Picking Up Work] for the
-full policy.
-
-[Picking Up Work]: docs/development.md#picking-up-work
+it and points you back here.
 
 ## Larger Changes
 

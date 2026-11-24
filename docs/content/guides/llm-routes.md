@@ -177,7 +177,8 @@ The same holds for a key a reported request leaves out. `llm.input.forced_tool` 
 written only when the request forces a tool, so
 `llm.input.forced_tool not in data.approved_tools: deny` denies every request that
 forces none. Pair it with the key's presence:
-`exists(llm.input.forced_tool) & llm.input.forced_tool not in data.approved_tools: deny`.
+`exists(llm.input.forced_tool) &
+llm.input.forced_tool not in data.approved_tools: deny`.
 
 ## Host obligations
 
@@ -212,7 +213,9 @@ routes:
         - "llm.input.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"
         - "!exists(llm.input.max_tokens): deny"
         - "llm.input.max_tokens > 4096: deny"
-        - "llm.input.instructions_digest != 'sha256-v1:c7ab4f357f26f014bb54a3ec069d56914eabffaf4aa2da4aa728baa0b57c415e': deny"
+        - >-
+          llm.input.instructions_digest !=
+          'sha256-v1:c7ab4f357f26f014bb54a3ec069d56914eabffaf4aa2da4aa728baa0b57c415e': deny
       post_invocation:
         - "llm.output.stop_reason == 'max_tokens': deny"
         - "llm.output.tokens.total > 20000: deny"

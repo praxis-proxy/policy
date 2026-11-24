@@ -234,7 +234,7 @@ The key has to be at least 32 bytes. The engine takes both digests, at entry and
 at emission, and puts them on the decision log, so a sink reads them and never
 holds the key.
 
-#### Setting up the key
+### Setting up the key
 
 The key is an ordinary declared secret, so everything in
 [the `secrets:` block](../reference/configuration.md#the-secrets-block) applies.
