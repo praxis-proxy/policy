@@ -69,7 +69,7 @@ use crate::delegation_invoker::DelegationPluginInvoker;
 use crate::dispatch_plan::DispatchCache;
 use crate::elicitation_invoker::ElicitationPluginInvoker;
 use crate::message_projection::{
-    EnvelopeError, EnvelopeReplaced, Projection, ResultIdentity, apply_changed_paths,
+    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, ResultIdentity, apply_changed_paths,
     extract_args_from_message, extract_result_by_identity, extract_result_from_message,
     write_args_back_to_message, write_result_back_to_message,
 };
@@ -108,10 +108,6 @@ pub const ELICITATION_UNAVAILABLE_CODE: i64 = -32122;
 /// approval — resolve its status without committing the action. Truthy
 /// value ("1"/"true"/anything non-empty) enables it.
 pub const ELICITATION_PEEK_HEADER: &str = "X-Policy-Elicitation-Peek";
-
-/// Violation code for a request denied because an `args:` / `result:`
-/// pipeline replaced a whole resource or prompt envelope.
-const ENVELOPE_REPLACED_CODE: &str = "policy.envelope_replaced";
 
 /// Which APL phase this handler runs. Pre covers `args` + `pre_invocation`; Post
 /// covers `result` + `post_invocation`. Set once at construction and never
@@ -737,16 +733,19 @@ impl AplRouteHandler {
                         (v, id)
                     },
                 );
-                let mut merged =
-                    extract_result_by_identity(&target.message, self.projection, &identity);
-                apply_changed_paths(&mut merged, &pre, result_value);
-                if let Err(e) = write_result_back_to_message(
-                    &mut target.message,
-                    &merged,
-                    self.projection,
-                    &identity,
-                ) {
-                    envelope_replaced = Some(("result", e));
+                let write_result =
+                    extract_result_by_identity(&target.message, self.projection, &identity)
+                        .and_then(|mut merged| {
+                            apply_changed_paths(&mut merged, &pre, result_value);
+                            write_result_back_to_message(
+                                &mut target.message,
+                                &merged,
+                                self.projection,
+                                &identity,
+                            )
+                        });
+                if let Err(error) = write_result {
+                    envelope_replaced = Some(("result", error));
                 }
             }
             Some::<Box<dyn PluginPayload>>(Box::new(updated))
@@ -900,22 +899,7 @@ impl AplRouteHandler {
             );
             if continue_processing {
                 continue_processing = false;
-                let part = replaced.part;
-                let reason = match replaced.error {
-                    EnvelopeError::Replaced => {
-                        let example = part.suggested_field();
-                        format!(
-                            "the `{block}:` pipeline replaced the whole `{part}` envelope, which \
-                             cannot be applied; address a field instead, such as `{example}: \
-                             redact` or `\"**.<field>\": redact`"
-                        )
-                    },
-                    EnvelopeError::Removed => format!(
-                        "the `{part}` that the `{block}:` pipeline checked is no longer in the \
-                         message, so its result cannot be written back; a plugin may have \
-                         removed it"
-                    ),
-                };
+                let reason = replaced.reason(block);
                 let mut v = PluginViolation::new(ENVELOPE_REPLACED_CODE, reason);
                 decorate_denial_response(&mut v, self.route.response.as_ref());
                 violation = Some(v);

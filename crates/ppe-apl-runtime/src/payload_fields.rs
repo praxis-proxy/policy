@@ -38,7 +38,7 @@ use praxis_policy_core::http_hook::HttpPayload;
 
 use praxis_policy_apl_core::step::DispatchPhase;
 
-use crate::message_projection::Projection;
+use crate::message_projection::{EnvelopeReplaced, Projection, ResultIdentity};
 
 /// Reads one pipeline field off a hook payload.
 ///
@@ -49,29 +49,62 @@ use crate::message_projection::Projection;
 ///
 /// `Clone` is a supertrait because the invoker keeps the request's payload
 /// under interior mutability and clones it for each dispatch.
+///
+/// # Examples
+///
+/// Hosts can keep their existing two-argument field method:
+///
+/// ```
+/// use praxis_policy_apl_core::step::DispatchPhase;
+/// use praxis_policy_apl_runtime::{PayloadFields, Projection};
+///
+/// #[derive(Clone)]
+/// struct HostPayload;
+/// praxis_policy_core::impl_plugin_payload!(HostPayload);
+///
+/// impl PayloadFields for HostPayload {
+///     fn field_value(&self, field: &str, _phase: DispatchPhase) -> Option<serde_json::Value> {
+///         Some(serde_json::json!(field))
+///     }
+/// }
+///
+/// assert_eq!(
+///     HostPayload.field_value_with_projection("body", DispatchPhase::Post, Projection::Resource),
+///     Some(serde_json::json!("body")),
+/// );
+/// ```
 pub trait PayloadFields: PluginPayload + Clone {
     /// The value this payload holds for `field` in `phase`, or `None` when
     /// the payload has no such field.
     ///
     /// `field` is relative to the args or result root, never prefixed with
     /// `args.` / `result.`. Pre addresses args, Post addresses result.
-    /// `projection` names which content parts the route reads, so the
-    /// readback sees the same part the route's pipeline wrote.
     ///
-    /// Defaults to `None`, which is the whole answer for a payload that
-    /// carries no fields.
-    fn field_value(
+    /// Defaults to `None` for a payload that carries no fields.
+    fn field_value(&self, _field: &str, _phase: DispatchPhase) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Read a field using the route's content-part projection.
+    ///
+    /// The default delegates to [`Self::field_value`] so existing host
+    /// implementations keep their field behavior without a signature change.
+    fn field_value_with_projection(
         &self,
-        _field: &str,
-        _phase: DispatchPhase,
+        field: &str,
+        phase: DispatchPhase,
         _projection: Projection,
     ) -> Option<serde_json::Value> {
-        None
+        self.field_value(field, phase)
     }
 }
 
 impl PayloadFields for MessagePayload {
-    fn field_value(
+    fn field_value(&self, field: &str, phase: DispatchPhase) -> Option<serde_json::Value> {
+        self.field_value_with_projection(field, phase, Projection::Tool)
+    }
+
+    fn field_value_with_projection(
         &self,
         field: &str,
         phase: DispatchPhase,
@@ -85,6 +118,36 @@ impl PayloadFields for MessagePayload {
 /// implementation. Everything a handler reads about an HTTP exchange is on
 /// the `Extensions` it is passed, and a body is not a payload field.
 impl PayloadFields for HttpPayload {}
+
+/// Capture the request's resource selection without copying its body.
+pub(crate) fn resource_identity<P: PayloadFields>(payload: &P) -> ResultIdentity {
+    payload
+        .as_any()
+        .downcast_ref::<MessagePayload>()
+        .map_or_else(ResultIdentity::default, |message| {
+            ResultIdentity::from_resource_message(&message.message)
+        })
+}
+
+/// Read a field from the selected resource throughout one route invocation.
+pub(crate) fn field_value_for_identity<P: PayloadFields>(
+    payload: &P,
+    field: &str,
+    phase: DispatchPhase,
+    projection: Projection,
+    identity: &ResultIdentity,
+) -> Result<Option<serde_json::Value>, EnvelopeReplaced> {
+    if phase == DispatchPhase::Post
+        && projection == Projection::Resource
+        && let Some(message) = payload.as_any().downcast_ref::<MessagePayload>()
+        && let Some(resource) = identity.resource(&message.message)?
+    {
+        return Ok(crate::message_projection::resource_field_value(
+            resource, field,
+        ));
+    }
+    Ok(payload.field_value_with_projection(field, phase, projection))
+}
 
 /// Read the value of one pipeline field out of a message.
 ///
@@ -112,8 +175,6 @@ fn field_value_from_message(
             crate::message_projection::extract_args_from_message(message, projection)
         },
         DispatchPhase::Post => {
-            // Reads the one field directly, so a resource body is not copied
-            // to read `uri`.
             return crate::message_projection::extract_result_field(message, projection, field);
         },
     };
@@ -135,6 +196,28 @@ mod tests {
     use super::*;
     use praxis_policy_core::cmf::enums::Role;
     use praxis_policy_core::cmf::{ContentPart, Message, ToolCall};
+
+    #[test]
+    fn projection_aware_readback_delegates_to_the_existing_host_method() {
+        assert_eq!(
+            LegacyPayload.field_value_with_projection(
+                "body",
+                DispatchPhase::Post,
+                Projection::Resource
+            ),
+            Some(serde_json::json!("body")),
+            "a host's existing field_value implementation must remain in use",
+        );
+    }
+
+    #[test]
+    fn the_existing_message_field_method_keeps_tool_argument_behavior() {
+        assert_eq!(
+            tool_call_payload().field_value("city", DispatchPhase::Pre),
+            Some(serde_json::json!("Boston")),
+            "existing message callers must still read their tool arguments",
+        );
+    }
 
     fn tool_call_payload() -> MessagePayload {
         MessagePayload {
@@ -158,11 +241,11 @@ mod tests {
     fn a_message_projects_the_named_argument() {
         let payload = tool_call_payload();
         assert_eq!(
-            payload.field_value("city", DispatchPhase::Pre, Projection::Tool),
+            payload.field_value_with_projection("city", DispatchPhase::Pre, Projection::Tool),
             Some(serde_json::json!("Boston")),
         );
         assert_eq!(
-            payload.field_value("absent", DispatchPhase::Pre, Projection::Tool),
+            payload.field_value_with_projection("absent", DispatchPhase::Pre, Projection::Tool),
             None
         );
     }
@@ -173,7 +256,7 @@ mod tests {
             message: Message::text(Role::User, "hello"),
         };
         assert_eq!(
-            payload.field_value("anything", DispatchPhase::Pre, Projection::Tool),
+            payload.field_value_with_projection("anything", DispatchPhase::Pre, Projection::Tool),
             Some(serde_json::json!("hello")),
         );
     }
@@ -223,15 +306,23 @@ mod tests {
     fn a_resource_projects_its_result_content_field() {
         let payload = resource_payload();
         assert_eq!(
-            payload.field_value("content", DispatchPhase::Post, Projection::Resource),
+            payload.field_value_with_projection(
+                "content",
+                DispatchPhase::Post,
+                Projection::Resource
+            ),
             Some(serde_json::json!("SSN 123-45-6789")),
         );
         assert_eq!(
-            payload.field_value("uri", DispatchPhase::Post, Projection::Resource),
+            payload.field_value_with_projection("uri", DispatchPhase::Post, Projection::Resource),
             Some(serde_json::json!("hr://employees/42")),
         );
         assert_eq!(
-            payload.field_value("nonexistent", DispatchPhase::Post, Projection::Resource),
+            payload.field_value_with_projection(
+                "nonexistent",
+                DispatchPhase::Post,
+                Projection::Resource
+            ),
             None,
         );
     }
@@ -240,15 +331,23 @@ mod tests {
     fn a_prompt_result_projects_its_result_content_field() {
         let payload = prompt_result_payload();
         assert_eq!(
-            payload.field_value("content", DispatchPhase::Post, Projection::Prompt),
+            payload.field_value_with_projection("content", DispatchPhase::Post, Projection::Prompt),
             Some(serde_json::json!("The summary text")),
         );
         assert_eq!(
-            payload.field_value("prompt_name", DispatchPhase::Post, Projection::Prompt),
+            payload.field_value_with_projection(
+                "prompt_name",
+                DispatchPhase::Post,
+                Projection::Prompt
+            ),
             Some(serde_json::json!("summarize")),
         );
         assert_eq!(
-            payload.field_value("nonexistent", DispatchPhase::Post, Projection::Prompt),
+            payload.field_value_with_projection(
+                "nonexistent",
+                DispatchPhase::Post,
+                Projection::Prompt
+            ),
             None,
         );
     }
@@ -260,12 +359,25 @@ mod tests {
         // route. The load-time refusal is what keeps it unreachable.
         let payload = HttpPayload;
         assert_eq!(
-            payload.field_value("city", DispatchPhase::Pre, Projection::Tool),
+            payload.field_value_with_projection("city", DispatchPhase::Pre, Projection::Tool),
             None
         );
         assert_eq!(
-            payload.field_value("city", DispatchPhase::Post, Projection::Tool),
+            payload.field_value_with_projection("city", DispatchPhase::Post, Projection::Tool),
             None
         );
+    }
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    #[derive(Clone)]
+    struct LegacyPayload;
+    praxis_policy_core::impl_plugin_payload!(LegacyPayload);
+
+    impl PayloadFields for LegacyPayload {
+        fn field_value(&self, field: &str, _phase: DispatchPhase) -> Option<serde_json::Value> {
+            Some(serde_json::json!(field))
+        }
     }
 }

@@ -20,6 +20,10 @@ use crate::message_projection::{
     RESOURCE_READ_ONLY, RESOURCE_REF_FIELDS, RESOURCE_REF_READ_ONLY,
 };
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// The field-path segment that matches at any depth (`**.ssn`).
 const RECURSIVE_SEGMENT: &str = "**";
 
@@ -68,11 +72,9 @@ pub(crate) fn reject_field_stages_without_fields(
 /// `taint(...)`, a detecting scan) is accepted, as are rules that read the
 /// field. Called for the same scopes as [`reject_field_stages_without_fields`].
 ///
-/// A recursive path (`**.uri`) is judged by the segment after `**`, since
-/// that is the one that could land at the root level. The name is compared
-/// without case,
-/// because a `redact` stage matches keys without case at runtime, so
-/// `**.URI` reaches `uri` too.
+/// Leading recursive segments can each match zero levels, so the first
+/// non-recursive segment can address a root field. Names are compared without
+/// case because redaction also matches `**.URI` against `uri`.
 pub(crate) fn reject_writes_to_read_only_fields(
     entity_type: &str,
     scope: &str,
@@ -80,14 +82,12 @@ pub(crate) fn reject_writes_to_read_only_fields(
 ) -> Result<(), VisitorError> {
     for envelope in fixed_envelopes(entity_type, layer) {
         for field_use in &envelope.uses {
-            let mut segments = field_use.field.split('.');
-            let first = segments.next().unwrap_or_default();
-            let addressed = if first == RECURSIVE_SEGMENT {
-                segments.next().unwrap_or_default()
-            } else {
-                first
-            };
-            let addressed = addressed.to_lowercase();
+            let addressed = field_use
+                .field
+                .split('.')
+                .find(|segment| *segment != RECURSIVE_SEGMENT)
+                .unwrap_or_default()
+                .to_lowercase();
             if envelope.read_only.contains(&addressed.as_str())
                 && field_use.stages.iter().any(stage_writes)
             {
@@ -115,8 +115,9 @@ pub(crate) fn reject_writes_to_read_only_fields(
 /// A recursive path (`**.ssn`) is judged by the segment after `**`. On an
 /// envelope with an open map, any name may sit inside that map, so the path is
 /// accepted. On an envelope without one, every key is a root field, so the
-/// name must be one of them; otherwise a typo such as `**.contnet` would load
-/// and never match.
+/// complete remaining path must resolve within that fixed shape. Leading
+/// recursive segments can match zero levels; trailing recursive segments can
+/// match the field itself, but cannot introduce named children of a scalar.
 ///
 /// Names are compared the way the runtime will match them: without case when
 /// the path's stages include `redact` (so `CONTENT: redact` is accepted), and
@@ -134,27 +135,20 @@ pub(crate) fn reject_unknown_field_paths(
         let block = envelope.block;
         for field_use in &envelope.uses {
             let ignore_case = matches_without_case(field_use.stages);
-            let mut segments = field_use.field.split('.');
+            let mut segments = field_use.field.split('.').peekable();
+            let recursive = segments
+                .peek()
+                .is_some_and(|segment| *segment == RECURSIVE_SEGMENT);
+            while segments.next_if_eq(&RECURSIVE_SEGMENT).is_some() {}
             let first = segments.next().unwrap_or_default();
-            if first == RECURSIVE_SEGMENT {
-                let name = segments.next().unwrap_or_default();
-                let has_open_map = envelope.fields.iter().any(|f| OPEN_MAP_FIELDS.contains(f));
-                if !has_open_map
-                    && !name.is_empty()
-                    && name != RECURSIVE_SEGMENT
-                    && envelope_field(envelope.fields, name, ignore_case).is_none()
-                {
-                    return Err(format!(
-                        "{scope}: {origin} names `{field}`, but a `{entity_type}:` `{block}` has \
-                         no field `{name}`, so the recursive path would never match. Its fields \
-                         are: {fields}.",
-                        origin = field_use.origin,
-                        field = field_use.field,
-                        fields = envelope.fields.join(", "),
-                    )
-                    .into());
+            if recursive {
+                let has_open_map = envelope
+                    .fields
+                    .iter()
+                    .any(|field| OPEN_MAP_FIELDS.contains(field));
+                if has_open_map || first.is_empty() {
+                    continue;
                 }
-                continue;
             }
             let Some(known) = envelope_field(envelope.fields, first, ignore_case) else {
                 return Err(format!(
@@ -166,7 +160,9 @@ pub(crate) fn reject_unknown_field_paths(
                 )
                 .into());
             };
-            if segments.next().is_some() && !OPEN_MAP_FIELDS.contains(&known) {
+            if segments.any(|segment| segment != RECURSIVE_SEGMENT)
+                && !OPEN_MAP_FIELDS.contains(&known)
+            {
                 return Err(format!(
                     "{scope}: {origin} names `{field}`, but `{first}` holds a single value with \
                      no fields inside it. Address `{first}` as a whole.",

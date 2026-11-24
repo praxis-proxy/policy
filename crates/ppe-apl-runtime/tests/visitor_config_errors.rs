@@ -774,3 +774,43 @@ fn dynamic_argument_maps_are_not_checked_against_a_field_set() {
 "#,
     );
 }
+
+#[test]
+fn a_recursive_path_inside_opaque_content_is_refused() {
+    let e = load_err(
+        "routes:\n  - prompt: summarize-*\n    result:\n      \"**.content.ssn\": redact\n",
+    );
+    assert!(
+        e.contains("single value"),
+        "nested access inside opaque content must fail: {e}"
+    );
+}
+
+#[test]
+fn a_repeated_recursive_path_with_a_typo_is_refused() {
+    let e = load_err(
+        "routes:\n  - prompt: summarize-*\n    result:\n      \"**.**.contnet\": redact\n",
+    );
+    assert!(
+        e.contains("contnet"),
+        "unknown recursive path must fail: {e}"
+    );
+}
+
+#[test]
+fn a_repeated_recursive_write_to_a_read_only_field_is_refused() {
+    let e = load_err(
+        "routes:\n  - resource: hr://employees/*\n    result:\n      \"**.**.uri\": redact\n",
+    );
+    assert!(
+        e.contains("read-only"),
+        "recursive write reaching root uri must fail: {e}"
+    );
+}
+
+#[test]
+fn valid_recursive_paths_and_redaction_case_variants_load() {
+    loads(
+        "routes:\n  - resource: hr://employees/*\n    result:\n      \"**.annotations.uri\": redact\n      \"**.ssn\": redact\n      CONTENT: redact\n      ANNOTATIONS.ssn: redact\n  - prompt: summarize-*\n    result:\n      \"**.Content\": redact\n      \"**.**.Content\": redact\n      \"content.**\": redact\n",
+    );
+}

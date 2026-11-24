@@ -69,6 +69,8 @@ enum Target {
     Text,
     /// Drop every `Resource` part from the message.
     RemoveResources,
+    ReorderResources,
+    DuplicateResource,
 }
 
 struct RewritePlugin {
@@ -90,7 +92,7 @@ impl HookHandler<CmfHook> for RewritePlugin {
         _extensions: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<MessagePayload> {
-        let content: Vec<ContentPart> = payload
+        let mut content: Vec<ContentPart> = payload
             .message
             .content
             .iter()
@@ -151,6 +153,18 @@ impl HookHandler<CmfHook> for RewritePlugin {
                 (_, other) => other.clone(),
             })
             .collect();
+
+        if matches!(self.target, Target::ReorderResources) {
+            content.reverse();
+        }
+        if matches!(self.target, Target::DuplicateResource)
+            && let Some(resource) = content
+                .iter()
+                .find(|part| matches!(part, ContentPart::Resource { .. }))
+                .cloned()
+        {
+            content.push(resource);
+        }
 
         PluginResult::modify_payload(MessagePayload {
             message: Message {
@@ -383,7 +397,7 @@ fn payload_of(role: Role, parts: Vec<ContentPart>) -> MessagePayload {
 }
 
 /// The payload the host would forward, downcast back to CMF.
-fn forwarded(result: &praxis_policy_core::executor::PipelineResult) -> MessagePayload {
+fn forwarded(result: &praxis_policy_core::executor::PipelineResult) -> &MessagePayload {
     result
         .modified_payload
         .as_ref()
@@ -391,7 +405,6 @@ fn forwarded(result: &praxis_policy_core::executor::PipelineResult) -> MessagePa
         .as_any()
         .downcast_ref::<MessagePayload>()
         .expect("cmf hooks carry MessagePayload")
-        .clone()
 }
 
 fn tool_result_of(payload: &MessagePayload) -> Option<&serde_json::Value> {
@@ -448,7 +461,7 @@ async fn tool_result_redaction_reaches_the_host() {
     );
     let out = forwarded(&result);
     assert_eq!(
-        tool_result_of(&out),
+        tool_result_of(out),
         Some(&serde_json::Value::String("[REDACTED]".to_owned())),
         "the host must receive the redacted tool result, not the original secret"
     );
@@ -481,7 +494,7 @@ async fn tool_call_argument_rewrite_reaches_the_host() {
 
     assert!(result.continue_processing);
     assert_eq!(
-        tool_arg_of(&forwarded(&result), "city"),
+        tool_arg_of(forwarded(&result), "city"),
         Some(serde_json::json!("[REDACTED]"))
     );
 }
@@ -571,7 +584,7 @@ async fn tool_result_redaction_reaches_the_host_in_post_phase() {
 
     assert!(result.continue_processing);
     assert_eq!(
-        tool_result_of(&forwarded(&result)),
+        tool_result_of(forwarded(&result)),
         Some(&serde_json::Value::String("[REDACTED]".to_owned()))
     );
 }
@@ -639,12 +652,12 @@ routes:
     assert!(result.continue_processing, "route should allow");
     let out = forwarded(&result);
     assert_eq!(
-        tool_arg_of(&out, "city"),
+        tool_arg_of(out, "city"),
         Some(serde_json::json!("[REDACTED]")),
         "the pipeline's redaction must reach the host"
     );
     assert_eq!(
-        tool_arg_of(&out, "token"),
+        tool_arg_of(out, "token"),
         Some(serde_json::json!("[REDACTED]")),
         "the plugin's edit must not be clobbered by folding the pipeline's \
          args back in"
@@ -702,7 +715,7 @@ routes:
 
     assert!(result.continue_processing, "route should allow");
     let out = forwarded(&result);
-    let content = tool_result_of(&out).expect("tool result present").clone();
+    let content = tool_result_of(out).expect("tool result present").clone();
     assert_eq!(
         content.get("employee_id"),
         Some(&serde_json::json!("****45")),
@@ -829,7 +842,7 @@ routes:
 
     assert!(result.continue_processing, "route should allow");
     assert_eq!(
-        tool_arg_of(&forwarded(&result), "city"),
+        tool_arg_of(forwarded(&result), "city"),
         Some(serde_json::json!("[REDACTED]"))
     );
 }
@@ -903,7 +916,7 @@ routes:
     assert!(result.continue_processing);
     let out = forwarded(&result);
     assert_eq!(
-        tool_result_of(&out),
+        tool_result_of(out),
         Some(&serde_json::Value::String("[REDACTED]".to_owned())),
         "the first plugin's redaction must survive the second plugin's dispatch"
     );
@@ -1015,7 +1028,7 @@ routes:
         "an audit-mode plugin's payload is discarded, so no mutation was applied"
     );
     assert_eq!(
-        tool_result_of(&forwarded(&result)),
+        tool_result_of(forwarded(&result)),
         Some(&serde_json::Value::String("sk-secret-value".to_owned())),
         "and the original must be what's forwarded"
     );
@@ -1075,14 +1088,14 @@ routes:
 
     assert!(result.continue_processing);
     let out = forwarded(&result);
-    assert_eq!(tool_arg_of(&out, "debug"), None, "the omit must apply");
+    assert_eq!(tool_arg_of(out, "debug"), None, "the omit must apply");
     assert_eq!(
-        tool_arg_of(&out, "token"),
+        tool_arg_of(out, "token"),
         Some(serde_json::json!("[REDACTED]")),
         "the plugin's edit must not be undone by applying the omit"
     );
     assert_eq!(
-        tool_arg_of(&out, "city"),
+        tool_arg_of(out, "city"),
         Some(serde_json::json!("London")),
         "an argument nobody touched must be left alone"
     );
@@ -1141,7 +1154,7 @@ routes:
         .await;
 
     assert!(result.continue_processing);
-    let user = tool_arg_of(&forwarded(&result), "user").expect("user argument present");
+    let user = tool_arg_of(forwarded(&result), "user").expect("user argument present");
     assert_eq!(
         user.get("ssn"),
         Some(&serde_json::json!("[REDACTED]")),
@@ -1215,12 +1228,12 @@ routes:
     assert!(result.continue_processing, "route should allow");
     let out = forwarded(&result);
     assert_eq!(
-        tool_arg_of(&out, "city"),
+        tool_arg_of(out, "city"),
         Some(serde_json::json!("****on")),
         "the mask stage's output must survive the plugin stage that followed it"
     );
     assert_eq!(
-        tool_arg_of(&out, "token"),
+        tool_arg_of(out, "token"),
         Some(serde_json::json!("[REDACTED]")),
         "and the plugin's own edit must still reach the host"
     );
@@ -1251,8 +1264,249 @@ async fn allow_without_mutation_reports_no_modification() {
     assert!(result.continue_processing);
     assert!(!result.payload_modified);
     assert_eq!(
-        tool_arg_of(&forwarded(&result), "city"),
+        tool_arg_of(forwarded(&result), "city"),
         Some(serde_json::json!("London")),
         "an untouched request must arrive untouched"
     );
+}
+
+#[tokio::test]
+async fn resource_field_readback_survives_reordering() {
+    let result = resource_plugin_result(
+        "str | run(resource-editor)",
+        "",
+        false,
+        Target::ReorderResources,
+    )
+    .await;
+    assert!(
+        result.continue_processing,
+        "reordering unique resources must allow"
+    );
+    assert_eq!(
+        resource_content(&result, "original"),
+        Some("SSN 123-45-6789"),
+        "reordering alone must not transfer another resource's content"
+    );
+    assert_eq!(
+        resource_content(&result, "other"),
+        Some("public"),
+        "the other resource must keep its own content"
+    );
+}
+
+#[tokio::test]
+async fn same_uri_resource_edits_are_denied_as_ambiguous() {
+    let result = resource_plugin_result(
+        "redact",
+        "    authorization:\n      post_invocation:\n        - \"run(resource-editor)\"",
+        true,
+        Target::ReorderResources,
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "same-URI edits must fail closed"
+    );
+    let violation = result.violation.expect("ambiguity carries a violation");
+    assert_eq!(
+        violation.code, "policy.envelope_replaced",
+        "the write must be refused"
+    );
+    assert!(
+        violation.reason.contains("unique"),
+        "the denial must describe the ambiguous target: {}",
+        violation.reason
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_resource_field_plugins_are_denied_before_dispatch() {
+    let result = resource_plugin_result(
+        "str | run(resource-editor)",
+        "",
+        true,
+        Target::ReorderResources,
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "an ambiguous baseline must fail closed"
+    );
+    assert!(
+        !result.payload_modified,
+        "a plugin must not run against an ambiguous field target"
+    );
+    let violation = result.violation.expect("ambiguity carries a violation");
+    assert!(
+        violation.reason.contains("unique"),
+        "the denial must explain the ambiguous baseline: {}",
+        violation.reason
+    );
+}
+
+#[tokio::test]
+async fn a_plugin_introducing_a_duplicate_resource_uri_is_denied_on_readback() {
+    let result = resource_plugin_result(
+        "str | run(resource-editor)",
+        "",
+        false,
+        Target::DuplicateResource,
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "readback must refuse a newly ambiguous target"
+    );
+    let violation = result.violation.expect("ambiguity carries a violation");
+    assert!(
+        violation.reason.contains("unique"),
+        "the denial must explain the duplicate introduced by the plugin: {}",
+        violation.reason
+    );
+}
+
+#[tokio::test]
+async fn resource_readback_preserves_redaction_across_multiple_plugins() {
+    let result = resource_plugin_result(
+        "str | redact | run(resource-editor) | run(resource-editor)",
+        "",
+        false,
+        Target::ReorderResources,
+    )
+    .await;
+    assert!(
+        result.continue_processing,
+        "unique resources can be reordered twice"
+    );
+    assert_eq!(
+        resource_content(&result, "original"),
+        Some("[REDACTED]"),
+        "later plugin baselines must keep the original target and preserve redaction"
+    );
+    assert_eq!(
+        resource_content(&result, "other"),
+        Some("public"),
+        "the unrelated resource must remain unchanged"
+    );
+}
+
+#[tokio::test]
+async fn a_resource_removed_during_field_readback_is_denied() {
+    let result = resource_plugin_result(
+        "str | run(resource-editor)",
+        "",
+        false,
+        Target::RemoveResources,
+    )
+    .await;
+    assert!(
+        !result.continue_processing,
+        "removing the selected readback target must fail closed"
+    );
+    let violation = result
+        .violation
+        .expect("missing target carries a violation");
+    assert!(
+        violation.code.ends_with(".result.content"),
+        "readback denial must be attributed to the focused field: {}",
+        violation.code
+    );
+    assert!(
+        violation.reason.contains("no longer in the message"),
+        "the denial must distinguish removal: {}",
+        violation.reason
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+async fn resource_plugin_result(
+    pipeline: &str,
+    authorization: &str,
+    duplicate_uri: bool,
+    target: Target,
+) -> praxis_policy_core::executor::PipelineResult {
+    let yaml = format!(
+        r#"engine_settings:
+  dispatch: policy
+plugins:
+  - name: resource-editor
+    kind: resource-editor
+    hooks: [cmf.resource_post_fetch]
+routes:
+  - resource: hr://employees/*
+    result:
+      content: "{pipeline}"
+{authorization}
+"#
+    );
+    let mgr = manager_with_yaml(
+        "resource-editor",
+        Box::new(RewriteFactory {
+            target,
+            hook: "cmf.resource_post_fetch",
+        }),
+        &yaml,
+    )
+    .await;
+    let ext = Extensions {
+        meta: Some(Arc::new(praxis_policy_core::extensions::MetaExtension {
+            entity_type: Some("resource".to_owned()),
+            entity_name: Some("hr://employees/42".to_owned()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let parts = [
+        ("original", "hr://employees/42", "SSN 123-45-6789"),
+        (
+            "other",
+            if duplicate_uri {
+                "hr://employees/42"
+            } else {
+                "hr://employees/99"
+            },
+            "public",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, uri, text)| ContentPart::Resource {
+        content: Resource {
+            resource_request_id: "shared-request-id".to_owned(),
+            name: Some(name.to_owned()),
+            uri: uri.to_owned(),
+            content: Some(text.to_owned()),
+            resource_type: ResourceType::Uri,
+            ..Resource::default()
+        },
+    })
+    .collect();
+    let (result, _background) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.resource_post_fetch",
+            payload_of(Role::Tool, parts),
+            ext,
+            None,
+        )
+        .await;
+    result
+}
+
+fn resource_content<'a>(
+    result: &'a praxis_policy_core::executor::PipelineResult,
+    name: &str,
+) -> Option<&'a str> {
+    forwarded(result)
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            ContentPart::Resource { content } if content.name.as_deref() == Some(name) => {
+                content.content.as_deref()
+            },
+            _ => None,
+        })
 }

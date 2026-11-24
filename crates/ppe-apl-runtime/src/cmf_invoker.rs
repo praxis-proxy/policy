@@ -88,8 +88,10 @@ use praxis_policy_apl_core::step::{
 };
 
 use crate::dispatch_plan::RouteDispatchPlan;
-use crate::message_projection::Projection;
-use crate::payload_fields::PayloadFields;
+use crate::message_projection::{
+    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, ResultIdentity,
+};
+use crate::payload_fields::{PayloadFields, field_value_for_identity, resource_identity};
 use crate::session_store::{SessionStore, SessionStoreError};
 
 /// The invoker an MCP or A2A route builds: CMF hooks, carrying the request's
@@ -157,6 +159,8 @@ where
     /// Which content parts a field stage's readback reads. Must match the
     /// route handler's, so the readback sees the part the pipeline wrote.
     projection: Projection,
+    /// The original resource selection survives every plugin dispatch.
+    resource_identity: ResultIdentity,
 }
 
 impl<H: HookTypeDef> HookPluginInvoker<H>
@@ -206,6 +210,7 @@ where
         }
 
         let initial_labels = snapshot_labels(&extensions);
+        let resource_identity = resource_identity(&payload);
 
         Ok(Self {
             engine,
@@ -217,6 +222,7 @@ where
             session_store,
             initial_labels,
             projection: Projection::default(),
+            resource_identity,
         })
     }
 
@@ -427,7 +433,22 @@ where
         // earlier stage.
         let field_before = match invocation {
             PluginInvocation::Field { name, phase, .. } => {
-                current_payload.field_value(name, phase, self.projection)
+                match field_value_for_identity(
+                    &current_payload,
+                    name,
+                    phase,
+                    self.projection,
+                    &self.resource_identity,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(PluginOutcome {
+                            decision: result_target_denial(error),
+                            taints: Vec::new(),
+                            modified_value: None,
+                        });
+                    },
+                }
             },
             PluginInvocation::Step { .. } => None,
         };
@@ -444,7 +465,7 @@ where
 
         // Map deny: violation reason → APL deny reason; plugin code →
         // rule_source for audit attribution.
-        let decision = if result.is_denied() {
+        let mut decision = if result.is_denied() {
             let (reason, rule_source) = match result.violation {
                 Some(v) => (Some(v.reason), v.code),
                 None => (None, "policy.forbidden".to_owned()),
@@ -477,9 +498,23 @@ where
                 self.payload_modified.store(true, Ordering::Release);
                 match invocation {
                     PluginInvocation::Field { name, phase, .. } => {
-                        let rewritten = modified
-                            .field_value(name, phase, self.projection)
-                            .filter(|new_value| field_before.as_ref() != Some(new_value));
+                        let rewritten = match field_value_for_identity(
+                            modified,
+                            name,
+                            phase,
+                            self.projection,
+                            &self.resource_identity,
+                        ) {
+                            Ok(value) => {
+                                value.filter(|new_value| field_before.as_ref() != Some(new_value))
+                            },
+                            Err(error) => {
+                                if matches!(decision, Decision::Allow) {
+                                    decision = result_target_denial(error);
+                                }
+                                None
+                            },
+                        };
                         if rewritten.is_none() {
                             tracing::debug!(
                                 plugin = %plugin_name,
@@ -642,4 +677,12 @@ fn hydrate_labels(mut extensions: Extensions, labels: &[String]) -> Extensions {
     }
     extensions.security = Some(Arc::new(security));
     extensions
+}
+
+/// A plugin cannot return a field value for a removed or ambiguous resource.
+fn result_target_denial(error: EnvelopeReplaced) -> Decision {
+    Decision::Deny {
+        reason: Some(error.reason("result")),
+        rule_source: ENVELOPE_REPLACED_CODE.to_owned(),
+    }
 }
