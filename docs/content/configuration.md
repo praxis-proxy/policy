@@ -520,9 +520,9 @@ remains unchanged. See [content provenance](auditing.md#content-provenance).
 Secret reload requires a loaded document. Ordinary `reload_secrets` defers reads
 until `initialize()` if no store has been resolved yet. `reload_secrets_with_key`
 always resolves and validates the replacement, including before initialization.
-Cancellation, invalid key
-material or a concurrent configuration change refuse the replacement. Policy
-annotations, plugin identities and state, rate-limit overrides, factory
+Cancellation, invalid key material or a concurrent configuration change refuse
+the replacement. Policy annotations, plugin identities and state, rate-limit
+overrides, factory
 context and audit counters survive the operation. Policy or plugin changes
 require the host's configuration-loading workflow; this API accepts secret
 material and key selection only.

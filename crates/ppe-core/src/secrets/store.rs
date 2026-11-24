@@ -304,7 +304,10 @@ impl ReloadedSecrets {
         if let Some((_, _, value)) = self.updates.iter().find(|(n, _, _)| n == name) {
             return Some(value.len());
         }
-        self.store.value(name).map(|value| value.len())
+        self.store
+            .values
+            .get(name)
+            .map(|binding| binding.cell.state.load().value.len())
     }
 
     /// A handle to a replacement binding, or `None` if it is undeclared.
@@ -556,7 +559,7 @@ impl SecretStore {
         }
 
         // Reused health is copied at publication: a refresh can complete while
-        // plugin factories are running. Separate slots keep retired stores
+        // providers are resolving. Separate slots keep retired stores
         // from observing the replacement's later refreshes.
         let resolved_at = Utc::now();
         let mut health = HashMap::new();

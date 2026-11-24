@@ -8369,13 +8369,12 @@ routes:
 
         release.notify_one();
         let (result, _tasks) = invoking.await.expect("the invocation does not panic");
-        let headers = result
+        let headers = &result
             .modified_extensions
             .as_ref()
             .and_then(|ext| ext.http.as_deref())
             .expect("the request has headers")
-            .request_headers
-            .clone();
+            .request_headers;
         assert_eq!(
             headers.get("X-API-Key").map(String::as_str),
             Some("original-secret"),
@@ -8624,8 +8623,6 @@ secrets:
         (dir, yaml)
     }
 
-    /// The executor is built at load, before any secret is read, so the key
-    /// reaches it at `initialize`.
     #[cfg(feature = "crypto-rustcrypto")]
     #[tokio::test]
     async fn initialize_hands_the_executor_its_content_key() {
@@ -8982,8 +8979,6 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Before `initialize`, nothing is resolved, so there is no baseline to
-    /// diverge from and the normal load path is untouched.
     #[tokio::test]
     async fn a_secrets_change_before_initialize_is_not_refused() {
         let (dir, yaml) = secret_fixture("hunter2\n");
@@ -9007,8 +9002,6 @@ secrets:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An engine initialized with no document at all. Loading one that
-    /// declares secrets afterwards would leave them unresolved forever.
     #[tokio::test]
     async fn secrets_arriving_after_an_empty_initialize_are_refused() {
         let engine = PolicyEngine::default();
