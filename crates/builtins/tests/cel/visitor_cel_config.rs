@@ -38,7 +38,8 @@ use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, Too
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::executor::PipelineResult;
 use praxis_policy_core::extensions::{
-    LlmRequestDocument, MetaExtension, SecurityExtension, SubjectExtension, SubjectType,
+    AcquiredFacts, LlmRequestDocument, MetaExtension, MetadataCacheDisposition, SecurityExtension,
+    SubjectExtension, SubjectType,
 };
 use praxis_policy_core::hooks::payload::Extensions;
 
@@ -130,6 +131,67 @@ async fn build_manager_with_yaml(
 fn payload() -> MessagePayload {
     MessagePayload {
         message: Message::text(Role::User, "fetch doc-42"),
+    }
+}
+
+#[tokio::test]
+async fn absolute_metadata_reference_overrides_fallback_with_acquired_facts() {
+    let yaml = r#"
+engine_settings:
+  dispatch: policy
+global:
+  pdp:
+    - kind: cel
+routes:
+  - tool: get_document
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "!.metadata.account.suspended"
+            metadata:
+              account:
+                suspended: false
+"#;
+    let mgr = Arc::new(PolicyEngine::default());
+    let mut options = AplOptions::in_process();
+    options.base_capabilities = Some(HashSet::new());
+    options.pdp_factories = vec![Arc::new(CelPdpFactory::new())];
+    register_apl(&mgr, options);
+    mgr.load_config_yaml(yaml).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    for suspended in [false, true] {
+        let mut ext = Extensions {
+            meta: Some(Arc::new(meta_for_tool("get_document"))),
+            ..Default::default()
+        };
+        ext.install_metadata(
+            "account",
+            "metadata/http",
+            AcquiredFacts::success(
+                serde_json::json!({"suspended": suspended}),
+                "2026-10-19T12:00:00Z".parse().expect("RFC3339 fixture"),
+                MetadataCacheDisposition::Disabled,
+            ),
+        )
+        .expect("metadata fixture installs");
+
+        let (result, _background) = mgr
+            .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), ext, None)
+            .await;
+
+        assert_eq!(
+            result.continue_processing, !suspended,
+            "acquired suspension must win over the CEL fallback: {:?}",
+            result.violation
+        );
+        if suspended {
+            let violation = denied_violation(&result);
+            assert!(
+                violation.contains("CEL expression evaluated to false"),
+                "{violation}"
+            );
+        }
     }
 }
 

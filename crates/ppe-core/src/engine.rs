@@ -13370,7 +13370,7 @@ routes:
     #[tokio::test]
     async fn content_provenance_retains_one_key_across_secret_refresh() {
         for invocation in ProvenanceInvocation::all() {
-            let (old, next) = provenance_rotation(invocation, false, false).await;
+            let (old, next) = provenance_refresh(invocation).await;
             assert_eq!(
                 old.decision_log.input_hash(),
                 old.decision_log.output_hash(),
@@ -13751,6 +13751,79 @@ routes:
                     .0
             },
         }
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    async fn provenance_refresh(
+        invocation: ProvenanceInvocation,
+    ) -> (PipelineResult, PipelineResult) {
+        use crate::hooks::payload::ContentKey;
+        let replacement_key = PROVENANCE_KEY.repeat(2);
+        let (directory, yaml) = provenance_fixture(PROVENANCE_KEY);
+        let engine = Arc::new(engine_reading_secrets(&yaml));
+        engine.initialize().await.expect("engine initializes");
+        let live_key = ContentKey::keyed(
+            resolved_secrets(&engine)
+                .secret("upstream_key")
+                .expect("key is declared"),
+        )
+        .expect("original key is valid");
+        let bytes = provenance_payload().audit_bytes().expect("CMF audit bytes");
+        let expected_old = live_key.digest(&bytes).expect("original digest");
+        let expected_new = ContentKey::keyed(crate::secrets::SecretRef::fixed(&replacement_key))
+            .expect("replacement key is valid")
+            .digest(&bytes)
+            .expect("replacement digest");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let config = make_config("provenance_probe", 10, PluginMode::Sequential);
+        engine
+            .register_handler_for_names::<crate::cmf::CmfHook, _>(
+                Arc::new(ProvenanceProbe {
+                    calls: AtomicUsize::new(0),
+                    cfg: config.clone(),
+                    denied: false,
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                }),
+                config,
+                &["cmf", "cmf.tool_pre_invoke"],
+            )
+            .expect("probe registers");
+        let pending = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move { invoke_provenance(&engine, invocation).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("invocation reaches the handler");
+        std::fs::write(directory.join("upstream.key"), &replacement_key)
+            .expect("valid refresh fixture");
+        let refreshed = engine.refresh_secrets().await;
+        assert_eq!(refreshed.updated.len(), 1);
+        assert_eq!(
+            live_key.digest(&bytes).as_deref(),
+            Some(expected_new.as_str()),
+            "direct ContentKey::digest must retain live SecretRef rotation"
+        );
+        let next = invoke_provenance(&engine, invocation).await;
+        assert_eq!(
+            next.decision_log.input_hash(),
+            Some(expected_new.as_str()),
+            "the next invocation must select the valid replacement key"
+        );
+        release.notify_one();
+        let old = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+            .await
+            .expect("paused invocation finishes")
+            .expect("invocation does not panic");
+        assert_eq!(
+            old.decision_log.input_hash(),
+            Some(expected_old.as_str()),
+            "{invocation:?}: input is taken under the original key"
+        );
+        std::fs::remove_dir_all(directory).expect("remove fixture");
+        (old, next)
     }
 
     #[cfg(feature = "crypto-rustcrypto")]
