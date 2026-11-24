@@ -762,6 +762,28 @@ impl<'a> PluginInvocation<'a> {
     }
 }
 
+/// A parent container addressed by a concrete field-path segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldParent {
+    /// An array whose indexes refer to this many elements.
+    Array {
+        /// Number of elements at evaluation time.
+        len: usize,
+    },
+    /// An object addressed by a literal key.
+    Object,
+}
+
+/// The concrete location of one field-stage invocation.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldLocation<'a> {
+    /// Parent containers, one for each path segment. A nonempty path with
+    /// no parents uses legacy field dispatch.
+    pub parents: &'a [FieldParent],
+    /// Object keys and array indexes, with literal key boundaries retained.
+    pub path: &'a [String],
+}
+
 /// Plugin invocation dispatch. praxis-policy-apl-runtime wraps the PPE `PolicyEngine`
 /// behind this trait so the praxis-policy-apl-core evaluator stays free of praxis-policy-core
 /// dependencies.
@@ -775,6 +797,33 @@ pub trait PluginInvoker: Send + Sync {
         bag: &crate::attributes::AttributeBag,
         invocation: PluginInvocation<'_>,
     ) -> Result<PluginOutcome, PluginError>;
+
+    /// Invoke a field stage at its expanded path. Segments retain object-key
+    /// boundaries and include array indexes. The default uses [`Self::invoke`].
+    ///
+    /// [`Self::invoke`]: Self::invoke
+    async fn invoke_field_at(
+        &self,
+        name: &str,
+        bag: &crate::attributes::AttributeBag,
+        invocation: PluginInvocation<'_>,
+        _location: FieldLocation<'_>,
+    ) -> Result<PluginOutcome, PluginError> {
+        self.invoke(name, bag, invocation).await
+    }
+
+    /// Record a successful policy write, including one that leaves the value
+    /// equal to its input. Hosts use this to reconcile independent plugin edits.
+    /// `value` is the replacement; `None` records an omission. `parents`
+    /// describes the containers before the write.
+    async fn record_field_write(
+        &self,
+        _path: &[String],
+        _phase: DispatchPhase,
+        _value: Option<&serde_json::Value>,
+        _parents: &[FieldParent],
+    ) {
+    }
 
     /// Acquire one named metadata record and return its APL projection.
     async fn fetch_metadata(

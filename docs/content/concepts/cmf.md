@@ -7,10 +7,34 @@ and resources without depending on the transport protocol.
 
 ## Why a common format
 
-Without CMF, tool-result redaction and LLM-output redaction require separate code
+Without CMF, tool-result redaction and LLM-output redaction require separate
+code
 for separate payload types. CMF gives every interception point the same
-representation. The same APL field pipeline can redact a field from either a
-tool result or a model completion.
+representation. The same APL policy can inspect a tool result, a fetched
+resource, a rendered prompt, or a model completion. Field pipelines (`args:` /
+`result:`) address the fields of structured parts; on a model completion, which
+reaches policy as plain text, a `**` path applies to the whole text, and
+`llm.*` attributes cover the rest.
+
+PPE transforms the content parts in the CMF message — it does not control
+the bytes the host sends to the client. A redaction applied to
+`result.content` or a `**` path rewrites the CMF part, but the client
+receives the redacted text only if the host serializes its response from
+that transformed part. If the host instead forwards the original upstream
+body, the redaction has no effect on what the client sees.
+
+Praxis currently re-serializes tool results from their CMF parts, so
+redactions on `tool:` routes reach the client. Praxis does not yet build
+response-side `Resource` or `PromptResult` parts or re-serialize those
+responses. Content-based rules on `resource:` and `prompt:` routes therefore
+have no response content to inspect, redact, or deny. The adapter work is
+tracked in [praxis#1583](https://github.com/praxis-proxy/praxis/pull/1583).
+A host that supplies these parts can use PPE's projection and write-back
+support, as described in the host integration guide. On `llm:` routes,
+Praxis forwards the original inference body; `result:` pipelines and `**`
+redactions on those routes change the CMF message but do not change what
+the client receives. See the [host integration guide](../guides/host-integration-guide.md)
+for the full contract.
 
 ## Message structure
 
@@ -65,5 +89,7 @@ gives policy the content; the extensions give it the context; APL decides.
   carried alongside each message.
 - [CMF extensions and the attribute bag](cmf-extensions.md): the keys APL
   reads and what a missing key means in each engine.
+- [Host integration guide](../guides/host-integration-guide.md): what a host
+  must put on a message for policy to take effect.
 - [Crates](../reference/crates.md): locate the CMF and runtime implementations
   in the workspace.
