@@ -665,6 +665,8 @@ impl SecretStore {
     /// serves traffic and a missing one does not. The report names what failed
     /// so the host can log, meter, and alarm on it.
     ///
+    /// A superseded refresh reports only results that already committed.
+    ///
     /// Values are re-read a provider at a time, so one backend's reads stay
     /// together and a host can reason about the load it puts on each.
     pub async fn refresh(&self) -> RefreshReport {
@@ -698,6 +700,7 @@ impl SecretStore {
             // The first failure, since one is enough to make the provider's
             // values unconfirmed and the report carries them all anyway.
             let mut failure: Option<String> = None;
+            let mut pending_failures = Vec::new();
             for (name, cell, provider, reference) in bound {
                 match provider.get_secret(&reference).await {
                     Ok(value) => {
@@ -705,7 +708,7 @@ impl SecretStore {
                         if self.retired.load(AtomicOrdering::Acquire)
                             || ticket < self.gate.applied.load(AtomicOrdering::Acquire)
                         {
-                            return RefreshReport::default();
+                            return report;
                         }
                         if cell.replace_if_changed(value) {
                             report.updated.push(name.to_owned());
@@ -721,7 +724,7 @@ impl SecretStore {
                         if failure.is_none() {
                             failure = Some(format!("{source}"));
                         }
-                        report.failed.push(SecretResolveError {
+                        pending_failures.push(SecretResolveError {
                             secret: name.to_owned(),
                             provider: provider_name.to_owned(),
                             source,
@@ -733,10 +736,11 @@ impl SecretStore {
             if self.retired.load(AtomicOrdering::Acquire)
                 || ticket < self.gate.applied.load(AtomicOrdering::Acquire)
             {
-                return RefreshReport::default();
+                return report;
             }
             self.gate.applied.store(ticket, AtomicOrdering::Release);
             self.record_refresh(provider_name, failure);
+            report.failed.extend(pending_failures);
         }
         report
     }
@@ -1407,9 +1411,163 @@ values:
         assert_eq!(handle.get().as_str(), "hunter2");
     }
 
+    #[tokio::test]
+    async fn superseded_refresh_reports_committed_updates() {
+        let report = suspended_refresh_report(false).await;
+        assert_eq!(
+            report.updated,
+            vec!["api_key"],
+            "the first provider update already committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn superseded_refresh_reports_committed_outages() {
+        let report = suspended_refresh_report(true).await;
+        assert_eq!(
+            report.failed.len(),
+            1,
+            "the first provider outage already committed"
+        );
+        assert_eq!(report.failed[0].secret, "api_key");
+    }
+
+    #[tokio::test]
+    async fn superseded_refresh_discards_uncommitted_failure() {
+        let provider = Arc::new(FailureThenPause {
+            entered: tokio::sync::Notify::new(),
+            reads: AtomicU64::new(0),
+            release: tokio::sync::Notify::new(),
+        });
+        let mut store = store_over_value(Scripted::new("unused"), "initial");
+        store.values.get_mut("api_key").expect("declared").provider = provider.clone();
+        store.values.insert(
+            "second_key".to_owned(),
+            Binding {
+                provider: provider.clone(),
+                provider_name: "scripted".to_owned(),
+                reference: "ignored".to_owned(),
+                cell: Arc::new(SecretCell::new(Zeroizing::new("initial".to_owned()))),
+            },
+        );
+        let store = Arc::new(store);
+        let old = Arc::clone(&store);
+        let refresh = tokio::spawn(async move { old.refresh().await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            provider.entered.notified(),
+        )
+        .await
+        .expect("second read starts");
+        assert!(
+            !store.provider_health("scripted").expect("declared").failing,
+            "the first failed read has not committed its provider health"
+        );
+        let newer = store.refresh().await;
+        assert_eq!(newer.updated.len(), 2, "{newer:?}");
+        provider.release.notify_one();
+        let report = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
+            .await
+            .expect("refresh completes")
+            .expect("refresh task succeeds");
+        assert!(
+            report.updated.is_empty() && report.failed.is_empty() && report.unchanged == 0,
+            "nothing in the old refresh committed: {report:?}"
+        );
+        assert!(!store.provider_health("scripted").expect("declared").failing);
+    }
+
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------
+
+    async fn suspended_refresh_report(fails: bool) -> RefreshReport {
+        let a = Scripted::new("committed-a");
+        if fails {
+            a.fail();
+        }
+        let b = Arc::new(PausingAnswer {
+            answer: std::sync::Mutex::new(Ok("committed-b".to_owned())),
+            entered: tokio::sync::Notify::new(),
+            reads: AtomicU64::new(0),
+            release: tokio::sync::Notify::new(),
+        });
+        let mut store = store_over_value(a, "initial-a");
+        store
+            .values
+            .get_mut("api_key")
+            .expect("first binding")
+            .provider_name = "aa".to_owned();
+        let a_health = store.health.remove("scripted").expect("first health");
+        store.health.insert("aa".to_owned(), a_health);
+        store.health.insert(
+            "zz".to_owned(),
+            ArcSwap::from_pointee(ProviderHealth {
+                failing: false,
+                last_failure: None,
+                last_success: None,
+            }),
+        );
+        store.values.insert(
+            "second_key".to_owned(),
+            Binding {
+                provider: b.clone(),
+                provider_name: "zz".to_owned(),
+                reference: "ignored".to_owned(),
+                cell: Arc::new(SecretCell::new(Zeroizing::new("initial-b".to_owned()))),
+            },
+        );
+        let store = Arc::new(store);
+        let old_store = Arc::clone(&store);
+        let older = tokio::spawn(async move { old_store.refresh().await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), b.entered.notified())
+            .await
+            .expect("second provider pauses after first committed");
+        if fails {
+            assert!(
+                store
+                    .provider_health("aa")
+                    .expect("provider exists")
+                    .failing,
+                "outage committed before supersession"
+            );
+        } else {
+            assert_eq!(
+                store.value("api_key").expect("binding exists").as_str(),
+                "committed-a",
+                "update committed before supersession"
+            );
+        }
+        store.refresh().await;
+        b.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), older)
+            .await
+            .expect("old refresh completes")
+            .expect("old task succeeds")
+    }
+
+    // -----------------------------------------------------------------------------
+
+    struct FailureThenPause {
+        entered: tokio::sync::Notify,
+        reads: AtomicU64,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl SecretProvider for FailureThenPause {
+        async fn get_secret(&self, _reference: &str) -> Result<Zeroizing<String>, SecretError> {
+            match self.reads.fetch_add(1, Ordering::Relaxed) {
+                0 => Err(SecretError::backend("uncommitted failure")),
+                1 => {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    Ok(Zeroizing::new("superseded".to_owned()))
+                },
+                _ => Ok(Zeroizing::new("fresh".to_owned())),
+            }
+        }
+    }
 
     struct PausingAnswer {
         answer: std::sync::Mutex<Result<String, SecretError>>,
