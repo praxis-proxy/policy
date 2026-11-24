@@ -83,12 +83,15 @@ use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::pipeline::{TaintEvent, TaintScope};
 use praxis_policy_apl_core::step::{
-    DispatchPhase, FetchStep, MetadataFetchError, MetadataFetchOutcome, PluginError,
-    PluginInvocation, PluginInvoker, PluginOutcome,
+    DispatchPhase, FetchStep, FieldLocation, FieldParent, MetadataFetchError, MetadataFetchOutcome,
+    PluginError, PluginInvocation, PluginInvoker, PluginOutcome,
 };
 
 use crate::dispatch_plan::RouteDispatchPlan;
-use crate::payload_fields::PayloadFields;
+use crate::message_projection::{
+    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, FieldWrite, Projection, ResultIdentity,
+};
+use crate::payload_fields::{PayloadFields, field_value_for_identity, payload_identities};
 use crate::session_store::{SessionStore, SessionStoreError};
 
 /// The invoker an MCP or A2A route builds: CMF hooks, carrying the request's
@@ -155,6 +158,12 @@ where
     initial_labels: HashSet<String>,
     /// Whether this phase has a PDP consumer for structured metadata.
     project_structured_metadata: bool,
+    /// Which content parts a field stage's readback reads. Must match the
+    /// route handler's, so the readback sees the part the pipeline wrote.
+    projection: Projection,
+    /// Original reference, resource and prompt selections.
+    identities: [ResultIdentity; 5],
+    written_fields: Mutex<Vec<(DispatchPhase, FieldWrite)>>,
 }
 
 impl<H: HookTypeDef> HookPluginInvoker<H>
@@ -204,6 +213,7 @@ where
         }
 
         let initial_labels = snapshot_labels(&extensions);
+        let identities = payload_identities(&payload);
 
         Ok(Self {
             engine,
@@ -215,6 +225,9 @@ where
             session_store,
             initial_labels,
             project_structured_metadata: true,
+            projection: Projection::default(),
+            identities,
+            written_fields: Mutex::new(Vec::new()),
         })
     }
 
@@ -222,6 +235,13 @@ where
     #[must_use]
     pub fn with_structured_metadata_projection(mut self, enabled: bool) -> Self {
         self.project_structured_metadata = enabled;
+        self
+    }
+
+    /// Select the content-part projection used by field-stage readback.
+    #[must_use]
+    pub fn with_projection(mut self, projection: Projection) -> Self {
+        self.projection = projection;
         self
     }
 
@@ -352,16 +372,16 @@ where
     }
 }
 
-#[async_trait]
-impl<H: HookTypeDef> PluginInvoker for HookPluginInvoker<H>
+impl<H: HookTypeDef> HookPluginInvoker<H>
 where
     H::Payload: PayloadFields,
 {
-    async fn invoke(
+    async fn invoke_at(
         &self,
         plugin_name: &str,
         _bag: &AttributeBag,
         invocation: PluginInvocation<'_>,
+        location: Option<FieldLocation<'_>>,
     ) -> Result<PluginOutcome, PluginError> {
         let resolved = self
             .plan
@@ -422,7 +442,25 @@ where
         // pre-redaction plaintext back to the pipeline, undoing the
         // earlier stage.
         let field_before = match invocation {
-            PluginInvocation::Field { name, phase, .. } => current_payload.field_value(name, phase),
+            PluginInvocation::Field { name, phase, .. } => {
+                match field_value_for_identity(
+                    &current_payload,
+                    name,
+                    phase,
+                    self.projection,
+                    self.identity(phase),
+                    location,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(PluginOutcome {
+                            decision: result_target_denial(error, phase),
+                            taints: Vec::new(),
+                            modified_value: None,
+                        });
+                    },
+                }
+            },
             PluginInvocation::Step { .. } => None,
         };
 
@@ -438,7 +476,7 @@ where
 
         // Map deny: violation reason → APL deny reason; plugin code →
         // rule_source for audit attribution.
-        let decision = if result.is_denied() {
+        let mut decision = if result.is_denied() {
             let (reason, rule_source) = match result.violation {
                 Some(v) => (Some(v.reason), v.code),
                 None => (None, "policy.forbidden".to_owned()),
@@ -471,9 +509,24 @@ where
                 self.payload_modified.store(true, Ordering::Release);
                 match invocation {
                     PluginInvocation::Field { name, phase, .. } => {
-                        let rewritten = modified
-                            .field_value(name, phase)
-                            .filter(|new_value| field_before.as_ref() != Some(new_value));
+                        let rewritten = match field_value_for_identity(
+                            modified,
+                            name,
+                            phase,
+                            self.projection,
+                            self.identity(phase),
+                            location,
+                        ) {
+                            Ok(value) => {
+                                value.filter(|new_value| field_before.as_ref() != Some(new_value))
+                            },
+                            Err(error) => {
+                                if matches!(decision, Decision::Allow) {
+                                    decision = result_target_denial(error, phase);
+                                }
+                                None
+                            },
+                        };
                         if rewritten.is_none() {
                             tracing::debug!(
                                 plugin = %plugin_name,
@@ -535,6 +588,74 @@ where
             taints,
             modified_value,
         })
+    }
+
+    pub(crate) fn identity(&self, phase: DispatchPhase) -> &ResultIdentity {
+        match (phase, self.projection) {
+            (DispatchPhase::Pre, Projection::Resource) => &self.identities[0],
+            (DispatchPhase::Post, Projection::Resource) => &self.identities[1],
+            (DispatchPhase::Post, Projection::Prompt) => &self.identities[2],
+            (DispatchPhase::Pre, Projection::Prompt) => &self.identities[3],
+            _ => &self.identities[4],
+        }
+    }
+
+    /// Take this phase's policy writes in evaluation order.
+    pub(crate) async fn field_writes(&self, phase: DispatchPhase) -> Vec<FieldWrite> {
+        let mut pending = self.written_fields.lock().await;
+        let mut completed = Vec::new();
+        for (written_phase, write) in std::mem::take(&mut *pending) {
+            if written_phase == phase {
+                completed.push(write);
+            } else {
+                pending.push((written_phase, write));
+            }
+        }
+        completed
+    }
+}
+
+#[async_trait]
+impl<H: HookTypeDef> PluginInvoker for HookPluginInvoker<H>
+where
+    H::Payload: PayloadFields,
+{
+    async fn invoke(
+        &self,
+        name: &str,
+        bag: &AttributeBag,
+        invocation: PluginInvocation<'_>,
+    ) -> Result<PluginOutcome, PluginError> {
+        self.invoke_at(name, bag, invocation, None).await
+    }
+
+    async fn invoke_field_at(
+        &self,
+        name: &str,
+        bag: &AttributeBag,
+        invocation: PluginInvocation<'_>,
+        location: FieldLocation<'_>,
+    ) -> Result<PluginOutcome, PluginError> {
+        let location =
+            (!location.parents.is_empty() || location.path.is_empty()).then_some(location);
+        self.invoke_at(name, bag, invocation, location).await
+    }
+
+    async fn record_field_write(
+        &self,
+        path: &[String],
+        phase: DispatchPhase,
+        value: Option<&serde_json::Value>,
+        parents: &[FieldParent],
+    ) {
+        self.written_fields.lock().await.push((
+            phase,
+            FieldWrite {
+                parents: parents.to_vec(),
+                path: path.to_vec(),
+                value: value.cloned(),
+            },
+        ));
     }
 
     /// Dispatch one resolved source and publish its validated acquired facts.
@@ -650,4 +771,15 @@ fn hydrate_labels(mut extensions: Extensions, labels: &[String]) -> Extensions {
     }
     extensions.security = Some(Arc::new(security));
     extensions
+}
+
+/// A plugin cannot return a field value for a removed or ambiguous resource.
+fn result_target_denial(error: EnvelopeReplaced, phase: DispatchPhase) -> Decision {
+    Decision::Deny {
+        reason: Some(error.reason(match phase {
+            DispatchPhase::Pre => "args",
+            DispatchPhase::Post => "result",
+        })),
+        rule_source: ENVELOPE_REPLACED_CODE.to_owned(),
+    }
 }

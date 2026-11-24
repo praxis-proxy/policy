@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::enums::ResourceType;
 use super::message::Message;
+use crate::extensions::mcp::Icon;
 
 /// Normalized tool/function invocation request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +55,9 @@ pub struct Resource {
     /// Human-readable name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Human-readable title for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// What this resource contains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -77,6 +81,9 @@ pub struct Resource {
     /// Version tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Display icons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
 }
 
 impl Resource {
@@ -136,6 +143,9 @@ pub struct PromptResult {
     pub prompt_request_id: String,
     /// Name of the prompt that was rendered.
     pub prompt_name: String,
+    /// Description of the rendered prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Rendered messages (prompts produce messages).
     #[serde(default)]
     pub messages: Vec<Message>,
@@ -496,6 +506,7 @@ mod tests {
             resource_request_id: "rr_001".into(),
             uri: "file:///data.txt".into(),
             name: None,
+            title: None,
             description: None,
             resource_type: ResourceType::File,
             content: Some("data".into()),
@@ -504,6 +515,7 @@ mod tests {
             size_bytes: None,
             annotations: HashMap::new(),
             version: None,
+            icons: None,
         };
         assert!(embedded.is_embedded());
 
@@ -511,6 +523,7 @@ mod tests {
             resource_request_id: "rr_002".into(),
             uri: "file:///other.txt".into(),
             name: None,
+            title: None,
             description: None,
             resource_type: ResourceType::File,
             content: None,
@@ -519,6 +532,7 @@ mod tests {
             size_bytes: None,
             annotations: HashMap::new(),
             version: None,
+            icons: None,
         };
         assert!(!not_embedded.is_embedded());
     }

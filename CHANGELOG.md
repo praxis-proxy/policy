@@ -19,47 +19,15 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **Kubernetes `TokenReview` identity.** `identity/kubernetes-token-review`,
-  behind the `kubernetes-token-review` feature, resolves a bearer token by
-  submitting it to the API server's `TokenReview` API and maps `status.user`
-  onto the identity slots. It serves tokens that cannot be verified locally,
-  such as legacy Secret-based ServiceAccount tokens. PPE authenticates with
-  its own token from a file, re-read so a projected token rotates, or from an
-  environment variable. `audiences` are sent and checked in the answer, a
-  cached answer never outlives a JWT's `exp`, and a `401` or `403` denies as
-  `auth.directory_unavailable` rather than as a bad caller.
-  ([#213](https://github.com/praxis-proxy/policy/issues/213))
+- **Resource and prompt payload projection.** APL fields can read resource
+  references, fetched resources and rendered prompt content. Edits are
+  written back to the selected content part; missing or ambiguous
+  targets deny the request. Fixed-envelope paths and read-only fields are
+  validated at load, including recursive paths. The host integration guide
+  includes tested deny and redaction examples and documents the remaining
+  multi-part and gateway adapter limits.
+  ([#305](https://github.com/praxis-proxy/policy/pull/305))
 
-### Changed
-
-- **Documentation navigation.** Organize published pages into Getting started,
-  Guides, Concepts, APL, and Reference sections. Add section landing pages
-  and a gateway integration guide, and update links and documentation test
-  fixtures to use the new page paths.
-  ([#362](https://github.com/praxis-proxy/policy/pull/362))
-
-## [0.7.0] - 2026-11-20
-
-### Added
-
-- **Typed metadata source dispatch.** `MetadataFetchHook`,
-  `MetadataFetchRequest` and `MetadataFetchResult` let callers select one
-  configured source and invoke its `metadata.fetch` handler through the normal
-  executor, with capability filtering and error handling. The framework owns
-  validation, provenance stamping and installation of acquired facts.
-  ([#281](https://github.com/praxis-proxy/policy/pull/281))
-- **APL metadata fetching.** `fetch(name)` acquires immutable facts in
-  `authorization.pre_invocation` and makes them available immediately to later
-  predicates and PDPs under `metadata.<name>.*`. Sources are validated at load;
-  each source may be fetched once per compiled route, and fetches cannot run in
-  `parallel`. `on_error: fail` stops authorization without publishing a record;
-  `ignore` publishes a valid source error record and continues. Malformed or
-  missing records and framework failures always fail closed.
-  `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and
-  `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method defaults
-  to rejecting unsupported fetches, preserving existing implementations.
-  `AcquiredFacts::validate()` exposes the core record validation rules.
-  ([#287](https://github.com/praxis-proxy/policy/pull/287))
 - **Acquired-metadata policy projections.** CEL and OPA receive lossless JSON
   metadata, while Cedar receives its documented value and provenance records.
   Empty top-level metadata objects are always present for absence checks.
@@ -74,6 +42,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `DecisionWarning` entries. The reference JSON and OCSF audit sinks serialize
   them in the decision record.
   ([#245](https://github.com/praxis-proxy/policy/issues/245))
+
+- **Kubernetes `TokenReview` identity.** `identity/kubernetes-token-review`,
+  behind the `kubernetes-token-review` feature, resolves a bearer token by
+  submitting it to the API server's `TokenReview` API and maps `status.user`
+  onto the identity slots. It serves tokens that cannot be verified locally,
+  such as legacy Secret-based ServiceAccount tokens. PPE authenticates with
+  its own token from a file, re-read so a projected token rotates, or from an
+  environment variable. `audiences` are sent and checked in the answer, a
+  cached answer never outlives a JWT's `exp`, and a `401` or `403` denies as
+  `auth.directory_unavailable` rather than as a bad caller.
+  ([#213](https://github.com/praxis-proxy/policy/issues/213))
 
 - **HTTP Basic identity.** The `basic` feature adds `identity/basic`, which
   decodes an [RFC 7617] credential, verifies it against an on-disk directory
@@ -101,19 +80,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive
-  matches must handle the new variant. `RouteDispatchPlan` adds
-  `metadata_entries`; exhaustive struct literals must initialize it or use
-  `..Default::default()`, and exhaustive destructuring must name the field or
-  use `..`. Both types are also reachable through the `praxis_policy` facade's
-  crate re-exports. `RoutePluginEntry::pick_entry` takes a new leading
-  `requested_family` argument; pass the dispatching hook's `HookTypeDef::NAME`.
-  ([#287](https://github.com/praxis-proxy/policy/pull/287))
-- **Breaking for metadata sources:** a plugin reached by APL `fetch(name)` must
-  use `mode: sequential`; `transform` and other modes cannot return the awaited
-  typed record required for publication. Sources must declare `metadata.fetch`
-  and use `on_error: fail` or `ignore`.
-  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Documentation navigation.** Organize published pages into Getting started,
+  Guides, Concepts, APL, and Reference sections. Add section landing pages
+  and a gateway integration guide, and update links and documentation test
+  fixtures to use the new page paths.
+  ([#362](https://github.com/praxis-proxy/policy/pull/362))
+
 - **Breaking for Rust callers:** `MetadataFetchOutcome` adds `metadata`,
   `cedar_metadata`, and `metadata_provenance`; `HeaderEntry` and
   `ResolvedHeader` add `allow_credential_target`. Struct literals and
@@ -129,6 +101,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `MetadataPath::instance()` and `MetadataPath::segments()`.
   ([#243](https://github.com/praxis-proxy/policy/issues/243),
   [#245](https://github.com/praxis-proxy/policy/issues/245))
+
 - **Breaking for route capability grants:** ordinary `run()` and field-pipeline
   plugin capabilities now contribute only to the request or response handler
   half where that plugin runs. Delegation, elicitation, and metadata-fetch
@@ -136,6 +109,52 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   Predicates on the other half that read `client.*`, `caller.workload.*`, or
   `this.workload.*` need `read_client` or `read_workload` in the host baseline.
   ([#242](https://github.com/praxis-proxy/policy/issues/242))
+
+### Security
+
+- **CEL acquired-metadata diagnostics are redacted.** Denials retain useful
+  expression and type information without serializing metadata values,
+  provenance, or normalized source errors into downstream audit records.
+  ([#244](https://github.com/praxis-proxy/policy/issues/244))
+
+## [0.7.0] - 2026-11-20
+
+### Added
+
+- **Typed metadata source dispatch.** `MetadataFetchHook`,
+  `MetadataFetchRequest` and `MetadataFetchResult` let callers select one
+  configured source and invoke its `metadata.fetch` handler through the normal
+  executor, with capability filtering and error handling. The framework owns
+  validation, provenance stamping and installation of acquired facts.
+  ([#281](https://github.com/praxis-proxy/policy/pull/281))
+- **APL metadata fetching.** `fetch(name)` acquires immutable facts in
+  `authorization.pre_invocation` and makes them available immediately to later
+  predicates and PDPs under `metadata.<name>.*`. Sources are validated at load;
+  each source may be fetched once per compiled route, and fetches cannot run in
+  `parallel`. `on_error: fail` stops authorization without publishing a record;
+  `ignore` publishes a valid source error record and continues. Malformed or
+  missing records and framework failures always fail closed.
+  `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and
+  `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method defaults
+  to rejecting unsupported fetches, preserving existing implementations.
+  `AcquiredFacts::validate()` exposes the core record validation rules.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+
+### Changed
+
+- **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive
+  matches must handle the new variant. `RouteDispatchPlan` adds
+  `metadata_entries`; exhaustive struct literals must initialize it or use
+  `..Default::default()`, and exhaustive destructuring must name the field or
+  use `..`. Both types are also reachable through the `praxis_policy` facade's
+  crate re-exports. `RoutePluginEntry::pick_entry` takes a new leading
+  `requested_family` argument; pass the dispatching hook's `HookTypeDef::NAME`.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for metadata sources:** a plugin reached by APL `fetch(name)` must
+  use `mode: sequential`; `transform` and other modes cannot return the awaited
+  typed record required for publication. Sources must declare `metadata.fetch`
+  and use `on_error: fail` or `ignore`.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
 
 ### Fixed
 
@@ -159,13 +178,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - Added supply-chain maintenance exceptions for unmaintained `chrono` and
   `chrono-tz` (RUSTSEC-2026-0543 and RUSTSEC-2026-0555), which remain runtime
   dependencies of the engine and bundled PDPs with no patched release.
-
-### Security
-
-- **CEL acquired-metadata diagnostics are redacted.** Denials retain useful
-  expression and type information without serializing metadata values,
-  provenance, or normalized source errors into downstream audit records.
-  ([#244](https://github.com/praxis-proxy/policy/issues/244))
 
 ## [0.6.0] - 2026-11-06
 

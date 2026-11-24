@@ -378,6 +378,7 @@ mod tests {
                     content: PromptResult {
                         prompt_request_id: "pr".into(),
                         prompt_name: "setup".into(),
+                        description: None,
                         messages,
                         content,
                         is_error: false,
@@ -432,6 +433,7 @@ mod tests {
                 content: PromptResult {
                     prompt_request_id: "pr".into(),
                     prompt_name: "setup".into(),
+                    description: None,
                     messages: vec![Message::text(Role::User, SECRET)],
                     content: None,
                     is_error: false,

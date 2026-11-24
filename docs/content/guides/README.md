@@ -3,6 +3,8 @@
 Configure routes, authenticate callers, and apply controls to requests and
 responses. For a first policy, see [Getting Started](../getting-started/README.md).
 
+- [Host integration](host-integration-guide.md):
+  supply policy content parts and write inspected response edits back
 - [HTTP Routing](http-routing.md):
   match requests by path and method
 - [Rate Limiting](rate-limiting.md):

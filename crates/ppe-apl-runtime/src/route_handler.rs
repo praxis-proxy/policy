@@ -69,8 +69,9 @@ use crate::delegation_invoker::DelegationPluginInvoker;
 use crate::dispatch_plan::DispatchCache;
 use crate::elicitation_invoker::ElicitationPluginInvoker;
 use crate::message_projection::{
-    apply_changed_paths, extract_args_from_message, extract_result_from_message,
-    write_args_back_to_message, write_result_back_to_message,
+    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, apply_written_paths,
+    extract_args_by_identity, extract_args_from_message, extract_result_by_identity,
+    extract_result_from_message, write_args_by_identity, write_result_back_to_message,
 };
 use crate::payload_fields::PayloadFields;
 use crate::pdp_router::PdpRouter;
@@ -175,6 +176,10 @@ pub struct AplRouteHandler {
     /// The hook family this handler dispatches. Decides which payload
     /// `invoke` expects and which typed invoker a request builds.
     family: HookFamily,
+    /// Which content parts `args.*` / `result.*` read, from the route's
+    /// entity type. Shared with the plugin invoker so a field stage's
+    /// readback reads the same part.
+    projection: Projection,
     plugin_registry: Arc<PluginRegistry>,
     dispatch_cache: Arc<DispatchCache>,
     session_store: Arc<dyn SessionStore>,
@@ -224,6 +229,7 @@ impl AplRouteHandler {
             route,
             phase,
             family,
+            projection: Projection::default(),
             plugin_registry,
             dispatch_cache,
             session_store,
@@ -239,6 +245,16 @@ impl AplRouteHandler {
     /// visitor enables it on `tool:` routes. Off by default.
     pub fn with_structured_args(mut self, enabled: bool) -> Self {
         self.structured_args = enabled;
+        self
+    }
+
+    /// Read `args.*` / `result.*` from the content parts `projection` names.
+    /// The visitor sets it from the route's entity type. Defaults to
+    /// [`Projection::Tool`].
+    ///
+    /// [`Projection::Tool`]: Projection::Tool
+    pub fn with_projection(mut self, projection: Projection) -> Self {
+        self.projection = projection;
         self
     }
 
@@ -383,7 +399,10 @@ impl AplRouteHandler {
         )
         .await
         {
-            Ok(inv) => Arc::new(inv.with_structured_metadata_projection(self.structured_input)),
+            Ok(inv) => Arc::new(
+                inv.with_structured_metadata_projection(self.structured_input)
+                    .with_projection(self.projection),
+            ),
             Err(e) => {
                 tracing::error!(
                     alarm = "session_store_failure",
@@ -466,7 +485,9 @@ impl AplRouteHandler {
         // is the whole of what a field stage could read there, and a field
         // stage on such a route is refused at load rather than left to read
         // it.
-        let args_value = message.map_or(Value::Null, extract_args_from_message);
+        let args_value = message.map_or(Value::Null, |m| {
+            extract_args_from_message(m, self.projection)
+        });
         // Structured input for PDPs, captured before any pipeline runs so it
         // matches the bag. The request body comes from this handler's
         // filtered view and shares the host's `Arc`. Arguments count only
@@ -503,7 +524,9 @@ impl AplRouteHandler {
                 // `Value::Null` when the message has no ToolResult /
                 // PromptResult / Resource content (e.g. for hooks that
                 // fire on entities without a structured result).
-                let result_value = message.map_or(Value::Null, extract_result_from_message);
+                let result_value = message.map_or(Value::Null, |m| {
+                    extract_result_from_message(m, self.projection).0
+                });
                 RoutePayload::with_result(args_value, result_value)
             },
         }
@@ -640,23 +663,8 @@ impl AplRouteHandler {
         let final_payload = invoker.current_payload().await;
         let final_extensions = invoker.current_extensions().await;
 
-        // The pre-evaluation projections. No longer used to *detect*
-        // pipeline edits (the decision reports those) — they're the
-        // baseline for folding those edits back in below, which needs to
-        // know which paths the pipeline touched.
-        //
-        // Each side is projected only in the phase that can edit it:
-        // `evaluate_pre` never sets `result_modified` and `evaluate_post`
-        // never sets `args_modified`, so the other projection would be
-        // unread work on every request.
-        let pre_args = match self.phase {
-            Phase::Pre => message.map(extract_args_from_message),
-            Phase::Post => None,
-        };
-        let pre_result = match self.phase {
-            Phase::Pre => None,
-            Phase::Post => message.map(extract_result_from_message),
-        };
+        // Write events retain policy edits even when their output equals the input.
+        let mut envelope_replaced: Option<(&'static str, EnvelopeReplaced)> = None;
         // Which of the three sources changed the payload, in precedence
         // order. Each condition is a signal from the code that performed
         // the change: the decision's flags are set when a pipeline's
@@ -664,58 +672,50 @@ impl AplRouteHandler {
         // invoker's flag is set when a plugin's payload is accepted.
         // Nothing here infers a change by comparing values.
         let modified_payload: Option<Box<dyn PluginPayload>> = if decision.args_modified {
-            // An args pipeline (Pre) rewrote a field. Fold the new
-            // args back into a fresh MessagePayload so downstream
-            // readers (the host's body re-serializer) see the
-            // change.
-            //
-            // Only the paths the pipeline touched are applied. A plugin
-            // may have rewritten other arguments on the same tool call,
-            // and those edits aren't in `route_payload.args` (it was
-            // projected before any plugin ran), so writing it wholesale
-            // would silently drop them.
-            //
-            // Without a pre-projection there is no way to tell which
-            // paths the pipeline changed, so write nothing rather than
-            // fold in an unattributable diff — a wholesale write is
-            // exactly the clobbering this merge exists to prevent. Only
-            // the Pre phase sets `args_modified`, and only the Pre phase
-            // projects `pre_args`, so this holds by construction.
-            //
-            // The fold is message-shaped, so it is gated on the payload
-            // being one. `pre_args` is already `None` for a payload that
-            // carries no message, and a route on such a family cannot
-            // declare the `args:` stage that sets this flag, so the gate
-            // never has anything to skip.
+            // Replacing the entire projection would discard independent plugin edits.
             let mut updated = final_payload.clone();
-            if let Some(pre) = pre_args.as_ref()
-                && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
-            {
-                let mut merged = extract_args_from_message(&target.message);
-                apply_changed_paths(&mut merged, pre, &route_payload.args);
-                write_args_back_to_message(&mut target.message, &merged);
+            if let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>() {
+                let identity = invoker.identity(praxis_policy_apl_core::step::DispatchPhase::Pre);
+                let paths = invoker
+                    .field_writes(praxis_policy_apl_core::step::DispatchPhase::Pre)
+                    .await;
+                let write_args = extract_args_by_identity(
+                    &target.message,
+                    self.projection,
+                    identity,
+                )
+                .and_then(|mut merged| {
+                    apply_written_paths(&mut merged, paths, self.projection, true)?;
+                    write_args_by_identity(&mut target.message, &merged, self.projection, identity)
+                });
+                if let Err(e) = write_args {
+                    envelope_replaced = Some(("args", e));
+                }
             }
             Some::<Box<dyn PluginPayload>>(Box::new(updated))
         } else if decision.result_modified {
-            // A `result:` pipeline rewrote a field in the upstream
-            // response. Fold the new result back into the message
-            // so the host's response body re-serializer can write
-            // it out before forwarding downstream. Only the Post phase
-            // can set this — a Pre route has no result to rewrite.
-            //
-            // Same per-path merge as the args branch above, for the same
-            // reason: a plugin may have redacted a different part of the
-            // same tool result.
-            // Same "no pre-projection, no write" rule as the args branch
-            // above, and the same message gate for the same reason.
             let mut updated = final_payload.clone();
-            if let (Some(result_value), Some(pre)) =
-                (route_payload.result.as_ref(), pre_result.as_ref())
+            if route_payload.result.is_some()
                 && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
             {
-                let mut merged = extract_result_from_message(&target.message);
-                apply_changed_paths(&mut merged, pre, result_value);
-                write_result_back_to_message(&mut target.message, &merged);
+                let identity = invoker.identity(praxis_policy_apl_core::step::DispatchPhase::Post);
+                let paths = invoker
+                    .field_writes(praxis_policy_apl_core::step::DispatchPhase::Post)
+                    .await;
+                let write_result =
+                    extract_result_by_identity(&target.message, self.projection, identity)
+                        .and_then(|mut merged| {
+                            apply_written_paths(&mut merged, paths, self.projection, false)?;
+                            write_result_back_to_message(
+                                &mut target.message,
+                                &merged,
+                                self.projection,
+                                identity,
+                            )
+                        });
+                if let Err(error) = write_result {
+                    envelope_replaced = Some(("result", error));
+                }
             }
             Some::<Box<dyn PluginPayload>>(Box::new(updated))
         } else if invoker.payload_was_modified() {
@@ -848,6 +848,28 @@ impl AplRouteHandler {
                     "session.persist_failed",
                     "session state could not be persisted",
                 );
+                decorate_denial_response(&mut v, self.route.response.as_ref());
+                violation = Some(v);
+            }
+        }
+
+        // Fail closed: a pipeline replaced a whole resource or prompt
+        // envelope, so the change cannot be written back. Forwarding the
+        // original would send what the pipeline meant to change, such as an
+        // unredacted body. An already-denied request keeps its own
+        // attribution, as above.
+        if let Some((block, replaced)) = envelope_replaced {
+            tracing::warn!(
+                route = %self.route.route_key,
+                block,
+                part = %replaced.part,
+                error = ?replaced.error,
+                "pipeline result cannot be written back; failing request closed"
+            );
+            if continue_processing {
+                continue_processing = false;
+                let reason = replaced.reason(block);
+                let mut v = PluginViolation::new(ENVELOPE_REPLACED_CODE, reason);
                 decorate_denial_response(&mut v, self.route.response.as_ref());
                 violation = Some(v);
             }
