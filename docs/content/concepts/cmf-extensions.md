@@ -1,0 +1,657 @@
+# CMF extensions and the attribute bag
+
+A policy is written against a flat `AttributeBag`. The bag is filled by
+`praxis-policy-apl-cmf`: each present slot on `Extensions` is walked into dotted
+keys. Plugins that received the typed slot still see the original struct. This
+document is the contract for what the bridge emits, how original collections
+relate to flattened booleans, and which keys exist.
+
+The fourteen slots dispatched by `extract_extensions` are listed below.
+`raw_credentials` and `candidate_constraint` are not among them: credentials
+never enter the bag, and a routing constraint is not a policy attribute.
+`llm_request` contributes normalized parts to the bag; its parsed body reaches
+PDPs as structured JSON instead (see
+[Structured request input](../apl/pdp.md#structured-request-input)).
+
+## Contents
+
+- [Absent values](#absent-values)
+- [Original collections and flattened booleans](#original-collections-and-flattened-booleans)
+- [`subject.claims`](#subjectclaims)
+- [What each decision point does with a missing key](#what-each-decision-point-does-with-a-missing-key)
+- [The fourteen slots](#the-fourteen-slots)
+- [Payloads that are not slots](#payloads-that-are-not-slots)
+
+---
+
+## Absent values
+
+The rule is per **attribute type**, and it only applies inside a **present
+slot**. An absent slot writes nothing for its namespace. CEL then reports an
+undeclared reference for that namespace; synthesizing empty namespaces for
+missing slots is out of scope.
+
+| Type | When the field is empty or `None` | Why |
+|---|---|---|
+| `StringSet` | **Present and empty.** Membership is false. | CEL treats a missing key as an evaluation error. `!("banned" in subject.roles)` would deny every subject with no roles — a routine state, including a plugin that lacks `read_roles` and is handed an empty set. |
+| `Bool` as a real field (`delegation.delegated`) | **Present**, including `false`. | The field is not optional on the struct. |
+| `Bool` as a flattened member (`role.hr`) | **Omitted.** Presence means true. Only undotted membership names receive aliases. | Emitting `false` for every name that is not a member is impossible. APL reads a missing flattened bool as false. Do not guard CEL with `has(role.hr)`: when no `role.*` keys exist the `role` namespace was never written, and `has(role.hr)` is an evaluation error. Use the always-present `subject.roles` set (`"hr" in subject.roles`). |
+| `Bool` derived (`authenticated`) | **Omitted** unless `subject.id` is set. | Absence is "not authenticated" in APL (`!authenticated` is true; `require(authenticated)` denies). `has(authenticated)` is a compile error (`has()` rejects a bare name), so that key itself cannot be guarded in CEL. When the `subject` namespace exists — a present subject writes empty `subject.roles` / `permissions` / `teams` even with no id — `has(subject.id)` is a valid substitute. Only a completely absent subject (no `subject.*` keys) leaves CEL with no guard; the deny then reaches the operator as a key error. Contrast `delegation.delegated`, a non-option field that is always written, including `false`. |
+| `String` | **Omitted** when `Option::None`. A non-option string (`client.client_id`) is always written, even if empty. | Empty string and missing are different questions (`exists(subject.id)` vs `subject.id == ""`). |
+| `Int` | **Omitted** when `Option::None` (`http.status`, `agent.turn`, `completion.latency_ms`). A non-option int (`delegation.depth`) is always written, including `0`. | Emitting `0` for an unset HTTP status would make `http.status >= 500` and `http.status == 0` both lie. |
+| `Float` | Same as `Int`. `delegation.age_seconds` is non-option and always written, including `0.0`. | Same reason: a missing telemetry field is not zero. |
+| JSON object / claims map | **No parent key.** Each scalar (or scalar-array) child is written under a dotted path. `{}`, `null`, and an array holding a nested container set nothing. | The bag has no map type. See [`subject.claims`](#subjectclaims). |
+
+Acquired metadata is the deliberate exception to the last row: each present
+object, mixed array, or `null` writes `NonScalar` at its own path so an
+installed result remains distinguishable from a missing one in APL. CEL and
+OPA skip `NonScalar` entries until the evaluator-native projection lands, so
+there this presence is not yet visible. An integer outside the `i64` range
+also projects as `NonScalar` rather than a rounded float. The structured
+record remains available to later evaluator-native projections.
+
+`ppe-pdp-diff` is the executable form of this table for the keys Cedar can
+see. Empty `subject.teams` and a subject with no roles (no `role.*` keys,
+empty `subject.roles`) must Deny on APL, CEL, cedar-direct, and OPA when the
+policy is a membership or flattened-bool gate. Unguarded **presence,
+equality, membership, and order** probes of an omitted claim scalar also
+Deny on all four (CEL and Cedar report a key error rather than a policy
+false). That agreement does **not** cover APL `!=` or `not in`: those
+evaluate true on a missing key, so `require(claim.tenant != "acme")`
+Allows in APL while CEL, cedar-direct, and OPA Deny. `not in` Allows in
+APL (and in OPA, where `not` of undefined is true) while CEL and
+cedar-direct Deny. A flattened bool whose namespace was never
+written, and a missing `subject.id`, remain allowlisted: CEL is an eval
+error, Cedar cannot build a principal without an id, and making those
+agree needs CEL root seeding and a generated Cedar schema, which is a
+follow-up to [#18](https://github.com/praxis-proxy/policy/issues/18).
+
+---
+
+## Original collections and flattened booleans
+
+[Pull request #7](https://github.com/praxis-proxy/policy/pull/7) added the
+original CMF collections as bag keys alongside the flattened booleans that
+were already there.
+
+| Original (the set) | Flattened (presence-only) | Write |
+|---|---|---|
+| `subject.roles` | `role.<name> = true` | Alias for each undotted member. |
+| `subject.permissions` | `perm.<name> = true` | Alias for each undotted member. |
+| `subject.teams` | `team.<name> = true` | Alias for each undotted member. |
+| `client.roles` | `client.role.<name> = true` | Alias for each undotted member. |
+| `client.permissions` | `client.perm.<name> = true` | Alias for each undotted member. |
+
+The set is the primary form. The five flattened collections exist because
+`require(role.hr)` predates the original sets; no more are added. Nine
+other `StringSet`s are set-only — `client.teams`,
+`client.authorized_scopes`, `client.authorized_audiences`,
+`caller_workload.selectors`, `this_workload.selectors`, `security.labels`,
+`agent.conversation.topics`, `meta.tags`, `llm.capabilities` — so
+`require(tag.pii)` is false forever, by design.
+
+Membership names are atomic values. A dotted name such as `admin.readonly`
+stays unchanged in `subject.roles`, but it does not emit
+`role.admin.readonly`. Emitting that key would make CEL construct nested maps
+and incorrectly satisfy `has(role.admin)`. Address dotted names through the
+original set: `subject.roles contains "admin.readonly"` in APL or
+`"admin.readonly" in subject.roles` in CEL.
+
+That rule is also why the list above is closed rather than merely unfinished.
+The flattened form cannot represent a dotted name, so it is lossy wherever one
+occurs, while the set always holds every member. Mirroring booleans onto a
+tenth collection would spread an incomplete projection rather than complete the
+vocabulary.
+
+`client.teams` is the case that looks like an oversight and is not.
+`subject.teams` carries both forms and `client.teams` carries only the set, so
+the asymmetry sits inside one namespace pair. It stays set-only: both
+namespaces already have the complete form, and what `subject.*` has in addition
+is the lossy sugar, not a capability `client.*` is missing. An author wanting
+client team membership writes `client.teams contains "platform"`, which is also
+the only form that works when a team name contains a dot.
+
+**Authors should use the original set** for membership (`subject.roles contains
+"hr"` in APL, `"hr" in subject.roles` in CEL, `"hr" in input.subject.roles` in
+OPA). That key is present whenever the subject (or client) sub-record is, so
+the four decision points agree on empty.
+
+Flattened booleans are an APL convenience: `require(role.hr)` is false when the
+key is missing. They are not a second source of truth. The bridge always
+derives them from the set, so as emitted they cannot disagree. A later
+`AttributeBag::set` that writes one and not the other **last write wins** on
+that key; the other key is left as it was. Do not mix a hand-built bag with
+the bridge if you need them to stay paired.
+
+Cedar does not read the bag the way CEL and OPA do. `principal.roles`,
+`principal.permissions`, and `principal.teams` are read from the canonical
+`subject.roles`, `subject.permissions`, and `subject.teams` sets, preserving
+dotted membership names. When a manually built bag omits a canonical roles or
+permissions set, Cedar falls back to flattened `role.*` / `perm.*` trues for
+compatibility. A present canonical set is authoritative. Cedar does not
+surface `client.*`, `http.*`, or the other slots as principal attributes. A
+Cedar policy that needs those values does not get them from this mapping.
+
+Unlike OPA (`input.http.query`) and CEL (`http.query`), Cedar's context is not
+auto-populated with the `http.*` slot — the builder injects only
+`context.delegation`, `context.meta`, and `context.security`. A Cedar step
+reaches the request line and query through a `${…}` template reference, which
+resolves from the same bag keys the HTTP extractor populates:
+
+<!-- validate: phase-list -->
+```yaml
+- cedar:
+    action: 'Action::"read"'
+    resource:
+      type: Request
+      id: ${http.path}
+      attributes:
+        method: ${http.method}
+        query:  ${http.query}
+```
+
+`${http.query}` resolves to the raw query string (no leading `?`). The
+reference is whole-string only. A request that carried no query leaves
+`http.query` out of the bag, so `${http.query}` fails loudly rather than
+resolving empty — a query-specific Cedar rule cannot be silently satisfied by
+an absent query. As with OPA and CEL, an equality on the raw query is an
+exact-string check, not a parsed-parameter gate.
+
+---
+
+## `subject.claims`
+
+There is no `subject.claims` bag key, and there will not be one until the bag
+gains a map type.
+
+`AttributeValue` is `Bool`, `Int`, `Float`, `String`, or `StringSet`. A JWT
+claim object is none of those. The bridge walks each claim through the same
+JSON flattener as `custom.*` and `args.*`:
+
+- a scalar lands at `claim.<name>` with its type kept
+- a scalar array, empty included, lands as a `StringSet` (numbers and bools
+  rendered as strings)
+- `{}`, `null`, and an array holding a nested container set no key
+- a nested object sets only the children (`claim.realm_access.roles`), never
+  the parent (`claim.realm_access`)
+
+Client claims are the same shape under `client.claim.<name>`.
+
+That is enough for every predicate the language can ask: `claim.tenant ==
+"acme"`, `claim.realm_access.roles contains "admin"`. What it cannot do is
+treat the whole map as one value (`exists(subject.claims)` meaning "any
+claim"). Cedar still injects an empty `principal.claims` record so a probe of
+the record itself is not a missing-attribute error; individual missing claim
+names inside it follow Cedar's own rules.
+
+To put a dict in the bag would take a sixth `AttributeValue` variant, APL
+lookup into it, CEL map construction (already nested from dotted keys, so
+partly redundant), a Cedar record that is not string-keyed leftovers, and an
+OPA object. The flattened keys would still be required for the predicates that
+exist today. Until that type exists, `claim.*` / `client.claim.*` are the
+policy surface, and `SubjectExtension.claims` remains the typed form plugins
+read.
+
+---
+
+## What each decision point does with a missing key
+
+| Engine | Missing key | Empty `StringSet` |
+|---|---|---|
+| APL | false for presence, equality, membership, and order. Every negated form is true: `!=`, `!key`, `!(...)`, and `not in`. Negation is spelled `!`; `not` is reserved for the `not in` phrase, so the idiom is `!authenticated`. | `contains` / `in` is false |
+| CEL | evaluation error; default `OnError::Deny` turns it into a denial that reports a key error, not a policy false | `in` is false |
+| cedar-direct | empty `roles` / `permissions` / `teams` / `claims` on the principal so those names exist; no `subject.id` is a dispatch error. A missing `subject.type` defaults to `User` (PascalCase). The bridge writes lowercase (`user` / `agent` / `service` / `system`), so a type-scoped policy (`principal is user` vs `User`) can miss a principal whose type was omitted. | `contains` is false |
+| OPA | undefined; without `default allow := false` the query is a default deny. `not` of undefined is true, so a denylist written `not (x in y)` Allows when `y` is missing. | `in` is false |
+
+`require` inverts its predicate and denies when that inversion is true, so
+the APL row above splits `require` on a missing key:
+
+| Rule (omitted keys) | APL | Other engines |
+|---|---|---|
+| `require(claim.tenant == "acme")` | Deny | Deny |
+| `require(subject.roles contains "hr")` | Deny | Deny |
+| `require(claim.tenant != "acme")` | Allow | Deny |
+| `require(subject.type not in blocked_types)` | Allow | CEL and cedar-direct Deny. OPA Allows: `not` of an undefined set is true. |
+
+Authors who need the denylist to stay closed when the key is missing write
+`require(exists(claim.tenant) & claim.tenant != "acme")`.
+
+A policy written against a **present-empty set** therefore agrees — including
+when Cedar and CEL both read `subject.roles`. A policy written against an
+**omitted claim scalar** agrees on the verdict (all Deny) for `==`, order, and
+membership, and is an `AgreeDeny` in `ppe-pdp-diff`; the cause still differs.
+`!=` and `not in` do **not** agree across all four engines: they are
+`missing-claim-not-eq` / `missing-not-in` on the allowlist. A flattened bool
+whose namespace was never written (unguarded CEL `role.hr` with no `role.*`
+keys), or a missing `subject.id`, is the `missing-collection` /
+`missing-subject-id` class of split.
+
+---
+
+## The fourteen slots
+
+Keys listed **always** are written whenever the slot (and, where noted, the
+sub-record) is present. The rest are omitted when the field is `None` or the
+map has no entry.
+
+These tables are checked, not maintained by hand.
+`crates/ppe-apl-cmf/tests/key_catalog/` declares the key universe and asserts
+three things against it: that flattening a fully populated `Extensions` emits
+exactly those keys with those types, that the tables below list exactly those
+keys with the same Type cell and under the slot each key comes from, and that
+`capability_namespaces` unlocks each one through the capability it is gated on
+while leaving the ungated ones alone. A key cannot be added to a table here
+without being added to the catalog, and a key the bridge starts writing fails
+the test until both list it. A field added to an extension stops that test's
+fixture compiling, which is what turns leaving it unbridged into a decision
+someone makes rather than one nobody notices.
+
+### 1. `security` — `SecurityExtension`
+
+**Subject** (`sec.subject` present):
+
+| Key | Type | When |
+|---|---|---|
+| `subject.id` | String | `id` is `Some` |
+| `subject.type` | String (`user` / `agent` / `service` / `system`) | `subject_type` is `Some`. cedar-direct, given no key, still builds a principal typed `User`; bridged values are lowercase. |
+| `subject.roles` | StringSet | always |
+| `role.<name>` | Bool (`true`) | each undotted member of `roles` |
+| `subject.permissions` | StringSet | always |
+| `perm.<name>` | Bool (`true`) | each undotted member of `permissions` |
+| `subject.teams` | StringSet | always |
+| `team.<name>` | Bool (`true`) | each undotted member of `teams` |
+| `claim.<dotted>` | flattened JSON | each claim; see [`subject.claims`](#subjectclaims) |
+| `authenticated` | Bool (`true`) | `id` is `Some` |
+| `subject.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `subject.key_binding_thumbprint` | String | same; what the credential is bound to, as the method defines it (for `dpop`, the RFC 7638 thumbprint of the key) |
+
+**Client** (`sec.client` present):
+
+| Key | Type | When |
+|---|---|---|
+| `client.client_id` | String | always |
+| `client.client_name` | String | `Some` |
+| `client.trust_level` | String | always (`first_party` / `third_party` / `internal` / custom / `unknown`) |
+| `client.roles` | StringSet | always |
+| `client.role.<name>` | Bool (`true`) | each undotted member |
+| `client.permissions` | StringSet | always |
+| `client.perm.<name>` | Bool (`true`) | each undotted member |
+| `client.authorized_scopes` | StringSet | always |
+| `client.authorized_audiences` | StringSet | always |
+| `client.teams` | StringSet | always |
+| `client.claim.<dotted>` | flattened JSON | each claim |
+| `client.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `client.key_binding_thumbprint` | String | same; as `subject.key_binding_thumbprint` |
+
+**Workload** (`caller_workload` / `this_workload`; same shape, two namespaces).
+These are not `agent.*`. `agent.*` is session context.
+
+| Key | Type | When |
+|---|---|---|
+| `<ns>.spiffe_id` | String | `Some` |
+| `<ns>.trust_domain` | String | `Some` |
+| `<ns>.attestor` | String | `Some` |
+| `<ns>.attested_at` | String | `Some`. RFC3339, second precision, `Z`. |
+| `<ns>.attested_at_epoch` | Int | `Some`. The same instant as Unix seconds. |
+| `<ns>.selectors` | StringSet | always |
+| `<ns>.client_id` | String | `Some` |
+| `<ns>.key_binding` | String (`dpop`) | `key_binding` is `Some`, set only when the resolver verified a proof of possession (DPoP) |
+| `<ns>.key_binding_thumbprint` | String | same; as `subject.key_binding_thumbprint` |
+
+`attested_at` renders as RFC3339 with second precision and a literal `Z`. At
+fixed precision the string sorts the same way the instant does, which is why
+the format is pinned: variable precision would break it, because `.` sorts
+before `Z` and `00.5Z` would compare as earlier than `00Z`.
+
+**APL cannot order it.** APL's `<`, `<=`, `>` and `>=` are numeric: an operand
+that will not coerce to a finite `f64` is unorderable, and the phase fails
+closed. So `caller_workload.attested_at < "2026-10-01T00:00:00Z"` does not
+test freshness, it denies every request, including one whose attestation is
+recent:
+
+```text
+order comparison on `caller_workload.attested_at` failed (fail-closed):
+value is not a finite number
+```
+
+`attested_at_epoch` carries the same instant as Unix seconds, which APL does
+order, on `numeric_compare`'s exact integer path. That is what makes an
+event-pinned floor writable:
+
+<!-- validate: apl-rule -->
+```text
+caller_workload.attested_at_epoch < 1790812800: deny
+```
+
+"reject anything attested before the CA rotation" is a lasting control rather
+than a window that goes stale, so the literal never needs editing. What is
+*not* writable is a rolling window: APL compares an attribute against a
+literal, with no arithmetic and no `now()`, so "attested within the last hour"
+cannot be expressed against either form. That needs language support and is
+tracked separately.
+
+CEL and Rego order both forms, the string lexicographically and the epoch
+numerically.
+
+This is the one of three date keys the engine controls the format of.
+`request.timestamp` and `completion.created_at` are host-supplied strings and
+carry no format guarantee at all, so they are not ordered reliably anywhere.
+Giving the bag a date type, and APL the operators to compare one, is what makes
+a staleness rule writable in the native language.
+
+**Other**, written whenever the security slot itself is present:
+
+| Key | Type | When |
+|---|---|---|
+| `auth_method` | String | `Some` |
+| `security.labels` | StringSet | always |
+| `security.classification` | String | `Some` |
+
+`security.objects` and `security.data` are not in the bag. Both live on
+`SecurityExtension`, and `filter_extensions` copies them to every plugin
+(unrestricted sub-fields). The bridge does not flatten
+`ObjectSecurityProfile` or `DataPolicy` (`apply_labels`, `allowed_actions`,
+`denied_actions`, `retention`). Plugins that need them read the typed slot.
+The static `data:` payload tree (`data.*` keys) is a different source; see
+[Payloads that are not slots](#payloads-that-are-not-slots).
+
+`capability_namespaces` maps `read_*` capabilities to bag prefixes. `read_labels`
+unlocks `security.labels`; `read_workload` unlocks `caller_workload.*` and
+`this_workload.*`. Nothing writes a `workload.*` prefix. `read_teams` unlocks
+`team.*` alongside `subject.teams`, the way `read_roles` and `read_permissions`
+unlock their flattened aliases.
+
+`auth_method` and `security.classification` are not gated. `filter_extensions`
+treats them as unrestricted sub-fields and includes them whatever a plugin
+declared, so no capability names them: naming one would describe a grant an
+operator could withhold, and these cannot be withheld.
+
+They are not alone. Eight whole slots are `AccessPolicy::Unrestricted` in
+`praxis_policy_core::extensions::filter` — `request`, `provenance`,
+`completion`, `llm`, `framework`, `mcp`, `meta` and `custom` — so **every key
+under them reaches every plugin and every PDP regardless of capabilities**. The
+`read_request`, `read_provenance`, `read_completion`, `read_llm`,
+`read_framework`, `read_mcp`, `read_meta` and `read_custom` capabilities gate
+nothing on the bag, and `capability_namespaces` returns no prefixes for them.
+
+Capabilities withhold the credential-bearing slots: `security.*` and its
+sub-records, `delegation.*`, `agent.*` and `http.*`. Those are the ones where
+declaring less actually shows a plugin less.
+
+### 2. `delegation` — `DelegationExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `delegation.depth` | Int | always (0 if none) |
+| `delegation.delegated` | Bool | always |
+| `delegated` | Bool | always (alias of the previous) |
+| `delegation.origin_subject_id` | String | `Some` |
+| `delegation.actor_subject_id` | String | `Some` |
+| `delegation.age_seconds` | Float | always |
+
+`chain` is a `Vec<DelegationHop>` and nothing from it is bridged, so
+`delegation.depth <= 2` is expressible and "deny if any hop granted
+`write:payroll`" is not. A plugin that needs per-hop grants reads the typed
+chain.
+
+Putting any of it on the bag first requires deciding what aggregation means,
+and the answer differs per field. A union over `scopes_granted` reports a scope
+one hop granted and a later hop narrowed, so the key would claim more authority
+than the chain conveys, and an author reading it could not tell. `from_cache`
+wants an any-hop flag rather than a union, and whether one cached hop taints
+the whole chain is an operator's decision. Per-hop `strategy` and `ttl_seconds`
+have no meaningful union at all. Indexing by position
+(`delegation.hop.2.scopes`) is not an answer either, since chain position is
+not stable across requests.
+
+### 3. `agent` — `AgentExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `agent.input` | String | `Some` |
+| `agent.session_id` | String | `Some` |
+| `agent.conversation_id` | String | `Some` |
+| `agent.turn` | Int | `Some` |
+| `agent.agent_id` | String | `Some` |
+| `agent.parent_agent_id` | String | `Some` |
+| `agent.conversation.summary` | String | conversation present and summary `Some` |
+| `agent.conversation.topics` | StringSet | conversation present (always then) |
+
+`conversation.history` is not flattened, and there is no length key either.
+The transcript is a `Vec<Value>` of turns, so flattening it would put message
+text on the bag under indexed keys, which is the opposite of what the bag is
+for. A plugin that needs the transcript reads the typed slot through
+`read_agent`.
+
+Turn-count gating needs no new key: `agent.turn` is an Int, so
+`agent.turn > 10` works today.
+
+### 4. `meta` — `MetaExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `meta.entity_type` | String | `Some` |
+| `meta.entity_name` | String | `Some` |
+| `meta.tags` | StringSet | always |
+| `meta.scope` | String | `Some` |
+| `meta.properties.<name>` | String | each map entry |
+
+### 5. `request` — `RequestExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `request.environment` | String | `Some` |
+| `request.request_id` | String | `Some` |
+| `request.timestamp` | String | `Some` (ISO 8601 text) |
+| `request.trace_id` | String | `Some` |
+| `request.span_id` | String | `Some` |
+
+A default request slot adds nothing.
+
+### 6. `http` — `HttpExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `http.method` | String | `Some` |
+| `http.path` | String | `Some` |
+| `http.query` | String | `Some` when the request carried a query (value excludes the leading `?`); omitted otherwise. Readable by a rule, but its value is redacted in diagnostics — see the note below |
+| `http.host` | String | `Some` |
+| `http.scheme` | String | `Some` |
+| `http.client_address` | String | `Some` when the host set a trusted client address: an IPv4 address, or an IPv6 /64 prefix such as `2001:db8:1:2::/64` |
+| `http.status` | Int | `Some` (response half) |
+| `http.request_headers.<name>` | String | each header; name lowercased |
+| `http.response_headers.<name>` | String | each header; name lowercased |
+
+A rule reads `http.query` and the header values directly. Built-in PDP deny
+diagnostics render these potentially secret values as type labels, and
+`HttpExtension` renders a present query as `[REDACTED]` in its serialized and
+`Debug` output. Plugin views include the raw query only with `read_query`;
+`read_headers` alone cannot read it.
+The canonical `AttributeBag` still holds the raw value for policy evaluation;
+its `Debug` and `Serialize` implementations are not redacted, so it must not
+be used directly as a log or audit record. A host must populate the canonical
+query after any serialization boundary because `HttpExtension` serialization
+replaces its value with `[REDACTED]`.
+
+### 7. `llm` — `LLMExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `llm.model.id` | String | `Some` |
+| `llm.model.provider` | String | `Some` |
+| `llm.model.capabilities` | StringSet | always |
+| `llm.model_id` | String | deprecated alias of `llm.model.id` |
+| `llm.provider` | String | deprecated alias of `llm.model.provider` |
+| `llm.capabilities` | StringSet | deprecated alias of `llm.model.capabilities` |
+
+The aliases have identical values. Keep them until old policy references can
+be detected at load time; removing a deny rule's key without that check could
+weaken a policy.
+
+### 8. `llm_request` — `LlmRequest`
+
+One gated, un-serialized carrier holds an optional parsed body and optional
+normalized parts. The following keys come only from reported normalized parts.
+A plugin needs `read_llm_request` to read the carrier and its bag keys.
+
+| Key | Type | When |
+|---|---|---|
+| `llm.input.offered_tools` | StringSet | always when parts reported; tool names |
+| `llm.input.stop_sequences` | StringSet | always when parts reported |
+| `llm.input.tool_choice` | String | `Some` (`auto` / `none` / `required` / `tool`) |
+| `llm.input.forced_tool` | String | choice is `tool` |
+| `llm.input.max_tokens` | Int | effective normalized completion cap, `Some` |
+| `llm.input.candidate_count` | Int | `Some` |
+| `llm.input.temperature` | Float | `Some` |
+| `llm.input.top_p` | Float | `Some` |
+| `llm.input.stream` | Bool | `Some` |
+| `llm.input.instructions_digest` | String | always when parts reported, `sha256-v1:<hex>` |
+
+With no normalized parts, none of these keys is written. A reported empty
+tool list writes an empty set. Instruction text and tool schemas stay off the
+bag. The digest uses the ordered system and developer instruction records:
+`b"ppe.llm.instructions.v1\0"`, a big-endian `u32` record count, then for
+each record a role byte (system `0`, developer `1`), a big-endian `u64`
+UTF-8 byte length, and the exact text bytes. The digest is lowercase SHA-256.
+`instruction_digest` in `ppe-apl-cmf::llm` computes a policy pin.
+
+The parsed body is available to OPA and CEL at `llm.request` and to Cedar
+at `context.llm.request`; it is not a bag key. A parts-only carrier creates
+bag keys without inventing a body.
+
+### 9. `mcp` — `MCPExtension`
+
+**Tool** present:
+
+| Key | Type | When |
+|---|---|---|
+| `mcp.tool.name` | String | always |
+| `mcp.tool.title` | String | `Some` |
+| `mcp.tool.description` | String | `Some` |
+| `mcp.tool.server_id` | String | `Some` |
+| `mcp.tool.namespace` | String | `Some` |
+| `mcp.tool.annotations.<name>` | flattened JSON | each map entry |
+
+**Resource** present:
+
+| Key | Type | When |
+|---|---|---|
+| `mcp.resource.uri` | String | always |
+| `mcp.resource.name` | String | `Some` |
+| `mcp.resource.description` | String | `Some` |
+| `mcp.resource.mime_type` | String | `Some` |
+| `mcp.resource.server_id` | String | `Some` |
+| `mcp.resource.annotations.<name>` | flattened JSON | each map entry |
+
+**Prompt** present:
+
+| Key | Type | When |
+|---|---|---|
+| `mcp.prompt.name` | String | always |
+| `mcp.prompt.description` | String | `Some` |
+| `mcp.prompt.server_id` | String | `Some` |
+| `mcp.prompt.annotations.<name>` | flattened JSON | each map entry |
+
+`annotations` flattens through the same JSON walker as `custom.*`,
+`framework.metadata.*` and `claim.*`, so `readOnlyHint` and `destructiveHint`
+are readable and a rule can refuse a destructive tool. Being free-form is not
+what keeps a map off the bag, or none of those four would be on it.
+
+`ToolMetadata.input_schema`, `ToolMetadata.output_schema` and
+`PromptMetadata.arguments` stay off. They describe the shape of a call rather
+than a fact about this one, so a rule over them would assert something about
+the contract instead of the request. The argument values themselves reach
+policy as `args.*`; see
+[Payloads that are not slots](#payloads-that-are-not-slots).
+
+### 10. `completion` — `CompletionExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `llm.output.stop_reason` | String | `Some` (`end` / `return` / `call` / `max_tokens` / `stop_sequence`) |
+| `llm.output.tokens.input` | Int | tokens present |
+| `llm.output.tokens.output` | Int | tokens present |
+| `llm.output.tokens.total` | Int | tokens present |
+| `llm.output.model` | String | `Some` |
+| `llm.output.raw_format` | String | `Some` |
+| `llm.output.created_at` | String | `Some` |
+| `llm.output.latency_ms` | Int | `Some` |
+| `completion.stop_reason` | String | `Some` (`end` / `return` / `call` / `max_tokens` / `stop_sequence`) (deprecated alias) |
+| `completion.tokens.input` | Int | tokens present (deprecated alias) |
+| `completion.tokens.output` | Int | tokens present (deprecated alias) |
+| `completion.tokens.total` | Int | tokens present (deprecated alias) |
+| `completion.model` | String | `Some` (deprecated alias) |
+| `completion.raw_format` | String | `Some` (deprecated alias) |
+| `completion.created_at` | String | `Some` (deprecated alias) |
+| `completion.latency_ms` | Int | `Some` (deprecated alias) |
+
+The `completion.*` aliases remain value-identical during migration.
+
+### 11. `provenance` — `ProvenanceExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `provenance.source` | String | `Some` |
+| `provenance.message_id` | String | `Some` |
+| `provenance.parent_id` | String | `Some` |
+
+### 12. `framework` — `FrameworkExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `framework.framework` | String | `Some` |
+| `framework.framework_version` | String | `Some` |
+| `framework.node_id` | String | `Some` |
+| `framework.graph_id` | String | `Some` |
+| `framework.metadata.<dotted>` | flattened JSON | each metadata entry |
+
+### 13. `custom` — `HashMap<String, Value>`
+
+| Key | Type | When |
+|---|---|---|
+| `custom.<dotted>` | flattened JSON | each map entry |
+
+An empty map adds nothing.
+
+### 14. `metadata` — `MetadataExtension`
+
+| Key | Type | When |
+|---|---|---|
+| `metadata.<name>` | acquired JSON | each installed instance and its derived value/provenance paths |
+
+Each instance is present as `NonScalar`. Object response members project
+directly below it; a scalar, array, or `null` root uses the stable `value`
+leaf. Scalar leaves keep their type, string arrays become `StringSet`, and
+objects, mixed arrays, and `null` are present as `NonScalar`. The structured
+`AcquiredFacts` value remains authoritative and is not reconstructed from
+these flattened keys.
+
+Reserved provenance leaves are `$source`, `$outcome`, `$fetched_at`, `$cache`,
+`$status`, `$stale`, and `$error_code`; optional leaves appear only when they
+apply. `$source` carries the registered plugin kind, while the containing
+namespace carries its instance name. `$fetched_at` is an RFC 3339 UTC string
+at second precision with a `Z` suffix, such as `2026-10-19T12:00:00Z`,
+matching `<ns>.attested_at`. APL reads these leaves as ordinary path
+segments, as in `metadata.account.$outcome`. A plugin sees this slot and
+namespace only with `read_metadata`; the synthetic APL handler receives that
+capability when the active route phase has a compiled metadata dependency.
+
+---
+
+## Payloads that are not slots
+
+These use the same walker and the same absent-value rules, but they are not
+`extract_extensions` slots:
+
+| Source | Keys |
+|---|---|
+| Request arguments | Object fields: `args.<dotted>`. A top-level scalar is the key `args` (String / Bool / Int / Float). A top-level scalar array is `args` as a StringSet (empty included). A top-level array of objects or nested arrays sets nothing. `null` sets nothing. |
+| Upstream result | Same shapes under `result` / `result.<dotted>`. |
+| Static `data:` tree | Same walker under `data` / `data.<dotted>`. |
+| Route identifier | `route.key` |
+
+On `tool:` routes, OPA and CEL do not read the request argument rows
+above. They receive the arguments as native JSON instead, so arrays of
+objects, array order, duplicates, numbers, and `null` survive. Cedar receives
+the same JSON, sanitized, as `context.args`. APL still reads the flattened
+keys. See [Structured request input](../apl/pdp.md#structured-request-input).

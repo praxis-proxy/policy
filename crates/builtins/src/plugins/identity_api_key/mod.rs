@@ -36,16 +36,14 @@
 //!
 //! [`record_map`]: crate::plugins::identity_api_key::config::ApiKeyResolverConfig::record_map
 
-/// A cache in front of a directory.
-pub mod cache;
+pub use crate::token_lookup::cache;
 /// Plugin configuration and its validation.
 pub mod config;
 /// Where the key is read from, and the prefix gate.
 pub mod credential;
 /// API-key hashing backend.
 pub mod crypto;
-/// Where identity records live.
-pub mod directory;
+pub use crate::token_lookup::directory;
 /// Constructs the resolver from configuration.
 pub mod factory;
 /// The hash indexed file backend.

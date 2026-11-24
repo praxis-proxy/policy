@@ -74,7 +74,6 @@ definitions and processes.
 
 [@crstrn13]: https://github.com/crstrn13
 [@asaadbalum]: https://github.com/asaadbalum
-[@nerdalert]: https://github.com/nerdalert
 [@christinaexyou]: https://github.com/christinaexyou
 [@maleck13]: https://github.com/maleck13
 [@dgn]: https://github.com/dgn

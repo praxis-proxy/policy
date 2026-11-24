@@ -152,6 +152,13 @@ impl PdpResolver for PdpRouter {
         PdpDialect::Custom("router".to_owned())
     }
 
+    fn requires_metadata(&self, call: &PdpCall) -> bool {
+        self.resolver(&call.dialect).map_or_else(
+            || call.references_metadata(),
+            |resolver| resolver.requires_metadata(call),
+        )
+    }
+
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
         let resolver = self
             .resolver(&call.dialect)

@@ -242,6 +242,10 @@ impl PdpResolver for CedarDirectResolver {
         self.dialect.clone()
     }
 
+    fn requires_metadata(&self, call: &PdpCall) -> bool {
+        crate::pdps::cedar_direct::template::references_metadata(&call.args)
+    }
+
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
         self.evaluate_structured(call, bag, &StructuredInput::default())
             .await

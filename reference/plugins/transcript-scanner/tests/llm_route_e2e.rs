@@ -43,7 +43,7 @@ routes:
         - "run(transcript-scan)"
 "#;
 
-/// The layout `docs/content/llm-routes.md` recommends: the scan under
+/// The layout `docs/content/guides/llm-routes.md` recommends: the scan under
 /// `global.defaults.llm`, beside a route that names `gpt-4*`. Only one `llm:`
 /// route runs per request and `gpt-4*` beats `*`, so a scan on the `*` route
 /// alone would skip every gpt-4 model.
