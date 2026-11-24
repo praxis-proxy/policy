@@ -24,10 +24,11 @@ in this order, or jump to the one that matches your task.
 
 1. [Getting started](#getting-started): run the engine and connect it to
    Praxis.
-2. [Guides](#guides): configure and operate a specific control.
-3. [Concepts](#concepts): how the engine works and why it is built this way.
+2. [Guides](guides/README.md): configure and operate a specific control.
+3. [Concepts](concepts/README.md): how the engine works and why it is built
+   this way.
 4. [APL](#apl): the policy language, its grammar, and its effects.
-5. [Reference](#reference): configuration keys, contracts, crates, and
+5. [Reference](reference/README.md): configuration keys, contracts, crates, and
    builtins.
 
 ## Getting started
