@@ -381,7 +381,14 @@ fn policy_set_references_metadata(policies: &PolicySet) -> bool {
 fn cedar_json_references_metadata(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
-            if let Some(access) = map.get(".").or_else(|| map.get("has")) {
+            if let Some(access) = map
+                .get(".")
+                .filter(|access| cedar_access_operator(access))
+                .or_else(|| {
+                    map.get("has")
+                        .filter(|access| cedar_access_operator(access))
+                })
+            {
                 return cedar_accesses_context_metadata(access)
                     || cedar_nested_access_references_metadata(access);
             }
@@ -391,6 +398,16 @@ fn cedar_json_references_metadata(value: &serde_json::Value) -> bool {
         serde_json::Value::Array(values) => values.iter().any(cedar_json_references_metadata),
         _ => false,
     }
+}
+
+fn cedar_access_operator(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|access| {
+        access.contains_key("left")
+            && matches!(
+                access.get("attr"),
+                Some(serde_json::Value::String(_) | serde_json::Value::Array(_))
+            )
+    })
 }
 
 fn cedar_accesses_context_metadata(access: &serde_json::Value) -> bool {

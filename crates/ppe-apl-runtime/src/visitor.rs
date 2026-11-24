@@ -909,10 +909,8 @@ impl ConfigVisitor for AplConfigVisitor {
         let Some(global) = yaml.get("global") else {
             return Ok(());
         };
-        let Some(assertions) = assertions_block(global)? else {
-            return Ok(());
-        };
-        let compiled = if let Some(apl_block) = apl_subblock(global) {
+        let global_assertions = assertions_block(global)?;
+        let global_compiled = if let Some(apl_block) = apl_subblock(global) {
             let policy_only = strip_wiring_keys(&apl_block);
             compile_policy_block_value("global", &policy_only)
                 .map_err(|error| -> VisitorError { Box::new(error) })?
@@ -920,7 +918,44 @@ impl ConfigVisitor for AplConfigVisitor {
             CompiledRoute::new("global")
         };
 
-        validate_assertion_fetch_reachability("global catch-all", &[&assertions], &compiled)?;
+        if let Some(assertions) = global_assertions.as_ref() {
+            validate_assertion_fetch_reachability(
+                "global catch-all",
+                &[assertions],
+                &global_compiled,
+            )?;
+        }
+
+        if let Some(defaults) = global
+            .get("defaults")
+            .and_then(serde_yaml::Value::as_mapping)
+        {
+            for (entity, section) in defaults {
+                let Some(entity) = entity.as_str() else {
+                    continue;
+                };
+                let default_assertions = assertions_block(section)?;
+                if global_assertions.is_none() && default_assertions.is_none() {
+                    continue;
+                }
+                let mut effective = global_compiled.clone();
+                if let Some(block) = apl_subblock(section) {
+                    effective.apply_layer(
+                        compile_policy_block_value(&format!("global.defaults.{entity}"), &block)
+                            .map_err(|error| -> VisitorError { Box::new(error) })?,
+                    );
+                }
+                let assertions = [global_assertions.as_ref(), default_assertions.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                validate_assertion_fetch_reachability(
+                    &format!("global.defaults.{entity} catch-all"),
+                    &assertions,
+                    &effective,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -1357,6 +1392,12 @@ impl ConfigVisitor for AplConfigVisitor {
                 },
             )?;
 
+            if let Some(assertions) = parsed.assertions.clone() {
+                assertion_layers.push(assertions);
+            }
+            let assertion_layer_refs: Vec<&AssertionsConfig> = assertion_layers.iter().collect();
+            validate_assertion_fetch_reachability(&route_key, &assertion_layer_refs, &effective)?;
+
             // Load-time lint, once per route: flag any APL `plugins:`
             // override declared for a plugin that no policy / delegate step
             // references. Checked on the fully-stacked `effective` route so
@@ -1461,12 +1502,6 @@ impl ConfigVisitor for AplConfigVisitor {
                 .into());
             }
             validate_metadata_fetch_sources(&route_key, &effective, plugin_registry.as_ref(), mgr)?;
-            if let Some(assertions) = parsed.assertions.clone() {
-                assertion_layers.push(assertions);
-            }
-            let assertion_layer_refs: Vec<&AssertionsConfig> = assertion_layers.iter().collect();
-            validate_assertion_fetch_reachability(&route_key, &assertion_layer_refs, &effective)?;
-
             // Each half installs only when the effective route declares steps
             // for it, the way the global catch-all already decides.
             let installs_pre = declares_pre_phase(&effective);

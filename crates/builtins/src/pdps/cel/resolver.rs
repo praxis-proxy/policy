@@ -816,6 +816,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_api_preserves_bag_metadata_and_structured_input_overrides_it() {
+        let r = CelResolver::new();
+        let mut bag = bag_with(&[("subject.id", "alice")]);
+        bag.set("metadata.account.active", true);
+
+        let direct = r
+            .evaluate(&cel_call("metadata.account.active"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(direct.decision, Decision::Allow);
+
+        let structured = StructuredInput::default().with_metadata(
+            Arc::new(serde_json::json!({"account": {"active": false}})),
+            Arc::new(serde_json::json!({})),
+            Arc::new(serde_json::json!({})),
+        );
+        let overridden = r
+            .evaluate_structured(&cel_call("metadata.account.active"), &bag, &structured)
+            .await
+            .unwrap();
+        assert!(matches!(overridden.decision, Decision::Deny { .. }));
+    }
+
+    #[tokio::test]
     async fn missing_expr_is_dispatch_error() {
         let r = CelResolver::new();
         let call = PdpCall {

@@ -245,13 +245,10 @@ impl PdpResolver for MetadataPdp {
     }
 
     async fn evaluate(&self, _call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
-        let decision = if bag.get_bool("metadata.account.active") == Some(true) {
-            Decision::Allow
-        } else {
-            Decision::Deny {
-                reason: Some("fetched metadata missing".to_owned()),
-                rule_source: "metadata-check".to_owned(),
-            }
+        let _flat_metadata_is_present = bag.get_bool("metadata.account.active") == Some(true);
+        let decision = Decision::Deny {
+            reason: Some("structured PDP path was not used".to_owned()),
+            rule_source: "metadata-check".to_owned(),
         };
         Ok(PdpDecision {
             decision,
@@ -261,7 +258,7 @@ impl PdpResolver for MetadataPdp {
 
     async fn evaluate_structured(
         &self,
-        call: &PdpCall,
+        _call: &PdpCall,
         bag: &AttributeBag,
         structured: &StructuredInput,
     ) -> Result<PdpDecision, PdpError> {
@@ -269,8 +266,11 @@ impl PdpResolver for MetadataPdp {
             .metadata()
             .and_then(|metadata| metadata.pointer("/account/active"))
             .and_then(serde_json::Value::as_bool);
-        if projected == Some(true) {
-            self.evaluate(call, bag).await
+        if bag.get_bool("metadata.account.active") == Some(true) && projected == Some(true) {
+            Ok(PdpDecision {
+                decision: Decision::Allow,
+                diagnostics: Vec::new(),
+            })
         } else {
             Ok(PdpDecision {
                 decision: Decision::Deny {
@@ -605,19 +605,71 @@ async fn inherited_metadata_assertions_are_checked_against_the_effective_route()
             "
 engine_settings:
   dispatch: policy
-global:
-  assertions:
-    request:
-      headers:
-        - name: x-account-active
-          from: metadata.account.active
+groups:
+  account-readers:
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
 routes:
   - tool: check_account
+    groups: account-readers
     authorization:
       pre_invocation: [allow]
 ",
         )
         .expect_err("an inherited assertion still needs a fetch on the effective route");
+    assert!(error.to_string().contains("fetch(account)"), "{error}");
+}
+
+#[tokio::test]
+async fn entity_default_metadata_assertions_require_a_default_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  defaults:
+    tool:
+      assertions:
+        request:
+          headers:
+            - name: x-account-active
+              from: metadata.account.active
+",
+        )
+        .expect_err("unmatched tool traffic cannot project metadata without a default fetch");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("global.defaults.tool catch-all"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("fetch(account)"), "{rendered}");
+}
+
+#[tokio::test]
+async fn assertion_only_route_still_requires_a_reachable_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+routes:
+  - tool: check_account
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
+",
+        )
+        .expect_err("assertions run even when the route installs no APL handler");
     assert!(error.to_string().contains("fetch(account)"), "{error}");
 }
 

@@ -69,8 +69,14 @@ impl MetadataDependencies {
             }) {
                 self.direct.insert(name.clone());
             }
-            references.retain(|candidate| known.contains(candidate));
-            self.edges.entry(name).or_default().extend(references);
+            let dependencies = references.into_iter().flat_map(|candidate| {
+                let descendant = format!("{candidate}.");
+                known
+                    .iter()
+                    .filter(move |rule| **rule == candidate || rule.starts_with(&descendant))
+                    .cloned()
+            });
+            self.edges.entry(name).or_default().extend(dependencies);
         }
     }
 }
@@ -418,8 +424,17 @@ fn collect_rule_references(
 ) {
     match rule {
         Rule::Spec { head, bodies, .. } => {
-            for expression in rule_head_expressions(head) {
-                collect_expression_references(expression, package, imports, out);
+            match head {
+                RuleHead::Compr { assign, .. } | RuleHead::Func { assign, .. } => {
+                    if let Some(assign) = assign {
+                        collect_expression_references(&assign.value, package, imports, out);
+                    }
+                },
+                RuleHead::Set { key, .. } => {
+                    if let Some(key) = key {
+                        collect_expression_references(key, package, imports, out);
+                    }
+                },
             }
             for body in bodies {
                 if let Some(assign) = &body.assign {
@@ -428,13 +443,7 @@ fn collect_rule_references(
                 collect_query_references(&body.query, package, imports, out);
             }
         },
-        Rule::Default {
-            refr, args, value, ..
-        } => {
-            collect_expression_references(refr, package, imports, out);
-            for arg in args {
-                collect_expression_references(arg, package, imports, out);
-            }
+        Rule::Default { value, .. } => {
             collect_expression_references(value, package, imports, out);
         },
     }

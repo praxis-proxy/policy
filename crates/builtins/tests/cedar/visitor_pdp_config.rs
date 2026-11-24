@@ -245,6 +245,45 @@ when { context.metadata has account && context.metadata.account.suspended };
 }
 
 #[tokio::test]
+async fn cedar_record_dot_field_does_not_hide_a_metadata_dependency() {
+    let yaml = route_yaml(
+        "tool: get_document",
+        r#"
+@id("allow")
+permit(principal, action, resource);
+@id("suspended")
+forbid(principal, action, resource)
+when { ({".": true, "m": context.metadata}).m has account };
+"#,
+        "",
+    );
+    let mgr = build_manager_with_yaml(&yaml).await.expect("config loads");
+    let mut ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_document"))),
+        security: Some(Arc::new(security_with_roles("alice", &[]))),
+        ..Default::default()
+    };
+    ext.install_metadata(
+        "account",
+        "metadata/http",
+        AcquiredFacts::success(
+            serde_json::json!({"suspended": true}),
+            Utc::now(),
+            MetadataCacheDisposition::Miss,
+        ),
+    )
+    .expect("trusted host metadata installs");
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), ext, None)
+        .await;
+    assert!(
+        !result.continue_processing,
+        "a record field named `.` must not hide the sibling metadata read"
+    );
+}
+
+#[tokio::test]
 async fn parenthesized_cedar_provenance_read_is_granted_without_a_fetch() {
     let yaml = route_yaml(
         "tool: get_document",

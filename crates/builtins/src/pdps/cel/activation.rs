@@ -78,7 +78,7 @@ pub fn bag_to_context(
     //    shadows an author-supplied extra arg with the same name — the
     //    bag wins by design, but a silent shadow can mask a typo in the
     //    author's args block.
-    let mut root = build_tree(bag);
+    let mut root = build_tree(bag, structured.metadata().is_none());
     overlay_structured(&mut root, structured);
     for (name, node) in root {
         if extra_names.contains(&name) {
@@ -96,13 +96,12 @@ pub fn bag_to_context(
 
 /// Overlay structured input on the bag tree.
 fn overlay_structured(root: &mut BTreeMap<String, Node>, structured: &StructuredInput) {
-    root.insert(
-        "metadata".to_owned(),
-        Node::Leaf(structured.metadata().map_or_else(
-            || Value::from(HashMap::<String, Value>::new()),
-            |value| json_to_value(value),
-        )),
-    );
+    if let Some(metadata) = structured.metadata() {
+        root.insert("metadata".to_owned(), Node::Leaf(json_to_value(metadata)));
+    } else {
+        root.entry("metadata".to_owned())
+            .or_insert_with(|| Node::Leaf(Value::from(HashMap::<String, Value>::new())));
+    }
     if let Some(document) = structured.llm_request() {
         let llm = root
             .entry("llm".to_owned())
@@ -137,11 +136,10 @@ enum Node {
 }
 
 /// Build the top-level namespace tree from the flat, dotted bag.
-fn build_tree(bag: &AttributeBag) -> BTreeMap<String, Node> {
+fn build_tree(bag: &AttributeBag, include_metadata: bool) -> BTreeMap<String, Node> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
-        if key == "metadata"
-            || key.starts_with("metadata.")
+        if (!include_metadata && (key == "metadata" || key.starts_with("metadata.")))
             || matches!(value, AttributeValue::NonScalar)
         {
             continue;

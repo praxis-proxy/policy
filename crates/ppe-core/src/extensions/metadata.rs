@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::de::Error as _;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -87,16 +87,27 @@ pub struct MetadataSource {
 }
 
 /// One immutable result returned by a policy information source.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AcquiredFacts {
+    cache: MetadataCacheDisposition,
+    error_code: Option<String>,
+    fetched_at: Option<DateTime<Utc>>,
+    numbers_validated: bool,
+    outcome: MetadataOutcome,
+    source: Option<MetadataSource>,
+    stale: bool,
+    status: Option<u16>,
+    value: Option<Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AcquiredFactsWire {
     cache: MetadataCacheDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fetched_at: Option<DateTime<Utc>>,
-    #[serde(skip)]
-    numbers_validated: bool,
     outcome: MetadataOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<MetadataSource>,
@@ -106,6 +117,56 @@ pub struct AcquiredFacts {
     status: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     value: Option<Value>,
+}
+
+impl Serialize for AcquiredFacts {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        AcquiredFactsWire {
+            cache: self.cache,
+            error_code: self.error_code.clone(),
+            fetched_at: self.fetched_at,
+            outcome: self.outcome,
+            source: self.source.clone(),
+            stale: self.stale,
+            status: self.status,
+            value: self.value.as_ref().map(|value| {
+                if self.numbers_validated {
+                    encode_validated_numbers(value)
+                } else {
+                    value.clone()
+                }
+            }),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AcquiredFacts {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = AcquiredFactsWire::deserialize(deserializer)?;
+        let value = wire
+            .value
+            .map(decode_and_validate_numbers)
+            .transpose()
+            .map_err(D::Error::custom)?;
+        Ok(Self {
+            cache: wire.cache,
+            error_code: wire.error_code,
+            fetched_at: wire.fetched_at,
+            numbers_validated: value.is_some(),
+            outcome: wire.outcome,
+            source: wire.source,
+            stale: wire.stale,
+            status: wire.status,
+            value,
+        })
+    }
 }
 
 impl AcquiredFacts {
@@ -345,6 +406,89 @@ pub enum MetadataInstallError {
 /// Serde predicate for omitting a false stale marker.
 fn is_false(value: &bool) -> bool {
     !value
+}
+
+const EXACT_BINARY64_TAG: &str = "$praxis_exact_binary64";
+
+/// Preserve an already validated floating-point value across serde formats.
+/// Response keys beginning with `$` are rejected, so this representation
+/// cannot collide with source-owned metadata.
+fn encode_validated_numbers(value: &Value) -> Value {
+    match value {
+        Value::Number(number) if number.as_i64().is_none() => {
+            let Some(candidate) = number.as_f64() else {
+                return value.clone();
+            };
+            let token = if candidate == 0.0 {
+                if candidate.is_sign_negative() {
+                    "-0.0".to_owned()
+                } else {
+                    "0.0".to_owned()
+                }
+            } else {
+                let (digits, exponent) = exact_binary64_decimal(candidate);
+                let sign = if candidate.is_sign_negative() {
+                    "-"
+                } else {
+                    ""
+                };
+                format!("{sign}{digits}e{exponent}")
+            };
+            Value::Object(serde_json::Map::from_iter([(
+                EXACT_BINARY64_TAG.to_owned(),
+                Value::String(token),
+            )]))
+        },
+        Value::Array(items) => Value::Array(items.iter().map(encode_validated_numbers).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), encode_validated_numbers(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+/// Decode the reserved exact-number representation and validate every plain
+/// JSON number before marking the record as validated.
+fn decode_and_validate_numbers(value: Value) -> Result<Value, MetadataInstallError> {
+    match value {
+        Value::Number(number) => {
+            validate_number(&number)?;
+            Ok(Value::Number(number))
+        },
+        Value::Array(items) => items
+            .into_iter()
+            .map(decode_and_validate_numbers)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        Value::Object(mut fields)
+            if fields.len() == 1 && fields.contains_key(EXACT_BINARY64_TAG) =>
+        {
+            let token = fields
+                .remove(EXACT_BINARY64_TAG)
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or_else(|| {
+                    MetadataInstallError::InvalidNumber(EXACT_BINARY64_TAG.to_owned())
+                })?;
+            let candidate = token
+                .parse::<f64>()
+                .map_err(|_error| MetadataInstallError::InvalidNumber(token.clone()))?;
+            if !decimal_is_exact_binary64(&token, candidate) {
+                return Err(MetadataInstallError::InvalidNumber(token));
+            }
+            serde_json::Number::from_f64(candidate)
+                .map(Value::Number)
+                .ok_or(MetadataInstallError::InvalidNumber(token))
+        },
+        Value::Object(fields) => fields
+            .into_iter()
+            .map(|(key, value)| decode_and_validate_numbers(value).map(|value| (key, value)))
+            .collect::<Result<serde_json::Map<_, _>, _>>()
+            .map(Value::Object),
+        other => Ok(other),
+    }
 }
 
 /// Enforce a single unambiguous dotted-namespace segment.
@@ -997,8 +1141,14 @@ mod tests {
     #[test]
     fn installed_extension_round_trips_without_losing_provenance() {
         let mut extensions = Extensions::default();
+        let facts = AcquiredFacts::success_json(
+            &format!(r#"{{"active": true, "ratio": {EXACT_BINARY64_ONE_TENTH}}}"#),
+            instant(),
+            MetadataCacheDisposition::Disabled,
+        )
+        .expect("the exact decimal is accepted");
         extensions
-            .install_metadata("account", "metadata/http", success(json!({"active": true})))
+            .install_metadata("account", "metadata/http", facts)
             .expect("metadata installs");
         let metadata = extensions.metadata.as_deref().expect("metadata exists");
 
@@ -1007,6 +1157,32 @@ mod tests {
             serde_json::from_value(encoded).expect("installed metadata deserializes");
 
         assert_eq!(&decoded, metadata);
+        decoded
+            .get("account")
+            .expect("account survives")
+            .validate()
+            .expect("exact-number validation survives serialization");
+    }
+
+    #[test]
+    fn serialized_exact_number_tag_cannot_bypass_validation() {
+        let raw_decimal = json!({
+            "cache": "disabled",
+            "fetched_at": "2026-10-19T12:00:00Z",
+            "outcome": "success",
+            "value": {"ratio": 0.1}
+        });
+        serde_json::from_value::<AcquiredFacts>(raw_decimal)
+            .expect_err("an ordinary rounded decimal remains invalid");
+
+        let forged_tag = json!({
+            "cache": "disabled",
+            "fetched_at": "2026-10-19T12:00:00Z",
+            "outcome": "success",
+            "value": {"ratio": {EXACT_BINARY64_TAG: "9007199254740993"}}
+        });
+        serde_json::from_value::<AcquiredFacts>(forged_tag)
+            .expect_err("the reserved tag accepts only exact binary64 decimals");
     }
 
     #[test]

@@ -51,13 +51,13 @@ pub fn bag_to_input(bag: &AttributeBag) -> Value {
 /// request document becomes `input.llm.request`. The result is always a JSON
 /// object (an empty bag with no structured input yields `{}`).
 pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
-    let mut root = bag_to_map(bag);
-    root.insert(
-        "metadata".to_owned(),
-        structured
-            .metadata()
-            .map_or_else(|| Value::Object(Map::new()), |value| Value::clone(value)),
-    );
+    let mut root = bag_to_map(bag, structured.metadata().is_none());
+    if let Some(metadata) = structured.metadata() {
+        root.insert("metadata".to_owned(), Value::clone(metadata));
+    } else {
+        root.entry("metadata".to_owned())
+            .or_insert_with(|| Value::Object(Map::new()));
+    }
     if let Some(document) = structured.llm_request() {
         let llm = root
             .entry("llm")
@@ -82,20 +82,20 @@ pub fn build_input(bag: &AttributeBag, structured: &StructuredInput) -> Value {
 
 /// Build Regorus input without cloning structured JSON into an intermediate tree.
 pub fn build_rego_input(bag: &AttributeBag, structured: &StructuredInput) -> regorus::Value {
-    let mut root = bag_to_map(bag);
+    let mut root = bag_to_map(bag, structured.metadata().is_none());
     let bag_args = root.remove("args");
     let bag_llm = root.remove("llm");
+    let bag_metadata = root.remove("metadata");
     let mut output = root
         .iter()
         .map(|(key, value)| (regorus::Value::from(key.as_str()), json_to_rego(value)))
         .collect::<BTreeMap<_, _>>();
-    output.insert(
-        regorus::Value::from("metadata"),
-        structured.metadata().map_or_else(
-            || regorus::Value::from(BTreeMap::<regorus::Value, regorus::Value>::new()),
-            |value| json_to_rego(value),
-        ),
-    );
+    let metadata = structured
+        .metadata()
+        .map(|value| json_to_rego(value))
+        .or_else(|| bag_metadata.as_ref().map(json_to_rego))
+        .unwrap_or_else(|| regorus::Value::from(BTreeMap::<regorus::Value, regorus::Value>::new()));
+    output.insert(regorus::Value::from("metadata"), metadata);
 
     match structured.llm_request() {
         Some(document) => {
@@ -154,11 +154,10 @@ fn json_to_rego(value: &Value) -> regorus::Value {
 }
 
 /// Rebuild the flat bag into a nested JSON object.
-fn bag_to_map(bag: &AttributeBag) -> Map<String, Value> {
+fn bag_to_map(bag: &AttributeBag, include_metadata: bool) -> Map<String, Value> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
-        if key == "metadata"
-            || key.starts_with("metadata.")
+        if (!include_metadata && (key == "metadata" || key.starts_with("metadata.")))
             || matches!(value, AttributeValue::NonScalar)
         {
             continue;
@@ -409,8 +408,8 @@ mod tests {
         let absent = rego_input_roundtrip(&bag, &StructuredInput::default());
         assert_eq!(
             absent["metadata"],
-            json!({}),
-            "absent structured metadata must be exactly an empty object"
+            json!({"account": {"stale": true}}),
+            "absent structured metadata must preserve the direct API's bag projection"
         );
     }
 

@@ -1086,6 +1086,26 @@ deny contains "suspended" if { values := [x | x := input]; values[0].metadata.ac
     }
 
     #[test]
+    fn dynamic_document_reference_inherits_descendant_metadata_dependency() {
+        let resolver = resolver(
+            &[
+                "package helpers\nsuspended if input.metadata.account.suspended",
+                "package authz\nconstant := true\ndeny contains \"suspended\" if data.helpers[input.subject.id]",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            !resolver.requires_metadata(&call("data.authz.constant", None)),
+            "an independent rule remains metadata-free"
+        );
+        assert!(
+            resolver.requires_metadata(&call("data.authz.deny", None)),
+            "a dynamic document lookup must include declared descendant rules"
+        );
+    }
+
+    #[test]
     fn inline_policy_dependency_reports_metadata_usage() {
         let resolver = resolver(&[], OnError::Deny);
         let dotted = call(
@@ -1171,6 +1191,33 @@ msg := "not a decision"
             .await
             .unwrap();
         assert_eq!(out.decision, Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn direct_api_preserves_bag_metadata_and_structured_input_overrides_it() {
+        let r = resolver(
+            &["package authz\ndefault allow := false\nallow if input.metadata.account.active"],
+            OnError::Deny,
+        );
+        let mut input = bag("alice");
+        input.set("metadata.account.active", true);
+
+        let direct = r
+            .evaluate(&call("data.authz.allow", None), &input)
+            .await
+            .unwrap();
+        assert_eq!(direct.decision, Decision::Allow);
+
+        let structured = StructuredInput::default().with_metadata(
+            std::sync::Arc::new(serde_json::json!({"account": {"active": false}})),
+            std::sync::Arc::new(serde_json::json!({})),
+            std::sync::Arc::new(serde_json::json!({})),
+        );
+        let overridden = r
+            .evaluate_structured(&call("data.authz.allow", None), &input, &structured)
+            .await
+            .unwrap();
+        assert!(matches!(overridden.decision, Decision::Deny { .. }));
     }
 
     #[tokio::test]
