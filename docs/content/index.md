@@ -34,7 +34,7 @@ in this order, or jump to the one that matches your task.
 ## Getting started
 
 - [Quick Start](getting-started/quickstart.md):
-  stand up an enforcement point and run your first policy
+  embed PPE in a Rust host and configure its runtime
 - [Use with Praxis](getting-started/use-with-the-gateway.md):
   run the engine as the Praxis `policy` filter
 
