@@ -447,7 +447,7 @@ impl PdpResolver for CelResolver {
         else {
             return true;
         };
-        self.get_or_compile(expr).map_or(true, |program| {
+        Program::compile(expr).map_or(true, |program| {
             let references = program.references();
             references.has_variable("metadata") || references.has_variable(".metadata")
         })
@@ -575,7 +575,9 @@ impl CelResolver {
 /// never reads is not converted.
 fn referenced_structured(program: &Program, structured: &StructuredInput) -> StructuredInput {
     let refs = program.references();
-    structured.retain(refs.has_variable("llm"), refs.has_variable("args"))
+    structured
+        .retain(refs.has_variable("llm"), refs.has_variable("args"))
+        .retain_metadata(refs.has_variable("metadata") || refs.has_variable(".metadata"))
 }
 
 /// Snapshot the values under every top-level name the expression references,
@@ -597,7 +599,13 @@ fn snapshot_referenced_values(
     let mut snapshot: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (key, value) in bag.iter() {
         let head = key.split('.').next().unwrap_or(key);
-        if !referenced_set.contains(head) {
+        if !(referenced_set.contains(head)
+            || head == "metadata" && referenced_set.contains(".metadata"))
+        {
+            continue;
+        }
+        if matches!(head, "metadata" | ".metadata") {
+            snapshot.insert(format!("metadata={}", TypeLabel::Map));
             continue;
         }
         match payload_namespace(key) {
@@ -623,6 +631,9 @@ fn snapshot_referenced_values(
     {
         snapshot.insert(format!("llm.request={}", TypeLabel::of_json(document)));
     }
+    if referenced_set.contains("metadata") || referenced_set.contains(".metadata") {
+        snapshot.insert(format!("metadata={}", TypeLabel::Map));
+    }
     snapshot.into_iter().collect()
 }
 
@@ -630,6 +641,7 @@ fn snapshot_referenced_values(
 /// structured input? Classifies referenced variables in eval-error causes.
 fn variable_present(bag: &AttributeBag, structured: &StructuredInput, name: &str) -> bool {
     match name {
+        "metadata" | ".metadata" => return true,
         "args" if structured.args().is_some() => return true,
         "llm" if structured.llm_request().is_some() => return true,
         _ => {},
@@ -770,6 +782,13 @@ mod tests {
     }
 
     #[test]
+    fn metadata_dependency_analysis_does_not_consume_execution_cache_capacity() {
+        let resolver = CelResolver::new().with_max_cache_entries(0);
+        assert!(resolver.requires_metadata(&cel_call("metadata.account.active")));
+        assert!(!resolver.requires_metadata(&cel_call("subject.active")));
+    }
+
+    #[test]
     fn invalid_call_shape_conservatively_requires_metadata() {
         let resolver = CelResolver::new();
         let call = PdpCall {
@@ -796,6 +815,30 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(deny.decision, Decision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn direct_api_preserves_bag_metadata_and_structured_input_overrides_it() {
+        let r = CelResolver::new();
+        let mut bag = bag_with(&[("subject.id", "alice")]);
+        bag.set("metadata.account.active", true);
+
+        let direct = r
+            .evaluate(&cel_call("metadata.account.active"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(direct.decision, Decision::Allow);
+
+        let structured = StructuredInput::default().with_metadata(
+            Arc::new(serde_json::json!({"account": {"active": false}})),
+            Arc::new(serde_json::json!({})),
+            Arc::new(serde_json::json!({})),
+        );
+        let overridden = r
+            .evaluate_structured(&cel_call("metadata.account.active"), &bag, &structured)
+            .await
+            .unwrap();
+        assert!(matches!(overridden.decision, Decision::Deny { .. }));
     }
 
     #[tokio::test]
@@ -1353,6 +1396,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_diagnostics_redact_values_and_reserved_provenance() {
+        let r = CelResolver::new();
+        let structured = StructuredInput::default().with_metadata(
+            Arc::new(serde_json::json!({
+                "account": {
+                    "nested": {"secret": MARKER},
+                    "$error_code": format!("metadata.{MARKER}")
+                }
+            })),
+            Arc::new(serde_json::json!({})),
+            Arc::new(serde_json::json!({})),
+        );
+        for expr in [
+            "metadata.account.nested.secret == 'other'",
+            ".metadata.account.nested.secret == 'other'",
+            "metadata.account['$error_code'] == 'metadata.other'",
+            "subject.id == 'alice' && metadata.account.nested.secret == 'other'",
+        ] {
+            let call = cel_call(expr);
+            let bag = bag_with(&[("subject.id", "alice")]);
+            let out = r
+                .evaluate_structured(&call, &bag, &structured)
+                .await
+                .unwrap();
+            assert_no_leak(&out);
+            assert!(out.diagnostics.contains(&"metadata=map".to_owned()));
+            if expr.starts_with("subject") {
+                assert!(
+                    out.diagnostics
+                        .contains(&"subject.id=String(\"alice\")".to_owned())
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn false_result_snapshot_redacts_query_value() {
         // A query can embed a credential (a query-parameter JWT, say). On a
         // false result, the snapshot must label `http.query` by type, never
@@ -1601,18 +1680,29 @@ mod tests {
         let structured = StructuredInput::new(
             Some(Arc::new(serde_json::json!({"model": "m"}))),
             Some(Arc::new(serde_json::json!({"a": 1}))),
+        )
+        .with_metadata(
+            Arc::new(serde_json::json!({"account": {"active": true}})),
+            Arc::new(serde_json::json!({"account": {"active": true}})),
+            Arc::new(serde_json::json!({"account": {"source": "http"}})),
         );
         let kept = |expr: &str| {
             let program = Program::compile(expr).unwrap();
             let out = referenced_structured(&program, &structured);
-            (out.llm_request().is_some(), out.args().is_some())
+            (
+                out.llm_request().is_some(),
+                out.args().is_some(),
+                out.metadata().is_some(),
+            )
         };
-        assert_eq!(kept("subject.id == 'alice'"), (false, false));
-        assert_eq!(kept("args.a == 1"), (false, true));
-        assert_eq!(kept("has(llm.request.model)"), (true, false));
+        assert_eq!(kept("subject.id == 'alice'"), (false, false, false));
+        assert_eq!(kept("args.a == 1"), (false, true, false));
+        assert_eq!(kept("metadata.account.active"), (false, false, true));
+        assert_eq!(kept(".metadata.account.active"), (false, false, true));
+        assert_eq!(kept("has(llm.request.model)"), (true, false, false));
         assert_eq!(
             kept("[1].all(x, x == args.a) && llm.request.model == 'm'"),
-            (true, true)
+            (true, true, false)
         );
     }
 

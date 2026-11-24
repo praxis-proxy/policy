@@ -18,8 +18,45 @@
 // It records what happened (which plugin, which phase, which action), not
 // copies of payloads.
 
+use std::collections::BTreeMap;
+
+use serde::Serialize;
+
 use crate::error::PluginViolation;
 use crate::plugin::PluginMode;
+
+/// A framework warning attached to the tamper-evident decision record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DecisionWarning {
+    code: String,
+    fields: BTreeMap<String, String>,
+}
+
+impl DecisionWarning {
+    /// Build one warning from a stable code and non-secret diagnostic fields.
+    #[must_use]
+    pub fn new(
+        code: impl Into<String>,
+        fields: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            fields: fields.into_iter().collect(),
+        }
+    }
+
+    /// Stable machine-readable warning code.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Non-secret warning context.
+    #[must_use]
+    pub fn fields(&self) -> &BTreeMap<String, String> {
+        &self.fields
+    }
+}
 
 /// What a single plugin did to the request, as the executor saw it.
 ///
@@ -152,6 +189,7 @@ fn new_span_id() -> String {
 #[derive(Debug, Clone, Default)]
 pub struct DecisionLog {
     steps: Vec<DecisionStep>,
+    warnings: Vec<DecisionWarning>,
     verdict: Option<Verdict>,
     span: Option<Span>,
     input_labels: Vec<String>,
@@ -182,6 +220,17 @@ impl DecisionLog {
             phase,
             action,
         });
+    }
+
+    /// Attach a framework warning that audit sinks must serialize.
+    pub fn record_warning(&mut self, warning: DecisionWarning) {
+        self.warnings.push(warning);
+    }
+
+    /// Framework warnings accumulated while settling this invocation.
+    #[must_use]
+    pub fn warnings(&self) -> &[DecisionWarning] {
+        &self.warnings
     }
 
     /// Set the terminal verdict, once, at the pipeline's return point and

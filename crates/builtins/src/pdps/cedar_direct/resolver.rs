@@ -41,8 +41,8 @@ use crate::pdps::cedar_direct::decision::{translate, withheld};
 use crate::pdps::cedar_direct::entities::build as build_entities;
 use crate::pdps::cedar_direct::error::BuildError;
 use crate::pdps::cedar_direct::request::{
-    CedarStructured, parse as parse_call, request_error_category, reserved_context_key,
-    reserved_key_message, sanitize_structured,
+    omit_structured, parse as parse_call, request_error_category, reserved_context_key,
+    reserved_key_message, sanitize_metadata, sanitize_payload, sanitize_structured,
 };
 use crate::pdps::stack;
 
@@ -63,6 +63,9 @@ pub struct CedarDirectResolver {
     /// default, since a schema must declare `args` and `llm` in each action's
     /// context type or every request fails validation.
     structured_context: bool,
+    /// Whether the loaded policies read the framework-projected
+    /// `context.metadata` or `context.metadata_provenance` records.
+    policy_requires_metadata: bool,
 }
 
 impl CedarDirectResolver {
@@ -77,6 +80,7 @@ impl CedarDirectResolver {
         let policy_set: PolicySet = policies
             .parse()
             .map_err(|e: cedar_policy::ParseErrors| BuildError::PolicyParse(e.to_string()))?;
+        let policy_requires_metadata = policy_set_references_metadata(&policy_set);
         Ok(Self {
             policies: Arc::new(policy_set),
             schema: None,
@@ -84,6 +88,7 @@ impl CedarDirectResolver {
             dialect: PdpDialect::Cedar,
             entity_namespace: None,
             structured_context: false,
+            policy_requires_metadata,
         })
     }
 
@@ -153,6 +158,7 @@ impl CedarDirectResolver {
         let policy_set: PolicySet = policies
             .parse()
             .map_err(|e: cedar_policy::ParseErrors| BuildError::PolicyParse(e.to_string()))?;
+        let policy_requires_metadata = policy_set_references_metadata(&policy_set);
 
         let schema_text = read_yaml_string(map, "schema_text");
         let schema_file = read_yaml_string(map, "schema_file");
@@ -194,6 +200,7 @@ impl CedarDirectResolver {
             dialect,
             entity_namespace,
             structured_context,
+            policy_requires_metadata,
         })
     }
 
@@ -223,7 +230,8 @@ impl CedarDirectResolver {
 
     /// Add structured input to the context even when a schema is set. The
     /// schema must then declare `args` and `llm` in each affected action's
-    /// context type. Has no effect without a schema, where structured input is
+    /// context type. Metadata fields are added only when a loaded policy reads
+    /// them. Has no effect without a schema, where payload structured input is
     /// always added.
     pub fn with_structured_context(mut self, enabled: bool) -> Self {
         self.structured_context = enabled;
@@ -234,6 +242,10 @@ impl CedarDirectResolver {
     fn injects_structured(&self) -> bool {
         self.schema.is_none() || self.structured_context
     }
+
+    fn injects_metadata(&self) -> bool {
+        self.schema.is_none() || self.policy_requires_metadata
+    }
 }
 
 #[async_trait]
@@ -243,7 +255,8 @@ impl PdpResolver for CedarDirectResolver {
     }
 
     fn requires_metadata(&self, call: &PdpCall) -> bool {
-        crate::pdps::cedar_direct::template::references_metadata(&call.args)
+        self.policy_requires_metadata
+            || crate::pdps::cedar_direct::template::references_metadata(&call.args)
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
@@ -306,13 +319,14 @@ impl PdpResolver for CedarDirectResolver {
         // schema is set without `structured_context`, the input is not added,
         // so it is neither sanitized nor checked.
         stack::guarded(|| {
-            let sanitized = if self.injects_structured() {
-                let Ok(sanitized) = sanitize_structured(structured) else {
-                    return Ok(withheld());
-                };
-                sanitized
-            } else {
-                CedarStructured::default()
+            let sanitized = match (self.injects_structured(), self.injects_metadata()) {
+                (true, true) => sanitize_structured(structured),
+                (true, false) => sanitize_payload(structured),
+                (false, true) => sanitize_metadata(structured),
+                (false, false) => Ok(omit_structured()),
+            };
+            let Ok(sanitized) = sanitized else {
+                return Ok(withheld());
             };
             let parsed = parse_call(&resolved_call, bag, sanitized, self.schema.as_deref())?;
             let entities = build_entities(
@@ -346,6 +360,86 @@ impl PdpResolver for CedarDirectResolver {
             Ok(translate(&response, &self.policies))
         })
     }
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+fn policy_set_references_metadata(policies: &PolicySet) -> bool {
+    policies.policies().any(|policy| {
+        policy
+            .to_json()
+            .map_or(true, |json| cedar_json_references_metadata(&json))
+    }) || policies.templates().any(|template| {
+        template
+            .to_json()
+            .map_or(true, |json| cedar_json_references_metadata(&json))
+    })
+}
+
+fn cedar_json_references_metadata(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(access) = map
+                .get(".")
+                .filter(|access| cedar_access_operator(access))
+                .or_else(|| {
+                    map.get("has")
+                        .filter(|access| cedar_access_operator(access))
+                })
+            {
+                return cedar_accesses_context_metadata(access)
+                    || cedar_nested_access_references_metadata(access);
+            }
+            map.get("Var").and_then(serde_json::Value::as_str) == Some("context")
+                || map.values().any(cedar_json_references_metadata)
+        },
+        serde_json::Value::Array(values) => values.iter().any(cedar_json_references_metadata),
+        _ => false,
+    }
+}
+
+fn cedar_access_operator(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|access| {
+        access.contains_key("left")
+            && matches!(
+                access.get("attr"),
+                Some(serde_json::Value::String(_) | serde_json::Value::Array(_))
+            )
+    })
+}
+
+fn cedar_accesses_context_metadata(access: &serde_json::Value) -> bool {
+    let Some(access) = access.as_object() else {
+        return false;
+    };
+    cedar_is_context_variable(access.get("left"))
+        && match access.get("attr") {
+            Some(serde_json::Value::String(attr)) => is_metadata_record(attr),
+            Some(serde_json::Value::Array(path)) => path
+                .first()
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_metadata_record),
+            _ => false,
+        }
+}
+
+fn cedar_nested_access_references_metadata(access: &serde_json::Value) -> bool {
+    let left = access.as_object().and_then(|access| access.get("left"));
+    !cedar_is_context_variable(left) && left.is_some_and(cedar_json_references_metadata)
+}
+
+fn cedar_is_context_variable(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_object)
+        .and_then(|left| left.get("Var"))
+        .and_then(serde_json::Value::as_str)
+        == Some("context")
+}
+
+fn is_metadata_record(name: &str) -> bool {
+    matches!(name, "metadata" | "metadata_provenance")
 }
 
 fn parse_schema(text: &str) -> Result<Schema, BuildError> {

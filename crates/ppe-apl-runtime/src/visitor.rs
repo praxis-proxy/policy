@@ -73,6 +73,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, Weak};
 
+use praxis_policy_core::assertions::{
+    AssertionsConfig, AuthoredSource, Direction, HeaderEntry, SourcePath,
+};
 use praxis_policy_core::cmf::constants::{
     ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL,
     HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_POST_INVOKE,
@@ -97,6 +100,11 @@ use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
 
 use crate::decision_cache::{CachedPdpResolver, split_cache_block};
 use crate::dispatch_plan::{DispatchCache, walk_effects};
+use crate::envelope_checks::{
+    reject_field_stages_without_fields, reject_unknown_field_paths,
+    reject_writes_to_read_only_fields,
+};
+use crate::message_projection::Projection;
 use crate::pdp_router::PdpRouter;
 use crate::route_handler::{AplRouteHandler, HookFamily, Phase};
 use crate::session_store::{SessionStore, SessionStoreFactory};
@@ -142,6 +150,9 @@ struct VisitorState {
     global_layer: Option<CompiledRoute>,
     default_layers: HashMap<String, CompiledRoute>,
     tag_layers: HashMap<String, CompiledRoute>,
+    global_assertions: Option<AssertionsConfig>,
+    default_assertions: HashMap<String, AssertionsConfig>,
+    tag_assertions: HashMap<String, AssertionsConfig>,
     pdp_router: PdpRouter,
     /// Each declared plugin's name against the hooks its own `hooks:` names.
     /// Filled by `visit_plugins`, which runs before any section is walked.
@@ -899,6 +910,53 @@ impl ConfigVisitor for AplConfigVisitor {
         "apl"
     }
 
+    fn validate_before_load(&self, yaml: &serde_yaml::Value) -> Result<(), VisitorError> {
+        let Some(global) = yaml.get("global") else {
+            return Ok(());
+        };
+        let global_assertions = assertions_block(global)?;
+        let global_compiled = if let Some(apl_block) = apl_subblock(global) {
+            let policy_only = strip_wiring_keys(&apl_block);
+            compile_policy_block_value("global", &policy_only)
+                .map_err(|error| -> VisitorError { Box::new(error) })?
+        } else {
+            CompiledRoute::new("global")
+        };
+
+        if let Some(assertions) = global_assertions.as_ref() {
+            validate_assertion_fetch_reachability(
+                "global catch-all",
+                &[assertions],
+                &global_compiled,
+            )?;
+        }
+
+        if let Some(defaults) = global
+            .get("defaults")
+            .and_then(serde_yaml::Value::as_mapping)
+        {
+            for (entity, section) in defaults {
+                let Some(entity) = entity.as_str() else {
+                    continue;
+                };
+                let default_assertions = assertions_block(section)?;
+                if global_assertions.is_none() && default_assertions.is_none() {
+                    continue;
+                }
+                let assertions = [global_assertions.as_ref(), default_assertions.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                validate_assertion_fetch_reachability(
+                    &format!("global.defaults.{entity} catch-all"),
+                    &assertions,
+                    &global_compiled,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn visit_plugins(
         &self,
         _mgr: &Arc<PolicyEngine>,
@@ -920,6 +978,12 @@ impl ConfigVisitor for AplConfigVisitor {
         state.declared_plugin_hooks.clear();
         state.reached_plugin_hooks.clear();
         state.reached_plugin_names.clear();
+        state.global_layer = None;
+        state.default_layers.clear();
+        state.tag_layers.clear();
+        state.global_assertions = None;
+        state.default_assertions.clear();
+        state.tag_assertions.clear();
         for cfg in plugins {
             state
                 .declared_plugin_hooks
@@ -948,6 +1012,11 @@ impl ConfigVisitor for AplConfigVisitor {
         yaml: &serde_yaml::Value,
     ) -> Result<(), VisitorError> {
         self.record_structural_names(yaml);
+        let global_assertions = assertions_block(yaml)?;
+        self.state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .global_assertions = global_assertions.clone();
         let Some(apl_block) = apl_subblock(yaml) else {
             // No policy term, so this load declares no PDPs. Drop config-owned
             // resolvers from the previous load; code-supplied ones stay.
@@ -1029,7 +1098,6 @@ impl ConfigVisitor for AplConfigVisitor {
             .plugin_registry
             .clone();
         validate_metadata_fetch_sources("global", &compiled, &plugin_registry, mgr)?;
-
         // Install catch-all handlers so the global policy also evaluates for
         // generic (non-MCP/A2A) HTTP requests, which carry no entity.
         // Entity routes still stack `global` via apply_layer in visit_route;
@@ -1124,6 +1192,13 @@ impl ConfigVisitor for AplConfigVisitor {
         // entity default's `authentication:` list reaches its plugins whether
         // or not the block carries a policy body.
         self.record_structural_names(yaml);
+        if let Some(assertions) = assertions_block(yaml)? {
+            self.state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .default_assertions
+                .insert(entity_type.to_owned(), assertions);
+        }
         warn_if_response_at_unsupported_scope(yaml, &source);
         let Some(apl_block) = apl_subblock(yaml) else {
             return Ok(());
@@ -1135,6 +1210,8 @@ impl ConfigVisitor for AplConfigVisitor {
         // A default layer reaches only its own entity type, so a field stage
         // declared here for `http` is as unreadable as one on the route.
         reject_field_stages_without_fields(entity_type, &source, &compiled)?;
+        reject_unknown_field_paths(entity_type, &source, &compiled)?;
+        reject_writes_to_read_only_fields(entity_type, &source, &compiled)?;
         // No reachability tally here. This installs no handler and matches no
         // request: it stacks onto routes, and `visit_route` records what the
         // effective route reaches. Recording at compile time meant a default for
@@ -1155,6 +1232,13 @@ impl ConfigVisitor for AplConfigVisitor {
     ) -> Result<(), VisitorError> {
         let source = format!("groups.{tag}");
         self.record_structural_names(yaml);
+        if let Some(assertions) = assertions_block(yaml)? {
+            self.state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .tag_assertions
+                .insert(tag.to_owned(), assertions);
+        }
         warn_if_response_at_unsupported_scope(yaml, &source);
         let Some(apl_block) = apl_subblock(yaml) else {
             return Ok(());
@@ -1252,6 +1336,9 @@ impl ConfigVisitor for AplConfigVisitor {
             // effective policy in evaluation order.
             let mut effective = CompiledRoute::new(&route_key);
             if let Some(layer) = state.global_layer.clone() {
+                let source = format!("global (inherited by route '{route_key}')");
+                reject_unknown_field_paths(entity_type, &source, &layer)?;
+                reject_writes_to_read_only_fields(entity_type, &source, &layer)?;
                 effective.apply_layer(layer);
             }
             if let Some(layer) = state.default_layers.get(entity_type).cloned() {
@@ -1259,7 +1346,26 @@ impl ConfigVisitor for AplConfigVisitor {
             }
             for bundle in &bundles {
                 if let Some(layer) = state.tag_layers.get(bundle).cloned() {
+                    // A group is compiled before any route joins it, and its
+                    // field paths are valid or not only against the joining
+                    // route's envelope (`ssn` fits a tool, not a resource),
+                    // so the envelope checks run here, once per join.
+                    let scope = format!("group '{bundle}' (joined by route '{route_key}')");
+                    reject_unknown_field_paths(entity_type, &scope, &layer)?;
+                    reject_writes_to_read_only_fields(entity_type, &scope, &layer)?;
                     effective.apply_layer(layer);
+                }
+            }
+            let mut assertion_layers: Vec<AssertionsConfig> = Vec::new();
+            if let Some(assertions) = state.global_assertions.clone() {
+                assertion_layers.push(assertions);
+            }
+            if let Some(assertions) = state.default_assertions.get(entity_type).cloned() {
+                assertion_layers.push(assertions);
+            }
+            for bundle in &bundles {
+                if let Some(assertions) = state.tag_assertions.get(bundle).cloned() {
+                    assertion_layers.push(assertions);
                 }
             }
             drop(state);
@@ -1270,11 +1376,10 @@ impl ConfigVisitor for AplConfigVisitor {
                     .map_err(|e| -> VisitorError { Box::new(e) })?;
                 self.validate_pdp_steps(&source, &route_layer)?;
                 self.reject_rate_limit_only_runs(&source, &route_layer)?;
-                reject_field_stages_without_fields(
-                    entity_type,
-                    &format!("route '{route_key}'"),
-                    &route_layer,
-                )?;
+                let scope = format!("route '{route_key}'");
+                reject_field_stages_without_fields(entity_type, &scope, &route_layer)?;
+                reject_unknown_field_paths(entity_type, &scope, &route_layer)?;
+                reject_writes_to_read_only_fields(entity_type, &scope, &route_layer)?;
                 effective.apply_layer(route_layer);
             }
 
@@ -1295,6 +1400,12 @@ impl ConfigVisitor for AplConfigVisitor {
                     args: entity_type == ENTITY_TOOL,
                 },
             )?;
+
+            if let Some(assertions) = parsed.assertions.clone() {
+                assertion_layers.push(assertions);
+            }
+            let assertion_layer_refs: Vec<&AssertionsConfig> = assertion_layers.iter().collect();
+            validate_assertion_fetch_reachability(&route_key, &assertion_layer_refs, &effective)?;
 
             // Load-time lint, once per route: flag any APL `plugins:`
             // override declared for a plugin that no policy / delegate step
@@ -1400,7 +1511,6 @@ impl ConfigVisitor for AplConfigVisitor {
                 .into());
             }
             validate_metadata_fetch_sources(&route_key, &effective, plugin_registry.as_ref(), mgr)?;
-
             // Each half installs only when the effective route declares steps
             // for it, the way the global catch-all already decides.
             let installs_pre = declares_pre_phase(&effective);
@@ -1487,38 +1597,83 @@ impl ConfigVisitor for AplConfigVisitor {
     }
 }
 
-/// Refuse an `args:` or `result:` block declared at a scope that reaches only
-/// a payload with no fields. Today that is the `http:` selector: an HTTP
-/// exchange reaches a policy through its extensions, and `HttpPayload` has
-/// nothing for a field path to address, so such a stage would read nothing and
-/// rewrite nothing.
-///
-/// `scope` is the label the refusal names, already spelled the way its caller
-/// names the declaration. Called for each scope whose reach is one entity type,
-/// which is what gives it a payload to check: a route's own block and
-/// `global.defaults.<entity>`. A bundle is shared by routes of several entity
-/// types, and `global:` accepts neither block at all.
-fn reject_field_stages_without_fields(
-    entity_type: &str,
-    scope: &str,
-    layer: &CompiledRoute,
+/// Refuse an exact metadata assertion when its source cannot run before render.
+fn validate_assertion_fetch_reachability(
+    route_key: &str,
+    layers: &[&AssertionsConfig],
+    effective: &CompiledRoute,
 ) -> Result<(), VisitorError> {
-    if entity_type != ENTITY_HTTP {
-        return Ok(());
+    let fetched_names = effective.fetch_names();
+    let fetched: HashSet<&str> = fetched_names.iter().map(String::as_str).collect();
+    for direction in [Direction::Request, Direction::Response] {
+        for header in effective_assertion_headers(layers, direction) {
+            let paths: Vec<&str> = match &header.source {
+                AuthoredSource::From(path) => vec![path],
+                AuthoredSource::Members(members) => members.values().map(String::as_str).collect(),
+            };
+            for path in paths {
+                let instance = match SourcePath::parse(path) {
+                    Ok(SourcePath::Metadata(metadata)) => metadata.instance().to_owned(),
+                    Ok(_) => continue,
+                    Err(error) => {
+                        return Err(format!(
+                            "route '{route_key}': assertion source `{path}` passed core validation but APL could not parse it: {error}"
+                        )
+                        .into());
+                    },
+                };
+                if !fetched.contains(instance.as_str()) {
+                    return Err(format!(
+                        "route '{route_key}': {} header `{}` reads `{path}`, but `fetch({instance})` is not reachable in authorization.pre_invocation before assertion rendering",
+                        direction.label(),
+                        header.name
+                    )
+                    .into());
+                }
+            }
+        }
     }
-    let block = if !layer.args.is_empty() {
-        "args"
-    } else if !layer.result.is_empty() {
-        "result"
-    } else {
-        return Ok(());
+    Ok(())
+}
+
+/// Resolve the header layering needed for fetch reachability validation.
+fn effective_assertion_headers(
+    layers: &[&AssertionsConfig],
+    direction: Direction,
+) -> Vec<HeaderEntry> {
+    let mut headers: Vec<HeaderEntry> = Vec::new();
+    for assertions in layers {
+        let Some(block) = direction.block_of(assertions) else {
+            continue;
+        };
+        if block.replace_inherited {
+            headers.clear();
+        }
+        for entry in &block.headers {
+            if let Some(existing) = headers
+                .iter_mut()
+                .find(|existing| existing.name.eq_ignore_ascii_case(&entry.name))
+            {
+                *existing = entry.clone();
+            } else {
+                headers.push(entry.clone());
+            }
+        }
+    }
+    headers
+}
+
+/// Read the assertions block already validated by the core config loader.
+fn assertions_block(yaml: &serde_yaml::Value) -> Result<Option<AssertionsConfig>, VisitorError> {
+    let Some(value) = yaml.get("assertions").filter(|value| !value.is_null()) else {
+        return Ok(None);
     };
-    Err(format!(
-        "{scope}: an `http:` route cannot declare a `{block}:` block, because a \
-         generic HTTP request carries no message for a field path to address. Read the request \
-         from the `http.*` attributes under `pre_invocation:` (or `post_invocation:`) instead."
-    )
-    .into())
+    serde_yaml::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| {
+            format!("assertions block passed core validation but could not be read by APL: {error}")
+                .into()
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1633,6 +1788,7 @@ fn install_handler(
         engine.clone(),
     )
     .with_attribute_tree(attribute_tree)
+    .with_projection(Projection::for_entity(entity_type))
     .with_structured_args(entity_type == ENTITY_TOOL)
     .with_structured_input(has_pdp);
     if let Some(pdp) = pdp {
@@ -2916,6 +3072,50 @@ routes:
         assert_eq!(
             resolver_label(&visitor, PdpDialect::Cedar).await.unwrap(),
             "from-code"
+        );
+    }
+
+    #[test]
+    fn a_new_load_clears_every_compiled_hierarchy_layer() {
+        let engine = Arc::new(PolicyEngine::default());
+        let visitor = AplConfigVisitor::new(
+            Arc::new(DispatchCache::new()),
+            Arc::new(MemorySessionStore::new()),
+            Arc::downgrade(&engine),
+        );
+        {
+            let mut state = visitor
+                .state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.global_layer = Some(CompiledRoute::new("global"));
+            state
+                .default_layers
+                .insert("tool".to_owned(), CompiledRoute::new("default:tool"));
+            state
+                .tag_layers
+                .insert("sensitive".to_owned(), CompiledRoute::new("tag:sensitive"));
+        }
+
+        visitor
+            .visit_plugins(&engine, &[])
+            .expect("a reload with no plugins starts cleanly");
+
+        let state = visitor
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            state.global_layer.is_none(),
+            "the old global layer is stale"
+        );
+        assert!(
+            state.default_layers.is_empty(),
+            "old entity defaults must not survive reload"
+        );
+        assert!(
+            state.tag_layers.is_empty(),
+            "old policy bundles must not survive reload"
         );
     }
 

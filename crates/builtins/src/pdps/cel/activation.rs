@@ -78,7 +78,7 @@ pub fn bag_to_context(
     //    shadows an author-supplied extra arg with the same name — the
     //    bag wins by design, but a silent shadow can mask a typo in the
     //    author's args block.
-    let mut root = build_tree(bag);
+    let mut root = build_tree(bag, structured.metadata().is_none());
     overlay_structured(&mut root, structured);
     for (name, node) in root {
         if extra_names.contains(&name) {
@@ -96,6 +96,12 @@ pub fn bag_to_context(
 
 /// Overlay structured input on the bag tree.
 fn overlay_structured(root: &mut BTreeMap<String, Node>, structured: &StructuredInput) {
+    if let Some(metadata) = structured.metadata() {
+        root.insert("metadata".to_owned(), Node::Leaf(json_to_value(metadata)));
+    } else {
+        root.entry("metadata".to_owned())
+            .or_insert_with(|| Node::Leaf(Value::from(HashMap::<String, Value>::new())));
+    }
     if let Some(document) = structured.llm_request() {
         let llm = root
             .entry("llm".to_owned())
@@ -130,10 +136,12 @@ enum Node {
 }
 
 /// Build the top-level namespace tree from the flat, dotted bag.
-fn build_tree(bag: &AttributeBag) -> BTreeMap<String, Node> {
+fn build_tree(bag: &AttributeBag, include_metadata: bool) -> BTreeMap<String, Node> {
     let mut root: BTreeMap<String, Node> = BTreeMap::new();
     for (key, value) in bag.iter() {
-        if matches!(value, AttributeValue::NonScalar) {
+        if (!include_metadata && (key == "metadata" || key.starts_with("metadata.")))
+            || matches!(value, AttributeValue::NonScalar)
+        {
             continue;
         }
         let segments: Vec<&str> = key.split('.').collect();
@@ -327,6 +335,14 @@ mod tests {
         StructuredInput::new(Some(Arc::new(document)), None)
     }
 
+    fn with_metadata(metadata: serde_json::Value) -> StructuredInput {
+        StructuredInput::default().with_metadata(
+            Arc::new(metadata),
+            Arc::new(json!({})),
+            Arc::new(json!({})),
+        )
+    }
+
     fn holds(expr: &str, ctx: &Context<'static, 'static>) -> bool {
         matches!(run_cel(expr, ctx), Ok(Value::Bool(true)))
     }
@@ -343,6 +359,37 @@ mod tests {
         bag.set("subject.type", "user");
         assert!(truthy("subject.id == 'alice'", &bag));
         assert!(truthy("subject.type == 'user'", &bag));
+    }
+
+    #[test]
+    fn structured_metadata_preserves_json_shape_and_reserved_provenance() {
+        let input = with_metadata(json!({
+            "account": {
+                "missing": null,
+                "mixed": ["reader", 2, "reader"],
+                "nested": {"ratio": 0.5},
+                "$outcome": "success"
+            }
+        }));
+        let mut bag = AttributeBag::new();
+        bag.set("metadata.account.stale", true);
+        bag.set("metadata_extra.keep", "bag-owned");
+        let ctx = structured_ctx(&bag, &input);
+        assert!(holds("metadata.account.missing == null", &ctx));
+        assert!(holds(
+            "metadata.account.mixed == ['reader', 2, 'reader']",
+            &ctx
+        ));
+        assert!(holds("metadata.account.nested.ratio == 0.5", &ctx));
+        assert!(holds("metadata.account['$outcome'] == 'success'", &ctx));
+        assert!(holds("!has(metadata.account.stale)", &ctx));
+        assert!(holds("metadata_extra.keep == 'bag-owned'", &ctx));
+    }
+
+    #[test]
+    fn metadata_is_always_registered_as_an_empty_object() {
+        let ctx = structured_ctx(&AttributeBag::new(), &StructuredInput::default());
+        assert!(holds("size(metadata) == 0", &ctx));
     }
 
     #[test]
