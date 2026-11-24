@@ -446,6 +446,7 @@ pub struct Executor {
     /// with `capture_content_provenance` on, so a missing key never degrades
     /// to an unkeyed digest nobody chose.
     content_key: Option<crate::hooks::payload::ContentKey>,
+    captured_content_key: Option<crate::hooks::payload::CapturedContentKey>,
 
     /// Effect keys open in this process, which a recovery sweep leaves alone.
     /// Belongs with the log rather than the executor, so the engine carries it
@@ -484,6 +485,7 @@ impl Executor {
             emission_seq: Arc::new(AtomicU64::new(0)),
             stream_namespace,
             content_key: None,
+            captured_content_key: None,
             in_flight: Arc::default(),
         }
     }
@@ -508,6 +510,7 @@ impl Executor {
     #[must_use]
     pub fn with_content_key(mut self, key: crate::hooks::payload::ContentKey) -> Self {
         self.content_key = Some(key);
+        self.captured_content_key = None;
         self
     }
 
@@ -515,6 +518,37 @@ impl Executor {
     /// engine's path once secrets are resolved.
     pub fn set_content_key(&mut self, key: crate::hooks::payload::ContentKey) {
         self.content_key = Some(key);
+        self.captured_content_key = None;
+    }
+
+    pub(crate) fn for_invocation(&self) -> std::borrow::Cow<'_, Self> {
+        let Some(key @ crate::hooks::payload::ContentKey::Keyed(_)) = self.provenance_key() else {
+            return std::borrow::Cow::Borrowed(self);
+        };
+        if self.audit_handlers.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+
+        let captured = match key.capture() {
+            Ok(captured) => Some(captured),
+            Err(error) => {
+                tracing::error!(%error, "content provenance key capture failed");
+                None
+            },
+        };
+        let mut executor = self.clone();
+        // A failed capture must not fall back to the live handle.
+        executor.content_key = None;
+        executor.captured_content_key = captured;
+        std::borrow::Cow::Owned(executor)
+    }
+
+    fn content_hash(&self, payload: &dyn PluginPayload) -> Option<String> {
+        if let Some(key) = self.captured_content_key.as_ref() {
+            return payload.audit_bytes().and_then(|bytes| key.digest(&bytes));
+        }
+        let key = self.provenance_key()?;
+        payload.audit_bytes().and_then(|bytes| key.digest(&bytes))
     }
 
     /// The key to digest under, when provenance is on and a key is installed.
@@ -682,8 +716,8 @@ impl Executor {
             return;
         }
         // Taken here rather than by a sink, so the key stays with the executor.
-        if let Some(key) = self.provenance_key() {
-            decisions.set_output_hash(payload.audit_bytes().and_then(|b| key.digest(&b)));
+        if self.provenance_key().is_some() || self.captured_content_key.is_some() {
+            decisions.set_output_hash(self.content_hash(payload));
         }
         self.stamp_decision_stream(decisions);
         self.emit_audit(payload, extensions, decisions).await;
@@ -722,8 +756,8 @@ impl Executor {
             labels.sort_unstable();
             decisions.set_input_labels(labels);
         }
-        if let Some(key) = self.provenance_key() {
-            decisions.set_input_hash(payload.audit_bytes().and_then(|b| key.digest(&b)));
+        if self.provenance_key().is_some() || self.captured_content_key.is_some() {
+            decisions.set_input_hash(self.content_hash(payload));
         }
     }
 
@@ -811,7 +845,8 @@ impl Executor {
         context_table: Option<PluginContextTable>,
         task_tracker: &tokio_util::task::TaskTracker,
     ) -> (PipelineResult, BackgroundTasks) {
-        let (result, tasks, _refused) = self
+        let executor = self.for_invocation();
+        let (result, tasks, _refused) = executor
             .execute_audited(entries, payload, extensions, context_table, task_tracker)
             .await;
         (result, tasks)
