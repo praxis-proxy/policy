@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use praxis_policy_core::cmf::enums::{ResourceType, Role};
 
 use praxis_policy_core::cmf::{
-    CmfHook, ContentPart, Message, MessagePayload, PromptResult, Resource, ResourceReference,
-    ToolCall, ToolResult,
+    CmfHook, ContentPart, Message, MessagePayload, PromptRequest, PromptResult, Resource,
+    ResourceReference, ToolCall, ToolResult,
 };
 
 use praxis_policy_core::context::PluginContext;
@@ -1464,6 +1464,108 @@ routes:
     );
 }
 
+#[tokio::test]
+async fn prompt_argument_readback_and_writes_follow_the_original_request() {
+    for fallback in [false, true] {
+        let original = if fallback {
+            ContentPart::ToolCall {
+                content: ToolCall {
+                    tool_call_id: "original".to_owned(),
+                    name: "original".to_owned(),
+                    arguments: serde_json::from_value(serde_json::json!({"tone": "original"}))
+                        .expect("arguments"),
+                    namespace: None,
+                },
+            }
+        } else {
+            ContentPart::PromptRequest {
+                content: PromptRequest {
+                    prompt_request_id: "original".to_owned(),
+                    name: "original".to_owned(),
+                    arguments: serde_json::from_value(serde_json::json!({"tone": "original"}))
+                        .expect("arguments"),
+                    server_id: None,
+                },
+            }
+        };
+        let mut other = original.clone();
+        match &mut other {
+            ContentPart::PromptRequest { content } => {
+                content.prompt_request_id = "other".to_owned();
+                content
+                    .arguments
+                    .insert("tone".to_owned(), serde_json::json!(123));
+            },
+            ContentPart::ToolCall { content } => {
+                content.tool_call_id = "other".to_owned();
+                content
+                    .arguments
+                    .insert("tone".to_owned(), serde_json::json!(123));
+            },
+            _ => panic!("request"),
+        }
+        let result = projection_edit_result(
+            ("prompt", "cmf.prompt_pre_invoke", "args"),
+            "tone",
+            "run(projection-editor) | str | mask(1)",
+            "",
+            vec![original, other],
+            Target::ReorderResources,
+        )
+        .await;
+        assert!(
+            result.continue_processing,
+            "readback must use the original string argument"
+        );
+        let values: Vec<_> = forwarded(&result)
+            .message
+            .content
+            .iter()
+            .map(|part| match part {
+                ContentPart::PromptRequest { content } => &content.arguments["tone"],
+                ContentPart::ToolCall { content } => &content.arguments["tone"],
+                _ => panic!("request"),
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![&serde_json::json!(123), &serde_json::json!("*******l")]
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_or_duplicate_prompt_requests_deny_field_readback() {
+    for target in [Target::RemoveRequests, Target::DuplicateRequest] {
+        let part = ContentPart::PromptRequest {
+            content: PromptRequest {
+                prompt_request_id: "original".to_owned(),
+                name: "original".to_owned(),
+                arguments: serde_json::from_value(serde_json::json!({"tone": "original"}))
+                    .expect("arguments"),
+                server_id: None,
+            },
+        };
+        let result = projection_edit_result(
+            ("prompt", "cmf.prompt_pre_invoke", "args"),
+            "tone",
+            "run(projection-editor) | str",
+            "",
+            vec![part],
+            target,
+        )
+        .await;
+        assert!(
+            !result.continue_processing,
+            "request identity must remain unique"
+        );
+        assert!(
+            result.modified_payload.is_none(),
+            "a denied edit must not reach the host"
+        );
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -1491,6 +1593,8 @@ enum Target {
     InsertNestedToolResultBranch,
     EditSiblingArrayNote,
     RemoveFirstResourceRow,
+    RemoveRequests,
+    DuplicateRequest,
 }
 
 struct RewritePlugin {
@@ -1528,6 +1632,10 @@ impl HookHandler<CmfHook> for RewritePlugin {
                     (Target::RemoveResources, ContentPart::Resource { .. })
                         | (Target::RemoveReferences, ContentPart::ResourceRef { .. })
                         | (Target::RemovePrompts, ContentPart::PromptResult { .. })
+                        | (
+                            Target::RemoveRequests,
+                            ContentPart::PromptRequest { .. } | ContentPart::ToolCall { .. }
+                        )
                 )
             })
             .map(|part| match (self.target, part) {
@@ -1647,6 +1755,10 @@ impl HookHandler<CmfHook> for RewritePlugin {
                     (self.target, part),
                     (Target::DuplicatePrompt, ContentPart::PromptResult { .. })
                         | (Target::DuplicateReference, ContentPart::ResourceRef { .. })
+                        | (
+                            Target::DuplicateRequest,
+                            ContentPart::PromptRequest { .. } | ContentPart::ToolCall { .. }
+                        )
                 )
             })
             .cloned()
@@ -2049,6 +2161,7 @@ async fn projection_edit_result(
                 "cmf.resource_pre_fetch" => "cmf.resource_pre_fetch",
                 "cmf.resource_post_fetch" => "cmf.resource_post_fetch",
                 "cmf.tool_post_invoke" => "cmf.tool_post_invoke",
+                "cmf.prompt_pre_invoke" => "cmf.prompt_pre_invoke",
                 _ => "cmf.prompt_post_invoke",
             },
         }),

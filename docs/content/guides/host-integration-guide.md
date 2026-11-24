@@ -108,6 +108,8 @@ Map its edited text back into the response sent to the client; reusing the
 original rendered messages bypasses redaction.
 PPE ties edits to the inspected request ID and prompt name, and denies if
 that pair no longer identifies a unique result.
+Prompt argument reads and writes also retain the originally selected request,
+including a tool-call fallback. Request source metadata must remain unchanged.
 
 Retain each message's role and text boundaries separately from the joined
 string. Apply edits only when they can be mapped back without changing those
@@ -137,7 +139,8 @@ the route and PDP have decided requires separate routing and authorization.
 
 Array fields use indexes. Plugins must retain element order when editing
 array leaves. A write is refused if its parent structure or array length no
-longer matches the recorded state. Use one chain, such as `run(plugin) | omit`,
+longer matches the recorded state. These checks do not detect same-length
+reordering. Use one chain, such as `run(plugin) | omit`,
 when a plugin must inspect an element before removal. Use ordered `do:` steps
 for operations that depend on earlier edits; field maps define no execution
 order. A later field plugin addressing that array is refused while its

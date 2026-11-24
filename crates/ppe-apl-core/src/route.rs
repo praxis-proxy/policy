@@ -578,7 +578,7 @@ pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option
         if let serde_json::Value::Array(items) = value {
             if let Ok(idx) = seg.parse::<usize>() {
                 if let Some(child) = items.get(idx) {
-                    return walk(child, rest, &join(prefix, seg), depth + 1, out);
+                    return walk(child, rest, &join(prefix, &idx.to_string()), depth + 1, out);
                 }
             } else {
                 // Apply an unnamed intermediate array to every element.
@@ -746,7 +746,7 @@ pub(crate) fn expand_for_pipeline(
             serde_json::Value::Array(items) => {
                 if let Ok(index) = seg.parse::<usize>() {
                     if let Some(child) = items.get(index)
-                        && !descend(child, rest, seg, prefix, depth, budget, out)
+                        && !descend(child, rest, &index.to_string(), prefix, depth, budget, out)
                     {
                         return false;
                     }
@@ -2186,6 +2186,33 @@ mod tests {
             payload.result,
             Some(json!({"2": [[4]], "10": [], "1a": []})),
             "nested removals must address original indexes and retain sibling keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_padded_array_paths_omit_each_selected_element_once() {
+        let mut route = CompiledRoute::new("zero-padded-indexes");
+        route.result.push(field_rule(
+            "**.00.**",
+            vec![Stage::Redact { condition: None }, Stage::Omit],
+        ));
+        let mut payload = RoutePayload::with_result(json!({}), json!([[1, 2], [3, 4]]));
+        let decision = evaluate_post(
+            &route,
+            &mut AttributeBag::new(),
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(payload.result, Some(json!([[4]])));
+        assert_eq!(
+            expand_field_paths(&json!({"00": [1]}), "00.00"),
+            Some(vec!["00.0".to_owned()]),
+            "object keys retain their spelling while array indexes are canonical"
         );
     }
 

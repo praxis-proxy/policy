@@ -400,14 +400,21 @@ pub(crate) fn write_args_back_to_message(
     Ok(())
 }
 
-/// Read arguments from the originally selected reference.
+/// Read arguments from the originally selected request part.
 pub(crate) fn extract_args_by_identity(
     msg: &Message,
     projection: Projection,
     identity: &ResultIdentity,
 ) -> Result<Value, EnvelopeReplaced> {
-    if let Some(ContentPart::ResourceRef { content }) = identity.part(msg)? {
-        return Ok(project_resource_ref_args(content));
+    match identity.part(msg)? {
+        Some(ContentPart::ResourceRef { content }) => {
+            return Ok(project_resource_ref_args(content));
+        },
+        Some(ContentPart::PromptRequest { content }) => {
+            return Ok(clone_arguments(&content.arguments));
+        },
+        Some(ContentPart::ToolCall { content }) => return Ok(clone_arguments(&content.arguments)),
+        _ => {},
     }
     Ok(if projection == Projection::Resource {
         Value::String(msg.get_text_content())
@@ -416,17 +423,24 @@ pub(crate) fn extract_args_by_identity(
     })
 }
 
-/// Write arguments to the originally selected reference.
+/// Write arguments to the originally selected request part.
 pub(crate) fn write_args_by_identity(
     msg: &mut Message,
     args: &Value,
     projection: Projection,
     identity: &ResultIdentity,
 ) -> Result<(), EnvelopeReplaced> {
-    if let Some(index) = identity.index(msg)?
-        && let Some(ContentPart::ResourceRef { content }) = msg.content.get_mut(index)
-    {
-        return write_resource_ref(content, args);
+    if let Some(index) = identity.index(msg)? {
+        match msg.content.get_mut(index) {
+            Some(ContentPart::ResourceRef { content }) => return write_resource_ref(content, args),
+            Some(ContentPart::PromptRequest { .. }) => {
+                return write_arguments_at(msg, index, args, ReplacedPart::PromptRequest);
+            },
+            Some(ContentPart::ToolCall { .. }) => {
+                return write_arguments_at(msg, index, args, ReplacedPart::ToolCall);
+            },
+            _ => {},
+        }
     }
     if projection == Projection::Resource {
         if let Some(text) = args.as_str() {
@@ -518,6 +532,20 @@ impl ResultIdentity {
         Self::select(msg, ReplacedPart::PromptResult)
     }
 
+    /// Identify the preferred prompt request, retaining the tool-call fallback.
+    pub(crate) fn from_prompt_request_message(msg: &Message) -> Self {
+        let kind = if msg
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::PromptRequest { .. }))
+        {
+            ReplacedPart::PromptRequest
+        } else {
+            ReplacedPart::ToolCall
+        };
+        Self::select(msg, kind)
+    }
+
     fn select(msg: &Message, kind: ReplacedPart) -> Self {
         let key = msg
             .content
@@ -606,9 +634,28 @@ impl ResultIdentity {
 
 #[derive(Clone, Debug)]
 enum PartKey {
-    Resource { uri: String, request_id: String },
-    ResourceRef { uri: String, request_id: String },
-    PromptResult { request_id: String, name: String },
+    Resource {
+        uri: String,
+        request_id: String,
+    },
+    ResourceRef {
+        uri: String,
+        request_id: String,
+    },
+    PromptRequest {
+        request_id: String,
+        name: String,
+        server_id: Option<String>,
+    },
+    ToolCall {
+        request_id: String,
+        name: String,
+        namespace: Option<String>,
+    },
+    PromptResult {
+        request_id: String,
+        name: String,
+    },
 }
 
 impl PartKey {
@@ -640,6 +687,18 @@ impl PartKey {
                     name: content.prompt_name.clone(),
                 })
             },
+            (ReplacedPart::PromptRequest, ContentPart::PromptRequest { content }) => {
+                Some(Self::PromptRequest {
+                    request_id: content.prompt_request_id.clone(),
+                    name: content.name.clone(),
+                    server_id: content.server_id.clone(),
+                })
+            },
+            (ReplacedPart::ToolCall, ContentPart::ToolCall { content }) => Some(Self::ToolCall {
+                request_id: content.tool_call_id.clone(),
+                name: content.name.clone(),
+                namespace: content.namespace.clone(),
+            }),
             _ => None,
         }
     }
@@ -649,6 +708,8 @@ impl PartKey {
             Self::Resource { .. } => ReplacedPart::Resource,
             Self::ResourceRef { .. } => ReplacedPart::ResourceRef,
             Self::PromptResult { .. } => ReplacedPart::PromptResult,
+            Self::PromptRequest { .. } => ReplacedPart::PromptRequest,
+            Self::ToolCall { .. } => ReplacedPart::ToolCall,
         }
     }
 
@@ -662,6 +723,30 @@ impl PartKey {
             },
             (Self::PromptResult { request_id, name }, ContentPart::PromptResult { content }) => {
                 content.prompt_request_id == *request_id && content.prompt_name == *name
+            },
+            (
+                Self::PromptRequest {
+                    request_id,
+                    name,
+                    server_id,
+                },
+                ContentPart::PromptRequest { content },
+            ) => {
+                content.prompt_request_id == *request_id
+                    && content.name == *name
+                    && content.server_id == *server_id
+            },
+            (
+                Self::ToolCall {
+                    request_id,
+                    name,
+                    namespace,
+                },
+                ContentPart::ToolCall { content },
+            ) => {
+                content.tool_call_id == *request_id
+                    && content.name == *name
+                    && content.namespace == *namespace
             },
             _ => false,
         }
@@ -1000,7 +1085,7 @@ pub(crate) fn write_prompt_result(
 }
 
 /// One field write made by policy, including writes equal to their input.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct FieldWrite {
     pub(crate) parents: Vec<FieldParent>,
     pub(crate) path: Vec<String>,
@@ -1012,14 +1097,14 @@ pub(crate) struct FieldWrite {
 /// A changed array shape or a removed parent refuses reconciliation.
 pub(crate) fn apply_written_paths(
     base: &mut Value,
-    writes: &[FieldWrite],
+    writes: Vec<FieldWrite>,
     projection: Projection,
     args: bool,
 ) -> Result<(), EnvelopeReplaced> {
-    fn apply(base: &mut Value, path: &[String], value: Option<&Value>) -> bool {
+    fn apply(base: &mut Value, path: &[String], value: Option<Value>) -> bool {
         let Some((key, rest)) = path.split_first() else {
             if let Some(value) = value {
-                *base = value.clone();
+                *base = value;
                 return true;
             }
             return false;
@@ -1028,7 +1113,7 @@ pub(crate) fn apply_written_paths(
             Value::Object(map) => {
                 if rest.is_empty() {
                     if let Some(value) = value {
-                        map.insert(key.clone(), value.clone());
+                        map.insert(key.clone(), value);
                     } else {
                         map.remove(key);
                     }
@@ -1049,7 +1134,7 @@ pub(crate) fn apply_written_paths(
                 if rest.is_empty() {
                     if let Some(value) = value {
                         if let Some(slot) = items.get_mut(index) {
-                            *slot = value.clone();
+                            *slot = value;
                         }
                     } else {
                         items.remove(index);
@@ -1069,7 +1154,7 @@ pub(crate) fn apply_written_paths(
         if field_parents(base, &write.path).as_deref() != Some(write.parents.as_slice()) {
             return Err(error);
         }
-        if !apply(base, &write.path, write.value.as_ref()) {
+        if !apply(base, &write.path, write.value) {
             return Err(error);
         }
     }
@@ -2443,6 +2528,6 @@ mod tests {
                 }
             })
             .collect();
-        apply_written_paths(base, &writes, Projection::Tool, false)
+        apply_written_paths(base, writes, Projection::Tool, false)
     }
 }

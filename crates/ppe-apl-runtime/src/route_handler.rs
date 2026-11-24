@@ -673,7 +673,7 @@ impl AplRouteHandler {
                     identity,
                 )
                 .and_then(|mut merged| {
-                    apply_written_paths(&mut merged, &paths, self.projection, true)?;
+                    apply_written_paths(&mut merged, paths, self.projection, true)?;
                     write_args_by_identity(&mut target.message, &merged, self.projection, identity)
                 });
                 if let Err(e) = write_args {
@@ -693,7 +693,7 @@ impl AplRouteHandler {
                 let write_result =
                     extract_result_by_identity(&target.message, self.projection, identity)
                         .and_then(|mut merged| {
-                            apply_written_paths(&mut merged, &paths, self.projection, false)?;
+                            apply_written_paths(&mut merged, paths, self.projection, false)?;
                             write_result_back_to_message(
                                 &mut target.message,
                                 &merged,

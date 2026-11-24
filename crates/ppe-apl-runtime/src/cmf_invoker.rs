@@ -160,7 +160,7 @@ where
     /// route handler's, so the readback sees the part the pipeline wrote.
     projection: Projection,
     /// Original reference, resource and prompt selections.
-    identities: [ResultIdentity; 4],
+    identities: [ResultIdentity; 5],
     written_fields: Mutex<Vec<(DispatchPhase, FieldWrite)>>,
 }
 
@@ -585,18 +585,23 @@ where
             (DispatchPhase::Pre, Projection::Resource) => &self.identities[0],
             (DispatchPhase::Post, Projection::Resource) => &self.identities[1],
             (DispatchPhase::Post, Projection::Prompt) => &self.identities[2],
-            _ => &self.identities[3],
+            (DispatchPhase::Pre, Projection::Prompt) => &self.identities[3],
+            _ => &self.identities[4],
         }
     }
 
+    /// Take this phase's policy writes in evaluation order.
     pub(crate) async fn field_writes(&self, phase: DispatchPhase) -> Vec<FieldWrite> {
-        self.written_fields
-            .lock()
-            .await
-            .iter()
-            .filter(|(written_phase, _)| *written_phase == phase)
-            .map(|(_, write)| write.clone())
-            .collect()
+        let mut pending = self.written_fields.lock().await;
+        let mut completed = Vec::new();
+        for (written_phase, write) in std::mem::take(&mut *pending) {
+            if written_phase == phase {
+                completed.push(write);
+            } else {
+                pending.push((written_phase, write));
+            }
+        }
+        completed
     }
 }
 

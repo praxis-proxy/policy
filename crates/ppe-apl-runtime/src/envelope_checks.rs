@@ -112,7 +112,10 @@ pub(crate) fn reject_unknown_field_paths(
         let block = envelope.block;
         for field_use in &envelope.uses {
             let ignore_case = matches_without_case(field_use.stages);
-            let mut segments = field_use.field.split('.').peekable();
+            let mut segments = field_use
+                .field
+                .split(|ch| ch == '.' || (field_use.condition && ch == '['))
+                .peekable();
             let recursive = segments
                 .peek()
                 .is_some_and(|segment| *segment == RECURSIVE_SEGMENT);

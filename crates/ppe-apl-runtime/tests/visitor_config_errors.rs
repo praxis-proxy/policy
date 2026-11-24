@@ -787,6 +787,16 @@ fn fixed_condition_fields_and_inherited_global_rules_are_validated() {
     loads(
         "global:\n  authorization:\n    post_invocation:\n      - \"result.content == 'secret': deny\"\nroutes:\n  - resource: '*'\n  - prompt: '*'\n",
     );
+    loads(
+        "routes:\n  - resource: '*'\n    authorization:\n      post_invocation:\n        - \"result.annotations[subject.id].restricted: deny\"\n",
+    );
+    let e = load_err(
+        "routes:\n  - resource: '*'\n    authorization:\n      post_invocation:\n        - \"result.contnet[subject.id].restricted: deny\"\n",
+    );
+    assert!(
+        e.contains("contnet"),
+        "a subscript must not hide an unknown root: {e}"
+    );
 }
 
 #[test]

@@ -98,6 +98,15 @@ impl PayloadFields for MessagePayload {
     ) -> Option<serde_json::Value> {
         match phase {
             DispatchPhase::Pre => {
+                if projection != Projection::Resource {
+                    return match crate::message_projection::arguments_for_projection(
+                        &self.message,
+                        projection,
+                    ) {
+                        Some(arguments) => argument_field(arguments, path),
+                        None => Some(serde_json::Value::String(self.message.get_text_content())),
+                    };
+                }
                 let args =
                     crate::message_projection::extract_args_from_message(&self.message, projection);
                 if args.is_object() || args.is_array() {
@@ -117,7 +126,7 @@ impl PayloadFields for MessagePayload {
 impl PayloadFields for HttpPayload {}
 
 /// Identify the reference, resource and prompt selected before plugins run.
-pub(crate) fn payload_identities<P: PayloadFields>(payload: &P) -> [ResultIdentity; 4] {
+pub(crate) fn payload_identities<P: PayloadFields>(payload: &P) -> [ResultIdentity; 5] {
     payload
         .as_any()
         .downcast_ref::<MessagePayload>()
@@ -128,6 +137,7 @@ pub(crate) fn payload_identities<P: PayloadFields>(payload: &P) -> [ResultIdenti
                     ResultIdentity::from_reference_message(&message.message),
                     ResultIdentity::from_resource_message(&message.message),
                     ResultIdentity::from_prompt_message(&message.message),
+                    ResultIdentity::from_prompt_request_message(&message.message),
                     ResultIdentity::default(),
                 ]
             },
@@ -167,6 +177,19 @@ pub(crate) fn field_value_for_identity<P: PayloadFields>(
                     phase == DispatchPhase::Pre,
                 ));
             }
+        }
+        if phase == DispatchPhase::Pre && projection == Projection::Prompt {
+            return Ok(match identity.part(&message.message)? {
+                Some(praxis_policy_core::cmf::ContentPart::PromptRequest { content }) => {
+                    argument_field(&content.arguments, path)
+                },
+                Some(praxis_policy_core::cmf::ContentPart::ToolCall { content }) => {
+                    argument_field(&content.arguments, path)
+                },
+                _ => Some(serde_json::Value::String(
+                    message.message.get_text_content(),
+                )),
+            });
         }
         if phase == DispatchPhase::Post && projection == Projection::Resource {
             return Ok(match identity.resource(&message.message)? {
@@ -286,6 +309,11 @@ fn message_field_parents(
             Some(ContentPart::ResourceRef { .. }) => fixed_parents(path),
             _ => path.is_empty().then(Vec::new),
         },
+        (DispatchPhase::Pre, Projection::Prompt) => match identity.part(message)? {
+            Some(ContentPart::PromptRequest { content }) => map_parents(&content.arguments, path),
+            Some(ContentPart::ToolCall { content }) => map_parents(&content.arguments, path),
+            _ => path.is_empty().then(Vec::new),
+        },
         (DispatchPhase::Pre, _) => arguments_for_projection(message, projection)
             .and_then(|map| map_parents(map, path))
             .or_else(|| path.is_empty().then(Vec::new)),
@@ -308,6 +336,21 @@ fn message_field_parents(
             .or_else(|| path.is_empty().then(Vec::new)),
     };
     parents.ok_or_else(|| EnvelopeReplaced::shape_changed(projection, phase == DispatchPhase::Pre))
+}
+
+fn argument_field(
+    arguments: &std::collections::HashMap<String, serde_json::Value>,
+    path: &[String],
+) -> Option<serde_json::Value> {
+    let Some((key, rest)) = path.split_first() else {
+        return Some(serde_json::Value::Object(
+            arguments
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ));
+    };
+    crate::message_projection::value_at(arguments.get(key)?, rest).cloned()
 }
 
 /// Return the argument or result field addressed by the dispatch phase.
