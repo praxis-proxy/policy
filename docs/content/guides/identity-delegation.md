@@ -1,3 +1,5 @@
+<a id="identity-and-token-exchange--delegation"></a>
+
 # Identity and Delegation
 
 PPE resolves the inbound caller and mints the outbound credential on every
