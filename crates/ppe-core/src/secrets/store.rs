@@ -330,7 +330,11 @@ impl ReloadedSecrets {
                     let current = source.load_full();
                     if let Some(confirmed_at) = reused.confirmed_at {
                         target.store(Arc::new(ProviderHealth {
-                            last_success: Some(confirmed_at),
+                            last_success: Some(
+                                current
+                                    .last_success
+                                    .map_or(confirmed_at, |at| at.max(confirmed_at)),
+                            ),
                             last_failure: current.last_failure.clone(),
                             failing: current.failing
                                 && current
@@ -1663,6 +1667,37 @@ values:
         assert_eq!(
             next.value("api_key").expect("binding remains").as_str(),
             "initial"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_keeps_a_later_success_timestamp() {
+        let provider = Scripted::new("initial");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let first = SecretStore::resolve(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+        )
+        .await
+        .expect("initial binding resolves");
+        let staged = SecretStore::resolve_replacing(
+            &scripted_config("  api_key: { provider: scripted, ref: second }\n"),
+            &registry,
+            Some(&first),
+        )
+        .await
+        .expect("replacement resolves");
+        first.refresh().await;
+        let latest = first.provider_health("scripted").expect("provider exists");
+        let guard = first.lock_refresh().await;
+        let next = staged.publish(Some(&first));
+        drop(guard);
+        assert_eq!(
+            next.provider_health("scripted")
+                .expect("provider exists")
+                .last_success,
+            latest.last_success,
+            "publication must retain a success recorded after staged resolution"
         );
     }
 
