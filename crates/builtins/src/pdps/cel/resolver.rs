@@ -577,7 +577,7 @@ fn referenced_structured(program: &Program, structured: &StructuredInput) -> Str
     let refs = program.references();
     structured
         .retain(refs.has_variable("llm"), refs.has_variable("args"))
-        .retain_metadata(refs.has_variable("metadata"))
+        .retain_metadata(refs.has_variable("metadata") || refs.has_variable(".metadata"))
 }
 
 /// Snapshot the values under every top-level name the expression references,
@@ -1671,6 +1671,7 @@ mod tests {
         assert_eq!(kept("subject.id == 'alice'"), (false, false, false));
         assert_eq!(kept("args.a == 1"), (false, true, false));
         assert_eq!(kept("metadata.account.active"), (false, false, true));
+        assert_eq!(kept(".metadata.account.active"), (false, false, true));
         assert_eq!(kept("has(llm.request.model)"), (true, false, false));
         assert_eq!(
             kept("[1].all(x, x == args.a) && llm.request.model == 'm'"),
